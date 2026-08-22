@@ -100,6 +100,27 @@ final class VerticalTabWindowLayoutState: ObservableObject {
         isSidebarVisible = visible
     }
 
+    func applySidebarPreferences(
+        visible: Bool,
+        width proposedWidth: CGFloat,
+        availableWidth: CGFloat
+    ) {
+        setSidebarVisible(visible)
+        let maximumWidth = min(
+            VerticalTabSidebarMetrics.maximumWidth,
+            max(VerticalTabSidebarMetrics.minimumWidth, availableWidth * 0.5)
+        )
+        let width = min(
+            max(proposedWidth, VerticalTabSidebarMetrics.minimumWidth),
+            maximumWidth
+        )
+        resizeWorkItem?.cancel()
+        resizeWorkItem = nil
+        pendingSidebarWidth = nil
+        applySidebarWidth(width)
+        committedSidebarWidth = width
+    }
+
     func toggleSidebar() {
         setSidebarVisible(!isSidebarVisible)
     }
@@ -961,7 +982,7 @@ struct VerticalTabLayoutContainer<Content: View>: View {
                 VerticalTabSidebarDivider(
                     controller: controller,
                     layoutState: layoutState,
-                    color: Color.primary.opacity(0.10)
+                    color: TerminalShellStyle.dividerColor
                 )
             }
             content

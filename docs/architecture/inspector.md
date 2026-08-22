@@ -70,9 +70,9 @@ Blur and macOS glass continue to be provided by Ghostty's `TerminalViewContainer
 
 ## Interaction
 
-- **View > Toggle Inspector** and `⌘⇧I` show/hide the host.
-- The Inspector header owns pane selection and collapse.
-- The divider supports continuous resize; only the committed width is persisted on mouse-up.
+- A persistent `sidebar.right` control in the window's top-right titlebar, **View > Toggle Inspector**, and `⌘⇧I` all show/hide the host.
+- The Inspector header owns a compact, extensible pane-switch strip and collapse action.
+- Left and Right shell dividers consume the same `TerminalShellStyle.dividerColor` token. The divider supports continuous resize; only the committed width is persisted on mouse-up.
 - Visibility, width, and active pane restore for later windows/app launches.
 - An empty registry still removes the complete trailing host from layout.
 

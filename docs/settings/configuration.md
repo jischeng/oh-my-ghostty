@@ -49,6 +49,7 @@ Window UI state is intentionally separate: `InspectorPresentationStore` owns las
 | `tabs.ordering` | enum | `manual` | `manual`, `created`, `recentlyUsed` | Settings > Tabs | Runtime |
 | `tabs.showShortcutLabels` | boolean | `true` | `true`, `false` | Settings > Tabs | Runtime |
 | `tabs.rememberSidebarWidth` | boolean | `true` | `true`, `false` | Settings > Tabs | Runtime |
+| `tabs.sidebarVisible` | boolean | `true` | `true`, `false` | Settings > Tabs | Runtime and new windows |
 | `appearance.windowTheme` | enum | Ghostty config | `system`, `light`, `dark` | Settings > Appearance | Live |
 | `appearance.lightTheme` | string | Ghostty config | Ghostty theme name | Settings > Appearance | Live |
 | `appearance.darkTheme` | string | Ghostty config | Ghostty theme name | Settings > Appearance | Live |

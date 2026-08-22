@@ -1,6 +1,67 @@
 import AppKit
 import SwiftUI
 
+enum TerminalShellStyle {
+    static let dividerColor = Color.primary.opacity(0.18)
+}
+
+extension TerminalWindow {
+    func installInspectorToggle(
+        controller: TerminalController,
+        registry: InspectorRegistry
+    ) {
+        let installed = titlebarAccessoryViewControllers.contains(inspectorToggleAccessory)
+        inspectorToggleAccessory.layoutAttribute = .right
+        inspectorToggleAccessory.view = AlignedTitlebarControlsView(
+            width: 28,
+            rootView: InspectorTitlebarControl(
+                layoutState: controller.tabLayoutState,
+                registry: registry,
+                toggle: { [weak controller] in controller?.toggleInspectorPane() }
+            )
+        )
+        if !installed {
+            addTitlebarAccessoryViewController(inspectorToggleAccessory)
+        }
+        inspectorToggleAccessory.view.translatesAutoresizingMaskIntoConstraints = false
+        inspectorToggleAccessory.view.widthAnchor.constraint(equalToConstant: 28).isActive = true
+
+        // AppKit may reset an already-visible transparent window to opaque when
+        // adding a trailing titlebar accessory after the initial appearance pass.
+        DispatchQueue.main.async { [weak self, weak controller] in
+            guard let self,
+                  let surface = controller?.focusedSurface ?? controller?.surfaceTree.first else {
+                return
+            }
+            self.syncAppearance(surface.derivedConfig)
+        }
+    }
+
+    var inspectorToggleIsInstalled: Bool {
+        titlebarAccessoryViewControllers.contains(inspectorToggleAccessory)
+    }
+
+    var inspectorControlsCenterY: CGFloat? {
+        (inspectorToggleAccessory.view as? TitlebarControlsCentering)?.contentCenterYInWindow
+    }
+}
+
+private struct InspectorTitlebarControl: View {
+    @ObservedObject var layoutState: VerticalTabWindowLayoutState
+    @ObservedObject var registry: InspectorRegistry
+    let toggle: () -> Void
+
+    var body: some View {
+        SidebarIconButton(
+            systemName: "sidebar.right",
+            help: layoutState.isInspectorVisible ? "Hide Inspector" : "Show Inspector",
+            action: toggle
+        )
+        .disabled(registry.isEmpty)
+        .opacity(registry.isEmpty ? 0.45 : 1)
+    }
+}
+
 struct TerminalShellLayoutContainer<Content: View>: View {
     @ObservedObject var controller: TerminalController
     @ObservedObject var layoutState: VerticalTabWindowLayoutState
@@ -32,38 +93,41 @@ struct TerminalShellLayoutContainer<Content: View>: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            if showsTabSidebar && layoutState.isSidebarVisible {
-                TerminalTabSidebarView(
-                    controller: controller,
-                    layoutState: layoutState,
-                    statusStore: statusStore,
-                    backgroundColor: backgroundColor,
-                    backgroundOpacity: backgroundOpacity
-                )
-                .frame(width: presentedSidebarWidth)
-                VerticalTabSidebarDivider(
-                    controller: controller,
-                    layoutState: layoutState,
-                    color: Color.primary.opacity(0.10)
-                )
-            }
+        GeometryReader { geometry in
+            HStack(spacing: 0) {
+                if showsTabSidebar && layoutState.isSidebarVisible {
+                    TerminalTabSidebarView(
+                        controller: controller,
+                        layoutState: layoutState,
+                        statusStore: statusStore,
+                        backgroundColor: backgroundColor,
+                        backgroundOpacity: backgroundOpacity
+                    )
+                    .frame(width: presentedSidebarWidth)
+                    VerticalTabSidebarDivider(
+                        controller: controller,
+                        layoutState: layoutState,
+                        color: TerminalShellStyle.dividerColor
+                    )
+                }
 
-            content
+                content
 
-            if layoutState.isInspectorVisible && !inspectorRegistry.isEmpty {
-                RightInspectorDivider(
-                    currentWidth: { layoutState.inspectorWidth },
-                    resize: controller.updateInspectorWidth
-                )
-                RightInspectorHost(
-                    controller: controller,
-                    layoutState: layoutState,
-                    registry: inspectorRegistry,
-                    backgroundColor: backgroundColor,
-                    backgroundOpacity: backgroundOpacity
-                )
-                .frame(width: presentedInspectorWidth)
+                if layoutState.isInspectorVisible && !inspectorRegistry.isEmpty {
+                    RightInspectorDivider(
+                        color: TerminalShellStyle.dividerColor,
+                        currentWidth: { layoutState.inspectorWidth },
+                        resize: controller.updateInspectorWidth
+                    )
+                    RightInspectorHost(
+                        controller: controller,
+                        layoutState: layoutState,
+                        registry: inspectorRegistry,
+                        backgroundColor: backgroundColor,
+                        backgroundOpacity: backgroundOpacity
+                    )
+                    .frame(width: presentedInspectorWidth(totalWidth: geometry.size.width))
+                }
             }
         }
     }
@@ -74,10 +138,18 @@ struct TerminalShellLayoutContainer<Content: View>: View {
             : layoutState.committedSidebarWidth
     }
 
-    private var presentedInspectorWidth: CGFloat {
-        controller.selectedTabID == ObjectIdentifier(controller)
+    private func presentedInspectorWidth(totalWidth: CGFloat) -> CGFloat {
+        let preferred = controller.selectedTabID == ObjectIdentifier(controller)
             ? layoutState.inspectorWidth
             : layoutState.committedInspectorWidth
+        let leadingWidth = showsTabSidebar && layoutState.isSidebarVisible
+            ? presentedSidebarWidth + 8
+            : 0
+        let maximum = max(
+            RightInspectorMetrics.minimumWidth,
+            totalWidth - leadingWidth - 320 - 8
+        )
+        return min(preferred, maximum)
     }
 }
 
@@ -107,7 +179,9 @@ struct RightInspectorHost: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
+            Rectangle()
+                .fill(TerminalShellStyle.dividerColor)
+                .frame(height: 1)
             if let paneID = selectedPaneID,
                let content = registry.content(for: paneID, context: context) {
                 InspectorPaneContentView(content: content)
@@ -136,44 +210,65 @@ struct RightInspectorHost: View {
     }
 
     private var header: some View {
-        HStack(spacing: 8) {
-            if registry.entries.count == 1, let descriptor = registry.entries.first?.descriptor {
-                Label(descriptor.title, systemImage: descriptor.systemImage)
-                    .font(.headline)
-                    .lineLimit(1)
-            } else {
-                Picker("Pane", selection: Binding(
-                    get: { selectedPaneID },
-                    set: { layoutState.selectInspectorPane($0) }
-                )) {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Text("INSPECTOR")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                SidebarIconButton(
+                    systemName: "xmark",
+                    help: "Hide Inspector",
+                    action: { layoutState.setInspectorVisible(false) }
+                )
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 32)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
                     ForEach(registry.entries) { entry in
-                        Label(
-                            entry.descriptor.title,
-                            systemImage: entry.descriptor.systemImage
+                        InspectorPaneSwitchButton(
+                            descriptor: entry.descriptor,
+                            selected: selectedPaneID == entry.id,
+                            select: { layoutState.selectInspectorPane(entry.id) }
                         )
-                        .tag(Optional(entry.id))
                     }
                 }
-                .labelsHidden()
-                .pickerStyle(.menu)
+                .padding(.horizontal, 8)
+                .padding(.bottom, 7)
             }
-            Spacer(minLength: 4)
-            Button {
-                layoutState.setInspectorVisible(false)
-            } label: {
-                Image(systemName: "xmark")
-            }
-            .buttonStyle(.plain)
-            .help("Hide Inspector")
         }
-        .padding(.horizontal, 12)
-        .frame(height: 38)
     }
 
     private func reconcileSelection() {
         if selectedPaneID != layoutState.selectedInspectorPaneID {
             layoutState.selectInspectorPane(selectedPaneID)
         }
+    }
+}
+
+private struct InspectorPaneSwitchButton: View {
+    let descriptor: InspectorPaneDescriptor
+    let selected: Bool
+    let select: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: select) {
+            Label(descriptor.title, systemImage: descriptor.systemImage)
+                .font(.system(size: 11.5, weight: selected ? .semibold : .regular))
+                .lineLimit(1)
+                .padding(.horizontal, 9)
+                .frame(height: 25)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(Color.primary.opacity(selected ? 0.12 : hovered ? 0.07 : 0))
+                )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .accessibilityValue(selected ? "Selected" : "")
     }
 }
 
@@ -234,13 +329,14 @@ private struct InspectorPaneContentView: View {
 }
 
 private struct RightInspectorDivider: View {
+    let color: Color
     let currentWidth: () -> CGFloat
     let resize: (CGFloat, Bool) -> Void
 
     var body: some View {
         ZStack {
             Rectangle()
-                .fill(Color.primary.opacity(0.10))
+                .fill(color)
                 .frame(width: 1)
             RightInspectorResizeInteraction(
                 currentWidth: currentWidth,

@@ -56,8 +56,8 @@ class BaseTerminalController: NSWindowController,
     /// This can be set to show/hide the command palette.
     @Published var commandPaletteIsShowing: Bool = false
 
-    /// Window-level presentation state used by the vertical tab layout.
-    var tabLayoutState = VerticalTabWindowLayoutState(isSidebarVisible: false)
+    /// Window-level presentation state shared by terminal shell presentations.
+    var tabLayoutState: VerticalTabWindowLayoutState
 
     /// Whether this controller supports the native vertical tab bar.
     var supportsSidebar: Bool { false }
@@ -158,10 +158,14 @@ class BaseTerminalController: NSWindowController,
 
     init(_ ghostty: Ghostty.App,
          baseConfig base: Ghostty.SurfaceConfiguration? = nil,
-         surfaceTree tree: SplitTree<Ghostty.SurfaceView>? = nil
+         surfaceTree tree: SplitTree<Ghostty.SurfaceView>? = nil,
+         tabLayoutState: VerticalTabWindowLayoutState? = nil
     ) {
         self.ghostty = ghostty
         self.derivedConfig = DerivedConfig(ghostty.config)
+        self.tabLayoutState = tabLayoutState ?? VerticalTabWindowLayoutState(
+            isSidebarVisible: false
+        )
 
         super.init(window: nil)
 

@@ -117,9 +117,17 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let sessionBase = tree == nil
             ? Self.injectingSessionID(self.tabSessionID, into: base)
             : base
+        let initialLayoutState = VerticalTabWindowLayoutState(
+            isSidebarVisible: self.tabLayout == .vertical &&
+                OhMyGhosttySettings.shared.sidebarVisible
+        )
 
-        super.init(ghostty, baseConfig: sessionBase, surfaceTree: tree)
-        tabLayoutState = VerticalTabWindowLayoutState(isSidebarVisible: tabLayout == .vertical)
+        super.init(
+            ghostty,
+            baseConfig: sessionBase,
+            surfaceTree: tree,
+            tabLayoutState: initialLayoutState
+        )
 
         // Setup our notifications for behaviors
         let center = NotificationCenter.default
@@ -490,6 +498,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 if controller.tabLayout == .vertical {
                     (controller.window as? VerticalTabsTerminalWindow)?
                         .installSidebarToggle(controller: controller)
+                }
+                if let appDelegate = NSApp.delegate as? AppDelegate {
+                    (controller.window as? TerminalWindow)?.installInspectorToggle(
+                        controller: controller,
+                        registry: appDelegate.inspectorRegistry
+                    )
                 }
                 controller.objectWillChange.send()
             }
@@ -1459,6 +1473,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
 
         (window as? VerticalTabsTerminalWindow)?.installSidebarToggle(controller: self)
+        if let appDelegate = NSApp.delegate as? AppDelegate {
+            (window as? TerminalWindow)?.installInspectorToggle(
+                controller: self,
+                registry: appDelegate.inspectorRegistry
+            )
+        }
 
         // Apply any additional appearance-related properties to the new window. We
         // apply this based on the root config but change it later based on surface
@@ -1778,6 +1798,18 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         guard supportsSidebar,
               window?.tabGroup?.selectedWindow === window else { return }
         let settings = OhMyGhosttySettings.shared
+        let changedKey = notification.userInfo?[
+            OhMyGhosttySettings.changedKeyUserInfoKey
+        ] as? String
+        if changedKey == nil ||
+            changedKey == "tabs.sidebarVisible" ||
+            changedKey == "tabs.sidebarWidth" {
+            tabLayoutState.applySidebarPreferences(
+                visible: settings.sidebarVisible,
+                width: CGFloat(settings.defaultSidebarWidth),
+                availableWidth: window?.contentLayoutRect.width ?? 960
+            )
+        }
         if tabLayoutState.groupingMode != settings.groupingMode ||
             tabLayoutState.orderingMode != settings.orderingMode {
             reconcileTabOrganization(
@@ -2005,7 +2037,10 @@ extension NSWindowTabGroup {
         let state = windows
             .compactMap { $0.windowController as? TerminalController }
             .first?
-            .tabLayoutState ?? VerticalTabWindowLayoutState(isSidebarVisible: false)
+            .tabLayoutState ?? VerticalTabWindowLayoutState(
+                isSidebarVisible: OhMyGhosttySettings.shared.tabLayout == .vertical &&
+                    OhMyGhosttySettings.shared.sidebarVisible
+            )
         objc_setAssociatedObject(
             self,
             &verticalTabLayoutStateAssociationKey,

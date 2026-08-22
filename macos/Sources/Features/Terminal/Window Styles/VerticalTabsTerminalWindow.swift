@@ -88,16 +88,18 @@ final class VerticalTabsTerminalWindow: TransparentTitlebarTerminalWindow {
     }
 }
 
-private protocol TitlebarControlsCentering {
+protocol TitlebarControlsCentering {
     var contentCenterYInWindow: CGFloat? { get }
 }
 
-private final class AlignedTitlebarControlsView<Content: View>: NSView, TitlebarControlsCentering {
+final class AlignedTitlebarControlsView<Content: View>: NSView, TitlebarControlsCentering {
     private let hostingView: NSHostingView<Content>
+    private let contentWidth: CGFloat
 
-    init(rootView: Content) {
+    init(width: CGFloat = 58, rootView: Content) {
+        self.contentWidth = width
         self.hostingView = NSHostingView(rootView: rootView)
-        super.init(frame: NSRect(x: 0, y: 0, width: 58, height: 28))
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: 28))
         addSubview(hostingView)
     }
 
@@ -107,7 +109,7 @@ private final class AlignedTitlebarControlsView<Content: View>: NSView, Titlebar
     }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: 58, height: 28)
+        NSSize(width: contentWidth, height: 28)
     }
 
     override func viewDidMoveToWindow() {
@@ -117,7 +119,7 @@ private final class AlignedTitlebarControlsView<Content: View>: NSView, Titlebar
 
     override func layout() {
         super.layout()
-        let size = NSSize(width: 58, height: 24)
+        let size = NSSize(width: contentWidth, height: 24)
         let centerY = trafficLightsCenterYInLocalCoordinates ?? bounds.midY
         hostingView.frame = NSRect(
             x: bounds.midX - size.width / 2,

@@ -29,9 +29,15 @@ struct InspectorRegistryTests {
         #expect(state.selectedInspectorPaneID == "builtin.files")
     }
 
-    @Test func emptyRegistryDoesNotMutateWindowLayoutState() {
+    @Test func emptyRegistryDoesNotMutateWindowLayoutState() throws {
+        let suite = "InspectorEmptyRegistryTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
         let registry = InspectorRegistry()
-        let state = VerticalTabWindowLayoutState(isSidebarVisible: false)
+        let state = VerticalTabWindowLayoutState(
+            isSidebarVisible: false,
+            inspectorPresentation: InspectorPresentationStore(defaults: defaults)
+        )
 
         state.setInspectorVisible(true)
 

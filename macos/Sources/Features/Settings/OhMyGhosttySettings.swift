@@ -153,6 +153,7 @@ enum OhMyGhosttyTabRowDensity: String, CaseIterable, Identifiable {
 final class OhMyGhosttySettings: ObservableObject {
     static let shared = OhMyGhosttySettings()
     static let didChangeNotification = Notification.Name("com.oh-my-ghostty.settingsDidChange")
+    static let changedKeyUserInfoKey = "changedKey"
     static let appearanceDidChangeNotification = Notification.Name(
         "com.oh-my-ghostty.appearanceDidChange"
     )
@@ -196,6 +197,11 @@ final class OhMyGhosttySettings: ObservableObject {
             id: "tabs.rememberSidebarWidth", type: .boolean, defaultValue: "true",
             allowedValues: nil, minimum: nil, maximum: nil,
             description: "Use the last committed sidebar width as the next window default.",
+            requiresNewWindow: false, category: "tabs"),
+        .init(
+            id: "tabs.sidebarVisible", type: .boolean, defaultValue: "true",
+            allowedValues: nil, minimum: nil, maximum: nil,
+            description: "Show the Vertical Tabs sidebar by default.",
             requiresNewWindow: false, category: "tabs"),
         .init(
             id: "appearance.windowTheme", type: .enumeration, defaultValue: "ghostty-config",
@@ -293,6 +299,9 @@ final class OhMyGhosttySettings: ObservableObject {
     }
     @Published var rememberSidebarWidth = true {
         didSet { persist("tabs.rememberSidebarWidth", rememberSidebarWidth) }
+    }
+    @Published var sidebarVisible = true {
+        didSet { persist("tabs.sidebarVisible", sidebarVisible) }
     }
     @Published var windowThemeOverride: OhMyGhosttyWindowTheme? {
         didSet { persistOptional("appearance.windowTheme", windowThemeOverride?.rawValue) }
@@ -499,6 +508,7 @@ final class OhMyGhosttySettings: ObservableObject {
             orderingMode = enumValue("tabs.ordering", fallback: .manual)
             showShortcutLabels = boolValue("tabs.showShortcutLabels", fallback: true)
             rememberSidebarWidth = boolValue("tabs.rememberSidebarWidth", fallback: true)
+            sidebarVisible = boolValue("tabs.sidebarVisible", fallback: true)
             windowThemeOverride = optionalEnumValue("appearance.windowTheme")
             lightThemeOverride = optionalStringValue("appearance.lightTheme")
             darkThemeOverride = optionalStringValue("appearance.darkTheme")
@@ -568,7 +578,7 @@ final class OhMyGhosttySettings: ObservableObject {
         guard !isApplying else { return }
         chosen[key] = value
         save()
-        notifyRuntime()
+        notifyRuntime(changedKey: key)
         if key.hasPrefix("appearance.") { notifyAppearanceRuntime() }
     }
 
@@ -580,7 +590,7 @@ final class OhMyGhosttySettings: ObservableObject {
             chosen.removeValue(forKey: key)
         }
         save()
-        notifyRuntime()
+        notifyRuntime(changedKey: key)
         notifyAppearanceRuntime()
     }
 
@@ -602,8 +612,12 @@ final class OhMyGhosttySettings: ObservableObject {
         }
     }
 
-    private func notifyRuntime() {
-        NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
+    private func notifyRuntime(changedKey: String? = nil) {
+        NotificationCenter.default.post(
+            name: Self.didChangeNotification,
+            object: self,
+            userInfo: changedKey.map { [Self.changedKeyUserInfoKey: $0] }
+        )
     }
 
     private func notifyAppearanceRuntime() {

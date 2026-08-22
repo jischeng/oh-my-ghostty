@@ -11,6 +11,7 @@ struct OhMyGhosttySettingsTests {
 
         settings.tabLayout = .vertical
         settings.defaultSidebarWidth = 300
+        settings.sidebarVisible = false
         settings.groupingMode = .project
         settings.orderingMode = .manual
         settings.notifyTaskComplete = false
@@ -21,6 +22,7 @@ struct OhMyGhosttySettingsTests {
         )
         #expect(object["tabs.layout"] as? String == "vertical")
         #expect((object["tabs.sidebarWidth"] as? NSNumber)?.doubleValue == 300)
+        #expect(object["tabs.sidebarVisible"] as? Bool == false)
         #expect(object["tabs.grouping"] as? String == "project")
         #expect(object["tabs.ordering"] as? String == "manual")
         #expect(object["notifications.taskComplete"] as? Bool == false)
@@ -28,6 +30,7 @@ struct OhMyGhosttySettingsTests {
         let restored = OhMyGhosttySettings(fileURL: url)
         #expect(restored.tabLayout == .vertical)
         #expect(restored.defaultSidebarWidth == 300)
+        #expect(!restored.sidebarVisible)
         #expect(restored.groupingMode == .project)
         #expect(restored.orderingMode == .manual)
         #expect(!restored.notifyTaskComplete)
@@ -179,6 +182,7 @@ struct OhMyGhosttySettingsTests {
         #expect(Set(descriptors.map(\.id)).count == descriptors.count)
         #expect(descriptors.contains { $0.id == "tabs.layout" })
         #expect(descriptors.contains { $0.id == "tabs.ordering" })
+        #expect(descriptors.contains { $0.id == "tabs.sidebarVisible" })
         #expect(descriptors.contains { $0.id == "agents.statusHooks" })
         #expect(descriptors.contains { $0.id == "appearance.backgroundOpacity" })
         #expect(descriptors.contains { $0.id == "appearance.cursorStyle" })

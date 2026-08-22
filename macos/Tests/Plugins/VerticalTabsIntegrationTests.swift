@@ -44,6 +44,7 @@ struct VerticalTabsIntegrationTests {
         let settings = OhMyGhosttySettings.shared
         settings.tabLayout = .vertical
         settings.defaultSidebarWidth = 240
+        settings.sidebarVisible = true
         settings.groupingMode = .none
         settings.orderingMode = .manual
         settings.showShortcutLabels = true
@@ -108,6 +109,23 @@ struct VerticalTabsIntegrationTests {
         try await settle(controllers)
 
         let eighth = controllers[7]
+        #expect(controllers.allSatisfy { $0.sidebarIsShowing })
+        settings.defaultSidebarWidth = 300
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(controllers.allSatisfy { abs($0.sidebarWidth - 300) < 0.001 })
+        settings.sidebarVisible = false
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(controllers.allSatisfy { !$0.sidebarIsShowing })
+        settings.sidebarVisible = true
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(controllers.allSatisfy { $0.sidebarIsShowing })
+        eighth.setSidebarVisible(false)
+        settings.tabIconSize = 17
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(controllers.allSatisfy { !$0.sidebarIsShowing })
+        eighth.setSidebarVisible(true)
+        try await Task.sleep(for: .milliseconds(300))
+
         eighth.setTabGroupingMode(.none)
         eighth.setTabOrderingMode(.manual)
         let tabGroup = try #require(eighth.window?.tabGroup)
@@ -122,8 +140,11 @@ struct VerticalTabsIntegrationTests {
         let alignedWindow = try #require(eighth.window as? VerticalTabsTerminalWindow)
         alignedWindow.contentView?.superview?.layoutSubtreeIfNeeded()
         let controlsCenterY = try #require(alignedWindow.titlebarControlsCenterY)
+        let inspectorCenterY = try #require(alignedWindow.inspectorControlsCenterY)
         let trafficLightsCenterY = try #require(alignedWindow.trafficLightsCenterY)
         #expect(abs(controlsCenterY - trafficLightsCenterY) < 0.5)
+        #expect(abs(inspectorCenterY - trafficLightsCenterY) < 0.5)
+        #expect(alignedWindow.inspectorToggleIsInstalled)
 
         let surfaceIDs = controllers.map { $0.surfaceTree.first?.id }
         #expect(Set(controllers.map(\.tabSessionID)).count == controllers.count)
@@ -176,9 +197,14 @@ struct VerticalTabsIntegrationTests {
         #expect(controllers.map { $0.surfaceTree.first?.id } == surfaceIDs)
         try capture(window: try #require(eighth.window), path: inspectorScreenshotPath)
         eighth.toggleInspectorPane()
-        try await Task.sleep(for: .milliseconds(100))
+        for _ in 0..<20 where
+            eighth.tabLayoutState.isInspectorVisible ||
+                controllers.map(surfaceSize) != initialSurfaceSizes {
+            try await Task.sleep(for: .milliseconds(50))
+        }
         #expect(!eighth.tabLayoutState.isInspectorVisible)
         #expect(controllers.map { $0.surfaceTree.first?.id } == surfaceIDs)
+        #expect(controllers.map(surfaceSize) == initialSurfaceSizes)
         let expectedFrameSize = try #require(eighth.window).frame.size
         let switchOrder = [0, 4, 1, 7, 2, 5]
         let clock = ContinuousClock()
@@ -563,6 +589,7 @@ struct VerticalTabsIntegrationTests {
         #expect(nativeWindow.tabBarView != nil || nativeWindow.titlebarAccessoryViewControllers.contains {
             nativeWindow.isTabBar($0)
         })
+        #expect(nativeWindow.inspectorToggleIsInstalled)
         horizontalThird.toggleInspectorPane()
         try await Task.sleep(for: .milliseconds(200))
         #expect(horizontalControllers.allSatisfy { $0.tabLayoutState.isInspectorVisible })

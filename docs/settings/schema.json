@@ -124,6 +124,12 @@
       "description": "Use the last committed sidebar width as the next window default.",
       "type": "boolean"
     },
+    "tabs.sidebarVisible": {
+      "category": "tabs",
+      "default": true,
+      "description": "Show the Vertical Tabs sidebar by default.",
+      "type": "boolean"
+    },
     "tabs.showShortcutLabels": {
       "category": "tabs",
       "default": true,

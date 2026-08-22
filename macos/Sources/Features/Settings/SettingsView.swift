@@ -155,14 +155,15 @@ struct SettingsView: View {
                     Text("Applies to newly created windows; existing terminals are not rebuilt.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    Toggle("Show Sidebar", isOn: $settings.sidebarVisible)
                     HStack {
-                        Text("Default Sidebar Width")
+                        Text("Sidebar Width")
                         Slider(value: $settings.defaultSidebarWidth, in: 176...480, step: 1)
                         Text("\(Int(settings.defaultSidebarWidth)) pt")
                             .monospacedDigit()
                             .frame(width: 52, alignment: .trailing)
                     }
-                    Toggle("Remember Sidebar Width", isOn: $settings.rememberSidebarWidth)
+                    Toggle("Remember Resized Width", isOn: $settings.rememberSidebarWidth)
                 }
                 Section("Organization") {
                     Picker("Grouping", selection: $settings.groupingMode) {

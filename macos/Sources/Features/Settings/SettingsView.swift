@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 enum OhMyGhosttySettingsTab: String, CaseIterable, Identifiable {
@@ -27,8 +28,13 @@ enum OhMyGhosttySettingsTab: String, CaseIterable, Identifiable {
 
 @MainActor
 final class OhMyGhosttySettingsWindowController: NSWindowController {
-    init(settings: OhMyGhosttySettings) {
-        let root = SettingsView(settings: settings)
+    private var appearanceCancellable: AnyCancellable?
+
+    init(
+        settings: OhMyGhosttySettings,
+        initialSelection: OhMyGhosttySettingsTab = .tabs
+    ) {
+        let root = SettingsView(settings: settings, initialSelection: initialSelection)
         let hostingController = NSHostingController(rootView: root)
         let window = NSWindow(contentViewController: hostingController)
         window.title = "Settings"
@@ -38,11 +44,34 @@ final class OhMyGhosttySettingsWindowController: NSWindowController {
         window.minSize = NSSize(width: 720, height: 480)
         window.setFrameAutosaveName("OhMyGhosttySettingsWindow")
         super.init(window: window)
+
+        applyAppearance(settings)
+        appearanceCancellable = settings.objectWillChange.sink { [weak self, weak settings] _ in
+            DispatchQueue.main.async {
+                guard let self, let settings else { return }
+                self.applyAppearance(settings)
+            }
+        }
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    private func applyAppearance(_ settings: OhMyGhosttySettings) {
+        guard let window else { return }
+        switch settings.windowThemeOverride {
+        case .light:
+            window.appearance = NSAppearance(named: .aqua)
+        case .dark:
+            window.appearance = NSAppearance(named: .darkAqua)
+        case .system:
+            window.appearance = nil
+        case nil:
+            let config = (NSApp.delegate as? AppDelegate)?.ghostty.config
+            window.appearance = config.flatMap(NSAppearance.init(ghosttyConfig:))
+        }
     }
 }
 
@@ -84,11 +113,9 @@ struct SettingsView: View {
                     .padding(.horizontal, 24)
                     .frame(height: 52)
                 Divider()
-                ScrollView {
-                    detail
-                        .padding(24)
-                        .frame(maxWidth: 620, alignment: .topLeading)
-                }
+                detail
+                    .formStyle(.grouped)
+                    .frame(maxWidth: 680, alignment: .topLeading)
             }
         }
         .frame(minWidth: 720, minHeight: 480)
@@ -105,13 +132,12 @@ struct SettingsView: View {
         switch selection {
         case .general:
             Form {
-                Section("Application") {
-                    Picker("Default Tab Layout", selection: $settings.tabLayout) {
-                        Text("Horizontal").tag(Ghostty.Config.MacOSTabLayout.horizontal)
-                        Text("Vertical").tag(Ghostty.Config.MacOSTabLayout.vertical)
-                    }
-                    .pickerStyle(.segmented)
-                    Toggle("Remember Sidebar Width", isOn: $settings.rememberSidebarWidth)
+                Section("Configuration") {
+                    LabeledContent("Fork Settings", value: OhMyGhosttySettings.fileURL.path)
+                    LabeledContent("Precedence", value: "Runtime → OMG → Ghostty → Defaults")
+                    Text("Tab layout, appearance, and plugin preferences each have one canonical page.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -126,6 +152,9 @@ struct SettingsView: View {
                         Text("Vertical").tag(Ghostty.Config.MacOSTabLayout.vertical)
                     }
                     .pickerStyle(.segmented)
+                    Text("Applies to newly created windows; existing terminals are not rebuilt.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     HStack {
                         Text("Default Sidebar Width")
                         Slider(value: $settings.defaultSidebarWidth, in: 176...480, step: 1)
@@ -167,8 +196,12 @@ struct SettingsView: View {
 
         case .keyboard:
             Form {
-                Section("Tabs") {
-                    Toggle("Show Position Shortcuts", isOn: $settings.showShortcutLabels)
+                Section("Ghostty Keybindings") {
+                    Text("Keyboard shortcuts are defined by Ghostty configuration. Position labels are configured once in Tabs.")
+                        .foregroundStyle(.secondary)
+                    Button("Open Ghostty Configuration") {
+                        (NSApp.delegate as? AppDelegate)?.ghostty.openConfig()
+                    }
                 }
             }
 
@@ -239,14 +272,27 @@ struct SettingsView: View {
                     value: optionalStringBinding(\.darkThemeOverride)
                 )
                 resolutionRow(appearance.theme)
+                HStack {
+                    Text("Resolved Background")
+                    Spacer()
+                    Circle()
+                        .fill(inheritedGhosttyConfig.backgroundColor)
+                        .overlay(Circle().stroke(Color.primary.opacity(0.15)))
+                        .frame(width: 18, height: 18)
+                }
+                Text("Foreground, selection, and palette remain owned by the selected Ghostty theme.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Font") {
                 LabeledContent("Font Family") {
                     TextField(
-                        "Ghostty config",
+                        "Inherit Ghostty config",
                         text: optionalStringBinding(\.fontFamilyOverride)
                     )
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 360)
                     .multilineTextAlignment(.trailing)
                 }
                 optionalSlider(
@@ -402,7 +448,9 @@ private struct GhosttyThemeField: View {
     var body: some View {
         LabeledContent(title) {
             HStack(spacing: 6) {
-                TextField("Ghostty config", text: $value)
+                TextField("Inherit Ghostty config", text: $value)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 360)
                     .multilineTextAlignment(.trailing)
                 if !themes.isEmpty {
                     Menu {

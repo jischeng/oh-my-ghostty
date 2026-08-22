@@ -30,12 +30,14 @@ Reload the file with **Settings > Advanced > Reload** or Ghostty's **Reload Conf
 
 | Layer | Owns | Priority |
 | --- | --- | --- |
-| Runtime/window state | Current sidebar visibility, current live width, collapsed groups, selected tab | Highest |
+| Runtime/window state | Current tab Sidebar visibility/live width, Inspector visibility/width/active pane, collapsed groups, selected tab | Highest |
 | Oh My Ghostty settings | Optional fork and Appearance overrides listed below | Second |
 | Ghostty config | Inherited baseline, including `macos-tab-layout`, theme, font, opacity, blur, and cursor | Third |
 | Built-in defaults | Safe values for unset settings | Lowest |
 
-The fork settings model is the single writer for `settings.json`. Settings UI controls bind directly to that typed model. Runtime code observes the same model; it does not mirror these values into a second UserDefaults domain.
+The fork settings model is the single writer for `settings.json`. Settings UI controls bind directly to that typed model. Runtime code observes the same model; it does not mirror these preferences into a second UserDefaults domain.
+
+Window UI state is intentionally separate: `InspectorPresentationStore` owns last-used Inspector visibility, committed width, and active pane in the application UserDefaults domain. These values are not Ghostty configuration and are not portable user preferences.
 
 ## Settings
 
@@ -82,6 +84,7 @@ The CLI is designed but not implemented in this iteration. It must call the type
 
 ## Validation Captures
 
-- [`settings-appearance.png`](../images/settings-appearance.png): inherited Appearance values, source labels, optional overrides, and Reset to Ghostty.
+- [`settings-appearance.png`](../images/settings-appearance.png): Dark Appearance, inherited values, source labels, optional overrides, and Reset to Ghostty.
+- [`settings-appearance-light.png`](../images/settings-appearance-light.png): the same native Settings hierarchy under explicit Light Appearance.
 - [`appearance-transparency-vertical.png`](../images/appearance-transparency-vertical.png): Vertical Tabs and terminal content using the same 58% Ghostty background alpha.
 - [`appearance-transparency-horizontal.png`](../images/appearance-transparency-horizontal.png): native Horizontal presentation under the same Ghostty opacity/blur configuration.

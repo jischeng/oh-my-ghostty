@@ -36,6 +36,12 @@ struct TerminalCommandPaletteView: View {
     /// Toggles the native sidebar.
     var onToggleSidebar: () -> Void
 
+    /// Whether a trailing Inspector pane is available.
+    var inspectorIsSupported: Bool
+
+    /// Toggles the trailing Inspector.
+    var onToggleInspector: () -> Void
+
     /// The callback when an action is submitted.
     var onAction: ((String) -> Void)
 
@@ -92,12 +98,22 @@ struct TerminalCommandPaletteView: View {
 
     /// Commands implemented by the native terminal host.
     private var hostOptions: [CommandOption] {
-        guard sidebarIsSupported else { return [] }
-        return [CommandOption(
-            title: "Toggle Sidebar",
-            leadingIcon: "sidebar.left",
-            action: onToggleSidebar
-        )]
+        var options: [CommandOption] = []
+        if sidebarIsSupported {
+            options.append(CommandOption(
+                title: "Toggle Sidebar",
+                leadingIcon: "sidebar.left",
+                action: onToggleSidebar
+            ))
+        }
+        if inspectorIsSupported {
+            options.append(CommandOption(
+                title: "Toggle Inspector",
+                leadingIcon: "sidebar.right",
+                action: onToggleInspector
+            ))
+        }
+        return options
     }
 
     /// Commands for installing or canceling available updates.

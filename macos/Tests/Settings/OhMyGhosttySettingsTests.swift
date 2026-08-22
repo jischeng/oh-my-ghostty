@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 @testable import Ghostty
@@ -123,6 +124,25 @@ struct OhMyGhosttySettingsTests {
         #expect(!resetOverlay.contains("background-opacity ="))
         #expect(settings.windowThemeOverride == nil)
         #expect(settings.backgroundOpacityOverride == nil)
+    }
+
+    @Test func settingsWindowTracksExplicitAndSystemAppearance() async throws {
+        let (settings, url) = temporarySettings()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let controller = OhMyGhosttySettingsWindowController(settings: settings)
+        let window = try #require(controller.window)
+
+        settings.windowThemeOverride = .dark
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(window.appearance?.name == .darkAqua)
+
+        settings.windowThemeOverride = .light
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(window.appearance?.name == .aqua)
+
+        settings.windowThemeOverride = .system
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(window.appearance == nil)
     }
 
     @Test func themeCatalogCombinesBundledAndUserThemes() throws {

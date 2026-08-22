@@ -125,6 +125,9 @@ struct RightInspectorHost: View {
         .onChange(of: layoutState.selectedInspectorPaneID) { _ in
             registry.presentationDidChange(to: selectedPaneID, context: context)
         }
+        .onChange(of: context) { nextContext in
+            registry.presentationDidChange(to: selectedPaneID, context: nextContext)
+        }
         .onDisappear {
             registry.presentationDidChange(to: nil, context: context)
         }

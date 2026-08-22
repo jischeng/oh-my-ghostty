@@ -2,7 +2,7 @@
 
 ## Status
 
-The host foundation is implemented. No Files, Git, Issues, Pull Requests, AI Context Browser, or Marketplace pane is included in this iteration.
+The Core host foundation and a minimal `builtin.files` provider are implemented. Git, Search, Issues, Pull Requests, AI Context Browser, and Marketplace panes remain out of scope.
 
 ## Shell hierarchy
 
@@ -30,6 +30,8 @@ Core App Shell owns:
 
 `VerticalTabWindowLayoutState` currently carries the shared shell state for compatibility with the existing tab implementation. Despite the historical name, the instance is associated with `NSWindowTabGroup` and shared by Horizontal and Vertical tabs. Inspector state never belongs to one terminal tab.
 
+`InspectorPresentationStore` is the typed persistence boundary for last-used visibility, committed width, and active pane. It uses the application UserDefaults domain because these are UI runtime state, not portable user configuration. The values are intentionally absent from Ghostty config and `~/.config/oh-my-ghostty/settings.json`.
+
 Core Features and Plugins own only pane-specific data and commands. They do not own the split view or Inspector chrome.
 
 ## Registry contract
@@ -43,6 +45,8 @@ Core Features and Plugins own only pane-specific data and commands. They do not 
 Descriptors include stable ID, title, SF Symbol name, owner, preferred width, and minimum width. IDs, labels, and widths are validated before registration. Duplicate IDs are rejected.
 
 A Core Feature registers a typed content provider and may receive appeared/disappeared lifecycle events. A Plugin registers a data-only pane and updates its content through an owner-scoped API. Plugin ownership is checked on every update and all panes are removed on owner disconnect.
+
+`BuiltInFilesInspectorProvider` dogfoods the Plugin path under owner `builtin.files`. On pane appearance or cwd change it asynchronously reads at most 200 visible top-level entries and publishes an owner-scoped typed list. It does not inject a View or perform filesystem I/O on the main actor. The shell only knows that a Files descriptor and typed content exist.
 
 The stable Plugin capability is `inspectorPane`. The v1 process transport does not yet expose pane registration messages; adding those messages must preserve this same typed, owner-scoped model.
 
@@ -63,6 +67,14 @@ This keeps a Plugin pane declarative and prevents it from bypassing Core layout,
 Window, terminal-adjacent chrome, Vertical Tabs, and Right Inspector consume the same Ghostty-derived background color and `background-opacity`. Background layers apply alpha locally. The application never uses `window.alphaValue` or a whole-tree SwiftUI opacity modifier, so glyphs, cursor, icons, and controls remain sharp and opaque.
 
 Blur and macOS glass continue to be provided by Ghostty's `TerminalViewContainer` and `TerminalWindow` mechanisms. Inspector code does not install an independent material.
+
+## Interaction
+
+- **View > Toggle Inspector** and `⌘⇧I` show/hide the host.
+- The Inspector header owns pane selection and collapse.
+- The divider supports continuous resize; only the committed width is persisted on mouse-up.
+- Visibility, width, and active pane restore for later windows/app launches.
+- An empty registry still removes the complete trailing host from layout.
 
 ## Empty registry behavior
 

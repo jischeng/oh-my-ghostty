@@ -1570,8 +1570,10 @@ extension BaseTerminalController: NSMenuItemValidation {
         /// We set the scheme on surfaces so they pick the correct theme
         /// and let ``syncAppearance(_:)`` update the window accordingly.
         ///
-        /// Using App's effectiveAppearance here to prevent incorrect updates.
-        let themeAppearance = NSApplication.shared.effectiveAppearance
+        /// A forced window theme must also drive conditional terminal themes.
+        /// System mode leaves the window appearance unset and therefore follows
+        /// the application's effective appearance automatically.
+        let themeAppearance = window?.effectiveAppearance ?? NSApplication.shared.effectiveAppearance
         let scheme: ghostty_color_scheme_e
         if themeAppearance.isDark {
             scheme = GHOSTTY_COLOR_SCHEME_DARK

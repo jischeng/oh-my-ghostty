@@ -246,7 +246,7 @@ Pi 不依赖 Sidebar 或状态插件，但依赖 IPC、QuickInput 和 Terminal C
 - 将 OSC 9;4 progress 生命周期映射为 running/waiting/completed/failed wire 状态，再归一为 host-owned idle/working/done/needsAttention/error activity model。
 - `~/.config/oh-my-ghostty/settings.json`、typed settings model、machine-readable schema 与原生 Settings Window；fork preference 不再散落在 UserDefaults，Ghostty config 仅作为未显式设置项的 fallback。
 - Host-owned tab icon/metadata/activity presentation contracts；plugin 只能贡献已验证的数据，不能访问 SwiftUI/AppKit/PTY/renderer 对象。
-- Core-owned `InspectorRegistry` / `RightInspectorHost` foundation；Horizontal/Vertical 共用 `NSWindowTabGroup` layout state，空 registry 不改变 Terminal hierarchy，Plugin Inspector 仅贡献经过 owner validation 的 typed content。
+- Core-owned `InspectorRegistry` / `RightInspectorHost`；Horizontal/Vertical 共用 `NSWindowTabGroup` layout state，`InspectorPresentationStore` 持久化 UI state，`⌘⇧I` 切换，Plugin Inspector 仅贡献经过 owner validation 的 typed content；`builtin.files` 通过同一数据边界异步提供最小文件列表。
 - Ghostty baseline + OMG Appearance overlay resolution；theme/font/size/opacity/blur/cursor 通过 Ghostty live config update 应用，Reset 只移除 OMG override，不改写用户 Ghostty config。
 - Vertical Tabs 和 Right Inspector 使用 renderer-derived background color/opacity；移除 terminal content 上方的 opaque SwiftUI fill，保持 glyph/cursor/icon opaque 并恢复 upstream transparency/blur semantics。
 - Plugin capability audit 明确：codec/authorization/status store 是已测试组件，但 discovery、socket、peer credential、进程监管和真实 Agent adapter 尚未完成。
@@ -271,6 +271,8 @@ Vertical Tabs 验证截图：
 - `docs/images/vertical-tabs-reordered.png`：Manual reorder 后 A,D,B,C 的 position-based shortcuts，active C identity 保持。
 - `docs/images/vertical-tabs-groups-status.png`：Mock agent 的 plugin icon 与 host-owned working indicator。
 - `docs/images/settings-tabs.png`：原生 Settings Window 的七个 category 与 typed Tabs controls。
-- `docs/images/settings-appearance.png`：Ghostty inherited values、OMG optional override、effective source 与 Reset to Ghostty。
+- `docs/images/settings-appearance.png`：Dark Appearance 下的 Ghostty inherited values、OMG optional override、effective source 与 Reset to Ghostty。
+- `docs/images/settings-appearance-light.png`：相同原生 Settings hierarchy 的 explicit Light Appearance 验证。
 - `docs/images/appearance-transparency-vertical.png`：Vertical Sidebar 与 terminal content 在相同 58% Ghostty background alpha 下保持一致。
 - `docs/images/appearance-transparency-horizontal.png`：相同 opacity/blur config 下的 Ghostty 原生 Horizontal 对照。
+- `docs/images/right-inspector-files.png`：Core-owned Right Inspector Host 挂载 owner-scoped `builtin.files` typed content。

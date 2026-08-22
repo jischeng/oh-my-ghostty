@@ -4,6 +4,31 @@ import Testing
 
 @MainActor
 struct InspectorRegistryTests {
+    @Test func inspectorPresentationPersistsVisibilityWidthAndPane() throws {
+        let suite = "InspectorPresentationStoreTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = InspectorPresentationStore(defaults: defaults)
+
+        store.setVisible(true)
+        store.setWidth(412)
+        store.selectPane("builtin.files")
+
+        let restored = InspectorPresentationStore(defaults: defaults)
+        #expect(restored.snapshot == .init(
+            isVisible: true,
+            width: 412,
+            selectedPaneID: "builtin.files"
+        ))
+        let state = VerticalTabWindowLayoutState(
+            isSidebarVisible: false,
+            inspectorPresentation: restored
+        )
+        #expect(state.isInspectorVisible)
+        #expect(state.inspectorWidth == 412)
+        #expect(state.selectedInspectorPaneID == "builtin.files")
+    }
+
     @Test func emptyRegistryDoesNotMutateWindowLayoutState() {
         let registry = InspectorRegistry()
         let state = VerticalTabWindowLayoutState(isSidebarVisible: false)
@@ -43,9 +68,21 @@ struct InspectorRegistryTests {
             .init(id: "title", label: "Title", value: "Shell"),
         ]))
 
+        let updatedContext = InspectorPaneContext(
+            tabID: context.tabID,
+            surfaceID: context.surfaceID,
+            title: "Updated Shell",
+            workingDirectory: "/var/tmp"
+        )
         registry.presentationDidChange(to: descriptor.id, context: context)
-        registry.presentationDidChange(to: nil, context: context)
-        #expect(events == [.appeared(context), .disappeared])
+        registry.presentationDidChange(to: descriptor.id, context: updatedContext)
+        registry.presentationDidChange(to: nil, context: updatedContext)
+        #expect(events == [
+            .appeared(context),
+            .disappeared,
+            .appeared(updatedContext),
+            .disappeared,
+        ])
     }
 
     @Test func pluginPaneIsDataOnlyAndOwnerScoped() throws {
@@ -80,6 +117,55 @@ struct InspectorRegistryTests {
         }
 
         registry.disconnectPlugin("agent")
+        #expect(registry.isEmpty)
+    }
+
+    @Test func builtInFilesProviderUsesPluginDataBoundary() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("Sources"),
+            withIntermediateDirectories: true
+        )
+        try "demo".write(
+            to: root.appendingPathComponent("README.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let registry = InspectorRegistry()
+        let provider = BuiltInFilesInspectorProvider(registry: registry)
+        try provider.register()
+        let context = InspectorPaneContext(
+            tabID: UUID(),
+            surfaceID: UUID(),
+            title: "Demo",
+            workingDirectory: root.path
+        )
+        registry.presentationDidChange(
+            to: BuiltInFilesInspectorProvider.paneID,
+            context: context
+        )
+
+        var content: InspectorPaneContent?
+        for _ in 0..<20 {
+            content = registry.content(
+                for: BuiltInFilesInspectorProvider.paneID,
+                context: context
+            )
+            if case .list = content { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        guard case .list(let items) = content else {
+            Issue.record("Expected a typed Files list")
+            return
+        }
+        #expect(items.map(\.title) == ["Sources", "README.md"])
+        #expect(registry.descriptor(id: BuiltInFilesInspectorProvider.paneID)?.source ==
+            .plugin(BuiltInFilesInspectorProvider.pluginID))
+
+        registry.disconnectPlugin(BuiltInFilesInspectorProvider.pluginID)
         #expect(registry.isEmpty)
     }
 

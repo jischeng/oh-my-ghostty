@@ -21,6 +21,7 @@ Status vocabulary:
 | Plugin settings | Stub | `PluginSettingDescriptor` defines safe data types; no contribution registry or renderer is connected. |
 | Tab icon provider | Partial | Host-owned icon provider and validated status icon descriptor render in Vertical Tabs; no discovered plugin can currently connect. |
 | Tab metadata | Partial | Host-owned metadata provider and project fallback are connected; no out-of-process metadata command/router exists. |
+| Inspector pane | Partial | Core host, owner-scoped typed registry, persistence, shortcut, and `builtin.files` provider are connected; v1 wire registration/update messages are not implemented. |
 | Status events | Partial | Versioned message, validation, revision/ownership/TTL store, core activity mapping, mock adapter and Vertical UI exist; no production socket/CLI ingress exists. |
 | Badge / activity indicator | Partial | Host-owned per-tab activity indicator exists. Dock badge policy is not connected to plugin activity. |
 | Notifications | Design only | Host settings exist; no activity-to-UNUserNotificationCenter policy dispatcher exists. |

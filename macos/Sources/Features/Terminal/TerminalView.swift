@@ -172,6 +172,11 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                                 viewModel.tabLayoutState.toggleSidebar()
                             }
                         },
+                        inspectorIsSupported: (NSApp.delegate as? AppDelegate)?
+                            .inspectorRegistry.isEmpty == false,
+                        onToggleInspector: {
+                            (viewModel as? TerminalController)?.toggleInspectorPane()
+                        },
                         onAction: { action in
                             self.delegate?.performAction(action, on: surfaceView)
                         })

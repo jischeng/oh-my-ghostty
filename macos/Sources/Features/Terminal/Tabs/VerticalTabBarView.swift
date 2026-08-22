@@ -70,20 +70,29 @@ final class VerticalTabWindowLayoutState: ObservableObject {
     private(set) var appliedResizeCount = 0
     private(set) var appliedInspectorResizeCount = 0
     private let settings: OhMyGhosttySettings
+    private let inspectorPresentation: InspectorPresentationStore
 
     init(
         isSidebarVisible: Bool,
         sidebarWidth: CGFloat? = nil,
-        settings: OhMyGhosttySettings? = nil
+        settings: OhMyGhosttySettings? = nil,
+        inspectorPresentation: InspectorPresentationStore? = nil
     ) {
         let settings = settings ?? OhMyGhosttySettings.shared
+        let inspectorPresentation = inspectorPresentation ?? InspectorPresentationStore.shared
         self.settings = settings
+        self.inspectorPresentation = inspectorPresentation
         let initialWidth = sidebarWidth ?? CGFloat(settings.defaultSidebarWidth)
         self.isSidebarVisible = isSidebarVisible
         self.sidebarWidth = initialWidth
         self.committedSidebarWidth = initialWidth
         self.groupingMode = settings.groupingMode
         self.orderingMode = settings.orderingMode
+        self.isInspectorVisible = inspectorPresentation.snapshot.isVisible
+        let inspectorWidth = CGFloat(inspectorPresentation.snapshot.width)
+        self.inspectorWidth = inspectorWidth
+        self.committedInspectorWidth = inspectorWidth
+        self.selectedInspectorPaneID = inspectorPresentation.snapshot.selectedPaneID
     }
 
     func setSidebarVisible(_ visible: Bool) {
@@ -98,6 +107,7 @@ final class VerticalTabWindowLayoutState: ObservableObject {
     func setInspectorVisible(_ visible: Bool) {
         guard isInspectorVisible != visible else { return }
         isInspectorVisible = visible
+        inspectorPresentation.setVisible(visible)
     }
 
     func toggleInspector() {
@@ -107,6 +117,7 @@ final class VerticalTabWindowLayoutState: ObservableObject {
     func selectInspectorPane(_ paneID: String?) {
         guard selectedInspectorPaneID != paneID else { return }
         selectedInspectorPaneID = paneID
+        inspectorPresentation.selectPane(paneID)
     }
 
     func setGroupingMode(_ mode: GhosttyTabGroupingMode) {
@@ -191,6 +202,7 @@ final class VerticalTabWindowLayoutState: ObservableObject {
             pendingInspectorWidth = nil
             applyInspectorWidth(width)
             committedInspectorWidth = width
+            inspectorPresentation.setWidth(width)
             return
         }
 

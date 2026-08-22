@@ -346,6 +346,12 @@
                                     <action selector="toggleSidebar:" target="bbz-4X-AYv" id="OMG-SB-Act"/>
                                 </connections>
                             </menuItem>
+                            <menuItem title="Toggle Inspector" keyEquivalent="i" id="OMG-IN-Tgl">
+                                <modifierMask key="keyEquivalentModifierMask" shift="YES" command="YES"/>
+                                <connections>
+                                    <action selector="toggleInspector:" target="bbz-4X-AYv" id="OMG-IN-Act"/>
+                                </connections>
+                            </menuItem>
                             <menuItem title="Change Tab Title..." id="iac-lh-Cl7">
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>

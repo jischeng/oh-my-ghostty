@@ -18,9 +18,19 @@ struct VerticalTabsIntegrationTests {
     private let settingsScreenshotPath = "/tmp/oh-my-ghostty-settings-tabs.png"
     private let appearanceSettingsScreenshotPath =
         "/tmp/oh-my-ghostty-settings-appearance.png"
+    private let appearanceSettingsLightScreenshotPath =
+        "/tmp/oh-my-ghostty-settings-appearance-light.png"
     private let reorderScreenshotPath = "/tmp/oh-my-ghostty-vertical-tabs-reordered.png"
+    private let inspectorScreenshotPath = "/tmp/oh-my-ghostty-inspector-files.png"
 
     @Test func appKitTabGroupDrivesVerticalTabsWithoutRecreatingSurfaces() async throws {
+        let inspectorPresentation = InspectorPresentationStore.shared
+        let previousInspectorPresentation = inspectorPresentation.snapshot
+        inspectorPresentation.replace(with: .init())
+        defer {
+            inspectorPresentation.replace(with: previousInspectorPresentation)
+        }
+
         let settingsURL = OhMyGhosttySettings.fileURL
         let previousSettings = try? Data(contentsOf: settingsURL)
         defer {
@@ -144,6 +154,31 @@ struct VerticalTabsIntegrationTests {
 
         let initialSurfaceSizes = controllers.map(surfaceSize)
         #expect(initialSurfaceSizes.allSatisfy { $0 != nil })
+        #expect(!appDelegate.inspectorRegistry.isEmpty)
+        let inspectorMenuItem = try #require(menuItem(
+            withAction: #selector(AppDelegate.toggleInspector(_:)),
+            in: NSApp.mainMenu
+        ))
+        #expect(inspectorMenuItem.keyEquivalent == "i")
+        #expect(inspectorMenuItem.keyEquivalentModifierMask.contains([.command, .shift]))
+        #expect(NSApp.sendAction(
+            inspectorMenuItem.action!,
+            to: inspectorMenuItem.target,
+            from: inspectorMenuItem
+        ))
+        try await Task.sleep(for: .milliseconds(250))
+        #expect(eighth.tabLayoutState.isInspectorVisible)
+        #expect(eighth.tabLayoutState.selectedInspectorPaneID ==
+            BuiltInFilesInspectorProvider.paneID)
+        eighth.updateInspectorWidth(380, persist: true)
+        #expect(eighth.tabLayoutState.inspectorWidth == 380)
+        #expect(inspectorPresentation.snapshot.width == 380)
+        #expect(controllers.map { $0.surfaceTree.first?.id } == surfaceIDs)
+        try capture(window: try #require(eighth.window), path: inspectorScreenshotPath)
+        eighth.toggleInspectorPane()
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(!eighth.tabLayoutState.isInspectorVisible)
+        #expect(controllers.map { $0.surfaceTree.first?.id } == surfaceIDs)
         let expectedFrameSize = try #require(eighth.window).frame.size
         let switchOrder = [0, 4, 1, 7, 2, 5]
         let clock = ContinuousClock()
@@ -433,6 +468,39 @@ struct VerticalTabsIntegrationTests {
         )
         #expect(verticalAlpha.allSatisfy { abs($0 - 0.58) < 0.01 })
 
+        let appearanceSurface = try #require(eighth.focusedSurface)
+        let initialCellSize = appearanceSurface.cellSize
+
+        settings.fontSizeOverride = 19
+        settings.backgroundOpacityOverride = 0.42
+        settings.windowThemeOverride = .dark
+        for _ in 0..<30 where
+            abs(eighth.terminalBackgroundOpacity - 0.42) > 0.001 ||
+                appearanceSurface.cellSize == initialCellSize ||
+                eighth.window?.effectiveAppearance.isDark != true {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(abs(eighth.terminalBackgroundOpacity - 0.42) < 0.001)
+        #expect(appearanceSurface.cellSize != initialCellSize)
+        #expect(eighth.window?.effectiveAppearance.isDark == true)
+
+        settings.windowThemeOverride = .light
+        for _ in 0..<20 where eighth.window?.effectiveAppearance.isDark != false {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(eighth.window?.effectiveAppearance.isDark == false)
+
+        settings.windowThemeOverride = .system
+        for _ in 0..<20 where eighth.window?.appearance != nil {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(eighth.window?.appearance == nil)
+
+        settings.fontSizeOverride = nil
+        settings.backgroundOpacityOverride = nil
+        settings.windowThemeOverride = nil
+        try await Task.sleep(for: .milliseconds(300))
+
         eighth.newVerticalTab()
         try await Task.sleep(for: .milliseconds(300))
         eighth.refreshTabState()
@@ -495,6 +563,14 @@ struct VerticalTabsIntegrationTests {
         #expect(nativeWindow.tabBarView != nil || nativeWindow.titlebarAccessoryViewControllers.contains {
             nativeWindow.isTabBar($0)
         })
+        horizontalThird.toggleInspectorPane()
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(horizontalControllers.allSatisfy { $0.tabLayoutState.isInspectorVisible })
+        #expect(horizontalThird.tabLayoutState.inspectorWidth == 380)
+        #expect(nativeWindow.tabBarView != nil || nativeWindow.titlebarAccessoryViewControllers.contains {
+            nativeWindow.isTabBar($0)
+        })
+        horizontalThird.toggleInspectorPane()
         try capture(window: nativeWindow, path: horizontalScreenshotPath)
         try capture(window: nativeWindow, path: transparencyHorizontalScreenshotPath)
         let horizontalAlpha = try screenshotAlpha(
@@ -515,18 +591,46 @@ struct VerticalTabsIntegrationTests {
         try capture(window: settingsWindow, path: settingsScreenshotPath)
         settingsWindow.close()
 
-        let appearanceSettingsWindow = NSWindow(contentViewController: NSHostingController(
-            rootView: SettingsView(settings: settings, initialSelection: .appearance)
-        ))
-        appearanceSettingsWindow.title = "Settings"
+        let appearanceSettingsController = OhMyGhosttySettingsWindowController(
+            settings: settings,
+            initialSelection: .appearance
+        )
+        let appearanceSettingsWindow = try #require(appearanceSettingsController.window)
         appearanceSettingsWindow.setContentSize(NSSize(width: 820, height: 640))
         appearanceSettingsWindow.makeKeyAndOrderFront(nil)
+
+        settings.windowThemeOverride = .light
         try await Task.sleep(for: .milliseconds(300))
+        #expect(appearanceSettingsWindow.effectiveAppearance.isDark == false)
+        try capture(
+            window: appearanceSettingsWindow,
+            path: appearanceSettingsLightScreenshotPath
+        )
+
+        settings.windowThemeOverride = .dark
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(appearanceSettingsWindow.effectiveAppearance.isDark)
         try capture(
             window: appearanceSettingsWindow,
             path: appearanceSettingsScreenshotPath
         )
+
+        settings.windowThemeOverride = .system
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(appearanceSettingsWindow.appearance == nil)
+        settings.windowThemeOverride = nil
         appearanceSettingsWindow.close()
+    }
+
+    private func menuItem(withAction action: Selector, in menu: NSMenu?) -> NSMenuItem? {
+        guard let menu else { return nil }
+        for item in menu.items {
+            if item.action == action { return item }
+            if let nested = menuItem(withAction: action, in: item.submenu) {
+                return nested
+            }
+        }
+        return nil
     }
 
     private func menuItem(withKeyEquivalent key: String, in menu: NSMenu?) -> NSMenuItem? {
@@ -579,6 +683,15 @@ struct VerticalTabsIntegrationTests {
         try? FileManager.default.createDirectory(
             atPath: directory,
             withIntermediateDirectories: true
+        )
+        try? FileManager.default.createDirectory(
+            atPath: "\(directory)/Sources",
+            withIntermediateDirectories: true
+        )
+        try? "demo".write(
+            toFile: "\(directory)/README.md",
+            atomically: true,
+            encoding: .utf8
         )
         var configuration = Ghostty.SurfaceConfiguration()
         configuration.workingDirectory = directory

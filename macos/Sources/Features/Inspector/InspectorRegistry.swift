@@ -73,10 +73,15 @@ final class InspectorRegistry: ObservableObject {
     @Published private(set) var entries: [Entry] = []
     @Published private var contentRevision: UInt64 = 0
 
+    private struct PresentedPane: Equatable {
+        let paneID: String
+        let context: InspectorPaneContext
+    }
+
     private var contentProviders: [String: ContentProvider] = [:]
     private var lifecycleHandlers: [String: LifecycleHandler] = [:]
     private var pluginContent: [String: InspectorPaneContent] = [:]
-    private var presentedPanes: [UUID: String] = [:]
+    private var presentedPanes: [UUID: PresentedPane] = [:]
 
     var isEmpty: Bool { entries.isEmpty }
 
@@ -97,16 +102,23 @@ final class InspectorRegistry: ObservableObject {
 
     /// Registers a data-only plugin pane. Plugins update typed content and never
     /// receive an NSWindow, NSSplitView, NSView, or SwiftUI View capability.
-    func registerPluginPane(_ descriptor: InspectorPaneDescriptor) throws {
+    func registerPluginPane(
+        _ descriptor: InspectorPaneDescriptor,
+        lifecycle: LifecycleHandler? = nil
+    ) throws {
         guard case .plugin = descriptor.source else {
             throw RegistryError.ownerMismatch
         }
-        try register(descriptor, content: { [weak self] _ in
-            self?.pluginContent[descriptor.id] ?? .empty(
-                title: descriptor.title,
-                message: "Waiting for plugin data"
-            )
-        })
+        try register(
+            descriptor,
+            content: { [weak self] _ in
+                self?.pluginContent[descriptor.id] ?? .empty(
+                    title: descriptor.title,
+                    message: "Waiting for plugin data"
+                )
+            },
+            lifecycle: lifecycle
+        )
     }
 
     func updatePluginContent(
@@ -129,8 +141,10 @@ final class InspectorRegistry: ObservableObject {
             $0.descriptor.source == source ? $0.id : nil
         })
         guard !removedIDs.isEmpty else { return }
-        let removedHosts = presentedPanes.compactMap { hostID, paneID in
-            removedIDs.contains(paneID) ? (hostID, paneID) : nil
+        let removedHosts = presentedPanes.compactMap { hostID, presentation in
+            removedIDs.contains(presentation.paneID)
+                ? (hostID, presentation.paneID)
+                : nil
         }
         for (hostID, paneID) in removedHosts {
             lifecycleHandlers[paneID]?(.disappeared)
@@ -155,13 +169,14 @@ final class InspectorRegistry: ObservableObject {
 
     func presentationDidChange(to paneID: String?, context: InspectorPaneContext) {
         let hostID = context.tabID
-        guard presentedPanes[hostID] != paneID else { return }
-        if let previousPaneID = presentedPanes[hostID] {
-            lifecycleHandlers[previousPaneID]?(.disappeared)
+        let next = paneID.map { PresentedPane(paneID: $0, context: context) }
+        guard presentedPanes[hostID] != next else { return }
+        if let previous = presentedPanes[hostID] {
+            lifecycleHandlers[previous.paneID]?(.disappeared)
         }
-        presentedPanes[hostID] = paneID
-        if let paneID {
-            lifecycleHandlers[paneID]?(.appeared(context))
+        presentedPanes[hostID] = next
+        if let next {
+            lifecycleHandlers[next.paneID]?(.appeared(context))
         }
     }
 

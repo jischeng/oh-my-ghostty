@@ -113,6 +113,10 @@ class AppDelegate: NSObject,
     /// Core-owned registry for declarative trailing Inspector panes.
     @MainActor lazy var inspectorRegistry = InspectorRegistry()
 
+    /// Built-in data provider that dogfoods the plugin-owned Inspector contract.
+    @MainActor private lazy var builtInFilesInspector =
+        BuiltInFilesInspectorProvider(registry: inspectorRegistry)
+
     /// The global undo manager for app-level state such as window restoration.
     lazy var undoManager = ExpiringUndoManager()
 
@@ -267,6 +271,11 @@ class AppDelegate: NSObject,
 
         // Initial config loading
         ghosttyConfigDidChange(config: ghostty.config)
+        do {
+            try builtInFilesInspector.register()
+        } catch {
+            Self.logger.error("failed to register built-in Files Inspector: \(error)")
+        }
 
         // Start our update checker.
         updateController.startUpdater()
@@ -357,6 +366,10 @@ class AppDelegate: NSObject,
             }
 
             ghostty_app_set_color_scheme(app, scheme)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.applyOhMyGhosttyWindowTheme(using: self.ghostty.config)
+            }
         }
 
         // Setup our menu
@@ -790,6 +803,35 @@ class AppDelegate: NSObject,
         NSApp.dockTile.display()
     }
 
+    @MainActor
+    private func applyOhMyGhosttyWindowTheme(using config: Ghostty.Config) {
+        let settings = OhMyGhosttySettings.shared
+        let appearance: NSAppearance?
+        let shouldOverrideEveryWindow: Bool
+        switch settings.windowThemeOverride {
+        case .light:
+            appearance = NSAppearance(named: .aqua)
+            shouldOverrideEveryWindow = true
+        case .dark:
+            appearance = NSAppearance(named: .darkAqua)
+            shouldOverrideEveryWindow = true
+        case .system:
+            appearance = nil
+            shouldOverrideEveryWindow = true
+        case nil:
+            appearance = NSAppearance(ghosttyConfig: config)
+            shouldOverrideEveryWindow = false
+        }
+
+        NSApp.appearance = settings.windowThemeOverride == .light ||
+            settings.windowThemeOverride == .dark ? appearance : nil
+        for candidate in NSApp.windows {
+            if shouldOverrideEveryWindow || candidate.windowController is BaseTerminalController {
+                candidate.appearance = appearance
+            }
+        }
+    }
+
     private func ghosttyConfigDidChange(config: Ghostty.Config) {
         MainActor.assumeIsolated {
             OhMyGhosttySettings.shared.configureGhosttyFallback(
@@ -799,6 +841,9 @@ class AppDelegate: NSObject,
 
         // Update the config we need to store
         self.derivedConfig = DerivedConfig(config)
+        MainActor.assumeIsolated {
+            applyOhMyGhosttyWindowTheme(using: config)
+        }
 
         // Depending on the "window-save-state" setting we have to set the NSQuitAlwaysKeepsWindows
         // configuration. This is the only way to carefully control whether macOS invokes the
@@ -992,6 +1037,16 @@ class AppDelegate: NSObject,
         }
         guard let controller, controller.supportsSidebar else { return }
         controller.toggleSidebar(sender)
+    }
+
+    @IBAction func toggleInspector(_ sender: Any?) {
+        let focusedController = (NSApp.keyWindow ?? NSApp.mainWindow)?
+            .windowController as? TerminalController
+        let controller = focusedController ?? TerminalController.all.first {
+            $0.window?.isVisible == true
+        }
+        guard let controller, !inspectorRegistry.isEmpty else { return }
+        controller.toggleInspectorPane()
     }
 
     @IBAction func openSettings(_ sender: Any?) {

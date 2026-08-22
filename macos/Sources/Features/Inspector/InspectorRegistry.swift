@@ -35,10 +35,55 @@ struct InspectorListItem: Identifiable, Equatable, Sendable {
     let systemImage: String?
 }
 
+enum InspectorFileIconTint: String, Equatable, Sendable {
+    case secondary
+    case blue
+    case green
+    case orange
+    case yellow
+    case purple
+    case red
+}
+
+struct InspectorFileIcon: Equatable, Sendable {
+    let systemImage: String
+    let tint: InspectorFileIconTint
+}
+
+struct InspectorFileNode: Identifiable, Equatable, Sendable {
+    let id: String
+    let name: String
+    let isDirectory: Bool
+    let icon: InspectorFileIcon
+    let isExpanded: Bool
+    let isLoading: Bool
+    let children: [InspectorFileNode]?
+}
+
+struct InspectorFileTree: Equatable, Sendable {
+    let rootName: String
+    let rootPath: String
+    let nodes: [InspectorFileNode]
+}
+
+enum InspectorPaneActionKind: Equatable, Sendable {
+    case toggleNode(id: String, expanded: Bool)
+    case refresh
+    case collapseAll
+    case createFile(name: String)
+    case createFolder(name: String)
+}
+
+struct InspectorPaneAction: Equatable, Sendable {
+    let context: InspectorPaneContext
+    let kind: InspectorPaneActionKind
+}
+
 enum InspectorPaneContent: Equatable, Sendable {
     case empty(title: String, message: String)
     case fields([InspectorField])
     case list([InspectorListItem])
+    case fileTree(InspectorFileTree)
 }
 
 struct InspectorPaneContext: Equatable, Sendable {
@@ -69,6 +114,7 @@ final class InspectorRegistry: ObservableObject {
 
     typealias ContentProvider = (InspectorPaneContext) -> InspectorPaneContent
     typealias LifecycleHandler = (InspectorPaneLifecycleEvent) -> Void
+    typealias ActionHandler = (InspectorPaneAction) -> Void
 
     @Published private(set) var entries: [Entry] = []
     @Published private var contentRevision: UInt64 = 0
@@ -78,9 +124,15 @@ final class InspectorRegistry: ObservableObject {
         let context: InspectorPaneContext
     }
 
+    private struct PluginContentKey: Hashable {
+        let paneID: String
+        let tabID: UUID?
+    }
+
     private var contentProviders: [String: ContentProvider] = [:]
     private var lifecycleHandlers: [String: LifecycleHandler] = [:]
-    private var pluginContent: [String: InspectorPaneContent] = [:]
+    private var actionHandlers: [String: ActionHandler] = [:]
+    private var pluginContent: [PluginContentKey: InspectorPaneContent] = [:]
     private var presentedPanes: [UUID: PresentedPane] = [:]
 
     var isEmpty: Bool { entries.isEmpty }
@@ -104,26 +156,35 @@ final class InspectorRegistry: ObservableObject {
     /// receive an NSWindow, NSSplitView, NSView, or SwiftUI View capability.
     func registerPluginPane(
         _ descriptor: InspectorPaneDescriptor,
-        lifecycle: LifecycleHandler? = nil
+        lifecycle: LifecycleHandler? = nil,
+        action: ActionHandler? = nil
     ) throws {
         guard case .plugin = descriptor.source else {
             throw RegistryError.ownerMismatch
         }
         try register(
             descriptor,
-            content: { [weak self] _ in
-                self?.pluginContent[descriptor.id] ?? .empty(
+            content: { [weak self] context in
+                self?.pluginContent[.init(
+                    paneID: descriptor.id,
+                    tabID: context.tabID
+                )] ?? self?.pluginContent[.init(
+                    paneID: descriptor.id,
+                    tabID: nil
+                )] ?? .empty(
                     title: descriptor.title,
                     message: "Waiting for plugin data"
                 )
             },
-            lifecycle: lifecycle
+            lifecycle: lifecycle,
+            action: action
         )
     }
 
     func updatePluginContent(
         paneID: String,
         pluginID: String,
+        tabID: UUID? = nil,
         content: InspectorPaneContent
     ) throws {
         guard let descriptor = descriptor(id: paneID) else {
@@ -132,8 +193,12 @@ final class InspectorRegistry: ObservableObject {
         guard descriptor.source == .plugin(pluginID) else {
             throw RegistryError.ownerMismatch
         }
-        pluginContent[paneID] = content
+        pluginContent[.init(paneID: paneID, tabID: tabID)] = content
         contentRevision &+= 1
+    }
+
+    func performAction(paneID: String, action: InspectorPaneAction) {
+        actionHandlers[paneID]?(action)
     }
 
     func unregister(source: InspectorPaneDescriptor.Source) {
@@ -154,7 +219,8 @@ final class InspectorRegistry: ObservableObject {
         for id in removedIDs {
             contentProviders.removeValue(forKey: id)
             lifecycleHandlers.removeValue(forKey: id)
-            pluginContent.removeValue(forKey: id)
+            actionHandlers.removeValue(forKey: id)
+            pluginContent = pluginContent.filter { $0.key.paneID != id }
         }
     }
 
@@ -183,7 +249,8 @@ final class InspectorRegistry: ObservableObject {
     private func register(
         _ descriptor: InspectorPaneDescriptor,
         content: @escaping ContentProvider,
-        lifecycle: LifecycleHandler? = nil
+        lifecycle: LifecycleHandler? = nil,
+        action: ActionHandler? = nil
     ) throws {
         guard Self.validate(descriptor) else { throw RegistryError.invalidDescriptor }
         guard self.descriptor(id: descriptor.id) == nil else {
@@ -192,6 +259,7 @@ final class InspectorRegistry: ObservableObject {
         entries.append(.init(descriptor: descriptor))
         contentProviders[descriptor.id] = content
         lifecycleHandlers[descriptor.id] = lifecycle
+        actionHandlers[descriptor.id] = action
     }
 
     private static func validate(_ descriptor: InspectorPaneDescriptor) -> Bool {

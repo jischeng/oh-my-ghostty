@@ -36,17 +36,19 @@ Core Features and Plugins own only pane-specific data and commands. They do not 
 
 ## Registry contract
 
-`InspectorRegistry` accepts `InspectorPaneDescriptor` metadata and typed `InspectorPaneContent`:
+`InspectorRegistry` accepts `InspectorPaneDescriptor` metadata, typed `InspectorPaneContent`, and owner-scoped actions:
 
 - empty state;
 - label/value fields;
-- list items.
+- list items;
+- recursive file-tree snapshots;
+- refresh, collapse, disclosure, and create actions.
 
 Descriptors include stable ID, title, SF Symbol name, owner, preferred width, and minimum width. IDs, labels, and widths are validated before registration. Duplicate IDs are rejected.
 
 A Core Feature registers a typed content provider and may receive appeared/disappeared lifecycle events. A Plugin registers a data-only pane and updates its content through an owner-scoped API. Plugin ownership is checked on every update and all panes are removed on owner disconnect.
 
-`BuiltInFilesInspectorProvider` dogfoods the Plugin path under owner `builtin.files`. On pane appearance or cwd change it asynchronously reads at most 200 visible top-level entries and publishes an owner-scoped typed list. It does not inject a View or perform filesystem I/O on the main actor. The shell only knows that a Files descriptor and typed content exist.
+`BuiltInFilesInspectorProvider` dogfoods the Plugin path under owner `builtin.files`. Content is isolated by stable tab ID. Pane appearance, tab switches, and live `SurfaceView.$pwd` changes asynchronously refresh the selected root. Directories load recursively only when expanded and preserve per-tab expansion state. The provider handles typed New File, New Folder, Refresh, Collapse All, and disclosure actions without injecting a View or performing filesystem I/O on the main actor. Filename/extension metadata selects host-owned Git, shell, language, config, document, and media icons.
 
 The stable Plugin capability is `inspectorPane`. The v1 process transport does not yet expose pane registration messages; adding those messages must preserve this same typed, owner-scoped model.
 
@@ -71,7 +73,7 @@ Blur and macOS glass continue to be provided by Ghostty's `TerminalViewContainer
 ## Interaction
 
 - A persistent `sidebar.right` control in the window's top-right titlebar, **View > Toggle Inspector**, and `⌘⇧I` all show/hide the host.
-- The Inspector header owns a compact, extensible pane-switch strip and collapse action.
+- The Inspector header contains only a compact, extensible pane-switch strip; close/reopen remains exclusively in the window titlebar.
 - Left and Right shell dividers consume the same `TerminalShellStyle.dividerColor` token. The divider supports continuous resize; only the committed width is persisted on mouse-up.
 - Visibility, width, and active pane restore for later windows/app launches.
 - An empty registry still removes the complete trailing host from layout.

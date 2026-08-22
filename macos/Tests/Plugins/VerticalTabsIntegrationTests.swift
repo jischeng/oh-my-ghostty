@@ -195,7 +195,94 @@ struct VerticalTabsIntegrationTests {
         #expect(eighth.tabLayoutState.inspectorWidth == 380)
         #expect(inspectorPresentation.snapshot.width == 380)
         #expect(controllers.map { $0.surfaceTree.first?.id } == surfaceIDs)
+
+        let inspectorSurface = try #require(eighth.focusedSurface ?? eighth.surfaceTree.first)
+        let inspectorContext = InspectorPaneContext(
+            tabID: eighth.tabSessionID,
+            surfaceID: inspectorSurface.id,
+            title: eighth.titleOverride ?? inspectorSurface.title,
+            workingDirectory: inspectorSurface.pwd
+        )
+        var inspectorContent: InspectorPaneContent?
+        for _ in 0..<30 {
+            inspectorContent = appDelegate.inspectorRegistry.content(
+                for: BuiltInFilesInspectorProvider.paneID,
+                context: inspectorContext
+            )
+            if case .fileTree = inspectorContent { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        guard case .fileTree(let initialInspectorTree) = inspectorContent,
+              let sourcesNode = initialInspectorTree.nodes.first(where: {
+                  $0.name == "Sources"
+              }) else {
+            Issue.record("Expected cwd-driven Files tree")
+            return
+        }
+        appDelegate.inspectorRegistry.performAction(
+            paneID: BuiltInFilesInspectorProvider.paneID,
+            action: .init(
+                context: inspectorContext,
+                kind: .toggleNode(id: sourcesNode.id, expanded: true)
+            )
+        )
+        for _ in 0..<30 {
+            inspectorContent = appDelegate.inspectorRegistry.content(
+                for: BuiltInFilesInspectorProvider.paneID,
+                context: inspectorContext
+            )
+            if case .fileTree(let tree) = inspectorContent,
+               tree.nodes.first(where: { $0.name == "Sources" })?
+                .children?.contains(where: { $0.name == "main.swift" }) == true {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        guard case .fileTree(let expandedInspectorTree) = inspectorContent else {
+            Issue.record("Expected expanded cwd-driven Files tree")
+            return
+        }
+        #expect(expandedInspectorTree.nodes.first(where: {
+            $0.name == "Sources"
+        })?.children?.contains(where: { $0.name == "main.swift" }) == true)
         try capture(window: try #require(eighth.window), path: inspectorScreenshotPath)
+
+        let switchedRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: switchedRoot) }
+        try FileManager.default.createDirectory(at: switchedRoot, withIntermediateDirectories: true)
+        try "{}".write(
+            to: switchedRoot.appendingPathComponent("switched.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let originalPWD = inspectorSurface.pwd
+        inspectorSurface.pwd = switchedRoot.path
+        let switchedContext = InspectorPaneContext(
+            tabID: eighth.tabSessionID,
+            surfaceID: inspectorSurface.id,
+            title: eighth.titleOverride ?? inspectorSurface.title,
+            workingDirectory: switchedRoot.path
+        )
+        var switchedContent: InspectorPaneContent?
+        for _ in 0..<30 {
+            switchedContent = appDelegate.inspectorRegistry.content(
+                for: BuiltInFilesInspectorProvider.paneID,
+                context: switchedContext
+            )
+            if case .fileTree(let tree) = switchedContent,
+               tree.nodes.contains(where: { $0.name == "switched.json" }) {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        guard case .fileTree(let switchedTree) = switchedContent else {
+            Issue.record("Expected Files tree to follow terminal cwd")
+            return
+        }
+        #expect(switchedTree.nodes.map(\.name) == ["switched.json"])
+        inspectorSurface.pwd = originalPWD
+        try await Task.sleep(for: .milliseconds(100))
         eighth.toggleInspectorPane()
         for _ in 0..<20 where
             eighth.tabLayoutState.isInspectorVisible ||
@@ -717,6 +804,11 @@ struct VerticalTabsIntegrationTests {
         )
         try? "demo".write(
             toFile: "\(directory)/README.md",
+            atomically: true,
+            encoding: .utf8
+        )
+        try? "print(\"demo\")".write(
+            toFile: "\(directory)/Sources/main.swift",
             atomically: true,
             encoding: .utf8
         )

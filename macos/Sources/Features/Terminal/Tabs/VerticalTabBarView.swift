@@ -982,7 +982,8 @@ struct VerticalTabLayoutContainer<Content: View>: View {
                 VerticalTabSidebarDivider(
                     controller: controller,
                     layoutState: layoutState,
-                    color: TerminalShellStyle.dividerColor
+                    color: TerminalShellStyle.dividerColor,
+                    background: backgroundColor.opacity(backgroundOpacity)
                 )
             }
             content
@@ -1000,6 +1001,7 @@ struct VerticalTabSidebarDivider: View {
     @ObservedObject var controller: TerminalController
     @ObservedObject var layoutState: VerticalTabWindowLayoutState
     let color: Color
+    var background: Color = .clear
 
     var body: some View {
         ZStack {
@@ -1012,6 +1014,7 @@ struct VerticalTabSidebarDivider: View {
             )
         }
         .frame(width: 8)
+        .background(background)
         .accessibilityLabel("Resize Tabs Sidebar")
     }
 }

@@ -129,13 +129,29 @@ struct InspectorRegistryTests {
     @Test func builtInFilesProviderUsesPluginDataBoundary() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
+        let secondRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: secondRoot)
+        }
+        let sources = root.appendingPathComponent("Sources")
         try FileManager.default.createDirectory(
-            at: root.appendingPathComponent("Sources"),
+            at: sources,
             withIntermediateDirectories: true
+        )
+        try "print(\"demo\")".write(
+            to: sources.appendingPathComponent("main.swift"),
+            atomically: true,
+            encoding: .utf8
         )
         try "demo".write(
             to: root.appendingPathComponent("README.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try "{}".write(
+            to: root.appendingPathComponent("package.json"),
             atomically: true,
             encoding: .utf8
         )
@@ -160,14 +176,175 @@ struct InspectorRegistryTests {
                 for: BuiltInFilesInspectorProvider.paneID,
                 context: context
             )
-            if case .list = content { break }
+            if case .fileTree = content { break }
             try await Task.sleep(for: .milliseconds(25))
         }
-        guard case .list(let items) = content else {
-            Issue.record("Expected a typed Files list")
+        guard case .fileTree(let initialTree) = content else {
+            Issue.record("Expected a typed Files tree")
             return
         }
-        #expect(items.map(\.title) == ["Sources", "README.md"])
+        #expect(initialTree.rootName == root.lastPathComponent)
+        #expect(initialTree.nodes.map(\.name) == ["Sources", "package.json", "README.md"])
+        #expect(initialTree.nodes[0].isDirectory)
+        #expect(initialTree.nodes[0].children == nil)
+        #expect(initialTree.nodes[1].icon.systemImage == "shippingbox")
+
+        registry.performAction(
+            paneID: BuiltInFilesInspectorProvider.paneID,
+            action: .init(
+                context: context,
+                kind: .toggleNode(id: initialTree.nodes[0].id, expanded: true)
+            )
+        )
+        for _ in 0..<20 {
+            content = registry.content(
+                for: BuiltInFilesInspectorProvider.paneID,
+                context: context
+            )
+            if case .fileTree(let tree) = content,
+               tree.nodes.first?.children?.first?.name == "main.swift" { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        guard case .fileTree(let expandedTree) = content else {
+            Issue.record("Expected an expanded Files tree")
+            return
+        }
+        #expect(expandedTree.nodes[0].isExpanded)
+        #expect(expandedTree.nodes[0].children?.map(\.name) == ["main.swift"])
+        #expect(expandedTree.nodes[0].children?.first?.icon.systemImage == "swift")
+
+        registry.performAction(
+            paneID: BuiltInFilesInspectorProvider.paneID,
+            action: .init(context: context, kind: .collapseAll)
+        )
+        for _ in 0..<20 {
+            content = registry.content(
+                for: BuiltInFilesInspectorProvider.paneID,
+                context: context
+            )
+            if case .fileTree(let tree) = content,
+               tree.nodes.first?.isExpanded == false { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        guard case .fileTree(let collapsedTree) = content else {
+            Issue.record("Expected collapsed Files tree")
+            return
+        }
+        #expect(collapsedTree.nodes[0].children == nil)
+
+        registry.performAction(
+            paneID: BuiltInFilesInspectorProvider.paneID,
+            action: .init(context: context, kind: .createFile(name: "created.json"))
+        )
+        for _ in 0..<20 where !FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("created.json").path
+        ) {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        #expect(FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("created.json").path
+        ))
+        registry.performAction(
+            paneID: BuiltInFilesInspectorProvider.paneID,
+            action: .init(context: context, kind: .createFolder(name: "Created Folder"))
+        )
+        for _ in 0..<20 where !FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("Created Folder").path
+        ) {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        #expect(FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("Created Folder").path
+        ))
+        try "external".write(
+            to: root.appendingPathComponent("external.toml"),
+            atomically: true,
+            encoding: .utf8
+        )
+        registry.performAction(
+            paneID: BuiltInFilesInspectorProvider.paneID,
+            action: .init(context: context, kind: .refresh)
+        )
+        for _ in 0..<20 {
+            content = registry.content(
+                for: BuiltInFilesInspectorProvider.paneID,
+                context: context
+            )
+            if case .fileTree(let tree) = content,
+               tree.nodes.contains(where: { $0.name == "external.toml" }) { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        guard case .fileTree(let refreshedTree) = content else {
+            Issue.record("Expected refreshed Files tree")
+            return
+        }
+        #expect(refreshedTree.nodes.contains(where: { $0.name == "external.toml" }))
+
+        try FileManager.default.createDirectory(at: secondRoot, withIntermediateDirectories: true)
+        try "second".write(
+            to: secondRoot.appendingPathComponent("second.py"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let secondContext = InspectorPaneContext(
+            tabID: UUID(),
+            surfaceID: UUID(),
+            title: "Second",
+            workingDirectory: secondRoot.path
+        )
+        registry.presentationDidChange(
+            to: BuiltInFilesInspectorProvider.paneID,
+            context: secondContext
+        )
+        var secondContent: InspectorPaneContent?
+        for _ in 0..<20 {
+            secondContent = registry.content(
+                for: BuiltInFilesInspectorProvider.paneID,
+                context: secondContext
+            )
+            if case .fileTree = secondContent { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        guard case .fileTree(let secondTree) = secondContent else {
+            Issue.record("Expected tab-scoped Files content")
+            return
+        }
+        #expect(secondTree.rootPath == secondRoot.path)
+        #expect(secondTree.nodes.map(\.name) == ["second.py"])
+        guard case .fileTree(let retainedFirstTree) = registry.content(
+            for: BuiltInFilesInspectorProvider.paneID,
+            context: context
+        ) else {
+            Issue.record("Expected first tab Files content to remain isolated")
+            return
+        }
+        #expect(retainedFirstTree.rootPath == root.path)
+
+        let movedContext = InspectorPaneContext(
+            tabID: context.tabID,
+            surfaceID: context.surfaceID,
+            title: context.title,
+            workingDirectory: secondRoot.path
+        )
+        registry.presentationDidChange(
+            to: BuiltInFilesInspectorProvider.paneID,
+            context: movedContext
+        )
+        var movedContent: InspectorPaneContent?
+        for _ in 0..<20 {
+            movedContent = registry.content(
+                for: BuiltInFilesInspectorProvider.paneID,
+                context: movedContext
+            )
+            if case .fileTree(let tree) = movedContent,
+               tree.rootPath == secondRoot.path { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        guard case .fileTree(let movedTree) = movedContent else {
+            Issue.record("Expected cwd-driven Files refresh")
+            return
+        }
+        #expect(movedTree.rootPath == secondRoot.path)
         #expect(registry.descriptor(id: BuiltInFilesInspectorProvider.paneID)?.source ==
             .plugin(BuiltInFilesInspectorProvider.pluginID))
 

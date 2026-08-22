@@ -106,6 +106,20 @@ struct ConfigTests {
         #expect(config.macosTitlebarStyle == expected)
     }
 
+    @Test func macosTabLayoutDefaultsToVertical() throws {
+        let config = try TemporaryConfig("")
+        #expect(config.macosTabLayout == .vertical)
+    }
+
+    @Test(arguments: [
+        ("horizontal", Ghostty.Config.MacOSTabLayout.horizontal),
+        ("vertical", Ghostty.Config.MacOSTabLayout.vertical),
+    ])
+    func macosTabLayoutValues(raw: String, expected: Ghostty.Config.MacOSTabLayout) throws {
+        let config = try TemporaryConfig("macos-tab-layout = \(raw)")
+        #expect(config.macosTabLayout == expected)
+    }
+
     @Test func resizeOverlayDefaultsToAfterFirst() throws {
         let config = try TemporaryConfig("")
         #expect(config.resizeOverlay == .after_first)

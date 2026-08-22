@@ -37,8 +37,16 @@ extension Ghostty {
             self.config = config
         }
 
-        convenience init(at path: String? = nil, finalize: Bool = true) {
-            self.init(config: Self.loadConfig(at: path, finalize: finalize))
+        convenience init(
+            at path: String? = nil,
+            overrideAt overridePath: String? = nil,
+            finalize: Bool = true
+        ) {
+            self.init(config: Self.loadConfig(
+                at: path,
+                overrideAt: overridePath,
+                finalize: finalize
+            ))
         }
 
         convenience init(clone config: ghostty_config_t) {
@@ -57,7 +65,11 @@ extension Ghostty {
         /// - Parameters:
         ///   - path: An optional preferred config file path. Pass `nil` to load the default configuration files.
         ///   - finalize: Whether to finalize the configuration to populate default values.
-        static func loadConfig(at path: String?, finalize: Bool) -> ghostty_config_t? {
+        static func loadConfig(
+            at path: String?,
+            overrideAt overridePath: String? = nil,
+            finalize: Bool
+        ) -> ghostty_config_t? {
             // Initialize the global configuration.
             guard let cfg = ghostty_config_new() else {
                 logger.critical("ghostty_config_new failed")
@@ -78,6 +90,13 @@ extension Ghostty {
             }
 
             ghostty_config_load_recursive_files(cfg)
+
+            // OMG settings are an optional final overlay. This preserves the
+            // user's Ghostty configuration as the inherited baseline while
+            // allowing GUI-owned values to win without rewriting that file.
+            if let overridePath {
+                ghostty_config_load_file(cfg, overridePath)
+            }
 
             // TODO: we'd probably do some config loading here... for now we'd
             // have to do this synchronously. When we support config updating we can do
@@ -358,6 +377,16 @@ extension Ghostty {
             return MacOSTitlebarStyle(rawValue: String(cString: ptr)) ?? defaultValue
         }
 
+        var macosTabLayout: MacOSTabLayout {
+            let defaultValue = MacOSTabLayout.vertical
+            guard let config = self.config else { return defaultValue }
+            var value: UnsafePointer<Int8>?
+            let key = "macos-tab-layout"
+            guard ghostty_config_get(config, &value, key, UInt(key.lengthOfBytes(using: .utf8))),
+                  let value else { return defaultValue }
+            return MacOSTabLayout(rawValue: String(cString: value)) ?? defaultValue
+        }
+
         var macosTitlebarProxyIcon: MacOSTitlebarProxyIcon {
             let defaultValue = MacOSTitlebarProxyIcon.visible
             guard let config = self.config else { return defaultValue }
@@ -455,6 +484,27 @@ extension Ghostty {
             let key = "focus-follows-mouse"
             _ = ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8)))
             return v
+        }
+
+        var fontSize: Double {
+            guard let config = self.config else { return 13 }
+            var value: Float = 13
+            let key = "font-size"
+            _ = ghostty_config_get(config, &value, key, UInt(key.lengthOfBytes(using: .utf8)))
+            return Double(value)
+        }
+
+        var cursorStyle: String {
+            guard let config = self.config else { return "block" }
+            var value: UnsafePointer<Int8>?
+            let key = "cursor-style"
+            guard ghostty_config_get(
+                config,
+                &value,
+                key,
+                UInt(key.lengthOfBytes(using: .utf8))
+            ), let value else { return "block" }
+            return String(cString: value)
         }
 
         var backgroundColor: Color {
@@ -910,6 +960,10 @@ extension Ghostty.Config {
     enum MacOSTitlebarStyle: String {
         static let `default` = MacOSTitlebarStyle.transparent
         case native, transparent, tabs, hidden
+    }
+
+    enum MacOSTabLayout: String {
+        case horizontal, vertical
     }
 
     enum DragHandle: String {

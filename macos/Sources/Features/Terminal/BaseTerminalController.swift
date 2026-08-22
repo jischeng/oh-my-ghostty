@@ -56,6 +56,20 @@ class BaseTerminalController: NSWindowController,
     /// This can be set to show/hide the command palette.
     @Published var commandPaletteIsShowing: Bool = false
 
+    /// Window-level presentation state used by the vertical tab layout.
+    var tabLayoutState = VerticalTabWindowLayoutState(isSidebarVisible: false)
+
+    /// Whether this controller supports the native vertical tab bar.
+    var supportsSidebar: Bool { false }
+
+    /// Stable identity used by host-owned activity state, when this controller represents a tab.
+    var activitySessionID: UUID? { nil }
+
+    /// Whether terminal content should extend into a hidden titlebar.
+    var contentExtendsIntoTitlebar: Bool {
+        window is HiddenTitlebarTerminalWindow
+    }
+
     /// Set if the terminal view should show the update overlay.
     @Published var updateOverlayIsVisible: Bool = false
 
@@ -103,7 +117,10 @@ class BaseTerminalController: NSWindowController,
     /// An override title for the tab/window set by the user via prompt_tab_title.
     /// When set, this takes precedence over the computed title from the terminal.
     var titleOverride: String? {
-        didSet { applyTitleToWindow() }
+        didSet {
+            applyTitleToWindow()
+            objectWillChange.send()
+        }
     }
 
     /// The last computed title from the focused surface (without the override).
@@ -336,6 +353,7 @@ class BaseTerminalController: NSWindowController,
     func surfaceTreeDidChange(from: SplitTree<Ghostty.SurfaceView>, to: SplitTree<Ghostty.SurfaceView>) {
         for surfaceView in from where !to.contains(surfaceView) {
             cancelPendingClipboardConfirmation(for: surfaceView)
+
         }
 
         // If our surface tree becomes empty then we have no focused surface.
@@ -888,24 +906,48 @@ class BaseTerminalController: NSWindowController,
         if let titleSurface = focusedSurface ?? lastFocusedSurface,
            surfaceTree.contains(titleSurface) {
             // If we have a surface, we want to listen for title changes.
-            titleSurface.$title
-                .combineLatest(titleSurface.$bell)
-                .map { [weak self] in self?.computeTitle(title: $0, bell: $1) ?? "" }
-                .sink { [weak self] in self?.titleDidChange(to: $0) }
-                .store(in: &focusedSurfaceCancellables)
+            let statusPublisher: AnyPublisher<TabActivity?, Never>
+            if let appDelegate = NSApp.delegate as? AppDelegate,
+               let activitySessionID {
+                statusPublisher = appDelegate.tabActivities.$entries
+                    .map { $0[activitySessionID]?.status.activity }
+                    .removeDuplicates()
+                    .eraseToAnyPublisher()
+            } else {
+                statusPublisher = Just(nil).eraseToAnyPublisher()
+            }
+
+            Publishers.CombineLatest3(
+                titleSurface.$title,
+                titleSurface.$bell,
+                statusPublisher
+            )
+            .map { [weak self] in
+                self?.computeTitle(title: $0, bell: $1, status: $2) ?? ""
+            }
+            .sink { [weak self] in self?.titleDidChange(to: $0) }
+            .store(in: &focusedSurfaceCancellables)
         } else {
             // There is no surface to listen to titles for.
             titleDidChange(to: "👻")
         }
     }
 
-    private func computeTitle(title: String, bell: Bool) -> String {
-        var result = title
+    private func computeTitle(
+        title: String,
+        bell: Bool,
+        status: TabActivity?
+    ) -> String {
+        let statusTitle = status?.label?.trimmingCharacters(in: .whitespacesAndNewlines)
+        var result = statusTitle.flatMap { $0.isEmpty ? nil : $0 } ?? title
         if bell && ghostty.config.bellFeatures.contains(.title) {
             result = "🔔 \(result)"
         }
 
-        return result
+        guard let status else { return result }
+        return [status.source, result, status.state.titleMarker]
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
     }
 
     private func titleDidChange(to: String) {
@@ -917,9 +959,13 @@ class BaseTerminalController: NSWindowController,
         guard let window else { return }
 
         if let titleOverride {
+            let status = activitySessionID.flatMap {
+                (NSApp.delegate as? AppDelegate)?.tabActivities.activity(for: $0)
+            }
             window.title = computeTitle(
                 title: titleOverride,
-                bell: focusedSurface?.bell ?? false)
+                bell: focusedSurface?.bell ?? false,
+                status: status)
             return
         }
 
@@ -1424,6 +1470,11 @@ class BaseTerminalController: NSWindowController,
     @IBAction func resetFontSize(_ sender: Any) {
         guard let surface = focusedSurface?.surface else { return }
         ghostty.changeFontSize(surface: surface, .reset)
+    }
+
+    @IBAction func toggleSidebar(_ sender: Any?) {
+        guard supportsSidebar else { return }
+        tabLayoutState.toggleSidebar()
     }
 
     @IBAction func toggleCommandPalette(_ sender: Any?) {

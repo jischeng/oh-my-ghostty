@@ -3352,6 +3352,17 @@ keybind: Keybinds = .{},
 /// Changing this option at runtime only applies to new windows.
 @"macos-titlebar-style": MacTitlebarStyle = .transparent,
 
+/// The layout used to present tabs in macOS terminal windows.
+///
+/// Valid values are:
+///
+///   * `horizontal` - Use Ghostty's native horizontal tab presentation.
+///   * `vertical` - Present the same tabs in a vertical strip on the left.
+///
+/// The default value is `vertical`. Changing this option at runtime only
+/// applies to new windows so existing terminal surfaces are never recreated.
+@"macos-tab-layout": MacTabLayout = .vertical,
+
 /// Whether the proxy icon in the macOS titlebar is visible. The proxy icon
 /// is the icon that represents the folder of the current working directory.
 /// You can see this very clearly in the macOS built-in Terminal.app
@@ -9093,6 +9104,12 @@ pub const MacTitlebarStyle = enum {
     transparent,
     tabs,
     hidden,
+};
+
+/// See macos-tab-layout
+pub const MacTabLayout = enum {
+    horizontal,
+    vertical,
 };
 
 /// See macos-titlebar-proxy-icon

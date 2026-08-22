@@ -27,8 +27,14 @@ extension Ghostty {
         /// configuration (i.e. font size) from the previously focused window. This would override this.
         @Published private(set) var config: Config
 
-        /// Preferred config file than the default ones
+        /// Ghostty configuration before the optional OMG appearance overlay.
+        @Published private(set) var inheritedConfig: Config
+
+        /// Preferred config file than the default ones.
         private var configPath: String?
+
+        /// Optional app-owned overlay loaded after Ghostty configuration.
+        private var configOverridePath: String?
         /// The ghostty app instance. We only have one of these for the entire app, although I guess
         /// in theory you can have multiple... I don't know why you would...
         @Published var app: ghostty_app_t? {
@@ -44,10 +50,12 @@ extension Ghostty {
             return ghostty_app_needs_confirm_quit(app)
         }
 
-        init(configPath: String? = nil) {
+        init(configPath: String? = nil, configOverridePath: String? = nil) {
             self.configPath = configPath
-            // Initialize the global configuration.
-            self.config = Config(at: configPath)
+            self.configOverridePath = configOverridePath
+            // Keep both the Ghostty-owned baseline and the effective config.
+            self.inheritedConfig = Config(at: configPath)
+            self.config = Config(at: configPath, overrideAt: configOverridePath)
             if self.config.config == nil {
                 readiness = .error
                 return
@@ -138,13 +146,15 @@ extension Ghostty {
                 return
             }
 
-            // Hard or full updates have to reload the full configuration
-            let newConfig = Config(at: configPath)
-            guard newConfig.loaded else {
+            // Hard or full updates have to reload the full configuration.
+            let inheritedConfig = Config(at: configPath)
+            let newConfig = Config(at: configPath, overrideAt: configOverridePath)
+            guard inheritedConfig.loaded, newConfig.loaded else {
                 Ghostty.logger.warning("failed to reload configuration")
                 return
             }
 
+            self.inheritedConfig = inheritedConfig
             ghostty_app_update_config(app, newConfig.config!)
             /// applied config will be updated in ``Self.configChange(_:target:v:)``
         }
@@ -159,7 +169,7 @@ extension Ghostty {
             // Hard or full updates have to reload the full configuration.
             // NOTE: We never set this on self.config because this is a surface-only
             // config. We free it after the call.
-            let newConfig = Config(at: configPath)
+            let newConfig = Config(at: configPath, overrideAt: configOverridePath)
             guard newConfig.loaded else {
                 Ghostty.logger.warning("failed to reload configuration")
                 return

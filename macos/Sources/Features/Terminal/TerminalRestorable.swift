@@ -58,7 +58,7 @@ extension TerminalRestorable {
 
 /// The state stored for terminal window restoration.
 final class TerminalRestorableState: TerminalRestorable {
-    static var version: Int { 7 }
+    static var version: Int { 8 }
     static var minimumVersion: Int { 5 }
 
     var focusedSurface: String? {
@@ -75,6 +75,12 @@ final class TerminalRestorableState: TerminalRestorable {
     }
     var titleOverride: String? {
         internalState.titleOverride
+    }
+    var tabSessionID: UUID? {
+        internalState.tabSessionID.flatMap(UUID.init(uuidString:))
+    }
+    var tabCreatedAt: Date? {
+        internalState.tabCreatedAt
     }
 
     /// Internal State we use to perform unit tests
@@ -157,7 +163,9 @@ class TerminalWindowRestoration: NSObject, NSWindowRestoration {
         // be.
         let c = TerminalController.init(
             appDelegate.ghostty,
-            withSurfaceTree: state.surfaceTree)
+            withSurfaceTree: state.surfaceTree,
+            tabSessionID: state.tabSessionID,
+            tabCreatedAt: state.tabCreatedAt)
         guard let window = c.window else {
             completionHandler(nil, TerminalRestoreError.windowDidNotLoad)
             return

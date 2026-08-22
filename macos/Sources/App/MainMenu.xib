@@ -94,9 +94,9 @@
                                 </connections>
                             </menuItem>
                             <menuItem isSeparatorItem="YES" id="VOq-y0-SEH"/>
-                            <menuItem title="Preferences…" keyEquivalent="," id="BOF-NM-1cW">
+                            <menuItem title="Settings…" keyEquivalent="," id="BOF-NM-1cW">
                                 <connections>
-                                    <action selector="openConfig:" target="bbz-4X-AYv" id="X65-fg-iWU"/>
+                                    <action selector="openSettings:" target="bbz-4X-AYv" id="X65-fg-iWU"/>
                                 </connections>
                             </menuItem>
                             <menuItem isSeparatorItem="YES" id="GOd-qX-exa"/>
@@ -338,6 +338,12 @@
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>
                                     <action selector="toggleCommandPalette:" target="-1" id="FcT-XD-gM1"/>
+                                </connections>
+                            </menuItem>
+                            <menuItem title="Toggle Sidebar" keyEquivalent="s" id="OMG-SB-Tgl">
+                                <modifierMask key="keyEquivalentModifierMask" shift="YES" command="YES"/>
+                                <connections>
+                                    <action selector="toggleSidebar:" target="bbz-4X-AYv" id="OMG-SB-Act"/>
                                 </connections>
                             </menuItem>
                             <menuItem title="Change Tab Title..." id="iac-lh-Cl7">

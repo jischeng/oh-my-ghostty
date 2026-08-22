@@ -30,6 +30,12 @@ struct TerminalCommandPaletteView: View {
     /// The update view model for showing update commands.
     var updateViewModel: UpdateViewModel?
 
+    /// Whether the containing terminal supports the native sidebar.
+    var sidebarIsSupported: Bool
+
+    /// Toggles the native sidebar.
+    var onToggleSidebar: () -> Void
+
     /// The callback when an action is submitted.
     var onAction: ((String) -> Void)
 
@@ -75,12 +81,23 @@ struct TerminalCommandPaletteView: View {
         var options: [CommandOption] = []
         // Updates always appear first
         options.append(contentsOf: updateOptions)
+        options.append(contentsOf: hostOptions)
 
         // Sort the rest. We replace ":" with a character that sorts before space
         // so that "Foo:" sorts before "Foo Bar:". Use sortKey as a tie-breaker
         // for stable ordering when titles are equal.
         options.append(contentsOf: sortedTerminalPaletteOptions(jumpOptions + terminalOptions))
         return options
+    }
+
+    /// Commands implemented by the native terminal host.
+    private var hostOptions: [CommandOption] {
+        guard sidebarIsSupported else { return [] }
+        return [CommandOption(
+            title: "Toggle Sidebar",
+            leadingIcon: "sidebar.left",
+            action: onToggleSidebar
+        )]
     }
 
     /// Commands for installing or canceling available updates.

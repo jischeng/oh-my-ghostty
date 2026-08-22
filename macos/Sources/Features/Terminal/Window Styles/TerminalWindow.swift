@@ -340,7 +340,7 @@ class TerminalWindow: NSWindow {
             keyEquivalentLabel.attributedStringValue = NSAttributedString(
                 string: "\(keyEquivalent) ",
                 attributes: [
-                    .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+                    .font: NSFont.systemFont(ofSize: GhosttyTabStyle.shortcutFontSize),
                     .foregroundColor: isKeyWindow ? NSColor.labelColor : NSColor.secondaryLabelColor,
                 ])
         }

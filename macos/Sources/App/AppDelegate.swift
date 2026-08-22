@@ -107,6 +107,12 @@ class AppDelegate: NSObject,
     /// The ghostty global state. Only one per process.
     let ghostty: Ghostty.App
 
+    /// Host-owned tab activity reduced from terminal and plugin producers.
+    @MainActor lazy var tabActivities = TabActivityStore()
+
+    /// Core-owned registry for declarative trailing Inspector panes.
+    @MainActor lazy var inspectorRegistry = InspectorRegistry()
+
     /// The global undo manager for app-level state such as window restoration.
     lazy var undoManager = ExpiringUndoManager()
 
@@ -150,6 +156,9 @@ class AppDelegate: NSObject,
 
     /// Manages updates
     let updateController = UpdateController()
+
+    @MainActor private lazy var ohMyGhosttySettingsController =
+        OhMyGhosttySettingsWindowController(settings: .shared)
     var updateViewModel: UpdateViewModel {
         updateController.viewModel
     }
@@ -173,14 +182,44 @@ class AppDelegate: NSObject,
     @MainActor private lazy var menuShortcutManager = Ghostty.MenuShortcutManager()
 
     override init() {
+        let appearanceOverlayPath = MainActor.assumeIsolated {
+            OhMyGhosttySettings.shared.prepareAppearanceOverlay()
+            return OhMyGhosttySettings.ghosttyAppearanceOverlayURL.path
+        }
+        let app: Ghostty.App
 #if DEBUG
-        ghostty = Ghostty.App(configPath: ProcessInfo.processInfo.environment["GHOSTTY_CONFIG_PATH"])
+        app = Ghostty.App(
+            configPath: ProcessInfo.processInfo.environment["GHOSTTY_CONFIG_PATH"],
+            configOverridePath: appearanceOverlayPath
+        )
 #else
-        ghostty = Ghostty.App()
+        app = Ghostty.App(configOverridePath: appearanceOverlayPath)
 #endif
+        ghostty = app
+        MainActor.assumeIsolated {
+            OhMyGhosttySettings.shared.configureGhosttyFallback(
+                tabLayout: app.config.macosTabLayout
+            )
+        }
         super.init()
 
         ghostty.delegate = self
+        let appearanceObservation = MainActor.assumeIsolated {
+            (
+                OhMyGhosttySettings.appearanceDidChangeNotification,
+                OhMyGhosttySettings.shared
+            )
+        }
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(ohMyGhosttyAppearanceDidChange),
+            name: appearanceObservation.0,
+            object: appearanceObservation.1
+        )
+    }
+
+    @objc private func ohMyGhosttyAppearanceDidChange(_ notification: Notification) {
+        ghostty.reloadConfig()
     }
 
     // MARK: - NSApplicationDelegate
@@ -752,6 +791,12 @@ class AppDelegate: NSObject,
     }
 
     private func ghosttyConfigDidChange(config: Ghostty.Config) {
+        MainActor.assumeIsolated {
+            OhMyGhosttySettings.shared.configureGhosttyFallback(
+                tabLayout: config.macosTabLayout
+            )
+        }
+
         // Update the config we need to store
         self.derivedConfig = DerivedConfig(config)
 
@@ -938,6 +983,22 @@ class AppDelegate: NSObject,
     }
 
     // MARK: - IB Actions
+
+    @IBAction func toggleSidebar(_ sender: Any?) {
+        let focusedController = (NSApp.keyWindow ?? NSApp.mainWindow)?
+            .windowController as? BaseTerminalController
+        let controller = focusedController ?? TerminalController.all.first {
+            $0.window?.isVisible == true
+        }
+        guard let controller, controller.supportsSidebar else { return }
+        controller.toggleSidebar(sender)
+    }
+
+    @IBAction func openSettings(_ sender: Any?) {
+        ohMyGhosttySettingsController.showWindow(sender)
+        ohMyGhosttySettingsController.window?.makeKeyAndOrderFront(sender)
+        NSApp.activate(ignoringOtherApps: true)
+    }
 
     @IBAction func openConfig(_ sender: Any?) {
         ghostty.openConfig()
@@ -1277,6 +1338,11 @@ extension AppDelegate: NSMenuItemValidation {
         switch item.action {
         case #selector(setAsDefaultTerminal(_:)):
             return NSWorkspace.shared.defaultTerminal != Bundle.main.bundleURL
+
+        case #selector(toggleSidebar(_:)):
+            let controller = (NSApp.keyWindow ?? NSApp.mainWindow)?
+                .windowController as? BaseTerminalController
+            return controller?.supportsSidebar == true
 
         case #selector(floatOnTop(_:)),
             #selector(useAsDefault(_:)):

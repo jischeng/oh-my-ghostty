@@ -19,6 +19,7 @@ class SurfaceScrollView: NSView {
     private var observers: [NSObjectProtocol] = []
     private var cancellables: Set<AnyCancellable> = []
     private var isLiveScrolling = false
+    private var synchronizedCoreSize: CGSize?
 
     /// The last row position sent via scroll_to_row action. Used to avoid
     /// sending redundant actions when the user drags the scrollbar but stays
@@ -211,9 +212,11 @@ class SurfaceScrollView: NSView {
         // Practically, this happened in the quick terminal.
         let width = scrollView.contentSize.width
         let height = surfaceView.frame.height
-        if width > 0 && height > 0 {
-            surfaceView.sizeDidChange(CGSize(width: width, height: height))
-        }
+        guard width > 0, height > 0 else { return }
+        let size = CGSize(width: width, height: height)
+        guard synchronizedCoreSize != size else { return }
+        synchronizedCoreSize = size
+        surfaceView.sizeDidChange(size)
     }
 
     /// Sizes the document view and scrolls the content view according to the scrollbar state

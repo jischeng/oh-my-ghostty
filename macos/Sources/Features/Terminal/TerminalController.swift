@@ -3,22 +3,28 @@ import Cocoa
 import SwiftUI
 import Combine
 import GhosttyKit
+import ObjectiveC
 
 /// A classic, tabbed terminal experience.
 class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Controller {
+    let tabLayout: Ghostty.Config.MacOSTabLayout
+
+    override var supportsSidebar: Bool {
+        tabLayout == .vertical
+    }
+
+    override var activitySessionID: UUID? { tabSessionID }
+
+    var sidebarIsShowing: Bool { tabLayoutState.isSidebarVisible }
+    var sidebarWidth: CGFloat { tabLayoutState.sidebarWidth }
+
     override var windowNibName: NSNib.Name? {
-        let defaultValue = "Terminal"
-
-        guard let appDelegate = NSApp.delegate as? AppDelegate else { return defaultValue }
+        guard let appDelegate = NSApp.delegate as? AppDelegate else { return "Terminal" }
         let config = appDelegate.ghostty.config
+        guard config.windowDecorations else { return "Terminal" }
+        guard tabLayout == .horizontal else { return "TerminalVerticalTabs" }
 
-        // If we have no window decorations, there's no reason to do anything but
-        // the default titlebar (because there will be no titlebar).
-        if !config.windowDecorations {
-            return defaultValue
-        }
-
-        let nib = switch config.macosTitlebarStyle {
+        return switch config.macosTitlebarStyle {
         case .native: "Terminal"
         case .hidden: "TerminalHiddenTitlebar"
         case .transparent: "TerminalTransparentTitlebar"
@@ -33,8 +39,6 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             "TerminalTabsTitlebarVentura"
 #endif
         }
-
-        return nib
     }
 
     /// This is set to true when we care about frame changes. This is a small optimization since
@@ -61,10 +65,37 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// The notification cancellable for focused surface property changes.
     private var surfaceAppearanceCancellables: Set<AnyCancellable> = []
 
+    let tabSessionID: UUID
+    let tabCreatedAt: Date
+    @Published private(set) var tabLastActivatedAt: Date
+
+    /// The real AppKit tabs in this controller's tab group, in display order.
+    @Published private(set) var tabControllers: [TerminalController] = []
+
+    /// The selected tab controller identity.
+    @Published private(set) var selectedTabID: ObjectIdentifier?
+
+    /// The tab currently under the pointer. This is independent from selection.
+    @Published private(set) var hoveredTabID: ObjectIdentifier?
+
+    /// Actual background used by the focused terminal, including runtime color changes.
+    @Published private(set) var terminalBackgroundColor: Color
+
+    /// Background opacity used by terminal-adjacent app shell chrome.
+    /// The terminal renderer applies this independently to preserve opaque glyphs.
+    @Published private(set) var terminalBackgroundOpacity: Double
+
+    private weak var observedVerticalTabGroup: NSWindowTabGroup?
+    private var verticalTabWindowsObservation: NSKeyValueObservation?
+    private var verticalTabSelectionObservation: NSKeyValueObservation?
+
     init(_ ghostty: Ghostty.App,
          withBaseConfig base: Ghostty.SurfaceConfiguration? = nil,
          withSurfaceTree tree: SplitTree<Ghostty.SurfaceView>? = nil,
-         parent: NSWindow? = nil
+         parent: NSWindow? = nil,
+         tabLayout: Ghostty.Config.MacOSTabLayout? = nil,
+         tabSessionID: UUID? = nil,
+         tabCreatedAt: Date? = nil
     ) {
         // The window we manage is not restorable if we've specified a command
         // to execute. We do this because the restored window is meaningless at the
@@ -75,8 +106,20 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // Setup our initial derived config based on the current app config
         self.derivedConfig = DerivedConfig(ghostty.config)
+        self.terminalBackgroundColor = ghostty.config.backgroundColor
+        self.terminalBackgroundOpacity = ghostty.config.backgroundOpacity
+        self.tabLayout = tabLayout ?? OhMyGhosttySettings.shared.tabLayout
+        self.tabSessionID = tabSessionID ?? UUID()
+        let now = Date()
+        self.tabCreatedAt = tabCreatedAt ?? now
+        self.tabLastActivatedAt = now
 
-        super.init(ghostty, baseConfig: base, surfaceTree: tree)
+        let sessionBase = tree == nil
+            ? Self.injectingSessionID(self.tabSessionID, into: base)
+            : base
+
+        super.init(ghostty, baseConfig: sessionBase, surfaceTree: tree)
+        tabLayoutState = VerticalTabWindowLayoutState(isSidebarVisible: tabLayout == .vertical)
 
         // Setup our notifications for behaviors
         let center = NotificationCenter.default
@@ -89,6 +132,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             self,
             selector: #selector(onMoveTab),
             name: .ghosttyMoveTab,
+            object: nil)
+        center.addObserver(
+            self,
+            selector: #selector(onOhMyGhosttySettingsChanged),
+            name: OhMyGhosttySettings.didChangeNotification,
             object: nil)
         center.addObserver(
             self,
@@ -140,6 +188,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     deinit {
+        verticalTabWindowsObservation?.invalidate()
+        verticalTabSelectionObservation?.invalidate()
+
         // Remove all of our notificationcenter subscriptions
         let center = NotificationCenter.default
         center.removeObserver(self)
@@ -164,6 +215,15 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let workItem = scheduledWorkItem!
         pendingInitialPresentation = workItem
         DispatchQueue.main.async(execute: workItem)
+    }
+
+    static func injectingSessionID(
+        _ sessionID: UUID,
+        into base: Ghostty.SurfaceConfiguration?
+    ) -> Ghostty.SurfaceConfiguration {
+        var configuration = base ?? Ghostty.SurfaceConfiguration()
+        configuration.environmentVariables["OH_MY_GHOSTTY_SESSION"] = sessionID.uuidString
+        return configuration
     }
 
     // MARK: Base Controller Overrides
@@ -204,6 +264,250 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             moveFocusTo: newView,
             moveFocusFrom: oldView,
             undoAction: undoAction)
+    }
+
+    // MARK: Vertical Tabs
+
+    func selectVerticalTab(_ controller: TerminalController) {
+        guard tabControllers.contains(where: { $0 === controller }),
+              let targetWindow = controller.window else { return }
+        let tabGroup = window?.tabGroup
+        tabGroup?.selectedWindow = targetWindow
+        controller.markTabActivated()
+        targetWindow.makeKeyAndOrderFront(nil)
+        Self.refreshTabs(in: tabGroup)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func markTabActivated() {
+        tabLastActivatedAt = Date()
+        if tabLayoutState.orderingMode == .recentlyUsed,
+           window?.tabGroup?.selectedWindow === window {
+            reconcileTabOrganization()
+        }
+    }
+
+    @discardableResult
+    func reorderTab(_ controller: TerminalController, toInsertionIndex insertionIndex: Int) -> Bool {
+        guard let tabGroup = window?.tabGroup,
+              let movedWindow = controller.window else { return false }
+        let windows = tabGroup.windows
+        guard let sourceIndex = windows.firstIndex(of: movedWindow) else { return false }
+
+        var reordered = windows
+        reordered.remove(at: sourceIndex)
+        var destination = min(max(insertionIndex, 0), windows.count)
+        if sourceIndex < destination { destination -= 1 }
+        destination = min(max(destination, 0), reordered.count)
+        reordered.insert(movedWindow, at: destination)
+        guard reordered != windows else { return false }
+
+        tabLayoutState.setOrderingMode(.manual)
+        applyCanonicalTabOrder(reordered, in: tabGroup)
+        return true
+    }
+
+    func setTabGroupingMode(_ mode: GhosttyTabGroupingMode) {
+        guard mode != tabLayoutState.groupingMode else { return }
+        reconcileTabOrganization(grouping: mode, ordering: tabLayoutState.orderingMode)
+        tabLayoutState.setGroupingMode(mode)
+    }
+
+    func setTabOrderingMode(_ mode: GhosttyTabOrderingMode) {
+        guard mode != tabLayoutState.orderingMode else { return }
+        reconcileTabOrganization(grouping: tabLayoutState.groupingMode, ordering: mode)
+        tabLayoutState.setOrderingMode(mode)
+    }
+
+    func beginManualTabDrag() {
+        if tabLayoutState.orderingMode != .manual {
+            tabLayoutState.setOrderingMode(.manual)
+        }
+    }
+
+    func reconcileTabOrganization(
+        grouping: GhosttyTabGroupingMode? = nil,
+        ordering: GhosttyTabOrderingMode? = nil
+    ) {
+        guard let tabGroup = window?.tabGroup else { return }
+        let controllers = tabGroup.windows.compactMap {
+            $0.windowController as? TerminalController
+        }
+        let groups = GhosttyTabOrganizationModel().groups(
+            tabs: controllers,
+            grouping: grouping ?? tabLayoutState.groupingMode,
+            ordering: ordering ?? tabLayoutState.orderingMode
+        )
+        let windows = groups.flatMap(\.tabs).compactMap(\.controller.window)
+        guard windows.count == tabGroup.windows.count else { return }
+        applyCanonicalTabOrder(windows, in: tabGroup)
+    }
+
+    private func applyCanonicalTabOrder(_ windows: [NSWindow], in tabGroup: NSWindowTabGroup) {
+        guard windows != tabGroup.windows else { return }
+        let selectedWindow = tabGroup.selectedWindow
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            for (index, candidate) in windows.enumerated() {
+                guard tabGroup.windows.indices.contains(index),
+                      tabGroup.windows[index] !== candidate else { continue }
+                tabGroup.removeWindow(candidate)
+                tabGroup.insertWindow(candidate, at: index)
+            }
+        }
+
+        if let selectedWindow, tabGroup.windows.contains(selectedWindow) {
+            tabGroup.selectedWindow = selectedWindow
+        }
+        for candidate in tabGroup.windows {
+            candidate.invalidateRestorableState()
+        }
+        Self.refreshTabs(in: tabGroup)
+    }
+
+    func newVerticalTab() {
+        _ = Self.newTab(ghostty, from: window)
+    }
+
+    func setVerticalTabHovered(_ controller: TerminalController, hovered: Bool) {
+        let id = ObjectIdentifier(controller)
+        if hovered {
+            hoveredTabID = id
+        } else if hoveredTabID == id {
+            hoveredTabID = nil
+        }
+    }
+
+    func updateSidebarWidth(_ proposedWidth: CGFloat, persist: Bool) {
+        let contentWidth = window?.contentLayoutRect.width ?? VerticalTabSidebarMetrics.maximumWidth * 2
+        tabLayoutState.updateSidebarWidth(
+            proposedWidth,
+            availableWidth: contentWidth,
+            persist: persist
+        )
+    }
+
+    func updateInspectorWidth(_ proposedWidth: CGFloat, persist: Bool) {
+        let contentWidth = window?.contentLayoutRect.width ?? RightInspectorMetrics.maximumWidth * 2
+        tabLayoutState.updateInspectorWidth(
+            proposedWidth,
+            availableWidth: contentWidth,
+            persist: persist
+        )
+    }
+
+    func setInspectorVisible(_ visible: Bool) {
+        tabLayoutState.setInspectorVisible(visible)
+    }
+
+    func toggleInspectorPane() {
+        tabLayoutState.toggleInspector()
+    }
+
+    func closeVerticalTab(_ controller: TerminalController) {
+        guard tabControllers.contains(where: { $0 === controller }) else { return }
+        selectVerticalTab(controller)
+        DispatchQueue.main.async {
+            controller.closeTab(nil)
+        }
+    }
+
+    func setSidebarVisible(_ visible: Bool) {
+        guard supportsSidebar else { return }
+        tabLayoutState.setSidebarVisible(visible)
+    }
+
+    override func toggleSidebar(_ sender: Any?) {
+        guard supportsSidebar else { return }
+        tabLayoutState.toggleSidebar()
+    }
+
+    func refreshTabState() {
+        setupTabObservation()
+    }
+
+    private func setupTabObservation() {
+        let currentGroup = window?.tabGroup
+        if observedVerticalTabGroup === currentGroup {
+            refreshTabs()
+            return
+        }
+
+        verticalTabWindowsObservation?.invalidate()
+        verticalTabSelectionObservation?.invalidate()
+        observedVerticalTabGroup = currentGroup
+
+        guard let currentGroup else {
+            refreshTabs()
+            return
+        }
+
+        verticalTabWindowsObservation = currentGroup.observe(
+            \.windows,
+            options: [.new]
+        ) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.refreshTabs() }
+        }
+        verticalTabSelectionObservation = currentGroup.observe(
+            \.selectedWindow,
+            options: [.new]
+        ) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.refreshTabs() }
+        }
+        refreshTabs()
+    }
+
+    private func refreshTabs() {
+        guard let window else {
+            if !tabControllers.isEmpty { tabControllers = [] }
+            if selectedTabID != nil { selectedTabID = nil }
+            return
+        }
+
+        let tabGroup = window.tabGroup
+        let windows = tabGroup?.windows ?? [window]
+        let controllers = windows.compactMap {
+            $0.windowController as? TerminalController
+        }
+        let sameControllers = tabControllers.count == controllers.count &&
+            zip(tabControllers, controllers).allSatisfy { $0 === $1 }
+        if !sameControllers {
+            tabControllers = controllers
+            if tabGroup?.selectedWindow === window,
+               tabLayoutState.orderingMode != .manual {
+                DispatchQueue.main.async { [weak self] in
+                    self?.reconcileTabOrganization()
+                }
+            }
+        }
+
+        let sharedState = tabGroup?.ghosttyTerminalShellLayoutState ?? tabLayoutState
+        for controller in controllers where controller.tabLayoutState !== sharedState {
+            controller.tabLayoutState = sharedState
+            DispatchQueue.main.async { [weak controller] in
+                guard let controller else { return }
+                if controller.tabLayout == .vertical {
+                    (controller.window as? VerticalTabsTerminalWindow)?
+                        .installSidebarToggle(controller: controller)
+                }
+                controller.objectWillChange.send()
+            }
+        }
+
+        let selectedWindow = tabGroup?.selectedWindow ?? window
+        let selectedID = (selectedWindow.windowController as? TerminalController)
+            .map(ObjectIdentifier.init)
+        if selectedTabID != selectedID {
+            selectedTabID = selectedID
+        }
+    }
+
+    private static func refreshTabs(in tabGroup: NSWindowTabGroup?) {
+        guard let tabGroup else { return }
+        for case let controller as TerminalController in tabGroup.windows.compactMap(\.windowController) {
+            controller.setupTabObservation()
+        }
     }
 
     // MARK: Terminal Creation
@@ -431,8 +735,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
 
         // Create a new window and add it to the parent
-        let controller = TerminalController.init(ghostty, withBaseConfig: baseConfig)
+        let controller = TerminalController.init(
+            ghostty,
+            withBaseConfig: baseConfig,
+            tabLayout: parentController.tabLayout
+        )
         controller.isBackgroundOpaque = parentController.isBackgroundOpaque
+        controller.tabLayoutState = parentController.tabLayoutState
         guard let window = controller.window else { return controller }
 
         // If the parent is miniaturized, then macOS exhibits really strange behaviors
@@ -468,6 +777,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             default:
                 parent.addTabbedWindowSafely(window, ordered: .above)
             }
+            Self.refreshTabs(in: window.tabGroup)
         }
 
         // We're dispatching this async because otherwise the lastCascadePoint doesn't
@@ -497,6 +807,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // solution we should do that.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             controller.relabelTabs()
+            Self.refreshTabs(in: window.tabGroup)
         }
 
         // Setup our undo
@@ -572,8 +883,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                     continue
                 }
 
-                if let equiv = ghostty.config.keyboardShortcut(for: "goto_tab:\(tab)") {
-                    window.keyEquivalent = "\(equiv)"
+                if let shortcut = tabShortcutLabel(for: tab) {
+                    window.keyEquivalent = shortcut
                 } else {
                     window.keyEquivalent = ""
                 }
@@ -581,16 +892,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
     }
 
-    private func fixTabBar() {
-        // We do this to make sure that the tab bar will always re-composite. If we don't,
-        // then the it will "drag" pieces of the background with it when a transparent
-        // window is moved around.
-        //
-        // There might be a better way to make the tab bar "un-lazy", but I can't find it.
-        if let window = window, !window.isOpaque {
-            window.isOpaque = true
-            window.isOpaque = false
+    func tabShortcutLabel(for index: Int) -> String? {
+        guard (1...9).contains(index),
+              let shortcut = ghostty.config.keyboardShortcut(for: "goto_tab:\(index)") else {
+            return nil
         }
+        return "\(shortcut)"
     }
 
     @objc private func onFrameDidChange(_ notification: NSNotification) {
@@ -618,6 +925,20 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     private func syncAppearance(_ surfaceConfig: Ghostty.SurfaceView.DerivedConfig) {
         // Let our window handle its own appearance
         guard let window = window as? TerminalWindow else { return }
+        let backgroundColor = focusedSurface?.backgroundColor ?? surfaceConfig.backgroundColor
+        let backgroundOpacity = surfaceConfig.backgroundOpacity
+        if terminalBackgroundColor != backgroundColor ||
+            terminalBackgroundOpacity != backgroundOpacity {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if self.terminalBackgroundColor != backgroundColor {
+                    self.terminalBackgroundColor = backgroundColor
+                }
+                if self.terminalBackgroundOpacity != backgroundOpacity {
+                    self.terminalBackgroundOpacity = backgroundOpacity
+                }
+            }
+        }
 
         // Sync our zoom state for splits
         window.surfaceIsZoomed = surfaceTree.zoomed != nil
@@ -1137,10 +1458,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             }
         }
 
+        (window as? VerticalTabsTerminalWindow)?.installSidebarToggle(controller: self)
+
         // Apply any additional appearance-related properties to the new window. We
         // apply this based on the root config but change it later based on surface
         // config (see focused surface change callback).
         syncAppearance(.init(config))
+        setupTabObservation()
     }
 
     /// Setup correct window frame before showing the window
@@ -1202,6 +1526,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     override func windowWillClose(_ notification: Notification) {
         super.windowWillClose(notification)
+        (NSApp.delegate as? AppDelegate)?.tabActivities.removeSession(tabSessionID)
         cancelPendingInitialPresentation()
         self.relabelTabs()
 
@@ -1237,8 +1562,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     override func windowDidBecomeKey(_ notification: Notification) {
         super.windowDidBecomeKey(notification)
+        markTabActivated()
+        setupTabObservation()
+        Self.refreshTabs(in: window?.tabGroup)
         self.relabelTabs()
-        self.fixTabBar()
         terminalViewContainer?.updateGlassTintOverlay(isKeyWindow: true)
     }
 
@@ -1249,7 +1576,6 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     override func windowDidMove(_ notification: Notification) {
         super.windowDidMove(notification)
-        self.fixTabBar()
 
         // Whenever we move save our last position for the next start.
         LastWindowPosition.shared.save(window)
@@ -1448,6 +1774,23 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     // MARK: - Notifications
 
+    @objc private func onOhMyGhosttySettingsChanged(_ notification: SwiftUI.Notification) {
+        guard supportsSidebar,
+              window?.tabGroup?.selectedWindow === window else { return }
+        let settings = OhMyGhosttySettings.shared
+        if tabLayoutState.groupingMode != settings.groupingMode ||
+            tabLayoutState.orderingMode != settings.orderingMode {
+            reconcileTabOrganization(
+                grouping: settings.groupingMode,
+                ordering: settings.orderingMode
+            )
+            tabLayoutState.applyPreferences(
+                grouping: settings.groupingMode,
+                ordering: settings.orderingMode
+            )
+        }
+    }
+
     @objc private func onMoveTab(notification: SwiftUI.Notification) {
         guard let target = notification.object as? Ghostty.SurfaceView else { return }
         guard target == self.focusedSurface else { return }
@@ -1476,6 +1819,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // If our index is the same we do nothing
         guard finalIndex != selectedIndex else { return }
+
+        if supportsSidebar {
+            let insertionIndex = finalIndex > selectedIndex ? finalIndex + 1 : finalIndex
+            _ = reorderTab(self, toInsertionIndex: insertionIndex)
+            return
+        }
 
         // Get our target window
         let targetWindow = tabbedWindows[finalIndex]
@@ -1560,7 +1909,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         guard finalIndex >= 0 else { return }
         let targetWindow = tabbedWindows[finalIndex]
+        tabGroup.selectedWindow = targetWindow
+        (targetWindow.windowController as? TerminalController)?.markTabActivated()
         targetWindow.makeKeyAndOrderFront(nil)
+        Self.refreshTabs(in: tabGroup)
     }
 
     @objc private func onCloseTab(notification: SwiftUI.Notification) {
@@ -1635,6 +1987,38 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             self.windowPositionX = config.windowPositionX
             self.windowPositionY = config.windowPositionY
         }
+    }
+}
+
+private nonisolated(unsafe) var verticalTabLayoutStateAssociationKey: UInt8 = 0
+
+extension NSWindowTabGroup {
+    @MainActor
+    var ghosttyTerminalShellLayoutState: VerticalTabWindowLayoutState {
+        if let state = objc_getAssociatedObject(
+            self,
+            &verticalTabLayoutStateAssociationKey
+        ) as? VerticalTabWindowLayoutState {
+            return state
+        }
+
+        let state = windows
+            .compactMap { $0.windowController as? TerminalController }
+            .first?
+            .tabLayoutState ?? VerticalTabWindowLayoutState(isSidebarVisible: false)
+        objc_setAssociatedObject(
+            self,
+            &verticalTabLayoutStateAssociationKey,
+            state,
+            .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        )
+        return state
+    }
+
+    /// Compatibility name for vertical-tab call sites and tests.
+    @MainActor
+    var ghosttyVerticalTabLayoutState: VerticalTabWindowLayoutState {
+        ghosttyTerminalShellLayoutState
     }
 }
 

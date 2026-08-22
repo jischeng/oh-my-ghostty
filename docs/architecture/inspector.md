@@ -50,6 +50,8 @@ A Core Feature registers a typed content provider and may receive appeared/disap
 
 `BuiltInFilesInspectorProvider` dogfoods the Plugin path under owner `builtin.files`. Content is isolated by stable tab ID. Pane appearance, tab switches, and live `SurfaceView.$pwd` changes asynchronously refresh the selected root. Directories load recursively only when expanded and preserve per-tab expansion state. The provider handles typed New File, New Folder, Refresh, Collapse All, and disclosure actions without injecting a View or performing filesystem I/O on the main actor. Filename/extension metadata selects host-owned Git, shell, language, config, document, and media icons.
 
+During Debug/development builds the provider emits `OSLog` diagnostics under the `files-inspector` category for pane lifecycle, cwd/root changes, disclosure actions, generation cancellation/discard, directory read depth/count, total elapsed time, refreshes, and rejected creation names. The bounded generation/task cancellation model ensures stale reads cannot publish into a newer tree. Release builds can filter this category without changing the data path.
+
 The stable Plugin capability is `inspectorPane`. The v1 process transport does not yet expose pane registration messages; adding those messages must preserve this same typed, owner-scoped model.
 
 ## Prohibited Plugin access

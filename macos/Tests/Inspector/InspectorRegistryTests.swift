@@ -352,6 +352,81 @@ struct InspectorRegistryTests {
         #expect(registry.isEmpty)
     }
 
+    @Test func repeatedDeepExpansionRemainsBoundedAndResponsive() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var directory = root
+        var directoryIDs: [String] = []
+        for depth in 0..<12 {
+            directory = directory.appendingPathComponent("level-\(depth)")
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+            directoryIDs.append(directory.resolvingSymlinksInPath().path)
+            for index in 0..<30 {
+                try "{}".write(
+                    to: directory.appendingPathComponent("file-\(index).json"),
+                    atomically: true,
+                    encoding: .utf8
+                )
+            }
+        }
+
+        let registry = InspectorRegistry()
+        let provider = BuiltInFilesInspectorProvider(registry: registry)
+        try provider.register()
+        let context = InspectorPaneContext(
+            tabID: UUID(),
+            surfaceID: UUID(),
+            title: "Stress",
+            workingDirectory: root.path
+        )
+        registry.presentationDidChange(
+            to: BuiltInFilesInspectorProvider.paneID,
+            context: context
+        )
+
+        let clock = ContinuousClock()
+        let start = clock.now
+        for id in directoryIDs {
+            registry.performAction(
+                paneID: BuiltInFilesInspectorProvider.paneID,
+                action: .init(
+                    context: context,
+                    kind: .toggleNode(id: id, expanded: true)
+                )
+            )
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(start.duration(to: clock.now) < .seconds(2))
+
+        let content = registry.content(
+            for: BuiltInFilesInspectorProvider.paneID,
+            context: context
+        )
+        guard case .fileTree(let tree) = content else {
+            Issue.record("Expected a stress-test Files tree")
+            return
+        }
+        #expect(tree.nodes.count == 1)
+        #expect(countNodes(tree.nodes) <= 500)
+
+        for _ in 0..<40 {
+            registry.performAction(
+                paneID: BuiltInFilesInspectorProvider.paneID,
+                action: .init(context: context, kind: .refresh)
+            )
+        }
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(registry.content(
+            for: BuiltInFilesInspectorProvider.paneID,
+            context: context
+        ) != nil)
+    }
+
     @Test func descriptorsAndWidthsAreValidated() throws {
         let registry = InspectorRegistry()
         let descriptor = paneDescriptor(id: "valid.pane", source: .coreFeature("core"))
@@ -384,6 +459,12 @@ struct InspectorRegistryTests {
         #expect(state.committedInspectorWidth == 400)
         state.updateInspectorWidth(100, availableWidth: 800, persist: true)
         #expect(state.inspectorWidth == RightInspectorMetrics.minimumWidth)
+    }
+
+    private func countNodes(_ nodes: [InspectorFileNode]) -> Int {
+        nodes.reduce(0) { count, node in
+            count + 1 + countNodes(node.children ?? [])
+        }
     }
 
     private func paneDescriptor(

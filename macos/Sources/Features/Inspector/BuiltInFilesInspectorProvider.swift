@@ -1,7 +1,12 @@
 import Foundation
+import OSLog
 
 @MainActor
 final class BuiltInFilesInspectorProvider {
+    nonisolated private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "oh-my-ghostty",
+        category: "files-inspector"
+    )
     static let pluginID = "builtin.files"
     static let paneID = "builtin.files"
 
@@ -37,7 +42,11 @@ final class BuiltInFilesInspectorProvider {
     }
 
     private func handle(_ event: InspectorPaneLifecycleEvent) {
-        guard case .appeared(let context) = event else { return }
+        guard case .appeared(let context) = event else {
+            Self.logger.debug("Files pane disappeared")
+            return
+        }
+        Self.logger.debug("Files pane appeared tab=\(context.tabID.uuidString, privacy: .public) cwd=\(context.workingDirectory ?? "<none>", privacy: .public)")
         guard context.workingDirectory?.trimmingCharacters(
             in: .whitespacesAndNewlines
         ).isEmpty == false else {
@@ -72,6 +81,7 @@ final class BuiltInFilesInspectorProvider {
                     $0 != id && !$0.hasPrefix(id + "/")
                 }
             }
+            Self.logger.debug("Files disclosure tab=\(context.tabID.uuidString, privacy: .public) node=\(id, privacy: .public) expanded=\(expanded)")
             states[context.tabID] = state
             reload(context: context)
 
@@ -116,13 +126,18 @@ final class BuiltInFilesInspectorProvider {
             tabID: context.tabID,
             content: .empty(title: "Files", message: "Loading…")
         )
+        let started = ContinuousClock.now
+        Self.logger.debug("Files reload started tab=\(context.tabID.uuidString, privacy: .public) generation=\(generation) root=\(rootURL.path, privacy: .public) expanded=\(expanded.count)")
         loadTasks[context.tabID] = Task { [weak self] in
             let content = await Task.detached(priority: .utility) {
                 Self.loadContent(rootURL: rootURL, expanded: expanded)
             }.value
             guard !Task.isCancelled,
                   let self,
-                  states[context.tabID]?.generation == generation else { return }
+                  states[context.tabID]?.generation == generation else {
+                Self.logger.debug("Files reload discarded/cancelled tab=\(context.tabID.uuidString, privacy: .public) generation=\(generation)")
+                return
+            }
             try? registry.updatePluginContent(
                 paneID: Self.paneID,
                 pluginID: Self.pluginID,
@@ -130,6 +145,8 @@ final class BuiltInFilesInspectorProvider {
                 content: content
             )
             loadTasks.removeValue(forKey: context.tabID)
+            let elapsed = ContinuousClock.now - started
+            Self.logger.debug("Files reload completed tab=\(context.tabID.uuidString, privacy: .public) generation=\(generation) elapsed=\(elapsed) content=\(String(describing: content).prefix(120), privacy: .public)")
         }
     }
 
@@ -139,7 +156,10 @@ final class BuiltInFilesInspectorProvider {
         context: InspectorPaneContext
     ) {
         let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard Self.validChildName(normalized) else { return }
+        guard Self.validChildName(normalized) else {
+            Self.logger.error("Files create rejected invalid name=\(normalized, privacy: .public)")
+            return
+        }
         let rootURL = state(for: context).rootURL
         Task { [weak self] in
             await Task.detached(priority: .utility) {
@@ -179,6 +199,7 @@ final class BuiltInFilesInspectorProvider {
         rootURL: URL,
         expanded: Set<String>
     ) -> InspectorPaneContent {
+        let started = ContinuousClock.now
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(
             atPath: rootURL.path,
@@ -191,6 +212,8 @@ final class BuiltInFilesInspectorProvider {
         }
 
         let nodes = loadNodes(at: rootURL, expanded: expanded, depth: 0)
+        let elapsed = ContinuousClock.now - started
+        Self.logger.debug("Files root read completed root=\(rootURL.path, privacy: .public) nodes=\(nodes.count) elapsed=\(elapsed)")
         return .fileTree(.init(
             rootName: rootURL.lastPathComponent.isEmpty ? rootURL.path : rootURL.lastPathComponent,
             rootPath: rootURL.path,
@@ -213,7 +236,11 @@ final class BuiltInFilesInspectorProvider {
             at: directoryURL,
             includingPropertiesForKeys: Array(keys),
             options: []
-        ) else { return [] }
+        ) else {
+            Self.logger.error("Files directory read failed path=\(directoryURL.path, privacy: .public)")
+            return []
+        }
+        Self.logger.debug("Files directory read path=\(directoryURL.path, privacy: .public) depth=\(depth) entries=\(urls.count)")
 
         return urls
             .filter { $0.lastPathComponent != ".DS_Store" }

@@ -109,6 +109,14 @@ struct VerticalTabsIntegrationTests {
         try await settle(controllers)
 
         let eighth = controllers[7]
+        let initialDividerColor = NSColor(eighth.sidebarDividerColor)
+        let expectedInitialDividerColor = NSColor(
+            appDelegate.ghostty.config.splitDividerColor(
+                for: eighth.terminalBackgroundColor
+            )
+        )
+        #expect(initialDividerColor.distance(to: expectedInitialDividerColor) < 0.001)
+        #expect(initialDividerColor.alphaComponent == 1)
         #expect(controllers.allSatisfy { $0.sidebarIsShowing })
         settings.defaultSidebarWidth = 300
         try await Task.sleep(for: .milliseconds(100))
@@ -612,6 +620,15 @@ struct VerticalTabsIntegrationTests {
             try await Task.sleep(for: .milliseconds(100))
         }
         #expect(NSColor(eighth.terminalBackgroundColor).isLightColor)
+        let lightDividerColor = NSColor(eighth.sidebarDividerColor)
+        let expectedLightDividerColor = NSColor(
+            appDelegate.ghostty.config.splitDividerColor(
+                for: eighth.terminalBackgroundColor
+            )
+        )
+        #expect(lightDividerColor.distance(to: expectedLightDividerColor) < 0.001)
+        #expect(lightDividerColor.alphaComponent == 1)
+        #expect(lightDividerColor.luminance > initialDividerColor.luminance)
         try capture(window: try #require(eighth.window), path: lightScreenshotPath)
 
         try await applyConfig(
@@ -630,6 +647,15 @@ struct VerticalTabsIntegrationTests {
             try await Task.sleep(for: .milliseconds(100))
         }
         #expect(abs(eighth.terminalBackgroundOpacity - 0.58) < 0.001)
+        let transparentDividerColor = NSColor(eighth.sidebarDividerColor)
+        let expectedTransparentDividerColor = NSColor(
+            appDelegate.ghostty.config.splitDividerColor(
+                for: eighth.terminalBackgroundColor
+            )
+        )
+        #expect(transparentDividerColor.distance(to: expectedTransparentDividerColor) < 0.001)
+        #expect(transparentDividerColor.alphaComponent == 1)
+        #expect(transparentDividerColor.distance(to: lightDividerColor) > 0.1)
         try capture(
             window: try #require(eighth.window),
             path: transparencyVerticalScreenshotPath

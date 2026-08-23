@@ -1,3 +1,4 @@
+import AppKit
 import Testing
 @testable import Ghostty
 import SwiftUI
@@ -181,6 +182,37 @@ struct ConfigTests {
         let config = try TemporaryConfig("")
         #expect(config.windowPositionX == nil)
         #expect(config.windowPositionY == nil)
+    }
+
+    // MARK: - Semantic Colors
+
+    @Test func splitDividerDerivesFromPresentedBackground() throws {
+        let config = try TemporaryConfig("")
+        let darkBackground = NSColor(srgbRed: 0.10, green: 0.12, blue: 0.16, alpha: 0.4)
+        let lightBackground = NSColor(srgbRed: 0.94, green: 0.95, blue: 0.96, alpha: 0.4)
+        let darkDivider = NSColor(config.splitDividerColor(
+            for: Color(nsColor: darkBackground)
+        ))
+        let lightDivider = NSColor(config.splitDividerColor(
+            for: Color(nsColor: lightBackground)
+        ))
+
+        #expect(darkDivider.luminance < darkBackground.luminance)
+        #expect(lightDivider.luminance < lightBackground.luminance)
+        #expect(darkDivider.alphaComponent == 1)
+        #expect(lightDivider.alphaComponent == 1)
+        #expect(darkDivider.distance(to: lightDivider) > 0.1)
+    }
+
+    @Test func explicitSplitDividerColorRemainsAuthoritative() throws {
+        let config = try TemporaryConfig("split-divider-color = #123456")
+        let darkDivider = NSColor(config.splitDividerColor(for: .black))
+        let lightDivider = NSColor(config.splitDividerColor(for: .white))
+
+        let configuredColor = try #require(NSColor(hex: "#123456"))
+        #expect(darkDivider.distance(to: configuredColor) < 0.01)
+        #expect(lightDivider.distance(to: configuredColor) < 0.01)
+        #expect(darkDivider.distance(to: lightDivider) < 0.001)
     }
 
     // MARK: - Config Loading

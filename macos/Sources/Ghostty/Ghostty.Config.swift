@@ -563,16 +563,27 @@ extension Ghostty {
         }
 
         var splitDividerColor: Color {
+            splitDividerColor(for: backgroundColor)
+        }
+
+        /// Resolve the configured divider color against the background that is
+        /// actually presented by the current surface. An explicit Ghostty
+        /// split-divider-color remains authoritative; otherwise the existing
+        /// semantic contrast is derived from the supplied background.
+        func splitDividerColor(for backgroundColor: Color) -> Color {
             let backgroundColor = NSColor(backgroundColor)
             let isLightBackground = backgroundColor.isLightColor
-            let newColor = isLightBackground ? backgroundColor.darken(by: 0.08) : backgroundColor.darken(by: 0.4)
+            let derivedColor = isLightBackground
+                ? backgroundColor.darken(by: 0.08)
+                : backgroundColor.darken(by: 0.4)
+            let opaqueDerivedColor = derivedColor.withAlphaComponent(1)
 
-            guard let config = self.config else { return Color(newColor) }
+            guard let config = self.config else { return Color(opaqueDerivedColor) }
 
             var color: ghostty_config_color_s = .init()
             let key = "split-divider-color"
             if !ghostty_config_get(config, &color, key, UInt(key.lengthOfBytes(using: .utf8))) {
-                return Color(newColor)
+                return Color(opaqueDerivedColor)
             }
 
             return .init(

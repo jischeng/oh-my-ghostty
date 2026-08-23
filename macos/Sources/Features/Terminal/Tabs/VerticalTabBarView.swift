@@ -982,6 +982,7 @@ struct VerticalTabLayoutContainer<Content: View>: View {
                 VerticalTabSidebarDivider(
                     controller: controller,
                     layoutState: layoutState,
+                    color: controller.sidebarDividerColor,
                     background: backgroundColor.opacity(backgroundOpacity)
                 )
             }
@@ -999,11 +1000,12 @@ struct VerticalTabLayoutContainer<Content: View>: View {
 struct VerticalTabSidebarDivider: View {
     @ObservedObject var controller: TerminalController
     @ObservedObject var layoutState: VerticalTabWindowLayoutState
+    let color: Color
     var background: Color = .clear
 
     var body: some View {
         ZStack {
-            TerminalSidebarDividerLine()
+            TerminalSidebarDividerLine(color: color)
             VerticalTabResizeInteraction(
                 currentWidth: { layoutState.sidebarWidth },
                 resize: controller.updateSidebarWidth
@@ -1080,6 +1082,7 @@ enum SidebarToolbarStyle {
     static let itemSpacing: CGFloat = 4
     static let labelFontSize: CGFloat = 11.5
     static let labelWeight = Font.Weight.medium
+    static let iconHorizontalPadding: CGFloat = 4
     static let horizontalLabelPadding: CGFloat = 8
     static let hoverOpacity = 0.06
     static let disabledOpacity = 0.45
@@ -1110,7 +1113,12 @@ struct SidebarToolbarButton: View {
                         .lineLimit(1)
                 }
             }
-            .padding(.horizontal, title == nil ? 4 : SidebarToolbarStyle.horizontalLabelPadding)
+            .padding(
+                .horizontal,
+                title == nil
+                    ? SidebarToolbarStyle.iconHorizontalPadding
+                    : SidebarToolbarStyle.horizontalLabelPadding
+            )
             .frame(
                 minWidth: SidebarToolbarStyle.iconControlWidth,
                 minHeight: SidebarToolbarStyle.controlHeight

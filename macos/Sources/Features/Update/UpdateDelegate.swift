@@ -3,17 +3,11 @@ import Cocoa
 
 extension UpdateDriver: SPUUpdaterDelegate {
     func feedURLString(for updater: SPUUpdater) -> String? {
-        guard let appDelegate = NSApplication.shared.delegate as? AppDelegate else {
-            return nil
-        }
-
-        // Sparkle supports a native concept of "channels" but it requires that
-        // you share a single appcast file. We don't want to do that so we
-        // do this instead.
-        switch appDelegate.ghostty.config.autoUpdateChannel {
-        case .tip: return "https://tip.files.ghostty.org/appcast.xml"
-        case .stable: return "https://release.files.ghostty.org/appcast.xml"
-        }
+        // OMG and Ghostty have independent version lifecycles. Never compare
+        // an OMG bundle version against the upstream Ghostty appcast. OMG does
+        // not publish a separate nightly channel yet, so both legacy channel
+        // preferences resolve to the same OMG-owned stable feed.
+        OhMyGhosttyVersion.updateFeedURL?.absoluteString
     }
 
     /// Called when an update is scheduled to install silently,

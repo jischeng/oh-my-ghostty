@@ -3,11 +3,6 @@ import Combine
 import SwiftUI
 
 enum TerminalShellStyle {
-    static var dividerNSColor: NSColor {
-        NSColor.labelColor.withAlphaComponent(0.18)
-    }
-
-    static var dividerColor: Color { Color(nsColor: dividerNSColor) }
     static let resizeHitWidth: CGFloat = 8
     static let dividerWidth: CGFloat = 1
     static let minimumTerminalWidth: CGFloat = 320
@@ -30,10 +25,25 @@ enum TerminalShellStyle {
     }
 }
 
+enum InspectorContentMetrics {
+    static let leadingInset: CGFloat = 12
+    static let treeOuterInset: CGFloat = 4
+    static let treeRowLeadingInset = leadingInset - treeOuterInset
+
+    static func titlebarLeadingInset(firstItemHasTitle: Bool) -> CGFloat {
+        let buttonInset = firstItemHasTitle
+            ? SidebarToolbarStyle.horizontalLabelPadding
+            : SidebarToolbarStyle.iconHorizontalPadding
+        return max(0, leadingInset - buttonInset)
+    }
+}
+
 struct TerminalSidebarDividerLine: View {
+    let color: Color
+
     var body: some View {
         Rectangle()
-            .fill(TerminalShellStyle.dividerColor)
+            .fill(color)
             .frame(width: TerminalShellStyle.dividerWidth)
             .frame(maxHeight: .infinity)
     }
@@ -198,6 +208,7 @@ extension TerminalWindow {
         inspectorToggleAccessory.view = AlignedTitlebarControlsView(
             width: 190,
             rootView: InspectorTitlebarControls(
+                controller: controller,
                 layoutState: controller.tabLayoutState,
                 registry: registry,
                 toggleInspector: { [weak controller] in controller?.toggleInspectorPane() }
@@ -296,6 +307,7 @@ extension TerminalWindow {
 }
 
 private struct InspectorTitlebarControls: View {
+    @ObservedObject var controller: TerminalController
     @ObservedObject var layoutState: VerticalTabWindowLayoutState
     @ObservedObject var registry: InspectorRegistry
     let toggleInspector: () -> Void
@@ -322,9 +334,12 @@ private struct InspectorTitlebarControls: View {
                 selectedID: selectedPaneID,
                 availableWidth: max(0, geometry.size.width - dividerSlotWidth)
             )
+            let titlebarLeadingInset = InspectorContentMetrics.titlebarLeadingInset(
+                firstItemHasTitle: layout.visibleIDs.first == selectedPaneID
+            )
             HStack(spacing: 0) {
                 if inspectorVisible {
-                    TerminalSidebarDividerLine()
+                    TerminalSidebarDividerLine(color: controller.sidebarDividerColor)
                         .frame(width: dividerSlotWidth)
                 }
                 HStack(spacing: SidebarToolbarStyle.itemSpacing) {
@@ -357,7 +372,7 @@ private struct InspectorTitlebarControls: View {
                         registry.isEmpty ? SidebarToolbarStyle.disabledOpacity : 1
                     )
                 }
-                .padding(.leading, 8)
+                .padding(.leading, titlebarLeadingInset)
                 .padding(.trailing, 10)
             }
         }
@@ -443,6 +458,7 @@ struct TerminalShellLayoutContainer<Content: View>: View {
                         VerticalTabSidebarDivider(
                             controller: controller,
                             layoutState: layoutState,
+                            color: controller.sidebarDividerColor,
                             background: backgroundColor.opacity(backgroundOpacity)
                         )
                     }
@@ -458,6 +474,7 @@ struct TerminalShellLayoutContainer<Content: View>: View {
                 ) {
                     HStack(spacing: 0) {
                         RightInspectorResizeHandle(
+                            color: controller.sidebarDividerColor,
                             background: backgroundColor.opacity(backgroundOpacity),
                             currentWidth: { layoutState.inspectorWidth },
                             resize: controller.updateInspectorWidth
@@ -689,18 +706,17 @@ private struct InspectorPluginOverflowMenu: View {
     }
 }
 
-struct InspectorPluginSectionHeader: View {
+struct InspectorPluginContextHeader: View {
     let title: String
 
     var body: some View {
-        Text(title.uppercased())
-            .font(.system(size: 10.5, weight: .medium))
-            .tracking(0.7)
+        Text(title)
+            .font(.system(size: 11.5, weight: .medium))
             .foregroundStyle(.secondary)
             .lineLimit(1)
             .truncationMode(.middle)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 12)
+            .padding(.horizontal, InspectorContentMetrics.leadingInset)
             .padding(.top, 10)
             .padding(.bottom, 6)
     }
@@ -713,7 +729,7 @@ private struct InspectorFileTreeView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            InspectorPluginSectionHeader(title: tree.rootName)
+            InspectorPluginContextHeader(title: tree.rootName)
                 .help(tree.rootPath)
             ScrollView {
                 LazyVStack(spacing: 0) {
@@ -773,7 +789,10 @@ private struct InspectorFileTreeNodeView: View {
                         ProgressView().controlSize(.mini)
                     }
                 }
-                .padding(.leading, CGFloat(depth) * 14 + 8)
+                .padding(
+                    .leading,
+                    CGFloat(depth) * 14 + InspectorContentMetrics.treeRowLeadingInset
+                )
                 .padding(.trailing, 8)
                 .frame(height: 27)
                 .contentShape(Rectangle())
@@ -802,7 +821,7 @@ private struct InspectorFileTreeNodeView: View {
                 .clipped()
             }
         }
-        .padding(.horizontal, 4)
+        .padding(.horizontal, InspectorContentMetrics.treeOuterInset)
         .animation(.easeInOut(duration: 0.16), value: node.isExpanded)
         .animation(
             .easeInOut(duration: 0.16),
@@ -834,13 +853,14 @@ private struct InspectorFileIconView: View {
 }
 
 private struct RightInspectorResizeHandle: View {
+    let color: Color
     let background: Color
     let currentWidth: () -> CGFloat
     let resize: (CGFloat, Bool) -> Void
 
     var body: some View {
         ZStack {
-            TerminalSidebarDividerLine()
+            TerminalSidebarDividerLine(color: color)
             RightInspectorResizeInteraction(
                 currentWidth: currentWidth,
                 resize: resize

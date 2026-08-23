@@ -3,45 +3,25 @@ import SwiftUI
 struct AboutView: View {
     @Environment(\.openURL) var openURL
 
-    private let githubURL = URL(string: "https://github.com/ghostty-org/ghostty")
+    private let githubURL = OhMyGhosttyVersion.repositoryURL
+    private let upstreamURL = OhMyGhosttyVersion.upstreamURL
     private let docsURL = URL(string: "https://ghostty.org/docs")
+    private let versions = OhMyGhosttyVersion()
 
-    /// Read the commit from the bundle.
+    /// Read build metadata from the bundle.
     private var build: String? { Bundle.main.infoDictionary?["CFBundleVersion"] as? String }
     private var commit: String? { Bundle.main.infoDictionary?["GhosttyCommit"] as? String }
-    private var version: String? { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String }
-
-    private enum VersionConfig {
-        case stable(version: String)
-        case tip(commit: String?)
-        case other(String)
-        case none
-
-        init(version: String?) {
-            guard let version else { self = .none; return }
-            if version.range(of: #"^\d+\.\d+\.\d+$"#, options: .regularExpression) != nil {
-                self = .stable(version: version)
-                return
-            }
-            if version.range(of: #"^[0-9a-f]{7,40}$"#, options: .regularExpression) != nil {
-                self = .tip(commit: version)
-                return
-            }
-            self = .other(version)
-        }
-
-        var url: URL? {
-            switch self {
-            case .stable(let version):
-                let slug = version.replacingOccurrences(of: ".", with: "-")
-                return URL(string: "https://ghostty.org/docs/install/release-notes/\(slug)")
-            default:
-                return nil
-            }
-        }
+    private var releaseURL: URL? {
+        guard let tag = versions.releaseTag else { return nil }
+        return githubURL?
+            .appendingPathComponent("releases")
+            .appendingPathComponent("tag")
+            .appendingPathComponent(tag)
     }
-
-    private var versionConfig: VersionConfig { VersionConfig(version: version) }
+    private var ghosttyRevisionLabel: String {
+        guard versions.ghosttyRevision != "unknown" else { return "unknown" }
+        return String(versions.ghosttyRevision.prefix(12))
+    }
 
     private var copyright: String? { Bundle.main.infoDictionary?["NSHumanReadableCopyright"] as? String }
 
@@ -78,10 +58,10 @@ struct AboutView: View {
 
             VStack(alignment: .center, spacing: 32) {
                 VStack(alignment: .center, spacing: 8) {
-                    Text("Ghostty")
+                    Text("Oh My Ghostty")
                         .bold()
                         .font(.title)
-                    Text("Fast, native, feature-rich terminal \nemulator pushing modern features.")
+                    Text("Ghostty-powered terminal with native macOS extensions.")
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
                         .font(.caption)
@@ -91,22 +71,26 @@ struct AboutView: View {
                 .textSelection(.enabled)
 
                 VStack(spacing: 2) {
-                    switch versionConfig {
-                    case .stable(let version):
-                        PropertyRow(label: "Version", text: version, url: versionConfig.url)
-                    case .tip:
-                        PropertyRow(label: "Version", text: "Tip Release")
-                    case .other(let v):
-                        PropertyRow(label: "Version", text: v)
-                    case .none:
-                        EmptyView()
+                    PropertyRow(label: "OMG Version", text: versions.omg, url: releaseURL)
+                    PropertyRow(label: "Ghostty Base", text: versions.ghostty)
+                    if versions.ghosttyRevision != "unknown",
+                       let url = upstreamURL?
+                        .appendingPathComponent("commit")
+                        .appendingPathComponent(versions.ghosttyRevision) {
+                        PropertyRow(
+                            label: "Base Revision",
+                            text: ghosttyRevisionLabel,
+                            url: url
+                        )
                     }
                     if let build {
                         PropertyRow(label: "Build", text: build)
                     }
                     if let commit, commit != "",
-                       let url = githubURL?.appendingPathComponent("/commits/\(commit)") {
-                        PropertyRow(label: "Commit", text: commit, url: url)
+                       let url = githubURL?
+                        .appendingPathComponent("commit")
+                        .appendingPathComponent(commit) {
+                        PropertyRow(label: "Build Commit", text: commit, url: url)
                     }
                 }
                 .frame(maxWidth: .infinity)
@@ -119,6 +103,11 @@ struct AboutView: View {
                     }
                     if let url = githubURL {
                         Button("GitHub") {
+                            openURL(url)
+                        }
+                    }
+                    if let url = upstreamURL {
+                        Button("Ghostty") {
                             openURL(url)
                         }
                     }

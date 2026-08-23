@@ -85,6 +85,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// The terminal renderer applies this independently to preserve opaque glyphs.
     @Published private(set) var terminalBackgroundOpacity: Double
 
+    /// Opaque semantic separator derived from the current terminal background.
+    @Published private(set) var sidebarDividerColor: Color
+
     private weak var observedVerticalTabGroup: NSWindowTabGroup?
     private var verticalTabWindowsObservation: NSKeyValueObservation?
     private var verticalTabSelectionObservation: NSKeyValueObservation?
@@ -106,8 +109,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // Setup our initial derived config based on the current app config
         self.derivedConfig = DerivedConfig(ghostty.config)
-        self.terminalBackgroundColor = ghostty.config.backgroundColor
+        let initialBackgroundColor = ghostty.config.backgroundColor
+        self.terminalBackgroundColor = initialBackgroundColor
         self.terminalBackgroundOpacity = ghostty.config.backgroundOpacity
+        self.sidebarDividerColor = ghostty.config.splitDividerColor(
+            for: initialBackgroundColor
+        )
         self.tabLayout = tabLayout ?? OhMyGhosttySettings.shared.tabLayout
         self.tabSessionID = tabSessionID ?? UUID()
         let now = Date()
@@ -927,8 +934,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         guard let window = window as? TerminalWindow else { return }
         let backgroundColor = focusedSurface?.backgroundColor ?? surfaceConfig.backgroundColor
         let backgroundOpacity = surfaceConfig.backgroundOpacity
+        let dividerColor = ghostty.config.splitDividerColor(for: backgroundColor)
         if terminalBackgroundColor != backgroundColor ||
-            terminalBackgroundOpacity != backgroundOpacity {
+            terminalBackgroundOpacity != backgroundOpacity ||
+            sidebarDividerColor != dividerColor {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 if self.terminalBackgroundColor != backgroundColor {
@@ -936,6 +945,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 }
                 if self.terminalBackgroundOpacity != backgroundOpacity {
                     self.terminalBackgroundOpacity = backgroundOpacity
+                }
+                if self.sidebarDividerColor != dividerColor {
+                    self.sidebarDividerColor = dividerColor
                 }
             }
         }

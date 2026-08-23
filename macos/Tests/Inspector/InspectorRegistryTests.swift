@@ -43,6 +43,21 @@ struct InspectorRegistryTests {
         ))
     }
 
+    @Test func inspectorContentSharesLeadingBaseline() {
+        let activeTitlebarContent = InspectorContentMetrics.titlebarLeadingInset(
+            firstItemHasTitle: true
+        ) + SidebarToolbarStyle.horizontalLabelPadding
+        let iconOnlyTitlebarContent = InspectorContentMetrics.titlebarLeadingInset(
+            firstItemHasTitle: false
+        ) + SidebarToolbarStyle.iconHorizontalPadding
+        let rootTreeContent = InspectorContentMetrics.treeOuterInset +
+            InspectorContentMetrics.treeRowLeadingInset
+
+        #expect(activeTitlebarContent == InspectorContentMetrics.leadingInset)
+        #expect(iconOnlyTitlebarContent == InspectorContentMetrics.leadingInset)
+        #expect(rootTreeContent == InspectorContentMetrics.leadingInset)
+    }
+
     @Test func inspectorPresentationPersistsVisibilityWidthAndPane() throws {
         let suite = "InspectorPresentationStoreTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))

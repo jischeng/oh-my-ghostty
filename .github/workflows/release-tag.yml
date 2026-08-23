@@ -22,6 +22,10 @@ concurrency:
 
 jobs:
   setup:
+    # This inherited workflow requires Ghostty-owned runners, signing keys,
+    # storage, and appcast infrastructure. OMG source releases are published
+    # separately and must never enter the upstream update channel.
+    if: github.repository == 'ghostty-org/ghostty'
     runs-on: namespace-profile-ghostty-sm
     outputs:
       version: ${{ steps.extract_version.outputs.version }}

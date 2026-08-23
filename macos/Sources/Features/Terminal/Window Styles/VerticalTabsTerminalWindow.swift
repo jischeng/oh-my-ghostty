@@ -36,6 +36,7 @@ final class VerticalTabsTerminalWindow: TransparentTitlebarTerminalWindow {
         sidebarToggleAccessory.layoutAttribute = .left
         sidebarToggleAccessory.view = AlignedTitlebarControlsView(
             rootView: VerticalTabsTitlebarControls(
+                controller: controller,
                 layoutState: controller.tabLayoutState,
                 toggleSidebar: { [weak controller] in controller?.toggleSidebar(nil) },
                 newTab: { [weak controller] in controller?.newVerticalTab() }
@@ -240,6 +241,7 @@ final class AlignedTitlebarControlsView<Content: View>: NSView, TitlebarControls
 }
 
 private struct VerticalTabsTitlebarControls: View {
+    @ObservedObject var controller: TerminalController
     @ObservedObject var layoutState: VerticalTabWindowLayoutState
     let toggleSidebar: () -> Void
     let newTab: () -> Void
@@ -260,7 +262,7 @@ private struct VerticalTabsTitlebarControls: View {
                 Spacer(minLength: 0)
             }
             if layoutState.isSidebarVisible {
-                TerminalSidebarDividerLine()
+                TerminalSidebarDividerLine(color: controller.sidebarDividerColor)
                     .frame(width: TerminalShellStyle.resizeHitWidth)
             }
         }

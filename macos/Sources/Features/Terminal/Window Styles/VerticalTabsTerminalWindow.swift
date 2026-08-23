@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 /// A terminal window that keeps AppKit tab grouping but renders tabs in the content sidebar.
@@ -6,6 +7,9 @@ final class VerticalTabsTerminalWindow: TransparentTitlebarTerminalWindow {
     override var supportsUpdateAccessory: Bool { false }
 
     private let sidebarToggleAccessory = NSTitlebarAccessoryViewController()
+    private let titlebarSidebarDivider = TitlebarShellDividerView()
+    private var titlebarDividerLeadingConstraint: NSLayoutConstraint?
+    private var titlebarDividerCancellable: AnyCancellable?
     private(set) var nativeTabBarRejectionCount = 0
 
     override func awakeFromNib() {
@@ -43,6 +47,7 @@ final class VerticalTabsTerminalWindow: TransparentTitlebarTerminalWindow {
         }
         sidebarToggleAccessory.view.translatesAutoresizingMaskIntoConstraints = false
         sidebarToggleAccessory.view.widthAnchor.constraint(equalToConstant: 58).isActive = true
+        installTitlebarSidebarDivider(layoutState: controller.tabLayoutState)
     }
 
     override func addTitlebarAccessoryViewController(
@@ -59,6 +64,10 @@ final class VerticalTabsTerminalWindow: TransparentTitlebarTerminalWindow {
 
     var sidebarToggleIsInstalled: Bool {
         titlebarAccessoryViewControllers.contains(sidebarToggleAccessory)
+    }
+
+    var titlebarSidebarDividerIsInstalled: Bool {
+        titlebarSidebarDivider.superview != nil
     }
 
     var titlebarControlsCenterY: CGFloat? {
@@ -85,6 +94,69 @@ final class VerticalTabsTerminalWindow: TransparentTitlebarTerminalWindow {
 
     var nativeTabBarIsSuppressed: Bool {
         !titlebarAccessoryViewControllers.contains(where: isTabBar) && tabBarView == nil
+    }
+
+    private func installTitlebarSidebarDivider(
+        layoutState: VerticalTabWindowLayoutState
+    ) {
+        guard let contentView,
+              let themeFrame = contentView.superview else { return }
+        if titlebarSidebarDivider.superview !== contentView {
+            titlebarSidebarDivider.removeFromSuperview()
+            contentView.addSubview(titlebarSidebarDivider, positioned: .above, relativeTo: nil)
+            titlebarSidebarDivider.translatesAutoresizingMaskIntoConstraints = false
+            let leadingConstraint = titlebarSidebarDivider.leadingAnchor.constraint(
+                equalTo: contentView.leadingAnchor
+            )
+            titlebarDividerLeadingConstraint = leadingConstraint
+            NSLayoutConstraint.activate([
+                leadingConstraint,
+                titlebarSidebarDivider.topAnchor.constraint(equalTo: themeFrame.topAnchor),
+                titlebarSidebarDivider.bottomAnchor.constraint(equalTo: contentView.topAnchor),
+                titlebarSidebarDivider.widthAnchor.constraint(
+                    equalToConstant: TerminalShellStyle.dividerWidth
+                ),
+            ])
+        }
+
+        titlebarDividerCancellable = Publishers.CombineLatest(
+            layoutState.$sidebarWidth,
+            layoutState.$isSidebarVisible
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self, weak themeFrame] width, visible in
+            guard let self, let themeFrame else { return }
+            titlebarSidebarDivider.isHidden = !visible
+            titlebarDividerLeadingConstraint?.constant = width +
+                (TerminalShellStyle.resizeHitWidth - TerminalShellStyle.dividerWidth) / 2
+            themeFrame.layoutSubtreeIfNeeded()
+        }
+    }
+}
+
+private final class TitlebarShellDividerView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        updateColor()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateColor()
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    private func updateColor() {
+        layer?.backgroundColor = NSColor.labelColor
+            .withAlphaComponent(0.18)
+            .cgColor
     }
 }
 

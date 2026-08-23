@@ -48,7 +48,7 @@ Descriptors include stable ID, title, SF Symbol name, owner, preferred width, an
 
 A Core Feature registers a typed content provider and may receive appeared/disappeared lifecycle events. A Plugin registers a data-only pane and updates its content through an owner-scoped API. Plugin ownership is checked on every update and all panes are removed on owner disconnect.
 
-`BuiltInFilesInspectorProvider` dogfoods the Plugin path under owner `builtin.files`. Content is isolated by stable tab ID. Pane appearance, tab switches, and live `SurfaceView.$pwd` changes asynchronously refresh the selected root. Directories load recursively only when expanded and preserve per-tab expansion state. The provider handles typed New File, New Folder, Refresh, Collapse All, and disclosure actions without injecting a View or performing filesystem I/O on the main actor. Filename/extension metadata selects host-owned Git, shell, language, config, document, and media icons.
+`BuiltInFilesInspectorProvider` dogfoods the Plugin path under owner `builtin.files`. Content is isolated by stable tab ID. Pane appearance, tab switches, and live `SurfaceView.$pwd` changes asynchronously refresh the selected root; title-only context updates never reload the tree. Disclosure uses node-scoped tasks and merges only the affected subtree, retaining the mounted ScrollView, other node identities, selection, scroll position, cached children, and per-tab expansion state. Root rebuilds are reserved for cwd changes and explicit refresh/create actions. The provider accepts typed New File, New Folder, Refresh, Collapse All, and disclosure actions without injecting a View or performing filesystem I/O on the main actor. Filename/extension metadata selects host-owned Git, shell, language, config, document, and media icons.
 
 During Debug/development builds the provider emits `OSLog` diagnostics under the `files-inspector` category for pane lifecycle, cwd/root changes, disclosure actions, generation cancellation/discard, directory read depth/count, total elapsed time, refreshes, and rejected creation names. The bounded generation/task cancellation model ensures stale reads cannot publish into a newer tree. Release builds can filter this category without changing the data path.
 
@@ -74,9 +74,9 @@ Blur and macOS glass continue to be provided by Ghostty's `TerminalViewContainer
 
 ## Interaction
 
-- A persistent `sidebar.right` control in the window's top-right titlebar, **View > Toggle Inspector**, and `⌘⇧I` all show/hide the host.
-- The Inspector header contains only a compact, extensible pane-switch strip; close/reopen remains exclusively in the window titlebar.
-- Left and Right shell dividers consume the same `TerminalShellStyle.dividerColor` token. The divider supports continuous resize; only the committed width is persisted on mouse-up.
+- The window titlebar owns the extensible pane switch and persistent `sidebar.right` control; active panes display icon + title while inactive panes display icon only. **View > Toggle Inspector** and `⌘⇧I` use the same state.
+- Inspector content begins directly with the selected pane; Files has no duplicate root/action header.
+- The Right Inspector has no visible divider. Its transparent resize hit area remains continuous with the Inspector background; only the Left Sidebar uses the shared divider stroke, extended through the titlebar. Committed width is persisted on mouse-up.
 - Visibility, width, and active pane restore for later windows/app launches.
 - An empty registry still removes the complete trailing host from layout.
 

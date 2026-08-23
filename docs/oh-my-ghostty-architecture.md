@@ -246,7 +246,7 @@ Pi 不依赖 Sidebar 或状态插件，但依赖 IPC、QuickInput 和 Terminal C
 - 将 OSC 9;4 progress 生命周期映射为 running/waiting/completed/failed wire 状态，再归一为 host-owned idle/working/done/needsAttention/error activity model。
 - `~/.config/oh-my-ghostty/settings.json`、typed settings model、machine-readable schema 与原生 Settings Window；fork preference 不再散落在 UserDefaults，Ghostty config 仅作为未显式设置项的 fallback。
 - Host-owned tab icon/metadata/activity presentation contracts；plugin 只能贡献已验证的数据，不能访问 SwiftUI/AppKit/PTY/renderer 对象。
-- Core-owned `InspectorRegistry` / `RightInspectorHost`；Horizontal/Vertical 共用 `NSWindowTabGroup` layout state，`InspectorPresentationStore` 持久化 UI state，右上 titlebar control / `⌘⇧I` 切换，pane switch strip 预留 Git/SSH 等扩展；Plugin Inspector 仅贡献经过 owner validation 的 typed snapshot/action，`builtin.files` 按稳定 tab ID 跟随 live cwd，异步提供可展开递归 tree、创建/刷新/折叠动作和 type-aware icons。
+- Core-owned `InspectorRegistry` / `RightInspectorHost`；Horizontal/Vertical 共用 `NSWindowTabGroup` layout state，`InspectorPresentationStore` 持久化 UI state，titlebar pane switch / `⌘⇧I` 切换并预留 Git/SSH 等扩展；Plugin Inspector 仅贡献经过 owner validation 的 typed snapshot/action，`builtin.files` 按稳定 tab ID 跟随 live cwd，node-scoped 异步合并 subtree，保留 scroll/selection/expanded identity，并提供递归 tree 与 type-aware icons。
 - Ghostty baseline + OMG Appearance overlay resolution；theme/font/size/opacity/blur/cursor 通过 Ghostty live config update 应用，Reset 只移除 OMG override，不改写用户 Ghostty config。
 - Vertical Tabs 和 Right Inspector 使用 renderer-derived background color/opacity；移除 terminal content 上方的 opaque SwiftUI fill，保持 glyph/cursor/icon opaque 并恢复 upstream transparency/blur semantics。
 - Plugin capability audit 明确：codec/authorization/status store 是已测试组件，但 discovery、socket、peer credential、进程监管和真实 Agent adapter 尚未完成。

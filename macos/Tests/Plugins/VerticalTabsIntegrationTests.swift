@@ -245,6 +245,7 @@ struct VerticalTabsIntegrationTests {
         #expect(expandedInspectorTree.nodes.first(where: {
             $0.name == "Sources"
         })?.children?.contains(where: { $0.name == "main.swift" }) == true)
+        try await Task.sleep(for: .milliseconds(500))
         try capture(window: try #require(eighth.window), path: inspectorScreenshotPath)
 
         let switchedRoot = FileManager.default.temporaryDirectory

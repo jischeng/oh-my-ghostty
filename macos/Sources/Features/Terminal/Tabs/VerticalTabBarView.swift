@@ -1013,7 +1013,7 @@ struct VerticalTabSidebarDivider: View {
                 resize: controller.updateSidebarWidth
             )
         }
-        .frame(width: 8)
+        .frame(width: TerminalShellStyle.resizeHitWidth)
         .background(background)
         .accessibilityLabel("Resize Tabs Sidebar")
     }

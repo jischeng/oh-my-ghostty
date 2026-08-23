@@ -189,6 +189,25 @@ struct InspectorRegistryTests {
         #expect(initialTree.nodes[0].children == nil)
         #expect(initialTree.nodes[1].icon.systemImage == "shippingbox")
 
+        let titleOnlyContext = InspectorPaneContext(
+            tabID: context.tabID,
+            surfaceID: context.surfaceID,
+            title: "Renamed Demo",
+            workingDirectory: context.workingDirectory
+        )
+        registry.presentationDidChange(
+            to: BuiltInFilesInspectorProvider.paneID,
+            context: titleOnlyContext
+        )
+        guard case .fileTree(let titleUpdatedTree) = registry.content(
+            for: BuiltInFilesInspectorProvider.paneID,
+            context: titleOnlyContext
+        ) else {
+            Issue.record("Title-only context changes must keep the mounted tree")
+            return
+        }
+        #expect(titleUpdatedTree == initialTree)
+
         registry.performAction(
             paneID: BuiltInFilesInspectorProvider.paneID,
             action: .init(
@@ -196,6 +215,18 @@ struct InspectorRegistryTests {
                 kind: .toggleNode(id: initialTree.nodes[0].id, expanded: true)
             )
         )
+        guard case .fileTree(let immediateTree) = registry.content(
+            for: BuiltInFilesInspectorProvider.paneID,
+            context: context
+        ) else {
+            Issue.record("Disclosure must keep the existing tree mounted")
+            return
+        }
+        #expect(immediateTree.rootPath == initialTree.rootPath)
+        #expect(immediateTree.nodes.map(\.id) == initialTree.nodes.map(\.id))
+        #expect(immediateTree.nodes[0].isExpanded)
+        #expect(immediateTree.nodes[0].isLoading)
+        #expect(immediateTree.nodes[1] == initialTree.nodes[1])
         for _ in 0..<20 {
             content = registry.content(
                 for: BuiltInFilesInspectorProvider.paneID,
@@ -230,7 +261,8 @@ struct InspectorRegistryTests {
             Issue.record("Expected collapsed Files tree")
             return
         }
-        #expect(collapsedTree.nodes[0].children == nil)
+        #expect(!collapsedTree.nodes[0].isExpanded)
+        #expect(collapsedTree.nodes[0].children?.map(\.name) == ["main.swift"])
 
         registry.performAction(
             paneID: BuiltInFilesInspectorProvider.paneID,

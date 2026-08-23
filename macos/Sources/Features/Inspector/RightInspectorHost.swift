@@ -4,6 +4,8 @@ import SwiftUI
 
 enum TerminalShellStyle {
     static let dividerColor = Color.primary.opacity(0.18)
+    static let resizeHitWidth: CGFloat = 8
+    static let dividerWidth: CGFloat = 1
 }
 
 extension TerminalWindow {
@@ -14,18 +16,18 @@ extension TerminalWindow {
         let installed = titlebarAccessoryViewControllers.contains(inspectorToggleAccessory)
         inspectorToggleAccessory.layoutAttribute = .right
         inspectorToggleAccessory.view = AlignedTitlebarControlsView(
-            width: 44,
-            rootView: InspectorTitlebarControl(
+            width: 190,
+            rootView: InspectorTitlebarControls(
                 layoutState: controller.tabLayoutState,
                 registry: registry,
-                toggle: { [weak controller] in controller?.toggleInspectorPane() }
+                toggleInspector: { [weak controller] in controller?.toggleInspectorPane() }
             )
         )
         if !installed {
             addTitlebarAccessoryViewController(inspectorToggleAccessory)
         }
         inspectorToggleAccessory.view.translatesAutoresizingMaskIntoConstraints = false
-        inspectorToggleAccessory.view.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        inspectorToggleAccessory.view.widthAnchor.constraint(equalToConstant: 190).isActive = true
 
         // AppKit may reset an already-visible transparent window to opaque when
         // adding a trailing titlebar accessory after the initial appearance pass.
@@ -47,19 +49,72 @@ extension TerminalWindow {
     }
 }
 
-private struct InspectorTitlebarControl: View {
+private struct InspectorTitlebarControls: View {
     @ObservedObject var layoutState: VerticalTabWindowLayoutState
     @ObservedObject var registry: InspectorRegistry
-    let toggle: () -> Void
+    let toggleInspector: () -> Void
+
+    private var selectedPaneID: String? {
+        if let selected = layoutState.selectedInspectorPaneID,
+           registry.descriptor(id: selected) != nil {
+            return selected
+        }
+        return registry.entries.first?.id
+    }
 
     var body: some View {
-        SidebarIconButton(
-            systemName: "sidebar.right",
-            help: layoutState.isInspectorVisible ? "Hide Inspector" : "Show Inspector",
-            action: toggle
-        )
-        .disabled(registry.isEmpty)
-        .opacity(registry.isEmpty ? 0.45 : 1)
+        HStack(spacing: 4) {
+            Spacer(minLength: 0)
+            ForEach(registry.entries) { entry in
+                InspectorTitlebarPaneButton(
+                    descriptor: entry.descriptor,
+                    selected: selectedPaneID == entry.id,
+                    select: {
+                        layoutState.selectInspectorPane(entry.id)
+                        layoutState.setInspectorVisible(true)
+                    }
+                )
+            }
+            SidebarIconButton(
+                systemName: "sidebar.right",
+                help: layoutState.isInspectorVisible ? "Hide Inspector" : "Show Inspector",
+                action: toggleInspector
+            )
+            .disabled(registry.isEmpty)
+            .opacity(registry.isEmpty ? 0.45 : 1)
+        }
+        .padding(.trailing, 10)
+    }
+}
+
+private struct InspectorTitlebarPaneButton: View {
+    let descriptor: InspectorPaneDescriptor
+    let selected: Bool
+    let select: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: select) {
+            Group {
+                if selected {
+                    Label(descriptor.title, systemImage: descriptor.systemImage)
+                        .padding(.horizontal, 8)
+                } else {
+                    Image(systemName: descriptor.systemImage)
+                        .frame(width: 24)
+                }
+            }
+            .font(.system(size: 11.5, weight: selected ? .semibold : .regular))
+            .frame(height: 24)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(Color.primary.opacity(selected ? 0.12 : hovered ? 0.07 : 0))
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .help(descriptor.title)
+        .accessibilityValue(selected ? "Selected" : "")
     }
 }
 
@@ -116,8 +171,7 @@ struct TerminalShellLayoutContainer<Content: View>: View {
                 content
 
                 if layoutState.isInspectorVisible && !inspectorRegistry.isEmpty {
-                    RightInspectorDivider(
-                        color: TerminalShellStyle.dividerColor,
+                    RightInspectorResizeHandle(
                         background: backgroundColor.opacity(backgroundOpacity),
                         currentWidth: { layoutState.inspectorWidth },
                         resize: controller.updateInspectorWidth
@@ -192,11 +246,7 @@ struct RightInspectorHost: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Rectangle()
-                .fill(TerminalShellStyle.dividerColor)
-                .frame(height: 1)
+        Group {
             if let paneID = selectedPaneID,
                let content = registry.content(for: paneID, context: context) {
                 InspectorPaneContentView(
@@ -232,50 +282,10 @@ struct RightInspectorHost: View {
         .accessibilityLabel("Inspector")
     }
 
-    private var header: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 4) {
-                ForEach(registry.entries) { entry in
-                    InspectorPaneSwitchButton(
-                        descriptor: entry.descriptor,
-                        selected: selectedPaneID == entry.id,
-                        select: { layoutState.selectInspectorPane(entry.id) }
-                    )
-                }
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 7)
-        }
-    }
-
     private func reconcileSelection() {
         if selectedPaneID != layoutState.selectedInspectorPaneID {
             layoutState.selectInspectorPane(selectedPaneID)
         }
-    }
-}
-
-private struct InspectorPaneSwitchButton: View {
-    let descriptor: InspectorPaneDescriptor
-    let selected: Bool
-    let select: () -> Void
-    @State private var hovered = false
-
-    var body: some View {
-        Button(action: select) {
-            Label(descriptor.title, systemImage: descriptor.systemImage)
-                .font(.system(size: 11.5, weight: selected ? .semibold : .regular))
-                .lineLimit(1)
-                .padding(.horizontal, 9)
-                .frame(height: 25)
-                .background(
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(Color.primary.opacity(selected ? 0.12 : hovered ? 0.07 : 0))
-                )
-        }
-        .buttonStyle(.plain)
-        .onHover { hovered = $0 }
-        .accessibilityValue(selected ? "Selected" : "")
     }
 }
 
@@ -350,105 +360,45 @@ private struct InspectorPaneContentView: View {
 }
 
 private struct InspectorFileTreeView: View {
-    enum CreationKind: String, Identifiable {
-        case file
-        case folder
-
-        var id: String { rawValue }
-        var title: String { self == .file ? "New File" : "New Folder" }
-    }
-
     let tree: InspectorFileTree
     let perform: (InspectorPaneActionKind) -> Void
-    @State private var creation: CreationKind?
-    @State private var newName = ""
+    @State private var selectedNodeID: String?
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 4) {
-                Image(systemName: "folder")
-                    .foregroundStyle(.secondary)
-                Text(tree.rootName)
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(tree.rootPath)
-                Spacer(minLength: 6)
-                SidebarIconButton(
-                    systemName: "doc.badge.plus",
-                    help: "New File",
-                    action: { beginCreating(.file) }
-                )
-                SidebarIconButton(
-                    systemName: "folder.badge.plus",
-                    help: "New Folder",
-                    action: { beginCreating(.folder) }
-                )
-                SidebarIconButton(
-                    systemName: "arrow.clockwise",
-                    help: "Refresh",
-                    action: { perform(.refresh) }
-                )
-                SidebarIconButton(
-                    systemName: "rectangle.compress.vertical",
-                    help: "Collapse All",
-                    action: { perform(.collapseAll) }
-                )
-            }
-            .padding(.horizontal, 9)
-            .frame(height: 34)
-
-            Rectangle()
-                .fill(TerminalShellStyle.dividerColor)
-                .frame(height: 1)
-
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(tree.nodes) { node in
-                        InspectorFileTreeNodeView(
-                            node: node,
-                            depth: 0,
-                            perform: perform
-                        )
-                    }
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(tree.nodes) { node in
+                    InspectorFileTreeNodeView(
+                        node: node,
+                        depth: 0,
+                        selectedNodeID: $selectedNodeID,
+                        perform: perform
+                    )
                 }
-                .padding(.vertical, 4)
             }
+            .padding(.vertical, 4)
         }
-        .alert(creation?.title ?? "New Item", isPresented: Binding(
-            get: { creation != nil },
-            set: { if !$0 { creation = nil } }
-        )) {
-            TextField("Name", text: $newName)
-            Button("Create") {
-                guard let creation else { return }
-                switch creation {
-                case .file: perform(.createFile(name: newName))
-                case .folder: perform(.createFolder(name: newName))
-                }
-                self.creation = nil
-            }
-            Button("Cancel", role: .cancel) { creation = nil }
+        .onChange(of: tree.rootPath) { _ in
+            selectedNodeID = nil
         }
-    }
-
-    private func beginCreating(_ kind: CreationKind) {
-        newName = ""
-        creation = kind
     }
 }
 
 private struct InspectorFileTreeNodeView: View {
     let node: InspectorFileNode
     let depth: Int
+    @Binding var selectedNodeID: String?
     let perform: (InspectorPaneActionKind) -> Void
     @State private var hovered = false
 
     var body: some View {
         VStack(spacing: 0) {
             Button {
+                selectedNodeID = node.id
                 guard node.isDirectory else { return }
-                perform(.toggleNode(id: node.id, expanded: !node.isExpanded))
+                withAnimation(.easeInOut(duration: 0.16)) {
+                    perform(.toggleNode(id: node.id, expanded: !node.isExpanded))
+                }
             } label: {
                 HStack(spacing: 6) {
                     Group {
@@ -477,23 +427,34 @@ private struct InspectorFileTreeNodeView: View {
                 .contentShape(Rectangle())
                 .background(
                     RoundedRectangle(cornerRadius: 4)
-                        .fill(Color.primary.opacity(hovered ? 0.07 : 0))
+                        .fill(Color.primary.opacity(
+                            selectedNodeID == node.id ? 0.12 : hovered ? 0.07 : 0
+                        ))
                 )
             }
             .buttonStyle(.plain)
             .onHover { hovered = $0 }
 
             if node.isExpanded, let children = node.children {
-                ForEach(children) { child in
-                    InspectorFileTreeNodeView(
-                        node: child,
-                        depth: depth + 1,
-                        perform: perform
-                    )
+                VStack(spacing: 0) {
+                    ForEach(children) { child in
+                        InspectorFileTreeNodeView(
+                            node: child,
+                            depth: depth + 1,
+                            selectedNodeID: $selectedNodeID,
+                            perform: perform
+                        )
+                    }
                 }
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
         .padding(.horizontal, 4)
+        .animation(.easeInOut(duration: 0.16), value: node.isExpanded)
+        .animation(
+            .easeInOut(duration: 0.16),
+            value: node.children?.map(\.id) ?? []
+        )
     }
 }
 
@@ -519,23 +480,17 @@ private struct InspectorFileIconView: View {
     }
 }
 
-private struct RightInspectorDivider: View {
-    let color: Color
+private struct RightInspectorResizeHandle: View {
     let background: Color
     let currentWidth: () -> CGFloat
     let resize: (CGFloat, Bool) -> Void
 
     var body: some View {
-        ZStack {
-            Rectangle()
-                .fill(color)
-                .frame(width: 1)
-            RightInspectorResizeInteraction(
-                currentWidth: currentWidth,
-                resize: resize
-            )
-        }
-        .frame(width: 8)
+        RightInspectorResizeInteraction(
+            currentWidth: currentWidth,
+            resize: resize
+        )
+        .frame(width: TerminalShellStyle.resizeHitWidth)
         .background(background)
         .accessibilityLabel("Resize Inspector")
     }

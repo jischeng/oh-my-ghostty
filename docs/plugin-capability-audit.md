@@ -2,6 +2,10 @@
 
 Audit date: 2026-08-21
 
+Developer-facing status, protocol reference, and maintenance rules live in
+[`PLUGIN_DEVELOPMENT.md`](PLUGIN_DEVELOPMENT.md). This matrix and that guide
+must change together when implementation status changes.
+
 Status vocabulary:
 
 - **Done**: connected to the running app and covered by behavioral tests.
@@ -32,7 +36,7 @@ Status vocabulary:
 | Error isolation | Partial | Inputs have frame limits, Codable validation, status limits and failure responses. There is no supervised out-of-process runtime yet. |
 | Permissions/security | Partial | Nonce/manifest capability intersection policy exists. No socket, peer UID/PID validation or executable ownership checks exist. |
 | Unload/reload | Missing | Router cleanup can clear one plugin's statuses, but no loaded plugin lifecycle exists. |
-| Documentation | Done | Architecture baseline, this audit, settings docs and schema document the current boundary and gaps. |
+| Documentation | Done | Architecture baseline, this audit, settings docs/schema, and `PLUGIN_DEVELOPMENT.md` document the current boundary and gaps. |
 
 ## What Actually Runs Today
 

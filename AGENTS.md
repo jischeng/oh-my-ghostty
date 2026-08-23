@@ -15,6 +15,11 @@ A file for [guiding coding agents](https://agents.md/).
 - **Formatting (Zig)**: `zig fmt .`
 - **Formatting (Swift)**: `swiftlint lint --strict --fix`
 - **Formatting (other)**: `prettier -w .`
+- **OMG documentation contract:** `python3 dist/check_omg_docs.py`
+
+Any change to plugin APIs, manifests, wire messages, capabilities, lifecycle,
+loading/discovery, package layout, Inspector provider behavior, or permissions
+must update `docs/PLUGIN_DEVELOPMENT.md` and relevant tests in the same commit.
 
 ## libghostty-vt
 

@@ -15,6 +15,8 @@ concurrency:
 
 jobs:
   setup:
+    # Upstream-only: OMG releases use docs/RELEASING.md and GitHub assets.
+    if: github.repository == 'ghostty-org/ghostty'
     runs-on: namespace-profile-ghostty-sm
     outputs:
       version: ${{ steps.extract_version.outputs.version }}

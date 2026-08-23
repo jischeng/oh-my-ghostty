@@ -137,7 +137,7 @@ struct SettingsView: View {
         case .general:
             Form {
                 Section("Configuration") {
-                    LabeledContent("Fork Settings", value: OhMyGhosttySettings.fileURL.path)
+                    LabeledContent("OMG Settings", value: OhMyGhosttySettings.fileURL.path)
                     LabeledContent("Precedence", value: "Runtime → OMG → Ghostty → Defaults")
                     Text("Tab layout, appearance, and plugin preferences each have one canonical page.")
                         .font(.caption)

@@ -1,4 +1,4 @@
-# Oh My Ghostty Settings
+# OMG Settings
 
 Fork-specific preferences are stored in:
 
@@ -31,7 +31,7 @@ Reload the file with **Settings > Advanced > Reload** or Ghostty's **Reload Conf
 | Layer | Owns | Priority |
 | --- | --- | --- |
 | Runtime/window state | Current tab Sidebar visibility/live width, Inspector visibility/width/active pane, collapsed groups, selected tab | Highest |
-| Oh My Ghostty settings | Optional fork and Appearance overrides listed below | Second |
+| OMG settings | Optional application and Appearance overrides listed below | Second |
 | Ghostty config | Inherited baseline, including `macos-tab-layout`, theme, font, opacity, blur, and cursor | Third |
 | Built-in defaults | Safe values for unset settings | Lowest |
 

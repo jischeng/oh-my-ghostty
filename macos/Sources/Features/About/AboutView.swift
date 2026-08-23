@@ -58,10 +58,10 @@ struct AboutView: View {
 
             VStack(alignment: .center, spacing: 32) {
                 VStack(alignment: .center, spacing: 8) {
-                    Text("Oh My Ghostty")
+                    Text("OMG")
                         .bold()
                         .font(.title)
-                    Text("Ghostty-powered terminal with native macOS extensions.")
+                    Text("Native macOS terminal extensions, based on Ghostty.")
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
                         .font(.caption)

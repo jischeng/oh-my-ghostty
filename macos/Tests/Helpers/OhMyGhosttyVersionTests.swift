@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import Ghostty
 
@@ -8,6 +9,17 @@ struct OhMyGhosttyVersionTests {
         #expect(versions.omg == "0.1.0")
         #expect(versions.ghostty == "1.3.2-dev")
         #expect(versions.ghosttyRevision == "9ae02a326f62bd88f7f5508cf1807c67e7775cb5")
+    }
+
+    @Test func appBundleUsesIndependentOMGIdentity() {
+        let bundle = Bundle.main
+        let info = bundle.infoDictionary ?? [:]
+
+        #expect(bundle.bundleIdentifier == "com.jischeng.omg.debug")
+        #expect(bundle.bundleURL.lastPathComponent == "OMG.app")
+        #expect(info["CFBundleExecutable"] as? String == "omg")
+        #expect((info["CFBundleDisplayName"] as? String)?.hasPrefix("OMG") == true)
+        #expect(info["CFBundleIconName"] as? String == "OMG")
     }
 
     @Test func readsIndependentOMGAndGhosttyVersions() {

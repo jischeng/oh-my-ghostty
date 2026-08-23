@@ -5,6 +5,22 @@ for anyone considering opening an **issue**, **discussion** or **pull request**.
 For people who are interested in developing Ghostty and technical details behind
 it, please check out our ["Developing Ghostty"](HACKING.md) document as well.
 
+## OMG-specific contribution rules
+
+OMG-owned macOS application work follows the repository checks in `AGENTS.md`
+and `macos/AGENTS.md`. Release work uses `docs/RELEASING.md`.
+
+Plugin documentation is part of the compatibility boundary. Any change to a
+plugin API, `PluginManifest`, wire message, capability, lifecycle, discovery or
+loading path, package/directory layout, Inspector provider behavior, or plugin
+permission must update `docs/PLUGIN_DEVELOPMENT.md` and relevant tests in the
+same commit.
+
+Plugin-related review checklist:
+
+- [ ] Plugin API/manifest/lifecycle/loading/capabilities are unchanged; or
+- [ ] `docs/PLUGIN_DEVELOPMENT.md` and compatibility tests are updated.
+
 > [!NOTE]
 >
 > I'm sorry for the wall of text. I'm not trying to be difficult and I do

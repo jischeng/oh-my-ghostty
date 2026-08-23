@@ -1,7 +1,7 @@
 import AppKit
 import System
 
-/// The icon style for the Ghostty App.
+/// Optional icon styles for the OMG app.
 enum AppIcon: Equatable, Codable, Sendable {
     case official
     case blueprint

@@ -14,7 +14,7 @@ def main [
     # Skip UI tests for CLI-based invocations because it requires
     # special permissions.
     let skip_testing = if $action == "test" {
-        [-skip-testing GhosttyUITests]
+        [-skip-testing GhosttyUITests -parallel-testing-enabled NO]
     } else {
         []
     }

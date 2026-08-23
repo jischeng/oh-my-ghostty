@@ -6,10 +6,10 @@ import GhosttyKit
 
 extension Ghostty {
     // The user notification category identifier
-    static let userNotificationCategory = "com.mitchellh.ghostty.userNotification"
+    static let userNotificationCategory = "com.jischeng.omg.user-notification"
 
     // The user notification "Show" action
-    static let userNotificationActionShow = "com.mitchellh.ghostty.userNotification.Show"
+    static let userNotificationActionShow = "com.jischeng.omg.user-notification.show"
 }
 
 // MARK: Build Info

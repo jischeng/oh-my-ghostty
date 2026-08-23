@@ -191,10 +191,10 @@ final class AlignedTitlebarControlsView<Content: View>: NSView, TitlebarControls
 
     override func layout() {
         super.layout()
-        let size = NSSize(width: contentWidth, height: 24)
+        let size = NSSize(width: bounds.width, height: 24)
         let centerY = trafficLightsCenterYInLocalCoordinates ?? bounds.midY
         hostingView.frame = NSRect(
-            x: bounds.midX - size.width / 2,
+            x: bounds.minX,
             y: centerY - size.height / 2,
             width: size.width,
             height: size.height

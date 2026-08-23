@@ -366,10 +366,6 @@ class AppDelegate: NSObject,
             }
 
             ghostty_app_set_color_scheme(app, scheme)
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.applyOhMyGhosttyWindowTheme(using: self.ghostty.config)
-            }
         }
 
         // Setup our menu
@@ -823,10 +819,14 @@ class AppDelegate: NSObject,
             shouldOverrideEveryWindow = false
         }
 
-        NSApp.appearance = settings.windowThemeOverride == .light ||
+        let appAppearance = settings.windowThemeOverride == .light ||
             settings.windowThemeOverride == .dark ? appearance : nil
-        for candidate in NSApp.windows {
-            if shouldOverrideEveryWindow || candidate.windowController is BaseTerminalController {
+        if NSApp.appearance?.name != appAppearance?.name {
+            NSApp.appearance = appAppearance
+        }
+        for candidate in NSApp.windows where
+            shouldOverrideEveryWindow || candidate.windowController is BaseTerminalController {
+            if candidate.appearance?.name != appearance?.name {
                 candidate.appearance = appearance
             }
         }

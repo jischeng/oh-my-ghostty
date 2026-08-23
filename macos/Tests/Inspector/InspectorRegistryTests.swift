@@ -4,6 +4,45 @@ import Testing
 
 @MainActor
 struct InspectorRegistryTests {
+    @Test func pluginBarUsesStableOverflowBuckets() {
+        let descriptors = [
+            paneDescriptor(id: "files", source: .coreFeature("files"), title: "Files"),
+            paneDescriptor(id: "git", source: .coreFeature("git"), title: "Git"),
+            paneDescriptor(id: "ssh", source: .coreFeature("ssh"), title: "SSH"),
+            paneDescriptor(id: "info", source: .coreFeature("info"), title: "Info"),
+        ]
+
+        let wide = InspectorPluginBarLayout.resolve(
+            descriptors: descriptors,
+            selectedID: "files",
+            availableWidth: 240
+        )
+        #expect(wide.visibleIDs == ["files", "git", "ssh", "info"])
+        #expect(wide.overflowIDs.isEmpty)
+
+        let medium = InspectorPluginBarLayout.resolve(
+            descriptors: descriptors,
+            selectedID: "files",
+            availableWidth: 170
+        )
+        #expect(medium.visibleIDs == ["files"])
+        #expect(medium.overflowIDs == ["git", "ssh", "info"])
+
+        let selectedOverflow = InspectorPluginBarLayout.resolve(
+            descriptors: descriptors,
+            selectedID: "git",
+            availableWidth: 130
+        )
+        #expect(selectedOverflow.visibleIDs == ["files"])
+        #expect(selectedOverflow.overflowIDs.contains("git"))
+
+        #expect(medium == InspectorPluginBarLayout.resolve(
+            descriptors: descriptors,
+            selectedID: "files",
+            availableWidth: 179
+        ))
+    }
+
     @Test func inspectorPresentationPersistsVisibilityWidthAndPane() throws {
         let suite = "InspectorPresentationStoreTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))
@@ -501,11 +540,12 @@ struct InspectorRegistryTests {
 
     private func paneDescriptor(
         id: String,
-        source: InspectorPaneDescriptor.Source
+        source: InspectorPaneDescriptor.Source,
+        title: String = "Context"
     ) -> InspectorPaneDescriptor {
         .init(
             id: id,
-            title: "Context",
+            title: title,
             systemImage: "sidebar.trailing",
             source: source,
             preferredWidth: 320,

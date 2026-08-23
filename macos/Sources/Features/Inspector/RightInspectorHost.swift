@@ -6,6 +6,65 @@ enum TerminalShellStyle {
     static let dividerColor = Color.primary.opacity(0.18)
     static let resizeHitWidth: CGFloat = 8
     static let dividerWidth: CGFloat = 1
+    static let minimumTerminalWidth: CGFloat = 320
+
+    static func presentedInspectorWidth(
+        preferred: CGFloat,
+        totalWidth: CGFloat,
+        leadingWidth: CGFloat
+    ) -> CGFloat {
+        let maximum = max(
+            RightInspectorMetrics.minimumWidth,
+            totalWidth - leadingWidth - minimumTerminalWidth - resizeHitWidth
+        )
+        return min(preferred, maximum)
+    }
+}
+
+struct InspectorPluginBarLayout: Equatable {
+    let visibleIDs: [String]
+    let overflowIDs: [String]
+
+    static func resolve(
+        descriptors: [InspectorPaneDescriptor],
+        selectedID: String?,
+        availableWidth: CGFloat
+    ) -> Self {
+        let bucketedWidth = floor(max(availableWidth, 0) / 12) * 12
+        let horizontalPadding: CGFloat = 18
+        let toggleWidth: CGFloat = 28
+        let overflowWidth: CGFloat = 28
+        let spacing: CGFloat = 4
+        let usable = max(0, bucketedWidth - horizontalPadding)
+
+        func itemWidth(_ descriptor: InspectorPaneDescriptor) -> CGFloat {
+            guard descriptor.id == selectedID else { return 28 }
+            return max(52, 34 + CGFloat(descriptor.title.count) * 6.5)
+        }
+
+        let allItemsWidth = descriptors.reduce(toggleWidth) { result, descriptor in
+            result + spacing + itemWidth(descriptor)
+        }
+        if allItemsWidth <= usable {
+            return .init(
+                visibleIDs: descriptors.map(\.id),
+                overflowIDs: []
+            )
+        }
+
+        var visible: [String] = []
+        var used = toggleWidth + overflowWidth + spacing * 2
+        for descriptor in descriptors {
+            let candidate = itemWidth(descriptor) + (visible.isEmpty ? 0 : spacing)
+            guard used + candidate <= usable else { break }
+            visible.append(descriptor.id)
+            used += candidate
+        }
+        return .init(
+            visibleIDs: visible,
+            overflowIDs: descriptors.map(\.id).filter { !visible.contains($0) }
+        )
+    }
 }
 
 extension TerminalWindow {
@@ -27,7 +86,37 @@ extension TerminalWindow {
             addTitlebarAccessoryViewController(inspectorToggleAccessory)
         }
         inspectorToggleAccessory.view.translatesAutoresizingMaskIntoConstraints = false
-        inspectorToggleAccessory.view.widthAnchor.constraint(equalToConstant: 190).isActive = true
+        inspectorToggleWidthConstraint?.isActive = false
+        let widthConstraint = inspectorToggleAccessory.view.widthAnchor.constraint(
+            equalToConstant: 190
+        )
+        inspectorToggleWidthConstraint = widthConstraint
+        widthConstraint.isActive = true
+        let stateChanges = controller.tabLayoutState.objectWillChange.map { _ in () }
+        let resizeChanges = NotificationCenter.default.publisher(
+            for: NSWindow.didResizeNotification,
+            object: self
+        ).map { _ in () }
+        inspectorToggleCancellable = Publishers.Merge(stateChanges, resizeChanges)
+            .prepend(())
+            .sink { [weak self, weak controller] _ in
+                DispatchQueue.main.async {
+                    guard let self, let controller else { return }
+                    let state = controller.tabLayoutState
+                    let totalWidth = self.contentLayoutRect.width
+                    let leadingWidth = controller.supportsSidebar && state.isSidebarVisible
+                        ? state.sidebarWidth + TerminalShellStyle.resizeHitWidth
+                        : 0
+                    let presentedWidth = TerminalShellStyle.presentedInspectorWidth(
+                        preferred: state.inspectorWidth,
+                        totalWidth: totalWidth,
+                        leadingWidth: leadingWidth
+                    )
+                    self.inspectorToggleWidthConstraint?.constant = state.isInspectorVisible
+                        ? presentedWidth
+                        : 120
+                }
+            }
 
         // AppKit may reset an already-visible transparent window to opaque when
         // adding a trailing titlebar accessory after the initial appearance pass.
@@ -63,27 +152,49 @@ private struct InspectorTitlebarControls: View {
     }
 
     var body: some View {
-        HStack(spacing: 4) {
-            Spacer(minLength: 0)
-            ForEach(registry.entries) { entry in
-                InspectorTitlebarPaneButton(
-                    descriptor: entry.descriptor,
-                    selected: selectedPaneID == entry.id,
-                    select: {
-                        layoutState.selectInspectorPane(entry.id)
-                        layoutState.setInspectorVisible(true)
-                    }
-                )
-            }
-            SidebarIconButton(
-                systemName: "sidebar.right",
-                help: layoutState.isInspectorVisible ? "Hide Inspector" : "Show Inspector",
-                action: toggleInspector
+        GeometryReader { geometry in
+            let descriptors = registry.entries.map(\.descriptor)
+            let layout = InspectorPluginBarLayout.resolve(
+                descriptors: descriptors,
+                selectedID: selectedPaneID,
+                availableWidth: geometry.size.width
             )
-            .disabled(registry.isEmpty)
-            .opacity(registry.isEmpty ? 0.45 : 1)
+            HStack(spacing: 4) {
+                ForEach(layout.visibleIDs, id: \.self) { id in
+                    if let descriptor = registry.descriptor(id: id) {
+                        InspectorTitlebarPaneButton(
+                            descriptor: descriptor,
+                            selected: selectedPaneID == id,
+                            select: { select(id) }
+                        )
+                    }
+                }
+                if !layout.overflowIDs.isEmpty {
+                    InspectorPluginOverflowMenu(
+                        descriptors: layout.overflowIDs.compactMap {
+                            registry.descriptor(id: $0)
+                        },
+                        selectedID: selectedPaneID,
+                        select: select
+                    )
+                }
+                Spacer(minLength: 0)
+                SidebarIconButton(
+                    systemName: "sidebar.right",
+                    help: layoutState.isInspectorVisible ? "Hide Inspector" : "Show Inspector",
+                    action: toggleInspector
+                )
+                .disabled(registry.isEmpty)
+                .opacity(registry.isEmpty ? 0.45 : 1)
+            }
+            .padding(.leading, 8)
+            .padding(.trailing, 10)
         }
-        .padding(.trailing, 10)
+    }
+
+    private func select(_ paneID: String) {
+        layoutState.selectInspectorPane(paneID)
+        layoutState.setInspectorVisible(true)
     }
 }
 
@@ -108,7 +219,7 @@ private struct InspectorTitlebarPaneButton: View {
             .frame(height: 24)
             .background(
                 RoundedRectangle(cornerRadius: 5)
-                    .fill(Color.primary.opacity(selected ? 0.12 : hovered ? 0.07 : 0))
+                    .fill(Color.primary.opacity(hovered ? 0.06 : 0))
             )
         }
         .buttonStyle(.plain)
@@ -200,13 +311,13 @@ struct TerminalShellLayoutContainer<Content: View>: View {
             ? layoutState.inspectorWidth
             : layoutState.committedInspectorWidth
         let leadingWidth = showsTabSidebar && layoutState.isSidebarVisible
-            ? presentedSidebarWidth + 8
+            ? presentedSidebarWidth + TerminalShellStyle.resizeHitWidth
             : 0
-        let maximum = max(
-            RightInspectorMetrics.minimumWidth,
-            totalWidth - leadingWidth - 320 - 8
+        return TerminalShellStyle.presentedInspectorWidth(
+            preferred: preferred,
+            totalWidth: totalWidth,
+            leadingWidth: leadingWidth
         )
-        return min(preferred, maximum)
     }
 }
 
@@ -359,6 +470,39 @@ private struct InspectorPaneContentView: View {
     }
 }
 
+private struct InspectorPluginOverflowMenu: View {
+    let descriptors: [InspectorPaneDescriptor]
+    let selectedID: String?
+    let select: (String) -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Menu {
+            ForEach(descriptors) { descriptor in
+                Toggle(isOn: Binding(
+                    get: { selectedID == descriptor.id },
+                    set: { enabled in if enabled { select(descriptor.id) } }
+                )) {
+                    Label(descriptor.title, systemImage: descriptor.systemImage)
+                }
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .frame(width: 24, height: 24)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(Color.primary.opacity(hovered ? 0.06 : 0))
+                )
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .onHover { hovered = $0 }
+        .help("More Inspector Plugins")
+        .accessibilityLabel("More Inspector Plugins")
+    }
+}
+
 private struct InspectorFileTreeView: View {
     let tree: InspectorFileTree
     let perform: (InspectorPaneActionKind) -> Void
@@ -446,7 +590,8 @@ private struct InspectorFileTreeNodeView: View {
                         )
                     }
                 }
-                .transition(.opacity.combined(with: .move(edge: .top)))
+                .transition(.opacity)
+                .clipped()
             }
         }
         .padding(.horizontal, 4)

@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import GhosttyKit
 
@@ -26,6 +27,8 @@ class TerminalWindow: NSWindow {
 
     /// Persistent trailing control used to reopen the Core-owned Inspector.
     let inspectorToggleAccessory = NSTitlebarAccessoryViewController()
+    var inspectorToggleWidthConstraint: NSLayoutConstraint?
+    var inspectorToggleCancellable: AnyCancellable?
 
     /// Visual indicator that mirrors the selected tab color.
     private lazy var tabColorIndicator: NSHostingView<TabColorIndicatorView> = {

@@ -61,16 +61,20 @@ final class OhMyGhosttySettingsWindowController: NSWindowController {
 
     private func applyAppearance(_ settings: OhMyGhosttySettings) {
         guard let window else { return }
+        let appearance: NSAppearance?
         switch settings.windowThemeOverride {
         case .light:
-            window.appearance = NSAppearance(named: .aqua)
+            appearance = NSAppearance(named: .aqua)
         case .dark:
-            window.appearance = NSAppearance(named: .darkAqua)
+            appearance = NSAppearance(named: .darkAqua)
         case .system:
-            window.appearance = nil
+            appearance = nil
         case nil:
             let config = (NSApp.delegate as? AppDelegate)?.ghostty.config
-            window.appearance = config.flatMap(NSAppearance.init(ghosttyConfig:))
+            appearance = config.flatMap(NSAppearance.init(ghosttyConfig:))
+        }
+        if window.appearance?.name != appearance?.name {
+            window.appearance = appearance
         }
     }
 }

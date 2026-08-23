@@ -29,6 +29,7 @@ class TerminalWindow: NSWindow {
     let inspectorToggleAccessory = NSTitlebarAccessoryViewController()
     var inspectorToggleWidthConstraint: NSLayoutConstraint?
     var inspectorToggleCancellable: AnyCancellable?
+    var inspectorAppearanceWorkItem: DispatchWorkItem?
 
     /// Visual indicator that mirrors the selected tab color.
     private lazy var tabColorIndicator: NSHostingView<TabColorIndicatorView> = {

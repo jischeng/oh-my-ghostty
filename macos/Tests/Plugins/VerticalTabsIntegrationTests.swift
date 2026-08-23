@@ -144,7 +144,23 @@ struct VerticalTabsIntegrationTests {
         let trafficLightsCenterY = try #require(alignedWindow.trafficLightsCenterY)
         #expect(abs(controlsCenterY - trafficLightsCenterY) < 0.5)
         #expect(abs(inspectorCenterY - trafficLightsCenterY) < 0.5)
+        let titlebarHeight = try #require(alignedWindow.titlebarContainer?.bounds.height)
+        #expect(abs((alignedWindow.titlebarControlsHeight ?? 0) - titlebarHeight) < 0.5)
+        #expect(abs((alignedWindow.inspectorControlsHeight ?? 0) - titlebarHeight) < 0.5)
         #expect(alignedWindow.inspectorToggleIsInstalled)
+        let alignedContentView = try #require(alignedWindow.contentView)
+        let expectedLeftDividerCenterX = alignedContentView.convert(
+            NSPoint(
+                x: eighth.tabLayoutState.sidebarWidth +
+                    TerminalShellStyle.resizeHitWidth / 2,
+                y: alignedContentView.bounds.midY
+            ),
+            to: nil
+        ).x
+        let leftDividerCenterX = try #require(
+            alignedWindow.titlebarSidebarDividerCenterX
+        )
+        #expect(abs(leftDividerCenterX - expectedLeftDividerCenterX) < 0.5)
 
         let surfaceIDs = controllers.map { $0.surfaceTree.first?.id }
         #expect(Set(controllers.map(\.tabSessionID)).count == controllers.count)
@@ -187,13 +203,49 @@ struct VerticalTabsIntegrationTests {
             to: inspectorMenuItem.target,
             from: inspectorMenuItem
         ))
-        try await Task.sleep(for: .milliseconds(250))
+        let terminalWindow = try #require(eighth.window as? TerminalWindow)
+        for _ in 0..<20 where
+            !eighth.tabLayoutState.isInspectorVisible ||
+                eighth.tabLayoutState.selectedInspectorPaneID == nil ||
+                (terminalWindow.inspectorToggleWidthConstraint?.constant ?? 0) <= 44 {
+            try await Task.sleep(for: .milliseconds(50))
+        }
         #expect(eighth.tabLayoutState.isInspectorVisible)
         #expect(eighth.tabLayoutState.selectedInspectorPaneID ==
             BuiltInFilesInspectorProvider.paneID)
+        #expect((terminalWindow.inspectorToggleWidthConstraint?.constant ?? 0) > 44)
         eighth.updateInspectorWidth(380, persist: true)
         #expect(eighth.tabLayoutState.inspectorWidth == 380)
         #expect(inspectorPresentation.snapshot.width == 380)
+        let presentedInspectorWidth = TerminalShellStyle.presentedInspectorWidth(
+            preferred: 380,
+            totalWidth: alignedContentView.bounds.width,
+            leadingWidth: eighth.tabLayoutState.sidebarWidth +
+                TerminalShellStyle.resizeHitWidth
+        )
+        let expectedAccessoryWidth = presentedInspectorWidth +
+            TerminalShellStyle.resizeHitWidth
+        for _ in 0..<20 where abs(
+            (terminalWindow.inspectorToggleWidthConstraint?.constant ?? 0) -
+                expectedAccessoryWidth
+        ) >= 0.5 {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        alignedContentView.superview?.layoutSubtreeIfNeeded()
+        #expect(abs(
+            (terminalWindow.inspectorToggleWidthConstraint?.constant ?? 0) -
+                expectedAccessoryWidth
+        ) < 0.5)
+        let expectedRightDividerCenterX = alignedContentView.convert(
+            NSPoint(
+                x: alignedContentView.bounds.maxX - presentedInspectorWidth -
+                    TerminalShellStyle.resizeHitWidth / 2,
+                y: alignedContentView.bounds.midY
+            ),
+            to: nil
+        ).x
+        let rightDividerCenterX = try #require(terminalWindow.inspectorDividerCenterX)
+        #expect(abs(rightDividerCenterX - expectedRightDividerCenterX) < 0.5)
         #expect(controllers.map { $0.surfaceTree.first?.id } == surfaceIDs)
 
         let inspectorSurface = try #require(eighth.focusedSurface ?? eighth.surfaceTree.first)
@@ -219,6 +271,9 @@ struct VerticalTabsIntegrationTests {
             Issue.record("Expected cwd-driven Files tree")
             return
         }
+        #expect(initialInspectorTree.rootName == URL(
+            fileURLWithPath: inspectorContext.workingDirectory ?? ""
+        ).lastPathComponent)
         appDelegate.inspectorRegistry.performAction(
             paneID: BuiltInFilesInspectorProvider.paneID,
             action: .init(
@@ -281,16 +336,19 @@ struct VerticalTabsIntegrationTests {
             Issue.record("Expected Files tree to follow terminal cwd")
             return
         }
+        #expect(switchedTree.rootName == switchedRoot.lastPathComponent)
         #expect(switchedTree.nodes.map(\.name) == ["switched.json"])
         inspectorSurface.pwd = originalPWD
         try await Task.sleep(for: .milliseconds(100))
         eighth.toggleInspectorPane()
         for _ in 0..<20 where
             eighth.tabLayoutState.isInspectorVisible ||
+                terminalWindow.inspectorToggleWidthConstraint?.constant != 44 ||
                 controllers.map(surfaceSize) != initialSurfaceSizes {
             try await Task.sleep(for: .milliseconds(50))
         }
         #expect(!eighth.tabLayoutState.isInspectorVisible)
+        #expect(terminalWindow.inspectorToggleWidthConstraint?.constant == 44)
         #expect(controllers.map { $0.surfaceTree.first?.id } == surfaceIDs)
         #expect(controllers.map(surfaceSize) == initialSurfaceSizes)
         let expectedFrameSize = try #require(eighth.window).frame.size

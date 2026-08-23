@@ -7,8 +7,7 @@ final class VerticalTabsTerminalWindow: TransparentTitlebarTerminalWindow {
     override var supportsUpdateAccessory: Bool { false }
 
     private let sidebarToggleAccessory = NSTitlebarAccessoryViewController()
-    private let titlebarSidebarDivider = TitlebarShellDividerView()
-    private var titlebarDividerLeadingConstraint: NSLayoutConstraint?
+    private var sidebarToggleWidthConstraint: NSLayoutConstraint?
     private var titlebarDividerCancellable: AnyCancellable?
     private(set) var nativeTabBarRejectionCount = 0
 
@@ -46,7 +45,12 @@ final class VerticalTabsTerminalWindow: TransparentTitlebarTerminalWindow {
             addTitlebarAccessoryViewController(sidebarToggleAccessory)
         }
         sidebarToggleAccessory.view.translatesAutoresizingMaskIntoConstraints = false
-        sidebarToggleAccessory.view.widthAnchor.constraint(equalToConstant: 58).isActive = true
+        sidebarToggleWidthConstraint?.isActive = false
+        let widthConstraint = sidebarToggleAccessory.view.widthAnchor.constraint(
+            equalToConstant: 58
+        )
+        sidebarToggleWidthConstraint = widthConstraint
+        widthConstraint.isActive = true
         installTitlebarSidebarDivider(layoutState: controller.tabLayoutState)
     }
 
@@ -66,12 +70,25 @@ final class VerticalTabsTerminalWindow: TransparentTitlebarTerminalWindow {
         titlebarAccessoryViewControllers.contains(sidebarToggleAccessory)
     }
 
-    var titlebarSidebarDividerIsInstalled: Bool {
-        titlebarSidebarDivider.superview != nil
-    }
-
     var titlebarControlsCenterY: CGFloat? {
         (sidebarToggleAccessory.view as? TitlebarControlsCentering)?.contentCenterYInWindow
+    }
+
+    var titlebarControlsHeight: CGFloat? {
+        guard sidebarToggleAccessory.view.window != nil else { return nil }
+        return sidebarToggleAccessory.view.bounds.height
+    }
+
+    var titlebarSidebarDividerCenterX: CGFloat? {
+        guard sidebarToggleAccessory.view.window != nil else { return nil }
+        return sidebarToggleAccessory.view.convert(
+            NSPoint(
+                x: sidebarToggleAccessory.view.bounds.maxX -
+                    TerminalShellStyle.resizeHitWidth / 2,
+                y: sidebarToggleAccessory.view.bounds.midY
+            ),
+            to: nil
+        ).x
     }
 
     var trafficLightsCenterY: CGFloat? {
@@ -99,64 +116,42 @@ final class VerticalTabsTerminalWindow: TransparentTitlebarTerminalWindow {
     private func installTitlebarSidebarDivider(
         layoutState: VerticalTabWindowLayoutState
     ) {
-        guard let contentView,
-              let themeFrame = contentView.superview else { return }
-        if titlebarSidebarDivider.superview !== contentView {
-            titlebarSidebarDivider.removeFromSuperview()
-            contentView.addSubview(titlebarSidebarDivider, positioned: .above, relativeTo: nil)
-            titlebarSidebarDivider.translatesAutoresizingMaskIntoConstraints = false
-            let leadingConstraint = titlebarSidebarDivider.leadingAnchor.constraint(
-                equalTo: contentView.leadingAnchor
-            )
-            titlebarDividerLeadingConstraint = leadingConstraint
-            NSLayoutConstraint.activate([
-                leadingConstraint,
-                titlebarSidebarDivider.topAnchor.constraint(equalTo: themeFrame.topAnchor),
-                titlebarSidebarDivider.bottomAnchor.constraint(equalTo: contentView.topAnchor),
-                titlebarSidebarDivider.widthAnchor.constraint(
-                    equalToConstant: TerminalShellStyle.dividerWidth
-                ),
-            ])
-        }
-
-        titlebarDividerCancellable = Publishers.CombineLatest(
-            layoutState.$sidebarWidth,
-            layoutState.$isSidebarVisible
+        let resizeChanges = NotificationCenter.default.publisher(
+            for: NSWindow.didResizeNotification,
+            object: self
         )
-        .receive(on: DispatchQueue.main)
-        .sink { [weak self, weak themeFrame] width, visible in
-            guard let self, let themeFrame else { return }
-            titlebarSidebarDivider.isHidden = !visible
-            titlebarDividerLeadingConstraint?.constant = width +
-                (TerminalShellStyle.resizeHitWidth - TerminalShellStyle.dividerWidth) / 2
-            themeFrame.layoutSubtreeIfNeeded()
+        .map { _ in () }
+        .prepend(())
+        titlebarDividerCancellable = Publishers.CombineLatest(
+            Publishers.CombineLatest(
+                layoutState.$sidebarWidth,
+                layoutState.$isSidebarVisible
+            ),
+            resizeChanges
+        )
+        .sink { [weak self] layout, _ in
+            guard let self else { return }
+            let (width, visible) = layout
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let contentView else { return }
+                let accessoryView = sidebarToggleAccessory.view
+                let accessoryOriginX = accessoryView.convert(
+                    NSPoint(x: accessoryView.bounds.minX, y: accessoryView.bounds.midY),
+                    to: nil
+                ).x
+                let sidebarTrailingX = contentView.convert(
+                    NSPoint(
+                        x: width + TerminalShellStyle.resizeHitWidth,
+                        y: contentView.bounds.midY
+                    ),
+                    to: nil
+                ).x
+                sidebarToggleWidthConstraint?.constant = visible
+                    ? max(58, sidebarTrailingX - accessoryOriginX)
+                    : 58
+                titlebarContainer?.layoutSubtreeIfNeeded()
+            }
         }
-    }
-}
-
-private final class TitlebarShellDividerView: NSView {
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        updateColor()
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        updateColor()
-    }
-
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    private func updateColor() {
-        layer?.backgroundColor = NSColor.labelColor
-            .withAlphaComponent(0.18)
-            .cgColor
     }
 }
 
@@ -165,13 +160,20 @@ protocol TitlebarControlsCentering {
 }
 
 final class AlignedTitlebarControlsView<Content: View>: NSView, TitlebarControlsCentering {
+    private static var fallbackHeight: CGFloat { 28 }
+
     private let hostingView: NSHostingView<Content>
     private let contentWidth: CGFloat
 
     init(width: CGFloat = 58, rootView: Content) {
         self.contentWidth = width
         self.hostingView = NSHostingView(rootView: rootView)
-        super.init(frame: NSRect(x: 0, y: 0, width: width, height: 28))
+        super.init(frame: NSRect(
+            x: 0,
+            y: 0,
+            width: width,
+            height: Self.fallbackHeight
+        ))
         addSubview(hostingView)
     }
 
@@ -181,17 +183,18 @@ final class AlignedTitlebarControlsView<Content: View>: NSView, TitlebarControls
     }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: contentWidth, height: 28)
+        NSSize(width: contentWidth, height: titlebarHeight)
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        invalidateIntrinsicContentSize()
         needsLayout = true
     }
 
     override func layout() {
         super.layout()
-        let size = NSSize(width: bounds.width, height: 24)
+        let size = NSSize(width: bounds.width, height: bounds.height)
         let centerY = trafficLightsCenterYInLocalCoordinates ?? bounds.midY
         hostingView.frame = NSRect(
             x: bounds.minX,
@@ -207,6 +210,13 @@ final class AlignedTitlebarControlsView<Content: View>: NSView, TitlebarControls
             NSPoint(x: hostingView.frame.midX, y: hostingView.frame.midY),
             to: nil
         ).y
+    }
+
+    private var titlebarHeight: CGFloat {
+        guard let titlebarContainer = (window as? TerminalWindow)?.titlebarContainer else {
+            return Self.fallbackHeight
+        }
+        return max(Self.fallbackHeight, titlebarContainer.bounds.height)
     }
 
     private var trafficLightsCenterYInLocalCoordinates: CGFloat? {
@@ -235,17 +245,24 @@ private struct VerticalTabsTitlebarControls: View {
     let newTab: () -> Void
 
     var body: some View {
-        HStack(spacing: 2) {
-            SidebarIconButton(
-                systemName: "sidebar.left",
-                help: layoutState.isSidebarVisible ? "Hide Tabs" : "Show Tabs",
-                action: toggleSidebar
-            )
-            SidebarIconButton(
-                systemName: "plus",
-                help: "New Tab",
-                action: newTab
-            )
+        ZStack(alignment: .trailing) {
+            HStack(spacing: SidebarToolbarStyle.itemSpacing) {
+                SidebarIconButton(
+                    systemName: "sidebar.left",
+                    help: layoutState.isSidebarVisible ? "Hide Tabs" : "Show Tabs",
+                    action: toggleSidebar
+                )
+                SidebarIconButton(
+                    systemName: "plus",
+                    help: "New Tab",
+                    action: newTab
+                )
+                Spacer(minLength: 0)
+            }
+            if layoutState.isSidebarVisible {
+                TerminalSidebarDividerLine()
+                    .frame(width: TerminalShellStyle.resizeHitWidth)
+            }
         }
     }
 }

@@ -3,10 +3,19 @@ import Combine
 import SwiftUI
 
 enum TerminalShellStyle {
-    static let dividerColor = Color.primary.opacity(0.18)
+    static var dividerNSColor: NSColor {
+        NSColor.labelColor.withAlphaComponent(0.18)
+    }
+
+    static var dividerColor: Color { Color(nsColor: dividerNSColor) }
     static let resizeHitWidth: CGFloat = 8
     static let dividerWidth: CGFloat = 1
     static let minimumTerminalWidth: CGFloat = 320
+    static let sidebarTransitionDuration = 0.18
+    static let sidebarTransitionDistance: CGFloat = 6
+    static let sidebarTransitionAnimation = Animation.easeOut(
+        duration: sidebarTransitionDuration
+    )
 
     static func presentedInspectorWidth(
         preferred: CGFloat,
@@ -18,6 +27,118 @@ enum TerminalShellStyle {
             totalWidth - leadingWidth - minimumTerminalWidth - resizeHitWidth
         )
         return min(preferred, maximum)
+    }
+}
+
+struct TerminalSidebarDividerLine: View {
+    var body: some View {
+        Rectangle()
+            .fill(TerminalShellStyle.dividerColor)
+            .frame(width: TerminalShellStyle.dividerWidth)
+            .frame(maxHeight: .infinity)
+    }
+}
+
+private struct TerminalSidebarTransitionContainer<Content: View>: View {
+    enum Edge {
+        case left
+        case right
+
+        var alignment: Alignment { self == .left ? .leading : .trailing }
+        var hiddenOffset: CGFloat {
+            self == .left
+                ? -TerminalShellStyle.sidebarTransitionDistance
+                : TerminalShellStyle.sidebarTransitionDistance
+        }
+    }
+
+    let isVisible: Bool
+    let width: CGFloat
+    let edge: Edge
+    let animationsEnabled: Bool
+    let content: Content
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var occupiesSpace: Bool
+    @State private var contentVisible: Bool
+    @State private var transitionTask: Task<Void, Never>?
+
+    init(
+        isVisible: Bool,
+        width: CGFloat,
+        edge: Edge,
+        animationsEnabled: Bool,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.isVisible = isVisible
+        self.width = width
+        self.edge = edge
+        self.animationsEnabled = animationsEnabled
+        self.content = content()
+        self._occupiesSpace = State(initialValue: isVisible)
+        self._contentVisible = State(initialValue: isVisible)
+    }
+
+    var body: some View {
+        ZStack(alignment: edge.alignment) {
+            if occupiesSpace {
+                content
+                    .frame(width: width, alignment: edge.alignment)
+                    .opacity(contentVisible ? 1 : 0)
+                    .offset(x: contentVisible ? 0 : edge.hiddenOffset)
+                    .allowsHitTesting(contentVisible)
+                    .accessibilityHidden(!contentVisible)
+            }
+        }
+        .frame(
+            width: occupiesSpace ? width : 0,
+            alignment: edge.alignment
+        )
+        .clipped()
+        .onAppear { synchronizeImmediately() }
+        .onChange(of: isVisible) { visible in transition(to: visible) }
+        .onChange(of: reduceMotion) { _ in synchronizeImmediately() }
+        .onChange(of: animationsEnabled) { _ in synchronizeImmediately() }
+        .onDisappear { transitionTask?.cancel() }
+    }
+
+    private func transition(to visible: Bool) {
+        transitionTask?.cancel()
+        transitionTask = nil
+        guard !reduceMotion, animationsEnabled else {
+            occupiesSpace = visible
+            contentVisible = visible
+            return
+        }
+
+        if visible {
+            occupiesSpace = true
+            contentVisible = false
+            transitionTask = Task { @MainActor in
+                await Task.yield()
+                guard !Task.isCancelled else { return }
+                withAnimation(TerminalShellStyle.sidebarTransitionAnimation) {
+                    contentVisible = true
+                }
+            }
+        } else {
+            withAnimation(TerminalShellStyle.sidebarTransitionAnimation) {
+                contentVisible = false
+            }
+            transitionTask = Task { @MainActor in
+                try? await Task.sleep(for: .seconds(
+                    TerminalShellStyle.sidebarTransitionDuration
+                ))
+                guard !Task.isCancelled else { return }
+                occupiesSpace = false
+            }
+        }
+    }
+
+    private func synchronizeImmediately() {
+        transitionTask?.cancel()
+        transitionTask = nil
+        occupiesSpace = isVisible
+        contentVisible = isVisible
     }
 }
 
@@ -34,7 +155,7 @@ struct InspectorPluginBarLayout: Equatable {
         let horizontalPadding: CGFloat = 18
         let toggleWidth: CGFloat = 28
         let overflowWidth: CGFloat = 28
-        let spacing: CGFloat = 4
+        let spacing = SidebarToolbarStyle.itemSpacing
         let usable = max(0, bucketedWidth - horizontalPadding)
 
         func itemWidth(_ descriptor: InspectorPaneDescriptor) -> CGFloat {
@@ -92,41 +213,61 @@ extension TerminalWindow {
         )
         inspectorToggleWidthConstraint = widthConstraint
         widthConstraint.isActive = true
-        let stateChanges = controller.tabLayoutState.objectWillChange.map { _ in () }
+        let state = controller.tabLayoutState
+        let layoutChanges = Publishers.CombineLatest3(
+            state.$isInspectorVisible,
+            state.$inspectorWidth,
+            state.$sidebarWidth
+        )
         let resizeChanges = NotificationCenter.default.publisher(
             for: NSWindow.didResizeNotification,
             object: self
-        ).map { _ in () }
-        inspectorToggleCancellable = Publishers.Merge(stateChanges, resizeChanges)
-            .prepend(())
-            .sink { [weak self, weak controller] _ in
-                DispatchQueue.main.async {
-                    guard let self, let controller else { return }
-                    let state = controller.tabLayoutState
-                    let totalWidth = self.contentLayoutRect.width
-                    let leadingWidth = controller.supportsSidebar && state.isSidebarVisible
-                        ? state.sidebarWidth + TerminalShellStyle.resizeHitWidth
-                        : 0
-                    let presentedWidth = TerminalShellStyle.presentedInspectorWidth(
-                        preferred: state.inspectorWidth,
-                        totalWidth: totalWidth,
-                        leadingWidth: leadingWidth
-                    )
-                    self.inspectorToggleWidthConstraint?.constant = state.isInspectorVisible
-                        ? presentedWidth
-                        : 120
-                }
+        )
+        .map { _ in () }
+        .prepend(())
+        inspectorToggleCancellable = Publishers.CombineLatest(
+            layoutChanges,
+            resizeChanges
+        )
+        .sink { [weak self, weak controller] layout, _ in
+            guard let self, let controller else { return }
+            let (isVisible, inspectorWidth, sidebarWidth) = layout
+            let totalWidth = self.contentLayoutRect.width
+            let leadingWidth = controller.supportsSidebar
+                ? sidebarWidth + TerminalShellStyle.resizeHitWidth
+                : 0
+            let presentedWidth = TerminalShellStyle.presentedInspectorWidth(
+                preferred: inspectorWidth,
+                totalWidth: totalWidth,
+                leadingWidth: leadingWidth
+            )
+            let targetWidth = isVisible
+                ? presentedWidth + TerminalShellStyle.resizeHitWidth
+                : 44
+            guard self.inspectorToggleWidthConstraint?.constant != targetWidth else {
+                return
             }
+            self.inspectorToggleWidthConstraint?.constant = targetWidth
+            self.scheduleInspectorAppearanceSync(controller: controller)
+        }
 
         // AppKit may reset an already-visible transparent window to opaque when
-        // adding a trailing titlebar accessory after the initial appearance pass.
-        DispatchQueue.main.async { [weak self, weak controller] in
+        // adding or resizing a trailing titlebar accessory. Restore appearance
+        // once the titlebar layout has settled rather than on every resize event.
+        scheduleInspectorAppearanceSync(controller: controller)
+    }
+
+    private func scheduleInspectorAppearanceSync(controller: TerminalController) {
+        inspectorAppearanceWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self, weak controller] in
             guard let self,
                   let surface = controller?.focusedSurface ?? controller?.surfaceTree.first else {
                 return
             }
             self.syncAppearance(surface.derivedConfig)
         }
+        inspectorAppearanceWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: workItem)
     }
 
     var inspectorToggleIsInstalled: Bool {
@@ -135,6 +276,22 @@ extension TerminalWindow {
 
     var inspectorControlsCenterY: CGFloat? {
         (inspectorToggleAccessory.view as? TitlebarControlsCentering)?.contentCenterYInWindow
+    }
+
+    var inspectorControlsHeight: CGFloat? {
+        guard inspectorToggleAccessory.view.window != nil else { return nil }
+        return inspectorToggleAccessory.view.bounds.height
+    }
+
+    var inspectorDividerCenterX: CGFloat? {
+        guard inspectorToggleAccessory.view.window != nil else { return nil }
+        return inspectorToggleAccessory.view.convert(
+            NSPoint(
+                x: TerminalShellStyle.resizeHitWidth / 2,
+                y: inspectorToggleAccessory.view.bounds.midY
+            ),
+            to: nil
+        ).x
     }
 }
 
@@ -153,42 +310,56 @@ private struct InspectorTitlebarControls: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let descriptors = registry.entries.map(\.descriptor)
+            let inspectorVisible = layoutState.isInspectorVisible
+            let descriptors = inspectorVisible
+                ? registry.entries.map(\.descriptor)
+                : []
+            let dividerSlotWidth = inspectorVisible
+                ? TerminalShellStyle.resizeHitWidth
+                : 0
             let layout = InspectorPluginBarLayout.resolve(
                 descriptors: descriptors,
                 selectedID: selectedPaneID,
-                availableWidth: geometry.size.width
+                availableWidth: max(0, geometry.size.width - dividerSlotWidth)
             )
-            HStack(spacing: 4) {
-                ForEach(layout.visibleIDs, id: \.self) { id in
-                    if let descriptor = registry.descriptor(id: id) {
-                        InspectorTitlebarPaneButton(
-                            descriptor: descriptor,
-                            selected: selectedPaneID == id,
-                            select: { select(id) }
+            HStack(spacing: 0) {
+                if inspectorVisible {
+                    TerminalSidebarDividerLine()
+                        .frame(width: dividerSlotWidth)
+                }
+                HStack(spacing: SidebarToolbarStyle.itemSpacing) {
+                    ForEach(layout.visibleIDs, id: \.self) { id in
+                        if let descriptor = registry.descriptor(id: id) {
+                            InspectorTitlebarPaneButton(
+                                descriptor: descriptor,
+                                selected: selectedPaneID == id,
+                                select: { select(id) }
+                            )
+                        }
+                    }
+                    if !layout.overflowIDs.isEmpty {
+                        InspectorPluginOverflowMenu(
+                            descriptors: layout.overflowIDs.compactMap {
+                                registry.descriptor(id: $0)
+                            },
+                            selectedID: selectedPaneID,
+                            select: select
                         )
                     }
-                }
-                if !layout.overflowIDs.isEmpty {
-                    InspectorPluginOverflowMenu(
-                        descriptors: layout.overflowIDs.compactMap {
-                            registry.descriptor(id: $0)
-                        },
-                        selectedID: selectedPaneID,
-                        select: select
+                    Spacer(minLength: 0)
+                    SidebarIconButton(
+                        systemName: "sidebar.right",
+                        help: inspectorVisible ? "Hide Inspector" : "Show Inspector",
+                        action: toggleInspector
+                    )
+                    .disabled(registry.isEmpty)
+                    .opacity(
+                        registry.isEmpty ? SidebarToolbarStyle.disabledOpacity : 1
                     )
                 }
-                Spacer(minLength: 0)
-                SidebarIconButton(
-                    systemName: "sidebar.right",
-                    help: layoutState.isInspectorVisible ? "Hide Inspector" : "Show Inspector",
-                    action: toggleInspector
-                )
-                .disabled(registry.isEmpty)
-                .opacity(registry.isEmpty ? 0.45 : 1)
+                .padding(.leading, 8)
+                .padding(.trailing, 10)
             }
-            .padding(.leading, 8)
-            .padding(.trailing, 10)
         }
     }
 
@@ -202,29 +373,14 @@ private struct InspectorTitlebarPaneButton: View {
     let descriptor: InspectorPaneDescriptor
     let selected: Bool
     let select: () -> Void
-    @State private var hovered = false
 
     var body: some View {
-        Button(action: select) {
-            Group {
-                if selected {
-                    Label(descriptor.title, systemImage: descriptor.systemImage)
-                        .padding(.horizontal, 8)
-                } else {
-                    Image(systemName: descriptor.systemImage)
-                        .frame(width: 24)
-                }
-            }
-            .font(.system(size: 11.5, weight: selected ? .semibold : .regular))
-            .frame(height: 24)
-            .background(
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(Color.primary.opacity(hovered ? 0.06 : 0))
-            )
-        }
-        .buttonStyle(.plain)
-        .onHover { hovered = $0 }
-        .help(descriptor.title)
+        SidebarToolbarButton(
+            systemName: descriptor.systemImage,
+            title: selected ? descriptor.title : nil,
+            help: descriptor.title,
+            action: select
+        )
         .accessibilityValue(selected ? "Selected" : "")
     }
 }
@@ -261,40 +417,60 @@ struct TerminalShellLayoutContainer<Content: View>: View {
 
     var body: some View {
         GeometryReader { geometry in
+            let selectedPresentation = controller.selectedTabID == ObjectIdentifier(controller)
+            let leftVisible = showsTabSidebar && layoutState.isSidebarVisible
+            let leftWidth = presentedSidebarWidth + TerminalShellStyle.resizeHitWidth
+            let inspectorWidth = presentedInspectorWidth(totalWidth: geometry.size.width)
+            let rightVisible = layoutState.isInspectorVisible && !inspectorRegistry.isEmpty
+            let rightWidth = inspectorWidth + TerminalShellStyle.resizeHitWidth
+
             HStack(spacing: 0) {
-                if showsTabSidebar && layoutState.isSidebarVisible {
-                    TerminalTabSidebarView(
-                        controller: controller,
-                        layoutState: layoutState,
-                        statusStore: statusStore,
-                        backgroundColor: backgroundColor,
-                        backgroundOpacity: backgroundOpacity
-                    )
-                    .frame(width: presentedSidebarWidth)
-                    VerticalTabSidebarDivider(
-                        controller: controller,
-                        layoutState: layoutState,
-                        color: TerminalShellStyle.dividerColor,
-                        background: backgroundColor.opacity(backgroundOpacity)
-                    )
+                TerminalSidebarTransitionContainer(
+                    isVisible: leftVisible,
+                    width: leftWidth,
+                    edge: .left,
+                    animationsEnabled: selectedPresentation
+                ) {
+                    HStack(spacing: 0) {
+                        TerminalTabSidebarView(
+                            controller: controller,
+                            layoutState: layoutState,
+                            statusStore: statusStore,
+                            backgroundColor: backgroundColor,
+                            backgroundOpacity: backgroundOpacity
+                        )
+                        .frame(width: presentedSidebarWidth)
+                        VerticalTabSidebarDivider(
+                            controller: controller,
+                            layoutState: layoutState,
+                            background: backgroundColor.opacity(backgroundOpacity)
+                        )
+                    }
                 }
 
                 content
 
-                if layoutState.isInspectorVisible && !inspectorRegistry.isEmpty {
-                    RightInspectorResizeHandle(
-                        background: backgroundColor.opacity(backgroundOpacity),
-                        currentWidth: { layoutState.inspectorWidth },
-                        resize: controller.updateInspectorWidth
-                    )
-                    RightInspectorHost(
-                        controller: controller,
-                        layoutState: layoutState,
-                        registry: inspectorRegistry,
-                        backgroundColor: backgroundColor,
-                        backgroundOpacity: backgroundOpacity
-                    )
-                    .frame(width: presentedInspectorWidth(totalWidth: geometry.size.width))
+                TerminalSidebarTransitionContainer(
+                    isVisible: rightVisible,
+                    width: rightWidth,
+                    edge: .right,
+                    animationsEnabled: selectedPresentation
+                ) {
+                    HStack(spacing: 0) {
+                        RightInspectorResizeHandle(
+                            background: backgroundColor.opacity(backgroundOpacity),
+                            currentWidth: { layoutState.inspectorWidth },
+                            resize: controller.updateInspectorWidth
+                        )
+                        RightInspectorHost(
+                            controller: controller,
+                            layoutState: layoutState,
+                            registry: inspectorRegistry,
+                            backgroundColor: backgroundColor,
+                            backgroundOpacity: backgroundOpacity
+                        )
+                        .frame(width: inspectorWidth)
+                    }
                 }
             }
         }
@@ -310,7 +486,7 @@ struct TerminalShellLayoutContainer<Content: View>: View {
         let preferred = controller.selectedTabID == ObjectIdentifier(controller)
             ? layoutState.inspectorWidth
             : layoutState.committedInspectorWidth
-        let leadingWidth = showsTabSidebar && layoutState.isSidebarVisible
+        let leadingWidth = showsTabSidebar
             ? presentedSidebarWidth + TerminalShellStyle.resizeHitWidth
             : 0
         return TerminalShellStyle.presentedInspectorWidth(
@@ -488,10 +664,20 @@ private struct InspectorPluginOverflowMenu: View {
             }
         } label: {
             Image(systemName: "ellipsis")
-                .frame(width: 24, height: 24)
+                .font(.system(size: SidebarToolbarStyle.iconFontSize))
+                .frame(
+                    width: SidebarToolbarStyle.iconSize,
+                    height: SidebarToolbarStyle.iconSize
+                )
+                .frame(
+                    width: SidebarToolbarStyle.iconControlWidth,
+                    height: SidebarToolbarStyle.controlHeight
+                )
                 .background(
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(Color.primary.opacity(hovered ? 0.06 : 0))
+                    RoundedRectangle(cornerRadius: SidebarToolbarStyle.cornerRadius)
+                        .fill(Color.primary.opacity(
+                            hovered ? SidebarToolbarStyle.hoverOpacity : 0
+                        ))
                 )
         }
         .menuStyle(.borderlessButton)
@@ -503,24 +689,46 @@ private struct InspectorPluginOverflowMenu: View {
     }
 }
 
+struct InspectorPluginSectionHeader: View {
+    let title: String
+
+    var body: some View {
+        Text(title.uppercased())
+            .font(.system(size: 10.5, weight: .medium))
+            .tracking(0.7)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+            .padding(.bottom, 6)
+    }
+}
+
 private struct InspectorFileTreeView: View {
     let tree: InspectorFileTree
     let perform: (InspectorPaneActionKind) -> Void
     @State private var selectedNodeID: String?
 
     var body: some View {
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                ForEach(tree.nodes) { node in
-                    InspectorFileTreeNodeView(
-                        node: node,
-                        depth: 0,
-                        selectedNodeID: $selectedNodeID,
-                        perform: perform
-                    )
+        VStack(spacing: 0) {
+            InspectorPluginSectionHeader(title: tree.rootName)
+                .help(tree.rootPath)
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(tree.nodes) { node in
+                        InspectorFileTreeNodeView(
+                            node: node,
+                            depth: 0,
+                            selectedNodeID: $selectedNodeID,
+                            perform: perform
+                        )
+                    }
                 }
+                .padding(.top, 2)
+                .padding(.bottom, 4)
             }
-            .padding(.vertical, 4)
         }
         .onChange(of: tree.rootPath) { _ in
             selectedNodeID = nil
@@ -631,10 +839,13 @@ private struct RightInspectorResizeHandle: View {
     let resize: (CGFloat, Bool) -> Void
 
     var body: some View {
-        RightInspectorResizeInteraction(
-            currentWidth: currentWidth,
-            resize: resize
-        )
+        ZStack {
+            TerminalSidebarDividerLine()
+            RightInspectorResizeInteraction(
+                currentWidth: currentWidth,
+                resize: resize
+            )
+        }
         .frame(width: TerminalShellStyle.resizeHitWidth)
         .background(background)
         .accessibilityLabel("Resize Inspector")

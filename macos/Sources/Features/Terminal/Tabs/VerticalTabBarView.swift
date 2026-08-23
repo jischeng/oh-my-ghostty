@@ -982,7 +982,6 @@ struct VerticalTabLayoutContainer<Content: View>: View {
                 VerticalTabSidebarDivider(
                     controller: controller,
                     layoutState: layoutState,
-                    color: TerminalShellStyle.dividerColor,
                     background: backgroundColor.opacity(backgroundOpacity)
                 )
             }
@@ -1000,14 +999,11 @@ struct VerticalTabLayoutContainer<Content: View>: View {
 struct VerticalTabSidebarDivider: View {
     @ObservedObject var controller: TerminalController
     @ObservedObject var layoutState: VerticalTabWindowLayoutState
-    let color: Color
     var background: Color = .clear
 
     var body: some View {
         ZStack {
-            Rectangle()
-                .fill(color)
-                .frame(width: 1)
+            TerminalSidebarDividerLine()
             VerticalTabResizeInteraction(
                 currentWidth: { layoutState.sidebarWidth },
                 resize: controller.updateSidebarWidth
@@ -1075,27 +1071,76 @@ struct VerticalTabResizeInteraction: NSViewRepresentable {
     }
 }
 
-struct SidebarIconButton: View {
+enum SidebarToolbarStyle {
+    static let iconSize: CGFloat = 16
+    static let iconFontSize: CGFloat = 12
+    static let controlHeight: CGFloat = 24
+    static let iconControlWidth: CGFloat = 24
+    static let cornerRadius: CGFloat = 4
+    static let itemSpacing: CGFloat = 4
+    static let labelFontSize: CGFloat = 11.5
+    static let labelWeight = Font.Weight.medium
+    static let horizontalLabelPadding: CGFloat = 8
+    static let hoverOpacity = 0.06
+    static let disabledOpacity = 0.45
+}
+
+struct SidebarToolbarButton: View {
     let systemName: String
+    let title: String?
     let help: String
     let action: () -> Void
-
     @State private var hovered = false
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: systemName)
-                .frame(width: 16, height: 16)
-                .frame(width: 24, height: 24)
-                .background(
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(Color.primary.opacity(hovered ? 0.07 : 0))
-                )
+            HStack(spacing: 5) {
+                Image(systemName: systemName)
+                    .font(.system(size: SidebarToolbarStyle.iconFontSize))
+                    .frame(
+                        width: SidebarToolbarStyle.iconSize,
+                        height: SidebarToolbarStyle.iconSize
+                    )
+                if let title {
+                    Text(title)
+                        .font(.system(
+                            size: SidebarToolbarStyle.labelFontSize,
+                            weight: SidebarToolbarStyle.labelWeight
+                        ))
+                        .lineLimit(1)
+                }
+            }
+            .padding(.horizontal, title == nil ? 4 : SidebarToolbarStyle.horizontalLabelPadding)
+            .frame(
+                minWidth: SidebarToolbarStyle.iconControlWidth,
+                minHeight: SidebarToolbarStyle.controlHeight
+            )
+            .background(
+                RoundedRectangle(cornerRadius: SidebarToolbarStyle.cornerRadius)
+                    .fill(Color.primary.opacity(
+                        hovered ? SidebarToolbarStyle.hoverOpacity : 0
+                    ))
+            )
         }
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
         .help(help)
         .accessibilityLabel(help)
+    }
+}
+
+struct SidebarIconButton: View {
+    let systemName: String
+    let help: String
+    let action: () -> Void
+
+    var body: some View {
+        SidebarToolbarButton(
+            systemName: systemName,
+            title: nil,
+            help: help,
+            action: action
+        )
     }
 }
 

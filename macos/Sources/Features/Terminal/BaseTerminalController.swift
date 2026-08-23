@@ -57,7 +57,23 @@ class BaseTerminalController: NSWindowController,
     @Published var commandPaletteIsShowing: Bool = false
 
     /// Window-level presentation state shared by terminal shell presentations.
-    var tabLayoutState: VerticalTabWindowLayoutState
+    var tabLayoutState: VerticalTabWindowLayoutState {
+        didSet {
+            guard tabLayoutState !== oldValue else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let controller = self as? TerminalController else { return }
+                (controller.window as? VerticalTabsTerminalWindow)?
+                    .installSidebarToggle(controller: controller)
+                if let appDelegate = NSApp.delegate as? AppDelegate {
+                    (controller.window as? TerminalWindow)?.installInspectorToggle(
+                        controller: controller,
+                        registry: appDelegate.inspectorRegistry
+                    )
+                }
+                controller.objectWillChange.send()
+            }
+        }
+    }
 
     /// Whether this controller supports the native vertical tab bar.
     var supportsSidebar: Bool { false }

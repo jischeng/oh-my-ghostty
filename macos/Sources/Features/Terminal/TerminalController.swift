@@ -493,20 +493,6 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let sharedState = tabGroup?.ghosttyTerminalShellLayoutState ?? tabLayoutState
         for controller in controllers where controller.tabLayoutState !== sharedState {
             controller.tabLayoutState = sharedState
-            DispatchQueue.main.async { [weak controller] in
-                guard let controller else { return }
-                if controller.tabLayout == .vertical {
-                    (controller.window as? VerticalTabsTerminalWindow)?
-                        .installSidebarToggle(controller: controller)
-                }
-                if let appDelegate = NSApp.delegate as? AppDelegate {
-                    (controller.window as? TerminalWindow)?.installInspectorToggle(
-                        controller: controller,
-                        registry: appDelegate.inspectorRegistry
-                    )
-                }
-                controller.objectWillChange.send()
-            }
         }
 
         let selectedWindow = tabGroup?.selectedWindow ?? window

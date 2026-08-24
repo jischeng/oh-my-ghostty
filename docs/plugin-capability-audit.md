@@ -41,9 +41,9 @@ Status vocabulary:
 
 ## What Actually Runs Today
 
-The running app owns one core `TabActivityStore`. Vertical Tabs and window titles read normalized activity by stable tab session UUID. `MockAgentStatusAdapter` exercises working, done, needs-attention, idle and plugin-provided icon data through the same validated store.
+The running app owns the normalized `TabActivity` model and validated `TabActivityStore`. The in-tree Agent Status bridge additionally reduces bounded OSC 3008 events per Surface for Codex, Claude Code, and Pi, including idle identity, working/progress, approval, completion, error, and clear. Vertical Tabs keep one identity icon slot and host-owned status presentation. `MockAgentStatusAdapter` still exercises the future process-plugin store.
 
-No third-party executable can reach that store in a production build yet. `PluginAuthorizationPolicy`, `PluginMessageRouter` and the frame codec are tested components, not a connected daemon. `SSHPlugin` is currently trusted in-tree code using the generic workspace boundary, not an installable third-party plugin.
+No third-party executable can reach that store in a production build yet. `PluginAuthorizationPolicy`, `PluginMessageRouter` and the frame codec are tested components, not a connected daemon. `SSHPlugin` and the Agent hook bridge are trusted in-tree code using generic workspace/activity boundaries, not installable third-party plugins.
 
 ## Stable Extension Boundary
 
@@ -65,7 +65,6 @@ Plugins do not receive `NSView`, `NSWindow`, SwiftUI `View`, `TerminalController
 3. Discover and validate manifests without executing them.
 4. Launch only enabled executables with capability-specific tokens/nonces.
 5. Supervise child processes and route bounded frames through `PluginMessageRouter`.
-6. Add a small CLI that reads `OH_MY_GHOSTTY_SESSION` and sends normalized status events.
-7. Implement one Agent adapter at a time: Codex hook, Claude hook, then Pi extension.
+6. Add authenticated public CLI ingress only if external producers need it; the built-in Codex/Claude/Pi adapters already use presentation-only TTY events and do not require a socket.
 
 A plugin crash or invalid event must terminate/disable only that plugin connection. The terminal Surface, PTY and app process remain host-owned and are never passed across the boundary.

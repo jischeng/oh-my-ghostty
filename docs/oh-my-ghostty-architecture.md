@@ -123,9 +123,11 @@ WebView 不是首批架构依赖。它只可能在第三方生态开放后作为
 
 ### 6.1 Agent 状态提醒
 
-官方状态插件订阅稳定事件并声明 `running`、`waiting`、`completed`、`failed` 状态。宿主原生更新 tab/window 标题和 Sidebar 数据。
+官方状态插件将 Codex、Claude Code 和 Pi 的原生 hook/extension 事件归一为 `idle`、`working`、`needsAttention`、`done`、`error`。首版采用 bounded OSC 3008 presentation context：事件由 agent 所在 TTY 接收，因此 Local 和 SSH Pane 使用同一 Surface correlation，不轮询进程、不解析终端文本，也不依赖远端安装 OMG executable。
 
-没有 agent 显式协议时，只展示能够由现有信号可靠推断的较粗状态。Agent 专用适配器可以提高精度，但必须独立测试。
+宿主保留唯一 Tab icon slot。Agent 连接时 identity icon 替换 terminal/cloud；working 使用围绕 icon 的紧凑 progress ring；等待审批、完成和失败继续使用右侧 status slot。Agent context 结束后恢复 canonical terminal/cloud icon。Hook 只能改变展示状态，不获得 Terminal Control、文件系统或网络能力。
+
+Settings 显式安装/移除用户级 hooks，合并 Codex/Claude 配置并保留其他集成，Pi 使用可审计 TypeScript extension。SSH 上需在 agent 实际运行的远端账户安装同样 hooks；本地 App 不静默修改远端 dotfiles。
 
 ### 6.2 Tab Layout
 

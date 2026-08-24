@@ -258,6 +258,26 @@ struct VerticalTabsIntegrationTests {
         #expect(controllers.map { $0.surfaceTree.first?.id } == surfaceIDs)
 
         let inspectorSurface = try #require(eighth.focusedSurface ?? eighth.surfaceTree.first)
+        inspectorSurface.contextSignal = .init(
+            action: .start,
+            id: "omg-agent-codex",
+            metadata: "type=app;omg_agent=codex;omg_state=working"
+        )
+        for _ in 0..<20 where eighth.agentActivity(for: inspectorSurface) == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(eighth.agentActivity(for: inspectorSurface)?.source == "codex")
+        #expect(eighth.agentActivity(for: inspectorSurface)?.state == .working)
+        inspectorSurface.contextSignal = .init(
+            action: .end,
+            id: "omg-agent-codex",
+            metadata: "type=app;omg_agent=codex"
+        )
+        for _ in 0..<20 where eighth.agentActivity(for: inspectorSurface) != nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(eighth.agentActivity(for: inspectorSurface) == nil)
+
         let inspectorContext = InspectorPaneContext(
             tabID: eighth.tabSessionID,
             surfaceID: inspectorSurface.id,

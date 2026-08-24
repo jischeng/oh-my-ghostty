@@ -91,7 +91,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// Canonical pane session state. Tab title/icon and Inspector/Files all
     /// consume this map rather than independently inferring SSH from titles.
     @Published private(set) var paneSessionContexts: [UUID: PaneSessionContext] = [:]
+    @Published private(set) var agentActivities: [UUID: TabActivity] = [:]
     private var paneSessionObservers: [UUID: Set<AnyCancellable>] = [:]
+    private var agentReducers: [UUID: AgentContextSignalReducer] = [:]
 
     var focusedPaneSessionContext: PaneSessionContext? {
         paneSessionContext(for: focusedSurface ?? surfaceTree.first)
@@ -100,6 +102,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// Generic workspace metadata resolved from the canonical focused session.
     var workspaceDescriptor: WorkspaceDescriptor? {
         focusedPaneSessionContext?.workspace
+    }
+
+    func agentActivity(for surface: Ghostty.SurfaceView?) -> TabActivity? {
+        guard let surface else { return nil }
+        return agentActivities[surface.id]
     }
 
     func paneSessionContext(
@@ -270,6 +277,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let activeIDs = Set(surfaces.map(\.id))
         paneSessionObservers = paneSessionObservers.filter { activeIDs.contains($0.key) }
         paneSessionContexts = paneSessionContexts.filter { activeIDs.contains($0.key) }
+        agentActivities = agentActivities.filter { activeIDs.contains($0.key) }
+        agentReducers = agentReducers.filter { activeIDs.contains($0.key) }
 
         for surface in surfaces where paneSessionObservers[surface.id] == nil {
             paneSessionContexts[surface.id] = .init(
@@ -308,11 +317,36 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                         currentTerminalTitle: surface.title
                     )
                     updatePaneSessionContext(context, for: surface.id)
+                    updateAgentActivity(signal, for: surface.id)
                 }
                 .store(in: &observers)
 
             paneSessionObservers[surface.id] = observers
         }
+    }
+
+    private func updateAgentActivity(
+        _ signal: Ghostty.ContextSignal,
+        for surfaceID: UUID
+    ) {
+        guard AgentStatusPlugin.isEnabled else {
+            if agentActivities.removeValue(forKey: surfaceID) != nil {
+                objectWillChange.send()
+            }
+            return
+        }
+        var reducer = agentReducers[surfaceID] ?? AgentContextSignalReducer()
+        guard let update = reducer.consume(signal) else { return }
+        agentReducers[surfaceID] = reducer
+        var next = agentActivities
+        switch update {
+        case .set(let activity):
+            next[surfaceID] = activity
+        case .clear:
+            next.removeValue(forKey: surfaceID)
+        }
+        guard next != agentActivities else { return }
+        agentActivities = next
     }
 
     private func updatePaneSessionContext(
@@ -1957,12 +1991,18 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     // MARK: - Notifications
 
     @objc private func onOhMyGhosttySettingsChanged(_ notification: SwiftUI.Notification) {
-        guard supportsSidebar,
-              window?.tabGroup?.selectedWindow === window else { return }
         let settings = OhMyGhosttySettings.shared
         let changedKey = notification.userInfo?[
             OhMyGhosttySettings.changedKeyUserInfoKey
         ] as? String
+        if changedKey == nil || changedKey == "agents.statusHooks" {
+            if !settings.agentStatusHooksEnabled {
+                agentActivities = [:]
+                agentReducers = [:]
+            }
+        }
+        guard supportsSidebar,
+              window?.tabGroup?.selectedWindow === window else { return }
         if changedKey == nil ||
             changedKey == "tabs.sidebarVisible" ||
             changedKey == "tabs.sidebarWidth" {

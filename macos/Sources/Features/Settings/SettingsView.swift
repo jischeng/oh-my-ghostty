@@ -87,6 +87,9 @@ struct SettingsView: View {
     @State private var githubRepository = ""
     @State private var pluginOperation: String?
     @State private var pluginError: String?
+    @State private var agentHookRevision = 0
+    @State private var agentHookOperation: SupportedAgent?
+    @State private var agentHookError: String?
 
     init(
         settings: OhMyGhosttySettings,
@@ -267,7 +270,7 @@ struct SettingsView: View {
                         uninstall: { uninstall(manifest) }
                     )
                 }
-                Text("Official plugins are installed independently from the OMG app. SSH uses your existing OpenSSH configuration and credentials.")
+                Text("Official plugins are installed independently from the OMG app. SSH uses your existing OpenSSH configuration and credentials. Built-in agent hook adapters are configured below.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -295,9 +298,17 @@ struct SettingsView: View {
 
             Section("Agent Integration") {
                 Toggle("Enable Normalized Status Events", isOn: $settings.agentStatusHooksEnabled)
-                capabilityRow("Protocol Core", status: "Available")
-                capabilityRow("Status Store", status: "Available")
-                capabilityRow("Socket Listener", status: "Not Installed")
+                ForEach(SupportedAgent.allCases) { agent in
+                    agentHookRow(agent)
+                }
+                Text("Hooks write bounded presentation-only OSC events to the owning terminal. The same hooks work inside SSH when installed in the remote account. Codex may require approving the new entries with /hooks after installation.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let agentHookError {
+                    Text(agentHookError)
+                        .foregroundStyle(.red)
+                        .textSelection(.enabled)
+                }
             }
             Section("Notifications") {
                 Toggle("Task Complete", isOn: $settings.notifyTaskComplete)
@@ -535,6 +546,60 @@ struct SettingsView: View {
         .foregroundStyle(.secondary)
     }
 
+    @ViewBuilder
+    private func agentHookRow(_ agent: SupportedAgent) -> some View {
+        let revision = agentHookRevision
+        let installed = AgentHookInstaller().isInstalled(agent)
+        HStack {
+            Image(systemName: agent.systemImage)
+                .frame(width: 20)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(agent.displayName)
+                Text(installed ? "Hooks Installed" : "Hooks Not Installed")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if agentHookOperation == agent {
+                ProgressView()
+                    .controlSize(.small)
+            }
+            Button(installed ? "Update" : "Install") {
+                updateAgentHook(agent, remove: false)
+            }
+            .disabled(agentHookOperation != nil)
+            if installed {
+                Button("Remove") {
+                    updateAgentHook(agent, remove: true)
+                }
+                .disabled(agentHookOperation != nil)
+            }
+        }
+        .id("\(agent.id)-\(revision)")
+    }
+
+    private func updateAgentHook(
+        _ agent: SupportedAgent,
+        remove: Bool
+    ) {
+        agentHookError = nil
+        agentHookOperation = agent
+        defer {
+            agentHookOperation = nil
+            agentHookRevision &+= 1
+        }
+        do {
+            let installer = AgentHookInstaller()
+            if remove {
+                try installer.uninstall(agent)
+            } else {
+                try installer.install(agent)
+            }
+        } catch {
+            agentHookError = error.localizedDescription
+        }
+    }
+
     private func capabilityRow(_ title: String, status: String) -> some View {
         LabeledContent(title) {
             Text(status)
@@ -556,10 +621,10 @@ private struct PluginManagementRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
-                Image(systemName: manifest.id == SSHPlugin.pluginID ? "cloud" : "puzzlepiece.extension")
+                Image(systemName: pluginSystemImage)
                     .frame(width: 20)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(manifest.id == SSHPlugin.pluginID ? "SSH" : manifest.id)
+                    Text(pluginTitle)
                         .font(.headline)
                     Text("v\(manifest.version) · \(status)")
                         .font(.caption)
@@ -587,6 +652,20 @@ private struct PluginManagementRow: View {
                 .foregroundStyle(.secondary)
         }
         .opacity(operation == nil ? 1 : 0.7)
+    }
+
+    private var pluginTitle: String {
+        switch manifest.id {
+        case SSHPlugin.pluginID: "SSH"
+        default: manifest.id
+        }
+    }
+
+    private var pluginSystemImage: String {
+        switch manifest.id {
+        case SSHPlugin.pluginID: "cloud"
+        default: "puzzlepiece.extension"
+        }
     }
 
     private var status: String {

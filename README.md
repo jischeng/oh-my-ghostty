@@ -100,8 +100,14 @@ An Experimental in-tree SSH workspace provider reads OpenSSH aliases and uses
 the system SFTP client for remote Files without owning credentials. Splitting
 an active SSH Pane launches a new independent `omg +ssh` child from the original
 OpenSSH argv and ready remote cwd, preserving config aliases, ProxyJump,
-explicit options, and folder context without keystroke injection. It is not an
-installable third-party plugin yet.
+explicit options, and folder context without keystroke injection.
+
+The built-in Agent Status integration supports Codex, Claude Code, and Pi hooks.
+An active agent replaces the terminal/cloud icon in the existing tab slot;
+working state uses a compact progress ring, while approval, completion, and
+failure use the trailing status slot. The bounded OSC transport follows the
+owning Surface and therefore also works in SSH when hooks are installed in the
+remote account. These in-tree providers are not installable third-party plugins.
 A public third-party executable loader is **not implemented yet**; see
 [Plugin Development](docs/PLUGIN_DEVELOPMENT.md) for exact Stable,
 Experimental, Internal, and Planned status.

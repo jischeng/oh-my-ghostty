@@ -678,7 +678,8 @@ struct TerminalTabSidebarView: View {
         let selected = controller.selectedTabID == tabID
         let hovered = controller.hoveredTabID == tabID
         if let surface = tab.focusedSurface ?? tab.surfaceTree.first {
-            let activity = statusStore.activity(for: tab.tabSessionID)
+            let activity = tab.agentActivity(for: surface) ??
+                statusStore.activity(for: tab.tabSessionID)
             VerticalTabRow(
                 controller: tab,
                 surface: surface,
@@ -735,9 +736,12 @@ struct TerminalTabSidebarView: View {
             workingDirectory: surface.pwd,
             terminalTitle: surface.title
         )
-        let resolvedTitle = tab.titleOverride ?? session.presentationTitle(
+        let baseTitle = tab.titleOverride ?? session.presentationTitle(
             pathDisplay: settings.tabPathDisplay
         )
+        let resolvedTitle = activity
+            .flatMap { SupportedAgent(rawValue: $0.source) }?
+            .normalizedTitle(baseTitle) ?? baseTitle
         let context = GhosttyTabIconContext(
             tabID: tab.tabSessionID,
             title: resolvedTitle,
@@ -1222,13 +1226,27 @@ private struct VerticalTabRow: View {
             workingDirectory: surface.pwd,
             terminalTitle: surface.title
         )
+        let agentActivity = controller.agentActivity(for: surface)
+        let icon: GhosttyTabIcon = if let requested = agentActivity?.icon {
+            switch requested.kind {
+            case .systemSymbol: .systemSymbol(requested.name)
+            case .bundledAsset: .asset(requested.name)
+            }
+        } else {
+            presentation.icon
+        }
+        let baseTitle = controller.titleOverride ?? session.presentationTitle(
+            pathDisplay: settings.tabPathDisplay
+        )
+        let activity = agentActivity ?? presentation.activity
+        let title = activity
+            .flatMap { SupportedAgent(rawValue: $0.source) }?
+            .normalizedTitle(baseTitle) ?? baseTitle
         return .init(
-            title: controller.titleOverride ?? session.presentationTitle(
-                pathDisplay: settings.tabPathDisplay
-            ),
+            title: title,
             shortcut: presentation.shortcut,
-            icon: presentation.icon,
-            activity: presentation.activity,
+            icon: icon,
+            activity: activity,
             selected: presentation.selected,
             hovered: presentation.hovered
         )
@@ -1239,12 +1257,13 @@ private struct VerticalTabRow: View {
         HStack(spacing: 4) {
             Button(action: select) {
                 HStack(spacing: GhosttyTabStyle.contentSpacing) {
-                    GhosttyTabIconView(
+                    AgentTabIconView(
                         icon: presentation.icon,
                         color: GhosttyTabStyle.iconColor(
                             selected: presentation.selected,
                             hovered: presentation.hovered
-                        )
+                        ),
+                        activity: presentation.activity
                     )
 
                     Text(presentation.title)
@@ -1258,7 +1277,10 @@ private struct VerticalTabRow: View {
             }
             .buttonStyle(.plain)
 
-            if let activity = presentation.activity, activity.state != .idle {
+            if let activity = presentation.activity,
+               activity.state != .idle,
+               !(SupportedAgent(rawValue: activity.source) != nil &&
+                    activity.state == .working) {
                 TabActivityIndicator(activity: activity)
             }
 
@@ -1326,6 +1348,86 @@ private struct TabActivityIndicator: View {
     private var color: Color {
         switch activity.state {
         case .idle, .working: .secondary
+        case .done: .green
+        case .needsAttention: .orange
+        case .error: .red
+        }
+    }
+}
+
+private struct AgentTabIconView: View {
+    @ObservedObject private var settings = OhMyGhosttySettings.shared
+    let icon: GhosttyTabIcon
+    let color: Color
+    let activity: TabActivity?
+    @State private var rotation: Double = 0
+
+    private var isAgent: Bool {
+        activity.flatMap { SupportedAgent(rawValue: $0.source) } != nil
+    }
+
+    var body: some View {
+        ZStack {
+            if isAgent, let activity, activity.state != .idle {
+                Circle()
+                    .trim(from: 0, to: ringProgress(activity))
+                    .stroke(
+                        ringColor(activity),
+                        style: .init(lineWidth: 1.5, lineCap: .round)
+                    )
+                    .rotationEffect(.degrees(
+                        activity.state == .working && activity.progress == nil
+                            ? rotation
+                            : -90
+                    ))
+                    .frame(
+                        width: settings.tabIconSize + 3,
+                        height: settings.tabIconSize + 3
+                    )
+            }
+
+            GhosttyTabIconView(icon: icon, color: color)
+                .scaleEffect(isAgent ? 0.68 : 1)
+        }
+        .frame(
+            width: settings.tabIconSize,
+            height: settings.tabIconSize + 3
+        )
+        .help(activity.map {
+            $0.message ?? $0.label ?? $0.state.rawValue
+        } ?? "Terminal")
+        .onAppear { updateRotation() }
+        .onChange(of: animationKey) { _ in updateRotation() }
+    }
+
+    private var animationKey: String {
+        guard let activity else { return "none" }
+        return "\(activity.state.rawValue):\(activity.progress.map { String($0) } ?? "none")"
+    }
+
+    private func updateRotation() {
+        rotation = 0
+        guard activity?.state == .working,
+              activity?.progress == nil else { return }
+        withAnimation(.linear(duration: 0.9).repeatForever(
+            autoreverses: false
+        )) {
+            rotation = 360
+        }
+    }
+
+    private func ringProgress(_ activity: TabActivity) -> Double {
+        switch activity.state {
+        case .idle: 0
+        case .working: activity.progress.map { max(0.05, $0) } ?? 0.72
+        case .done, .needsAttention, .error: 1
+        }
+    }
+
+    private func ringColor(_ activity: TabActivity) -> Color {
+        switch activity.state {
+        case .idle: .clear
+        case .working: .accentColor
         case .done: .green
         case .needsAttention: .orange
         case .error: .red

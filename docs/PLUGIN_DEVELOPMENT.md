@@ -43,7 +43,9 @@ not a third-party SDK:
   typed content rendering;
 - owner validation and cleanup in `InspectorRegistry`;
 - built-in `builtin.files` provider using the plugin-shaped Inspector boundary;
-- stable terminal tab identity via `OH_MY_GHOSTTY_SESSION`.
+- stable terminal tab identity via `OH_MY_GHOSTTY_SESSION`;
+- built-in Codex, Claude Code, and Pi hook adapters using bounded OSC 3008
+  presentation events on the owning Surface.
 
 ### Experimental protocol components
 
@@ -65,6 +67,7 @@ These require compiling code into OMG and are not ABI/API-stable:
 - `GhosttyTabMetadataProviding`;
 - `GhosttyTabIconProviding`;
 - `MockAgentStatusAdapter`;
+- `AgentContextSignalReducer` and `AgentHookInstaller`;
 - `BuiltInFilesInspectorProvider`.
 
 ### Not yet supported
@@ -216,7 +219,9 @@ Message bodies implemented by the codec:
 
 Encoding support does not mean every message is routed in production.
 `PluginMessageRouter.handle` currently accepts only status set/clear as plugin
-commands. Other bodies return `invalidMessage`.
+commands. Other bodies return `invalidMessage`. The built-in agent adapters do
+not pretend this future process transport exists: they normalize agent-native
+hooks into a separate bounded, presentation-only OSC path owned by Core.
 
 ## Capabilities
 
@@ -252,15 +257,40 @@ Wire states map to host activity:
 | `completed` | `done` |
 | `failed` | `error` |
 
+The in-tree OSC adapter can additionally retain an `idle` `TabActivity` so the
+agent identity icon remains visible while its TUI is connected but not running a
+turn. This is not a new v1 wire state.
+
 Validation includes session existence, owner, increasing revision, progress
 `0...1`, bounded strings, bounded TTL (maximum 24 hours), and safe icon names.
 A status is removed on explicit clear, TTL expiry, session deletion, or router
 disconnect. Successful commands return an acknowledgement correlated to the
 request sequence; failures return a typed `PluginProtocolFailure`.
 
+### Built-in agent hook bridge (Internal)
+
+`AgentHookInstaller` merges marked entries into user Codex and Claude JSON hook
+files without removing unrelated integrations, ensures Codex's hooks feature is
+enabled, and installs one readable Pi TypeScript extension. Installation is an
+explicit Settings action and keeps a one-time `.omg-backup` beside each existing
+file. Removal deletes only commands carrying the `_omg_agent_status` marker.
+
+Adapters emit OSC 3008 contexts with IDs `omg-agent-codex`,
+`omg-agent-claude`, or `omg-agent-pi`, `type=app`, and a bounded
+`omg_state`. The host accepts only the built-in agent allowlist and normalized
+states, then associates the event with the Surface that parsed it. These events
+can change only host-owned tab presentation; they do not authorize terminal
+input, filesystem, network, or plugin execution. A remote process can spoof its
+own tab badge, but cannot use this channel to gain capabilities.
+
+Because the event is written to `/dev/tty`, the same installed hook works through
+OpenSSH. Hooks must be installed in the account where the agent executable runs;
+local installation does not silently modify remote dotfiles.
+
 ### Terminal events
 
-The following data kinds exist but no running event bridge publishes them:
+The following general process-plugin data kinds exist but no running external
+event bridge publishes them:
 
 - opened/closed;
 - title changed;

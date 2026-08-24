@@ -25,13 +25,9 @@ OH_MY_GHOSTTY_SESSION=<uuid>
 
 The UUID is stored in TerminalRestorable v8 and is independent of cwd, title and process name. Two agents in the same repository therefore remain distinguishable.
 
-A future status CLI reads this variable automatically:
+The built-in first-party adapters do not require a status socket. Codex and Claude Code command hooks plus the Pi extension emit bounded OSC 3008 presentation events to the owning TTY. Because correlation is the terminal Surface that receives the sequence, the same transport works through SSH without forwarding `OH_MY_GHOSTTY_SESSION` or installing an OMG executable remotely. Hooks must be installed in the account where the agent runs; Settings can install and merge local hooks without replacing other integrations.
 
-```text
-oh-my-ghostty status working --message "Running tests"
-```
-
-The CLI and Unix socket listener are not implemented yet. Until they are, `MockAgentStatusAdapter` exercises the same validated core store in app-hosted tests.
+A future public `omg status` CLI may expose the same normalized contract over authenticated app IPC. It is not required by the built-in adapters and must not become an unauthenticated terminal-control channel.
 
 ## Core State
 
@@ -71,17 +67,28 @@ A plugin may request a system symbol or a host-bundled asset by name. Names are 
 2. host metadata provider icon
 3. terminal fallback
 
-The host renders spinners, success, attention and error indicators with theme-aware colors. Notification and Dock badge behavior are separate consumers controlled by host settings.
+The host keeps the existing left icon slot. When an agent context is active, its validated identity icon replaces terminal/cloud; working state renders a compact progress ring around that icon. Waiting, completed and failed states additionally use the existing trailing status slot with theme-aware attention/check/error symbols. Clearing the agent context restores the canonical SSH cloud or terminal icon. Notification and Dock badge behavior are separate consumers controlled by host settings.
 
 ## Adapter Responsibilities
 
 A Codex, Claude or Pi adapter owns only dialect translation:
 
-- detect the agent-specific lifecycle event
-- map it to one core state
-- invoke the common status command with the inherited session UUID
+- detect the agent-specific lifecycle event;
+- map it to `idle`, `working`, `needsAttention`, `done` or `error`;
+- emit one bounded typed context event to its controlling TTY.
 
-It does not parse or mutate the Sidebar. Adding a new agent should not require changes to `VerticalTabBarView`.
+Current mappings are:
+
+| Agent event | Core state |
+| --- | --- |
+| SessionStart | `idle` |
+| UserPromptSubmit / agent_start | `working` |
+| PreToolUse / PostToolUse | `working` |
+| PermissionRequest / permission prompt / question tool | `needsAttention` |
+| Stop / agent_settled | `done` |
+| SessionEnd / session_shutdown | clear agent identity |
+
+It does not parse terminal text or mutate the Sidebar. The host converts normalized activity into the shared tab presentation; adding a new hook adapter should not require another status renderer.
 
 ## Invalid Producers
 

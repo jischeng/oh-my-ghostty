@@ -718,7 +718,8 @@ struct TerminalTabSidebarView: View {
         hovered: Bool,
         activity: TabActivity?
     ) -> GhosttyTabPresentation {
-        let resolvedTitle = VerticalTabTitleResolver.resolve(
+        let workspace = tab.workspaceDescriptor
+        let resolvedTitle = workspace?.presentationTitle ?? VerticalTabTitleResolver.resolve(
             explicitTitle: tab.titleOverride,
             terminalTitle: surface.title,
             workingDirectory: surface.pwd
@@ -731,7 +732,7 @@ struct TerminalTabSidebarView: View {
         return .init(
             title: resolvedTitle,
             shortcut: settings.showShortcutLabels ? tab.tabShortcutLabel(for: index) : nil,
-            icon: iconProvider.icon(for: context) ?? .systemSymbol("terminal"),
+            icon: iconProvider.icon(for: context) ?? workspace?.icon ?? .systemSymbol("terminal"),
             activity: activity,
             selected: selected,
             hovered: hovered
@@ -1162,11 +1163,12 @@ private struct VerticalTabRow: View {
     let hoverChanged: (Bool) -> Void
 
     private var livePresentation: GhosttyTabPresentation {
-        let resolved = VerticalTabTitleResolver.resolve(
-            explicitTitle: controller.titleOverride,
-            terminalTitle: surface.title,
-            workingDirectory: surface.pwd
-        )
+        let resolved = controller.workspaceDescriptor?.presentationTitle ??
+            VerticalTabTitleResolver.resolve(
+                explicitTitle: controller.titleOverride,
+                terminalTitle: surface.title,
+                workingDirectory: surface.pwd
+            )
         return .init(
             title: resolved,
             shortcut: presentation.shortcut,

@@ -26,6 +26,7 @@ Status vocabulary:
 | Tab icon provider | Partial | Host-owned icon provider and validated status icon descriptor render in Vertical Tabs; no discovered plugin can currently connect. |
 | Tab metadata | Partial | Host-owned metadata provider and project fallback are connected; no out-of-process metadata command/router exists. |
 | Inspector pane | Partial | Core host, tab-scoped typed tree snapshots/actions, persistence, shortcut, recursive `builtin.files`, diagnostics, and pane lifecycle are connected; v1 wire registration/update/action messages are not implemented. |
+| Workspace filesystem | Partial | Shared local/SSH provider boundary and system-SFTP SSH provider exist; external plugin registration, remote helper, and file watching are not connected. |
 | Status events | Partial | Versioned message, validation, revision/ownership/TTL store, core activity mapping, mock adapter and Vertical UI exist; no production socket/CLI ingress exists. |
 | Badge / activity indicator | Partial | Host-owned per-tab activity indicator exists. Dock badge policy is not connected to plugin activity. |
 | Notifications | Design only | Host settings exist; no activity-to-UNUserNotificationCenter policy dispatcher exists. |
@@ -42,7 +43,7 @@ Status vocabulary:
 
 The running app owns one core `TabActivityStore`. Vertical Tabs and window titles read normalized activity by stable tab session UUID. `MockAgentStatusAdapter` exercises working, done, needs-attention, idle and plugin-provided icon data through the same validated store.
 
-No third-party executable can reach that store in a production build yet. `PluginAuthorizationPolicy`, `PluginMessageRouter` and the frame codec are tested components, not a connected daemon.
+No third-party executable can reach that store in a production build yet. `PluginAuthorizationPolicy`, `PluginMessageRouter` and the frame codec are tested components, not a connected daemon. `SSHPlugin` is currently trusted in-tree code using the generic workspace boundary, not an installable third-party plugin.
 
 ## Stable Extension Boundary
 

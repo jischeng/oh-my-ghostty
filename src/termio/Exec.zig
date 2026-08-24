@@ -684,12 +684,13 @@ const Subprocess = struct {
                 break :ghostty_path;
             }];
             const exe_dir = std.fs.path.dirname(exe_bin_path) orelse break :ghostty_path;
-            log.debug("appending ghostty bin to path dir={s}", .{exe_dir});
+            log.debug("appending OMG/Ghostty bin to path dir={s}", .{exe_dir});
 
-            // We always set this so that if the shell overwrites the path
-            // scripts still have a way to find the Ghostty binary when
-            // running in Ghostty.
+            // Keep the directory and executable name separate so the shell
+            // integration works for branded products such as OMG as well as
+            // upstream Ghostty without requiring a compatibility binary alias.
             try env.put("GHOSTTY_BIN_DIR", exe_dir);
+            try env.put("GHOSTTY_BIN_NAME", std.fs.path.basename(exe_bin_path));
 
             // Append if we have a path. We want to append so that ghostty is
             // the last priority in the path. If we don't have a path set

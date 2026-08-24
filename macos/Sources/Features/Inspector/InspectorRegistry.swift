@@ -91,6 +91,21 @@ struct InspectorPaneContext: Equatable, Sendable {
     let surfaceID: UUID?
     let title: String
     let workingDirectory: String?
+    let workspace: WorkspaceDescriptor?
+
+    init(
+        tabID: UUID,
+        surfaceID: UUID?,
+        title: String,
+        workingDirectory: String?,
+        workspace: WorkspaceDescriptor? = nil
+    ) {
+        self.tabID = tabID
+        self.surfaceID = surfaceID
+        self.title = title
+        self.workingDirectory = workingDirectory
+        self.workspace = workspace
+    }
 }
 
 enum InspectorPaneLifecycleEvent: Equatable, Sendable {

@@ -529,7 +529,8 @@ struct RightInspectorHost: View {
             tabID: controller.tabSessionID,
             surfaceID: surface?.id,
             title: controller.titleOverride ?? surface?.title ?? "Terminal",
-            workingDirectory: surface?.pwd
+            workingDirectory: surface?.pwd,
+            workspace: controller.workspaceDescriptor
         )
     }
 

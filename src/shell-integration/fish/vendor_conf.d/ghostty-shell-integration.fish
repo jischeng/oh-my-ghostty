@@ -121,7 +121,7 @@ function __ghostty_setup --on-event fish_prompt -d "Setup ghostty integration"
 
     # SSH Integration
     #
-    # Wrap `ssh` with `ghostty +ssh` and translate the shell-integration
+    # Wrap `ssh` with the running terminal executable and translate the shell-integration
     # feature flags into command options.
     set -l features (string split ',' -- "$GHOSTTY_SHELL_FEATURES")
     if contains ssh-env $features; or contains ssh-terminfo $features
@@ -130,7 +130,11 @@ function __ghostty_setup --on-event fish_prompt -d "Setup ghostty integration"
             set -l flags
             contains ssh-env $features; or set -a flags --forward-env=false
             contains ssh-terminfo $features; or set -a flags --terminfo=false
-            "$GHOSTTY_BIN_DIR/ghostty" +ssh $flags -- $argv
+            set -l ghostty_bin_name ghostty
+            if set -q GHOSTTY_BIN_NAME
+                set ghostty_bin_name "$GHOSTTY_BIN_NAME"
+            end
+            "$GHOSTTY_BIN_DIR/$ghostty_bin_name" +ssh $flags -- $argv
         end
     end
 

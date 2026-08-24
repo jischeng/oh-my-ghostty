@@ -88,6 +88,25 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// Opaque semantic separator derived from the current terminal background.
     @Published private(set) var sidebarDividerColor: Color
 
+    /// Generic workspace metadata resolved by a workspace provider. The terminal
+    /// UI consumes this without knowing whether it is local or remote.
+    var workspaceDescriptor: WorkspaceDescriptor? {
+        guard let surface = focusedSurface ?? surfaceTree.first,
+              let workingDirectory = surface.pwd else { return nil }
+        let title = titleOverride ?? surface.title
+        if let alias = ProcessInfo.processInfo.environment["OMG_SSH_ALIAS"],
+           let workspace = SSHPlugin.workspace(
+               alias: alias,
+               workingDirectory: workingDirectory
+           ) {
+            return workspace
+        }
+        return SSHPlugin.workspace(
+            forTitle: title,
+            workingDirectory: workingDirectory
+        )
+    }
+
     private weak var observedVerticalTabGroup: NSWindowTabGroup?
     private var verticalTabWindowsObservation: NSKeyValueObservation?
     private var verticalTabSelectionObservation: NSKeyValueObservation?

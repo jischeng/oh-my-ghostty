@@ -75,6 +75,8 @@ These require compiling code into OMG and are not ABI/API-stable:
 - public commands, settings contributions, Sidebar model, QuickInput, terminal
   control, or raw terminal output;
 - filesystem, network, shell, clipboard, settings, or storage APIs for plugins;
+- SSH workspace/session integration is an in-tree provider boundary, not an
+  installable external plugin yet;
 - third-party sandbox/signature/permission UI;
 - public SDK artifacts or a Marketplace.
 
@@ -264,6 +266,28 @@ The following data kinds exist but no running event bridge publishes them:
 
 `AgentProgressStatusReducer` translates progress events in unit tests. The
 planned status CLI and `OH_MY_GHOSTTY_SESSION` correlation are not implemented.
+
+## Workspace and SSH provider (Experimental)
+
+`WorkspaceDescriptor` and `WorkspaceFilesystem` are generic boundaries for
+local and remote workspace providers. `LocalWorkspaceFilesystem` is the local
+implementation used by the Files provider. `SSHPlugin` reads non-wildcard
+aliases from the user's `~/.ssh/config` without owning private keys, passwords,
+known_hosts, ProxyJump, or ssh-agent state. `SSHWorkspaceFilesystem` uses the
+system `/usr/bin/sftp` client and the user's OpenSSH configuration for bounded
+remote directory operations and file/folder creation.
+
+The provider can resolve a workspace from an explicit `OMG_SSH_ALIAS` or from a
+terminal title matching an SSH alias/hostname. The shared Files tree consumes
+the provider boundary rather than branching its UI for Local versus SSH. An
+SSH context is represented by an alias (`ssh:cloud`) and preserves the alias in
+presentation; it never replaces it with a jump host or private IP.
+
+This first provider does not install a remote helper and does not manage
+credentials. It depends on the system SSH/SFTP client and configured
+`ssh-agent`/known_hosts. Remote `sftp ls -la` parsing is intentionally bounded
+and is not yet a general remote file protocol. Automatic alias propagation from
+all SSH server configurations and remote file watching remain Experimental.
 
 ## Inspector API (Internal)
 

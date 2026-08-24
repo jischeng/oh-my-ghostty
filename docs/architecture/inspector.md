@@ -32,7 +32,7 @@ Core App Shell owns:
 
 `InspectorPresentationStore` is the typed persistence boundary for last-used visibility, committed width, and active pane. It uses the application UserDefaults domain because these are UI runtime state, not portable user configuration. The values are intentionally absent from Ghostty config and `~/.config/oh-my-ghostty/settings.json`.
 
-Core Features and Plugins own only pane-specific data and commands. They do not own the split view or Inspector chrome.
+Core Features and Plugins own only pane-specific data and commands. They do not own the split view or Inspector chrome. Files consumes the generic `WorkspaceFilesystem` boundary: `LocalWorkspaceFilesystem` handles local paths and the in-tree SSH provider uses the system SFTP client for remote paths. The Files UI does not branch on Local versus SSH.
 
 ## Registry contract
 

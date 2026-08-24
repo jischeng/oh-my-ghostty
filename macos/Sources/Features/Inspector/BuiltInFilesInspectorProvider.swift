@@ -14,7 +14,8 @@ final class BuiltInFilesInspectorProvider {
 
     private struct BrowserState {
         var context: InspectorPaneContext
-        var rootURL: URL
+        var rootPath: String
+        var filesystem: any WorkspaceFilesystem
         var expanded: Set<String> = []
         var generation: UInt64 = 0
         var tree: InspectorFileTree?
@@ -23,11 +24,6 @@ final class BuiltInFilesInspectorProvider {
     private struct LoadKey: Hashable {
         let tabID: UUID
         let nodeID: String
-    }
-
-    private struct DiskEntry: Sendable {
-        let url: URL
-        let isDirectory: Bool
     }
 
     private let registry: InspectorRegistry
@@ -79,12 +75,12 @@ final class BuiltInFilesInspectorProvider {
         var state = state(for: context)
         state.context = context
         states[context.tabID] = state
-        if previousState?.rootURL == state.rootURL, state.tree != nil {
+        if previousState?.rootPath == state.rootPath, state.tree != nil {
             Self.logger.debug("Files context updated without root reload tab=\(context.tabID.uuidString, privacy: .public)")
             return
         }
-        if previousState?.rootURL != state.rootURL {
-            Self.logger.debug("Files cwd changed tab=\(context.tabID.uuidString, privacy: .public) root=\(state.rootURL.path, privacy: .public)")
+        if previousState?.rootPath != state.rootPath {
+            Self.logger.debug("Files cwd changed tab=\(context.tabID.uuidString, privacy: .public) root=\(state.rootPath, privacy: .public)")
         }
         reloadRoot(
             context: context,
@@ -163,13 +159,19 @@ final class BuiltInFilesInspectorProvider {
     }
 
     private func state(for context: InspectorPaneContext) -> BrowserState {
-        let rootURL = Self.rootURL(for: context)
-        if var state = states[context.tabID], state.rootURL == rootURL {
+        let filesystem = WorkspaceFilesystemFactory.make(for: context)
+        let rootPath = filesystem.descriptor.workingDirectory
+        if var state = states[context.tabID], state.rootPath == rootPath,
+           state.filesystem.descriptor == filesystem.descriptor {
             state.context = context
             return state
         }
         cancelTasks(tabID: context.tabID)
-        return .init(context: context, rootURL: rootURL)
+        return .init(
+            context: context,
+            rootPath: rootPath,
+            filesystem: filesystem
+        )
     }
 
     private func reloadRoot(context: InspectorPaneContext, reason: String) {
@@ -177,7 +179,8 @@ final class BuiltInFilesInspectorProvider {
         state.generation &+= 1
         states[context.tabID] = state
         let generation = state.generation
-        let rootURL = state.rootURL
+        let rootPath = state.rootPath
+        let filesystem = state.filesystem
         let expanded = state.expanded
         let key = LoadKey(tabID: context.tabID, nodeID: Self.rootTaskID)
 
@@ -186,9 +189,13 @@ final class BuiltInFilesInspectorProvider {
             publish(.empty(title: "Files", message: "Loading…"), tabID: context.tabID)
         }
         let started = ContinuousClock.now
-        Self.logger.debug("Files root refresh started tab=\(context.tabID.uuidString, privacy: .public) generation=\(generation) reason=\(reason, privacy: .public) root=\(rootURL.path, privacy: .public) expanded=\(expanded.count)")
+        Self.logger.debug("Files root refresh started tab=\(context.tabID.uuidString, privacy: .public) generation=\(generation) reason=\(reason, privacy: .public) root=\(rootPath, privacy: .public) expanded=\(expanded.count)")
         let diskTask = Task.detached(priority: .utility) {
-            Self.loadContent(rootURL: rootURL, expanded: expanded)
+            await Self.loadContent(
+                rootPath: rootPath,
+                filesystem: filesystem,
+                expanded: expanded
+            )
         }
         loadTasks[key] = Task { [weak self] in
             let content = await withTaskCancellationHandler(
@@ -215,16 +222,22 @@ final class BuiltInFilesInspectorProvider {
         guard let state = states[context.tabID] else { return }
         let generation = state.generation
         let expanded = state.expanded
+        let filesystem = state.filesystem
         let key = LoadKey(tabID: context.tabID, nodeID: nodeID)
         loadTasks[key]?.cancel()
         let started = ContinuousClock.now
         Self.logger.debug("Files subtree read started tab=\(context.tabID.uuidString, privacy: .public) node=\(nodeID, privacy: .public) generation=\(generation)")
         let diskTask = Task.detached(priority: .utility) {
-            Self.loadNodes(
-                at: URL(fileURLWithPath: nodeID),
-                expanded: expanded,
-                depth: 0
-            )
+            do {
+                return try await Self.loadNodes(
+                    at: nodeID,
+                    filesystem: filesystem,
+                    expanded: expanded,
+                    depth: 0
+                )
+            } catch {
+                return []
+            }
         }
         loadTasks[key] = Task { [weak self] in
             let children = await withTaskCancellationHandler(
@@ -302,34 +315,25 @@ final class BuiltInFilesInspectorProvider {
             Self.logger.error("Files create rejected invalid name=\(normalized, privacy: .public)")
             return
         }
-        let rootURL = state(for: context).rootURL
+        let state = state(for: context)
         Task { [weak self] in
-            await Task.detached(priority: .utility) {
-                let destination = rootURL.appendingPathComponent(normalized)
+            do {
                 if directory {
-                    try? FileManager.default.createDirectory(
-                        at: destination,
-                        withIntermediateDirectories: false
+                    try await state.filesystem.createDirectory(
+                        named: normalized,
+                        in: state.rootPath
                     )
-                } else if !FileManager.default.fileExists(atPath: destination.path) {
-                    _ = FileManager.default.createFile(
-                        atPath: destination.path,
-                        contents: Data()
+                } else {
+                    try await state.filesystem.createFile(
+                        named: normalized,
+                        in: state.rootPath
                     )
                 }
-            }.value
+            } catch {
+                Self.logger.error("Files create failed error=\(error.localizedDescription, privacy: .public)")
+            }
             self?.reloadRoot(context: context, reason: directory ? "create-folder" : "create-file")
         }
-    }
-
-    nonisolated private static func rootURL(for context: InspectorPaneContext) -> URL {
-        guard let path = context.workingDirectory,
-              !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return URL(fileURLWithPath: "/")
-        }
-        return URL(fileURLWithPath: path)
-            .standardizedFileURL
-            .resolvingSymlinksInPath()
     }
 
     nonisolated private static func validChildName(_ name: String) -> Bool {
@@ -337,85 +341,64 @@ final class BuiltInFilesInspectorProvider {
             !name.contains("/") && !name.contains(":")
     }
 
-    nonisolated private static func loadContent(
-        rootURL: URL,
+    private static func loadContent(
+        rootPath: String,
+        filesystem: any WorkspaceFilesystem,
         expanded: Set<String>
-    ) -> InspectorPaneContent {
+    ) async -> InspectorPaneContent {
         let started = ContinuousClock.now
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(
-            atPath: rootURL.path,
-            isDirectory: &isDirectory
-        ), isDirectory.boolValue else {
+        do {
+            let nodes = try await loadNodes(
+                at: rootPath,
+                filesystem: filesystem,
+                expanded: expanded,
+                depth: 0
+            )
+            let elapsed = ContinuousClock.now - started
+            Self.logger.debug("Files root read completed root=\(rootPath, privacy: .public) nodes=\(nodes.count) elapsed=\(elapsed)")
+            return .fileTree(.init(
+                rootName: filesystem.descriptor.displayName,
+                rootPath: rootPath,
+                nodes: nodes
+            ))
+        } catch {
             return .empty(
                 title: "Files",
                 message: "The current working directory is unavailable."
             )
         }
-
-        let nodes = loadNodes(at: rootURL, expanded: expanded, depth: 0)
-        let elapsed = ContinuousClock.now - started
-        Self.logger.debug("Files root read completed root=\(rootURL.path, privacy: .public) nodes=\(nodes.count) elapsed=\(elapsed)")
-        return .fileTree(.init(
-            rootName: rootURL.lastPathComponent.isEmpty ? rootURL.path : rootURL.lastPathComponent,
-            rootPath: rootURL.path,
-            nodes: nodes
-        ))
     }
 
-    nonisolated private static func loadNodes(
-        at directoryURL: URL,
+    private static func loadNodes(
+        at path: String,
+        filesystem: any WorkspaceFilesystem,
         expanded: Set<String>,
         depth: Int
-    ) -> [InspectorFileNode] {
+    ) async throws -> [InspectorFileNode] {
         guard depth < 24, !Task.isCancelled else { return [] }
-        let keys: Set<URLResourceKey> = [
-            .isDirectoryKey,
-            .isRegularFileKey,
-            .isSymbolicLinkKey,
-        ]
         let started = ContinuousClock.now
-        guard let urls = try? FileManager.default.contentsOfDirectory(
-            at: directoryURL,
-            includingPropertiesForKeys: Array(keys),
-            options: []
-        ) else {
-            Self.logger.error("Files directory read failed path=\(directoryURL.path, privacy: .public)")
-            return []
-        }
-
-        var entries: [DiskEntry] = []
-        entries.reserveCapacity(min(urls.count, 500))
-        for url in urls where !Task.isCancelled && url.lastPathComponent != ".DS_Store" {
-            let values = try? url.resourceValues(forKeys: keys)
-            entries.append(.init(
-                url: url,
-                isDirectory: values?.isDirectory == true && values?.isSymbolicLink != true
-            ))
-        }
-        entries.sort { lhs, rhs in
-            if lhs.isDirectory != rhs.isDirectory { return lhs.isDirectory }
-            return lhs.url.lastPathComponent.localizedStandardCompare(
-                rhs.url.lastPathComponent
-            ) == .orderedAscending
-        }
-        if entries.count > 500 { entries.removeSubrange(500...) }
+        let entries = try await filesystem.listDirectory(at: path)
+        let boundedEntries = Array(entries.prefix(500))
         let elapsed = ContinuousClock.now - started
-        Self.logger.debug("Files directory read path=\(directoryURL.path, privacy: .public) depth=\(depth) entries=\(entries.count) elapsed=\(elapsed)")
+        Self.logger.debug("Files directory read path=\(path, privacy: .public) depth=\(depth) entries=\(boundedEntries.count) elapsed=\(elapsed)")
 
         var nodes: [InspectorFileNode] = []
-        nodes.reserveCapacity(entries.count)
-        for entry in entries where !Task.isCancelled {
-            let nodeID = entry.url.path
-            let isExpanded = entry.isDirectory && expanded.contains(nodeID)
+        nodes.reserveCapacity(boundedEntries.count)
+        for entry in boundedEntries where !Task.isCancelled {
+            let isExpanded = entry.isDirectory && expanded.contains(entry.path)
             let children = isExpanded
-                ? loadNodes(at: entry.url, expanded: expanded, depth: depth + 1)
+                ? try await loadNodes(
+                    at: entry.path,
+                    filesystem: filesystem,
+                    expanded: expanded,
+                    depth: depth + 1
+                )
                 : nil
             nodes.append(.init(
-                id: nodeID,
-                name: entry.url.lastPathComponent,
+                id: entry.path,
+                name: entry.name,
                 isDirectory: entry.isDirectory,
-                icon: icon(for: entry.url.lastPathComponent, isDirectory: entry.isDirectory),
+                icon: icon(for: entry.name, isDirectory: entry.isDirectory),
                 isExpanded: isExpanded,
                 isLoading: false,
                 children: children

@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import Testing
 @testable import Ghostty
@@ -321,7 +322,13 @@ struct VerticalTabsIntegrationTests {
             encoding: .utf8
         )
         let originalPWD = inspectorSurface.pwd
+        var focusedContextChangeObserved = false
+        let focusedContextObservation = eighth.objectWillChange.sink {
+            focusedContextChangeObserved = true
+        }
         inspectorSurface.pwd = switchedRoot.path
+        #expect(focusedContextChangeObserved)
+        withExtendedLifetime(focusedContextObservation) {}
         let switchedContext = InspectorPaneContext(
             tabID: eighth.tabSessionID,
             surfaceID: inspectorSurface.id,

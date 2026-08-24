@@ -42,8 +42,13 @@ class BaseTerminalController: NSWindowController,
 
     /// The currently focused surface.
     @Published var focusedSurface: Ghostty.SurfaceView? {
-        didSet { syncFocusToSurfaceTree() }
+        didSet {
+            syncFocusToSurfaceTree()
+            observeFocusedSurfaceContext()
+        }
     }
+
+    private var focusedSurfaceContextCancellables: Set<AnyCancellable> = []
 
     /// The tree of splits within this terminal window.
     @Published var surfaceTree: SplitTree<Ghostty.SurfaceView> = .init() {
@@ -385,6 +390,20 @@ class BaseTerminalController: NSWindowController,
 
     /// Update all surfaces with the focus state. This ensures that libghostty has an accurate view about
     /// what surface is focused. This must be called whenever a surface OR window changes focus.
+    private func observeFocusedSurfaceContext() {
+        focusedSurfaceContextCancellables.removeAll()
+        guard let focusedSurface else { return }
+
+        focusedSurface.$pwd
+            .dropFirst()
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &focusedSurfaceContextCancellables)
+        focusedSurface.$title
+            .dropFirst()
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &focusedSurfaceContextCancellables)
+    }
+
     func syncFocusToSurfaceTree() {
         var newlyFocused: Ghostty.SurfaceView?
         for surfaceView in surfaceTree {

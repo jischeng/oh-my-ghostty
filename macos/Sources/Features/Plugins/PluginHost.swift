@@ -45,6 +45,157 @@ struct PluginManifest: Codable, Equatable, Sendable {
     }
 }
 
+enum PluginInstallationError: Error, Equatable {
+    case unsupportedSource
+    case downloadFailed
+    case archiveFailed
+    case manifestNotFound
+    case invalidManifest
+    case invalidExecutable
+}
+
+/// Maintains the on-disk package/data boundary for future external plugins.
+/// Installation is available before process loading: an installed plugin is
+/// still disabled until a supervised runtime is connected.
+@MainActor
+final class PluginInstallationManager: ObservableObject {
+    static let shared = PluginInstallationManager()
+
+    @Published private(set) var installed: [PluginManifest] = []
+    @Published private(set) var disabledIDs: Set<String> = []
+
+    let pluginsDirectory: URL
+    let dataDirectory: URL
+
+    init(applicationSupport: URL? = nil) {
+        let support = applicationSupport ?? FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        )[0].appendingPathComponent("OMG", isDirectory: true)
+        self.pluginsDirectory = support.appendingPathComponent("Plugins", isDirectory: true)
+        self.dataDirectory = support.appendingPathComponent("PluginData", isDirectory: true)
+        reload()
+    }
+
+    func reload() {
+        installed = (try? FileManager.default.contentsOfDirectory(
+            at: pluginsDirectory,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ))?.compactMap { Self.readManifest(at: $0) } ?? []
+        disabledIDs = Set(
+            (try? JSONDecoder().decode(
+                [String].self,
+                from: Data(contentsOf: pluginsDirectory.appendingPathComponent("disabled.json"))
+            )) ?? []
+        )
+    }
+
+    func install(from repositoryURL: URL) async throws -> PluginManifest {
+        guard repositoryURL.scheme == "https",
+              repositoryURL.host == "github.com" else {
+            throw PluginInstallationError.unsupportedSource
+        }
+        let components = repositoryURL.pathComponents.filter { $0 != "/" }
+        guard components.count >= 2 else { throw PluginInstallationError.unsupportedSource }
+        let archiveURL = URL(string: "https://github.com/\(components[0])/\(components[1])/archive/refs/heads/main.tar.gz")!
+        let (data, _) = try await URLSession.shared.data(from: archiveURL)
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-plugin-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let archive = temporary.appendingPathComponent("plugin.tar.gz")
+        try data.write(to: archive, options: .atomic)
+        try Self.extract(archive: archive, into: temporary)
+
+        guard let manifestURL = Self.findManifest(in: temporary),
+              let manifest = Self.readManifest(at: manifestURL.deletingLastPathComponent()) else {
+            throw PluginInstallationError.manifestNotFound
+        }
+        guard Self.valid(manifest) else { throw PluginInstallationError.invalidManifest }
+        let packageDirectory = manifestURL.deletingLastPathComponent()
+        let destination = pluginsDirectory.appendingPathComponent(manifest.id, isDirectory: true)
+        try FileManager.default.createDirectory(at: pluginsDirectory, withIntermediateDirectories: true)
+        try? FileManager.default.removeItem(at: destination)
+        try FileManager.default.copyItem(at: packageDirectory, to: destination)
+        try FileManager.default.createDirectory(at: dataDirectory.appendingPathComponent(manifest.id), withIntermediateDirectories: true)
+        reload()
+        return manifest
+    }
+
+    func update(_ manifest: PluginManifest, from repositoryURL: URL) async throws {
+        _ = try await install(from: repositoryURL)
+    }
+
+    func disable(_ pluginID: String) throws {
+        disabledIDs.insert(pluginID)
+        try persistDisabled()
+    }
+
+    func enable(_ pluginID: String) throws {
+        disabledIDs.remove(pluginID)
+        try persistDisabled()
+    }
+
+    func uninstall(_ pluginID: String, removeData: Bool = false) throws {
+        try FileManager.default.removeItem(at: pluginsDirectory.appendingPathComponent(pluginID))
+        if removeData {
+            try FileManager.default.removeItem(at: dataDirectory.appendingPathComponent(pluginID))
+        }
+        disabledIDs.remove(pluginID)
+        try persistDisabled()
+        reload()
+    }
+
+    func dataURL(for pluginID: String) -> URL {
+        dataDirectory.appendingPathComponent(pluginID, isDirectory: true)
+    }
+
+    private func persistDisabled() throws {
+        try FileManager.default.createDirectory(at: pluginsDirectory, withIntermediateDirectories: true)
+        let data = try JSONEncoder().encode(disabledIDs.sorted())
+        try data.write(to: pluginsDirectory.appendingPathComponent("disabled.json"), options: .atomic)
+    }
+
+    private static func readManifest(at directory: URL) -> PluginManifest? {
+        guard let data = try? Data(contentsOf: directory.appendingPathComponent("manifest.json")) else { return nil }
+        return try? JSONDecoder().decode(PluginManifest.self, from: data)
+    }
+
+    private static func findManifest(in directory: URL) -> URL? {
+        let enumerator = FileManager.default.enumerator(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )
+        return enumerator?.compactMap { $0 as? URL }.first {
+            $0.lastPathComponent == "manifest.json"
+        }
+    }
+
+    private static func extract(archive: URL, into directory: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+        process.arguments = ["-xzf", archive.path, "-C", directory.path]
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { throw PluginInstallationError.archiveFailed }
+    }
+
+    private static func valid(_ manifest: PluginManifest) -> Bool {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-_"))
+        guard !manifest.id.isEmpty, manifest.id.count <= 128,
+              manifest.id.unicodeScalars.allSatisfy(allowed.contains),
+              !manifest.version.isEmpty,
+              !manifest.executable.isEmpty,
+              !manifest.executable.hasPrefix("/"),
+              !manifest.executable.split(separator: "/").contains("..") else {
+            return false
+        }
+        return true
+    }
+}
+
 struct PluginAuthorizationPolicy: Sendable {
     let manifests: [String: PluginManifest]
 

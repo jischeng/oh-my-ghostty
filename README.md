@@ -142,9 +142,12 @@ in-process typed Inspector providers. The process protocol codec,
 authorization policy, manifest model, and status router are tested but are not
 connected to discovery, a socket server, or a supervised external executable.
 
-There is currently no supported plugin install directory, package command,
-enable/disable UI, hot reload, or public third-party SDK. Do not treat protocol
-types alone as a production plugin runtime.
+An Experimental `PluginInstallationManager` can store a validated GitHub
+`manifest.json` package under OMG Application Support and keep plugin data in a
+separate directory. Installed packages are currently inert: there is no public
+install command/UI, executable loader, process supervisor, hot reload, or
+third-party SDK. Do not treat protocol types or storage installation alone as a
+production plugin runtime.
 
 See [Plugin Development](docs/PLUGIN_DEVELOPMENT.md) for:
 

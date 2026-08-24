@@ -9,8 +9,10 @@ but it does **not** discover, install, launch, or connect third-party plugin
 executables in production.
 
 A directory, manifest, or executable copied beside OMG will not be loaded.
-There is currently no supported plugin package format, installation directory,
-Plugin Manager, socket listener, public SDK, or hot reload command.
+The Experimental `PluginInstallationManager` can download a GitHub repository's
+`main` archive, validate `manifest.json`, and store it under the OMG Application
+Support Plugins directory, but no installed package is launched or connected to
+runtime yet. There is no public SDK, socket listener, or hot reload command.
 
 ## Documentation maintenance rule
 
@@ -68,7 +70,9 @@ These require compiling code into OMG and are not ABI/API-stable:
 ### Not yet supported
 
 - plugin discovery or manifest file loading;
-- plugin installation, packaging, updates, enable/disable, or persistence;
+- plugin package build/distribution and runtime loading;
+- plugin installation is Experimental and currently only supports a GitHub main
+  branch archive; update/enable/disable/uninstall are storage operations only;
 - executable launch, Unix socket ingress, peer UID/PID checks, supervision,
   restart, heartbeat, or unload/reload;
 - external Inspector registration/update/action messages;
@@ -507,22 +511,33 @@ Not implemented:
 
 Do not claim process isolation until those runtime pieces exist.
 
-## Packaging and installation
+## Packaging and installation (Experimental storage only)
 
-There is no supported package or installation flow today. Specifically:
+The first storage contract is:
 
 ```text
-no plugin directory
-no manifest filename convention
-no install command
-no enable/disable setting
-no executable launcher
-no signature or Marketplace policy
+~/Library/Application Support/OMG/
+├── Plugins/<plugin-id>/manifest.json + plugin code
+└── PluginData/<plugin-id>/              user data/config boundary
 ```
 
-When that changes, this document must add a copyable directory layout,
-manifest, build/package/install commands, compatibility checks, uninstall
-behavior, and migration rules in the same implementation commit.
+`PluginInstallationManager` provides `install(from:)`, `update(_:from:)`,
+`disable(_:)`, `enable(_:)`, `uninstall(_:removeData:)`, and `dataURL(for:)`.
+The source currently must be an HTTPS GitHub repository URL. Installation
+fetches the repository's `main.tar.gz`, finds `manifest.json`, validates the
+plugin ID/version/relative executable path, copies code to `Plugins/<id>`, and
+creates a separate data directory. Disabled state is stored in
+`Plugins/disabled.json`.
+
+This is not yet a runnable plugin install flow: there is no UI/CLI command,
+signature/ownership verification, semver host compatibility enforcement,
+executable launch, process supervision, or automatic update service. An
+installed plugin remains inert. Do not distribute executable plugins until
+those security/runtime pieces are implemented.
+
+When runtime loading changes, this document must add a copyable directory
+layout, manifest, build/package/install commands, compatibility checks,
+uninstall/data migration behavior, and end-to-end tests in the same commit.
 
 ## Planned design notes (not API)
 

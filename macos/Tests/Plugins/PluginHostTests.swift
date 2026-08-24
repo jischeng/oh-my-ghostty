@@ -6,6 +6,31 @@ import Testing
 struct PluginHostTests {
     private let sessionID = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
 
+    @Test func pluginInstallationKeepsCodeAndDataSeparate() throws {
+        let support = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-plugin-manager-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: support) }
+        let manager = PluginInstallationManager(applicationSupport: support)
+        let package = manager.pluginsDirectory.appendingPathComponent("dev.example.hello", isDirectory: true)
+        try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+        let manifest = PluginManifest(
+            id: "dev.example.hello",
+            version: "0.1.0",
+            executable: "bin/hello",
+            capabilities: [.sessionStatus]
+        )
+        try JSONEncoder().encode(manifest).write(
+            to: package.appendingPathComponent("manifest.json")
+        )
+        manager.reload()
+        #expect(manager.installed == [manifest])
+        try manager.disable(manifest.id)
+        #expect(manager.disabledIDs.contains(manifest.id))
+        #expect(manager.dataURL(for: manifest.id).path.contains("PluginData"))
+        try manager.uninstall(manifest.id)
+        #expect(manager.installed.isEmpty)
+    }
+
     @Test func authorizationIntersectsRequestedAndManifestCapabilities() throws {
         let manifest = PluginManifest(
             id: "dev.ghostty.agent-status",

@@ -18,9 +18,9 @@ Status vocabulary:
 
 | Capability | Status | Implementation / Gap |
 | --- | --- | --- |
-| Discover plugins | Missing | No plugin directory scan or registry loader. |
-| Load manifest | Partial | `PluginManifest` is Codable and carries identity, version, capabilities, minimum host version and declarative settings, but no filesystem loader calls it. |
-| Enable/disable | Missing | No persisted enabled set or lifecycle action. |
+| Discover plugins | Missing | No runtime discovery/registry loader; `PluginInstallationManager` only finds a manifest during an explicit GitHub archive install. |
+| Load manifest | Partial | `PluginManifest` is Codable and the experimental installer validates `manifest.json`; no runtime loader calls it. |
+| Enable/disable | Partial | Experimental installer persists disabled IDs and exposes enable/disable storage operations; no runtime lifecycle action. |
 | Persist plugin state | Missing | Status entries are intentionally ephemeral; no plugin state store exists. |
 | Plugin settings | Stub | `PluginSettingDescriptor` defines safe data types; no contribution registry or renderer is connected. |
 | Tab icon provider | Partial | Host-owned icon provider and validated status icon descriptor render in Vertical Tabs; no discovered plugin can currently connect. |
@@ -31,7 +31,7 @@ Status vocabulary:
 | Badge / activity indicator | Partial | Host-owned per-tab activity indicator exists. Dock badge policy is not connected to plugin activity. |
 | Notifications | Design only | Host settings exist; no activity-to-UNUserNotificationCenter policy dispatcher exists. |
 | Commands | Stub | Capability enum exists; no command descriptor, registry or invocation router. |
-| Process lifecycle | Missing | No plugin launch, monitor, restart or termination implementation. |
+| Process lifecycle | Missing | No plugin launch, monitor, restart or termination implementation; installed packages remain inert. |
 | Protocol versioning | Partial | v1 handshake negotiation and frame version validation exist. Manifest compatibility is not enforced end-to-end. |
 | Host compatibility | Stub | Manifest field exists; no semantic-version evaluator/loader enforcement. |
 | Error isolation | Partial | Inputs have frame limits, Codable validation, status limits and failure responses. There is no supervised out-of-process runtime yet. |

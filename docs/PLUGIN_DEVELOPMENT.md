@@ -287,11 +287,14 @@ the provider boundary rather than branching its UI for Local versus SSH. An
 SSH context is represented by an alias (`ssh:cloud`) and preserves the alias in
 presentation; it never replaces it with a jump host or private IP.
 
-This first provider does not install a remote helper and does not manage
+This first provider does not install a remote service and does not manage
 credentials. It depends on the system SSH/SFTP client and configured
-`ssh-agent`/known_hosts. Remote `sftp ls -la` parsing is intentionally bounded
-and is not yet a general remote file protocol. Automatic alias propagation from
-all SSH server configurations and remote file watching remain Experimental.
+`ssh-agent`/known_hosts. For a simple interactive Fish destination, OMG's
+existing `+ssh` action starts a transient login-shell hook that emits standard
+OSC 7 on each prompt; the focused Surface cwd therefore follows remote `cd`
+without polling or a persistent helper. Other remote shells currently fall back
+to the last reported cwd and remain Experimental. Remote `sftp ls -la` parsing
+is intentionally bounded and is not yet a general remote file protocol.
 
 ## Inspector API (Internal)
 

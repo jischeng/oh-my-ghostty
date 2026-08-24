@@ -416,6 +416,14 @@ struct InspectorRegistryTests {
             to: BuiltInFilesInspectorProvider.paneID,
             context: movedContext
         )
+        guard case .fileTree(let transitioningTree) = registry.content(
+            for: BuiltInFilesInspectorProvider.paneID,
+            context: movedContext
+        ) else {
+            Issue.record("Local cwd changes should keep existing Files content while loading")
+            return
+        }
+        #expect(transitioningTree.rootPath == root.path)
         var movedContent: InspectorPaneContent?
         for _ in 0..<20 {
             movedContent = registry.content(

@@ -288,7 +288,20 @@ fn runInner(
         };
     };
 
-    // Build the full argv: [ssh, ...our opts, ...user args]
+    // For a simple interactive destination, detect the remote login shell and
+    // attach a transient cwd reporter. This requires no remote service or
+    // installation: the shell emits standard OSC 7 whenever its prompt is
+    // rendered, so OMG's focused Surface and Workspace provider stay current.
+    const remote_command: ?[]const u8 = if (opts._ssh_args.items.len == 1) remote: {
+        const shell = detectRemoteShell(
+            alloc,
+            opts.ssh,
+            opts._ssh_args.items,
+        ) orelse break :remote null;
+        break :remote remoteShellCommand(shell);
+    } else null;
+
+    // Build the full argv: [ssh, ...our opts, ...user args, ...remote command]
     const env_opts: []const []const u8 = if (opts.@"forward-env") env_opts: {
         const set_term = try std.fmt.allocPrint(
             alloc,
@@ -302,10 +315,15 @@ fn runInner(
             "-o", "SendEnv=TERM_PROGRAM_VERSION",
         };
     } else &.{};
+    const remote_opts: []const []const u8 = if (remote_command) |command|
+        &.{ "-tt", command }
+    else
+        &.{};
     const argv = try std.mem.concat(alloc, []const u8, &.{
         &.{opts.ssh},
         env_opts,
         opts._ssh_args.items,
+        remote_opts,
     });
     verbosePrint(opts, stderr, "exec: {f}", .{Joined{ .items = argv }});
 
@@ -417,6 +435,39 @@ fn checkExit(term: std.process.Child.Term, label: []const u8) error{ChildFailed}
 /// Run `ssh -G <args>` and parse the output for `user` and `hostname`.
 /// Returns the resolved `user@hostname`, or null if the destination
 /// could not be resolved.
+fn detectRemoteShell(
+    alloc: Allocator,
+    ssh: []const u8,
+    args: []const []const u8,
+) ?[]const u8 {
+    const argv = std.mem.concat(alloc, []const u8, &.{
+        &.{ssh},
+        args,
+        &.{"printf '%s' \"$SHELL\""},
+    }) catch return null;
+    const result = std.process.run(alloc, global.io(), .{ .argv = argv }) catch return null;
+    checkExit(result.term, "ssh shell detection") catch return null;
+    return std.mem.trim(u8, result.stdout, &std.ascii.whitespace);
+}
+
+fn remoteShellCommand(shell: []const u8) ?[]const u8 {
+    const name = std.fs.path.basename(shell);
+    if (std.mem.eql(u8, name, "fish")) {
+        return
+        \\exec fish -l -C 'function __omg_report_pwd --on-event fish_prompt; printf "\e]7;file://%s%s\a" (hostname) "$PWD"; end'
+        ;
+    }
+    return null;
+}
+
+test remoteShellCommand {
+    const testing = std.testing;
+    try testing.expect(remoteShellCommand("/bin/bash") == null);
+    try testing.expect(remoteShellCommand("/usr/bin/fish") != null);
+    try testing.expect(std.mem.indexOf(u8, remoteShellCommand("fish").?, "OSC") == null);
+    try testing.expect(std.mem.indexOf(u8, remoteShellCommand("fish").?, "]7;") != null);
+}
+
 fn resolveDestination(
     alloc: Allocator,
     ssh: []const u8,

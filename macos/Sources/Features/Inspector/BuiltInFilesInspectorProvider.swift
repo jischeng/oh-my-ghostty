@@ -11,6 +11,7 @@ final class BuiltInFilesInspectorProvider {
     static let paneID = "builtin.files"
 
     private static let rootTaskID = "__root__"
+    private static let loadingTaskID = "__loading__"
 
     private struct BrowserState {
         var context: InspectorPaneContext
@@ -186,7 +187,23 @@ final class BuiltInFilesInspectorProvider {
 
         cancelTasks(tabID: context.tabID)
         if state.tree == nil {
-            publish(.empty(title: "Files", message: "Loading…"), tabID: context.tabID)
+            let loadingKey = LoadKey(
+                tabID: context.tabID,
+                nodeID: Self.loadingTaskID
+            )
+            let loadingDelay = filesystem.descriptor.kind == .local ? 300 : 150
+            loadTasks[loadingKey] = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(loadingDelay))
+                guard !Task.isCancelled,
+                      let self,
+                      states[context.tabID]?.generation == generation,
+                      states[context.tabID]?.tree == nil else { return }
+                publish(
+                    .empty(title: "Files", message: "Loading…"),
+                    tabID: context.tabID
+                )
+                loadTasks.removeValue(forKey: loadingKey)
+            }
         }
         let started = ContinuousClock.now
         Self.logger.debug("Files root refresh started tab=\(context.tabID.uuidString, privacy: .public) generation=\(generation) reason=\(reason, privacy: .public) root=\(rootPath, privacy: .public) expanded=\(expanded.count)")
@@ -208,6 +225,11 @@ final class BuiltInFilesInspectorProvider {
                 Self.logger.debug("Files root refresh discarded tab=\(context.tabID.uuidString, privacy: .public) generation=\(generation)")
                 return
             }
+            let loadingKey = LoadKey(
+                tabID: context.tabID,
+                nodeID: Self.loadingTaskID
+            )
+            loadTasks.removeValue(forKey: loadingKey)?.cancel()
             if case .fileTree(let tree) = content {
                 states[context.tabID]?.tree = tree
             }

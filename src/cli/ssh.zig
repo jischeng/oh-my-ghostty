@@ -298,7 +298,11 @@ fn runInner(
             opts.ssh,
             opts._ssh_args.items,
         ) orelse break :remote null;
-        break :remote remoteShellCommand(shell);
+        break :remote remoteShellCommand(
+            alloc,
+            shell,
+            opts._ssh_args.items[0],
+        );
     } else null;
 
     // Build the full argv: [ssh, ...our opts, ...user args, ...remote command]
@@ -450,27 +454,47 @@ fn detectRemoteShell(
     return std.mem.trim(u8, result.stdout, &std.ascii.whitespace);
 }
 
-fn remoteShellCommand(shell: []const u8) ?[]const u8 {
+fn remoteShellCommand(
+    alloc: Allocator,
+    shell: []const u8,
+    destination: []const u8,
+) ?[]const u8 {
     const name = std.fs.path.basename(shell);
-    if (std.mem.eql(u8, name, "fish")) {
-        return
-        \\exec fish -l -C 'function __omg_report_pwd --on-event fish_prompt; printf "\e]7;file://localhost%s\a" "$PWD"; end'
-        ;
-    }
-    return null;
+    if (!std.mem.eql(u8, name, "fish")) return null;
+
+    const label = if (std.mem.lastIndexOfScalar(u8, destination, '@')) |index|
+        destination[index + 1 ..]
+    else
+        destination;
+    if (label.len == 0) return null;
+    for (label) |char| switch (char) {
+        'a'...'z', 'A'...'Z', '0'...'9', '.', '_', '-' => {},
+        else => return null,
+    };
+
+    return std.fmt.allocPrint(
+        alloc,
+        \\exec fish -l -C 'function __omg_report_pwd --on-event fish_prompt; printf "\e]7;file://localhost%s\a\e]2;OMG SSH {s} %s\a" "$PWD" "$PWD"; end'
+    ,
+        .{label},
+    ) catch null;
 }
 
 test remoteShellCommand {
     const testing = std.testing;
-    try testing.expect(remoteShellCommand("/bin/bash") == null);
-    try testing.expect(remoteShellCommand("/usr/bin/fish") != null);
-    try testing.expect(std.mem.indexOf(u8, remoteShellCommand("fish").?, "OSC") == null);
-    try testing.expect(std.mem.indexOf(u8, remoteShellCommand("fish").?, "]7;") != null);
-    try testing.expect(std.mem.indexOf(
-        u8,
-        remoteShellCommand("fish").?,
-        "file://localhost",
-    ) != null);
+    try testing.expect(remoteShellCommand(testing.allocator, "/bin/bash", "cloud") == null);
+    try testing.expect(remoteShellCommand(testing.allocator, "fish", "bad;host") == null);
+
+    const command = remoteShellCommand(
+        testing.allocator,
+        "/usr/bin/fish",
+        "user@cloud",
+    ).?;
+    defer testing.allocator.free(command);
+    try testing.expect(std.mem.indexOf(u8, command, "OSC") == null);
+    try testing.expect(std.mem.indexOf(u8, command, "]7;") != null);
+    try testing.expect(std.mem.indexOf(u8, command, "file://localhost") != null);
+    try testing.expect(std.mem.indexOf(u8, command, "OMG SSH cloud") != null);
 }
 
 fn resolveDestination(

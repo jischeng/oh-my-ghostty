@@ -291,8 +291,10 @@ This first provider does not install a remote service and does not manage
 credentials. It depends on the system SSH/SFTP client and configured
 `ssh-agent`/known_hosts. For a simple interactive Fish destination, OMG's
 existing `+ssh` action starts a transient login-shell hook that emits standard
-OSC 7 on each prompt; the focused Surface cwd therefore follows remote `cd`
-without polling or a persistent helper. Other remote shells currently fall back
+OSC 7 on each prompt and keeps the validated destination alias in the terminal
+title. The focused Surface cwd therefore follows remote `cd`, while workspace
+identity remains stable, without polling or a persistent helper. Other remote
+shells currently fall back
 to the last reported cwd and remain Experimental. Remote `sftp ls -la` parsing
 is intentionally bounded and is not yet a general remote file protocol.
 

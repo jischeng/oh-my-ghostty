@@ -581,7 +581,17 @@ struct RightInspectorHost: View {
             registry.presentationDidChange(to: selectedPaneID, context: context)
         }
         .onReceive(contextChanges) { _ in
-            contextRevision &+= 1
+            // @Published emits before its property storage is updated. Defer
+            // one main-queue turn so the Inspector context reads the committed
+            // Surface cwd/title, then notify the provider directly rather than
+            // relying only on a SwiftUI body diff.
+            DispatchQueue.main.async {
+                contextRevision &+= 1
+                registry.presentationDidChange(
+                    to: selectedPaneID,
+                    context: context
+                )
+            }
         }
         .onChange(of: context) { nextContext in
             registry.presentationDidChange(to: selectedPaneID, context: nextContext)

@@ -152,7 +152,20 @@ struct SSHPlugin: Sendable {
     )
 
     static var isEnabled: Bool {
-        UserDefaults.standard.bool(forKey: "OMG.Plugin.Enabled.\(pluginID)")
+        let defaultsKey = "OMG.Plugin.Enabled.\(pluginID)"
+        if UserDefaults.standard.object(forKey: defaultsKey) != nil {
+            return UserDefaults.standard.bool(forKey: defaultsKey)
+        }
+        let supportURL = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        )[0].appendingPathComponent("OMG/Plugins", isDirectory: true)
+        return FileManager.default.fileExists(
+            atPath: supportURL
+                .appendingPathComponent(pluginID, isDirectory: true)
+                .appendingPathComponent("manifest.json")
+                .path
+        )
     }
 
     static func configurations(

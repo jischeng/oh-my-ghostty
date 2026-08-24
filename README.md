@@ -96,6 +96,9 @@ Core design rules:
 
 OMG includes tested protocol, capability, status, and Inspector registry
 components. The built-in Files provider dogfoods the typed Inspector boundary.
+An Experimental in-tree SSH workspace provider reads OpenSSH aliases and uses
+the system SFTP client for remote Files without owning credentials; it is not
+an installable third-party plugin yet.
 A public third-party executable loader is **not implemented yet**; see
 [Plugin Development](docs/PLUGIN_DEVELOPMENT.md) for exact Stable,
 Experimental, Internal, and Planned status.

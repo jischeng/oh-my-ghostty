@@ -194,6 +194,21 @@ struct VerticalTabsTests {
         #expect(name == "bolt.fill")
     }
 
+    @Test func sessionIconReplacesTerminalIconInTheSameSlot() {
+        let context = GhosttyTabIconContext(
+            tabID: UUID(),
+            title: "cloud /tmp",
+            activity: nil,
+            defaultIcon: .systemSymbol("cloud")
+        )
+        guard case .systemSymbol(let name) = DefaultGhosttyTabIconProvider()
+            .icon(for: context) else {
+            Issue.record("Expected the canonical session icon")
+            return
+        }
+        #expect(name == "cloud")
+    }
+
     @Test func customIconProviderOverridesTheDefaultIcon() {
         struct MockIconProvider: GhosttyTabIconProviding {
             func icon(for context: GhosttyTabIconContext) -> GhosttyTabIcon? {

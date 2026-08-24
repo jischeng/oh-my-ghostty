@@ -3,6 +3,17 @@ import GhosttyKit
 import SwiftUI
 
 extension Ghostty {
+    struct ContextSignal: Equatable, Sendable {
+        enum Action: Equatable, Sendable {
+            case start
+            case end
+        }
+
+        let action: Action
+        let id: String
+        let metadata: String
+    }
+
     class OSSurfaceView: NSView, ObservableObject {
         typealias ID = UUID
 
@@ -12,6 +23,9 @@ extension Ghostty {
         // The current pwd of the surface as defined by the pty. This can be
         // changed with escape codes.
         @Published var pwd: String?
+
+        // The latest typed OSC 3008 context lifecycle event.
+        @Published var contextSignal: ContextSignal?
 
         // The cell size of this surface. This is set by the core when the
         // surface is first created and any time the cell size changes (i.e.

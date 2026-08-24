@@ -40,26 +40,132 @@ struct WorkspaceProviderTests {
         #expect(filesystem.descriptor.workingDirectory == "/tmp/project")
     }
 
-    @Test func resolvesSSHWorkspaceFromTerminalTitle() throws {
-        let previous = UserDefaults.standard.object(forKey: "OMG.Plugin.Enabled.builtin.ssh")
-        UserDefaults.standard.set(true, forKey: "OMG.Plugin.Enabled.builtin.ssh")
-        defer { UserDefaults.standard.set(previous, forKey: "OMG.Plugin.Enabled.builtin.ssh") }
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("omg-ssh-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: url) }
-        try """
-        Host cloud
-            HostName 10.0.0.12
-            User json
-        """.write(to: url, atomically: true, encoding: .utf8)
-        let hosts = SSHPlugin.configurations(at: url)
-        let workspace = SSHPlugin.workspace(
-            forTitle: "json@cloud: ~/project",
-            workingDirectory: "/home/json/project",
-            configurations: hosts
+    @Test func paneSessionLifecycleRestoresLocalContextOnDisconnect() {
+        var context = PaneSessionContext(
+            workingDirectory: "/Users/test/code",
+            terminalTitle: "~/code"
         )
-        #expect(workspace?.displayName == "cloud")
-        #expect(workspace?.presentationTitle == "☁ cloud /home/json/project")
+        context.apply(
+            .init(
+                action: .start,
+                id: "omg-ssh-1",
+                metadata: "type=remote;targethost=cloud"
+            ),
+            currentWorkingDirectory: "/Users/test/code",
+            currentTerminalTitle: "~/code"
+        )
+        guard case .sshConnecting(let connecting) = context.state else {
+            Issue.record("Expected an SSH connecting context")
+            return
+        }
+        #expect(connecting.alias == "cloud")
+        #expect(context.workingDirectory == "/Users/test/code")
+        #expect(context.presentationTitle == "~/code")
+        #expect(context.tabIconSystemName == "terminal")
+
+        context.apply(
+            .init(
+                action: .start,
+                id: "omg-ssh-1",
+                metadata: "type=remote;targethost=cloud;cwd=/tmp"
+            ),
+            currentWorkingDirectory: "/tmp",
+            currentTerminalTitle: "remote title"
+        )
+        guard case .sshReady(let ready, let remoteCWD) = context.state else {
+            Issue.record("Expected an SSH ready context")
+            return
+        }
+        #expect(ready.alias == "cloud")
+        #expect(remoteCWD == "/tmp")
+        #expect(context.presentationTitle == "cloud /tmp")
+        #expect(context.tabIconSystemName == "cloud")
+
+        context.apply(
+            .init(
+                action: .end,
+                id: "omg-ssh-1",
+                metadata: "exit=success;status=0;cwd=/Users/test/code"
+            ),
+            currentWorkingDirectory: "/tmp",
+            currentTerminalTitle: "remote title"
+        )
+        #expect(context.state == .local)
+        #expect(context.workingDirectory == "/Users/test/code")
+        #expect(context.presentationTitle == "~/code")
+        #expect(context.tabIconSystemName == "terminal")
+
+        context.updateLocalMetadata(
+            workingDirectory: "/Users/test/code",
+            terminalTitle: "remote title"
+        )
+        #expect(context.presentationTitle == "~/code")
+        context.updateLocalMetadata(
+            workingDirectory: "/Users/test/code",
+            terminalTitle: "code"
+        )
+        #expect(context.presentationTitle == "code")
+    }
+
+    @Test func staleSSHDisconnectCannotClearNewConnection() {
+        var context = PaneSessionContext(
+            workingDirectory: "/Users/test/code",
+            terminalTitle: "code"
+        )
+        for (id, alias) in [("omg-ssh-a", "cloud"), ("omg-ssh-b", "build")] {
+            context.apply(
+                .init(
+                    action: .start,
+                    id: id,
+                    metadata: "type=remote;targethost=\(alias);cwd=/tmp"
+                ),
+                currentWorkingDirectory: "/tmp",
+                currentTerminalTitle: alias
+            )
+        }
+        context.apply(
+            .init(action: .end, id: "omg-ssh-a", metadata: "status=255"),
+            currentWorkingDirectory: "/tmp",
+            currentTerminalTitle: "cloud"
+        )
+        guard case .sshReady(let active, _) = context.state else {
+            Issue.record("Expected the newer SSH connection to remain active")
+            return
+        }
+        #expect(active.connectionID == "omg-ssh-b")
+        #expect(active.alias == "build")
+    }
+
+    @Test func unresolvedReadySSHNeverFallsBackToLocalFilesystem() {
+        var session = PaneSessionContext(
+            workingDirectory: "/Users/test/code",
+            terminalTitle: "code"
+        )
+        session.apply(
+            .init(
+                action: .start,
+                id: "omg-ssh-1",
+                metadata: "type=remote;targethost=missing-host;cwd=/remote/path"
+            ),
+            currentWorkingDirectory: "/remote/path",
+            currentTerminalTitle: "remote"
+        )
+        let context = InspectorPaneContext(
+            tabID: UUID(),
+            surfaceID: UUID(),
+            title: session.presentationTitle,
+            workingDirectory: session.workingDirectory,
+            session: session
+        )
+        let filesystem = WorkspaceFilesystemFactory.make(for: context)
+        #expect(filesystem.descriptor.kind == .ssh)
+        #expect(filesystem.descriptor.workingDirectory == "/remote/path")
+    }
+
+    @Test func folderDisplayNameIsSharedByLocalAndRemoteFiles() {
+        #expect(WorkspacePathPresentation.folderName("/Users/test/code") == "code")
+        #expect(WorkspacePathPresentation.folderName("/home/test/project/omg") == "omg")
+        #expect(WorkspacePathPresentation.folderName("/") == "/")
     }
 
     @Test func boundsLargeSFTPDirectoryListings() throws {

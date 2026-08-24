@@ -871,6 +871,19 @@ typedef struct {
   int8_t progress;
 } ghostty_action_progress_report_s;
 
+// apprt.action.ContextSignal.Action
+typedef enum {
+  GHOSTTY_CONTEXT_SIGNAL_START,
+  GHOSTTY_CONTEXT_SIGNAL_END,
+} ghostty_context_signal_action_e;
+
+// apprt.action.ContextSignal.C
+typedef struct {
+  ghostty_context_signal_action_e action;
+  const char* id;
+  const char* metadata;
+} ghostty_action_context_signal_s;
+
 // apprt.action.CommandFinished.C
 typedef struct {
   // -1 if no exit code was reported, otherwise 0-255
@@ -972,6 +985,7 @@ typedef enum {
   GHOSTTY_ACTION_READONLY,
   GHOSTTY_ACTION_COPY_TITLE_TO_CLIPBOARD,
   GHOSTTY_ACTION_MOVE_TAB_TO_NEW_WINDOW,
+  GHOSTTY_ACTION_CONTEXT_SIGNAL,
 } ghostty_action_tag_e;
 
 typedef union {
@@ -1009,6 +1023,7 @@ typedef union {
   ghostty_action_close_tab_mode_e close_tab_mode;
   ghostty_surface_message_childexited_s child_exited;
   ghostty_action_progress_report_s progress_report;
+  ghostty_action_context_signal_s context_signal;
   ghostty_action_command_finished_s command_finished;
   ghostty_action_start_search_s start_search;
   ghostty_action_search_total_s search_total;

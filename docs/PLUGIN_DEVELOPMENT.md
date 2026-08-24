@@ -281,22 +281,47 @@ known_hosts, ProxyJump, or ssh-agent state. `SSHWorkspaceFilesystem` uses the
 system `/usr/bin/sftp` client and the user's OpenSSH configuration for bounded
 remote directory operations and file/folder creation.
 
-The provider can resolve a workspace from an explicit `OMG_SSH_ALIAS` or from a
-terminal title matching an SSH alias/hostname. The shared Files tree consumes
-the provider boundary rather than branching its UI for Local versus SSH. An
-SSH context is represented by an alias (`ssh:cloud`) and preserves the alias in
-presentation; it never replaces it with a jump host or private IP.
+The production path does not infer active SSH ownership from a GUI-process
+environment variable or a human-readable terminal title. Each Surface has one
+`PaneSessionContext` with these transient states:
+
+```text
+local
+  -> sshConnecting(connection ID, alias)
+  -> sshReady(connection ID, alias, remote cwd)
+  -> local
+```
+
+Tab title, Tab icon, `InspectorPaneContext`, and the Files filesystem target all
+consume this same state. `WorkspaceDescriptor` remains data identity and does
+not own connection lifecycle. A new connection ID supersedes an older one, and
+an end event only clears the matching active ID, preventing late host-A events
+from clearing host B.
+
+The lifecycle transport is typed OSC 3008 hierarchical context signalling. For
+a simple interactive Fish destination, OMG's existing `+ssh` action emits a
+`type=remote` start immediately before launching the final OpenSSH child. The
+transient remote Fish prompt updates that same context ID with `targethost` and
+percent-encoded `cwd`, and also emits standard OSC 7. After `childExec` returns
+for normal `exit`, Ctrl-D, authentication/network failure, or remote close,
+`+ssh` emits the matching end from the actual child-process wait path and then
+re-emits the inherited local cwd as OSC 7. It never parses `Connection closed`
+or other terminal output. This is an in-process first-party lifecycle bridge,
+not a new external plugin wire capability and not authorization for arbitrary
+filesystem/network access.
+
+On begin, `PaneSessionContext` snapshots the local cwd/title. On a matching end,
+it atomically clears remote identity and restores that local snapshot before
+Files refreshes. Connecting contexts continue to use the known local target;
+only `sshReady` may construct `SSHWorkspaceFilesystem`. A ready context whose
+SSH alias is unavailable returns an unavailable filesystem and never falls back
+to local IO at a remote-looking path.
 
 This first provider does not install a remote service and does not manage
 credentials. It depends on the system SSH/SFTP client and configured
-`ssh-agent`/known_hosts. For a simple interactive Fish destination, OMG's
-existing `+ssh` action starts a transient login-shell hook that emits standard
-OSC 7 on each prompt and keeps the validated destination alias in the terminal
-title. The focused Surface cwd therefore follows remote `cd`, while workspace
-identity remains stable, without polling or a persistent helper. Other remote
-shells currently fall back
-to the last reported cwd and remain Experimental. Remote `sftp ls -la` parsing
-is intentionally bounded and is not yet a general remote file protocol.
+`ssh-agent`/known_hosts. Other remote shells do not yet publish a ready remote
+cwd and remain Experimental. Remote `sftp ls -la` parsing is bounded and is not
+yet a general remote file protocol.
 
 ## Inspector API (Internal)
 
@@ -325,10 +350,16 @@ window, controller, material, or arbitrary icon path.
 
 ### Context, actions, and lifecycle
 
-`InspectorPaneContext` contains tab/session presentation identity, title, and
-optional working directory. Supported action values are disclosure toggle,
-refresh, collapse all, create file, and create folder; whether they make sense
-is provider-specific.
+`InspectorPaneContext` contains tab/session presentation identity, title,
+optional working directory, workspace identity, and the canonical
+`PaneSessionContext`. Providers can therefore distinguish local,
+`sshConnecting`, and `sshReady` changes without parsing titles. A connection
+begin, remote cwd update, matching disconnect, focused Pane change, or local cwd
+change produces a new context/lifecycle appearance for the selected provider;
+the previous appearance is discarded and its asynchronous work must not
+publish afterward. Supported action values are disclosure toggle, refresh,
+collapse all, create file, and create folder; whether they make sense is
+provider-specific.
 
 Actual in-process lifecycle:
 
@@ -338,13 +369,14 @@ registerCorePane / registerPluginPane
   -> lifecycle appeared(context)
   -> host requests typed content
   -> provider updates content / receives typed actions
-  -> selection hides pane: disappeared
+  -> selection/context hides pane: disappeared(previousContext)
   -> unregister or disconnectPlugin: cleanup and disappeared
 ```
 
 The Core owns Inspector visibility, width, chrome, focus, persistence, and
-rendering. Hiding the Inspector does not unload a provider; it receives the
-presentation lifecycle change. `disconnectPlugin` removes every pane owned by
+rendering. Hiding the Inspector does not unload a provider; it receives
+`disappeared(previousContext)` so it can cancel work owned by that exact tab and
+session. `disconnectPlugin` removes every pane owned by
 that plugin ID and clears typed content/actions.
 
 ## Minimal working example (in-tree only)

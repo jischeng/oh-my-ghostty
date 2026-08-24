@@ -320,6 +320,7 @@ pub const StreamHandler = struct {
             .decaln => try self.decaln(),
             .window_title => try self.windowTitle(value.title),
             .report_pwd => try self.reportPwd(value.url),
+            .context_signal => try self.contextSignal(value),
             .show_desktop_notification => try self.showDesktopNotification(value.title, value.body),
             .progress_report => self.progressReport(value),
             .start_hyperlink => try self.startHyperlink(value.uri, value.id),
@@ -1022,6 +1023,20 @@ pub const StreamHandler = struct {
         // We do this last so failures are still processed correctly
         // above.
         try self.terminal.semanticPrompt(cmd);
+    }
+
+    fn contextSignal(
+        self: *StreamHandler,
+        signal: terminal.osc.context_signal.Command,
+    ) !void {
+        const message = apprt.surface.Message.ContextSignal.init(
+            self.alloc,
+            signal,
+        ) catch |err| {
+            log.warn("failed to allocate OSC 3008 context signal: {}", .{err});
+            return;
+        };
+        self.surfaceMessageWriter(.{ .context_signal = message });
     }
 
     fn reportPwd(self: *StreamHandler, url: []const u8) !void {

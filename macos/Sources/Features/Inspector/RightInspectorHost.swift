@@ -7,7 +7,6 @@ enum TerminalShellStyle {
     static let dividerWidth: CGFloat = 1
     static let minimumTerminalWidth: CGFloat = 320
     static let sidebarTransitionDuration = 0.18
-    static let sidebarTransitionDistance: CGFloat = 6
     static let sidebarTransitionAnimation = Animation.easeOut(
         duration: sidebarTransitionDuration
     )
@@ -55,10 +54,8 @@ private struct TerminalSidebarTransitionContainer<Content: View>: View {
         case right
 
         var alignment: Alignment { self == .left ? .leading : .trailing }
-        var hiddenOffset: CGFloat {
-            self == .left
-                ? -TerminalShellStyle.sidebarTransitionDistance
-                : TerminalShellStyle.sidebarTransitionDistance
+        func hiddenOffset(for width: CGFloat) -> CGFloat {
+            self == .left ? -width : width
         }
     }
 
@@ -70,7 +67,7 @@ private struct TerminalSidebarTransitionContainer<Content: View>: View {
     let content: Content
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var occupiesSpace: Bool
-    @State private var contentVisible: Bool
+    @State private var revealProgress: CGFloat
     @State private var transitionTask: Task<Void, Never>?
 
     init(
@@ -88,7 +85,7 @@ private struct TerminalSidebarTransitionContainer<Content: View>: View {
         self.background = background
         self.content = content()
         self._occupiesSpace = State(initialValue: isVisible)
-        self._contentVisible = State(initialValue: isVisible)
+        self._revealProgress = State(initialValue: isVisible ? 1 : 0)
     }
 
     var body: some View {
@@ -96,17 +93,18 @@ private struct TerminalSidebarTransitionContainer<Content: View>: View {
             if occupiesSpace {
                 content
                     .frame(width: width, alignment: edge.alignment)
-                    .opacity(contentVisible ? 1 : 0)
-                    .offset(x: contentVisible ? 0 : edge.hiddenOffset)
-                    .allowsHitTesting(contentVisible)
-                    .accessibilityHidden(!contentVisible)
+                    .offset(
+                        x: (1 - revealProgress) * edge.hiddenOffset(for: width)
+                    )
+                    .allowsHitTesting(revealProgress == 1)
+                    .accessibilityHidden(revealProgress != 1)
             }
         }
         .frame(
             width: occupiesSpace ? width : 0,
             alignment: edge.alignment
         )
-        .background(contentVisible ? Color.clear : background)
+        .background(background)
         .clipped()
         .onAppear { synchronizeImmediately() }
         .onChange(of: isVisible) { visible in transition(to: visible) }
@@ -120,23 +118,24 @@ private struct TerminalSidebarTransitionContainer<Content: View>: View {
         transitionTask = nil
         guard !reduceMotion, animationsEnabled else {
             occupiesSpace = visible
-            contentVisible = visible
+            revealProgress = visible ? 1 : 0
             return
         }
 
         if visible {
+            let needsMount = !occupiesSpace
             occupiesSpace = true
-            contentVisible = false
+            if needsMount { revealProgress = 0 }
             transitionTask = Task { @MainActor in
-                await Task.yield()
+                if needsMount { await Task.yield() }
                 guard !Task.isCancelled else { return }
                 withAnimation(TerminalShellStyle.sidebarTransitionAnimation) {
-                    contentVisible = true
+                    revealProgress = 1
                 }
             }
         } else {
             withAnimation(TerminalShellStyle.sidebarTransitionAnimation) {
-                contentVisible = false
+                revealProgress = 0
             }
             transitionTask = Task { @MainActor in
                 try? await Task.sleep(for: .seconds(
@@ -152,7 +151,7 @@ private struct TerminalSidebarTransitionContainer<Content: View>: View {
         transitionTask?.cancel()
         transitionTask = nil
         occupiesSpace = isVisible
-        contentVisible = isVisible
+        revealProgress = isVisible ? 1 : 0
     }
 }
 
@@ -457,14 +456,14 @@ struct TerminalShellLayoutContainer<Content: View>: View {
                             layoutState: layoutState,
                             statusStore: statusStore,
                             backgroundColor: backgroundColor,
-                            backgroundOpacity: backgroundOpacity
+                            backgroundOpacity: 0
                         )
                         .frame(width: presentedSidebarWidth)
                         VerticalTabSidebarDivider(
                             controller: controller,
                             layoutState: layoutState,
                             color: controller.sidebarDividerColor,
-                            background: backgroundColor.opacity(backgroundOpacity)
+                            background: .clear
                         )
                     }
                 }
@@ -481,7 +480,7 @@ struct TerminalShellLayoutContainer<Content: View>: View {
                     HStack(spacing: 0) {
                         RightInspectorResizeHandle(
                             color: controller.sidebarDividerColor,
-                            background: backgroundColor.opacity(backgroundOpacity),
+                            background: .clear,
                             currentWidth: { layoutState.inspectorWidth },
                             resize: controller.updateInspectorWidth
                         )
@@ -490,7 +489,7 @@ struct TerminalShellLayoutContainer<Content: View>: View {
                             layoutState: layoutState,
                             registry: inspectorRegistry,
                             backgroundColor: backgroundColor,
-                            backgroundOpacity: backgroundOpacity
+                            backgroundOpacity: 0
                         )
                         .frame(width: inspectorWidth)
                     }
@@ -531,12 +530,17 @@ struct RightInspectorHost: View {
     private var context: InspectorPaneContext {
         _ = contextRevision
         let surface = controller.focusedSurface ?? controller.surfaceTree.first
+        let session = controller.paneSessionContext(for: surface) ?? .init(
+            workingDirectory: surface?.pwd,
+            terminalTitle: surface?.title ?? "Terminal"
+        )
         return .init(
             tabID: controller.tabSessionID,
             surfaceID: surface?.id,
-            title: controller.titleOverride ?? surface?.title ?? "Terminal",
-            workingDirectory: surface?.pwd,
-            workspace: controller.workspaceDescriptor
+            title: controller.titleOverride ?? session.presentationTitle,
+            workingDirectory: session.workingDirectory,
+            workspace: session.workspace,
+            session: session
         )
     }
 
@@ -544,10 +548,13 @@ struct RightInspectorHost: View {
         guard let surface = controller.focusedSurface ?? controller.surfaceTree.first else {
             return Empty().eraseToAnyPublisher()
         }
-        return Publishers.CombineLatest(surface.$pwd, surface.$title)
+        let metadata = Publishers.CombineLatest(surface.$pwd, surface.$title)
             .dropFirst()
             .map { _ in () }
-            .eraseToAnyPublisher()
+        let session = surface.$contextSignal
+            .dropFirst()
+            .map { _ in () }
+        return Publishers.Merge(metadata, session).eraseToAnyPublisher()
     }
 
     private var selectedPaneID: String? {

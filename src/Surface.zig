@@ -1085,6 +1085,27 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
             );
         },
 
+        .context_signal => |signal| {
+            defer signal.deinit();
+
+            var stack = std.heap.stackFallback(512, self.alloc);
+            const alloc = stack.get();
+            const id = try alloc.dupeZ(u8, signal.id.slice());
+            defer alloc.free(id);
+            const metadata = try alloc.dupeZ(u8, signal.metadata.slice());
+            defer alloc.free(metadata);
+
+            _ = try self.rt_app.performAction(
+                .{ .surface = self },
+                .context_signal,
+                .{
+                    .action = signal.action,
+                    .id = id,
+                    .metadata = metadata,
+                },
+            );
+        },
+
         .close => self.close(),
 
         .child_exited => |v| self.childExited(v),

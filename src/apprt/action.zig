@@ -357,6 +357,9 @@ pub const Action = union(Key) {
     /// Move a tab to a new window.
     move_tab_to_new_window,
 
+    /// A typed OSC 3008 context started, changed, or ended.
+    context_signal: ContextSignal,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -428,6 +431,7 @@ pub const Action = union(Key) {
         readonly,
         copy_title_to_clipboard,
         move_tab_to_new_window,
+        context_signal,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
@@ -782,6 +786,39 @@ pub const Pwd = struct {
         writer: *std.Io.Writer,
     ) !void {
         try writer.print("{s}{{ {s} }}", .{ @typeName(@This()), value.pwd });
+    }
+};
+
+pub const ContextSignal = struct {
+    action: terminal.osc.context_signal.Command.Action,
+    id: [:0]const u8,
+    metadata: [:0]const u8,
+
+    pub const CAction = enum(c_int) {
+        start,
+        end,
+
+        test "ghostty.h ContextSignal.CAction" {
+            try lib.checkGhosttyHEnum(@This(), "GHOSTTY_CONTEXT_SIGNAL_");
+        }
+    };
+
+    // Sync with: ghostty_action_context_signal_s
+    pub const C = extern struct {
+        action: CAction,
+        id: [*:0]const u8,
+        metadata: [*:0]const u8,
+    };
+
+    pub fn cval(self: ContextSignal) C {
+        return .{
+            .action = switch (self.action) {
+                .start => .start,
+                .end => .end,
+            },
+            .id = self.id.ptr,
+            .metadata = self.metadata.ptr,
+        };
     }
 };
 

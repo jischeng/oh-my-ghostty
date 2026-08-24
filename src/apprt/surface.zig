@@ -16,6 +16,35 @@ pub const Message = union(enum) {
     /// we want this union to be.
     pub const WriteReq = MessageData(u8, 255);
 
+    /// OSC 3008 context lifecycle payload. The parser bounds IDs to 64 bytes;
+    /// metadata uses the existing small/allocation message boundary.
+    pub const ContextSignal = struct {
+        const ID = MessageData(u8, 64);
+
+        action: terminal.osc.context_signal.Command.Action,
+        id: ID,
+        metadata: WriteReq,
+
+        pub fn init(
+            alloc: Allocator,
+            signal: terminal.osc.context_signal.Command,
+        ) !ContextSignal {
+            const id = try ID.init(alloc, signal.id);
+            errdefer id.deinit();
+            const metadata = try WriteReq.init(alloc, signal.metadata);
+            return .{
+                .action = signal.action,
+                .id = id,
+                .metadata = metadata,
+            };
+        }
+
+        pub fn deinit(self: ContextSignal) void {
+            self.id.deinit();
+            self.metadata.deinit();
+        }
+    };
+
     /// A fixed-size desktop notification payload sent to the app thread.
     pub const DesktopNotification = struct {
         /// Desktop notification title.
@@ -119,6 +148,9 @@ pub const Message = union(enum) {
 
     /// The terminal has reported a change in the working directory.
     pwd_change: WriteReq,
+
+    /// A program started, updated, or ended a typed OSC 3008 context.
+    context_signal: ContextSignal,
 
     /// The terminal encountered a bell character.
     ring_bell,

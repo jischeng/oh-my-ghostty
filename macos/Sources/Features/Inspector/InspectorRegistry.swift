@@ -92,25 +92,31 @@ struct InspectorPaneContext: Equatable, Sendable {
     let title: String
     let workingDirectory: String?
     let workspace: WorkspaceDescriptor?
+    let session: PaneSessionContext
 
     init(
         tabID: UUID,
         surfaceID: UUID?,
         title: String,
         workingDirectory: String?,
-        workspace: WorkspaceDescriptor? = nil
+        workspace: WorkspaceDescriptor? = nil,
+        session: PaneSessionContext? = nil
     ) {
         self.tabID = tabID
         self.surfaceID = surfaceID
         self.title = title
         self.workingDirectory = workingDirectory
         self.workspace = workspace
+        self.session = session ?? .init(
+            workingDirectory: workingDirectory,
+            terminalTitle: title
+        )
     }
 }
 
 enum InspectorPaneLifecycleEvent: Equatable, Sendable {
     case appeared(InspectorPaneContext)
-    case disappeared
+    case disappeared(InspectorPaneContext)
 }
 
 @MainActor
@@ -223,11 +229,13 @@ final class InspectorRegistry: ObservableObject {
         guard !removedIDs.isEmpty else { return }
         let removedHosts = presentedPanes.compactMap { hostID, presentation in
             removedIDs.contains(presentation.paneID)
-                ? (hostID, presentation.paneID)
+                ? (hostID, presentation)
                 : nil
         }
-        for (hostID, paneID) in removedHosts {
-            lifecycleHandlers[paneID]?(.disappeared)
+        for (hostID, presentation) in removedHosts {
+            lifecycleHandlers[presentation.paneID]?(
+                .disappeared(presentation.context)
+            )
             presentedPanes.removeValue(forKey: hostID)
         }
         entries.removeAll { removedIDs.contains($0.id) }
@@ -253,7 +261,9 @@ final class InspectorRegistry: ObservableObject {
         let next = paneID.map { PresentedPane(paneID: $0, context: context) }
         guard presentedPanes[hostID] != next else { return }
         if let previous = presentedPanes[hostID] {
-            lifecycleHandlers[previous.paneID]?(.disappeared)
+            lifecycleHandlers[previous.paneID]?(
+                .disappeared(previous.context)
+            )
         }
         presentedPanes[hostID] = next
         if let next {

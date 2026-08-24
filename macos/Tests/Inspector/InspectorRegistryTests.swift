@@ -139,9 +139,59 @@ struct InspectorRegistryTests {
         registry.presentationDidChange(to: nil, context: updatedContext)
         #expect(events == [
             .appeared(context),
-            .disappeared,
+            .disappeared(context),
             .appeared(updatedContext),
-            .disappeared,
+            .disappeared(updatedContext),
+        ])
+    }
+
+    @Test func paneSessionChangesReachInspectorLifecycle() throws {
+        let registry = InspectorRegistry()
+        let descriptor = paneDescriptor(
+            id: "core.session-lifecycle",
+            source: .coreFeature("session")
+        )
+        var events: [InspectorPaneLifecycleEvent] = []
+        try registry.registerCorePane(
+            descriptor,
+            content: { _ in .fields([]) },
+            lifecycle: { events.append($0) }
+        )
+
+        var session = PaneSessionContext(
+            workingDirectory: "/Users/test/code",
+            terminalTitle: "code"
+        )
+        let local = InspectorPaneContext(
+            tabID: UUID(),
+            surfaceID: UUID(),
+            title: session.presentationTitle,
+            workingDirectory: session.workingDirectory,
+            session: session
+        )
+        session.apply(
+            .init(
+                action: .start,
+                id: "omg-ssh-1",
+                metadata: "type=remote;targethost=cloud;cwd=/tmp"
+            ),
+            currentWorkingDirectory: "/tmp",
+            currentTerminalTitle: "remote"
+        )
+        let remote = InspectorPaneContext(
+            tabID: local.tabID,
+            surfaceID: local.surfaceID,
+            title: session.presentationTitle,
+            workingDirectory: session.workingDirectory,
+            session: session
+        )
+
+        registry.presentationDidChange(to: descriptor.id, context: local)
+        registry.presentationDidChange(to: descriptor.id, context: remote)
+        #expect(events == [
+            .appeared(local),
+            .disappeared(local),
+            .appeared(remote),
         ])
     }
 
@@ -521,6 +571,221 @@ struct InspectorRegistryTests {
         ) != nil)
     }
 
+    @Test func canceledRemoteMutationCannotRestoreStaleFilesContext() async throws {
+        let rootA = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let rootB = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.removeItem(at: rootA)
+            try? FileManager.default.removeItem(at: rootB)
+        }
+        try FileManager.default.createDirectory(at: rootA, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: rootB, withIntermediateDirectories: true)
+        try "current".write(
+            to: rootB.appendingPathComponent("current.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let gate = FilesMutationGate()
+        let delayed = DelayedWorkspaceFilesystem(
+            descriptor: LocalWorkspaceFilesystem(
+                workingDirectory: rootA.path
+            ).descriptor,
+            gate: gate,
+            counter: FilesListCounter()
+        )
+        let registry = InspectorRegistry()
+        let provider = BuiltInFilesInspectorProvider(
+            registry: registry,
+            filesystemFactory: { context -> any WorkspaceFilesystem in
+                if context.workingDirectory == rootA.path { return delayed }
+                return LocalWorkspaceFilesystem(
+                    workingDirectory: context.workingDirectory ?? "/"
+                )
+            }
+        )
+        try provider.register()
+        let tabID = UUID()
+        let contextA = InspectorPaneContext(
+            tabID: tabID,
+            surfaceID: UUID(),
+            title: "A",
+            workingDirectory: rootA.path
+        )
+        let contextB = InspectorPaneContext(
+            tabID: tabID,
+            surfaceID: contextA.surfaceID,
+            title: "B",
+            workingDirectory: rootB.path
+        )
+        registry.presentationDidChange(
+            to: BuiltInFilesInspectorProvider.paneID,
+            context: contextA
+        )
+        try await Task.sleep(for: .milliseconds(50))
+        registry.performAction(
+            paneID: BuiltInFilesInspectorProvider.paneID,
+            action: .init(
+                context: contextA,
+                kind: .createFile(name: "stale.txt")
+            )
+        )
+        for _ in 0..<20 {
+            if await gate.started { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await gate.started)
+
+        registry.presentationDidChange(
+            to: BuiltInFilesInspectorProvider.paneID,
+            context: contextB
+        )
+        var currentTree: InspectorFileTree?
+        for _ in 0..<40 {
+            if case .fileTree(let tree) = registry.content(
+                for: BuiltInFilesInspectorProvider.paneID,
+                context: contextB
+            ), tree.rootPath == rootB.path {
+                currentTree = tree
+                break
+            }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        await gate.resume()
+        try await Task.sleep(for: .milliseconds(200))
+
+        guard case .fileTree(let finalTree) = registry.content(
+            for: BuiltInFilesInspectorProvider.paneID,
+            context: contextB
+        ) else {
+            Issue.record("Expected current Files context after stale mutation completion")
+            return
+        }
+        #expect(currentTree?.nodes.map(\.name) == ["current.txt"])
+        #expect(finalTree.rootPath == rootB.path)
+        #expect(finalTree.nodes.map(\.name) == ["current.txt"])
+    }
+
+    @Test func disappearingPaneCancelsOwnedMutationWork() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let gate = FilesMutationGate()
+        let counter = FilesListCounter()
+        let filesystem = DelayedWorkspaceFilesystem(
+            descriptor: LocalWorkspaceFilesystem(
+                workingDirectory: root.path
+            ).descriptor,
+            gate: gate,
+            counter: counter
+        )
+        let registry = InspectorRegistry()
+        let provider = BuiltInFilesInspectorProvider(
+            registry: registry,
+            filesystemFactory: { _ in filesystem }
+        )
+        try provider.register()
+        let context = InspectorPaneContext(
+            tabID: UUID(),
+            surfaceID: UUID(),
+            title: "Files",
+            workingDirectory: root.path
+        )
+        registry.presentationDidChange(
+            to: BuiltInFilesInspectorProvider.paneID,
+            context: context
+        )
+        for _ in 0..<20 {
+            if await counter.value == 1 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        registry.performAction(
+            paneID: BuiltInFilesInspectorProvider.paneID,
+            action: .init(
+                context: context,
+                kind: .createFile(name: "stale.txt")
+            )
+        )
+        for _ in 0..<20 {
+            if await gate.started { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        registry.presentationDidChange(to: nil, context: context)
+        await gate.resume()
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(await counter.value == 1)
+    }
+
+    @Test func sameRemotePathWithNewConnectionReloadsFiles() async throws {
+        let counter = FilesListCounter()
+        let filesystem = CountingWorkspaceFilesystem(
+            descriptor: .init(
+                kind: .ssh,
+                id: "ssh:cloud",
+                displayName: "cloud",
+                workingDirectory: "/remote/project"
+            ),
+            counter: counter
+        )
+        let registry = InspectorRegistry()
+        let provider = BuiltInFilesInspectorProvider(
+            registry: registry,
+            filesystemFactory: { _ in filesystem }
+        )
+        try provider.register()
+        let tabID = UUID()
+        let surfaceID = UUID()
+
+        func readySession(_ connectionID: String) -> PaneSessionContext {
+            var session = PaneSessionContext(
+                workingDirectory: "/Users/test/code",
+                terminalTitle: "code"
+            )
+            session.apply(
+                .init(
+                    action: .start,
+                    id: connectionID,
+                    metadata: "type=remote;targethost=cloud;cwd=/remote/project"
+                ),
+                currentWorkingDirectory: "/remote/project",
+                currentTerminalTitle: "remote"
+            )
+            return session
+        }
+
+        for (index, connectionID) in ["omg-ssh-a", "omg-ssh-b"].enumerated() {
+            let session = readySession(connectionID)
+            let context = InspectorPaneContext(
+                tabID: tabID,
+                surfaceID: surfaceID,
+                title: session.presentationTitle,
+                workingDirectory: session.workingDirectory,
+                workspace: filesystem.descriptor,
+                session: session
+            )
+            registry.presentationDidChange(
+                to: BuiltInFilesInspectorProvider.paneID,
+                context: context
+            )
+            for _ in 0..<40 {
+                if case .fileTree(let tree) = registry.content(
+                    for: BuiltInFilesInspectorProvider.paneID,
+                    context: context
+                ), tree.nodes.map(\.name) == ["generation-\(index + 1).txt"] {
+                    break
+                }
+                try await Task.sleep(for: .milliseconds(25))
+            }
+        }
+
+        #expect(await counter.value == 2)
+    }
+
     @Test func descriptorsAndWidthsAreValidated() throws {
         let registry = InspectorRegistry()
         let descriptor = paneDescriptor(id: "valid.pane", source: .coreFeature("core"))
@@ -575,4 +840,65 @@ struct InspectorRegistryTests {
             minimumWidth: 220
         )
     }
+}
+
+private actor FilesMutationGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var started = false
+
+    func suspend() async {
+        started = true
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func resume() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private struct DelayedWorkspaceFilesystem: WorkspaceFilesystem {
+    let descriptor: WorkspaceDescriptor
+    let gate: FilesMutationGate
+    let counter: FilesListCounter
+
+    func listDirectory(at path: String) async throws -> [WorkspaceFileEntry] {
+        _ = await counter.increment()
+        return []
+    }
+
+    func createFile(named name: String, in directory: String) async throws {
+        await gate.suspend()
+    }
+
+    func createDirectory(named name: String, in directory: String) async throws {
+        await gate.suspend()
+    }
+}
+
+private actor FilesListCounter {
+    private(set) var value = 0
+
+    func increment() -> Int {
+        value += 1
+        return value
+    }
+}
+
+private struct CountingWorkspaceFilesystem: WorkspaceFilesystem {
+    let descriptor: WorkspaceDescriptor
+    let counter: FilesListCounter
+
+    func listDirectory(at path: String) async throws -> [WorkspaceFileEntry] {
+        let generation = await counter.increment()
+        return [.init(
+            path: "\(path)/generation-\(generation).txt",
+            name: "generation-\(generation).txt",
+            isDirectory: false
+        )]
+    }
+
+    func createFile(named name: String, in directory: String) async throws {}
+
+    func createDirectory(named name: String, in directory: String) async throws {}
 }

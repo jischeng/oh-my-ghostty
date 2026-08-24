@@ -19,6 +19,7 @@ const encoding = @import("osc/encoding.zig");
 
 pub const color = parsers.color;
 pub const semantic_prompt = parsers.semantic_prompt;
+pub const context_signal = parsers.context_signal;
 
 const log = std.log.scoped(.osc);
 

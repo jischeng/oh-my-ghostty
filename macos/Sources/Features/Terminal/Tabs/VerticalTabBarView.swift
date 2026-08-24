@@ -332,6 +332,19 @@ struct GhosttyTabIconContext {
     let tabID: UUID
     let title: String
     let activity: TabActivity?
+    let defaultIcon: GhosttyTabIcon?
+
+    init(
+        tabID: UUID,
+        title: String,
+        activity: TabActivity?,
+        defaultIcon: GhosttyTabIcon? = nil
+    ) {
+        self.tabID = tabID
+        self.title = title
+        self.activity = activity
+        self.defaultIcon = defaultIcon
+    }
 }
 
 protocol GhosttyTabIconProviding {
@@ -346,7 +359,7 @@ struct DefaultGhosttyTabIconProvider: GhosttyTabIconProviding {
             case .bundledAsset: .asset(icon.name)
             }
         }
-        return .systemSymbol("terminal")
+        return context.defaultIcon ?? .systemSymbol("terminal")
     }
 }
 
@@ -718,21 +731,23 @@ struct TerminalTabSidebarView: View {
         hovered: Bool,
         activity: TabActivity?
     ) -> GhosttyTabPresentation {
-        let workspace = tab.workspaceDescriptor
-        let resolvedTitle = workspace?.presentationTitle ?? VerticalTabTitleResolver.resolve(
-            explicitTitle: tab.titleOverride,
-            terminalTitle: surface.title,
-            workingDirectory: surface.pwd
+        let session = tab.paneSessionContext(for: surface) ?? .init(
+            workingDirectory: surface.pwd,
+            terminalTitle: surface.title
         )
+        let resolvedTitle = tab.titleOverride ?? session.presentationTitle
         let context = GhosttyTabIconContext(
             tabID: tab.tabSessionID,
             title: resolvedTitle,
-            activity: activity
+            activity: activity,
+            defaultIcon: session.workspace?.icon ?? .systemSymbol(
+                session.tabIconSystemName
+            )
         )
         return .init(
             title: resolvedTitle,
             shortcut: settings.showShortcutLabels ? tab.tabShortcutLabel(for: index) : nil,
-            icon: iconProvider.icon(for: context) ?? workspace?.icon ?? .systemSymbol("terminal"),
+            icon: iconProvider.icon(for: context) ?? .systemSymbol("terminal"),
             activity: activity,
             selected: selected,
             hovered: hovered
@@ -1200,14 +1215,12 @@ private struct VerticalTabRow: View {
     let hoverChanged: (Bool) -> Void
 
     private var livePresentation: GhosttyTabPresentation {
-        let resolved = controller.workspaceDescriptor?.presentationTitle ??
-            VerticalTabTitleResolver.resolve(
-                explicitTitle: controller.titleOverride,
-                terminalTitle: surface.title,
-                workingDirectory: surface.pwd
-            )
+        let session = controller.paneSessionContext(for: surface) ?? .init(
+            workingDirectory: surface.pwd,
+            terminalTitle: surface.title
+        )
         return .init(
-            title: resolved,
+            title: controller.titleOverride ?? session.presentationTitle,
             shortcut: presentation.shortcut,
             icon: presentation.icon,
             activity: presentation.activity,

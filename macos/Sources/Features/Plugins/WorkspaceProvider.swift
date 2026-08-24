@@ -1,5 +1,164 @@
 import Foundation
 
+struct PaneSessionContext: Equatable, Sendable {
+    struct Local: Equatable, Sendable {
+        var workingDirectory: String?
+        var terminalTitle: String
+    }
+
+    struct SSH: Equatable, Sendable {
+        let connectionID: String
+        let alias: String
+    }
+
+    enum State: Equatable, Sendable {
+        case local
+        case sshConnecting(SSH)
+        case sshReady(SSH, workingDirectory: String)
+    }
+
+    private(set) var revision: UInt64 = 0
+    private(set) var local: Local
+    private(set) var state: State = .local
+    private var staleRemoteTerminalTitle: String?
+
+    init(workingDirectory: String?, terminalTitle: String) {
+        self.local = .init(
+            workingDirectory: workingDirectory,
+            terminalTitle: terminalTitle
+        )
+        self.staleRemoteTerminalTitle = nil
+    }
+
+    var workingDirectory: String? {
+        switch state {
+        case .local, .sshConnecting:
+            local.workingDirectory
+        case .sshReady(_, let workingDirectory):
+            workingDirectory
+        }
+    }
+
+    var workspace: WorkspaceDescriptor? {
+        guard case .sshReady(let ssh, let workingDirectory) = state else {
+            return nil
+        }
+        return SSHPlugin.workspace(
+            alias: ssh.alias,
+            workingDirectory: workingDirectory
+        )
+    }
+
+    var presentationTitle: String {
+        switch state {
+        case .local, .sshConnecting:
+            if !local.terminalTitle.isEmpty { return local.terminalTitle }
+            return local.workingDirectory.map(WorkspacePathPresentation.folderName) ?? "Terminal"
+        case .sshReady(let ssh, let workingDirectory):
+            return "\(ssh.alias) \(workingDirectory)"
+        }
+    }
+
+    var tabIconSystemName: String {
+        if case .sshReady = state { return "cloud" }
+        return "terminal"
+    }
+
+    mutating func updateLocalMetadata(
+        workingDirectory: String?,
+        terminalTitle: String
+    ) {
+        guard case .local = state else { return }
+        let acceptsTitle = staleRemoteTerminalTitle == nil ||
+            staleRemoteTerminalTitle != terminalTitle
+        if acceptsTitle { staleRemoteTerminalTitle = nil }
+        let next = Local(
+            workingDirectory: workingDirectory ?? local.workingDirectory,
+            terminalTitle: acceptsTitle && !terminalTitle.isEmpty
+                ? terminalTitle
+                : local.terminalTitle
+        )
+        guard next != local else { return }
+        local = next
+        revision &+= 1
+    }
+
+    mutating func apply(
+        _ signal: Ghostty.ContextSignal,
+        currentWorkingDirectory: String?,
+        currentTerminalTitle: String
+    ) {
+        guard signal.id.hasPrefix("omg-ssh-") else { return }
+        let metadata = Self.metadata(signal.metadata)
+
+        switch signal.action {
+        case .start:
+            guard metadata["type"] == "remote",
+                  let alias = metadata["targethost"],
+                  SSHPlugin.validAlias(alias) else { return }
+            let ssh = SSH(connectionID: signal.id, alias: alias)
+            let isCurrentConnection: Bool = switch state {
+            case .sshConnecting(let active), .sshReady(let active, _):
+                active.connectionID == signal.id
+            case .local:
+                false
+            }
+            if !isCurrentConnection, case .local = state {
+                local = .init(
+                    workingDirectory: currentWorkingDirectory ?? local.workingDirectory,
+                    terminalTitle: currentTerminalTitle.isEmpty
+                        ? local.terminalTitle
+                        : currentTerminalTitle
+                )
+            }
+            if let workingDirectory = metadata["cwd"]?.removingPercentEncoding,
+               !workingDirectory.isEmpty {
+                state = .sshReady(ssh, workingDirectory: workingDirectory)
+            } else {
+                state = .sshConnecting(ssh)
+            }
+            revision &+= 1
+
+        case .end:
+            let activeID: String? = switch state {
+            case .local:
+                nil
+            case .sshConnecting(let ssh), .sshReady(let ssh, _):
+                ssh.connectionID
+            }
+            guard activeID == signal.id else { return }
+            if let workingDirectory = metadata["cwd"]?.removingPercentEncoding,
+               !workingDirectory.isEmpty {
+                local.workingDirectory = workingDirectory
+            }
+            staleRemoteTerminalTitle = currentTerminalTitle
+            state = .local
+            revision &+= 1
+        }
+    }
+
+    private static func metadata(_ raw: String) -> [String: String] {
+        raw.split(separator: ";").reduce(into: [:]) { result, field in
+            let parts = field.split(
+                separator: "=",
+                maxSplits: 1,
+                omittingEmptySubsequences: false
+            )
+            guard parts.count == 2,
+                  !parts[0].isEmpty,
+                  !parts[1].isEmpty else { return }
+            result[String(parts[0])] = String(parts[1])
+        }
+    }
+}
+
+enum WorkspacePathPresentation {
+    static func folderName(_ path: String) -> String {
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        return url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent
+    }
+}
+
 /// Generic workspace identity shared by Local, SSH, and future remote providers.
 struct WorkspaceDescriptor: Equatable, Sendable {
     enum Kind: String, Sendable {
@@ -22,7 +181,7 @@ struct WorkspaceDescriptor: Equatable, Sendable {
     var presentationTitle: String {
         switch kind {
         case .local: workingDirectory
-        case .ssh: "☁ \(displayName) \(workingDirectory)"
+        case .ssh: "\(displayName) \(workingDirectory)"
         }
     }
 }
@@ -58,7 +217,7 @@ struct LocalWorkspaceFilesystem: WorkspaceFilesystem {
         self.descriptor = .init(
             kind: .local,
             id: "local",
-            displayName: url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent,
+            displayName: WorkspacePathPresentation.folderName(url.path),
             workingDirectory: url.path
         )
     }
@@ -123,6 +282,22 @@ struct LocalWorkspaceFilesystem: WorkspaceFilesystem {
     }
 }
 
+struct UnavailableWorkspaceFilesystem: WorkspaceFilesystem {
+    let descriptor: WorkspaceDescriptor
+
+    func listDirectory(at path: String) async throws -> [WorkspaceFileEntry] {
+        throw WorkspaceFilesystemError.unavailable
+    }
+
+    func createFile(named name: String, in directory: String) async throws {
+        throw WorkspaceFilesystemError.unavailable
+    }
+
+    func createDirectory(named name: String, in directory: String) async throws {
+        throw WorkspaceFilesystemError.unavailable
+    }
+}
+
 struct SSHHostConfiguration: Equatable, Sendable {
     let alias: String
     let hostname: String
@@ -133,10 +308,6 @@ struct SSHHostConfiguration: Equatable, Sendable {
     var workspaceID: String { "ssh:\(alias)" }
 
     var icon: GhosttyTabIcon { .systemSymbol("cloud") }
-
-    func displayTitle(for workingDirectory: String) -> String {
-        "☁ \(alias) \(workingDirectory)"
-    }
 }
 
 /// Reads aliases through the user's OpenSSH configuration without owning keys,
@@ -168,6 +339,12 @@ struct SSHPlugin: Sendable {
         )
     }
 
+    static func validAlias(_ alias: String) -> Bool {
+        !alias.isEmpty && alias.allSatisfy { character in
+            character.isLetter || character.isNumber || ".-_".contains(character)
+        }
+    }
+
     static func configurations(
         at url: URL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".ssh/config")
@@ -178,7 +355,7 @@ struct SSHPlugin: Sendable {
         var values: [String: String] = [:]
 
         func flush() {
-            for alias in aliases where !alias.contains("*") && !alias.contains("?") {
+            for alias in aliases where validAlias(alias) {
                 guard let hostname = values["hostname"] else { continue }
                 result.append(.init(
                     alias: alias,
@@ -233,53 +410,26 @@ struct SSHPlugin: Sendable {
             workingDirectory: workingDirectory
         )
     }
-
-    static func workspace(
-        forTitle title: String,
-        workingDirectory: String
-    ) -> WorkspaceDescriptor? {
-        workspace(
-            forTitle: title,
-            workingDirectory: workingDirectory,
-            configurations: configurations()
-        )
-    }
-
-    static func workspace(
-        forTitle title: String,
-        workingDirectory: String,
-        configurations: [SSHHostConfiguration]
-    ) -> WorkspaceDescriptor? {
-        guard isEnabled else { return nil }
-        let normalizedTitle = title.lowercased()
-        for host in configurations {
-            let candidates = [
-                host.alias.lowercased(),
-                host.hostname.lowercased(),
-                host.user.map { "\($0.lowercased())@\(host.hostname.lowercased())" },
-            ].compactMap { $0 }
-            if candidates.contains(where: { normalizedTitle.contains($0) }) {
-                return .init(
-                    kind: .ssh,
-                    id: host.workspaceID,
-                    displayName: host.alias,
-                    workingDirectory: workingDirectory
-                )
-            }
-        }
-        return nil
-    }
 }
 
 enum WorkspaceFilesystemFactory {
     static func make(for context: InspectorPaneContext) -> any WorkspaceFilesystem {
-        if let workspace = context.workspace,
-           workspace.kind == .ssh,
-           let host = SSHPlugin.configuration(alias: workspace.displayName) {
+        if let workspace = context.workspace, workspace.kind == .ssh {
+            guard let host = SSHPlugin.configuration(alias: workspace.displayName) else {
+                return UnavailableWorkspaceFilesystem(descriptor: workspace)
+            }
             return SSHWorkspaceFilesystem(
                 host: host,
                 workingDirectory: workspace.workingDirectory
             )
+        }
+        if case .sshReady(let ssh, let workingDirectory) = context.session.state {
+            return UnavailableWorkspaceFilesystem(descriptor: .init(
+                kind: .ssh,
+                id: "ssh:\(ssh.alias)",
+                displayName: ssh.alias,
+                workingDirectory: workingDirectory
+            ))
         }
         return LocalWorkspaceFilesystem(
             workingDirectory: context.workingDirectory ?? "/"

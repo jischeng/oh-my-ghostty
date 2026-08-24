@@ -128,6 +128,7 @@ pub const Action = union(Key) {
     kitty_color_report: kitty.color.OSC,
     color_operation: ColorOperation,
     semantic_prompt: SemanticPrompt,
+    context_signal: osc.context_signal.Command,
 
     pub const Key = lib.Enum(
         lib.target,
@@ -227,6 +228,7 @@ pub const Action = union(Key) {
             "kitty_color_report",
             "color_operation",
             "semantic_prompt",
+            "context_signal",
         },
     );
 
@@ -2551,6 +2553,10 @@ pub fn Stream(comptime H: type) type {
                     self.handler.vt(.progress_report, v);
                 },
 
+                .context_signal => |v| {
+                    self.handler.vt(.context_signal, v);
+                },
+
                 .conemu_sleep,
                 .conemu_show_message_box,
                 .conemu_change_tab_title,
@@ -2563,7 +2569,6 @@ pub fn Stream(comptime H: type) type {
                 .kitty_text_sizing,
                 .kitty_clipboard_protocol,
                 .kitty_dnd_protocol,
-                .context_signal,
                 => {
                     log.debug("unimplemented OSC callback: {}", .{cmd});
                 },

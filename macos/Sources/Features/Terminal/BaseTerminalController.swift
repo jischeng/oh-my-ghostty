@@ -961,8 +961,16 @@ class BaseTerminalController: NSWindowController,
                 titleSurface.$bell,
                 statusPublisher
             )
-            .map { [weak self] in
-                self?.computeTitle(title: $0, bell: $1, status: $2) ?? ""
+            .map { [weak self, weak titleSurface] in
+                guard let self, let titleSurface else { return "" }
+                return self.computeTitle(
+                    title: self.presentedTerminalTitle(
+                        for: titleSurface,
+                        terminalTitle: $0
+                    ),
+                    bell: $1,
+                    status: $2
+                )
             }
             .sink { [weak self] in self?.titleDidChange(to: $0) }
             .store(in: &focusedSurfaceCancellables)
@@ -970,6 +978,28 @@ class BaseTerminalController: NSWindowController,
             // There is no surface to listen to titles for.
             titleDidChange(to: "👻")
         }
+    }
+
+    func presentedTerminalTitle(
+        for surface: Ghostty.SurfaceView,
+        terminalTitle: String
+    ) -> String {
+        terminalTitle
+    }
+
+    func refreshPresentedTerminalTitle() {
+        guard let surface = focusedSurface ?? surfaceTree.first else { return }
+        let status = activitySessionID.flatMap {
+            (NSApp.delegate as? AppDelegate)?.tabActivities.activity(for: $0)
+        }
+        titleDidChange(to: computeTitle(
+            title: presentedTerminalTitle(
+                for: surface,
+                terminalTitle: surface.title
+            ),
+            bell: surface.bell,
+            status: status
+        ))
     }
 
     private func computeTitle(

@@ -617,6 +617,22 @@ struct VerticalTabsIntegrationTests {
         #expect(controllers.allSatisfy { $0.sidebarIsShowing })
         #expect(controllers.allSatisfy { $0.sidebarWidth == 340 })
         try await Task.sleep(for: .milliseconds(1_200))
+        let rapidToggleSurfaceSizes = controllers.map(surfaceSize)
+
+        for _ in 0..<4 {
+            eighth.setSidebarVisible(false)
+            try await Task.sleep(for: .milliseconds(40))
+            eighth.setSidebarVisible(true)
+            try await Task.sleep(for: .milliseconds(40))
+            eighth.toggleInspectorPane()
+            try await Task.sleep(for: .milliseconds(40))
+            eighth.toggleInspectorPane()
+            try await Task.sleep(for: .milliseconds(40))
+        }
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(eighth.sidebarIsShowing)
+        #expect(!eighth.tabLayoutState.isInspectorVisible)
+        #expect(controllers.map(surfaceSize) == rapidToggleSurfaceSizes)
 
         try await applyConfig(
             "macos-tab-layout = vertical\nbackground = #f3f3f3\nforeground = #202020\n",

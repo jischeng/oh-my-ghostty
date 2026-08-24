@@ -7,6 +7,7 @@ const diagnostics = @import("diagnostics.zig");
 const Action = @import("ghostty.zig").Action;
 const DiskCache = @import("ssh_cache.zig").DiskCache;
 const internal_os = @import("../os/main.zig");
+const string_encoding = @import("../os/string_encoding.zig");
 const terminfopkg = @import("../terminfo/main.zig");
 const global = @import("../global.zig");
 
@@ -188,6 +189,11 @@ pub fn run(alloc_gpa: Allocator) !u8 {
         try cli_args.parse(Options, alloc_gpa, &opts, &iter);
     }
 
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_file: std.Io.File = .stdout();
+    var stdout_writer = stdout_file.writer(global.io(), &stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
     var stderr_buffer: [1024]u8 = undefined;
     var stderr_file: std.Io.File = .stderr();
     var stderr_writer = stderr_file.writer(global.io(), &stderr_buffer);
@@ -212,8 +218,9 @@ pub fn run(alloc_gpa: Allocator) !u8 {
         return 2;
     }
 
-    const result = runInner(alloc_gpa, &opts, stderr);
+    const result = runInner(alloc_gpa, &opts, stdout, stderr);
 
+    stdout.flush() catch {};
     stderr.flush() catch {};
     return result;
 }
@@ -221,6 +228,7 @@ pub fn run(alloc_gpa: Allocator) !u8 {
 fn runInner(
     gpa: Allocator,
     opts: *const Options,
+    stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
 ) !u8 {
     var arena = ArenaAllocator.init(gpa);
@@ -288,22 +296,46 @@ fn runInner(
         };
     };
 
-    // For a simple interactive destination, detect the remote login shell and
-    // attach a transient cwd reporter. This requires no remote service or
-    // installation: the shell emits standard OSC 7 whenever its prompt is
-    // rendered, so OMG's focused Surface and Workspace provider stay current.
-    const remote_command: ?[]const u8 = if (opts._ssh_args.items.len == 1) remote: {
+    // A simple interactive Fish destination can provide a typed pane lifecycle
+    // and remote cwd without a remote service. +ssh owns the final OpenSSH child
+    // lifetime; the transient remote prompt only updates the active context.
+    const lifecycle: ?struct {
+        id: []const u8,
+        label: []const u8,
+        local_cwd: []const u8,
+        remote_command: []const u8,
+    } = if (opts._ssh_args.items.len == 1) lifecycle: {
+        const label = sshDestinationLabel(opts._ssh_args.items[0]) orelse
+            break :lifecycle null;
         const shell = detectRemoteShell(
             alloc,
             opts.ssh,
             opts._ssh_args.items,
-        ) orelse break :remote null;
-        break :remote remoteShellCommand(
+        ) orelse break :lifecycle null;
+        const id = std.fmt.allocPrint(
+            alloc,
+            "omg-ssh-{d}",
+            .{std.Io.Timestamp.now(global.io(), .real).toNanoseconds()},
+        ) catch break :lifecycle null;
+        const remote_command = remoteShellCommand(
             alloc,
             shell,
-            opts._ssh_args.items[0],
-        );
+            label,
+            id,
+        ) orelse break :lifecycle null;
+        const local_cwd = std.Io.Dir.cwd().realPathFileAlloc(
+            global.io(),
+            ".",
+            alloc,
+        ) catch break :lifecycle null;
+        break :lifecycle .{
+            .id = id,
+            .label = label,
+            .local_cwd = local_cwd,
+            .remote_command = remote_command,
+        };
     } else null;
+    const remote_command = if (lifecycle) |value| value.remote_command else null;
 
     // Build the full argv: [ssh, ...our opts, ...user args, ...remote command]
     const env_opts: []const []const u8 = if (opts.@"forward-env") env_opts: {
@@ -331,10 +363,26 @@ fn runInner(
     });
     verbosePrint(opts, stderr, "exec: {f}", .{Joined{ .items = argv }});
 
-    const exit_code = childExec(argv) catch |err| {
+    var exit_code: u8 = 1;
+    var lifecycle_ended = false;
+    if (lifecycle) |value| {
+        writeSessionStart(stdout, value.id, value.label) catch {};
+        stdout.flush() catch {};
+    }
+    defer if (!lifecycle_ended) if (lifecycle) |value| {
+        writeSessionEnd(stdout, value.id, exit_code, value.local_cwd) catch {};
+        stdout.flush() catch {};
+    };
+
+    exit_code = childExec(argv) catch |err| {
         try stderr.print("Error: failed to run {s}: {t}\n", .{ argv[0], err });
         return 1;
     };
+    if (lifecycle) |value| {
+        writeSessionEnd(stdout, value.id, exit_code, value.local_cwd) catch {};
+        stdout.flush() catch {};
+        lifecycle_ended = true;
+    }
     verbosePrint(opts, stderr, "exit: {d}", .{exit_code});
 
     // Attempt to cache (if needed) on a successful ssh execution.
@@ -454,14 +502,7 @@ fn detectRemoteShell(
     return std.mem.trim(u8, result.stdout, &std.ascii.whitespace);
 }
 
-fn remoteShellCommand(
-    alloc: Allocator,
-    shell: []const u8,
-    destination: []const u8,
-) ?[]const u8 {
-    const name = std.fs.path.basename(shell);
-    if (!std.mem.eql(u8, name, "fish")) return null;
-
+fn sshDestinationLabel(destination: []const u8) ?[]const u8 {
     const label = if (std.mem.lastIndexOfScalar(u8, destination, '@')) |index|
         destination[index + 1 ..]
     else
@@ -471,30 +512,87 @@ fn remoteShellCommand(
         'a'...'z', 'A'...'Z', '0'...'9', '.', '_', '-' => {},
         else => return null,
     };
+    return label;
+}
+
+fn remoteShellCommand(
+    alloc: Allocator,
+    shell: []const u8,
+    label: []const u8,
+    context_id: []const u8,
+) ?[]const u8 {
+    const name = std.fs.path.basename(shell);
+    if (!std.mem.eql(u8, name, "fish")) return null;
 
     return std.fmt.allocPrint(
         alloc,
-        \\exec fish -l -C 'function __omg_report_pwd --on-event fish_prompt; printf "\e]7;file://localhost%s\a\e]2;OMG SSH {s} %s\a" "$PWD" "$PWD"; end'
+        \\exec fish -l -C 'function __omg_report_pwd --on-event fish_prompt; set -l __omg_cwd (string escape --style=url "$PWD"); printf "\e]3008;start={s};type=remote;targethost={s};cwd=%s\a\e]7;file://localhost%s\a" "$__omg_cwd" "$__omg_cwd"; end'
     ,
-        .{label},
+        .{ context_id, label },
     ) catch null;
+}
+
+fn writeSessionStart(
+    writer: *std.Io.Writer,
+    context_id: []const u8,
+    label: []const u8,
+) !void {
+    try writer.print(
+        "\x1b]3008;start={s};type=remote;targethost={s}\x07",
+        .{ context_id, label },
+    );
+}
+
+fn writeSessionEnd(
+    writer: *std.Io.Writer,
+    context_id: []const u8,
+    exit_code: u8,
+    local_cwd: []const u8,
+) !void {
+    try writer.print(
+        "\x1b]3008;end={s};exit={s};status={d};cwd=",
+        .{ context_id, if (exit_code == 0) "success" else "failure", exit_code },
+    );
+    try string_encoding.urlPercentEncode(writer, local_cwd);
+    try writer.writeAll("\x07\x1b]7;file://localhost");
+    try string_encoding.urlPercentEncode(writer, local_cwd);
+    try writer.writeByte('\x07');
 }
 
 test remoteShellCommand {
     const testing = std.testing;
-    try testing.expect(remoteShellCommand(testing.allocator, "/bin/bash", "cloud") == null);
-    try testing.expect(remoteShellCommand(testing.allocator, "fish", "bad;host") == null);
+    try testing.expect(sshDestinationLabel("user@cloud").?.len == "cloud".len);
+    try testing.expect(sshDestinationLabel("bad;host") == null);
+    try testing.expect(remoteShellCommand(
+        testing.allocator,
+        "/bin/bash",
+        "cloud",
+        "omg-ssh-1",
+    ) == null);
 
     const command = remoteShellCommand(
         testing.allocator,
         "/usr/bin/fish",
-        "user@cloud",
+        "cloud",
+        "omg-ssh-1",
     ).?;
     defer testing.allocator.free(command);
-    try testing.expect(std.mem.indexOf(u8, command, "OSC") == null);
+    try testing.expect(std.mem.indexOf(u8, command, "]3008;start=omg-ssh-1") != null);
+    try testing.expect(std.mem.indexOf(u8, command, "targethost=cloud") != null);
     try testing.expect(std.mem.indexOf(u8, command, "]7;") != null);
     try testing.expect(std.mem.indexOf(u8, command, "file://localhost") != null);
-    try testing.expect(std.mem.indexOf(u8, command, "OMG SSH cloud") != null);
+}
+
+test "session end emits typed lifecycle and local cwd resync" {
+    const testing = std.testing;
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try writeSessionEnd(&writer, "omg-ssh-1", 255, "/Users/test/my project");
+    const output = buffer[0..writer.end];
+    try testing.expect(std.mem.indexOf(u8, output, "]3008;end=omg-ssh-1") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "exit=failure;status=255") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "cwd=/Users/test/my%20project") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "]7;file://localhost/Users/test/my%20project") != null);
 }
 
 fn resolveDestination(

@@ -534,6 +534,13 @@ extension Ghostty {
             case GHOSTTY_ACTION_PWD:
                 pwdChanged(app, target: target, v: action.action.pwd)
 
+            case GHOSTTY_ACTION_CONTEXT_SIGNAL:
+                contextSignalChanged(
+                    app,
+                    target: target,
+                    v: action.action.context_signal
+                )
+
             case GHOSTTY_ACTION_OPEN_CONFIG:
                 openConfig(app)
 
@@ -1796,6 +1803,39 @@ extension Ghostty {
                 guard let surfaceView = self.surfaceView(from: surface) else { return }
                 guard let pwd = String(cString: v.pwd!, encoding: .utf8) else { return }
                 surfaceView.pwd = pwd
+
+            default:
+                assertionFailure()
+            }
+        }
+
+        private static func contextSignalChanged(
+            _ app: ghostty_app_t,
+            target: ghostty_target_s,
+            v: ghostty_action_context_signal_s
+        ) {
+            switch target.tag {
+            case GHOSTTY_TARGET_APP:
+                Ghostty.logger.warning("context signal does nothing with an app target")
+
+            case GHOSTTY_TARGET_SURFACE:
+                guard let surface = target.target.surface,
+                      let surfaceView = self.surfaceView(from: surface),
+                      let id = String(cString: v.id, encoding: .utf8),
+                      let metadata = String(cString: v.metadata, encoding: .utf8) else {
+                    return
+                }
+                let action: Ghostty.ContextSignal.Action? = switch v.action {
+                case GHOSTTY_CONTEXT_SIGNAL_START: .start
+                case GHOSTTY_CONTEXT_SIGNAL_END: .end
+                default: nil
+                }
+                guard let action else { return }
+                surfaceView.contextSignal = .init(
+                    action: action,
+                    id: id,
+                    metadata: metadata
+                )
 
             default:
                 assertionFailure()

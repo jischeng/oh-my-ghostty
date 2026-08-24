@@ -88,44 +88,29 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// Opaque semantic separator derived from the current terminal background.
     @Published private(set) var sidebarDividerColor: Color
 
-    /// Generic workspace metadata resolved by a workspace provider. The terminal
-    /// UI consumes this without knowing whether it is local or remote.
-    var workspaceDescriptor: WorkspaceDescriptor? {
-        guard let surface = focusedSurface ?? surfaceTree.first,
-              let workingDirectory = surface.pwd else { return nil }
-        guard SSHPlugin.isEnabled else {
-            workspaceIdentityBySurfaceID.removeValue(forKey: surface.id)
-            return nil
-        }
-        if let existing = workspaceIdentityBySurfaceID[surface.id] {
-            return .init(
-                kind: existing.kind,
-                id: existing.id,
-                displayName: existing.displayName,
-                workingDirectory: workingDirectory
-            )
-        }
+    /// Canonical pane session state. Tab title/icon and Inspector/Files all
+    /// consume this map rather than independently inferring SSH from titles.
+    @Published private(set) var paneSessionContexts: [UUID: PaneSessionContext] = [:]
+    private var paneSessionObservers: [UUID: Set<AnyCancellable>] = [:]
 
-        let title = titleOverride ?? surface.title
-        let workspace: WorkspaceDescriptor?
-        if let alias = ProcessInfo.processInfo.environment["OMG_SSH_ALIAS"] {
-            workspace = SSHPlugin.workspace(
-                alias: alias,
-                workingDirectory: workingDirectory
-            )
-        } else {
-            workspace = SSHPlugin.workspace(
-                forTitle: title,
-                workingDirectory: workingDirectory
-            )
-        }
-        if let workspace {
-            workspaceIdentityBySurfaceID[surface.id] = workspace
-        }
-        return workspace
+    var focusedPaneSessionContext: PaneSessionContext? {
+        paneSessionContext(for: focusedSurface ?? surfaceTree.first)
     }
 
-    private var workspaceIdentityBySurfaceID: [UUID: WorkspaceDescriptor] = [:]
+    /// Generic workspace metadata resolved from the canonical focused session.
+    var workspaceDescriptor: WorkspaceDescriptor? {
+        focusedPaneSessionContext?.workspace
+    }
+
+    func paneSessionContext(
+        for surface: Ghostty.SurfaceView?
+    ) -> PaneSessionContext? {
+        guard let surface else { return nil }
+        return paneSessionContexts[surface.id] ?? .init(
+            workingDirectory: surface.pwd,
+            terminalTitle: surface.title
+        )
+    }
     private weak var observedVerticalTabGroup: NSWindowTabGroup?
     private var verticalTabWindowsObservation: NSKeyValueObservation?
     private var verticalTabSelectionObservation: NSKeyValueObservation?
@@ -234,6 +219,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             name: .ghosttyCloseWindow,
             object: nil
         )
+        synchronizePaneSessionContexts()
     }
 
     required init?(coder: NSCoder) {
@@ -279,7 +265,77 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         return configuration
     }
 
+    private func synchronizePaneSessionContexts() {
+        let surfaces = surfaceTree.map { $0 }
+        let activeIDs = Set(surfaces.map(\.id))
+        paneSessionObservers = paneSessionObservers.filter { activeIDs.contains($0.key) }
+        paneSessionContexts = paneSessionContexts.filter { activeIDs.contains($0.key) }
+
+        for surface in surfaces where paneSessionObservers[surface.id] == nil {
+            paneSessionContexts[surface.id] = .init(
+                workingDirectory: surface.pwd,
+                terminalTitle: surface.title
+            )
+            var observers: Set<AnyCancellable> = []
+
+            Publishers.CombineLatest(surface.$pwd, surface.$title)
+                .dropFirst()
+                .sink { [weak self, weak surface] pwd, title in
+                    guard let self, let surface else { return }
+                    var context = paneSessionContexts[surface.id] ?? .init(
+                        workingDirectory: pwd,
+                        terminalTitle: title
+                    )
+                    context.updateLocalMetadata(
+                        workingDirectory: pwd,
+                        terminalTitle: title
+                    )
+                    updatePaneSessionContext(context, for: surface.id)
+                }
+                .store(in: &observers)
+
+            surface.$contextSignal
+                .compactMap { $0 }
+                .sink { [weak self, weak surface] signal in
+                    guard let self, let surface else { return }
+                    var context = paneSessionContexts[surface.id] ?? .init(
+                        workingDirectory: surface.pwd,
+                        terminalTitle: surface.title
+                    )
+                    context.apply(
+                        signal,
+                        currentWorkingDirectory: surface.pwd,
+                        currentTerminalTitle: surface.title
+                    )
+                    updatePaneSessionContext(context, for: surface.id)
+                }
+                .store(in: &observers)
+
+            paneSessionObservers[surface.id] = observers
+        }
+    }
+
+    private func updatePaneSessionContext(
+        _ context: PaneSessionContext,
+        for surfaceID: UUID
+    ) {
+        guard paneSessionContexts[surfaceID] != context else { return }
+        var next = paneSessionContexts
+        next[surfaceID] = context
+        paneSessionContexts = next
+        if (focusedSurface ?? surfaceTree.first)?.id == surfaceID {
+            refreshPresentedTerminalTitle()
+        }
+    }
+
     // MARK: Base Controller Overrides
+
+    override func presentedTerminalTitle(
+        for surface: Ghostty.SurfaceView,
+        terminalTitle: String
+    ) -> String {
+        paneSessionContext(for: surface)?.presentationTitle ?? terminalTitle
+    }
 
     override func surfaceTreeDidChange(from: SplitTree<Ghostty.SurfaceView>, to: SplitTree<Ghostty.SurfaceView>) {
         super.surfaceTreeDidChange(from: from, to: to)
@@ -287,10 +343,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // Whenever our surface tree changes in any way (new split, close split, etc.)
         // we want to invalidate our state.
         invalidateRestorableState()
-        let activeSurfaceIDs = Set(to.map(\.id))
-        workspaceIdentityBySurfaceID = workspaceIdentityBySurfaceID.filter {
-            activeSurfaceIDs.contains($0.key)
-        }
+        synchronizePaneSessionContexts()
 
         // Update our zoom state
         if let window = window as? TerminalWindow {

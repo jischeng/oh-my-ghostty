@@ -12,6 +12,7 @@ final class BuiltInFilesInspectorProvider {
 
     private static let rootTaskID = "__root__"
     private static let loadingTaskID = "__loading__"
+    private static let mutationTaskID = "__mutation__"
 
     private struct BrowserState {
         var context: InspectorPaneContext
@@ -28,11 +29,17 @@ final class BuiltInFilesInspectorProvider {
     }
 
     private let registry: InspectorRegistry
+    private let filesystemFactory: (InspectorPaneContext) -> any WorkspaceFilesystem
     private var states: [UUID: BrowserState] = [:]
     private var loadTasks: [LoadKey: Task<Void, Never>] = [:]
 
-    init(registry: InspectorRegistry) {
+    init(
+        registry: InspectorRegistry,
+        filesystemFactory: @escaping (InspectorPaneContext) -> any WorkspaceFilesystem =
+            WorkspaceFilesystemFactory.make
+    ) {
         self.registry = registry
+        self.filesystemFactory = filesystemFactory
     }
 
     func register() throws {
@@ -53,7 +60,10 @@ final class BuiltInFilesInspectorProvider {
 
     private func handle(_ event: InspectorPaneLifecycleEvent) {
         guard case .appeared(let context) = event else {
-            Self.logger.debug("Files pane disappeared")
+            if case .disappeared(let previousContext) = event {
+                cancelTasks(tabID: previousContext.tabID)
+                Self.logger.debug("Files pane disappeared tab=\(previousContext.tabID.uuidString, privacy: .public)")
+            }
             return
         }
         Self.logger.debug("Files pane appeared tab=\(context.tabID.uuidString, privacy: .public) cwd=\(context.workingDirectory ?? "<none>", privacy: .public)")
@@ -160,10 +170,11 @@ final class BuiltInFilesInspectorProvider {
     }
 
     private func state(for context: InspectorPaneContext) -> BrowserState {
-        let filesystem = WorkspaceFilesystemFactory.make(for: context)
+        let filesystem = filesystemFactory(context)
         let rootPath = filesystem.descriptor.workingDirectory
         if var state = states[context.tabID], state.rootPath == rootPath,
-           state.filesystem.descriptor == filesystem.descriptor {
+           state.filesystem.descriptor == filesystem.descriptor,
+           state.context.session.state == context.session.state {
             state.context = context
             return state
         }
@@ -338,7 +349,21 @@ final class BuiltInFilesInspectorProvider {
             return
         }
         let state = state(for: context)
-        Task { [weak self] in
+        states[context.tabID] = state
+        let expectedDescriptor = state.filesystem.descriptor
+        let expectedSessionState = context.session.state
+        let previousMutationKeys = loadTasks.keys.filter {
+            $0.tabID == context.tabID &&
+                $0.nodeID.hasPrefix(Self.mutationTaskID + ":")
+        }
+        for previousKey in previousMutationKeys {
+            loadTasks.removeValue(forKey: previousKey)?.cancel()
+        }
+        let key = LoadKey(
+            tabID: context.tabID,
+            nodeID: Self.mutationTaskID + ":" + UUID().uuidString
+        )
+        loadTasks[key] = Task { [weak self] in
             do {
                 if directory {
                     try await state.filesystem.createDirectory(
@@ -352,9 +377,23 @@ final class BuiltInFilesInspectorProvider {
                     )
                 }
             } catch {
-                Self.logger.error("Files create failed error=\(error.localizedDescription, privacy: .public)")
+                if !Task.isCancelled {
+                    Self.logger.error("Files create failed error=\(error.localizedDescription, privacy: .public)")
+                }
             }
-            self?.reloadRoot(context: context, reason: directory ? "create-folder" : "create-file")
+            guard !Task.isCancelled,
+                  let self,
+                  let current = states[context.tabID],
+                  current.filesystem.descriptor == expectedDescriptor,
+                  current.context.session.state == expectedSessionState else {
+                self?.loadTasks.removeValue(forKey: key)
+                return
+            }
+            loadTasks.removeValue(forKey: key)
+            reloadRoot(
+                context: current.context,
+                reason: directory ? "create-folder" : "create-file"
+            )
         }
     }
 
@@ -379,7 +418,7 @@ final class BuiltInFilesInspectorProvider {
             let elapsed = ContinuousClock.now - started
             Self.logger.debug("Files root read completed root=\(rootPath, privacy: .public) nodes=\(nodes.count) elapsed=\(elapsed)")
             return .fileTree(.init(
-                rootName: filesystem.descriptor.displayName,
+                rootName: WorkspacePathPresentation.folderName(rootPath),
                 rootPath: rootPath,
                 nodes: nodes
             ))

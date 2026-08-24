@@ -93,20 +93,39 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     var workspaceDescriptor: WorkspaceDescriptor? {
         guard let surface = focusedSurface ?? surfaceTree.first,
               let workingDirectory = surface.pwd else { return nil }
-        let title = titleOverride ?? surface.title
-        if let alias = ProcessInfo.processInfo.environment["OMG_SSH_ALIAS"],
-           let workspace = SSHPlugin.workspace(
-               alias: alias,
-               workingDirectory: workingDirectory
-           ) {
-            return workspace
+        guard SSHPlugin.isEnabled else {
+            workspaceIdentityBySurfaceID.removeValue(forKey: surface.id)
+            return nil
         }
-        return SSHPlugin.workspace(
-            forTitle: title,
-            workingDirectory: workingDirectory
-        )
+        if let existing = workspaceIdentityBySurfaceID[surface.id] {
+            return .init(
+                kind: existing.kind,
+                id: existing.id,
+                displayName: existing.displayName,
+                workingDirectory: workingDirectory
+            )
+        }
+
+        let title = titleOverride ?? surface.title
+        let workspace: WorkspaceDescriptor?
+        if let alias = ProcessInfo.processInfo.environment["OMG_SSH_ALIAS"] {
+            workspace = SSHPlugin.workspace(
+                alias: alias,
+                workingDirectory: workingDirectory
+            )
+        } else {
+            workspace = SSHPlugin.workspace(
+                forTitle: title,
+                workingDirectory: workingDirectory
+            )
+        }
+        if let workspace {
+            workspaceIdentityBySurfaceID[surface.id] = workspace
+        }
+        return workspace
     }
 
+    private var workspaceIdentityBySurfaceID: [UUID: WorkspaceDescriptor] = [:]
     private weak var observedVerticalTabGroup: NSWindowTabGroup?
     private var verticalTabWindowsObservation: NSKeyValueObservation?
     private var verticalTabSelectionObservation: NSKeyValueObservation?
@@ -268,6 +287,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // Whenever our surface tree changes in any way (new split, close split, etc.)
         // we want to invalidate our state.
         invalidateRestorableState()
+        let activeSurfaceIDs = Set(to.map(\.id))
+        workspaceIdentityBySurfaceID = workspaceIdentityBySurfaceID.filter {
+            activeSurfaceIDs.contains($0.key)
+        }
 
         // Update our zoom state
         if let window = window as? TerminalWindow {

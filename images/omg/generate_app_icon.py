@@ -2,32 +2,31 @@
 """Generate the OMG macOS icon set from the maintained 1024px source.
 
 The base keeps Ghostty's recognizable terminal/ghost visual language. OMG adds
-an opaque cloud terminal badge on the right so titlebar, Dock, Finder, and
+a simple opaque foreground cloud so titlebar, Dock, Finder, and
 transparent/vibrant backgrounds render the same branded mark.
 """
 
 from pathlib import Path
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = Path(__file__).with_name("ghostty-base-1024.png")
 MASTER = Path(__file__).with_name("omg-app-icon-1024.png")
 APPICONSET = ROOT / "macos/Assets.xcassets/OMG.appiconset"
 RUNTIME_IMAGESET = ROOT / "macos/Assets.xcassets/AppIconImage.imageset"
-FONT = Path("/System/Library/Fonts/SFNSMono.ttf")
 
 
 def cloud_mask(size: tuple[int, int]) -> Image.Image:
     mask = Image.new("L", size, 0)
     draw = ImageDraw.Draw(mask)
-    # The cloud sits in front of the ghost's lower-right edge, matching the
+    # The cloud sits in front of the ghost's lower half, matching the
     # supplied brand sketch so the two shapes read as one mark rather than
     # separate stickers.
-    draw.rounded_rectangle((390, 455, 730, 600), radius=72, fill=255)
-    draw.ellipse((370, 425, 490, 545), fill=255)
-    draw.ellipse((430, 385, 565, 535), fill=255)
-    draw.ellipse((520, 405, 655, 545), fill=255)
-    draw.ellipse((610, 435, 750, 565), fill=255)
+    draw.rounded_rectangle((220, 455, 560, 600), radius=72, fill=255)
+    draw.ellipse((200, 425, 320, 545), fill=255)
+    draw.ellipse((260, 385, 395, 535), fill=255)
+    draw.ellipse((350, 405, 485, 545), fill=255)
+    draw.ellipse((440, 435, 580, 565), fill=255)
     return mask
 
 
@@ -40,15 +39,6 @@ def vertical_gradient(size: tuple[int, int], top: tuple[int, ...], bottom: tuple
         for x in range(size[0]):
             pixels[x, y] = color
     return image
-
-
-def draw_centered(draw: ImageDraw.ImageDraw, text: str, center: tuple[int, int], font: ImageFont.FreeTypeFont) -> None:
-    bounds = draw.textbbox((0, 0), text, font=font)
-    width = bounds[2] - bounds[0]
-    height = bounds[3] - bounds[1]
-    origin = (center[0] - width / 2, center[1] - height / 2 - bounds[1])
-    draw.text((origin[0] + 2, origin[1] + 3), text, font=font, fill=(112, 184, 255, 120))
-    draw.text(origin, text, font=font, fill=(8, 35, 91, 255))
 
 
 def generate_master() -> Image.Image:
@@ -84,17 +74,9 @@ def generate_master() -> Image.Image:
 
     highlight = Image.new("RGBA", base.size, (0, 0, 0, 0))
     highlight_draw = ImageDraw.Draw(highlight)
-    highlight_draw.arc((425, 395, 645, 550), 205, 325, fill=(255, 255, 255, 175), width=7)
+    highlight_draw.arc((255, 395, 475, 550), 205, 325, fill=(255, 255, 255, 175), width=7)
     highlight.putalpha(Image.composite(highlight.getchannel("A"), Image.new("L", base.size), mask))
-    base = Image.alpha_composite(base, highlight)
-
-    symbols = Image.new("RGBA", base.size, (0, 0, 0, 0))
-    symbol_draw = ImageDraw.Draw(symbols)
-    font = ImageFont.truetype(str(FONT), 36)
-    draw_centered(symbol_draw, "~  @", (610, 475), font)
-    draw_centered(symbol_draw, "$  *", (610, 525), font)
-    symbols.putalpha(Image.composite(symbols.getchannel("A"), Image.new("L", base.size), mask))
-    return Image.alpha_composite(base, symbols)
+    return Image.alpha_composite(base, highlight)
 
 
 def save_outputs(master: Image.Image) -> None:

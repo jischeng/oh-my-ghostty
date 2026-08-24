@@ -454,7 +454,7 @@ fn remoteShellCommand(shell: []const u8) ?[]const u8 {
     const name = std.fs.path.basename(shell);
     if (std.mem.eql(u8, name, "fish")) {
         return
-        \\exec fish -l -C 'function __omg_report_pwd --on-event fish_prompt; printf "\e]7;file://%s%s\a" (hostname) "$PWD"; end'
+        \\exec fish -l -C 'function __omg_report_pwd --on-event fish_prompt; printf "\e]7;file://localhost%s\a" "$PWD"; end'
         ;
     }
     return null;
@@ -466,6 +466,11 @@ test remoteShellCommand {
     try testing.expect(remoteShellCommand("/usr/bin/fish") != null);
     try testing.expect(std.mem.indexOf(u8, remoteShellCommand("fish").?, "OSC") == null);
     try testing.expect(std.mem.indexOf(u8, remoteShellCommand("fish").?, "]7;") != null);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        remoteShellCommand("fish").?,
+        "file://localhost",
+    ) != null);
 }
 
 fn resolveDestination(

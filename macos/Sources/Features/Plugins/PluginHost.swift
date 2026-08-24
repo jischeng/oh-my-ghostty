@@ -64,6 +64,10 @@ final class PluginInstallationManager: ObservableObject {
     @Published private(set) var installed: [PluginManifest] = []
     @Published private(set) var disabledIDs: Set<String> = []
 
+    static let officialPlugins: [PluginManifest] = [
+        SSHPlugin.manifest,
+    ]
+
     let pluginsDirectory: URL
     let dataDirectory: URL
 
@@ -89,6 +93,12 @@ final class PluginInstallationManager: ObservableObject {
                 from: Data(contentsOf: pluginsDirectory.appendingPathComponent("disabled.json"))
             )) ?? []
         )
+        for manifest in installed {
+            UserDefaults.standard.set(
+                !disabledIDs.contains(manifest.id),
+                forKey: "OMG.Plugin.Enabled.\(manifest.id)"
+            )
+        }
     }
 
     func install(from repositoryURL: URL) async throws -> PluginManifest {
@@ -127,13 +137,41 @@ final class PluginInstallationManager: ObservableObject {
         _ = try await install(from: repositoryURL)
     }
 
+    func installOfficial(_ pluginID: String) throws {
+        guard let manifest = Self.officialPlugins.first(where: { $0.id == pluginID }) else {
+            throw PluginInstallationError.manifestNotFound
+        }
+        let destination = pluginsDirectory.appendingPathComponent(manifest.id, isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        try JSONEncoder().encode(manifest).write(
+            to: destination.appendingPathComponent("manifest.json"),
+            options: .atomic
+        )
+        try FileManager.default.createDirectory(
+            at: dataDirectory.appendingPathComponent(manifest.id),
+            withIntermediateDirectories: true
+        )
+        try enable(manifest.id)
+        reload()
+    }
+
+    func isInstalled(_ pluginID: String) -> Bool {
+        installed.contains { $0.id == pluginID }
+    }
+
+    func isEnabled(_ pluginID: String) -> Bool {
+        isInstalled(pluginID) && !disabledIDs.contains(pluginID)
+    }
+
     func disable(_ pluginID: String) throws {
         disabledIDs.insert(pluginID)
+        UserDefaults.standard.set(false, forKey: "OMG.Plugin.Enabled.\(pluginID)")
         try persistDisabled()
     }
 
     func enable(_ pluginID: String) throws {
         disabledIDs.remove(pluginID)
+        UserDefaults.standard.set(true, forKey: "OMG.Plugin.Enabled.\(pluginID)")
         try persistDisabled()
     }
 

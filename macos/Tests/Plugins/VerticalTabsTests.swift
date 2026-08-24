@@ -58,6 +58,28 @@ struct VerticalTabsTests {
         #expect(updates[1].1 == true)
     }
 
+    @Test @MainActor func sharedTrailingDividerUsesTheSameResizeContract() throws {
+        var updates: [(CGFloat, Bool)] = []
+        let view = SidebarResizeInteraction.DragView(
+            currentWidth: { 240 },
+            resize: { updates.append(($0, $1)) },
+            direction: .trailing
+        )
+        let down = try #require(mouseEvent(type: .leftMouseDown, x: 100))
+        let dragged = try #require(mouseEvent(type: .leftMouseDragged, x: 160))
+        let up = try #require(mouseEvent(type: .leftMouseUp, x: 160))
+
+        view.mouseDown(with: down)
+        view.mouseDragged(with: dragged)
+        view.mouseUp(with: up)
+
+        #expect(updates.count == 2)
+        #expect(updates[0].0 == 180)
+        #expect(updates[0].1 == false)
+        #expect(updates[1].0 == 180)
+        #expect(updates[1].1 == true)
+    }
+
     @Test @MainActor func resizePersistsOnlyTheFinalWidth() {
         let (settings, url) = temporarySettings()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }

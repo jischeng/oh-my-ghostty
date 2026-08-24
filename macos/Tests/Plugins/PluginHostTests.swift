@@ -6,6 +6,21 @@ import Testing
 struct PluginHostTests {
     private let sessionID = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
 
+    @Test func officialSSHInstallationEnablesTheWorkspaceProvider() throws {
+        let support = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-official-plugin-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: support)
+            UserDefaults.standard.removeObject(forKey: "OMG.Plugin.Enabled.\(SSHPlugin.pluginID)")
+        }
+        let manager = PluginInstallationManager(applicationSupport: support)
+        try manager.installOfficial(SSHPlugin.pluginID)
+        #expect(manager.isInstalled(SSHPlugin.pluginID))
+        #expect(manager.isEnabled(SSHPlugin.pluginID))
+        try manager.disable(SSHPlugin.pluginID)
+        #expect(!manager.isEnabled(SSHPlugin.pluginID))
+    }
+
     @Test func pluginInstallationKeepsCodeAndDataSeparate() throws {
         let support = FileManager.default.temporaryDirectory
             .appendingPathComponent("omg-plugin-manager-\(UUID().uuidString)", isDirectory: true)

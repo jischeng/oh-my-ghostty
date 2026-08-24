@@ -66,6 +66,7 @@ private struct TerminalSidebarTransitionContainer<Content: View>: View {
     let width: CGFloat
     let edge: Edge
     let animationsEnabled: Bool
+    let background: Color
     let content: Content
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var occupiesSpace: Bool
@@ -77,12 +78,14 @@ private struct TerminalSidebarTransitionContainer<Content: View>: View {
         width: CGFloat,
         edge: Edge,
         animationsEnabled: Bool,
+        background: Color,
         @ViewBuilder content: () -> Content
     ) {
         self.isVisible = isVisible
         self.width = width
         self.edge = edge
         self.animationsEnabled = animationsEnabled
+        self.background = background
         self.content = content()
         self._occupiesSpace = State(initialValue: isVisible)
         self._contentVisible = State(initialValue: isVisible)
@@ -103,6 +106,7 @@ private struct TerminalSidebarTransitionContainer<Content: View>: View {
             width: occupiesSpace ? width : 0,
             alignment: edge.alignment
         )
+        .background(contentVisible ? Color.clear : background)
         .clipped()
         .onAppear { synchronizeImmediately() }
         .onChange(of: isVisible) { visible in transition(to: visible) }
@@ -444,7 +448,8 @@ struct TerminalShellLayoutContainer<Content: View>: View {
                     isVisible: leftVisible,
                     width: leftWidth,
                     edge: .left,
-                    animationsEnabled: selectedPresentation
+                    animationsEnabled: selectedPresentation,
+                    background: backgroundColor.opacity(backgroundOpacity)
                 ) {
                     HStack(spacing: 0) {
                         TerminalTabSidebarView(
@@ -470,7 +475,8 @@ struct TerminalShellLayoutContainer<Content: View>: View {
                     isVisible: rightVisible,
                     width: rightWidth,
                     edge: .right,
-                    animationsEnabled: selectedPresentation
+                    animationsEnabled: selectedPresentation,
+                    background: backgroundColor.opacity(backgroundOpacity)
                 ) {
                     HStack(spacing: 0) {
                         RightInspectorResizeHandle(
@@ -862,69 +868,14 @@ private struct RightInspectorResizeHandle: View {
     var body: some View {
         ZStack {
             TerminalSidebarDividerLine(color: color)
-            RightInspectorResizeInteraction(
+            SidebarResizeInteraction(
                 currentWidth: currentWidth,
-                resize: resize
+                resize: resize,
+                direction: .trailing
             )
         }
         .frame(width: TerminalShellStyle.resizeHitWidth)
         .background(background)
         .accessibilityLabel("Resize Inspector")
-    }
-}
-
-private struct RightInspectorResizeInteraction: NSViewRepresentable {
-    let currentWidth: () -> CGFloat
-    let resize: (CGFloat, Bool) -> Void
-
-    func makeNSView(context: Context) -> DragView {
-        DragView(currentWidth: currentWidth, resize: resize)
-    }
-
-    func updateNSView(_ view: DragView, context: Context) {
-        view.currentWidth = currentWidth
-        view.resize = resize
-    }
-
-    final class DragView: NSView {
-        var currentWidth: () -> CGFloat
-        var resize: (CGFloat, Bool) -> Void
-        private var startWidth: CGFloat = 0
-        private var startX: CGFloat = 0
-
-        init(
-            currentWidth: @escaping () -> CGFloat,
-            resize: @escaping (CGFloat, Bool) -> Void
-        ) {
-            self.currentWidth = currentWidth
-            self.resize = resize
-            super.init(frame: .zero)
-        }
-
-        @available(*, unavailable)
-        required init?(coder: NSCoder) {
-            fatalError("init(coder:) has not been implemented")
-        }
-
-        override func resetCursorRects() {
-            addCursorRect(bounds, cursor: .resizeLeftRight)
-        }
-
-        override func mouseDown(with event: NSEvent) {
-            startWidth = currentWidth()
-            startX = event.locationInWindow.x
-        }
-
-        override func mouseDragged(with event: NSEvent) {
-            resize(startWidth - event.locationInWindow.x + startX, false)
-        }
-
-        override func mouseUp(with event: NSEvent) {
-            resize(startWidth - event.locationInWindow.x + startX, true)
-        }
-
-        override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
-            true
-        }
     }
 }

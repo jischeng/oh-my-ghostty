@@ -41,7 +41,7 @@ class BaseTerminalController: NSWindowController,
     let ghostty: Ghostty.App
 
     /// The currently focused surface.
-    var focusedSurface: Ghostty.SurfaceView? {
+    @Published var focusedSurface: Ghostty.SurfaceView? {
         didSet { syncFocusToSurfaceTree() }
     }
 

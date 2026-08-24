@@ -143,6 +143,17 @@ struct SSHHostConfiguration: Equatable, Sendable {
 /// passwords, known_hosts, ProxyJump, or an SSH agent.
 struct SSHPlugin: Sendable {
     static let pluginID = "builtin.ssh"
+    static let manifest = PluginManifest(
+        id: pluginID,
+        version: "0.1.0",
+        executable: "builtin",
+        capabilities: [.terminalEvents, .tabMetadata, .tabIcon, .inspectorPane],
+        minimumHostVersion: "0.1.0"
+    )
+
+    static var isEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "OMG.Plugin.Enabled.\(pluginID)")
+    }
 
     static func configurations(
         at url: URL = FileManager.default.homeDirectoryForCurrentUser
@@ -201,7 +212,7 @@ struct SSHPlugin: Sendable {
         alias: String,
         workingDirectory: String
     ) -> WorkspaceDescriptor? {
-        guard let host = configuration(alias: alias) else { return nil }
+        guard isEnabled, let host = configuration(alias: alias) else { return nil }
         return .init(
             kind: .ssh,
             id: host.workspaceID,
@@ -226,6 +237,7 @@ struct SSHPlugin: Sendable {
         workingDirectory: String,
         configurations: [SSHHostConfiguration]
     ) -> WorkspaceDescriptor? {
+        guard isEnabled else { return nil }
         let normalizedTitle = title.lowercased()
         for host in configurations {
             let candidates = [

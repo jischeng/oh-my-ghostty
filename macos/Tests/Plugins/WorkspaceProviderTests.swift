@@ -4,6 +4,9 @@ import Testing
 
 struct WorkspaceProviderTests {
     @Test func parsesSSHConfigAliasesWithoutSecrets() throws {
+        let previous = UserDefaults.standard.object(forKey: "OMG.Plugin.Enabled.builtin.ssh")
+        UserDefaults.standard.set(true, forKey: "OMG.Plugin.Enabled.builtin.ssh")
+        defer { UserDefaults.standard.set(previous, forKey: "OMG.Plugin.Enabled.builtin.ssh") }
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("omg-ssh-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: url) }
@@ -38,6 +41,9 @@ struct WorkspaceProviderTests {
     }
 
     @Test func resolvesSSHWorkspaceFromTerminalTitle() throws {
+        let previous = UserDefaults.standard.object(forKey: "OMG.Plugin.Enabled.builtin.ssh")
+        UserDefaults.standard.set(true, forKey: "OMG.Plugin.Enabled.builtin.ssh")
+        defer { UserDefaults.standard.set(previous, forKey: "OMG.Plugin.Enabled.builtin.ssh") }
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("omg-ssh-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: url) }
@@ -57,6 +63,9 @@ struct WorkspaceProviderTests {
     }
 
     @Test func createsSSHWorkspaceDescriptorFromAlias() throws {
+        let previous = UserDefaults.standard.object(forKey: "OMG.Plugin.Enabled.builtin.ssh")
+        UserDefaults.standard.set(true, forKey: "OMG.Plugin.Enabled.builtin.ssh")
+        defer { UserDefaults.standard.set(previous, forKey: "OMG.Plugin.Enabled.builtin.ssh") }
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("omg-ssh-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: url) }

@@ -82,13 +82,18 @@ final class OhMyGhosttySettingsWindowController: NSWindowController {
 struct SettingsView: View {
     @ObservedObject var settings: OhMyGhosttySettings
     @Environment(\.colorScheme) private var colorScheme
+    @StateObject private var pluginManager: PluginInstallationManager
     @State private var selection: OhMyGhosttySettingsTab
+    @State private var githubRepository = ""
+    @State private var pluginOperation: String?
+    @State private var pluginError: String?
 
     init(
         settings: OhMyGhosttySettings,
         initialSelection: OhMyGhosttySettingsTab = .tabs
     ) {
         self.settings = settings
+        self._pluginManager = StateObject(wrappedValue: .shared)
         self._selection = State(initialValue: initialSelection)
     }
 
@@ -211,19 +216,7 @@ struct SettingsView: View {
             }
 
         case .plugins:
-            Form {
-                Section("Agent Integration") {
-                    Toggle("Enable Normalized Status Events", isOn: $settings.agentStatusHooksEnabled)
-                    capabilityRow("Protocol Core", status: "Available")
-                    capabilityRow("Status Store", status: "Available")
-                    capabilityRow("Socket Listener", status: "Not Installed")
-                }
-                Section("Notifications") {
-                    Toggle("Task Complete", isOn: $settings.notifyTaskComplete)
-                    Toggle("Attention Required", isOn: $settings.notifyAttention)
-                    Toggle("Play Sound", isOn: $settings.notificationSound)
-                }
-            }
+            pluginsForm
 
         case .advanced:
             Form {
@@ -251,6 +244,111 @@ struct SettingsView: View {
                     }
                 }
             }
+        }
+    }
+
+    private var pluginsForm: some View {
+        Form {
+            Section("Official Plugins") {
+                ForEach(PluginInstallationManager.officialPlugins, id: \.id) { manifest in
+                    PluginManagementRow(
+                        manifest: manifest,
+                        installed: pluginManager.isInstalled(manifest.id),
+                        enabled: pluginManager.isEnabled(manifest.id),
+                        operation: pluginOperation,
+                        install: { installOfficial(manifest) },
+                        update: { installOfficial(manifest) },
+                        toggle: { togglePlugin(manifest) },
+                        uninstall: { uninstall(manifest) }
+                    )
+                }
+                Text("Official plugins are installed independently from the OMG app. SSH uses your existing OpenSSH configuration and credentials.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Install from GitHub") {
+                TextField("https://github.com/owner/omg-plugin", text: $githubRepository)
+                    .textFieldStyle(.roundedBorder)
+                HStack {
+                    Button("Install") { installFromGitHub() }
+                        .disabled(githubRepository.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || pluginOperation != nil)
+                    if let pluginOperation {
+                        ProgressView(pluginOperation)
+                            .controlSize(.small)
+                    }
+                }
+                Text("Only HTTPS GitHub repositories with a validated manifest.json are accepted. Installed external executables remain disabled until the supervised runtime is available.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let pluginError {
+                    Text(pluginError)
+                        .foregroundStyle(.red)
+                        .textSelection(.enabled)
+                }
+            }
+
+            Section("Agent Integration") {
+                Toggle("Enable Normalized Status Events", isOn: $settings.agentStatusHooksEnabled)
+                capabilityRow("Protocol Core", status: "Available")
+                capabilityRow("Status Store", status: "Available")
+                capabilityRow("Socket Listener", status: "Not Installed")
+            }
+            Section("Notifications") {
+                Toggle("Task Complete", isOn: $settings.notifyTaskComplete)
+                Toggle("Attention Required", isOn: $settings.notifyAttention)
+                Toggle("Play Sound", isOn: $settings.notificationSound)
+            }
+        }
+    }
+
+    private func installOfficial(_ manifest: PluginManifest) {
+        performPluginOperation("Installing") {
+            try pluginManager.installOfficial(manifest.id)
+        }
+    }
+
+    private func togglePlugin(_ manifest: PluginManifest) {
+        performPluginOperation(pluginManager.isEnabled(manifest.id) ? "Disabling" : "Enabling") {
+            if pluginManager.isEnabled(manifest.id) {
+                try pluginManager.disable(manifest.id)
+            } else {
+                try pluginManager.enable(manifest.id)
+            }
+        }
+    }
+
+    private func uninstall(_ manifest: PluginManifest) {
+        performPluginOperation("Uninstalling") {
+            try pluginManager.uninstall(manifest.id)
+        }
+    }
+
+    private func performPluginOperation(
+        _ label: String,
+        operation: () throws -> Void
+    ) {
+        pluginError = nil
+        pluginOperation = label
+        defer { pluginOperation = nil }
+        do { try operation() } catch { pluginError = error.localizedDescription }
+    }
+
+    private func installFromGitHub() {
+        guard let url = URL(string: githubRepository.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            pluginError = "Enter a valid HTTPS GitHub repository URL."
+            return
+        }
+        pluginError = nil
+        pluginOperation = "Downloading"
+        Task {
+            do {
+                _ = try await pluginManager.install(from: url)
+                githubRepository = ""
+            } catch {
+                pluginError = error.localizedDescription
+            }
+            pluginOperation = nil
         }
     }
 
@@ -437,6 +535,58 @@ struct SettingsView: View {
             Text(status)
                 .foregroundStyle(.secondary)
         }
+    }
+}
+
+private struct PluginManagementRow: View {
+    let manifest: PluginManifest
+    let installed: Bool
+    let enabled: Bool
+    let operation: String?
+    let install: () -> Void
+    let update: () -> Void
+    let toggle: () -> Void
+    let uninstall: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Image(systemName: manifest.id == SSHPlugin.pluginID ? "cloud" : "puzzlepiece.extension")
+                    .frame(width: 20)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(manifest.id == SSHPlugin.pluginID ? "SSH" : manifest.id)
+                        .font(.headline)
+                    Text("v\(manifest.version) · \(status)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if installed {
+                    Menu {
+                        Button(enabled ? "Disable" : "Enable", action: toggle)
+                        Button("Update", action: update)
+                        Divider()
+                        Button("Uninstall", role: .destructive, action: uninstall)
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .menuStyle(.borderlessButton)
+                } else {
+                    Button("Install", action: install)
+                }
+            }
+            Text(manifest.id == SSHPlugin.pluginID
+                ? "SSH aliases and remote Files through the system OpenSSH/SFTP client."
+                : "OMG plugin")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .opacity(operation == nil ? 1 : 0.7)
+    }
+
+    private var status: String {
+        guard installed else { return "Not Installed" }
+        return enabled ? "Enabled" : "Disabled"
     }
 }
 

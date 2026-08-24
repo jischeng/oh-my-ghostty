@@ -1007,9 +1007,10 @@ struct VerticalTabSidebarDivider: View {
     var body: some View {
         ZStack {
             TerminalSidebarDividerLine(color: color)
-            VerticalTabResizeInteraction(
+            SidebarResizeInteraction(
                 currentWidth: { layoutState.sidebarWidth },
-                resize: controller.updateSidebarWidth
+                resize: controller.updateSidebarWidth,
+                direction: .leading
             )
         }
         .frame(width: TerminalShellStyle.resizeHitWidth)
@@ -1018,37 +1019,63 @@ struct VerticalTabSidebarDivider: View {
     }
 }
 
-struct VerticalTabResizeInteraction: NSViewRepresentable {
+struct SidebarResizeInteraction: NSViewRepresentable {
+    enum Direction {
+        case leading
+        case trailing
+    }
+
     let currentWidth: () -> CGFloat
     let resize: (CGFloat, Bool) -> Void
+    let direction: Direction
+
+    init(
+        currentWidth: @escaping () -> CGFloat,
+        resize: @escaping (CGFloat, Bool) -> Void,
+        direction: Direction = .leading
+    ) {
+        self.currentWidth = currentWidth
+        self.resize = resize
+        self.direction = direction
+    }
 
     func makeNSView(context: Context) -> DragView {
-        DragView(currentWidth: currentWidth, resize: resize)
+        DragView(currentWidth: currentWidth, resize: resize, direction: direction)
     }
 
     func updateNSView(_ view: DragView, context: Context) {
         view.currentWidth = currentWidth
         view.resize = resize
+        view.direction = direction
+        view.window?.invalidateCursorRects(for: view)
     }
 
     final class DragView: NSView {
         var currentWidth: () -> CGFloat
         var resize: (CGFloat, Bool) -> Void
+        var direction: Direction
         private var startWidth: CGFloat = 0
         private var startX: CGFloat = 0
 
         init(
             currentWidth: @escaping () -> CGFloat,
-            resize: @escaping (CGFloat, Bool) -> Void
+            resize: @escaping (CGFloat, Bool) -> Void,
+            direction: Direction = .leading
         ) {
             self.currentWidth = currentWidth
             self.resize = resize
+            self.direction = direction
             super.init(frame: .zero)
         }
 
         @available(*, unavailable)
         required init?(coder: NSCoder) {
             fatalError("init(coder:) has not been implemented")
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            window?.invalidateCursorRects(for: self)
         }
 
         override func resetCursorRects() {
@@ -1061,18 +1088,28 @@ struct VerticalTabResizeInteraction: NSViewRepresentable {
         }
 
         override func mouseDragged(with event: NSEvent) {
-            resize(startWidth + event.locationInWindow.x - startX, false)
+            resize(proposedWidth(for: event), false)
         }
 
         override func mouseUp(with event: NSEvent) {
-            resize(startWidth + event.locationInWindow.x - startX, true)
+            resize(proposedWidth(for: event), true)
         }
 
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
             true
         }
+
+        private func proposedWidth(for event: NSEvent) -> CGFloat {
+            let delta = event.locationInWindow.x - startX
+            switch direction {
+            case .leading: return startWidth + delta
+            case .trailing: return startWidth - delta
+            }
+        }
     }
 }
+
+typealias VerticalTabResizeInteraction = SidebarResizeInteraction
 
 enum SidebarToolbarStyle {
     static let iconSize: CGFloat = 16

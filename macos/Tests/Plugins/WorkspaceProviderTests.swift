@@ -62,6 +62,18 @@ struct WorkspaceProviderTests {
         #expect(workspace?.presentationTitle == "☁ cloud /home/json/project")
     }
 
+    @Test func boundsLargeSFTPDirectoryListings() throws {
+        let output = (0..<800).map { index in
+            "-rw-r--r-- 1 user group 1 Jan 1 00:00 file-\(index)"
+        }.joined(separator: "\n")
+        let entries = try SSHWorkspaceFilesystem.parseLongListing(
+            output,
+            directory: "/remote"
+        )
+        #expect(entries.count == 500)
+        #expect(entries.allSatisfy { $0.path.hasPrefix("/remote/") })
+    }
+
     @Test func createsSSHWorkspaceDescriptorFromAlias() throws {
         let previous = UserDefaults.standard.object(forKey: "OMG.Plugin.Enabled.builtin.ssh")
         UserDefaults.standard.set(true, forKey: "OMG.Plugin.Enabled.builtin.ssh")

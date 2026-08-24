@@ -317,27 +317,59 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
     }
 
     private func runSFTP(batch: String) async throws -> String {
-        try await Task.detached(priority: .utility) {
-            let process = Process()
-            let output = Pipe()
-            let errors = Pipe()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/sftp")
-            process.arguments = ["-q", "-b", "-", host.alias]
-            process.standardInput = Self.dataPipe(batch + "\n")
-            process.standardOutput = output
-            process.standardError = errors
-            do { try process.run() } catch { throw WorkspaceFilesystemError.unavailable }
-            process.waitUntilExit()
-            let stdout = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            let stderr = String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            guard process.terminationStatus == 0 else {
-                throw WorkspaceFilesystemError.commandFailed(process.terminationStatus, stderr)
-            }
-            return stdout
-        }.value
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sftp")
+        process.arguments = ["-q", "-b", "-", host.alias]
+        process.standardInput = Self.dataPipe(batch + "\n")
+
+        return try await withTaskCancellationHandler {
+            try await Task.detached(priority: .utility) {
+                let temporaryDirectory = FileManager.default.temporaryDirectory
+                let token = UUID().uuidString
+                let outputURL = temporaryDirectory
+                    .appendingPathComponent("omg-sftp-\(token).out")
+                let errorURL = temporaryDirectory
+                    .appendingPathComponent("omg-sftp-\(token).err")
+                FileManager.default.createFile(atPath: outputURL.path, contents: nil)
+                FileManager.default.createFile(atPath: errorURL.path, contents: nil)
+                defer {
+                    try? FileManager.default.removeItem(at: outputURL)
+                    try? FileManager.default.removeItem(at: errorURL)
+                }
+                guard let output = try? FileHandle(forWritingTo: outputURL),
+                      let errors = try? FileHandle(forWritingTo: errorURL) else {
+                    throw WorkspaceFilesystemError.unavailable
+                }
+                process.standardOutput = output
+                process.standardError = errors
+                do { try process.run() } catch {
+                    throw WorkspaceFilesystemError.unavailable
+                }
+                let timeout = Task.detached {
+                    try? await Task.sleep(for: .seconds(15))
+                    if process.isRunning { process.terminate() }
+                }
+                process.waitUntilExit()
+                timeout.cancel()
+                try? output.close()
+                try? errors.close()
+
+                let stdout = (try? String(contentsOf: outputURL, encoding: .utf8)) ?? ""
+                let stderr = (try? String(contentsOf: errorURL, encoding: .utf8)) ?? ""
+                guard process.terminationStatus == 0 else {
+                    throw WorkspaceFilesystemError.commandFailed(
+                        process.terminationStatus,
+                        stderr
+                    )
+                }
+                return stdout
+            }.value
+        } onCancel: {
+            if process.isRunning { process.terminate() }
+        }
     }
 
-    private static func parseLongListing(
+    static func parseLongListing(
         _ output: String,
         directory: String
     ) throws -> [WorkspaceFileEntry] {

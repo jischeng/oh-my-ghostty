@@ -529,11 +529,14 @@ plugin ID/version/relative executable path, copies code to `Plugins/<id>`, and
 creates a separate data directory. Disabled state is stored in
 `Plugins/disabled.json`.
 
-This is not yet a runnable plugin install flow: there is no UI/CLI command,
-signature/ownership verification, semver host compatibility enforcement,
-executable launch, process supervision, or automatic update service. An
-installed plugin remains inert. Do not distribute executable plugins until
-those security/runtime pieces are implemented.
+Settings → Plugins exposes the official catalog and an Install from GitHub
+URL field backed by this manager. The SSH official entry installs the in-tree
+provider marker and enables the generic workspace provider; it does not
+download private keys or a remote helper. External installed packages remain
+inert. There is no signature/ownership verification, semver host compatibility
+enforcement, executable launch, process supervision, or automatic update
+service. Do not distribute executable plugins until those security/runtime
+pieces are implemented.
 
 When runtime loading changes, this document must add a copyable directory
 layout, manifest, build/package/install commands, compatibility checks,

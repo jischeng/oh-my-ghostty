@@ -32,6 +32,12 @@ Core App Shell owns:
 
 `InspectorPresentationStore` is the typed persistence boundary for last-used visibility, committed width, and active pane. It uses the application UserDefaults domain because these are UI runtime state, not portable user configuration. The values are intentionally absent from Ghostty config and `~/.config/oh-my-ghostty/settings.json`.
 
+Inspector context is derived from the controller's published focused `Surface`,
+not merely the active tab. A split-pane focus change therefore updates the
+workspace descriptor, cwd, Files provider, and typed content context as one
+transaction; stale provider tasks are cancelled by the existing generation/key
+model.
+
 Core Features and Plugins own only pane-specific data and commands. They do not own the split view or Inspector chrome. Files consumes the generic `WorkspaceFilesystem` boundary: `LocalWorkspaceFilesystem` handles local paths and the in-tree SSH provider uses the system SFTP client for remote paths. The Files UI does not branch on Local versus SSH.
 
 ## Registry contract
@@ -79,7 +85,8 @@ Blur and macOS glass continue to be provided by Ghostty's `TerminalViewContainer
 - The window titlebar owns the extensible pane switch and persistent `sidebar.right` control; active panes display icon + title while inactive panes display icon only. Left and Right controls share the same icon size, 24pt hit target, corner radius, spacing, hover, disabled, and Medium active-label tokens. A deterministic 12pt width bucket keeps a fixed visible prefix and moves overflow into an icon + title + checkmark `…` menu without threshold jitter. Hidden Inspector panes remove every Plugin item and retain only the reopen control. **View > Toggle Inspector** and `⌘⇧I` use the same state.
 - Inspector content begins directly with the selected pane. Files uses the reusable lightweight Plugin context header to show the current root's last path component with its filesystem casing preserved. The active titlebar entry, context header, and root tree row derive their leading positions from the same content inset; the header updates from the same typed tree snapshot whenever cwd/root changes and adds no duplicate action chrome.
 - Sidebar separators remain two coordinated segments because Ghostty's native AppKit titlebar and SwiftUI content shell are separate layout layers. Both segments use the same Core-owned width and Ghostty `splitDividerColor(for:)` semantic resolver, evaluated against the focused surface's actual background. The default result is an opaque background-derived contrast color, avoiding titlebar/content alpha-compositing differences; an explicit `split-divider-color` remains authoritative. Each stroke is centered in the same 8pt boundary slot. The Right titlebar accessory includes that slot in its width, so its divider center matches the content resize handle exactly. Files never draws a separator, and committed width is still persisted only on mouse-up.
-- Left and Right visibility use one two-phase transition: shell width changes once while pane content uses a short opacity/6pt horizontal transform. Hidden tabs synchronize immediately, the selected terminal avoids per-frame width animation, and Reduce Motion switches to an immediate state change.
+- Left and Right visibility use one two-phase transition: shell width changes once while pane content uses a short opacity/6pt horizontal transform. The boundary background remains mounted while content opacity changes, so transparent/vibrant compositing stays continuous. Hidden tabs synchronize immediately, the selected terminal avoids per-frame width animation, and Reduce Motion switches to an immediate state change.
+- Left and Right resize handles share one `SidebarResizeInteraction`, including an 8pt hit area, horizontal resize cursor, first-mouse behavior, drag-width direction, and mouse-up commit semantics.
 - Visibility, width, and active pane restore for later windows/app launches.
 - An empty registry still removes the complete trailing host from layout.
 

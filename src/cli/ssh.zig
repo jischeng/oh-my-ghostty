@@ -21,6 +21,8 @@ const usage =
     \\  --terminfo[=bool]     Install Ghostty terminfo on first connect. Default: true.
     \\  --cache[=bool]        Use the terminfo install cache. Default: true.
     \\  --ssh=<path>          Path to the ssh binary. Default: first `ssh` on PATH.
+    \\  --remote-working-directory=<path>
+    \\                        Start a replayed interactive Fish session in path.
     \\  --verbose             Print +ssh status lines to stderr.
     \\  --help                Show full help.
     \\
@@ -44,6 +46,9 @@ pub const Options = struct {
     /// The wrapped `ssh` binary.
     /// `/`-containing values are treated as paths; otherwise resolved via PATH.
     ssh: []const u8 = "ssh",
+
+    /// Optional initial remote cwd used by OMG when replaying an SSH split.
+    @"remote-working-directory": ?[]const u8 = null,
 
     /// When true, print verbose output to stderr.
     verbose: bool = false,
@@ -157,6 +162,10 @@ pub const Options = struct {
 ///
 ///   * `--ssh=<path>`: Path to the `ssh` binary to execute. Default: the
 ///     first `ssh` found on `PATH`.
+///
+///   * `--remote-working-directory=<path>`: Start an interactive Fish
+///     destination in this remote directory. OMG uses this only when replaying
+///     an active SSH connection into a new split.
 ///
 ///   * `--verbose`: Print +ssh status lines to stderr, and surface
 ///     remote stderr during the terminfo install.
@@ -304,8 +313,9 @@ fn runInner(
         label: []const u8,
         local_cwd: []const u8,
         remote_command: []const u8,
-    } = if (opts._ssh_args.items.len == 1) lifecycle: {
-        const label = sshDestinationLabel(opts._ssh_args.items[0]) orelse
+        replay_path: ?[]const u8,
+    } = if (interactiveSSHDestination(opts._ssh_args.items)) |destination| lifecycle: {
+        const label = sshDestinationLabel(destination) orelse
             break :lifecycle null;
         const shell = detectRemoteShell(
             alloc,
@@ -322,6 +332,7 @@ fn runInner(
             shell,
             label,
             id,
+            opts.@"remote-working-directory",
         ) orelse break :lifecycle null;
         const local_cwd = std.Io.Dir.cwd().realPathFileAlloc(
             global.io(),
@@ -333,6 +344,7 @@ fn runInner(
             .label = label,
             .local_cwd = local_cwd,
             .remote_command = remote_command,
+            .replay_path = writeReplayDescriptor(alloc, opts, id),
         };
     } else null;
     const remote_command = if (lifecycle) |value| value.remote_command else null;
@@ -372,6 +384,7 @@ fn runInner(
     defer if (!lifecycle_ended) if (lifecycle) |value| {
         writeSessionEnd(stdout, value.id, exit_code, value.local_cwd) catch {};
         stdout.flush() catch {};
+        if (value.replay_path) |path| deleteReplayDescriptor(path);
     };
 
     exit_code = childExec(argv) catch |err| {
@@ -381,6 +394,7 @@ fn runInner(
     if (lifecycle) |value| {
         writeSessionEnd(stdout, value.id, exit_code, value.local_cwd) catch {};
         stdout.flush() catch {};
+        if (value.replay_path) |path| deleteReplayDescriptor(path);
         lifecycle_ended = true;
     }
     verbosePrint(opts, stderr, "exit: {d}", .{exit_code});
@@ -502,6 +516,111 @@ fn detectRemoteShell(
     return std.mem.trim(u8, result.stdout, &std.ascii.whitespace);
 }
 
+const ReplayDescriptor = struct {
+    version: u8 = 1,
+    ssh: []const u8,
+    forward_env: bool,
+    terminfo: bool,
+    cache: bool,
+    args: []const []const u8,
+};
+
+fn writeReplayDescriptor(
+    alloc: Allocator,
+    opts: *const Options,
+    context_id: []const u8,
+) ?[]const u8 {
+    if (comptime builtin.os.tag != .macos) return null;
+
+    var env = global.environMap() catch return null;
+    defer env.deinit();
+    _ = env.get("OH_MY_GHOSTTY_SESSION") orelse return null;
+    const home = env.get("HOME") orelse return null;
+    const directory_path = std.fs.path.join(alloc, &.{
+        home,
+        "Library",
+        "Application Support",
+        "OMG",
+        "SSHReplay",
+    }) catch return null;
+    std.Io.Dir.cwd().createDirPath(global.io(), directory_path) catch return null;
+    var directory = std.Io.Dir.openDirAbsolute(
+        global.io(),
+        directory_path,
+        .{},
+    ) catch return null;
+    defer directory.close(global.io());
+
+    const filename = std.fmt.allocPrint(alloc, "{s}.json", .{context_id}) catch return null;
+    var buffer: [1024]u8 = undefined;
+    var atomic_file = directory.createFileAtomic(global.io(), filename, .{
+        .permissions = if (std.posix.mode_t != u0)
+            .fromMode(0o600)
+        else
+            .default_file,
+        .replace = true,
+    }) catch return null;
+    defer atomic_file.deinit(global.io());
+    var writer = atomic_file.file.writer(global.io(), &buffer);
+    writer.interface.print("{f}", .{std.json.fmt(ReplayDescriptor{
+        .ssh = opts.ssh,
+        .forward_env = opts.@"forward-env",
+        .terminfo = opts.terminfo,
+        .cache = opts.cache,
+        .args = opts._ssh_args.items,
+    }, .{})}) catch return null;
+    writer.interface.flush() catch return null;
+    atomic_file.replace(global.io()) catch return null;
+    return std.fs.path.join(alloc, &.{ directory_path, filename }) catch null;
+}
+
+fn deleteReplayDescriptor(path: []const u8) void {
+    const directory_path = std.fs.path.dirname(path) orelse return;
+    const filename = std.fs.path.basename(path);
+    var directory = std.Io.Dir.openDirAbsolute(
+        global.io(),
+        directory_path,
+        .{},
+    ) catch return;
+    defer directory.close(global.io());
+    directory.deleteFile(global.io(), filename) catch {};
+}
+
+fn interactiveSSHDestination(args: []const []const u8) ?[]const u8 {
+    const options_with_value = "BbcDEeFIiJLlmOoPpQRSWw";
+    const noninteractive_options = "GNOQTVWfn";
+    var index: usize = 0;
+    while (index < args.len) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--")) {
+            index += 1;
+            break;
+        }
+        if (arg.len == 0 or arg[0] != '-' or std.mem.eql(u8, arg, "-")) break;
+        const first_option = arg[1];
+        if (std.mem.indexOfScalar(u8, noninteractive_options, first_option) != null) {
+            return null;
+        }
+        if (std.mem.indexOfScalar(u8, options_with_value, first_option) != null) {
+            if (arg.len == 2) {
+                index += 1;
+                if (index >= args.len) return null;
+            }
+            index += 1;
+            continue;
+        }
+        for (arg[1..]) |option| {
+            if (std.mem.indexOfScalar(u8, noninteractive_options, option) != null) {
+                return null;
+            }
+        }
+        index += 1;
+    }
+    if (index >= args.len) return null;
+    const destination = args[index];
+    return if (index + 1 == args.len) destination else null;
+}
+
 fn sshDestinationLabel(destination: []const u8) ?[]const u8 {
     const label = if (std.mem.lastIndexOfScalar(u8, destination, '@')) |index|
         destination[index + 1 ..]
@@ -520,16 +639,45 @@ fn remoteShellCommand(
     shell: []const u8,
     label: []const u8,
     context_id: []const u8,
+    remote_working_directory: ?[]const u8,
 ) ?[]const u8 {
     const name = std.fs.path.basename(shell);
     if (!std.mem.eql(u8, name, "fish")) return null;
 
-    return std.fmt.allocPrint(
-        alloc,
-        \\exec fish -l -C 'function __omg_report_pwd --on-event fish_prompt; set -l __omg_cwd (string escape --style=url "$PWD"); printf "\e]3008;start={s};type=remote;targethost={s};cwd=%s\a\e]7;file://localhost%s\a" "$__omg_cwd" "$__omg_cwd"; end'
-    ,
+    var fish_command: std.Io.Writer.Allocating = .init(alloc);
+    defer fish_command.deinit();
+    if (remote_working_directory) |cwd| {
+        fish_command.writer.writeAll("cd -- ") catch return null;
+        writeFishSingleQuoted(&fish_command.writer, cwd) catch return null;
+        fish_command.writer.writeAll("; ") catch return null;
+    }
+    fish_command.writer.print(
+        "function __omg_report_pwd --on-event fish_prompt; set -l __omg_cwd (string escape --style=url \"$PWD\"); printf \"\\e]3008;start={s};type=remote;targethost={s};cwd=%s\\a\\e]7;file://localhost%s\\a\" \"$__omg_cwd\" \"$__omg_cwd\"; end",
         .{ context_id, label },
-    ) catch null;
+    ) catch return null;
+
+    var command: std.Io.Writer.Allocating = .init(alloc);
+    defer command.deinit();
+    command.writer.writeAll("exec fish -l -C ") catch return null;
+    writeShellSingleQuoted(&command.writer, fish_command.written()) catch return null;
+    return command.toOwnedSlice() catch null;
+}
+
+fn writeFishSingleQuoted(writer: *std.Io.Writer, value: []const u8) !void {
+    try writer.writeByte('\'');
+    for (value) |byte| {
+        if (byte == '\\' or byte == '\'') try writer.writeByte('\\');
+        try writer.writeByte(byte);
+    }
+    try writer.writeByte('\'');
+}
+
+fn writeShellSingleQuoted(writer: *std.Io.Writer, value: []const u8) !void {
+    try writer.writeByte('\'');
+    for (value) |byte| {
+        if (byte == '\'') try writer.writeAll("'\\''") else try writer.writeByte(byte);
+    }
+    try writer.writeByte('\'');
 }
 
 fn writeSessionStart(
@@ -559,6 +707,29 @@ fn writeSessionEnd(
     try writer.writeByte('\x07');
 }
 
+test interactiveSSHDestination {
+    const testing = std.testing;
+    try testing.expectEqualStrings("cloud", interactiveSSHDestination(&.{"cloud"}).?);
+    try testing.expectEqualStrings(
+        "user@example.com",
+        interactiveSSHDestination(&.{ "-p", "2222", "-J", "jump", "user@example.com" }).?,
+    );
+    try testing.expectEqualStrings(
+        "cloud",
+        interactiveSSHDestination(&.{ "-C", "-v", "cloud" }).?,
+    );
+    try testing.expectEqualStrings(
+        "cloud",
+        interactiveSSHDestination(&.{ "-oProxyCommand=jump proxy", "cloud" }).?,
+    );
+    try testing.expect(interactiveSSHDestination(&.{ "cloud", "uptime" }) == null);
+    try testing.expect(interactiveSSHDestination(&.{ "-p", "2222" }) == null);
+    try testing.expect(interactiveSSHDestination(&.{ "-N", "cloud" }) == null);
+    try testing.expect(interactiveSSHDestination(&.{ "-W", "host:22", "cloud" }) == null);
+    try testing.expect(interactiveSSHDestination(&.{ "-O", "check", "cloud" }) == null);
+    try testing.expect(interactiveSSHDestination(&.{ "-T", "cloud" }) == null);
+}
+
 test remoteShellCommand {
     const testing = std.testing;
     try testing.expect(sshDestinationLabel("user@cloud").?.len == "cloud".len);
@@ -568,6 +739,7 @@ test remoteShellCommand {
         "/bin/bash",
         "cloud",
         "omg-ssh-1",
+        null,
     ) == null);
 
     const command = remoteShellCommand(
@@ -575,12 +747,32 @@ test remoteShellCommand {
         "/usr/bin/fish",
         "cloud",
         "omg-ssh-1",
+        null,
     ).?;
     defer testing.allocator.free(command);
     try testing.expect(std.mem.indexOf(u8, command, "]3008;start=omg-ssh-1") != null);
     try testing.expect(std.mem.indexOf(u8, command, "targethost=cloud") != null);
     try testing.expect(std.mem.indexOf(u8, command, "]7;") != null);
     try testing.expect(std.mem.indexOf(u8, command, "file://localhost") != null);
+
+    const cwd_command = remoteShellCommand(
+        testing.allocator,
+        "/usr/bin/fish",
+        "cloud",
+        "omg-ssh-2",
+        "/home/user/project's code",
+    ).?;
+    defer testing.allocator.free(cwd_command);
+    try testing.expect(std.mem.indexOf(u8, cwd_command, "cd --") != null);
+    try testing.expect(std.mem.indexOf(u8, cwd_command, "project") != null);
+
+    var fish_buffer: [128]u8 = undefined;
+    var fish_writer: std.Io.Writer = .fixed(&fish_buffer);
+    try writeFishSingleQuoted(&fish_writer, "/home/user/project's code");
+    try testing.expectEqualStrings(
+        "'/home/user/project\\'s code'",
+        fish_buffer[0..fish_writer.end],
+    );
 }
 
 test "session end emits typed lifecycle and local cwd resync" {

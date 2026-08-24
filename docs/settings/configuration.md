@@ -20,6 +20,7 @@ The file is a flat, sorted JSON object. Only values explicitly chosen by the use
   "tabs.grouping": "project",
   "tabs.layout": "vertical",
   "tabs.ordering": "manual",
+  "tabs.pathDisplay": "folderName",
   "tabs.sidebarWidth": 300
 }
 ```
@@ -47,6 +48,7 @@ Window UI state is intentionally separate: `InspectorPresentationStore` owns las
 | `tabs.sidebarWidth` | number | `240` | `176...480` | Settings > Tabs | Next committed/default width |
 | `tabs.grouping` | enum | `none` | `none`, `project`, `date` | Settings > Tabs | Runtime |
 | `tabs.ordering` | enum | `manual` | `manual`, `created`, `recentlyUsed` | Settings > Tabs | Runtime |
+| `tabs.pathDisplay` | enum | `fullPath` | `fullPath`, `folderName` | Settings > Tabs | Runtime |
 | `tabs.showShortcutLabels` | boolean | `true` | `true`, `false` | Settings > Tabs | Runtime |
 | `tabs.rememberSidebarWidth` | boolean | `true` | `true`, `false` | Settings > Tabs | Runtime |
 | `tabs.sidebarVisible` | boolean | `true` | `true`, `false` | Settings > Tabs | Runtime and new windows |
@@ -69,6 +71,8 @@ Appearance controls resolve each value as `OMG override > Ghostty config > built
 
 Vertical tabs and the Right Inspector use the active terminal background color and background opacity. There is no independent Sidebar or Inspector theme. Transparency is painted only on background layers; window alpha, terminal glyphs, cursors, and icons remain opaque.
 
+`tabs.pathDisplay` applies to the path portion of every Vertical Tab label. Local and SSH panes use the same policy: `fullPath` preserves the current full-path presentation, while `folderName` displays only the final folder component. SSH keeps its alias prefix, for example `cloud /home/user/code` becomes `cloud code`.
+
 ## Machine-readable Schema
 
 [`schema.json`](schema.json) contains stable keys, types, allowed values, ranges, descriptions, categories, and apply requirements. Automation should read that file rather than inspect Swift source.
@@ -76,12 +80,12 @@ Vertical tabs and the Right Inspector use the active terminal background color a
 A future CLI should expose the same registry:
 
 ```text
-ghostty +oh-my-config get tabs.layout
-ghostty +oh-my-config set tabs.layout vertical
-ghostty +oh-my-config list --json
+omg +oh-my-config get tabs.layout
+omg +oh-my-config set tabs.layout vertical
+omg +oh-my-config list --json
 ```
 
-The CLI is designed but not implemented in this iteration. It must call the typed settings registry and must not introduce another config store.
+The configuration action is designed but not implemented in this iteration. It will extend the existing `omg` executable rather than introduce another CLI binary, must call the typed settings registry, and must not introduce another config store.
 
 ## Validation Captures
 

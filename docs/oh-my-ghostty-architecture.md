@@ -151,6 +151,14 @@ Pi 不依赖 Sidebar 或状态插件，但依赖 IPC、QuickInput 和 Terminal C
 
 任意插件直接发模型请求却永远看不到所用 bearer key 在进程安全模型上不可实现。
 
+### 6.4 SSH Pane 与 OMG CLI
+
+每个 split 都拥有独立 PTY 和独立 SSH child，不能共享另一个 Pane 的 OpenSSH 进程。SSH Pane 的“复用”定义为复用原始 launch descriptor，而不是复制 resolved IP 或向终端模拟键盘输入。
+
+`omg +ssh` 在最终 OpenSSH child 存活期间保存 owner-only、短生命周期的 exact argv descriptor。源 Pane 执行 split 时，`TerminalController` 以当前 connection ID 读取 descriptor，并通过 `SurfaceConfiguration.command` 启动新的 `omg +ssh`；ready remote cwd 作为独立、shell-quoted wrapper option 传入，使新 Fish session 从相同目录开始。因此 `ssh cloud` 继续由 OpenSSH 读取 alias、ProxyJump 和 IdentityFile；`ssh -J jump user@host` 则原样重放参数。child 结束后 descriptor 删除，超过 24 小时的残留 descriptor 拒绝使用。
+
+OMG 不另造第二个 CLI binary。现有 app executable `omg` 是统一 CLI 入口，Ghostty upstream actions 继续使用 `+ssh` 等兼容形式。后续面向用户的 `omg pane split`、`omg config get/set` 应建立在经过认证的 app IPC 上；在此之前，SSH split replay 是宿主内部 launch handoff，不是可由插件调用的 Terminal Control API。
+
 ## 7. 权限模型
 
 首版能力：

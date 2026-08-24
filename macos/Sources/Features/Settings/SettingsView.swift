@@ -180,6 +180,11 @@ struct SettingsView: View {
                             Text(mode.title).tag(mode)
                         }
                     }
+                    Picker("Path Display", selection: $settings.tabPathDisplay) {
+                        ForEach(OhMyGhosttyTabPathDisplay.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
                     Picker("Ordering", selection: $settings.orderingMode) {
                         ForEach(GhosttyTabOrderingMode.allCases, id: \.self) { mode in
                             Text(mode.title).tag(mode)

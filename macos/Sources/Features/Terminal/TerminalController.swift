@@ -337,6 +337,75 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         paneSessionContext(for: surface)?.presentationTitle ?? terminalTitle
     }
 
+    @discardableResult
+    override func newSplit(
+        at oldView: Ghostty.SurfaceView,
+        direction: SplitTree<Ghostty.SurfaceView>.NewDirection,
+        baseConfig config: Ghostty.SurfaceConfiguration? = nil
+    ) -> Ghostty.SurfaceView? {
+        super.newSplit(
+            at: oldView,
+            direction: direction,
+            baseConfig: splitConfiguration(
+                inherited: config,
+                from: oldView
+            )
+        )
+    }
+
+    func splitConfiguration(
+        inherited config: Ghostty.SurfaceConfiguration?,
+        from source: Ghostty.SurfaceView
+    ) -> Ghostty.SurfaceConfiguration? {
+        guard let session = paneSessionContext(for: source) else { return config }
+        let connectionID: String? = switch session.state {
+        case .local:
+            nil
+        case .sshConnecting(let ssh), .sshReady(let ssh, _):
+            ssh.connectionID
+        }
+        let replay = connectionID.flatMap {
+            SSHReplayStore.load(connectionID: $0)
+        }
+        let split = Self.splitConfiguration(
+            inherited: config,
+            session: session,
+            replay: replay,
+            executablePath: Bundle.main.executableURL?.path
+        )
+        return Self.injectingSessionID(tabSessionID, into: split)
+    }
+
+    static func splitConfiguration(
+        inherited config: Ghostty.SurfaceConfiguration?,
+        session: PaneSessionContext,
+        replay: SSHReplayDescriptor?,
+        executablePath: String?
+    ) -> Ghostty.SurfaceConfiguration? {
+        let remoteWorkingDirectory: String?
+        switch session.state {
+        case .local:
+            return config
+        case .sshConnecting:
+            remoteWorkingDirectory = nil
+        case .sshReady(_, let workingDirectory):
+            remoteWorkingDirectory = workingDirectory
+        }
+
+        var result = config ?? Ghostty.SurfaceConfiguration()
+        result.workingDirectory = session.local.workingDirectory
+        result.command = nil
+        guard let executablePath,
+              let command = replay?.command(
+                executablePath: executablePath,
+                remoteWorkingDirectory: remoteWorkingDirectory
+              ) else {
+            return result
+        }
+        result.command = command
+        return result
+    }
+
     override func surfaceTreeDidChange(from: SplitTree<Ghostty.SurfaceView>, to: SplitTree<Ghostty.SurfaceView>) {
         super.surfaceTreeDidChange(from: from, to: to)
 

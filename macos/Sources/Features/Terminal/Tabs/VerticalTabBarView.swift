@@ -735,7 +735,9 @@ struct TerminalTabSidebarView: View {
             workingDirectory: surface.pwd,
             terminalTitle: surface.title
         )
-        let resolvedTitle = tab.titleOverride ?? session.presentationTitle
+        let resolvedTitle = tab.titleOverride ?? session.presentationTitle(
+            pathDisplay: settings.tabPathDisplay
+        )
         let context = GhosttyTabIconContext(
             tabID: tab.tabSessionID,
             title: resolvedTitle,
@@ -1208,6 +1210,7 @@ struct SidebarIconButton: View {
 private struct VerticalTabRow: View {
     @ObservedObject var controller: TerminalController
     @ObservedObject var surface: Ghostty.SurfaceView
+    @ObservedObject private var settings = OhMyGhosttySettings.shared
     let presentation: GhosttyTabPresentation
     let canClose: Bool
     let select: () -> Void
@@ -1220,7 +1223,9 @@ private struct VerticalTabRow: View {
             terminalTitle: surface.title
         )
         return .init(
-            title: controller.titleOverride ?? session.presentationTitle,
+            title: controller.titleOverride ?? session.presentationTitle(
+                pathDisplay: settings.tabPathDisplay
+            ),
             shortcut: presentation.shortcut,
             icon: presentation.icon,
             activity: presentation.activity,

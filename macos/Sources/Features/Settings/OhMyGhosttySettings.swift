@@ -129,6 +129,19 @@ enum GhosttyThemeCatalog {
     }
 }
 
+enum OhMyGhosttyTabPathDisplay: String, CaseIterable, Identifiable {
+    case fullPath
+    case folderName
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .fullPath: "Full Path"
+        case .folderName: "Current Folder"
+        }
+    }
+}
+
 enum OhMyGhosttyTabRowDensity: String, CaseIterable, Identifiable {
     case compact
     case comfortable
@@ -187,6 +200,12 @@ final class OhMyGhosttySettings: ObservableObject {
             id: "tabs.ordering", type: .enumeration, defaultValue: "manual",
             allowedValues: GhosttyTabOrderingMode.allCases.map(\.rawValue), minimum: nil, maximum: nil,
             description: "Canonical tab ordering policy.",
+            requiresNewWindow: false, category: "tabs"),
+        .init(
+            id: "tabs.pathDisplay", type: .enumeration, defaultValue: "fullPath",
+            allowedValues: OhMyGhosttyTabPathDisplay.allCases.map(\.rawValue),
+            minimum: nil, maximum: nil,
+            description: "Display the full working path or only the current folder in Vertical Tabs.",
             requiresNewWindow: false, category: "tabs"),
         .init(
             id: "tabs.showShortcutLabels", type: .boolean, defaultValue: "true",
@@ -293,6 +312,9 @@ final class OhMyGhosttySettings: ObservableObject {
     }
     @Published var orderingMode: GhosttyTabOrderingMode = .manual {
         didSet { persist("tabs.ordering", orderingMode.rawValue) }
+    }
+    @Published var tabPathDisplay: OhMyGhosttyTabPathDisplay = .fullPath {
+        didSet { persist("tabs.pathDisplay", tabPathDisplay.rawValue) }
     }
     @Published var showShortcutLabels = true {
         didSet { persist("tabs.showShortcutLabels", showShortcutLabels) }
@@ -506,6 +528,7 @@ final class OhMyGhosttySettings: ObservableObject {
             defaultSidebarWidth = numberValue("tabs.sidebarWidth", fallback: 240, range: 176...480)
             groupingMode = enumValue("tabs.grouping", fallback: .none)
             orderingMode = enumValue("tabs.ordering", fallback: .manual)
+            tabPathDisplay = enumValue("tabs.pathDisplay", fallback: .fullPath)
             showShortcutLabels = boolValue("tabs.showShortcutLabels", fallback: true)
             rememberSidebarWidth = boolValue("tabs.rememberSidebarWidth", fallback: true)
             sidebarVisible = boolValue("tabs.sidebarVisible", fallback: true)

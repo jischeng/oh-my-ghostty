@@ -118,6 +118,13 @@
       "enum": ["manual", "created", "recentlyUsed"],
       "type": "string"
     },
+    "tabs.pathDisplay": {
+      "category": "tabs",
+      "default": "fullPath",
+      "description": "Display the full working path or only the current folder in Vertical Tabs.",
+      "enum": ["fullPath", "folderName"],
+      "type": "string"
+    },
     "tabs.rememberSidebarWidth": {
       "category": "tabs",
       "default": true,

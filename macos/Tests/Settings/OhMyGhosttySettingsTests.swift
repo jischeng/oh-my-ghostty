@@ -14,6 +14,7 @@ struct OhMyGhosttySettingsTests {
         settings.sidebarVisible = false
         settings.groupingMode = .project
         settings.orderingMode = .manual
+        settings.tabPathDisplay = .folderName
         settings.notifyTaskComplete = false
 
         let data = try Data(contentsOf: url)
@@ -25,6 +26,7 @@ struct OhMyGhosttySettingsTests {
         #expect(object["tabs.sidebarVisible"] as? Bool == false)
         #expect(object["tabs.grouping"] as? String == "project")
         #expect(object["tabs.ordering"] as? String == "manual")
+        #expect(object["tabs.pathDisplay"] as? String == "folderName")
         #expect(object["notifications.taskComplete"] as? Bool == false)
 
         let restored = OhMyGhosttySettings(fileURL: url)
@@ -33,6 +35,7 @@ struct OhMyGhosttySettingsTests {
         #expect(!restored.sidebarVisible)
         #expect(restored.groupingMode == .project)
         #expect(restored.orderingMode == .manual)
+        #expect(restored.tabPathDisplay == .folderName)
         #expect(!restored.notifyTaskComplete)
     }
 
@@ -48,6 +51,7 @@ struct OhMyGhosttySettingsTests {
             "tabs.sidebarWidth": 280,
             "tabs.grouping": "date",
             "tabs.ordering": "recentlyUsed",
+            "tabs.pathDisplay": "folderName",
         ]
         let data = try JSONSerialization.data(withJSONObject: edited, options: [.sortedKeys])
         try data.write(to: url, options: .atomic)
@@ -58,6 +62,7 @@ struct OhMyGhosttySettingsTests {
         #expect(settings.defaultSidebarWidth == 280)
         #expect(settings.groupingMode == .date)
         #expect(settings.orderingMode == .recentlyUsed)
+        #expect(settings.tabPathDisplay == .folderName)
     }
 
     @Test func ghosttyConfigIsOnlyTheUnsetLayoutFallback() {
@@ -182,6 +187,7 @@ struct OhMyGhosttySettingsTests {
         #expect(Set(descriptors.map(\.id)).count == descriptors.count)
         #expect(descriptors.contains { $0.id == "tabs.layout" })
         #expect(descriptors.contains { $0.id == "tabs.ordering" })
+        #expect(descriptors.contains { $0.id == "tabs.pathDisplay" })
         #expect(descriptors.contains { $0.id == "tabs.sidebarVisible" })
         #expect(descriptors.contains { $0.id == "agents.statusHooks" })
         #expect(descriptors.contains { $0.id == "appearance.backgroundOpacity" })

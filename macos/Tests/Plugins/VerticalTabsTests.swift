@@ -26,6 +26,93 @@ struct VerticalTabsTests {
         #expect(configured.environmentVariables["EXISTING"] == "value")
     }
 
+    @Test func sshSplitReplaysExactLaunchInsteadOfInheritedRemotePath() throws {
+        var session = PaneSessionContext(
+            workingDirectory: "/Users/test/code",
+            terminalTitle: "code"
+        )
+        session.apply(
+            .init(
+                action: .start,
+                id: "omg-ssh-1",
+                metadata: "type=remote;targethost=cloud"
+            ),
+            currentWorkingDirectory: "/Users/test/code",
+            currentTerminalTitle: "code"
+        )
+        session.apply(
+            .init(
+                action: .start,
+                id: "omg-ssh-1",
+                metadata: "type=remote;targethost=cloud;cwd=/remote/project"
+            ),
+            currentWorkingDirectory: "/remote/project",
+            currentTerminalTitle: "remote"
+        )
+        var inherited = Ghostty.SurfaceConfiguration()
+        inherited.workingDirectory = "/remote/project"
+        inherited.environmentVariables["KEEP"] = "value"
+        let replay = SSHReplayDescriptor(
+            version: 1,
+            ssh: "/usr/bin/ssh",
+            forwardEnv: true,
+            terminfo: true,
+            cache: true,
+            args: ["-J", "jump", "cloud"]
+        )
+
+        let configured = try #require(TerminalController.splitConfiguration(
+            inherited: inherited,
+            session: session,
+            replay: replay,
+            executablePath: "/Applications/OMG.app/Contents/MacOS/omg"
+        ))
+        #expect(configured.workingDirectory == "/Users/test/code")
+        #expect(configured.environmentVariables["KEEP"] == "value")
+        #expect(configured.command?.contains("'+ssh'") == true)
+        #expect(configured.command?.contains(
+            "'--remote-working-directory=/remote/project'"
+        ) == true)
+        #expect(configured.command?.contains("'-J' 'jump' 'cloud'") == true)
+    }
+
+    @Test func sshSplitWithoutReplayFallsBackToSafeLocalShell() throws {
+        var session = PaneSessionContext(
+            workingDirectory: "/Users/test/code",
+            terminalTitle: "code"
+        )
+        session.apply(
+            .init(
+                action: .start,
+                id: "omg-ssh-missing",
+                metadata: "type=remote;targethost=cloud"
+            ),
+            currentWorkingDirectory: "/Users/test/code",
+            currentTerminalTitle: "code"
+        )
+        session.apply(
+            .init(
+                action: .start,
+                id: "omg-ssh-missing",
+                metadata: "type=remote;targethost=cloud;cwd=/remote/project"
+            ),
+            currentWorkingDirectory: "/remote/project",
+            currentTerminalTitle: "remote"
+        )
+        var inherited = Ghostty.SurfaceConfiguration()
+        inherited.workingDirectory = "/remote/project"
+        inherited.command = "unsafe inherited command"
+
+        let configured = try #require(TerminalController.splitConfiguration(
+            inherited: inherited,
+            session: session,
+            replay: nil,
+            executablePath: "/Applications/OMG.app/Contents/MacOS/omg"
+        ))
+        #expect(configured.workingDirectory == "/Users/test/code")
+        #expect(configured.command == nil)
+    }
+
     @Test func visualStatesIncreaseFromNormalToHoverToActive() {
         let normal = GhosttyTabStyle.backgroundOpacity(selected: false, hovered: false)
         let hover = GhosttyTabStyle.backgroundOpacity(selected: false, hovered: true)

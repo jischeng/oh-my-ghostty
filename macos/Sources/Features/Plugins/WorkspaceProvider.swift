@@ -50,12 +50,24 @@ struct PaneSessionContext: Equatable, Sendable {
     }
 
     var presentationTitle: String {
+        presentationTitle(pathDisplay: .fullPath)
+    }
+
+    func presentationTitle(
+        pathDisplay: OhMyGhosttyTabPathDisplay
+    ) -> String {
         switch state {
         case .local, .sshConnecting:
+            if pathDisplay == .folderName, let workingDirectory = local.workingDirectory {
+                return WorkspacePathPresentation.folderName(workingDirectory)
+            }
             if !local.terminalTitle.isEmpty { return local.terminalTitle }
             return local.workingDirectory.map(WorkspacePathPresentation.folderName) ?? "Terminal"
         case .sshReady(let ssh, let workingDirectory):
-            return "\(ssh.alias) \(workingDirectory)"
+            let path = pathDisplay == .folderName
+                ? WorkspacePathPresentation.folderName(workingDirectory)
+                : workingDirectory
+            return "\(ssh.alias) \(path)"
         }
     }
 
@@ -156,6 +168,104 @@ enum WorkspacePathPresentation {
     static func folderName(_ path: String) -> String {
         let url = URL(fileURLWithPath: path).standardizedFileURL
         return url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent
+    }
+}
+
+struct SSHReplayDescriptor: Codable, Equatable, Sendable {
+    let version: Int
+    let ssh: String
+    let forwardEnv: Bool
+    let terminfo: Bool
+    let cache: Bool
+    let args: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case version
+        case ssh
+        case forwardEnv = "forward_env"
+        case terminfo
+        case cache
+        case args
+    }
+
+    func command(
+        executablePath: String,
+        remoteWorkingDirectory: String? = nil
+    ) -> String? {
+        guard version == 1,
+              !ssh.isEmpty,
+              ssh.utf8.count <= 4_096,
+              !ssh.contains("\0"),
+              !args.isEmpty,
+              args.count <= 128,
+              args.allSatisfy({ $0.utf8.count <= 4_096 && !$0.contains("\0") }) else {
+            return nil
+        }
+        if let remoteWorkingDirectory {
+            guard remoteWorkingDirectory.utf8.count <= 4_096,
+                  !remoteWorkingDirectory.contains("\0") else { return nil }
+        }
+        var argv = [
+            executablePath,
+            "+ssh",
+            "--forward-env=\(forwardEnv)",
+            "--terminfo=\(terminfo)",
+            "--cache=\(cache)",
+            "--ssh=\(ssh)",
+        ]
+        if let remoteWorkingDirectory {
+            argv.append("--remote-working-directory=\(remoteWorkingDirectory)")
+        }
+        argv.append("--")
+        argv.append(contentsOf: args)
+        return argv.map(Self.shellQuote).joined(separator: " ")
+    }
+
+    private static func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+}
+
+enum SSHReplayStore {
+    static func url(
+        for connectionID: String,
+        applicationSupportURL: URL? = nil
+    ) -> URL? {
+        guard connectionID.hasPrefix("omg-ssh-"),
+              connectionID.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" }) else {
+            return nil
+        }
+        let support = applicationSupportURL ?? FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        )[0].appendingPathComponent("OMG", isDirectory: true)
+        return support
+            .appendingPathComponent("SSHReplay", isDirectory: true)
+            .appendingPathComponent("\(connectionID).json")
+    }
+
+    static func load(
+        connectionID: String,
+        applicationSupportURL: URL? = nil,
+        now: Date = Date()
+    ) -> SSHReplayDescriptor? {
+        guard let url = url(
+            for: connectionID,
+            applicationSupportURL: applicationSupportURL
+        ),
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+        attributes[.type] as? FileAttributeType == .typeRegular,
+        let modified = attributes[.modificationDate] as? Date,
+        now.timeIntervalSince(modified) >= -5 * 60,
+        now.timeIntervalSince(modified) <= 24 * 60 * 60,
+        let permissions = (attributes[.posixPermissions] as? NSNumber)?.intValue,
+        permissions & 0o077 == 0,
+        let size = (attributes[.size] as? NSNumber)?.intValue,
+        size <= 64 * 1_024,
+        let data = try? Data(contentsOf: url, options: [.mappedIfSafe]) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(SSHReplayDescriptor.self, from: data)
     }
 }
 

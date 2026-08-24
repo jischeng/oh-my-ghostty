@@ -162,10 +162,145 @@ struct WorkspaceProviderTests {
         #expect(filesystem.descriptor.workingDirectory == "/remote/path")
     }
 
+    @Test func tabPathDisplayIsSharedByLocalAndSSHContexts() {
+        var local = PaneSessionContext(
+            workingDirectory: "/Users/test/code",
+            terminalTitle: "~/code"
+        )
+        #expect(local.presentationTitle(pathDisplay: .fullPath) == "~/code")
+        #expect(local.presentationTitle(pathDisplay: .folderName) == "code")
+
+        local.apply(
+            .init(
+                action: .start,
+                id: "omg-ssh-1",
+                metadata: "type=remote;targethost=cloud;cwd=/home/test/project/omg"
+            ),
+            currentWorkingDirectory: "/home/test/project/omg",
+            currentTerminalTitle: "remote"
+        )
+        #expect(
+            local.presentationTitle(pathDisplay: .fullPath) ==
+                "cloud /home/test/project/omg"
+        )
+        #expect(local.presentationTitle(pathDisplay: .folderName) == "cloud omg")
+    }
+
     @Test func folderDisplayNameIsSharedByLocalAndRemoteFiles() {
         #expect(WorkspacePathPresentation.folderName("/Users/test/code") == "code")
         #expect(WorkspacePathPresentation.folderName("/home/test/project/omg") == "omg")
         #expect(WorkspacePathPresentation.folderName("/") == "/")
+    }
+
+    @Test func sshReplayDescriptorPreservesExactArgumentsAndQuotesCommand() throws {
+        let support = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: support) }
+        let connectionID = "omg-ssh-123"
+        let url = try #require(SSHReplayStore.url(
+            for: connectionID,
+            applicationSupportURL: support
+        ))
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let descriptor = SSHReplayDescriptor(
+            version: 1,
+            ssh: "/usr/bin/ssh",
+            forwardEnv: true,
+            terminfo: false,
+            cache: true,
+            args: ["-J", "jump host", "user@cloud", "quote'arg"]
+        )
+        try JSONEncoder().encode(descriptor).write(to: url, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: url.path
+        )
+
+        let restored = try #require(SSHReplayStore.load(
+            connectionID: connectionID,
+            applicationSupportURL: support
+        ))
+        #expect(restored == descriptor)
+        let command = try #require(restored.command(
+            executablePath: "/Applications/OMG Dev.app/Contents/MacOS/omg"
+        ))
+        #expect(command.contains("'+ssh'"))
+        #expect(command.contains("'--ssh=/usr/bin/ssh'"))
+        #expect(command.contains("'jump host'"))
+        #expect(command.contains("'quote'\\''arg'"))
+        #expect(command.hasSuffix("'quote'\\''arg'"))
+
+        let cwdCommand = try #require(restored.command(
+            executablePath: "/Applications/OMG Dev.app/Contents/MacOS/omg",
+            remoteWorkingDirectory: "/home/test/project's code"
+        ))
+        #expect(cwdCommand.contains(
+            "'--remote-working-directory=/home/test/project'\\''s code'"
+        ))
+    }
+
+    @Test func sshReplayStoreRejectsInvalidOrStaleDescriptors() throws {
+        let support = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: support) }
+        #expect(SSHReplayStore.url(
+            for: "../../escape",
+            applicationSupportURL: support
+        ) == nil)
+
+        let connectionID = "omg-ssh-stale"
+        let url = try #require(SSHReplayStore.url(
+            for: connectionID,
+            applicationSupportURL: support
+        ))
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let descriptor = SSHReplayDescriptor(
+            version: 1,
+            ssh: "ssh",
+            forwardEnv: true,
+            terminfo: true,
+            cache: true,
+            args: ["cloud"]
+        )
+        try JSONEncoder().encode(descriptor).write(to: url, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: url.path
+        )
+        let tomorrow = Date().addingTimeInterval(25 * 60 * 60)
+        #expect(SSHReplayStore.load(
+            connectionID: connectionID,
+            applicationSupportURL: support,
+            now: tomorrow
+        ) == nil)
+        try FileManager.default.setAttributes(
+            [
+                .modificationDate: Date(),
+                .posixPermissions: 0o644,
+            ],
+            ofItemAtPath: url.path
+        )
+        #expect(SSHReplayStore.load(
+            connectionID: connectionID,
+            applicationSupportURL: support
+        ) == nil)
+        try FileManager.default.setAttributes(
+            [
+                .modificationDate: Date().addingTimeInterval(10 * 60),
+                .posixPermissions: 0o600,
+            ],
+            ofItemAtPath: url.path
+        )
+        #expect(SSHReplayStore.load(
+            connectionID: connectionID,
+            applicationSupportURL: support
+        ) == nil)
     }
 
     @Test func boundsLargeSFTPDirectoryListings() throws {

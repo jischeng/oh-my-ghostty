@@ -317,6 +317,21 @@ only `sshReady` may construct `SSHWorkspaceFilesystem`. A ready context whose
 SSH alias is unavailable returns an unavailable filesystem and never falls back
 to local IO at a remote-looking path.
 
+While an interactive SSH connection is active, `+ssh` also writes a bounded,
+mode-0600 replay descriptor under
+`~/Library/Application Support/OMG/SSHReplay/<connection-id>.json`. It contains
+the original OpenSSH executable, wrapper policy flags, and exact argv. A split
+created from that Surface reads only the matching active connection ID and
+launches a new `omg +ssh` child through `SurfaceConfiguration.command`; it does
+not inject keystrokes, reconstruct options from `~/.ssh/config`, or connect to
+the resolved IP. The ready remote cwd is passed as a separately shell-quoted
+wrapper option so the independent Fish session starts in the same folder.
+Therefore config aliases retain ProxyJump and other OpenSSH configuration, and
+explicit direct invocations retain their original arguments.
+The descriptor is removed when the owning OpenSSH child exits and stale files
+older than 24 hours are rejected. This is an internal first-party launch handoff,
+not plugin storage or a public plugin API.
+
 This first provider does not install a remote service and does not manage
 credentials. It depends on the system SSH/SFTP client and configured
 `ssh-agent`/known_hosts. Other remote shells do not yet publish a ready remote

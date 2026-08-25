@@ -1,0 +1,45 @@
+{
+  "id": "copilot",
+  "displayName": "Copilot",
+  "command": "copilot",
+  "iconAsset": "AgentCopilot",
+  "opticalScale": 0.9,
+  "process": {
+    "executables": [
+      "copilot"
+    ],
+    "runtimeMarkers": [
+      "copilot"
+    ]
+  },
+  "resume": {
+    "resumeArguments": []
+  },
+  "hook": {
+    "kind": "json",
+    "dialect": "copilot",
+    "path": "~/.copilot/hooks/omg.json",
+    "events": [
+      {
+        "name": "SessionStart",
+        "state": "idle"
+      },
+      {
+        "name": "UserPromptSubmit",
+        "state": "working"
+      },
+      {
+        "name": "PreToolUse",
+        "state": "working"
+      },
+      {
+        "name": "PostToolUse",
+        "state": "working"
+      },
+      {
+        "name": "Stop",
+        "state": "done"
+      }
+    ]
+  }
+}

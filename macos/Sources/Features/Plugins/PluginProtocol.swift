@@ -20,6 +20,11 @@ enum PluginCapability: String, Codable, CaseIterable, Sendable {
     case rawTerminalOutput
 }
 
+enum TabAttentionKind: String, Codable, Sendable {
+    case question
+    case permission
+}
+
 enum TabActivityState: String, Codable, CaseIterable, Sendable {
     case idle
     case working
@@ -41,11 +46,32 @@ struct PluginTabIcon: Codable, Equatable, Sendable {
 struct TabActivity: Equatable, Sendable {
     let source: String
     let state: TabActivityState
+    let attentionKind: TabAttentionKind?
     let label: String?
     let message: String?
     let detail: String?
     let progress: Double?
     let icon: PluginTabIcon?
+
+    init(
+        source: String,
+        state: TabActivityState,
+        attentionKind: TabAttentionKind? = nil,
+        label: String?,
+        message: String?,
+        detail: String?,
+        progress: Double?,
+        icon: PluginTabIcon?
+    ) {
+        self.source = source
+        self.state = state
+        self.attentionKind = attentionKind
+        self.label = label
+        self.message = message
+        self.detail = detail
+        self.progress = progress
+        self.icon = icon
+    }
 }
 
 struct PluginHello: Codable, Equatable, Sendable {

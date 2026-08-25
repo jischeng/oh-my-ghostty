@@ -3,13 +3,25 @@
   "displayName": "Claude Code",
   "command": "claude",
   "iconAsset": "AgentClaude",
+  "opticalScale": 0.9,
   "process": {
-    "executables": ["claude"],
-    "runtimeMarkers": ["claude", "claude-code"]
+    "executables": [
+      "claude"
+    ],
+    "runtimeMarkers": [
+      "claude",
+      "claude-code"
+    ]
   },
   "resume": {
-    "createArguments": ["--session-id", "{id}"],
-    "resumeArguments": ["--resume", "{id}"],
+    "createArguments": [
+      "--session-id",
+      "{id}"
+    ],
+    "resumeArguments": [
+      "--resume",
+      "{id}"
+    ],
     "store": {
       "root": "~/.claude/projects",
       "entryPattern": "{id}.jsonl"
@@ -22,14 +34,43 @@
     "transcriptField": "transcript_path",
     "toolField": "tool_name",
     "events": [
-      {"name": "SessionStart", "state": "idle"},
-      {"name": "UserPromptSubmit", "state": "working"},
-      {"name": "PreToolUse", "state": "working"},
-      {"name": "PostToolUse", "state": "working"},
-      {"name": "PermissionRequest", "state": "needsAttention"},
-      {"name": "Stop", "state": "done"},
-      {"name": "SessionEnd"},
-      {"name": "Notification", "state": "needsAttention", "matcher": "permission_prompt"}
+      {
+        "name": "SessionStart",
+        "state": "idle"
+      },
+      {
+        "name": "UserPromptSubmit",
+        "state": "working"
+      },
+      {
+        "name": "PreToolUse",
+        "state": "working"
+      },
+      {
+        "name": "PostToolUse",
+        "state": "working"
+      },
+      {
+        "name": "PermissionRequest",
+        "state": "needsAttention"
+      },
+      {
+        "name": "Stop",
+        "state": "done"
+      },
+      {
+        "name": "SessionEnd"
+      },
+      {
+        "name": "Notification",
+        "state": "needsAttention",
+        "matcher": "permission_prompt"
+      }
+    ]
+  },
+  "titleStatus": {
+    "working": [
+      "^[⠀-⣿◐-◓] "
     ]
   }
 }

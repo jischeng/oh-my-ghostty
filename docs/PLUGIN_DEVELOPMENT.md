@@ -44,8 +44,8 @@ not a third-party SDK:
 - owner validation and cleanup in `InspectorRegistry`;
 - built-in `builtin.files` provider using the plugin-shaped Inspector boundary;
 - stable terminal tab identity via `OH_MY_GHOSTTY_SESSION`;
-- built-in Codex, Claude Code, and Pi hook adapters using bounded OSC 3008
-  presentation events on the owning Surface.
+- manifest-driven built-in Agent adapters using bounded OSC 3008 presentation
+  events on the owning Surface.
 
 ### Experimental protocol components
 
@@ -269,18 +269,18 @@ request sequence; failures return a typed `PluginProtocolFailure`.
 
 ### Built-in agent hook bridge (Internal)
 
-`AgentHookInstaller` merges versioned, owner-marked entries into user Codex and
-Claude JSON hook files without removing unrelated integrations, strictly updates
-Codex's hooks feature, and installs one readable Pi TypeScript extension. It
-rejects malformed JSON/TOML rather than replacing unknown shapes, preserves
-co-located third-party commands while migrating old OMG entries, uses atomic
+`AgentHookInstaller` installs only the closed mechanism selected by each bundled
+manifest: nested JSON, Cursor/Copilot/Reasonix flat JSON, Pi-compatible or
+OpenCode/Amp plugins, marker-delimited Kimi TOML, and event-named Cline scripts.
+It never removes unrelated JSON/TOML entries, never overwrites a non-OMG Cline
+script, rejects malformed config rather than replacing it, uses atomic
 mode-preserving writes (0600 for new files), and keeps a one-time `.omg-backup`
-beside each existing file. Removal deletes only OMG-owned commands.
+beside each existing file. Removal deletes only OMG-owned commands or blocks.
 
 Adapters emit OSC 3008 contexts with IDs
 `omg-agent-<codex|claude|pi>-<process-group-id>`, `type=app`, a bounded
-`omg_state`, `omg_scope=local|remote`, and an optional validated
-`omg_conversation`. The host verifies that ID and metadata
+`omg_state`, `omg_scope=local|remote`, optional validated
+`omg_conversation`, and optional `omg_attention=question|permission`. The host verifies that ID and metadata
 name the same built-in agent, then associates the event with the Surface that
 parsed it. Because some agent versions defer or omit `SessionStart`, the macOS
 host samples Ghostty's foreground process-group PID once per second; only when
@@ -300,17 +300,19 @@ OpenSSH. Hooks must be installed in the account where the agent executable runs.
 Settings can export an auditable Python 3 installer for explicit transfer and
 execution on that account; OMG does not log in or silently modify remote dotfiles.
 
-Agent glyphs use the template SVGs from LobeHub `lobe-icons` static package
-(version 1.94.0, MIT). OpenAI, Claude, and Pi names and marks remain trademarks
-of their respective owners.
+Agent glyphs use MIT-licensed assets from LobeHub `lobe-icons` 1.94.0,
+Termio, OMP/oh-my-pi, and Reasonix. Product names and marks remain trademarks
+of their respective owners; the assets do not imply vendor endorsement.
 
 ### Built-in agent manifests and restoration (Internal)
 
 Bundled `Agent*Manifest.dataset` JSON files are the single data source for each
-allowlisted agent's command, icon, process markers, hook path/events/identity
-fields, resume argv, and on-disk store/discovery mechanism. Manifests can select
-only closed host mechanisms; they cannot inject Swift, shell, or arbitrary remote
-commands.
+allowlisted agent's command, icon, optical scale, process markers, hook
+kind/dialect/path/events/identity fields, status rules, resume argv, and on-disk
+store/discovery mechanism. The roster covers Codex, Claude Code, Pi, Qoder CLI,
+Reasonix, OMP, OpenCode, Amp, Antigravity, Cline, Copilot, Crush, Cursor Agent,
+Droid, Grok, Hermes, Kimi, and Qwen Code. Manifests can select only closed host
+mechanisms; they cannot inject Swift, shell, or arbitrary remote commands.
 
 `AgentResumeDescriptor` persists only a version, allowlisted agent, bounded ASCII
 conversation ID, local/remote scope, cwd, and validated `SSHReplayDescriptor`.
@@ -322,8 +324,9 @@ Remote restore replays original OpenSSH argv and passes only typed
 emits a ready context, runs the allowlisted resume command, then returns to its
 interactive prompt.
 
-Conversation identity comes from hook stdin (`session_id`), Pi's
-`sessionManager.getSessionId()`, or bounded cwd+creation-time JSONL discovery.
+Conversation identity comes from hook stdin (`session_id`), Pi-compatible
+`sessionManager.getSessionId()`, OpenCode events, Reasonix's bounded machine JSON
+command, or bounded cwd+creation-time JSONL discovery.
 Multiple candidates are ambiguous and never resolved using `--last` or
 `--continue`. Agent end or the first resumed SSH prompt clears the descriptor,
 so a tab whose user explicitly ran `/quit` restores as a shell.

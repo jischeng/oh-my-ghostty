@@ -564,11 +564,16 @@ struct SettingsView: View {
     private func agentHookRow(_ agent: SupportedAgent) -> some View {
         let revision = agentHookRevision
         let installationState = AgentHookInstaller().installationState(agent)
+        let managedHooks = agent.definition.hook.kind != .none
         let installed = installationState.isInstalled
-        let statusText: String = switch installationState {
-        case .missing: "Hooks Not Installed"
-        case .updateAvailable: "Hook Update Required"
-        case .current: "Hooks Installed"
+        let statusText: String = if !managedHooks {
+            "Built-in Detection"
+        } else {
+            switch installationState {
+            case .missing: "Hooks Not Installed"
+            case .updateAvailable: "Hook Update Required"
+            case .current: "Hooks Installed"
+            }
         }
         HStack {
             Image(agent.assetName)
@@ -586,11 +591,13 @@ struct SettingsView: View {
                 ProgressView()
                     .controlSize(.small)
             }
-            Button(installed ? "Update" : "Install") {
-                updateAgentHook(agent, remove: false)
+            if managedHooks {
+                Button(installed ? "Update" : "Install") {
+                    updateAgentHook(agent, remove: false)
+                }
+                .disabled(agentHookOperation != nil)
             }
-            .disabled(agentHookOperation != nil)
-            if installed {
+            if managedHooks && installed {
                 Button("Remove") {
                     updateAgentHook(agent, remove: true)
                 }

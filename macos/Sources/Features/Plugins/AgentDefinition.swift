@@ -5,6 +5,21 @@ enum SupportedAgent: String, CaseIterable, Codable, Identifiable, Sendable {
     case codex
     case claude
     case pi
+    case qoder
+    case reasonix
+    case omp
+    case opencode
+    case amp
+    case antigravity
+    case cline
+    case copilot
+    case crush
+    case cursor
+    case droid
+    case grok
+    case hermes
+    case kimi
+    case qwen
 
     var id: String { rawValue }
     var definition: AgentDefinition { AgentCatalog.shared.definition(for: self) }
@@ -14,7 +29,9 @@ enum SupportedAgent: String, CaseIterable, Codable, Identifiable, Sendable {
 
     func normalizedTitle(_ title: String) -> String {
         switch self {
-        case .codex:
+        case .codex, .qoder, .reasonix, .opencode, .amp, .antigravity,
+             .cline, .copilot, .crush, .cursor, .droid, .grok, .hermes,
+             .kimi, .qwen:
             return title
         case .claude:
             guard title.contains("Claude Code") else { return title }
@@ -23,8 +40,8 @@ enum SupportedAgent: String, CaseIterable, Codable, Identifiable, Sendable {
                     character == "✶" || character == "*"
             })
             return trimmed.isEmpty ? displayName : String(trimmed)
-        case .pi:
-            let prefixes = ["π - ", "Pi - ", "pi - "]
+        case .pi, .omp:
+            let prefixes = ["π - ", "Pi - ", "pi - ", "OMP - ", "omp - "]
             guard let prefix = prefixes.first(where: { title.hasPrefix($0) }) else {
                 return title
             }
@@ -113,11 +130,14 @@ struct AgentResumeDescriptor: Codable, Equatable, Sendable {
             return localCommand(verifyStore: verifyLocalStore)
         case .remote:
             guard let sshReplay else { return nil }
+            let resumableConversation = agent.definition.resume.resumeArguments.isEmpty
+                ? nil
+                : conversationID
             return sshReplay.command(
                 executablePath: executablePath,
                 remoteWorkingDirectory: workingDirectory,
                 remoteAgent: agent,
-                conversationID: conversationID
+                conversationID: resumableConversation
             )
         }
     }
@@ -126,8 +146,12 @@ struct AgentResumeDescriptor: Codable, Equatable, Sendable {
         guard scope == .local else { return nil }
         let definition = agent.definition
         var argv = [definition.command]
+        let hasStoreProbe = definition.resume.store != nil ||
+            definition.resume.discover != nil ||
+            definition.resume.commandDiscovery != nil
         if let conversationID,
-           !verifyStore || definition.resume.discover != nil ||
+           !verifyStore || !hasStoreProbe || definition.resume.discover != nil ||
+           definition.resume.commandDiscovery != nil ||
            AgentConversationStore.contains(
                agent: agent,
                conversationID: conversationID
@@ -160,6 +184,14 @@ struct AgentDefinition: Codable, Equatable, Sendable {
             let entryPattern: String
         }
 
+        struct CommandDiscovery: Codable, Equatable, Sendable {
+            let executable: String
+            let arguments: [String]
+            let listKey: String
+            let idKey: String
+            let createdAtKey: String
+        }
+
         struct Discovery: Codable, Equatable, Sendable {
             enum Format: String, Codable, Sendable {
                 case json
@@ -176,13 +208,17 @@ struct AgentDefinition: Codable, Equatable, Sendable {
         let resumeArguments: [String]
         let store: Store?
         let discover: Discovery?
+        let commandDiscovery: CommandDiscovery?
         let seed: String?
     }
 
     struct HookSpec: Codable, Equatable, Sendable {
         enum Kind: String, Codable, Sendable {
+            case none
             case json
             case plugin
+            case toml
+            case scripts
         }
 
         struct Event: Codable, Equatable, Sendable {
@@ -192,6 +228,7 @@ struct AgentDefinition: Codable, Equatable, Sendable {
         }
 
         let kind: Kind
+        let dialect: String?
         let path: String
         let conversationField: String?
         let transcriptField: String?
@@ -200,13 +237,25 @@ struct AgentDefinition: Codable, Equatable, Sendable {
         let events: [Event]
     }
 
+    struct StatusSpec: Codable, Equatable, Sendable {
+        let working: [String]?
+        let attention: [String]?
+    }
+
     let id: String
     let displayName: String
     let command: String
     let iconAsset: String
+    let opticalScale: Double?
     let process: ProcessSpec
     let resume: ResumeSpec
     let hook: HookSpec
+    let status: StatusSpec?
+    let titleStatus: StatusSpec?
+
+    var iconScale: CGFloat {
+        CGFloat(min(max(opticalScale ?? 0.86, 0.7), 1.1))
+    }
 
     var expandedHookURL: URL {
         URL(fileURLWithPath: (hook.path as NSString).expandingTildeInPath)
@@ -218,24 +267,52 @@ struct AgentDefinition: Codable, Equatable, Sendable {
             displayName: agent.rawValue.capitalized,
             command: agent.rawValue,
             iconAsset: "AgentOpenAI",
+            opticalScale: 0.86,
             process: .init(executables: [agent.rawValue], runtimeMarkers: []),
             resume: .init(
                 createArguments: nil,
                 resumeArguments: [],
                 store: nil,
                 discover: nil,
+                commandDiscovery: nil,
                 seed: nil
             ),
             hook: .init(
-                kind: .json,
+                kind: .none,
+                dialect: nil,
                 path: "",
                 conversationField: nil,
                 transcriptField: nil,
                 toolField: nil,
                 promptTitleField: nil,
                 events: []
-            )
+            ),
+            status: nil,
+            titleStatus: nil
         )
+    }
+}
+
+enum AgentScreenStatusDetector {
+    static func detect(
+        definition: AgentDefinition,
+        screen: String
+    ) -> TabActivityState? {
+        detect(status: definition.status, text: screen)
+    }
+
+    static func detect(
+        status: AgentDefinition.StatusSpec?,
+        text: String
+    ) -> TabActivityState? {
+        guard let status else { return nil }
+        if status.attention?.contains(where: {
+            text.range(of: $0, options: [.regularExpression, .caseInsensitive]) != nil
+        }) == true { return .needsAttention }
+        if status.working?.contains(where: {
+            text.range(of: $0, options: [.regularExpression, .caseInsensitive]) != nil
+        }) == true { return .working }
+        return .idle
     }
 }
 
@@ -249,6 +326,21 @@ final class AgentCatalog: @unchecked Sendable {
             .codex: "AgentCodexManifest",
             .claude: "AgentClaudeManifest",
             .pi: "AgentPiManifest",
+            .qoder: "AgentQoderManifest",
+            .reasonix: "AgentReasonixManifest",
+            .omp: "AgentOMPManifest",
+            .opencode: "AgentOpenCodeManifest",
+            .amp: "AgentAmpManifest",
+            .antigravity: "AgentAntigravityManifest",
+            .cline: "AgentClineManifest",
+            .copilot: "AgentCopilotManifest",
+            .crush: "AgentCrushManifest",
+            .cursor: "AgentCursorManifest",
+            .droid: "AgentDroidManifest",
+            .grok: "AgentGrokManifest",
+            .hermes: "AgentHermesManifest",
+            .kimi: "AgentKimiManifest",
+            .qwen: "AgentQwenManifest",
         ]
         definitions = Dictionary(uniqueKeysWithValues: SupportedAgent.allCases.map { agent in
             guard let assetName = assetNames[agent],

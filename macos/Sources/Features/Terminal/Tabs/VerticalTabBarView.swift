@@ -678,7 +678,7 @@ struct TerminalTabSidebarView: View {
         let selected = controller.selectedTabID == tabID
         let hovered = controller.hoveredTabID == tabID
         if let surface = tab.focusedSurface ?? tab.surfaceTree.first {
-            let activity = tab.preferredAgentActivity() ??
+            let activity = tab.focusedAgentActivity() ??
                 statusStore.activity(for: tab.tabSessionID)
             VerticalTabRow(
                 controller: tab,
@@ -736,12 +736,11 @@ struct TerminalTabSidebarView: View {
             workingDirectory: surface.pwd,
             terminalTitle: surface.title
         )
-        let baseTitle = tab.titleOverride ?? session.presentationTitle(
-            pathDisplay: settings.tabPathDisplay
-        )
-        let resolvedTitle = activity
-            .flatMap { SupportedAgent(rawValue: $0.source) }?
-            .normalizedTitle(baseTitle) ?? baseTitle
+        let agent = activity.flatMap { SupportedAgent(rawValue: $0.source) }
+        let baseTitle = tab.titleOverride ?? (agent == nil
+            ? session.presentationTitle(pathDisplay: settings.tabPathDisplay)
+            : session.agentPathTitle(pathDisplay: settings.tabPathDisplay))
+        let resolvedTitle = agent?.normalizedTitle(baseTitle) ?? baseTitle
         let context = GhosttyTabIconContext(
             tabID: tab.tabSessionID,
             title: resolvedTitle,
@@ -1222,23 +1221,32 @@ private struct VerticalTabRow: View {
     let hoverChanged: (Bool) -> Void
 
     private var livePresentation: GhosttyTabPresentation {
-        let session = controller.paneSessionContext(for: surface) ?? .init(
-            workingDirectory: surface.pwd,
-            terminalTitle: surface.title
+        let activeSurface = controller.focusedSurface ?? controller.surfaceTree.first ?? surface
+        let session = controller.paneSessionContext(for: activeSurface) ?? .init(
+            workingDirectory: activeSurface.pwd,
+            terminalTitle: activeSurface.title
         )
-        let agentActivity = controller.preferredAgentActivity()
+        let agentActivity = controller.agentActivity(for: activeSurface)
+        let canonicalIcon = session.workspace?.icon ?? .systemSymbol(
+            session.tabIconSystemName
+        )
         let icon: GhosttyTabIcon = if let requested = agentActivity?.icon {
             switch requested.kind {
             case .systemSymbol: .systemSymbol(requested.name)
             case .bundledAsset: .asset(requested.name)
             }
-        } else {
+        } else if activeSurface.id == surface.id {
             presentation.icon
+        } else {
+            canonicalIcon
         }
-        let baseTitle = controller.titleOverride ?? session.presentationTitle(
-            pathDisplay: settings.tabPathDisplay
-        )
-        let activity = agentActivity ?? presentation.activity
+        let baseTitle = controller.titleOverride ?? (agentActivity == nil
+            ? session.presentationTitle(pathDisplay: settings.tabPathDisplay)
+            : session.agentPathTitle(pathDisplay: settings.tabPathDisplay))
+        let pluginActivity = presentation.activity.flatMap {
+            SupportedAgent(rawValue: $0.source) == nil ? $0 : nil
+        }
+        let activity = agentActivity ?? pluginActivity
         let title = activity
             .flatMap { SupportedAgent(rawValue: $0.source) }?
             .normalizedTitle(baseTitle) ?? baseTitle
@@ -1254,6 +1262,10 @@ private struct VerticalTabRow: View {
 
     var body: some View {
         let presentation = livePresentation
+        let pluginActivity = presentation.activity.flatMap {
+            SupportedAgent(rawValue: $0.source) == nil ? $0 : nil
+        }
+        let statusActivity = controller.preferredAgentActivity() ?? pluginActivity
         HStack(spacing: 4) {
             Button(action: select) {
                 HStack(spacing: GhosttyTabStyle.contentSpacing) {
@@ -1277,11 +1289,11 @@ private struct VerticalTabRow: View {
             }
             .buttonStyle(.plain)
 
-            if let activity = presentation.activity,
-               activity.state != .idle,
-               !(SupportedAgent(rawValue: activity.source) != nil &&
-                    activity.state == .working) {
-                TabActivityIndicator(activity: activity)
+            if let statusActivity,
+               statusActivity.state != .idle,
+               !(SupportedAgent(rawValue: statusActivity.source) != nil &&
+                    statusActivity.state == .working) {
+                TabActivityIndicator(activity: statusActivity)
             }
 
             if presentation.hovered && canClose {
@@ -1331,8 +1343,8 @@ private struct TabActivityIndicator: View {
             }
         }
         .frame(width: 12, height: 12)
-        .help(activity.message ?? activity.label ?? activity.state.rawValue)
-        .accessibilityLabel(activity.label ?? activity.state.rawValue)
+        .help(activity.message ?? attentionDescription ?? activity.label ?? activity.state.rawValue)
+        .accessibilityLabel(attentionDescription ?? activity.label ?? activity.state.rawValue)
     }
 
     private var systemImage: String {
@@ -1340,8 +1352,21 @@ private struct TabActivityIndicator: View {
         case .idle: "circle"
         case .working: "circle"
         case .done: "checkmark.circle.fill"
-        case .needsAttention: "exclamationmark.circle.fill"
+        case .needsAttention:
+            switch activity.attentionKind {
+            case .question: "questionmark.bubble.fill"
+            case .permission: "lock.shield.fill"
+            case nil: "exclamationmark.circle.fill"
+            }
         case .error: "xmark.circle.fill"
+        }
+    }
+
+    private var attentionDescription: String? {
+        switch activity.attentionKind {
+        case .question: "Answer required"
+        case .permission: "Approval required"
+        case nil: nil
         }
     }
 
@@ -1360,34 +1385,40 @@ private struct AgentTabIconView: View {
     let icon: GhosttyTabIcon
     let color: Color
     let activity: TabActivity?
-    @State private var rotation: Double = 0
 
-    private var isAgent: Bool {
-        activity.flatMap { SupportedAgent(rawValue: $0.source) } != nil
+    private var agent: SupportedAgent? {
+        activity.flatMap { SupportedAgent(rawValue: $0.source) }
+    }
+
+    private var isSpinning: Bool {
+        activity?.state == .working && activity?.progress == nil
     }
 
     var body: some View {
-        ZStack {
-            if isAgent, let activity, activity.state != .idle {
-                Circle()
-                    .trim(from: 0, to: ringProgress(activity))
-                    .stroke(
-                        ringColor(activity),
-                        style: .init(lineWidth: 1.5, lineCap: .round)
-                    )
-                    .rotationEffect(.degrees(
-                        activity.state == .working && activity.progress == nil
-                            ? rotation
-                            : -90
-                    ))
-                    .frame(
-                        width: settings.tabIconSize + 3,
-                        height: settings.tabIconSize + 3
-                    )
-            }
+        TimelineView(.animation(
+            minimumInterval: 1.0 / 30.0,
+            paused: !isSpinning
+        )) { timeline in
+            ZStack {
+                if agent != nil, let activity, activity.state != .idle {
+                    Circle()
+                        .trim(from: 0, to: ringProgress(activity))
+                        .stroke(
+                            ringColor(activity),
+                            style: .init(lineWidth: 1.5, lineCap: .round)
+                        )
+                        .rotationEffect(.degrees(
+                            isSpinning ? rotation(at: timeline.date) : -90
+                        ))
+                        .frame(
+                            width: settings.tabIconSize + 3,
+                            height: settings.tabIconSize + 3
+                        )
+                }
 
-            GhosttyTabIconView(icon: icon, color: color)
-                .scaleEffect(isAgent ? 0.68 : 1)
+                GhosttyTabIconView(icon: icon, color: color)
+                    .scaleEffect(agent?.definition.iconScale ?? 1)
+            }
         }
         .frame(
             width: settings.tabIconSize,
@@ -1396,24 +1427,13 @@ private struct AgentTabIconView: View {
         .help(activity.map {
             $0.message ?? $0.label ?? $0.state.rawValue
         } ?? "Terminal")
-        .onAppear { updateRotation() }
-        .onChange(of: animationKey) { _ in updateRotation() }
     }
 
-    private var animationKey: String {
-        guard let activity else { return "none" }
-        return "\(activity.state.rawValue):\(activity.progress.map { String($0) } ?? "none")"
-    }
-
-    private func updateRotation() {
-        rotation = 0
-        guard activity?.state == .working,
-              activity?.progress == nil else { return }
-        withAnimation(.linear(duration: 0.9).repeatForever(
-            autoreverses: false
-        )) {
-            rotation = 360
-        }
+    private func rotation(at date: Date) -> Double {
+        let period = 0.9
+        let phase = date.timeIntervalSinceReferenceDate
+            .truncatingRemainder(dividingBy: period) / period
+        return phase * 360 - 90
     }
 
     private func ringProgress(_ activity: TabActivity) -> Double {

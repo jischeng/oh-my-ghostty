@@ -1,0 +1,23 @@
+{
+  "id": "hermes",
+  "displayName": "Hermes",
+  "command": "hermes",
+  "iconAsset": "AgentHermes",
+  "opticalScale": 0.9,
+  "process": {
+    "executables": [
+      "hermes"
+    ],
+    "runtimeMarkers": [
+      "hermes"
+    ]
+  },
+  "resume": {
+    "resumeArguments": []
+  },
+  "hook": {
+    "kind": "none",
+    "path": "",
+    "events": []
+  }
+}

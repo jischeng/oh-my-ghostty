@@ -1,0 +1,33 @@
+{
+  "id": "amp",
+  "displayName": "Amp",
+  "command": "amp",
+  "iconAsset": "AgentAmp",
+  "opticalScale": 0.9,
+  "process": {
+    "executables": [
+      "amp"
+    ],
+    "runtimeMarkers": [
+      "amp"
+    ]
+  },
+  "resume": {
+    "resumeArguments": []
+  },
+  "hook": {
+    "kind": "plugin",
+    "dialect": "amp",
+    "path": "~/.config/amp/plugins/omg-agent-status.ts",
+    "events": [
+      {
+        "name": "agent.start",
+        "state": "working"
+      },
+      {
+        "name": "agent.end",
+        "state": "done"
+      }
+    ]
+  }
+}

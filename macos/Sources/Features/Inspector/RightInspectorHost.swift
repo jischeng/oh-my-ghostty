@@ -262,6 +262,10 @@ extension TerminalWindow {
                 return
             }
             self.inspectorToggleWidthConstraint?.constant = targetWidth
+            self.inspectorToggleAccessory.view.needsLayout = true
+            self.titlebarContainer?.needsLayout = true
+            self.titlebarContainer?.layoutSubtreeIfNeeded()
+            self.inspectorToggleAccessory.view.layoutSubtreeIfNeeded()
             self.scheduleInspectorAppearanceSync(controller: controller)
         }
 

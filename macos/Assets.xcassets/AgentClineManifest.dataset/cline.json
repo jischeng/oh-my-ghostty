@@ -1,0 +1,53 @@
+{
+  "id": "cline",
+  "displayName": "Cline",
+  "command": "cline",
+  "iconAsset": "AgentCline",
+  "opticalScale": 0.9,
+  "process": {
+    "executables": [
+      "cline"
+    ],
+    "runtimeMarkers": [
+      "cline"
+    ]
+  },
+  "resume": {
+    "resumeArguments": []
+  },
+  "hook": {
+    "kind": "scripts",
+    "dialect": "cline",
+    "path": "~/.cline/hooks",
+    "events": [
+      {
+        "name": "TaskStart",
+        "state": "working"
+      },
+      {
+        "name": "TaskResume",
+        "state": "working"
+      },
+      {
+        "name": "UserPromptSubmit",
+        "state": "working"
+      },
+      {
+        "name": "PreToolUse",
+        "state": "working"
+      },
+      {
+        "name": "PostToolUse",
+        "state": "working"
+      },
+      {
+        "name": "TaskComplete",
+        "state": "done"
+      },
+      {
+        "name": "TaskCancel",
+        "state": "done"
+      }
+    ]
+  }
+}

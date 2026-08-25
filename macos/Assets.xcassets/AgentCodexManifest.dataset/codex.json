@@ -3,12 +3,20 @@
   "displayName": "Codex",
   "command": "codex",
   "iconAsset": "AgentOpenAI",
+  "opticalScale": 0.88,
   "process": {
-    "executables": ["codex"],
-    "runtimeMarkers": ["codex"]
+    "executables": [
+      "codex"
+    ],
+    "runtimeMarkers": [
+      "codex"
+    ]
   },
   "resume": {
-    "resumeArguments": ["resume", "{id}"],
+    "resumeArguments": [
+      "resume",
+      "{id}"
+    ],
     "discover": {
       "root": "~/.codex/sessions",
       "format": "jsonl",
@@ -22,13 +30,41 @@
     "conversationField": "session_id",
     "promptTitleField": "prompt",
     "events": [
-      {"name": "SessionStart", "state": "idle"},
-      {"name": "UserPromptSubmit", "state": "working"},
-      {"name": "PreToolUse", "state": "working"},
-      {"name": "PostToolUse", "state": "working"},
-      {"name": "PermissionRequest", "state": "needsAttention"},
-      {"name": "Stop", "state": "done"},
-      {"name": "SessionEnd"}
+      {
+        "name": "SessionStart",
+        "state": "idle"
+      },
+      {
+        "name": "UserPromptSubmit",
+        "state": "working"
+      },
+      {
+        "name": "PreToolUse",
+        "state": "working"
+      },
+      {
+        "name": "PostToolUse",
+        "state": "working"
+      },
+      {
+        "name": "PermissionRequest",
+        "state": "needsAttention"
+      },
+      {
+        "name": "Stop",
+        "state": "done"
+      },
+      {
+        "name": "SessionEnd"
+      }
+    ]
+  },
+  "titleStatus": {
+    "working": [
+      "(?:^| )[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏](?: |$)"
+    ],
+    "attention": [
+      "Action Required"
     ]
   }
 }

@@ -1,0 +1,37 @@
+{
+  "id": "kimi",
+  "displayName": "Kimi",
+  "command": "kimi",
+  "iconAsset": "AgentKimi",
+  "opticalScale": 0.9,
+  "process": {
+    "executables": [
+      "kimi"
+    ],
+    "runtimeMarkers": [
+      "kimi"
+    ]
+  },
+  "resume": {
+    "resumeArguments": []
+  },
+  "hook": {
+    "kind": "toml",
+    "dialect": "kimi",
+    "path": "~/.kimi-code/config.toml",
+    "events": [
+      {
+        "name": "UserPromptSubmit",
+        "state": "working"
+      },
+      {
+        "name": "Stop",
+        "state": "done"
+      },
+      {
+        "name": "Interrupt",
+        "state": "done"
+      }
+    ]
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "id": "cursor",
+  "displayName": "Cursor Agent",
+  "command": "cursor-agent",
+  "iconAsset": "AgentCursor",
+  "opticalScale": 0.9,
+  "process": {
+    "executables": [
+      "cursor-agent"
+    ],
+    "runtimeMarkers": [
+      "cursor"
+    ]
+  },
+  "resume": {
+    "resumeArguments": []
+  },
+  "hook": {
+    "kind": "json",
+    "dialect": "cursor",
+    "path": "~/.cursor/hooks.json",
+    "events": [
+      {
+        "name": "beforeSubmitPrompt",
+        "state": "working"
+      },
+      {
+        "name": "preToolUse",
+        "state": "working"
+      },
+      {
+        "name": "postToolUse",
+        "state": "working"
+      },
+      {
+        "name": "subagentStop",
+        "state": "working"
+      },
+      {
+        "name": "stop",
+        "state": "done"
+      }
+    ]
+  }
+}

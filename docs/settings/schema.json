@@ -126,7 +126,7 @@
     },
     "tabs.pathDisplay": {
       "category": "tabs",
-      "default": "fullPath",
+      "default": "folderName",
       "description": "Display the full working path or only the current folder in Vertical Tabs.",
       "enum": ["fullPath", "folderName"],
       "type": "string"

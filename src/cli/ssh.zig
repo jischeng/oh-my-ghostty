@@ -17,6 +17,30 @@ const RemoteAgent = enum {
     codex,
     claude,
     pi,
+    qoder,
+    reasonix,
+    omp,
+    opencode,
+    amp,
+    antigravity,
+    cline,
+    copilot,
+    crush,
+    cursor,
+    droid,
+    grok,
+    hermes,
+    kimi,
+    qwen,
+
+    fn commandName(self: RemoteAgent) []const u8 {
+        return switch (self) {
+            .qoder => "qodercli",
+            .antigravity => "agy",
+            .cursor => "cursor-agent",
+            else => @tagName(self),
+        };
+    }
 
     fn parse(value: []const u8) ?RemoteAgent {
         inline for (std.meta.fields(RemoteAgent)) |field| {
@@ -36,7 +60,7 @@ const usage =
     \\  --ssh=<path>          Path to the ssh binary. Default: first `ssh` on PATH.
     \\  --remote-working-directory=<path>
     \\                        Start a replayed interactive Fish session in path.
-    \\  --remote-agent=<codex|claude|pi>
+    \\  --remote-agent=<allowlisted-agent>
     \\                        Start an allowlisted agent after connecting.
     \\  --remote-agent-session=<id>
     \\                        Resume that agent's validated conversation ID.
@@ -190,7 +214,7 @@ pub const Options = struct {
 ///     destination in this remote directory. OMG uses this only when replaying
 ///     an active SSH connection into a new split.
 ///
-///   * `--remote-agent=<codex|claude|pi>` and
+///   * `--remote-agent=<allowlisted-agent>` and
 ///     `--remote-agent-session=<id>`: Restore an allowlisted agent session.
 ///     These options never accept arbitrary remote commands.
 ///
@@ -715,12 +739,18 @@ fn remoteShellCommand(
     ) catch return null;
     if (remote_agent) |agent| {
         fish_command.writer.writeAll("; __omg_report_pwd; command ") catch return null;
-        fish_command.writer.writeAll(@tagName(agent)) catch return null;
+        fish_command.writer.writeAll(agent.commandName()) catch return null;
         if (remote_agent_session) |session_id| {
             switch (agent) {
                 .codex => fish_command.writer.writeAll(" resume ") catch return null,
                 .claude => fish_command.writer.writeAll(" --resume ") catch return null,
                 .pi => fish_command.writer.writeAll(" --session-id ") catch return null,
+                .qoder => fish_command.writer.writeAll(" --resume ") catch return null,
+                .reasonix => fish_command.writer.writeAll(" --resume ") catch return null,
+                .omp => fish_command.writer.writeAll(" --resume=") catch return null,
+                .opencode => fish_command.writer.writeAll(" --session ") catch return null,
+                .grok, .qwen => fish_command.writer.writeAll(" --resume ") catch return null,
+                .amp, .antigravity, .cline, .copilot, .crush, .cursor, .droid, .hermes, .kimi => return null,
             }
             writeFishSingleQuoted(&fish_command.writer, session_id) catch return null;
         }

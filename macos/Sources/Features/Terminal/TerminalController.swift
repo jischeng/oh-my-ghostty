@@ -109,6 +109,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     private var observedForegroundProcessIDs: [UUID: Int] = [:]
     private var detectedAgentInstances: [UUID: DetectedAgentInstance] = [:]
     private var conversationDiscoveryPending = Set<UUID>()
+    private var agentScreenSignatures: [UUID: Int] = [:]
+    private var agentScreenStableTicks: [UUID: Int] = [:]
 
     var focusedPaneSessionContext: PaneSessionContext? {
         paneSessionContext(for: focusedSurface ?? surfaceTree.first)
@@ -129,6 +131,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     ) -> AgentResumeDescriptor? {
         guard let surface else { return nil }
         return agentResumeDescriptors[surface.id]
+    }
+
+    func focusedAgentActivity() -> TabActivity? {
+        agentActivity(for: focusedSurface ?? surfaceTree.first)
     }
 
     func preferredAgentActivity() -> TabActivity? {
@@ -327,6 +333,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             activeIDs.contains($0.key)
         }
         conversationDiscoveryPending.formIntersection(activeIDs)
+        agentScreenSignatures = agentScreenSignatures.filter {
+            activeIDs.contains($0.key)
+        }
+        agentScreenStableTicks = agentScreenStableTicks.filter {
+            activeIDs.contains($0.key)
+        }
         for (surfaceID, workItem) in agentValidationWorkItems
         where !activeIDs.contains(surfaceID) {
             workItem.cancel()
@@ -359,6 +371,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                         terminalTitle: title
                     )
                     updatePaneSessionContext(context, for: surface.id)
+                    updateAgentTitleActivity(title, for: surface.id)
                 }
                 .store(in: &observers)
 
@@ -406,10 +419,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             guard let processGroupID = surface.surfaceModel?.foregroundPID else {
                 continue
             }
-            if let detected = detectedAgentInstances[surface.id],
-               detected.processGroupID != processGroupID,
-               !Self.processGroupExists(detected.processGroupID) {
-                clearDetectedAgent(for: surface.id, force: true)
+            if let detected = detectedAgentInstances[surface.id] {
+                if detected.processGroupID != processGroupID,
+                   !Self.processGroupExists(detected.processGroupID) {
+                    clearDetectedAgent(for: surface.id, force: true)
+                } else {
+                    updateScreenFallback(for: surface, detected: detected)
+                }
             }
             guard observedForegroundProcessIDs[surface.id] != processGroupID else {
                 continue
@@ -465,6 +481,48 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             metadata: "type=app;omg_agent=\(agent.rawValue);" +
                 "omg_scope=local;omg_state=idle"
         ), for: surfaceID)
+    }
+
+    private func updateScreenFallback(
+        for surface: Ghostty.SurfaceView,
+        detected: DetectedAgentInstance
+    ) {
+        let definition = detected.agent.definition
+        guard definition.hook.kind == .none else { return }
+        let screen = surface.cachedScreenContents.get()
+        let signature = screen.hashValue
+        let previous = agentScreenSignatures[surface.id]
+        agentScreenSignatures[surface.id] = signature
+        guard let previous else { return }
+
+        let classified = AgentScreenStatusDetector.detect(
+            definition: definition,
+            screen: screen
+        )
+        let nextState: TabActivityState
+        if let classified, classified != .idle {
+            nextState = classified
+            agentScreenStableTicks[surface.id] = 0
+        } else if signature != previous {
+            nextState = .working
+            agentScreenStableTicks[surface.id] = 0
+        } else {
+            let ticks = (agentScreenStableTicks[surface.id] ?? 0) + 1
+            agentScreenStableTicks[surface.id] = ticks
+            guard ticks >= 2,
+                  agentActivities[surface.id]?.state == .working else { return }
+            nextState = .done
+        }
+        guard agentActivities[surface.id]?.state != nextState else { return }
+        let attention = nextState == .needsAttention
+            ? ";omg_attention=permission"
+            : ""
+        updateAgentActivity(.init(
+            action: .start,
+            id: detected.id,
+            metadata: "type=app;omg_agent=\(detected.agent.rawValue);" +
+                "omg_scope=local;omg_state=\(nextState.rawValue)\(attention)"
+        ), for: surface.id)
     }
 
     private func scheduleConversationDiscovery(
@@ -525,6 +583,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return
         }
         detectedAgentInstances.removeValue(forKey: surfaceID)
+        agentScreenSignatures.removeValue(forKey: surfaceID)
+        agentScreenStableTicks.removeValue(forKey: surfaceID)
         updateAgentActivity(.init(
             action: .end,
             id: detected.id,
@@ -565,6 +625,24 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         } catch {
             return nil
         }
+    }
+
+    private func updateAgentTitleActivity(
+        _ title: String,
+        for surfaceID: UUID
+    ) {
+        guard let descriptor = agentResumeDescriptors[surfaceID],
+              let contextID = agentResumeContextIDs[surfaceID],
+              let state = AgentScreenStatusDetector.detect(
+                  status: descriptor.agent.definition.titleStatus,
+                  text: title
+              ), state != .idle else { return }
+        updateAgentActivity(.init(
+            action: .start,
+            id: contextID,
+            metadata: "type=app;omg_agent=\(descriptor.agent.rawValue);" +
+                "omg_scope=\(descriptor.scope.rawValue);omg_state=\(state.rawValue)"
+        ), for: surfaceID)
     }
 
     private func updateAgentActivity(
@@ -677,13 +755,14 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         invalidateRestorableState()
     }
 
-    private func acknowledgeCompletedAgentActivities() {
-        for surfaceID in Array(agentReducers.keys) {
-            guard var reducer = agentReducers[surfaceID],
-                  let update = reducer.acknowledgeCompletion() else { continue }
-            agentReducers[surfaceID] = reducer
-            applyAgentActivityUpdate(update, for: surfaceID)
-        }
+    private func acknowledgeCompletedAgentActivity(
+        for surface: Ghostty.SurfaceView?
+    ) {
+        guard let surface,
+              var reducer = agentReducers[surface.id],
+              let update = reducer.acknowledgeCompletion() else { return }
+        agentReducers[surface.id] = reducer
+        applyAgentActivityUpdate(update, for: surface.id)
     }
 
     private func applyAgentActivityUpdate(
@@ -882,7 +961,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     func markTabActivated() {
-        acknowledgeCompletedAgentActivities()
+        acknowledgeCompletedAgentActivity(for: focusedSurface ?? surfaceTree.first)
         tabLastActivatedAt = Date()
         if tabLayoutState.orderingMode == .recentlyUsed,
            window?.tabGroup?.selectedWindow === window {
@@ -2352,9 +2431,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // We always cancel our event listener
         surfaceAppearanceCancellables.removeAll()
 
-        // When our focus changes, we update our window appearance based on the
-        // currently focused surface.
+        // Focus changes acknowledge only the pane the user actually entered.
         guard let focusedSurface else { return }
+        acknowledgeCompletedAgentActivity(for: focusedSurface)
         syncAppearance(focusedSurface.derivedConfig)
 
         // We also want to get notified of certain changes to update our appearance.
@@ -2394,6 +2473,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 observedForegroundProcessIDs = [:]
                 detectedAgentInstances = [:]
                 conversationDiscoveryPending = []
+                agentScreenSignatures = [:]
+                agentScreenStableTicks = [:]
                 agentValidationWorkItems.values.forEach { $0.cancel() }
                 agentValidationWorkItems = [:]
             }

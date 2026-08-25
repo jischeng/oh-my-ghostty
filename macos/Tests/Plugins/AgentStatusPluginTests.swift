@@ -26,7 +26,8 @@ struct AgentStatusPluginTests {
 
             let waitingUpdate = reducer.consume(signal(
                 agent: agent,
-                state: "needsAttention"
+                state: "needsAttention",
+                attention: .permission
             ))
             let waiting = try #require(waitingUpdate)
             guard case .set(let waitingActivity) = waiting else {
@@ -34,6 +35,7 @@ struct AgentStatusPluginTests {
                 continue
             }
             #expect(waitingActivity.state == .needsAttention)
+            #expect(waitingActivity.attentionKind == .permission)
 
             let clearUpdate = reducer.consume(.init(
                 action: .end,
@@ -50,6 +52,21 @@ struct AgentStatusPluginTests {
             .codex: ("codex", "AgentOpenAI", 7),
             .claude: ("claude", "AgentClaude", 8),
             .pi: ("pi", "AgentPi", 7),
+            .qoder: ("qodercli", "AgentQoder", 7),
+            .reasonix: ("reasonix", "AgentReasonix", 8),
+            .omp: ("omp", "AgentOMP", 4),
+            .opencode: ("opencode", "AgentOpenCode", 4),
+            .amp: ("amp", "AgentAmp", 2),
+            .antigravity: ("agy", "AgentAntigravity", 0),
+            .cline: ("cline", "AgentCline", 7),
+            .copilot: ("copilot", "AgentCopilot", 5),
+            .crush: ("crush", "AgentCrush", 0),
+            .cursor: ("cursor-agent", "AgentCursor", 5),
+            .droid: ("droid", "AgentDroid", 5),
+            .grok: ("grok", "AgentGrok", 5),
+            .hermes: ("hermes", "AgentHermes", 0),
+            .kimi: ("kimi", "AgentKimi", 3),
+            .qwen: ("qwen", "AgentQwen", 5),
         ]
         for agent in SupportedAgent.allCases {
             let definition = agent.definition
@@ -58,7 +75,6 @@ struct AgentStatusPluginTests {
             #expect(definition.command == value?.0)
             #expect(definition.iconAsset == value?.1)
             #expect(definition.hook.events.count == value?.2)
-            #expect(!definition.resume.resumeArguments.isEmpty)
         }
         #expect(SupportedAgent.codex.definition.resume.discover != nil)
         #expect(SupportedAgent.claude.definition.resume.store != nil)
@@ -106,6 +122,28 @@ struct AgentStatusPluginTests {
             AgentResumeDescriptor.self,
             from: encoded
         ) == remote)
+        let expectedResumeFragments: [SupportedAgent: String] = [
+            .claude: "'claude' '--resume' '019f-test_session'",
+            .qoder: "'qodercli' '--resume' '019f-test_session'",
+            .reasonix: "'reasonix' '--resume' '019f-test_session'",
+            .omp: "'omp' '--resume=019f-test_session'",
+            .opencode: "'opencode' '--session' '019f-test_session'",
+            .grok: "'grok' '--resume' '019f-test_session'",
+            .qwen: "'qwen' '--resume' '019f-test_session'",
+        ]
+        for (agent, fragment) in expectedResumeFragments {
+            let descriptor = AgentResumeDescriptor(
+                agent: agent,
+                conversationID: conversation,
+                scope: .local,
+                workingDirectory: "/tmp/project"
+            )
+            let command = try #require(descriptor.restorationCommand(
+                executablePath: "/Applications/OMG.app/Contents/MacOS/omg",
+                verifyLocalStore: false
+            ))
+            #expect(command.contains(fragment))
+        }
         #expect(AgentConversationID("bad session") == nil)
         #expect(AgentConversationID("../escape") == nil)
     }
@@ -168,7 +206,37 @@ struct AgentStatusPluginTests {
         ) == nil)
     }
 
+    @Test func appliesManifestScreenStatusRules() {
+        let definition = SupportedAgent.crush.definition
+        #expect(AgentScreenStatusDetector.detect(
+            definition: definition,
+            screen: "Permission Required: Allow for Session"
+        ) == .needsAttention)
+        #expect(AgentScreenStatusDetector.detect(
+            definition: definition,
+            screen: "Thinking..."
+        ) == .working)
+        #expect(AgentScreenStatusDetector.detect(
+            definition: definition,
+            screen: "Ready"
+        ) == .idle)
+        #expect(AgentScreenStatusDetector.detect(
+            status: SupportedAgent.grok.definition.titleStatus,
+            text: "Action Required"
+        ) == .needsAttention)
+        #expect(AgentScreenStatusDetector.detect(
+            status: SupportedAgent.qwen.definition.titleStatus,
+            text: "◐ Thinking"
+        ) == .working)
+    }
+
     @Test func detectsLocalAgentForegroundCommandsWithoutFalseArguments() {
+        for agent in SupportedAgent.allCases {
+            let command = agent.definition.command
+            #expect(LocalAgentProcessDetector.detect(
+                in: "/Users/test/.local/bin/\(command)\n"
+            ) == agent)
+        }
         #expect(LocalAgentProcessDetector.detect(
             in: "/Users/test/.local/bin/codex --model gpt-5\n"
         ) == .codex)
@@ -182,6 +250,18 @@ struct AgentStatusPluginTests {
             in: "/usr/local/bin/node /opt/claude-code/cli.js\n"
         ) == .claude)
         #expect(LocalAgentProcessDetector.detect(
+            in: "/Users/test/.local/bin/qodercli\n"
+        ) == .qoder)
+        #expect(LocalAgentProcessDetector.detect(
+            in: "/usr/local/bin/reasonix\n"
+        ) == .reasonix)
+        #expect(LocalAgentProcessDetector.detect(
+            in: "/Users/test/.local/bin/omp\n"
+        ) == .omp)
+        #expect(LocalAgentProcessDetector.detect(
+            in: "/Users/test/.opencode/bin/opencode\n"
+        ) == .opencode)
+        #expect(LocalAgentProcessDetector.detect(
             in: "/bin/cat pi\n"
         ) == nil)
     }
@@ -189,9 +269,24 @@ struct AgentStatusPluginTests {
     @Test @MainActor func bundledAgentAssetsRenderVisiblePixels() throws {
         for agent in SupportedAgent.allCases {
             let image = try #require(NSImage(named: agent.assetName))
-            #expect(image.isTemplate)
+            if ![.reasonix, .crush, .droid, .hermes].contains(agent) {
+                #expect(image.isTemplate)
+            }
             #expect(renderedPixelCount(image) > 100)
         }
+    }
+
+    @Test func distinguishesQuestionFromPermissionAttention() throws {
+        var reducer = AgentContextSignalReducer()
+        guard case .set(let question) = reducer.consume(signal(
+            agent: .pi,
+            state: "needsAttention",
+            attention: .question
+        )) else {
+            Issue.record("Expected question activity")
+            return
+        }
+        #expect(question.attentionKind == .question)
     }
 
     @Test func normalizesAgentOwnedTerminalTitleDecoration() {
@@ -583,8 +678,30 @@ struct AgentStatusPluginTests {
 
         let installer = AgentHookInstaller(homeURL: home)
         for agent in SupportedAgent.allCases {
-            #expect(installer.installationState(agent) == .current)
+            let expected: AgentHookInstallationState =
+                agent.definition.hook.kind == .none ? .missing : .current
+            #expect(installer.installationState(agent) == expected)
         }
+        for path in [".cursor/hooks.json", ".copilot/hooks/omg.json"] {
+            let root = try #require(
+                JSONSerialization.jsonObject(with: Data(contentsOf:
+                    home.appendingPathComponent(path)
+                )) as? [String: Any]
+            )
+            #expect(root["version"] as? Int == 1)
+        }
+        let reasonix = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf:
+                home.appendingPathComponent(".reasonix/settings.json")
+            )) as? [String: Any]
+        )
+        let reasonixHooks = try #require(reasonix["hooks"] as? [String: Any])
+        let reasonixStart = try #require(
+            reasonixHooks["SessionStart"] as? [[String: Any]]
+        )
+        #expect(reasonixStart.first?["command"] is String)
+        #expect(reasonixStart.first?["hooks"] == nil)
+
         let remotePi = home.appendingPathComponent(
             ".pi/agent/extensions/omg-agent-status.ts"
         )
@@ -685,13 +802,15 @@ struct AgentStatusPluginTests {
         agent: SupportedAgent,
         state: String,
         instance: Int? = nil,
-        scope: String? = nil
+        scope: String? = nil,
+        attention: TabAttentionKind? = nil
     ) -> Ghostty.ContextSignal {
         let id = "omg-agent-\(agent.rawValue)" + (instance.map { "-\($0)" } ?? "")
         var metadata = "type=app;omg_agent=\(agent.rawValue);omg_state=\(state)"
         if let scope = scope ?? (instance == nil ? nil : "local") {
             metadata += ";omg_scope=\(scope)"
         }
+        if let attention { metadata += ";omg_attention=\(attention.rawValue)" }
         return .init(action: .start, id: id, metadata: metadata)
     }
 }

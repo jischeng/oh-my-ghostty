@@ -66,6 +66,13 @@ enum AgentConversationStore {
         rootURL: URL? = nil
     ) -> AgentConversationID? {
         let resume = agent.definition.resume
+        if let command = resume.commandDiscovery {
+            return discover(
+                command: command,
+                workingDirectory: workingDirectory,
+                launchedAfter: launchedAfter
+            )
+        }
         guard let rootValue = resume.discover?.root ?? resume.store?.root else {
             return nil
         }
@@ -114,6 +121,55 @@ enum AgentConversationStore {
             if matches.count > 1 { return nil }
         }
         return matches.first
+    }
+
+    private static func discover(
+        command: AgentDefinition.ResumeSpec.CommandDiscovery,
+        workingDirectory: String,
+        launchedAfter: Date
+    ) -> AgentConversationID? {
+        guard !workingDirectory.contains("\0"),
+              workingDirectory.utf8.count <= 4_096 else { return nil }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = [command.executable] + command.arguments.map {
+            $0.replacingOccurrences(of: "{cwd}", with: workingDirectory)
+        }
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            var data = Data()
+            var oversized = false
+            while let chunk = try output.fileHandleForReading.read(upToCount: 8_192),
+                  !chunk.isEmpty {
+                let remaining = max(0, 1_048_576 - data.count)
+                if remaining > 0 { data.append(chunk.prefix(remaining)) }
+                if chunk.count > remaining { oversized = true }
+            }
+            process.waitUntilExit()
+            guard process.terminationStatus == 0,
+                  !oversized,
+                  let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let entries = root[command.listKey] as? [[String: Any]] else {
+                return nil
+            }
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            let threshold = launchedAfter.addingTimeInterval(-creationTolerance)
+            let matches = Set(entries.compactMap { entry -> AgentConversationID? in
+                guard let rawID = entry[command.idKey] as? String,
+                      let rawDate = entry[command.createdAtKey] as? String,
+                      let created = formatter.date(from: rawDate),
+                      created >= threshold else { return nil }
+                return AgentConversationID(rawID)
+            })
+            return matches.count == 1 ? matches.first : nil
+        } catch {
+            if process.isRunning { process.terminate() }
+            return nil
+        }
     }
 
     private static func headerObjects(at url: URL) -> [[String: Any]]? {

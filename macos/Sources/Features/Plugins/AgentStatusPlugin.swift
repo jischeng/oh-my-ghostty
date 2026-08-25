@@ -83,8 +83,9 @@ struct AgentHookInstaller {
     func installationState(
         _ agent: SupportedAgent
     ) -> AgentHookInstallationState {
-        switch agent {
-        case .codex, .claude:
+        let definition = agent.definition
+        switch definition.hook.kind {
+        case .json:
             let url = hookURL(for: agent)
             guard containsMarker(in: url) else { return .missing }
             guard hasCurrentJSONHooks(at: url, agent: agent) else {
@@ -94,41 +95,121 @@ struct AgentHookInstaller {
                 return .updateAvailable
             }
             return .current
-        case .pi:
+        case .plugin:
+            guard let expected = Self.pluginSource(for: agent),
+                  let source = try? String(
+                      contentsOf: hookURL(for: agent),
+                      encoding: .utf8
+                  ), source.contains("marker: \(Self.marker)") else {
+                return .missing
+            }
+            return source == expected ? .current : .updateAvailable
+        case .toml:
             guard let source = try? String(
                 contentsOf: hookURL(for: agent),
                 encoding: .utf8
-            ), source.contains("marker: \(Self.marker)") else {
-                return .missing
+            ), source.contains(Self.tomlBlockBegin) else { return .missing }
+            return source.contains("_omg_agent_status_v\(Self.hookVersion)")
+                ? .current : .updateAvailable
+        case .scripts:
+            let directory = hookURL(for: agent)
+            let current = agent.definition.hook.events.allSatisfy { event in
+                let url = directory.appendingPathComponent(event.name)
+                return (try? String(contentsOf: url, encoding: .utf8))?
+                    .contains("_omg_agent_status_v\(Self.hookVersion)") == true
             }
-            return source == Self.piExtension ? .current : .updateAvailable
+            return current ? .current : .missing
+        case .none:
+            return .missing
         }
     }
 
     static func remoteInstallerScript() throws -> String {
-        let spec = Dictionary(uniqueKeysWithValues: [
-            SupportedAgent.codex,
-            SupportedAgent.claude,
-        ].map { agent in
+        let jsonAgents = SupportedAgent.allCases.filter {
+            $0.definition.hook.kind == .json
+        }
+        let spec = Dictionary(uniqueKeysWithValues: jsonAgents.map { agent in
             let entries = hookEvents(agent).map { event, state, matcher in
-                var entry: [String: Any] = [
-                    marker: hookVersion,
-                    "hooks": [[
-                        "type": "command",
-                        "command": hookCommand(agent: agent, state: state),
-                    ]],
-                ]
-                if let matcher { entry["matcher"] = matcher }
+                let command = hookCommand(
+                    agent: agent,
+                    state: state,
+                    attentionKind: attentionKind(
+                        event: event,
+                        matcher: matcher,
+                        state: state
+                    )
+                )
+                var entry: [String: Any]
+                let dialect = agent.definition.hook.dialect
+                if ["flat", "cursor", "copilot"].contains(dialect) {
+                    entry = ["command": command]
+                    if dialect == "flat" {
+                        entry["description"] = "OMG Agent Status"
+                    } else if dialect == "copilot" {
+                        entry["type"] = "command"
+                    }
+                    if let matcher { entry["match"] = matcher }
+                } else {
+                    entry = [
+                        marker: hookVersion,
+                        "hooks": [["type": "command", "command": command]],
+                    ]
+                    if let matcher { entry["matcher"] = matcher }
+                }
                 return ["event": event, "entry": entry]
             }
-            return (agent.rawValue, entries)
+            return (agent.rawValue, [
+                "path": agent.definition.hook.path,
+                "dialect": agent.definition.hook.dialect ?? "nested",
+                "entries": entries,
+            ] as [String: Any])
         })
         let specData = try JSONSerialization.data(
             withJSONObject: spec,
             options: [.sortedKeys]
         )
         let specBase64 = specData.base64EncodedString()
-        let piBase64 = Data(piExtension.utf8).base64EncodedString()
+        let auxiliaryPairs: [(String, [String: Any])] =
+            SupportedAgent.allCases.compactMap { agent in
+                let hook = agent.definition.hook
+                switch hook.kind {
+                case .plugin:
+                    guard let source = pluginSource(for: agent) else { return nil }
+                    return (agent.rawValue, [
+                        "kind": "plugin", "path": hook.path, "source": source,
+                    ])
+                case .toml, .scripts:
+                    let entries = hook.events.map { event in
+                        var item: [String: Any] = [
+                            "event": event.name,
+                            "command": hookCommand(
+                                agent: agent,
+                                state: event.state,
+                                attentionKind: attentionKind(
+                                    event: event.name,
+                                    matcher: event.matcher,
+                                    state: event.state
+                                )
+                            ),
+                        ]
+                        if let matcher = event.matcher { item["matcher"] = matcher }
+                        return item
+                    }
+                    return (agent.rawValue, [
+                        "kind": hook.kind.rawValue,
+                        "path": hook.path,
+                        "entries": entries,
+                    ])
+                case .none, .json:
+                    return nil
+                }
+            }
+        let auxiliaryPayload = Dictionary(uniqueKeysWithValues: auxiliaryPairs)
+        let auxiliaryData = try JSONSerialization.data(
+            withJSONObject: auxiliaryPayload,
+            options: [.sortedKeys]
+        )
+        let auxiliaryBase64 = auxiliaryData.base64EncodedString()
         return #"""
 #!/usr/bin/env python3
 # Auditable OMG Agent Status installer for an SSH account.
@@ -144,7 +225,7 @@ import tempfile
 MARKER = "_omg_agent_status"
 VERSION = \#(hookVersion)
 SPEC = json.loads(base64.b64decode("\#(specBase64)").decode("utf-8"))
-PI_SOURCE = base64.b64decode("\#(piBase64)").decode("utf-8")
+AUXILIARY = json.loads(base64.b64decode("\#(auxiliaryBase64)").decode("utf-8"))
 HOME = Path.home()
 
 
@@ -182,7 +263,7 @@ def is_legacy_omg(command):
 
 
 def remove_omg(entry):
-    if MARKER in entry:
+    if MARKER in entry or (": " + MARKER + ";") in str(entry.get("command", "")):
         return None
     commands = entry.get("hooks")
     if not isinstance(commands, list):
@@ -212,7 +293,7 @@ def load_hooks(path):
 
 def validate_json(path, agent):
     _, hooks = load_hooks(path)
-    for item in SPEC[agent]:
+    for item in SPEC[agent]["entries"]:
         existing = hooks.get(item["event"], [])
         if not isinstance(existing, list):
             raise ValueError(str(path) + " " + item["event"] + " is not an array")
@@ -222,7 +303,7 @@ def validate_json(path, agent):
 
 def install_json(path, agent):
     root, hooks = load_hooks(path)
-    for item in SPEC[agent]:
+    for item in SPEC[agent]["entries"]:
         event = item["event"]
         existing = hooks.get(event, [])
         if not isinstance(existing, list):
@@ -230,6 +311,8 @@ def install_json(path, agent):
         hooks[event] = [entry for entry in (remove_omg(value) for value in existing) if entry is not None]
         hooks[event].append(item["entry"])
     root["hooks"] = hooks
+    if SPEC[agent].get("dialect") in ("cursor", "copilot") and "version" not in root:
+        root["version"] = 1
     backup(path)
     atomic_write(path, json.dumps(root, indent=2, sort_keys=True) + "\n")
 
@@ -257,47 +340,210 @@ def enable_codex_hooks(path):
     atomic_write(path, "\n".join(lines))
 
 
-codex_hooks = HOME / ".codex" / "hooks.json"
-claude_hooks = HOME / ".claude" / "settings.json"
-validate_json(codex_hooks, "codex")
-validate_json(claude_hooks, "claude")
-enable_codex_hooks(HOME / ".codex" / "config.toml")
-install_json(codex_hooks, "codex")
-install_json(claude_hooks, "claude")
-pi_path = HOME / ".pi" / "agent" / "extensions" / "omg-agent-status.ts"
-backup(pi_path)
-atomic_write(pi_path, PI_SOURCE)
-print("Installed current OMG agent hooks for Codex, Claude Code, and Pi.")
+def strip_toml_block(text):
+    begin = "# >>> OMG agent-status hooks (managed; do not edit) >>>"
+    end = "# <<< OMG agent-status hooks <<<"
+    start = text.find(begin)
+    finish = text.find(end, start + len(begin)) if start >= 0 else -1
+    return text if start < 0 or finish < 0 else text[:start] + text[finish + len(end):]
+
+
+def install_auxiliary(item):
+    path = expand(item["path"])
+    kind = item["kind"]
+    if kind == "plugin":
+        backup(path)
+        atomic_write(path, item["source"])
+        return
+    if kind == "toml":
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        base = strip_toml_block(existing).strip("\n")
+        lines = ["# >>> OMG agent-status hooks (managed; do not edit) >>>"]
+        for entry in item["entries"]:
+            lines.extend(["[[hooks]]", 'event = "' + entry["event"] + '"'])
+            if entry.get("matcher") is not None:
+                lines.append('matcher = "' + entry["matcher"] + '"')
+            lines.extend(["command = '''" + entry["command"] + "'''", "timeout = 5", ""])
+        if lines[-1] == "": lines.pop()
+        lines.append("# <<< OMG agent-status hooks <<<")
+        backup(path)
+        atomic_write(path, (base + "\n\n" if base else "") + "\n".join(lines) + "\n")
+        return
+    if kind == "scripts":
+        path.mkdir(parents=True, exist_ok=True)
+        for entry in item["entries"]:
+            target = path / entry["event"]
+            if target.exists() and (": " + MARKER + ";") not in target.read_text(encoding="utf-8"):
+                raise ValueError(str(target) + " is owned by another hook")
+            backup(target)
+            atomic_write(target, "#!/bin/sh\n" + entry["command"] + "\n")
+            target.chmod(0o700)
+
+
+def expand(raw):
+    return HOME / raw[2:] if raw.startswith("~/") else Path(raw)
+
+
+for agent, item in SPEC.items():
+    validate_json(expand(item["path"]), agent)
+for agent, item in SPEC.items():
+    if agent == "codex":
+        enable_codex_hooks(HOME / ".codex" / "config.toml")
+    install_json(expand(item["path"]), agent)
+for item in AUXILIARY.values():
+    install_auxiliary(item)
+print("Installed current OMG agent hooks.")
 """#
     }
 
     func install(_ agent: SupportedAgent) throws {
-        switch agent {
-        case .codex:
-            let url = hookURL(for: agent)
+        let url = hookURL(for: agent)
+        switch agent.definition.hook.kind {
+        case .json:
             try validateJSONHooks(at: url, agent: agent)
-            try ensureCodexHooksEnabled()
+            if agent == .codex { try ensureCodexHooksEnabled() }
             try installJSONHooks(at: url, agent: agent)
-        case .claude:
-            try installJSONHooks(at: hookURL(for: agent), agent: agent)
-        case .pi:
-            let url = hookURL(for: agent)
+        case .plugin:
+            guard let source = Self.pluginSource(for: agent) else {
+                throw AgentHookInstallerError.invalidConfiguration
+            }
             try backupIfNeeded(url)
             try FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(),
                 withIntermediateDirectories: true
             )
-            try writeText(Self.piExtension, to: url)
+            try writeText(source, to: url)
+        case .toml:
+            try installTOMLHooks(at: url, agent: agent)
+        case .scripts:
+            try installScriptHooks(at: url, agent: agent)
+        case .none:
+            throw AgentHookInstallerError.invalidConfiguration
         }
     }
 
     func uninstall(_ agent: SupportedAgent) throws {
-        switch agent {
-        case .codex, .claude:
-            try removeJSONHooks(at: hookURL(for: agent))
-        case .pi:
-            let url = hookURL(for: agent)
+        let url = hookURL(for: agent)
+        switch agent.definition.hook.kind {
+        case .json:
+            try removeJSONHooks(at: url)
+        case .plugin:
             guard FileManager.default.fileExists(atPath: url.path) else { return }
+            try FileManager.default.removeItem(at: url)
+        case .toml:
+            try removeTOMLHooks(at: url)
+        case .scripts:
+            try removeScriptHooks(at: url, agent: agent)
+        case .none:
+            return
+        }
+    }
+
+    private static let tomlBlockBegin =
+        "# >>> OMG agent-status hooks (managed; do not edit) >>>"
+    private static let tomlBlockEnd = "# <<< OMG agent-status hooks <<<"
+
+    private func installTOMLHooks(
+        at url: URL,
+        agent: SupportedAgent
+    ) throws {
+        let existing = FileManager.default.fileExists(atPath: url.path)
+            ? try String(contentsOf: url, encoding: .utf8)
+            : ""
+        let base = Self.removingTOMLBlock(from: existing)
+            .trimmingCharacters(in: .newlines)
+        var lines = [Self.tomlBlockBegin]
+        for event in agent.definition.hook.events {
+            lines.append("[[hooks]]")
+            lines.append("event = \"\(event.name)\"")
+            if let matcher = event.matcher {
+                lines.append("matcher = \"\(matcher)\"")
+            }
+            let command = Self.hookCommand(
+                agent: agent,
+                state: event.state,
+                attentionKind: Self.attentionKind(
+                    event: event.name,
+                    matcher: event.matcher,
+                    state: event.state
+                )
+            )
+            lines.append("command = '''\(command)'''")
+            lines.append("timeout = 5")
+            lines.append("")
+        }
+        if lines.last == "" { lines.removeLast() }
+        lines.append(Self.tomlBlockEnd)
+        let block = lines.joined(separator: "\n")
+        try backupIfNeeded(url)
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try writeText(base.isEmpty ? block + "\n" : base + "\n\n" + block + "\n", to: url)
+    }
+
+    private func removeTOMLHooks(at url: URL) throws {
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        let existing = try String(contentsOf: url, encoding: .utf8)
+        let base = Self.removingTOMLBlock(from: existing)
+            .trimmingCharacters(in: .newlines)
+        try writeText(base.isEmpty ? "" : base + "\n", to: url)
+    }
+
+    private static func removingTOMLBlock(from text: String) -> String {
+        guard let begin = text.range(of: tomlBlockBegin),
+              let end = text.range(
+                  of: tomlBlockEnd,
+                  range: begin.upperBound..<text.endIndex
+              ) else { return text }
+        var result = text
+        result.removeSubrange(begin.lowerBound..<end.upperBound)
+        return result
+    }
+
+    private func installScriptHooks(
+        at directory: URL,
+        agent: SupportedAgent
+    ) throws {
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        for event in agent.definition.hook.events {
+            let url = directory.appendingPathComponent(event.name)
+            if FileManager.default.fileExists(atPath: url.path) {
+                let existing = try String(contentsOf: url, encoding: .utf8)
+                guard existing.contains(": \(Self.marker);") else {
+                    throw AgentHookInstallerError.invalidHooks(event.name)
+                }
+                try backupIfNeeded(url)
+            }
+            let source = "#!/bin/sh\n" + Self.hookCommand(
+                agent: agent,
+                state: event.state,
+                attentionKind: Self.attentionKind(
+                    event: event.name,
+                    matcher: event.matcher,
+                    state: event.state
+                )
+            ) + "\n"
+            try writeText(source, to: url)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: url.path
+            )
+        }
+    }
+
+    private func removeScriptHooks(
+        at directory: URL,
+        agent: SupportedAgent
+    ) throws {
+        for event in agent.definition.hook.events {
+            let url = directory.appendingPathComponent(event.name)
+            guard let source = try? String(contentsOf: url, encoding: .utf8),
+                  source.contains(": \(Self.marker);") else { continue }
             try FileManager.default.removeItem(at: url)
         }
     }
@@ -337,9 +583,7 @@ print("Installed current OMG agent hooks for Codex, Claude Code, and Pi.")
             guard let entries = hooks[event] as? [[String: Any]] else {
                 return false
             }
-            return entries.contains {
-                $0[Self.marker] as? Int == Self.hookVersion
-            }
+            return entries.contains(where: Self.isCurrentOMGEntry)
         }
     }
 
@@ -387,21 +631,43 @@ print("Installed current OMG agent hooks for Codex, Claude Code, and Pi.")
         for (event, state, matcher) in Self.hookEvents(agent) {
             let existing = try hookEntries(hooks[event], event: event)
             var entries = existing.compactMap(Self.removingOMGCommands)
-            var entry: [String: Any] = [
-                Self.marker: Self.hookVersion,
-                "hooks": [[
-                    "type": "command",
-                    "command": Self.hookCommand(
-                        agent: agent,
-                        state: state
-                    ),
-                ]],
-            ]
-            if let matcher { entry["matcher"] = matcher }
+            let command = Self.hookCommand(
+                agent: agent,
+                state: state,
+                attentionKind: Self.attentionKind(
+                    event: event,
+                    matcher: matcher,
+                    state: state
+                )
+            )
+            var entry: [String: Any]
+            let dialect = agent.definition.hook.dialect
+            if ["flat", "cursor", "copilot"].contains(dialect) {
+                entry = ["command": command]
+                if dialect == "flat" {
+                    entry["description"] = "OMG Agent Status"
+                } else if dialect == "copilot" {
+                    entry["type"] = "command"
+                }
+                if let matcher { entry["match"] = matcher }
+            } else {
+                entry = [
+                    Self.marker: Self.hookVersion,
+                    "hooks": [[
+                        "type": "command",
+                        "command": command,
+                    ]],
+                ]
+                if let matcher { entry["matcher"] = matcher }
+            }
             entries.append(entry)
             hooks[event] = entries
         }
         root["hooks"] = hooks
+        let dialect = agent.definition.hook.dialect
+        if ["cursor", "copilot"].contains(dialect), root["version"] == nil {
+            root["version"] = 1
+        }
         try writeJSONObject(root, to: url)
     }
 
@@ -535,15 +801,27 @@ print("Installed current OMG agent hooks for Codex, Claude Code, and Pi.")
     }
 
     private static func containsOMGCommand(_ entry: [String: Any]) -> Bool {
-        if entry[marker] != nil { return true }
+        if entry[marker] != nil || isLegacyOMGCommand(entry) { return true }
         guard let hooks = entry["hooks"] as? [[String: Any]] else { return false }
         return hooks.contains(where: isLegacyOMGCommand)
+    }
+
+    private static func isCurrentOMGEntry(_ entry: [String: Any]) -> Bool {
+        if entry[marker] as? Int == hookVersion { return true }
+        let versionMarker = "_omg_agent_status_v\(hookVersion)"
+        if (entry["command"] as? String)?.contains(versionMarker) == true {
+            return true
+        }
+        guard let hooks = entry["hooks"] as? [[String: Any]] else { return false }
+        return hooks.contains {
+            ($0["command"] as? String)?.contains(versionMarker) == true
+        }
     }
 
     private static func removingOMGCommands(
         _ entry: [String: Any]
     ) -> [String: Any]? {
-        if entry[marker] != nil { return nil }
+        if entry[marker] != nil || isLegacyOMGCommand(entry) { return nil }
         guard let commands = entry["hooks"] as? [[String: Any]] else {
             return entry
         }
@@ -575,13 +853,33 @@ print("Installed current OMG agent hooks for Codex, Claude Code, and Pi.")
         }
     }
 
+    private static func attentionKind(
+        event: String,
+        matcher: String?,
+        state: TabActivityState?
+    ) -> TabAttentionKind? {
+        guard state == .needsAttention else { return nil }
+        let value = "\(event) \(matcher ?? "")".lowercased()
+        if value.contains("permission") || value.contains("approval") {
+            return .permission
+        }
+        if value.contains("question") || value.contains("prompt") {
+            return .question
+        }
+        return nil
+    }
+
     private static func hookCommand(
         agent: SupportedAgent,
-        state: TabActivityState?
+        state: TabActivityState?,
+        attentionKind: TabAttentionKind? = nil
     ) -> String {
         let action = state == nil ? "end" : "start"
         var metadata = "type=app;omg_agent=\(agent.rawValue);omg_scope=%s"
         if let state { metadata += ";omg_state=\(state.rawValue)" }
+        if let attentionKind {
+            metadata += ";omg_attention=\(attentionKind.rawValue)"
+        }
         var setup = ""
         var arguments = "\"$omg_pgid\" \"$omg_scope\""
         if let field = agent.definition.hook.conversationField {
@@ -592,7 +890,7 @@ print("Installed current OMG agent hooks for Codex, Claude Code, and Pi.")
             metadata += ";omg_conversation=%s"
             arguments += " \"$omg_conversation\""
         }
-        return ": \(marker); " + setup +
+        return ": \(marker); : _omg_agent_status_v\(hookVersion); " + setup +
             "omg_tty=$(ps -o tty= -p \"$PPID\" 2>/dev/null | tr -d ' '); " +
             "omg_pgid=$(ps -o pgid= -p \"$PPID\" 2>/dev/null | tr -d ' '); " +
             "case \"$omg_tty\" in ''|*[!A-Za-z0-9/._-]*) exit 0;; esac; " +
@@ -603,6 +901,15 @@ print("Installed current OMG agent hooks for Codex, Claude Code, and Pi.")
             "2>/dev/null || true"
     }
 
+    private static func pluginSource(for agent: SupportedAgent) -> String? {
+        switch agent.definition.hook.dialect {
+        case "pi": agent == .omp ? ompExtension : piExtension
+        case "opencode": openCodeExtension
+        case "amp": ampExtension
+        default: nil
+        }
+    }
+
     private static let piExtension = #"""
 // OMG agent status integration for Pi.
 // marker: _omg_agent_status
@@ -610,16 +917,17 @@ import { closeSync, openSync, writeSync } from "node:fs";
 
 const contextId = `omg-agent-pi-${process.pid}`;
 const scope = process.env.SSH_CONNECTION ? "remote" : "local";
-function report(state?: string, end = false, context?: any) {
+function report(state?: string, end = false, context?: any, attention?: string) {
   let fd: number | undefined;
   try {
     const raw = context?.sessionManager?.getSessionId?.();
     const conversation = raw && /^[A-Za-z0-9._-]{1,128}$/.test(String(raw))
       ? `;omg_conversation=${encodeURIComponent(String(raw))}` : "";
+    const attentionKind = attention ? `;omg_attention=${attention}` : "";
     fd = openSync("/dev/tty", "w");
     const sequence = end
       ? `\u001b]3008;end=${contextId};type=app;omg_agent=pi;omg_scope=${scope}${conversation}\u0007`
-      : `\u001b]3008;start=${contextId};type=app;omg_agent=pi;omg_scope=${scope};omg_state=${state}${conversation}\u0007`;
+      : `\u001b]3008;start=${contextId};type=app;omg_agent=pi;omg_scope=${scope};omg_state=${state}${conversation}${attentionKind}\u0007`;
     writeSync(fd, sequence);
   } catch {
   } finally {
@@ -635,12 +943,133 @@ export default function (pi: any) {
   pi.on("agent_start", async (_event: any, context: any) => report("working", false, context));
   pi.on("tool_execution_start", async (event: any, context: any) => {
     const waitingTools = new Set(["ask_user_question", "ask_question", "question", "confirm"]);
-    report(waitingTools.has(String(event.toolName)) ? "needsAttention" : "working", false, context);
+    const waiting = waitingTools.has(String(event.toolName));
+    report(waiting ? "needsAttention" : "working", false, context, waiting ? "question" : undefined);
   });
   pi.on("tool_execution_end", async (_event: any, context: any) => report("working", false, context));
   pi.on("agent_settled", async (_event: any, context: any) => report("done", false, context));
   pi.on("session_shutdown", async (_event: any, context: any) => report(undefined, true, context));
 }
+"""#
+
+    private static let ampExtension = #"""
+// OMG agent status integration for Amp.
+// marker: _omg_agent_status
+import { closeSync, openSync, writeSync } from "node:fs";
+
+const contextId = `omg-agent-amp-${process.pid}`;
+const scope = process.env.SSH_CONNECTION ? "remote" : "local";
+function report(state, end = false) {
+  let fd;
+  try {
+    fd = openSync("/dev/tty", "w");
+    const sequence = end
+      ? `\u001b]3008;end=${contextId};type=app;omg_agent=amp;omg_scope=${scope}\u0007`
+      : `\u001b]3008;start=${contextId};type=app;omg_agent=amp;omg_scope=${scope};omg_state=${state}\u0007`;
+    writeSync(fd, sequence);
+  } catch {
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch {}
+    }
+  }
+}
+
+export default function (amp) {
+  amp.on("agent.start", () => report("working"));
+  amp.on("agent.end", () => report("done"));
+}
+"""#
+
+    private static let ompExtension = #"""
+// OMG agent status integration for OMP.
+// marker: _omg_agent_status
+import { closeSync, openSync, writeSync } from "node:fs";
+
+const contextId = `omg-agent-omp-${process.pid}`;
+const scope = process.env.SSH_CONNECTION ? "remote" : "local";
+function report(state?: string, end = false, context?: any, attention?: string) {
+  let fd: number | undefined;
+  try {
+    const raw = context?.sessionManager?.getSessionId?.();
+    const conversation = raw && /^[A-Za-z0-9._-]{1,128}$/.test(String(raw))
+      ? `;omg_conversation=${encodeURIComponent(String(raw))}` : "";
+    const attentionKind = attention ? `;omg_attention=${attention}` : "";
+    fd = openSync("/dev/tty", "w");
+    const sequence = end
+      ? `\u001b]3008;end=${contextId};type=app;omg_agent=omp;omg_scope=${scope}${conversation}\u0007`
+      : `\u001b]3008;start=${contextId};type=app;omg_agent=omp;omg_scope=${scope};omg_state=${state}${conversation}${attentionKind}\u0007`;
+    writeSync(fd, sequence);
+  } catch {
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch {}
+    }
+  }
+}
+
+export default function (omp: any) {
+  omp.on("session_start", async (_event: any, context: any) => report("idle", false, context));
+  omp.on("agent_start", async (_event: any, context: any) => report("working", false, context));
+  omp.on("tool_call", async (event: any, context: any) => {
+    const waitingTools = new Set(["ask_user_question", "ask_question", "question", "confirm"]);
+    const waiting = waitingTools.has(String(event.toolName));
+    if (waiting) report("needsAttention", false, context, "question");
+  });
+  omp.on("agent_end", async (_event: any, context: any) => report("done", false, context));
+  omp.on("session_shutdown", async (_event: any, context: any) => report(undefined, true, context));
+}
+"""#
+
+    private static let openCodeExtension = #"""
+// OMG agent status integration for OpenCode.
+// marker: _omg_agent_status
+import { closeSync, openSync, writeSync } from "node:fs";
+
+const contextId = `omg-agent-opencode-${process.pid}`;
+const scope = process.env.SSH_CONNECTION ? "remote" : "local";
+const roots = new Set();
+function report(state, conversation, end = false, attention) {
+  let fd;
+  try {
+    const safe = conversation && /^[A-Za-z0-9._-]{1,128}$/.test(String(conversation))
+      ? `;omg_conversation=${encodeURIComponent(String(conversation))}` : "";
+    const attentionKind = attention ? `;omg_attention=${attention}` : "";
+    fd = openSync("/dev/tty", "w");
+    const sequence = end
+      ? `\u001b]3008;end=${contextId};type=app;omg_agent=opencode;omg_scope=${scope}${safe}\u0007`
+      : `\u001b]3008;start=${contextId};type=app;omg_agent=opencode;omg_scope=${scope};omg_state=${state}${safe}${attentionKind}\u0007`;
+    writeSync(fd, sequence);
+  } catch {
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch {}
+    }
+  }
+}
+
+export const OmgAgentStatus = async () => ({
+  event: async ({ event }) => {
+    const info = event.properties?.info;
+    if (event.type === "session.created" || event.type === "session.updated") {
+      if (info?.id) {
+        if (info.parentID) roots.delete(info.id); else roots.add(info.id);
+      }
+      return;
+    }
+    if (event.type === "session.deleted") {
+      if (info?.id && roots.delete(info.id)) report(undefined, info.id, true);
+      return;
+    }
+    const id = event.properties?.sessionID;
+    if (!id || !roots.has(id)) return;
+    if (event.type === "permission.updated") return report("needsAttention", id, false, "permission");
+    if (event.type === "session.status") {
+      if (event.properties?.status?.type === "busy") return report("working", id);
+      if (event.properties?.status?.type === "idle") return report("done", id);
+    }
+  },
+});
 """#
 }
 
@@ -759,9 +1188,13 @@ struct AgentContextSignalReducer: Sendable {
             let progress = metadata["progress"].flatMap(Double.init).flatMap {
                 (0...1).contains($0) ? $0 : nil
             }
+            let attentionKind = state == .needsAttention
+                ? metadata["omg_attention"].flatMap(TabAttentionKind.init)
+                : nil
             let activity = TabActivity(
                 source: agent.rawValue,
                 state: state,
+                attentionKind: attentionKind,
                 label: agent.displayName,
                 message: metadata["message"]?.removingPercentEncoding,
                 detail: nil,

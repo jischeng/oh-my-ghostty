@@ -25,7 +25,7 @@ OH_MY_GHOSTTY_SESSION=<uuid>
 
 The UUID is stored in TerminalRestorable v9 and is independent of cwd, title and process name. Two agents in the same repository therefore remain distinguishable. Version 9 additionally stores an optional typed Agent resume descriptor on each Surface.
 
-The built-in first-party adapters do not require a status socket. Codex and Claude Code command hooks plus the Pi extension emit bounded, process-instance-scoped OSC 3008 presentation events to the owning TTY. Reports may carry a validated `omg_conversation` identity extracted from hook stdin or Pi's session manager. Because correlation is the terminal Surface that receives the sequence, the same transport works through SSH without forwarding `OH_MY_GHOSTTY_SESSION` or installing an OMG executable remotely. Hooks must be installed in the account where the agent runs; Settings can merge local hooks without replacing other integrations and can export an auditable Python 3 installer for explicit remote use.
+The built-in first-party adapters do not require a status socket. Manifest-selected JSON hooks, plugins/extensions, TOML blocks, scripts, title signals, and bounded screen rules emit or derive process-instance-scoped OSC 3008 presentation events on the owning TTY/Surface. Reports may carry a validated `omg_conversation` identity extracted from hook stdin or Pi's session manager. Because correlation is the terminal Surface that receives the sequence, the same transport works through SSH without forwarding `OH_MY_GHOSTTY_SESSION` or installing an OMG executable remotely. Hooks must be installed in the account where the agent runs; Settings can merge local hooks without replacing other integrations and can export an auditable Python 3 installer for explicit remote use.
 
 A future public `omg status` CLI may expose the same normalized contract over authenticated app IPC. It is not required by the built-in adapters and must not become an unauthenticated terminal-control channel.
 
@@ -40,7 +40,7 @@ The host persists conversation identity only in a typed `AgentResumeDescriptor` 
 | `idle` | No visible activity state. |
 | `working` | The agent is actively processing or using a tool. |
 | `done` | Work finished without requiring urgent action. |
-| `needsAttention` | The agent is blocked on the user or permission. |
+| `needsAttention` | The agent is blocked on the user; optional subtype is `question` or `permission`. |
 | `error` | The agent or task failed. |
 
 `TabActivity` carries:
@@ -69,7 +69,7 @@ A plugin may request a system symbol or a host-bundled asset by name. Names are 
 2. host metadata provider icon
 3. terminal fallback
 
-The host keeps the existing left icon slot. When an agent context is active, its validated OpenAI, Claude, or Pi bundled glyph replaces terminal/cloud. Idle has no ring; indeterminate working uses a rotating quarter-circle indicator and determinate progress uses the normalized ring fraction. Waiting, completed and failed states additionally use the existing trailing status slot with theme-aware attention/check/error symbols. Selecting a completed Tab acknowledges `done` to `idle`, immediately removing completion presentation while retaining identity. Clearing the agent context restores the canonical SSH cloud or terminal icon. Notification and Dock badge behavior are separate consumers controlled by host settings.
+The host keeps the existing left icon slot. When an Agent context is active, its validated bundled brand glyph replaces terminal/cloud. Identity, title and ring follow only the focused pane; non-focused panes may contribute a trailing attention/error/done indicator but never replace focused identity. Idle has no ring; indeterminate working uses a rotating quarter-circle indicator and determinate progress uses the normalized ring fraction. Waiting, completed and failed states additionally use the existing trailing status slot. Questions use `questionmark.bubble.fill`, permission approvals use `lock.shield.fill`, and an untyped attention event keeps the generic exclamation symbol. Selecting a completed Tab acknowledges `done` to `idle`, immediately removing completion presentation while retaining identity. Clearing the agent context restores the canonical SSH cloud or terminal icon. Notification and Dock badge behavior are separate consumers controlled by host settings.
 
 ## Adapter Responsibilities
 

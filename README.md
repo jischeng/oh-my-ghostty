@@ -102,7 +102,9 @@ an active SSH Pane launches a new independent `omg +ssh` child from the original
 OpenSSH argv and ready remote cwd, preserving config aliases, ProxyJump,
 explicit options, and folder context without keystroke injection.
 
-The built-in Agent Status integration supports Codex, Claude Code, and Pi hooks.
+The built-in Agent Status integration recognizes Codex, Claude Code, Pi, Qoder
+CLI, Reasonix, OMP, OpenCode, Amp, Antigravity, Cline, Copilot, Crush, Cursor
+Agent, Droid, Grok, Hermes, Kimi, and Qwen Code through bundled manifests.
 In Vertical Tabs, the highest-priority activity across every split replaces the
 terminal/cloud icon with the OpenAI, Claude, or Pi glyph. Idle has no ring;
 working uses a rotating quarter-circle progress indicator, while approval,
@@ -114,8 +116,9 @@ the remote account. Settings can export an auditable remote installer; OMG never
 silently changes remote dotfiles. Agent command, hook, icon, and resume behavior
 come from bundled, allowlisted manifests. With **Restore Windows and Agent
 Sessions** enabled (the default), OMG restores every open window/tab/split and
-uses the exact validated Codex/Claude/Pi conversation ID to resume agents that
-were still running at quit, locally or through the original SSH argv. These
+uses an exact validated conversation ID whenever the Agent exposes a resumable
+session API; Agents without one restart fresh in the same cwd. Local and SSH
+restore share the same original SSH argv and typed allowlist. These
 in-tree providers are not installable third-party plugins.
 A public third-party executable loader is **not implemented yet**; see
 [Plugin Development](docs/PLUGIN_DEVELOPMENT.md) for exact Stable,

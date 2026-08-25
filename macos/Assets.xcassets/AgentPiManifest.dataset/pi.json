@@ -3,6 +3,7 @@
   "displayName": "Pi",
   "command": "pi",
   "iconAsset": "AgentPi",
+  "opticalScale": 0.88,
   "process": {
     "executables": ["pi"],
     "runtimeMarkers": ["pi-coding-agent", "/pi/"]
@@ -18,6 +19,7 @@
   },
   "hook": {
     "kind": "plugin",
+    "dialect": "pi",
     "path": "~/.pi/agent/extensions/omg-agent-status.ts",
     "conversationField": "context",
     "events": [

@@ -1,0 +1,23 @@
+{
+  "id": "antigravity",
+  "displayName": "Antigravity",
+  "command": "agy",
+  "iconAsset": "AgentAntigravity",
+  "opticalScale": 0.9,
+  "process": {
+    "executables": [
+      "agy"
+    ],
+    "runtimeMarkers": [
+      "antigravity"
+    ]
+  },
+  "resume": {
+    "resumeArguments": []
+  },
+  "hook": {
+    "kind": "none",
+    "path": "",
+    "events": []
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "id": "crush",
+  "displayName": "Crush",
+  "command": "crush",
+  "iconAsset": "AgentCrush",
+  "opticalScale": 0.9,
+  "process": {
+    "executables": [
+      "crush"
+    ],
+    "runtimeMarkers": [
+      "crush"
+    ]
+  },
+  "resume": {
+    "resumeArguments": []
+  },
+  "hook": {
+    "kind": "none",
+    "path": "",
+    "events": []
+  },
+  "status": {
+    "working": [
+      "Waiting for tool response",
+      "Brrrrr\\.\\.\\.",
+      "Prrrrrrrr\\.\\.\\.",
+      "Processing\\.\\.\\.",
+      "Thinking\\.\\.\\.",
+      "\\bWorking(\\.\\.\\.|!)"
+    ],
+    "attention": [
+      "Permission Required",
+      "Allow for Session"
+    ]
+  }
+}

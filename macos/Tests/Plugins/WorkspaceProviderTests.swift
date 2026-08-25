@@ -169,6 +169,8 @@ struct WorkspaceProviderTests {
         )
         #expect(local.presentationTitle(pathDisplay: .fullPath) == "~/code")
         #expect(local.presentationTitle(pathDisplay: .folderName) == "code")
+        #expect(local.agentPathTitle(pathDisplay: .fullPath) == "/Users/test/code")
+        #expect(local.agentPathTitle(pathDisplay: .folderName) == "code")
 
         local.apply(
             .init(
@@ -184,6 +186,11 @@ struct WorkspaceProviderTests {
                 "cloud /home/test/project/omg"
         )
         #expect(local.presentationTitle(pathDisplay: .folderName) == "cloud omg")
+        #expect(
+            local.agentPathTitle(pathDisplay: .fullPath) ==
+                "cloud /home/test/project/omg"
+        )
+        #expect(local.agentPathTitle(pathDisplay: .folderName) == "cloud omg")
     }
 
     @Test func folderDisplayNameIsSharedByLocalAndRemoteFiles() {

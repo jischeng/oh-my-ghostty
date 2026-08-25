@@ -71,6 +71,24 @@ struct PaneSessionContext: Equatable, Sendable {
         }
     }
 
+    func agentPathTitle(
+        pathDisplay: OhMyGhosttyTabPathDisplay
+    ) -> String {
+        let path: String? = workingDirectory.map {
+            pathDisplay == .folderName
+                ? WorkspacePathPresentation.folderName($0)
+                : $0
+        }
+        switch state {
+        case .local:
+            return path ?? "Terminal"
+        case .sshConnecting(let ssh):
+            return path.map { "\(ssh.alias) \($0)" } ?? ssh.alias
+        case .sshReady(let ssh, _):
+            return path.map { "\(ssh.alias) \($0)" } ?? ssh.alias
+        }
+    }
+
     var tabIconSystemName: String {
         if case .sshReady = state { return "cloud" }
         return "terminal"
@@ -436,7 +454,7 @@ struct SSHPlugin: Sendable {
     static let pluginID = "builtin.ssh"
     static let manifest = PluginManifest(
         id: pluginID,
-        version: "0.1.0",
+        version: "0.2.0",
         executable: "builtin",
         capabilities: [.terminalEvents, .tabMetadata, .tabIcon, .inspectorPane],
         minimumHostVersion: "0.1.0"

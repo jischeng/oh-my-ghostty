@@ -406,6 +406,12 @@ struct VerticalTabsIntegrationTests {
         }
         #expect(!eighth.tabLayoutState.isInspectorVisible)
         #expect(terminalWindow.inspectorToggleWidthConstraint?.constant == 44)
+        terminalWindow.contentView?.superview?.layoutSubtreeIfNeeded()
+        let collapsedInspectorCenterY = try #require(
+            terminalWindow.inspectorControlsCenterY
+        )
+        let collapsedTrafficCenterY = try #require(alignedWindow.trafficLightsCenterY)
+        #expect(abs(collapsedInspectorCenterY - collapsedTrafficCenterY) < 0.5)
         #expect(controllers.map { $0.surfaceTree.first?.id } == surfaceIDs)
         #expect(controllers.map(surfaceSize) == initialSurfaceSizes)
         let expectedFrameSize = try #require(eighth.window).frame.size

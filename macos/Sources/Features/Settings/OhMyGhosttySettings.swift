@@ -202,7 +202,7 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Canonical tab ordering policy.",
             requiresNewWindow: false, category: "tabs"),
         .init(
-            id: "tabs.pathDisplay", type: .enumeration, defaultValue: "fullPath",
+            id: "tabs.pathDisplay", type: .enumeration, defaultValue: "folderName",
             allowedValues: OhMyGhosttyTabPathDisplay.allCases.map(\.rawValue),
             minimum: nil, maximum: nil,
             description: "Display the full working path or only the current folder in Vertical Tabs.",
@@ -318,7 +318,7 @@ final class OhMyGhosttySettings: ObservableObject {
     @Published var orderingMode: GhosttyTabOrderingMode = .manual {
         didSet { persist("tabs.ordering", orderingMode.rawValue) }
     }
-    @Published var tabPathDisplay: OhMyGhosttyTabPathDisplay = .fullPath {
+    @Published var tabPathDisplay: OhMyGhosttyTabPathDisplay = .folderName {
         didSet { persist("tabs.pathDisplay", tabPathDisplay.rawValue) }
     }
     @Published var showShortcutLabels = true {
@@ -439,7 +439,9 @@ final class OhMyGhosttySettings: ObservableObject {
             } else {
                 chosen = [:]
             }
+            let migrated = migratePathDisplayDefault()
             applyChosenValues()
+            if migrated { save() }
             lastError = nil
             writeAppearanceOverlay()
             notifyRuntime()
@@ -447,6 +449,14 @@ final class OhMyGhosttySettings: ObservableObject {
         } catch {
             lastError = error.localizedDescription
         }
+    }
+
+    private func migratePathDisplayDefault() -> Bool {
+        let marker = "_migrations.tabsPathDisplayFolderName"
+        guard chosen[marker] == nil else { return false }
+        chosen["tabs.pathDisplay"] = OhMyGhosttyTabPathDisplay.folderName.rawValue
+        chosen[marker] = 1
+        return true
     }
 
     func ensureFileExists() {
@@ -536,7 +546,7 @@ final class OhMyGhosttySettings: ObservableObject {
             defaultSidebarWidth = numberValue("tabs.sidebarWidth", fallback: 240, range: 176...480)
             groupingMode = enumValue("tabs.grouping", fallback: .none)
             orderingMode = enumValue("tabs.ordering", fallback: .manual)
-            tabPathDisplay = enumValue("tabs.pathDisplay", fallback: .fullPath)
+            tabPathDisplay = enumValue("tabs.pathDisplay", fallback: .folderName)
             showShortcutLabels = boolValue("tabs.showShortcutLabels", fallback: true)
             rememberSidebarWidth = boolValue("tabs.rememberSidebarWidth", fallback: true)
             sidebarVisible = boolValue("tabs.sidebarVisible", fallback: true)

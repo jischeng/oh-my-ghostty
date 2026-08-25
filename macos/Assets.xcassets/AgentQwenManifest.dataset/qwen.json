@@ -1,0 +1,64 @@
+{
+  "id": "qwen",
+  "displayName": "Qwen Code",
+  "command": "qwen",
+  "iconAsset": "AgentQwen",
+  "opticalScale": 0.9,
+  "process": {
+    "executables": [
+      "qwen"
+    ],
+    "runtimeMarkers": [
+      "qwen"
+    ]
+  },
+  "resume": {
+    "createArguments": [
+      "--session-id",
+      "{id}"
+    ],
+    "resumeArguments": [
+      "--resume",
+      "{id}"
+    ],
+    "store": {
+      "root": "~/.qwen/tmp",
+      "entryPattern": "chats/{id}.jsonl"
+    }
+  },
+  "hook": {
+    "kind": "json",
+    "dialect": "nested",
+    "path": "~/.qwen/settings.json",
+    "events": [
+      {
+        "name": "SessionStart",
+        "state": "idle"
+      },
+      {
+        "name": "UserPromptSubmit",
+        "state": "working"
+      },
+      {
+        "name": "PreToolUse",
+        "state": "working"
+      },
+      {
+        "name": "PostToolUse",
+        "state": "working"
+      },
+      {
+        "name": "Stop",
+        "state": "done"
+      }
+    ]
+  },
+  "titleStatus": {
+    "working": [
+      "^◐"
+    ],
+    "attention": [
+      "^✳"
+    ]
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "id": "grok",
+  "displayName": "Grok",
+  "command": "grok",
+  "iconAsset": "AgentGrok",
+  "opticalScale": 0.9,
+  "process": {
+    "executables": [
+      "grok"
+    ],
+    "runtimeMarkers": [
+      "grok"
+    ]
+  },
+  "resume": {
+    "createArguments": [
+      "--session-id",
+      "{id}"
+    ],
+    "resumeArguments": [
+      "--resume",
+      "{id}"
+    ],
+    "store": {
+      "root": "~/.grok/sessions",
+      "entryPattern": "{id}"
+    }
+  },
+  "hook": {
+    "kind": "json",
+    "dialect": "nested",
+    "path": "~/.grok/hooks/omg.json",
+    "events": [
+      {
+        "name": "SessionStart",
+        "state": "idle"
+      },
+      {
+        "name": "UserPromptSubmit",
+        "state": "working"
+      },
+      {
+        "name": "PreToolUse",
+        "state": "working"
+      },
+      {
+        "name": "PostToolUse",
+        "state": "working"
+      },
+      {
+        "name": "Stop",
+        "state": "done"
+      }
+    ],
+    "conversationField": "sessionId"
+  },
+  "titleStatus": {
+    "attention": [
+      "Action Required"
+    ]
+  }
+}

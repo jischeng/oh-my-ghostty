@@ -68,7 +68,7 @@ enum AgentHookInstallationState: Equatable, Sendable {
 
 struct AgentHookInstaller {
     static let marker = "_omg_agent_status"
-    static let hookVersion = 3
+    static let hookVersion = 4
 
     let homeURL: URL
 
@@ -807,15 +807,18 @@ print("Installed current OMG agent hooks.")
     }
 
     private static func isCurrentOMGEntry(_ entry: [String: Any]) -> Bool {
-        if entry[marker] as? Int == hookVersion { return true }
         let versionMarker = "_omg_agent_status_v\(hookVersion)"
         if (entry["command"] as? String)?.contains(versionMarker) == true {
             return true
         }
         guard let hooks = entry["hooks"] as? [[String: Any]] else { return false }
-        return hooks.contains {
+        let commandMatches = hooks.contains {
             ($0["command"] as? String)?.contains(versionMarker) == true
         }
+        if entry[marker] != nil {
+            return entry[marker] as? Int == hookVersion && commandMatches
+        }
+        return commandMatches
     }
 
     private static func removingOMGCommands(

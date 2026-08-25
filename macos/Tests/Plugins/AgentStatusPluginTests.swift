@@ -573,6 +573,44 @@ struct AgentStatusPluginTests {
         try assertUnrelatedHooksPreserved(at: claudeSettings)
     }
 
+    @Test func oldOwnerVersionRequiresHookCommandUpgrade() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let installer = AgentHookInstaller(homeURL: home)
+        try installer.install(.codex)
+        let url = home.appendingPathComponent(".codex/hooks.json")
+        var root = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+        )
+        var hooks = try #require(root["hooks"] as? [String: Any])
+        for key in hooks.keys {
+            var entries = try #require(hooks[key] as? [[String: Any]])
+            for index in entries.indices
+            where entries[index][AgentHookInstaller.marker] as? Int ==
+                AgentHookInstaller.hookVersion {
+                entries[index][AgentHookInstaller.marker] = 3
+                var commands = try #require(
+                    entries[index]["hooks"] as? [[String: Any]]
+                )
+                for commandIndex in commands.indices {
+                    let command = try #require(
+                        commands[commandIndex]["command"] as? String
+                    )
+                    commands[commandIndex]["command"] = command.replacingOccurrences(
+                        of: "_omg_agent_status_v4",
+                        with: "_omg_agent_status_v3"
+                    )
+                }
+                entries[index]["hooks"] = commands
+            }
+            hooks[key] = entries
+        }
+        root["hooks"] = hooks
+        try JSONSerialization.data(withJSONObject: root).write(to: url)
+        #expect(installer.installationState(.codex) == .updateAvailable)
+    }
+
     @Test func refusesMalformedHooksWithoutOverwriting() throws {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)

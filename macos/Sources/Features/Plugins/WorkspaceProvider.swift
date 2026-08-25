@@ -454,7 +454,7 @@ struct SSHPlugin: Sendable {
     static let pluginID = "builtin.ssh"
     static let manifest = PluginManifest(
         id: pluginID,
-        version: "0.2.0",
+        version: "0.2.1",
         executable: "builtin",
         capabilities: [.terminalEvents, .tabMetadata, .tabIcon, .inspectorPane],
         minimumHostVersion: "0.1.0"

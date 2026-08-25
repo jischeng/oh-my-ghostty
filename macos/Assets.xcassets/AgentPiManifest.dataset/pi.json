@@ -1,0 +1,33 @@
+{
+  "id": "pi",
+  "displayName": "Pi",
+  "command": "pi",
+  "iconAsset": "AgentPi",
+  "process": {
+    "executables": ["pi"],
+    "runtimeMarkers": ["pi-coding-agent", "/pi/"]
+  },
+  "resume": {
+    "createArguments": ["--session-id", "{id}"],
+    "resumeArguments": ["--session-id", "{id}"],
+    "store": {
+      "root": "~/.pi/agent/sessions",
+      "entryPattern": "*_{id}.jsonl"
+    },
+    "seed": "pi-session-file"
+  },
+  "hook": {
+    "kind": "plugin",
+    "path": "~/.pi/agent/extensions/omg-agent-status.ts",
+    "conversationField": "context",
+    "events": [
+      {"name": "session_start", "state": "idle"},
+      {"name": "before_agent_start", "state": "working"},
+      {"name": "agent_start", "state": "working"},
+      {"name": "tool_execution_start", "state": "working"},
+      {"name": "tool_execution_end", "state": "working"},
+      {"name": "agent_settled", "state": "done"},
+      {"name": "session_shutdown"}
+    ]
+  }
+}

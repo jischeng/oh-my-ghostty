@@ -111,8 +111,12 @@ acknowledges it back to idle without losing agent identity. Horizontal Tabs rema
 unmodified Ghostty native presentation. Instance-scoped bounded OSC events follow
 the owning Surface and also work in SSH when hooks are installed explicitly in
 the remote account. Settings can export an auditable remote installer; OMG never
-silently changes remote dotfiles. These in-tree providers are not installable
-third-party plugins.
+silently changes remote dotfiles. Agent command, hook, icon, and resume behavior
+come from bundled, allowlisted manifests. With **Restore Windows and Agent
+Sessions** enabled (the default), OMG restores every open window/tab/split and
+uses the exact validated Codex/Claude/Pi conversation ID to resume agents that
+were still running at quit, locally or through the original SSH argv. These
+in-tree providers are not installable third-party plugins.
 A public third-party executable loader is **not implemented yet**; see
 [Plugin Development](docs/PLUGIN_DEVELOPMENT.md) for exact Stable,
 Experimental, Internal, and Planned status.

@@ -96,6 +96,12 @@
       "description": "Allow completion events to request a notification.",
       "type": "boolean"
     },
+    "sessions.restoreOnLaunch": {
+      "category": "general",
+      "default": true,
+      "description": "Restore open windows, tabs, splits, and active agent sessions.",
+      "type": "boolean"
+    },
     "tabs.grouping": {
       "category": "tabs",
       "default": "none",

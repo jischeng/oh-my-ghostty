@@ -1869,6 +1869,7 @@ extension Ghostty {
             case uuid
             case title
             case isUserSetTitle
+            case agentResumeDescriptor
         }
 
         required convenience init(from decoder: Decoder) throws {
@@ -1883,10 +1884,24 @@ extension Ghostty {
             let uuid = UUID(uuidString: try container.decode(String.self, forKey: .uuid))
             var config = Ghostty.SurfaceConfiguration()
             config.workingDirectory = try container.decode(String?.self, forKey: .pwd)
+            let resume = try container.decodeIfPresent(
+                AgentResumeDescriptor.self,
+                forKey: .agentResumeDescriptor
+            )
+            if let resume, resume.isValid,
+               let executablePath = Bundle.main.executablePath {
+                config.workingDirectory = resume.scope == .local
+                    ? resume.workingDirectory ?? config.workingDirectory
+                    : nil
+                config.command = resume.restorationCommand(
+                    executablePath: executablePath
+                )
+            }
             let savedTitle = try container.decodeIfPresent(String.self, forKey: .title)
             let isUserSetTitle = try container.decodeIfPresent(Bool.self, forKey: .isUserSetTitle) ?? false
 
             self.init(app, baseConfig: config, uuid: uuid)
+            self.agentResumeDescriptor = resume
 
             // Restore the saved title after initialization
             if let title = savedTitle {
@@ -1904,6 +1919,10 @@ extension Ghostty {
             try container.encode(id.uuidString, forKey: .uuid)
             try container.encode(title, forKey: .title)
             try container.encode(titleFromTerminal != nil, forKey: .isUserSetTitle)
+            try container.encodeIfPresent(
+                agentResumeDescriptor,
+                forKey: .agentResumeDescriptor
+            )
         }
     }
 }

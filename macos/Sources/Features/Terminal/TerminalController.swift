@@ -93,12 +93,22 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// consume this map rather than independently inferring SSH from titles.
     @Published private(set) var paneSessionContexts: [UUID: PaneSessionContext] = [:]
     @Published private(set) var agentActivities: [UUID: TabActivity] = [:]
+    @Published private(set) var agentResumeDescriptors: [UUID: AgentResumeDescriptor] = [:]
+    private var agentResumeContextIDs: [UUID: String] = [:]
     private var paneSessionObservers: [UUID: Set<AnyCancellable>] = [:]
     private var agentReducers: [UUID: AgentContextSignalReducer] = [:]
     private var agentValidationWorkItems: [UUID: DispatchWorkItem] = [:]
+    private struct DetectedAgentInstance {
+        let id: String
+        let processGroupID: Int
+        let agent: SupportedAgent
+        let launchedAt: Date
+    }
+
     private var agentProcessPollCancellable: AnyCancellable?
     private var observedForegroundProcessIDs: [UUID: Int] = [:]
-    private var detectedAgentInstances: [UUID: (id: String, processGroupID: Int)] = [:]
+    private var detectedAgentInstances: [UUID: DetectedAgentInstance] = [:]
+    private var conversationDiscoveryPending = Set<UUID>()
 
     var focusedPaneSessionContext: PaneSessionContext? {
         paneSessionContext(for: focusedSurface ?? surfaceTree.first)
@@ -112,6 +122,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     func agentActivity(for surface: Ghostty.SurfaceView?) -> TabActivity? {
         guard let surface else { return nil }
         return agentActivities[surface.id]
+    }
+
+    func agentResumeDescriptor(
+        for surface: Ghostty.SurfaceView?
+    ) -> AgentResumeDescriptor? {
+        guard let surface else { return nil }
+        return agentResumeDescriptors[surface.id]
     }
 
     func preferredAgentActivity() -> TabActivity? {
@@ -296,6 +313,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         paneSessionObservers = paneSessionObservers.filter { activeIDs.contains($0.key) }
         paneSessionContexts = paneSessionContexts.filter { activeIDs.contains($0.key) }
         agentActivities = agentActivities.filter { activeIDs.contains($0.key) }
+        agentResumeDescriptors = agentResumeDescriptors.filter {
+            activeIDs.contains($0.key)
+        }
+        agentResumeContextIDs = agentResumeContextIDs.filter {
+            activeIDs.contains($0.key)
+        }
         agentReducers = agentReducers.filter { activeIDs.contains($0.key) }
         observedForegroundProcessIDs = observedForegroundProcessIDs.filter {
             activeIDs.contains($0.key)
@@ -303,6 +326,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         detectedAgentInstances = detectedAgentInstances.filter {
             activeIDs.contains($0.key)
         }
+        conversationDiscoveryPending.formIntersection(activeIDs)
         for (surfaceID, workItem) in agentValidationWorkItems
         where !activeIDs.contains(surfaceID) {
             workItem.cancel()
@@ -316,6 +340,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 workingDirectory: surface.pwd,
                 terminalTitle: surface.title
             )
+            if let descriptor = surface.agentResumeDescriptor,
+               descriptor.isValid {
+                agentResumeDescriptors[surface.id] = descriptor
+            }
             var observers: Set<AnyCancellable> = []
 
             Publishers.CombineLatest(surface.$pwd, surface.$title)
@@ -415,7 +443,21 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     ) {
         guard let agent else { return }
         let id = "omg-agent-\(agent.rawValue)-\(processGroupID)"
-        detectedAgentInstances[surfaceID] = (id, processGroupID)
+        let launchedAt = detectedAgentInstances[surfaceID]?.processGroupID == processGroupID
+            ? detectedAgentInstances[surfaceID]?.launchedAt ?? Date()
+            : Date()
+        detectedAgentInstances[surfaceID] = .init(
+            id: id,
+            processGroupID: processGroupID,
+            agent: agent,
+            launchedAt: launchedAt
+        )
+        scheduleConversationDiscovery(
+            agent: agent,
+            surfaceID: surfaceID,
+            processGroupID: processGroupID,
+            launchedAt: launchedAt
+        )
         guard agentActivities[surfaceID] == nil else { return }
         updateAgentActivity(.init(
             action: .start,
@@ -423,6 +465,58 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             metadata: "type=app;omg_agent=\(agent.rawValue);" +
                 "omg_scope=local;omg_state=idle"
         ), for: surfaceID)
+    }
+
+    private func scheduleConversationDiscovery(
+        agent: SupportedAgent,
+        surfaceID: UUID,
+        processGroupID: Int,
+        launchedAt: Date,
+        attempt: Int = 0
+    ) {
+        guard agentResumeDescriptors[surfaceID]?.conversationID == nil,
+              let workingDirectory = paneSessionContexts[surfaceID]?.workingDirectory,
+              conversationDiscoveryPending.insert(surfaceID).inserted else {
+            return
+        }
+        let delays: [TimeInterval] = [2, 3, 5, 8, 13]
+        guard attempt < delays.count else {
+            conversationDiscoveryPending.remove(surfaceID)
+            return
+        }
+        DispatchQueue.global(qos: .utility).asyncAfter(
+            deadline: .now() + delays[attempt]
+        ) { [weak self] in
+            let conversationID = AgentConversationStore.discover(
+                agent: agent,
+                workingDirectory: workingDirectory,
+                launchedAfter: launchedAt
+            )
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                conversationDiscoveryPending.remove(surfaceID)
+                guard detectedAgentInstances[surfaceID]?.processGroupID == processGroupID,
+                      var descriptor = agentResumeDescriptors[surfaceID],
+                      descriptor.agent == agent,
+                      descriptor.scope == .local,
+                      descriptor.conversationID == nil else { return }
+                guard let conversationID else {
+                    scheduleConversationDiscovery(
+                        agent: agent,
+                        surfaceID: surfaceID,
+                        processGroupID: processGroupID,
+                        launchedAt: launchedAt,
+                        attempt: attempt + 1
+                    )
+                    return
+                }
+                descriptor.conversationID = conversationID
+                agentResumeDescriptors[surfaceID] = descriptor
+                surfaceTree.first(where: { $0.id == surfaceID })?
+                    .agentResumeDescriptor = descriptor
+                invalidateRestorableState()
+            }
+        }
     }
 
     private func clearDetectedAgent(for surfaceID: UUID, force: Bool) {
@@ -480,17 +574,107 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         guard AgentStatusPlugin.isEnabled else {
             agentReducers.removeValue(forKey: surfaceID)
             agentValidationWorkItems.removeValue(forKey: surfaceID)?.cancel()
+            clearAgentResumeDescriptor(for: surfaceID)
             if agentActivities.removeValue(forKey: surfaceID) != nil {
                 objectWillChange.send()
             }
             return
         }
+        updateAgentResumeDescriptor(signal, for: surfaceID)
         var reducer = agentReducers[surfaceID] ?? AgentContextSignalReducer()
         let update = reducer.consume(signal) ?? reducer.consumeRemotePrompt(signal)
         guard let update else { return }
         agentReducers[surfaceID] = reducer
         applyAgentActivityUpdate(update, for: surfaceID)
         scheduleAgentValidation(for: surfaceID)
+    }
+
+    private func updateAgentResumeDescriptor(
+        _ signal: Ghostty.ContextSignal,
+        for surfaceID: UUID
+    ) {
+        if signal.action == .end {
+            guard agentResumeContextIDs[surfaceID] == signal.id else { return }
+            clearAgentResumeDescriptor(for: surfaceID)
+            return
+        }
+        if signal.id.hasPrefix("omg-ssh-"),
+           signal.metadata.contains("type=remote"),
+           signal.metadata.contains("cwd="),
+           agentResumeDescriptors[surfaceID]?.scope == .remote {
+            clearAgentResumeDescriptor(for: surfaceID)
+            return
+        }
+        guard let session = AgentContextSignalReducer.sessionSignal(from: signal) else {
+            return
+        }
+        let existing = agentResumeDescriptors[surfaceID]
+        let previous: AgentResumeDescriptor?
+        if existing?.agent == session.agent,
+           existing?.scope == session.scope {
+            previous = existing
+        } else {
+            previous = nil
+        }
+        let conversationID = session.conversationID ?? previous?.conversationID
+        let workingDirectory = paneSessionContexts[surfaceID]?.workingDirectory
+        let sshReplay: SSHReplayDescriptor? = if session.scope == .remote,
+           let context = paneSessionContexts[surfaceID] {
+            switch context.state {
+            case .local:
+                nil
+            case .sshConnecting(let ssh), .sshReady(let ssh, _):
+                SSHReplayStore.load(connectionID: ssh.connectionID)
+            }
+        } else {
+            nil
+        }
+        let descriptor = AgentResumeDescriptor(
+            agent: session.agent,
+            conversationID: conversationID,
+            scope: session.scope,
+            workingDirectory: workingDirectory,
+            sshReplay: sshReplay ?? previous?.sshReplay
+        )
+        guard descriptor.isValid else { return }
+        agentResumeContextIDs[surfaceID] = session.contextID
+        guard agentResumeDescriptors[surfaceID] != descriptor else { return }
+        agentResumeDescriptors[surfaceID] = descriptor
+        surfaceTree.first(where: { $0.id == surfaceID })?
+            .agentResumeDescriptor = descriptor
+        if descriptor.scope == .local,
+           descriptor.conversationID == nil,
+           let detected = detectedAgentInstances[surfaceID],
+           detected.agent == descriptor.agent {
+            scheduleConversationDiscovery(
+                agent: detected.agent,
+                surfaceID: surfaceID,
+                processGroupID: detected.processGroupID,
+                launchedAt: detected.launchedAt
+            )
+        }
+        enableRestorationForAgentSession()
+        invalidateRestorableState()
+    }
+
+    private func enableRestorationForAgentSession() {
+        guard !restorable else { return }
+        restorable = true
+        guard let window else { return }
+        window.isRestorable = true
+        window.restorationClass = TerminalWindowRestoration.self
+        window.identifier = .init(String(describing: TerminalWindowRestoration.self))
+    }
+
+    private func clearAgentResumeDescriptor(for surfaceID: UUID) {
+        agentResumeContextIDs.removeValue(forKey: surfaceID)
+        conversationDiscoveryPending.remove(surfaceID)
+        guard agentResumeDescriptors.removeValue(forKey: surfaceID) != nil else {
+            return
+        }
+        surfaceTree.first(where: { $0.id == surfaceID })?
+            .agentResumeDescriptor = nil
+        invalidateRestorableState()
     }
 
     private func acknowledgeCompletedAgentActivities() {
@@ -534,7 +718,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 processGroupIsAlive: processGroupIsAlive
             )
             agentReducers[surfaceID] = reducer
-            if let update { applyAgentActivityUpdate(update, for: surfaceID) }
+            if let update {
+                applyAgentActivityUpdate(update, for: surfaceID)
+                if update == .clear { clearAgentResumeDescriptor(for: surfaceID) }
+            }
             scheduleAgentValidation(for: surfaceID)
         }
         agentValidationWorkItems[surfaceID] = workItem
@@ -2202,8 +2389,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             if !settings.agentStatusHooksEnabled {
                 agentActivities = [:]
                 agentReducers = [:]
+                agentResumeDescriptors = [:]
+                agentResumeContextIDs = [:]
                 observedForegroundProcessIDs = [:]
                 detectedAgentInstances = [:]
+                conversationDiscoveryPending = []
                 agentValidationWorkItems.values.forEach { $0.cancel() }
                 agentValidationWorkItems = [:]
             }

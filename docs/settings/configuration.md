@@ -66,6 +66,7 @@ Window UI state is intentionally separate: `InspectorPresentationStore` owns las
 | `notifications.attention` | boolean | `true` | `true`, `false` | Settings > Plugins | Runtime policy |
 | `notifications.sound` | boolean | `false` | `true`, `false` | Settings > Plugins | Runtime policy |
 | `agents.statusHooks` | boolean | `true` | `true`, `false` | Settings > Plugins | Runtime ingress policy |
+| `sessions.restoreOnLaunch` | boolean | `true` | `true`, `false` | Settings > General | Next launch |
 
 Appearance controls resolve each value as `OMG override > Ghostty config > built-in default`. The UI reports the effective value and source, and **Reset to Ghostty** removes only OMG Appearance keys. The app writes a generated `appearance.ghostty` overlay beside `settings.json`; it never edits the user's Ghostty config. The overlay is loaded last and applied with Ghostty's existing live config update API, so current surfaces keep their PTY, shell, and scrollback.
 
@@ -74,6 +75,8 @@ Vertical tabs and the Right Inspector use the active terminal background color a
 `tabs.pathDisplay` applies to the path portion of every Vertical Tab label. Local and SSH panes use the same policy: `fullPath` preserves the current full-path presentation, while `folderName` displays only the final folder component. SSH keeps its alias prefix, for example `cloud /home/user/code` becomes `cloud code`.
 
 Settings > Plugins > Agent Integration installs versioned, removable local hooks for Codex and Claude Code plus a readable Pi extension. `agents.statusHooks` controls both normalized event ingress and the bounded local foreground-PID fallback used when an agent does not emit `SessionStart`. Vertical Tabs aggregate agent state across all splits and use bundled OpenAI/Claude/Pi glyphs; idle has no ring, and selecting a completed Tab acknowledges its reminder immediately. Horizontal Tabs keep Ghostty's native presentation. **Export SSH Installer…** writes an auditable Python 3 script that the user can explicitly transfer and run in a remote account. Remote hooks work through SSH because they write the bounded event to that remote TTY; OMG does not log in or alter remote accounts automatically.
+
+Settings > General > Sessions controls `sessions.restoreOnLaunch`. When enabled, AppKit restores every open window, canonical tab order, split tree, cwd, and typed Agent resume descriptor. Only Agents still running at quit are resumed with an exact validated conversation ID; a tab whose Agent already exited restores as a shell. SSH restore reuses original OpenSSH argv and never stores credentials or an arbitrary remote command.
 
 ## Machine-readable Schema
 

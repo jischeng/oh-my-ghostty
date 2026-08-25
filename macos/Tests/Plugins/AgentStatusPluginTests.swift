@@ -45,6 +45,129 @@ struct AgentStatusPluginTests {
         }
     }
 
+    @Test func bundledAgentCatalogDefinesHooksAndResume() {
+        let expected: [SupportedAgent: (String, String, Int)] = [
+            .codex: ("codex", "AgentOpenAI", 7),
+            .claude: ("claude", "AgentClaude", 8),
+            .pi: ("pi", "AgentPi", 7),
+        ]
+        for agent in SupportedAgent.allCases {
+            let definition = agent.definition
+            let value = expected[agent]
+            #expect(definition.id == agent.rawValue)
+            #expect(definition.command == value?.0)
+            #expect(definition.iconAsset == value?.1)
+            #expect(definition.hook.events.count == value?.2)
+            #expect(!definition.resume.resumeArguments.isEmpty)
+        }
+        #expect(SupportedAgent.codex.definition.resume.discover != nil)
+        #expect(SupportedAgent.claude.definition.resume.store != nil)
+        #expect(SupportedAgent.pi.definition.resume.seed == "pi-session-file")
+        #expect(SupportedAgent.codex.definition.hook.conversationField == "session_id")
+        #expect(SupportedAgent.claude.definition.hook.transcriptField == "transcript_path")
+    }
+
+    @Test func buildsOnlyAllowlistedAgentResumeCommands() throws {
+        let conversation = try #require(AgentConversationID("019f-test_session"))
+        let codex = AgentResumeDescriptor(
+            agent: .codex,
+            conversationID: conversation,
+            scope: .local,
+            workingDirectory: "/tmp/project"
+        )
+        let command = try #require(codex.restorationCommand(
+            executablePath: "/Applications/OMG.app/Contents/MacOS/omg",
+            verifyLocalStore: false
+        ))
+        #expect(command.contains("'codex' 'resume' '019f-test_session'"))
+        #expect(command.contains("exec \"${SHELL:-/bin/zsh}\" -l"))
+        let remote = AgentResumeDescriptor(
+            agent: .pi,
+            conversationID: conversation,
+            scope: .remote,
+            workingDirectory: "/home/user/project",
+            sshReplay: .init(
+                version: 1,
+                ssh: "/usr/bin/ssh",
+                forwardEnv: true,
+                terminfo: true,
+                cache: true,
+                args: ["cloud"]
+            )
+        )
+        let remoteCommand = try #require(remote.restorationCommand(
+            executablePath: "/Applications/OMG.app/Contents/MacOS/omg"
+        ))
+        #expect(remoteCommand.contains("--remote-agent=pi"))
+        #expect(remoteCommand.contains("--remote-agent-session=019f-test_session"))
+        #expect(remoteCommand.contains("--remote-working-directory=/home/user/project"))
+        let encoded = try JSONEncoder().encode(remote)
+        #expect(try JSONDecoder().decode(
+            AgentResumeDescriptor.self,
+            from: encoded
+        ) == remote)
+        #expect(AgentConversationID("bad session") == nil)
+        #expect(AgentConversationID("../escape") == nil)
+    }
+
+    @Test func extractsValidatedConversationIdentityFromContextSignal() throws {
+        let update = AgentContextSignalReducer.sessionSignal(from: .init(
+            action: .start,
+            id: "omg-agent-codex-42",
+            metadata: "type=app;omg_agent=codex;omg_scope=local;" +
+                "omg_state=working;omg_conversation=019f-test_session"
+        ))
+        let signal = try #require(update)
+        #expect(signal.agent == .codex)
+        #expect(signal.scope == .local)
+        #expect(signal.conversationID?.rawValue == "019f-test_session")
+    }
+
+    @Test func discoversExactConversationFromBoundedSessionStore() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let codexFile = root.appendingPathComponent("2026/08/25/rollout.jsonl")
+        try FileManager.default.createDirectory(
+            at: codexFile.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let record: [String: Any] = [
+            "type": "session_meta",
+            "payload": ["id": "019f-codex", "cwd": "/tmp/project"],
+        ]
+        var data = try JSONSerialization.data(withJSONObject: record)
+        data.append(0x0A)
+        try data.write(to: codexFile)
+        #expect(AgentConversationStore.discover(
+            agent: .codex,
+            workingDirectory: "/tmp/project",
+            launchedAfter: Date().addingTimeInterval(-1),
+            rootURL: root
+        )?.rawValue == "019f-codex")
+        let knownID = try #require(AgentConversationID("019f-codex"))
+        #expect(AgentConversationStore.contains(
+            agent: .codex,
+            conversationID: knownID,
+            rootURL: root
+        ))
+
+        let second = root.appendingPathComponent("2026/08/25/second.jsonl")
+        let secondRecord: [String: Any] = [
+            "type": "session_meta",
+            "payload": ["id": "019f-other", "cwd": "/tmp/project"],
+        ]
+        var secondData = try JSONSerialization.data(withJSONObject: secondRecord)
+        secondData.append(0x0A)
+        try secondData.write(to: second)
+        #expect(AgentConversationStore.discover(
+            agent: .codex,
+            workingDirectory: "/tmp/project",
+            launchedAfter: Date().addingTimeInterval(-1),
+            rootURL: root
+        ) == nil)
+    }
+
     @Test func detectsLocalAgentForegroundCommandsWithoutFalseArguments() {
         #expect(LocalAgentProcessDetector.detect(
             in: "/Users/test/.local/bin/codex --model gpt-5\n"
@@ -63,11 +186,11 @@ struct AgentStatusPluginTests {
         ) == nil)
     }
 
-    @Test @MainActor func bundledAgentAssetsLoadAsTemplateImages() {
+    @Test @MainActor func bundledAgentAssetsRenderVisiblePixels() throws {
         for agent in SupportedAgent.allCases {
-            let image = NSImage(named: agent.assetName)
-            #expect(image != nil)
-            #expect(image?.isTemplate == true)
+            let image = try #require(NSImage(named: agent.assetName))
+            #expect(image.isTemplate)
+            #expect(renderedPixelCount(image) > 100)
         }
     }
 
@@ -315,6 +438,8 @@ struct AgentStatusPluginTests {
             #expect(command.contains("ps -o pgid= -p \"$PPID\""))
             #expect(command.contains("omg-agent-\(url == codexHooks ? "codex" : "claude")-%s"))
             #expect(command.contains("omg_scope=%s"))
+            #expect(command.contains("omg_conversation=%s"))
+            #expect(command.contains("session_id"))
             #expect(command.contains("> \"/dev/$omg_tty\""))
             try assertUnrelatedHooksPreserved(at: url)
         }
@@ -487,6 +612,8 @@ struct AgentStatusPluginTests {
         #expect(source.contains("marker: \(AgentHookInstaller.marker)"))
         #expect(source.contains("omg-agent-pi-${process.pid}"))
         #expect(source.contains("process.env.SSH_CONNECTION"))
+        #expect(source.contains("sessionManager?.getSessionId"))
+        #expect(source.contains("omg_conversation="))
         #expect(source.contains("agent_settled"))
         #expect(source.contains("ask_user_question"))
         let mode = try #require(
@@ -497,6 +624,38 @@ struct AgentStatusPluginTests {
         #expect(mode.intValue == 0o600)
         try installer.uninstall(.pi)
         #expect(!installer.isInstalled(.pi))
+    }
+
+    @MainActor
+    private func renderedPixelCount(_ image: NSImage) -> Int {
+        let size = 32
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: size,
+            pixelsHigh: size,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ), let context = NSGraphicsContext(bitmapImageRep: bitmap) else {
+            return 0
+        }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        NSColor.clear.setFill()
+        NSRect(x: 0, y: 0, width: size, height: size).fill()
+        image.draw(in: NSRect(x: 2, y: 2, width: size - 4, height: size - 4))
+        NSGraphicsContext.restoreGraphicsState()
+        var count = 0
+        for y in 0..<size {
+            for x in 0..<size where (bitmap.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.1 {
+                count += 1
+            }
+        }
+        return count
     }
 
     private func assertUnrelatedHooksPreserved(at url: URL) throws {

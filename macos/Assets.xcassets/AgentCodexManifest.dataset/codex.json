@@ -1,0 +1,34 @@
+{
+  "id": "codex",
+  "displayName": "Codex",
+  "command": "codex",
+  "iconAsset": "AgentOpenAI",
+  "process": {
+    "executables": ["codex"],
+    "runtimeMarkers": ["codex"]
+  },
+  "resume": {
+    "resumeArguments": ["resume", "{id}"],
+    "discover": {
+      "root": "~/.codex/sessions",
+      "format": "jsonl",
+      "idKeyPath": "payload.id",
+      "cwdKeyPath": "payload.cwd"
+    }
+  },
+  "hook": {
+    "kind": "json",
+    "path": "~/.codex/hooks.json",
+    "conversationField": "session_id",
+    "promptTitleField": "prompt",
+    "events": [
+      {"name": "SessionStart", "state": "idle"},
+      {"name": "UserPromptSubmit", "state": "working"},
+      {"name": "PreToolUse", "state": "working"},
+      {"name": "PostToolUse", "state": "working"},
+      {"name": "PermissionRequest", "state": "needsAttention"},
+      {"name": "Stop", "state": "done"},
+      {"name": "SessionEnd"}
+    ]
+  }
+}

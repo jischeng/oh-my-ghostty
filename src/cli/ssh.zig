@@ -13,6 +13,19 @@ const global = @import("../global.zig");
 
 const log = std.log.scoped(.ssh);
 
+const RemoteAgent = enum {
+    codex,
+    claude,
+    pi,
+
+    fn parse(value: []const u8) ?RemoteAgent {
+        inline for (std.meta.fields(RemoteAgent)) |field| {
+            if (std.mem.eql(u8, value, field.name)) return @enumFromInt(field.value);
+        }
+        return null;
+    }
+};
+
 const usage =
     \\Usage: ghostty +ssh [flags] [--] <ssh args...>
     \\
@@ -23,6 +36,10 @@ const usage =
     \\  --ssh=<path>          Path to the ssh binary. Default: first `ssh` on PATH.
     \\  --remote-working-directory=<path>
     \\                        Start a replayed interactive Fish session in path.
+    \\  --remote-agent=<codex|claude|pi>
+    \\                        Start an allowlisted agent after connecting.
+    \\  --remote-agent-session=<id>
+    \\                        Resume that agent's validated conversation ID.
     \\  --verbose             Print +ssh status lines to stderr.
     \\  --help                Show full help.
     \\
@@ -49,6 +66,12 @@ pub const Options = struct {
 
     /// Optional initial remote cwd used by OMG when replaying an SSH split.
     @"remote-working-directory": ?[]const u8 = null,
+
+    /// Optional allowlisted agent launched by a restored SSH Surface.
+    @"remote-agent": ?[]const u8 = null,
+
+    /// Optional validated conversation ID for the restored remote agent.
+    @"remote-agent-session": ?[]const u8 = null,
 
     /// When true, print verbose output to stderr.
     verbose: bool = false,
@@ -167,6 +190,10 @@ pub const Options = struct {
 ///     destination in this remote directory. OMG uses this only when replaying
 ///     an active SSH connection into a new split.
 ///
+///   * `--remote-agent=<codex|claude|pi>` and
+///     `--remote-agent-session=<id>`: Restore an allowlisted agent session.
+///     These options never accept arbitrary remote commands.
+///
 ///   * `--verbose`: Print +ssh status lines to stderr, and surface
 ///     remote stderr during the terminfo install.
 ///
@@ -247,6 +274,24 @@ fn runInner(
     if (opts._ssh_args.items.len == 0) {
         try stderr.print("Error: no ssh arguments provided.\n\n{s}", .{usage});
         return 2;
+    }
+
+    const remote_agent: ?RemoteAgent = if (opts.@"remote-agent") |value|
+        RemoteAgent.parse(value) orelse {
+            try stderr.print("Error: invalid --remote-agent `{s}`.\n", .{value});
+            return 2;
+        }
+    else
+        null;
+    if (opts.@"remote-agent-session") |value| {
+        if (remote_agent == null) {
+            try stderr.writeAll("Error: --remote-agent-session requires --remote-agent.\n");
+            return 2;
+        }
+        if (!validAgentSessionID(value)) {
+            try stderr.writeAll("Error: invalid --remote-agent-session.\n");
+            return 2;
+        }
     }
 
     const session: struct {
@@ -333,6 +378,8 @@ fn runInner(
             label,
             id,
             opts.@"remote-working-directory",
+            remote_agent,
+            opts.@"remote-agent-session",
         ) orelse break :lifecycle null;
         const local_cwd = std.Io.Dir.cwd().realPathFileAlloc(
             global.io(),
@@ -634,12 +681,23 @@ fn sshDestinationLabel(destination: []const u8) ?[]const u8 {
     return label;
 }
 
+fn validAgentSessionID(value: []const u8) bool {
+    if (value.len == 0 or value.len > 128) return false;
+    for (value) |byte| switch (byte) {
+        'a'...'z', 'A'...'Z', '0'...'9', '.', '_', '-' => {},
+        else => return false,
+    };
+    return true;
+}
+
 fn remoteShellCommand(
     alloc: Allocator,
     shell: []const u8,
     label: []const u8,
     context_id: []const u8,
     remote_working_directory: ?[]const u8,
+    remote_agent: ?RemoteAgent,
+    remote_agent_session: ?[]const u8,
 ) ?[]const u8 {
     const name = std.fs.path.basename(shell);
     if (!std.mem.eql(u8, name, "fish")) return null;
@@ -655,6 +713,18 @@ fn remoteShellCommand(
         "function __omg_report_pwd --on-event fish_prompt; set -l __omg_cwd (string escape --style=url \"$PWD\"); printf \"\\e]3008;start={s};type=remote;targethost={s};cwd=%s\\a\\e]7;file://localhost%s\\a\" \"$__omg_cwd\" \"$__omg_cwd\"; end",
         .{ context_id, label },
     ) catch return null;
+    if (remote_agent) |agent| {
+        fish_command.writer.writeAll("; __omg_report_pwd; command ") catch return null;
+        fish_command.writer.writeAll(@tagName(agent)) catch return null;
+        if (remote_agent_session) |session_id| {
+            switch (agent) {
+                .codex => fish_command.writer.writeAll(" resume ") catch return null,
+                .claude => fish_command.writer.writeAll(" --resume ") catch return null,
+                .pi => fish_command.writer.writeAll(" --session-id ") catch return null,
+            }
+            writeFishSingleQuoted(&fish_command.writer, session_id) catch return null;
+        }
+    }
 
     var command: std.Io.Writer.Allocating = .init(alloc);
     defer command.deinit();
@@ -740,6 +810,8 @@ test remoteShellCommand {
         "cloud",
         "omg-ssh-1",
         null,
+        null,
+        null,
     ) == null);
 
     const command = remoteShellCommand(
@@ -747,6 +819,8 @@ test remoteShellCommand {
         "/usr/bin/fish",
         "cloud",
         "omg-ssh-1",
+        null,
+        null,
         null,
     ).?;
     defer testing.allocator.free(command);
@@ -761,10 +835,17 @@ test remoteShellCommand {
         "cloud",
         "omg-ssh-2",
         "/home/user/project's code",
+        .codex,
+        "019f-session_1",
     ).?;
     defer testing.allocator.free(cwd_command);
     try testing.expect(std.mem.indexOf(u8, cwd_command, "cd --") != null);
     try testing.expect(std.mem.indexOf(u8, cwd_command, "project") != null);
+    try testing.expect(std.mem.indexOf(u8, cwd_command, "__omg_report_pwd; command codex resume") != null);
+    try testing.expect(std.mem.indexOf(u8, cwd_command, "019f-session_1") != null);
+    try testing.expect(validAgentSessionID("019f-session_1"));
+    try testing.expect(!validAgentSessionID("bad session"));
+    try testing.expect(!validAgentSessionID("../escape"));
 
     var fish_buffer: [128]u8 = undefined;
     var fish_writer: std.Io.Writer = .fixed(&fish_buffer);

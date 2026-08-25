@@ -279,7 +279,8 @@ beside each existing file. Removal deletes only OMG-owned commands.
 
 Adapters emit OSC 3008 contexts with IDs
 `omg-agent-<codex|claude|pi>-<process-group-id>`, `type=app`, a bounded
-`omg_state`, and `omg_scope=local|remote`. The host verifies that ID and metadata
+`omg_state`, `omg_scope=local|remote`, and an optional validated
+`omg_conversation`. The host verifies that ID and metadata
 name the same built-in agent, then associates the event with the Surface that
 parsed it. Because some agent versions defer or omit `SessionStart`, the macOS
 host samples Ghostty's foreground process-group PID once per second; only when
@@ -302,6 +303,30 @@ execution on that account; OMG does not log in or silently modify remote dotfile
 Agent glyphs use the template SVGs from LobeHub `lobe-icons` static package
 (version 1.94.0, MIT). OpenAI, Claude, and Pi names and marks remain trademarks
 of their respective owners.
+
+### Built-in agent manifests and restoration (Internal)
+
+Bundled `Agent*Manifest.dataset` JSON files are the single data source for each
+allowlisted agent's command, icon, process markers, hook path/events/identity
+fields, resume argv, and on-disk store/discovery mechanism. Manifests can select
+only closed host mechanisms; they cannot inject Swift, shell, or arbitrary remote
+commands.
+
+`AgentResumeDescriptor` persists only a version, allowlisted agent, bounded ASCII
+conversation ID, local/remote scope, cwd, and validated `SSHReplayDescriptor`.
+Terminal restoration v9 stores this descriptor on its owning Surface. Local
+restore builds only `codex resume <id>`, `claude --resume <id>`, or
+`pi --session-id <id>` and falls back to the login shell when the Agent exits.
+Remote restore replays original OpenSSH argv and passes only typed
+`--remote-agent` / `--remote-agent-session` options to `+ssh`; Fish restores cwd,
+emits a ready context, runs the allowlisted resume command, then returns to its
+interactive prompt.
+
+Conversation identity comes from hook stdin (`session_id`), Pi's
+`sessionManager.getSessionId()`, or bounded cwd+creation-time JSONL discovery.
+Multiple candidates are ambiguous and never resolved using `--last` or
+`--continue`. Agent end or the first resumed SSH prompt clears the descriptor,
+so a tab whose user explicitly ran `/quit` restores as a shell.
 
 ### Terminal events
 

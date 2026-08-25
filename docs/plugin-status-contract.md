@@ -23,11 +23,13 @@ Every `TerminalController` owns a persistent UUID. New terminal child processes 
 OH_MY_GHOSTTY_SESSION=<uuid>
 ```
 
-The UUID is stored in TerminalRestorable v8 and is independent of cwd, title and process name. Two agents in the same repository therefore remain distinguishable.
+The UUID is stored in TerminalRestorable v9 and is independent of cwd, title and process name. Two agents in the same repository therefore remain distinguishable. Version 9 additionally stores an optional typed Agent resume descriptor on each Surface.
 
-The built-in first-party adapters do not require a status socket. Codex and Claude Code command hooks plus the Pi extension emit bounded, process-instance-scoped OSC 3008 presentation events to the owning TTY. Because correlation is the terminal Surface that receives the sequence, the same transport works through SSH without forwarding `OH_MY_GHOSTTY_SESSION` or installing an OMG executable remotely. Hooks must be installed in the account where the agent runs; Settings can merge local hooks without replacing other integrations and can export an auditable Python 3 installer for explicit remote use.
+The built-in first-party adapters do not require a status socket. Codex and Claude Code command hooks plus the Pi extension emit bounded, process-instance-scoped OSC 3008 presentation events to the owning TTY. Reports may carry a validated `omg_conversation` identity extracted from hook stdin or Pi's session manager. Because correlation is the terminal Surface that receives the sequence, the same transport works through SSH without forwarding `OH_MY_GHOSTTY_SESSION` or installing an OMG executable remotely. Hooks must be installed in the account where the agent runs; Settings can merge local hooks without replacing other integrations and can export an auditable Python 3 installer for explicit remote use.
 
 A future public `omg status` CLI may expose the same normalized contract over authenticated app IPC. It is not required by the built-in adapters and must not become an unauthenticated terminal-control channel.
+
+The host persists conversation identity only in a typed `AgentResumeDescriptor` attached to the owning Surface. The descriptor contains no arbitrary command or prompt content. Terminal restoration builds resume argv from the bundled allowlist; ambiguous store discovery produces no ID, and the host never substitutes a directory-wide `--last`/`--continue` guess. Agent end clears the descriptor so explicit `/quit` is respected.
 
 ## Core State
 

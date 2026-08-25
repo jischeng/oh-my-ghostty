@@ -145,6 +145,15 @@ struct SettingsView: View {
         switch selection {
         case .general:
             Form {
+                Section("Sessions") {
+                    Toggle(
+                        "Restore Windows and Agent Sessions",
+                        isOn: $settings.restoreSessionsOnLaunch
+                    )
+                    Text("Restores open windows, tabs, splits, working directories, and agents that were still running when OMG quit.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Section("Configuration") {
                     LabeledContent("OMG Settings", value: OhMyGhosttySettings.fileURL.path)
                     LabeledContent("Precedence", value: "Runtime → OMG → Ghostty → Defaults")

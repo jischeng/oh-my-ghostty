@@ -19,6 +19,8 @@ extension TerminalRestorableState {
         // MARK: - Version 8 (oh-my-ghostty)
         let tabSessionID: String?
         let tabCreatedAt: Date?
+
+        // MARK: - Version 9 (agent resume descriptors live on each SurfaceView)
     }
 }
 

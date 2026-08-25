@@ -58,7 +58,7 @@ extension TerminalRestorable {
 
 /// The state stored for terminal window restoration.
 final class TerminalRestorableState: TerminalRestorable {
-    static var version: Int { 8 }
+    static var version: Int { 9 }
     static var minimumVersion: Int { 5 }
 
     var focusedSurface: String? {
@@ -145,8 +145,8 @@ class TerminalWindowRestoration: NSObject, NSWindowRestoration {
         // no matter what. Note its safe to use "ghostty.config" directly here
         // because window restoration is only ever invoked on app start so we
         // don't have to deal with config reloads.
-        if appDelegate.ghostty.config.windowSaveState == "never" {
-            AppDelegate.logger.warning("skip restoration: window-save-state=never")
+        if !OhMyGhosttySettings.shared.restoreSessionsOnLaunch {
+            AppDelegate.logger.warning("skip restoration: sessions.restoreOnLaunch=false")
             completionHandler(nil, nil)
             return
         }

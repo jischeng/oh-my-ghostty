@@ -1,55 +1,5 @@
 import Foundation
 
-enum SupportedAgent: String, CaseIterable, Identifiable, Sendable {
-    case codex
-    case claude
-    case pi
-
-    var id: String { rawValue }
-
-    var displayName: String {
-        switch self {
-        case .codex: "Codex"
-        case .claude: "Claude Code"
-        case .pi: "Pi"
-        }
-    }
-
-    var assetName: String {
-        switch self {
-        case .codex: "AgentOpenAI"
-        case .claude: "AgentClaude"
-        case .pi: "AgentPi"
-        }
-    }
-
-    var icon: PluginTabIcon {
-        .init(kind: .bundledAsset, name: assetName)
-    }
-
-    func normalizedTitle(_ title: String) -> String {
-        switch self {
-        case .codex:
-            return title
-        case .claude:
-            guard title.contains("Claude Code") else { return title }
-            let trimmed = title.drop(while: { character in
-                character.isWhitespace || character == "✳" || character == "✻" ||
-                    character == "✶" || character == "*"
-            })
-            return trimmed.isEmpty ? displayName : String(trimmed)
-        case .pi:
-            let prefixes = ["π - ", "Pi - ", "pi - "]
-            guard let prefix = prefixes.first(where: { title.hasPrefix($0) }) else {
-                return title
-            }
-            let normalized = title.dropFirst(prefix.count)
-                .trimmingCharacters(in: .whitespaces)
-            return normalized.isEmpty ? displayName : normalized
-        }
-    }
-}
-
 enum AgentStatusPlugin {
     @MainActor static var isEnabled: Bool {
         OhMyGhosttySettings.shared.agentStatusHooksEnabled
@@ -71,10 +21,11 @@ enum LocalAgentProcessDetector {
                 let runtimeArguments = tokens.dropFirst().prefix(4)
                     .map { $0.lowercased() }
                     .joined(separator: " ")
-                if runtimeArguments.contains("claude") { return .claude }
-                if runtimeArguments.contains("pi-coding-agent") ||
-                    runtimeArguments.contains("/pi/") { return .pi }
-                if runtimeArguments.contains("codex") { return .codex }
+                if let agent = SupportedAgent.allCases.first(where: { candidate in
+                    candidate.definition.process.runtimeMarkers.contains {
+                        runtimeArguments.contains($0.lowercased())
+                    }
+                }) { return agent }
             }
         }
         return nil
@@ -82,11 +33,10 @@ enum LocalAgentProcessDetector {
 
     private static func exactAgent(_ token: String) -> SupportedAgent? {
         let name = URL(fileURLWithPath: token).lastPathComponent.lowercased()
-        return switch name {
-        case "codex": .codex
-        case "claude": .claude
-        case "pi": .pi
-        default: nil
+        return SupportedAgent.allCases.first { agent in
+            agent.definition.process.executables.contains {
+                $0.lowercased() == name
+            }
         }
     }
 }
@@ -118,7 +68,7 @@ enum AgentHookInstallationState: Equatable, Sendable {
 
 struct AgentHookInstaller {
     static let marker = "_omg_agent_status"
-    static let hookVersion = 2
+    static let hookVersion = 3
 
     let homeURL: URL
 
@@ -135,9 +85,7 @@ struct AgentHookInstaller {
     ) -> AgentHookInstallationState {
         switch agent {
         case .codex, .claude:
-            let url = homeURL.appendingPathComponent(
-                agent == .codex ? ".codex/hooks.json" : ".claude/settings.json"
-            )
+            let url = hookURL(for: agent)
             guard containsMarker(in: url) else { return .missing }
             guard hasCurrentJSONHooks(at: url, agent: agent) else {
                 return .updateAvailable
@@ -148,7 +96,7 @@ struct AgentHookInstaller {
             return .current
         case .pi:
             guard let source = try? String(
-                contentsOf: piExtensionURL,
+                contentsOf: hookURL(for: agent),
                 encoding: .utf8
             ), source.contains("marker: \(Self.marker)") else {
                 return .missing
@@ -194,7 +142,7 @@ import stat
 import tempfile
 
 MARKER = "_omg_agent_status"
-VERSION = 2
+VERSION = \#(hookVersion)
 SPEC = json.loads(base64.b64decode("\#(specBase64)").decode("utf-8"))
 PI_SOURCE = base64.b64decode("\#(piBase64)").decode("utf-8")
 HOME = Path.home()
@@ -326,52 +274,40 @@ print("Installed current OMG agent hooks for Codex, Claude Code, and Pi.")
     func install(_ agent: SupportedAgent) throws {
         switch agent {
         case .codex:
-            try validateJSONHooks(
-                at: homeURL.appendingPathComponent(".codex/hooks.json"),
-                agent: agent
-            )
+            let url = hookURL(for: agent)
+            try validateJSONHooks(at: url, agent: agent)
             try ensureCodexHooksEnabled()
-            try installJSONHooks(
-                at: homeURL.appendingPathComponent(".codex/hooks.json"),
-                agent: agent
-            )
+            try installJSONHooks(at: url, agent: agent)
         case .claude:
-            try installJSONHooks(
-                at: homeURL.appendingPathComponent(".claude/settings.json"),
-                agent: agent
-            )
+            try installJSONHooks(at: hookURL(for: agent), agent: agent)
         case .pi:
-            try backupIfNeeded(piExtensionURL)
+            let url = hookURL(for: agent)
+            try backupIfNeeded(url)
             try FileManager.default.createDirectory(
-                at: piExtensionURL.deletingLastPathComponent(),
+                at: url.deletingLastPathComponent(),
                 withIntermediateDirectories: true
             )
-            try writeText(Self.piExtension, to: piExtensionURL)
+            try writeText(Self.piExtension, to: url)
         }
     }
 
     func uninstall(_ agent: SupportedAgent) throws {
         switch agent {
-        case .codex:
-            try removeJSONHooks(
-                at: homeURL.appendingPathComponent(".codex/hooks.json")
-            )
-        case .claude:
-            try removeJSONHooks(
-                at: homeURL.appendingPathComponent(".claude/settings.json")
-            )
+        case .codex, .claude:
+            try removeJSONHooks(at: hookURL(for: agent))
         case .pi:
-            guard FileManager.default.fileExists(atPath: piExtensionURL.path) else {
-                return
-            }
-            try FileManager.default.removeItem(at: piExtensionURL)
+            let url = hookURL(for: agent)
+            guard FileManager.default.fileExists(atPath: url.path) else { return }
+            try FileManager.default.removeItem(at: url)
         }
     }
 
-    private var piExtensionURL: URL {
-        homeURL.appendingPathComponent(
-            ".pi/agent/extensions/omg-agent-status.ts"
-        )
+    private func hookURL(for agent: SupportedAgent) -> URL {
+        let path = agent.definition.hook.path
+        if path.hasPrefix("~/") {
+            return homeURL.appendingPathComponent(String(path.dropFirst(2)))
+        }
+        return URL(fileURLWithPath: path)
     }
 
     private func containsMarker(in url: URL) -> Bool {
@@ -634,19 +570,9 @@ print("Installed current OMG agent hooks for Codex, Claude Code, and Pi.")
     private static func hookEvents(
         _ agent: SupportedAgent
     ) -> [(String, TabActivityState?, String?)] {
-        var events: [(String, TabActivityState?, String?)] = [
-            ("SessionStart", .idle, nil),
-            ("UserPromptSubmit", .working, nil),
-            ("PreToolUse", .working, nil),
-            ("PostToolUse", .working, nil),
-            ("PermissionRequest", .needsAttention, nil),
-            ("Stop", .done, nil),
-            ("SessionEnd", nil, nil),
-        ]
-        if agent == .claude {
-            events.append(("Notification", .needsAttention, "permission_prompt"))
+        agent.definition.hook.events.map { event in
+            (event.name, event.state, event.matcher)
         }
-        return events
     }
 
     private static func hookCommand(
@@ -656,15 +582,25 @@ print("Installed current OMG agent hooks for Codex, Claude Code, and Pi.")
         let action = state == nil ? "end" : "start"
         var metadata = "type=app;omg_agent=\(agent.rawValue);omg_scope=%s"
         if let state { metadata += ";omg_state=\(state.rawValue)" }
-        return ": \(marker); " +
+        var setup = ""
+        var arguments = "\"$omg_pgid\" \"$omg_scope\""
+        if let field = agent.definition.hook.conversationField {
+            setup = "omg_conversation=$(python3 -c 'import json,sys,urllib.parse; " +
+                "value=json.load(sys.stdin).get(\"\(field)\",\"\"); " +
+                "print(urllib.parse.quote(str(value)[:128],safe=\"._~-\"),end=\"\")' " +
+                "2>/dev/null || true); "
+            metadata += ";omg_conversation=%s"
+            arguments += " \"$omg_conversation\""
+        }
+        return ": \(marker); " + setup +
             "omg_tty=$(ps -o tty= -p \"$PPID\" 2>/dev/null | tr -d ' '); " +
             "omg_pgid=$(ps -o pgid= -p \"$PPID\" 2>/dev/null | tr -d ' '); " +
             "case \"$omg_tty\" in ''|*[!A-Za-z0-9/._-]*) exit 0;; esac; " +
             "case \"$omg_pgid\" in ''|*[!0-9]*) exit 0;; esac; " +
             "omg_scope=local; test -n \"${SSH_CONNECTION-}\" && omg_scope=remote; " +
             "printf '\\033]3008;\(action)=omg-agent-\(agent.rawValue)-%s;" +
-            "\(metadata)\\007' \"$omg_pgid\" \"$omg_scope\" " +
-            "> \"/dev/$omg_tty\" 2>/dev/null || true"
+            "\(metadata)\\007' \(arguments) > \"/dev/$omg_tty\" " +
+            "2>/dev/null || true"
     }
 
     private static let piExtension = #"""
@@ -674,13 +610,16 @@ import { closeSync, openSync, writeSync } from "node:fs";
 
 const contextId = `omg-agent-pi-${process.pid}`;
 const scope = process.env.SSH_CONNECTION ? "remote" : "local";
-function report(state?: string, end = false) {
+function report(state?: string, end = false, context?: any) {
   let fd: number | undefined;
   try {
+    const raw = context?.sessionManager?.getSessionId?.();
+    const conversation = raw && /^[A-Za-z0-9._-]{1,128}$/.test(String(raw))
+      ? `;omg_conversation=${encodeURIComponent(String(raw))}` : "";
     fd = openSync("/dev/tty", "w");
     const sequence = end
-      ? `\u001b]3008;end=${contextId};type=app;omg_agent=pi;omg_scope=${scope}\u0007`
-      : `\u001b]3008;start=${contextId};type=app;omg_agent=pi;omg_scope=${scope};omg_state=${state}\u0007`;
+      ? `\u001b]3008;end=${contextId};type=app;omg_agent=pi;omg_scope=${scope}${conversation}\u0007`
+      : `\u001b]3008;start=${contextId};type=app;omg_agent=pi;omg_scope=${scope};omg_state=${state}${conversation}\u0007`;
     writeSync(fd, sequence);
   } catch {
   } finally {
@@ -691,16 +630,16 @@ function report(state?: string, end = false) {
 }
 
 export default function (pi: any) {
-  pi.on("session_start", async () => report("idle"));
-  pi.on("before_agent_start", async () => report("working"));
-  pi.on("agent_start", async () => report("working"));
-  pi.on("tool_execution_start", async (event: any) => {
+  pi.on("session_start", async (_event: any, context: any) => report("idle", false, context));
+  pi.on("before_agent_start", async (_event: any, context: any) => report("working", false, context));
+  pi.on("agent_start", async (_event: any, context: any) => report("working", false, context));
+  pi.on("tool_execution_start", async (event: any, context: any) => {
     const waitingTools = new Set(["ask_user_question", "ask_question", "question", "confirm"]);
-    report(waitingTools.has(String(event.toolName)) ? "needsAttention" : "working");
+    report(waitingTools.has(String(event.toolName)) ? "needsAttention" : "working", false, context);
   });
-  pi.on("tool_execution_end", async () => report("working"));
-  pi.on("agent_settled", async () => report("done"));
-  pi.on("session_shutdown", async () => report(undefined, true));
+  pi.on("tool_execution_end", async (_event: any, context: any) => report("working", false, context));
+  pi.on("agent_settled", async (_event: any, context: any) => report("done", false, context));
+  pi.on("session_shutdown", async (_event: any, context: any) => report(undefined, true, context));
 }
 """#
 }
@@ -708,6 +647,13 @@ export default function (pi: any) {
 enum AgentActivityUpdate: Equatable, Sendable {
     case set(TabActivity)
     case clear
+}
+
+struct AgentSessionSignal: Equatable, Sendable {
+    let contextID: String
+    let agent: SupportedAgent
+    let scope: AgentExecutionScope
+    let conversationID: AgentConversationID?
 }
 
 struct AgentActivityCandidate: Sendable {
@@ -771,6 +717,28 @@ struct AgentContextSignalReducer: Sendable {
 
     var requiresForegroundValidation: Bool {
         validationProcessGroupID != nil
+    }
+
+    static func sessionSignal(
+        from signal: Ghostty.ContextSignal
+    ) -> AgentSessionSignal? {
+        guard signal.action == .start else { return nil }
+        let metadata = metadata(signal.metadata)
+        guard metadata["type"] == "app",
+              let rawAgent = metadata["omg_agent"],
+              let agent = SupportedAgent(rawValue: rawAgent),
+              identity(signal.id, agent: agent) != nil,
+              let rawScope = metadata["omg_scope"],
+              let scope = AgentExecutionScope(rawValue: rawScope) else { return nil }
+        let conversationID = metadata["omg_conversation"]?
+            .removingPercentEncoding
+            .flatMap(AgentConversationID.init)
+        return .init(
+            contextID: signal.id,
+            agent: agent,
+            scope: scope,
+            conversationID: conversationID
+        )
     }
 
     mutating func consume(_ signal: Ghostty.ContextSignal) -> AgentActivityUpdate? {

@@ -190,7 +190,9 @@ struct SSHReplayDescriptor: Codable, Equatable, Sendable {
 
     func command(
         executablePath: String,
-        remoteWorkingDirectory: String? = nil
+        remoteWorkingDirectory: String? = nil,
+        remoteAgent: SupportedAgent? = nil,
+        conversationID: AgentConversationID? = nil
     ) -> String? {
         guard version == 1,
               !ssh.isEmpty,
@@ -215,6 +217,14 @@ struct SSHReplayDescriptor: Codable, Equatable, Sendable {
         ]
         if let remoteWorkingDirectory {
             argv.append("--remote-working-directory=\(remoteWorkingDirectory)")
+        }
+        if let remoteAgent {
+            argv.append("--remote-agent=\(remoteAgent.rawValue)")
+            if let conversationID {
+                argv.append("--remote-agent-session=\(conversationID.rawValue)")
+            }
+        } else if conversationID != nil {
+            return nil
         }
         argv.append("--")
         argv.append(contentsOf: args)

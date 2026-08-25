@@ -261,23 +261,31 @@ struct VerticalTabsIntegrationTests {
         inspectorSurface.contextSignal = .init(
             action: .start,
             id: "omg-agent-codex",
-            metadata: "type=app;omg_agent=codex;omg_state=working"
+            metadata: "type=app;omg_agent=codex;omg_scope=local;" +
+                "omg_state=working;omg_conversation=019f-first"
         )
         for _ in 0..<20 where eighth.agentActivity(for: inspectorSurface) == nil {
             try await Task.sleep(for: .milliseconds(10))
         }
         #expect(eighth.agentActivity(for: inspectorSurface)?.source == "codex")
         #expect(eighth.agentActivity(for: inspectorSurface)?.state == .working)
+        #expect(eighth.agentResumeDescriptor(
+            for: inspectorSurface
+        )?.conversationID?.rawValue == "019f-first")
         inspectorSurface.contextSignal = .init(
             action: .start,
             id: "omg-agent-codex",
-            metadata: "type=app;omg_agent=codex;omg_state=done"
+            metadata: "type=app;omg_agent=codex;omg_scope=local;" +
+                "omg_state=done;omg_conversation=019f-rotated"
         )
         for _ in 0..<20
         where eighth.agentActivity(for: inspectorSurface)?.state != .done {
             try await Task.sleep(for: .milliseconds(10))
         }
         #expect(eighth.agentActivity(for: inspectorSurface)?.state == .done)
+        #expect(eighth.agentResumeDescriptor(
+            for: inspectorSurface
+        )?.conversationID?.rawValue == "019f-rotated")
         eighth.markTabActivated()
         #expect(eighth.agentActivity(for: inspectorSurface)?.state == .idle)
         #expect(eighth.agentActivity(for: inspectorSurface)?.icon?.name == "AgentOpenAI")
@@ -290,6 +298,7 @@ struct VerticalTabsIntegrationTests {
             try await Task.sleep(for: .milliseconds(10))
         }
         #expect(eighth.agentActivity(for: inspectorSurface) == nil)
+        #expect(eighth.agentResumeDescriptor(for: inspectorSurface) == nil)
 
         let inspectorContext = InspectorPaneContext(
             tabID: eighth.tabSessionID,

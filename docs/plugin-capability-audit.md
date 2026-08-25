@@ -41,7 +41,7 @@ Status vocabulary:
 
 ## What Actually Runs Today
 
-The running app owns the normalized `TabActivity` model and validated `TabActivityStore`. The in-tree Agent Status bridge additionally reduces bounded, process-instance-scoped OSC 3008 events per Surface for Codex, Claude Code, and Pi, including idle identity, working/progress, approval, completion, error, and clear. Vertical Tabs aggregate all split activities into one identity icon slot and host-owned status presentation; Horizontal Tabs remain native Ghostty UI. `MockAgentStatusAdapter` still exercises the future process-plugin store.
+The running app owns the normalized `TabActivity` model and validated `TabActivityStore`. The in-tree Agent Status bridge additionally reduces bounded, process-instance-scoped OSC 3008 events per Surface for Codex, Claude Code, and Pi, including idle identity, working/progress, approval, completion, error, clear, and optional conversation identity. Vertical Tabs aggregate all split activities into one identity icon slot and host-owned status presentation; Horizontal Tabs remain native Ghostty UI. Typed v9 Surface restoration may resume only bundled allowlisted agents locally or through validated SSH replay; manifests and persisted state cannot supply arbitrary commands. `MockAgentStatusAdapter` still exercises the future process-plugin store.
 
 No third-party executable can reach that store in a production build yet. `PluginAuthorizationPolicy`, `PluginMessageRouter` and the frame codec are tested components, not a connected daemon. `SSHPlugin` and the Agent hook bridge are trusted in-tree code using generic workspace/activity boundaries, not installable third-party plugins.
 

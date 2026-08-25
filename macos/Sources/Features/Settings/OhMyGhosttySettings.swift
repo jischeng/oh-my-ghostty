@@ -292,6 +292,11 @@ final class OhMyGhosttySettings: ObservableObject {
             allowedValues: nil, minimum: nil, maximum: nil,
             description: "Accept normalized activity events from agent adapters.",
             requiresNewWindow: false, category: "plugins"),
+        .init(
+            id: "sessions.restoreOnLaunch", type: .boolean, defaultValue: "true",
+            allowedValues: nil, minimum: nil, maximum: nil,
+            description: "Restore open windows, tabs, splits, and active agent sessions.",
+            requiresNewWindow: false, category: "general"),
     ]
 
     @Published var tabLayout: Ghostty.Config.MacOSTabLayout = .vertical {
@@ -393,6 +398,9 @@ final class OhMyGhosttySettings: ObservableObject {
     }
     @Published var agentStatusHooksEnabled = true {
         didSet { persist("agents.statusHooks", agentStatusHooksEnabled) }
+    }
+    @Published var restoreSessionsOnLaunch = true {
+        didSet { persist("sessions.restoreOnLaunch", restoreSessionsOnLaunch) }
     }
     @Published private(set) var lastError: String?
 
@@ -549,6 +557,10 @@ final class OhMyGhosttySettings: ObservableObject {
             notifyAttention = boolValue("notifications.attention", fallback: true)
             notificationSound = boolValue("notifications.sound", fallback: false)
             agentStatusHooksEnabled = boolValue("agents.statusHooks", fallback: true)
+            restoreSessionsOnLaunch = boolValue(
+                "sessions.restoreOnLaunch",
+                fallback: true
+            )
         }
     }
 

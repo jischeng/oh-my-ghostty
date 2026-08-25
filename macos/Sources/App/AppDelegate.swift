@@ -211,6 +211,7 @@ class AppDelegate: NSObject,
         let appearanceObservation = MainActor.assumeIsolated {
             (
                 OhMyGhosttySettings.appearanceDidChangeNotification,
+                OhMyGhosttySettings.didChangeNotification,
                 OhMyGhosttySettings.shared
             )
         }
@@ -218,8 +219,27 @@ class AppDelegate: NSObject,
             self,
             selector: #selector(ohMyGhosttyAppearanceDidChange),
             name: appearanceObservation.0,
-            object: appearanceObservation.1
+            object: appearanceObservation.2
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(ohMyGhosttySettingsDidChange),
+            name: appearanceObservation.1,
+            object: appearanceObservation.2
+        )
+    }
+
+    @objc private func ohMyGhosttySettingsDidChange(_ notification: Notification) {
+        let key = MainActor.assumeIsolated {
+            notification.userInfo?[
+                OhMyGhosttySettings.changedKeyUserInfoKey
+            ] as? String
+        }
+        guard key == nil || key == "sessions.restoreOnLaunch" else { return }
+        let enabled = MainActor.assumeIsolated {
+            OhMyGhosttySettings.shared.restoreSessionsOnLaunch
+        }
+        UserDefaults.ghostty.setValue(enabled, forKey: "NSQuitAlwaysKeepsWindows")
     }
 
     @objc private func ohMyGhosttyAppearanceDidChange(_ notification: Notification) {
@@ -848,12 +868,13 @@ class AppDelegate: NSObject,
         // Depending on the "window-save-state" setting we have to set the NSQuitAlwaysKeepsWindows
         // configuration. This is the only way to carefully control whether macOS invokes the
         // state restoration system.
-        switch config.windowSaveState {
-        case "never": UserDefaults.ghostty.setValue(false, forKey: "NSQuitAlwaysKeepsWindows")
-        case "always": UserDefaults.ghostty.setValue(true, forKey: "NSQuitAlwaysKeepsWindows")
-        case "default": fallthrough
-        default: UserDefaults.ghostty.removeObject(forKey: "NSQuitAlwaysKeepsWindows")
+        let restoreSessionsOnLaunch = MainActor.assumeIsolated {
+            OhMyGhosttySettings.shared.restoreSessionsOnLaunch
         }
+        UserDefaults.ghostty.setValue(
+            restoreSessionsOnLaunch,
+            forKey: "NSQuitAlwaysKeepsWindows"
+        )
 
         // Sync our auto-update settings. If SUEnableAutomaticChecks (in our Info.plist) is
         // explicitly false (NO), auto-updates are disabled. Otherwise, we use the behavior

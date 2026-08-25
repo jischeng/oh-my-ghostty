@@ -16,6 +16,7 @@ struct OhMyGhosttySettingsTests {
         settings.orderingMode = .manual
         settings.tabPathDisplay = .folderName
         settings.notifyTaskComplete = false
+        settings.restoreSessionsOnLaunch = false
 
         let data = try Data(contentsOf: url)
         let object = try #require(
@@ -28,6 +29,7 @@ struct OhMyGhosttySettingsTests {
         #expect(object["tabs.ordering"] as? String == "manual")
         #expect(object["tabs.pathDisplay"] as? String == "folderName")
         #expect(object["notifications.taskComplete"] as? Bool == false)
+        #expect(object["sessions.restoreOnLaunch"] as? Bool == false)
 
         let restored = OhMyGhosttySettings(fileURL: url)
         #expect(restored.tabLayout == .vertical)
@@ -37,6 +39,7 @@ struct OhMyGhosttySettingsTests {
         #expect(restored.orderingMode == .manual)
         #expect(restored.tabPathDisplay == .folderName)
         #expect(!restored.notifyTaskComplete)
+        #expect(!restored.restoreSessionsOnLaunch)
     }
 
     @Test func externalEditReloadsTheSameRuntimeModel() throws {
@@ -190,6 +193,7 @@ struct OhMyGhosttySettingsTests {
         #expect(descriptors.contains { $0.id == "tabs.pathDisplay" })
         #expect(descriptors.contains { $0.id == "tabs.sidebarVisible" })
         #expect(descriptors.contains { $0.id == "agents.statusHooks" })
+        #expect(descriptors.contains { $0.id == "sessions.restoreOnLaunch" })
         #expect(descriptors.contains { $0.id == "appearance.backgroundOpacity" })
         #expect(descriptors.contains { $0.id == "appearance.cursorStyle" })
         let schema = try settings.schemaData()

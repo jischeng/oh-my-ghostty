@@ -1445,10 +1445,15 @@ private struct GhosttyTabIconView: View {
             switch icon {
             case .systemSymbol(let name):
                 Image(systemName: name)
+                    .font(.system(size: settings.tabIconSize))
             case .asset(let name):
                 Image(name)
+                    .resizable()
+                    .scaledToFit()
             case .image(let image):
                 Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
             }
         }
         .foregroundStyle(color)

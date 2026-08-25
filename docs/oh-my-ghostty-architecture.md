@@ -123,9 +123,9 @@ WebView 不是首批架构依赖。它只可能在第三方生态开放后作为
 
 ### 6.1 Agent 状态提醒
 
-官方状态插件将 Codex、Claude Code 和 Pi 的原生 hook/extension 事件归一为 `idle`、`working`、`needsAttention`、`done`、`error`。事件使用 `omg-agent-<tool>-<process-group-id>` 的 bounded OSC 3008 presentation context，由 agent 所在 TTY 接收，因此 Local 和 SSH Pane 使用同一 Surface correlation。唯一实例 ID 阻止旧 session 的 `end` 清理新 session；Local 仅在 context 活跃时每秒校验 PTY foreground process group，SSH 在下一个 authenticated remote Fish prompt 到达时清理异常退出残留。不解析 terminal title/process name，也不依赖远端 OMG executable。
+官方状态插件将 Codex、Claude Code 和 Pi 的原生 hook/extension 事件归一为 `idle`、`working`、`needsAttention`、`done`、`error`。事件使用 `omg-agent-<tool>-<process-group-id>` 的 bounded OSC 3008 presentation context，由 agent 所在 TTY 接收，因此 Local 和 SSH Pane 使用同一 Surface correlation。部分 agent 版本会延迟或不发送 `SessionStart`，因此 macOS Host 每秒只读取一次 Ghostty 已有的 foreground process-group PID；仅当 PID 改变时，才在 utility queue 执行一次 `ps`，识别本地 `codex`/`claude`/`pi` 并合成 `idle`。唯一实例 ID 阻止旧 session 的 `end` 清理新 session；Local 启动有 4 秒 foreground handoff grace，之后以 process-group 存活性清理异常退出。SSH 不做本地 process-name fallback，而在下一个 authenticated remote Fish prompt 到达时清理异常残留；远端不依赖 OMG executable。
 
-Vertical Tabs 保留唯一 Tab icon slot，并按整个 Tab 的所有 split 聚合状态：`needsAttention > error > working > done > idle`，同优先级优先 focused Surface。Agent 连接时 identity icon 替换 terminal/cloud；working 使用围绕 icon 的紧凑 progress ring；等待审批、完成和失败继续使用右侧 status slot。Agent context 结束后恢复 canonical terminal/cloud icon。Horizontal Tabs 保持 Ghostty 原生 presentation，不注入自定义状态 UI。Hook 只能改变展示状态，不获得 Terminal Control、文件系统或网络能力。
+Vertical Tabs 保留唯一 Tab icon slot，并按整个 Tab 的所有 split 聚合状态：`needsAttention > error > working > done > idle`，同优先级优先 focused Surface。Agent 启动时 OpenAI/Claude/Pi template glyph 替换 terminal/cloud；idle 不显示 ring，working 使用旋转的四分之一圆 progress indicator；等待审批、完成和失败继续使用右侧 status slot。用户选中已完成 Tab 时，`done` acknowledge 为 `idle`，提醒立即消失但 agent identity 保留。Agent context 结束后恢复 canonical terminal/cloud icon。Horizontal Tabs 保持 Ghostty 原生 presentation，不注入自定义状态 UI。Hook 只能改变展示状态，不获得 Terminal Control、文件系统或网络能力。
 
 Settings 显式安装/移除用户级 hooks，使用 versioned owner marker 合并 Codex/Claude 配置并保留同 entry 的其他命令，Pi 使用可审计 TypeScript extension。SSH 上可导出 Python 3 installer，由用户审阅、传输并在 agent 实际运行的远端账户显式执行；本地 App 不登录或静默修改远端 dotfiles。
 
@@ -197,7 +197,7 @@ OMG 不另造第二个 CLI binary。现有 app executable `omg` 是统一 CLI �
 
 交付：session 事件桥、状态 lease/store、原生标题组合、官方状态插件。
 
-退出条件：session 创建/关闭、插件崩溃、OSC 进度、PID 变化和 tab/split 聚焦切换均无陈旧状态；无插件时无额外子进程和轮询。
+退出条件：session 创建/关闭、插件崩溃、OSC 进度、PID 变化和 tab/split 聚焦切换均无陈旧状态；无外部插件时无额外子进程，内建 Agent Status 只保留 bounded foreground-PID 采样，PID 不变不得执行 `ps`。
 
 ### 阶段 2：Tab Layout
 

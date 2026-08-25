@@ -281,9 +281,14 @@ Adapters emit OSC 3008 contexts with IDs
 `omg-agent-<codex|claude|pi>-<process-group-id>`, `type=app`, a bounded
 `omg_state`, and `omg_scope=local|remote`. The host verifies that ID and metadata
 name the same built-in agent, then associates the event with the Surface that
-parsed it. A one-second validation runs only while a local agent context is
-active and clears state when the PTY foreground process group changes. In SSH,
-the next authenticated remote Fish prompt clears orphaned remote agent state.
+parsed it. Because some agent versions defer or omit `SessionStart`, the macOS
+host samples Ghostty's foreground process-group PID once per second; only when
+that PID changes does a utility-queue `ps` lookup recognize a local
+`codex`/`claude`/`pi` command and synthesize `idle`. Local startup then gets a
+four-second foreground handoff grace, after which validation keeps the identity
+while its process group exists and clears it when that group exits. In SSH, no
+local process-name fallback is attempted; the next authenticated remote Fish
+prompt clears orphaned remote agent state.
 Unique instance IDs prevent an old `end` from clearing a newer same-agent
 session. These events can change only host-owned tab presentation; they do not
 authorize terminal input, filesystem, network, or plugin execution. A process
@@ -293,6 +298,10 @@ Because the event is written to the owning TTY, the same hook works through
 OpenSSH. Hooks must be installed in the account where the agent executable runs.
 Settings can export an auditable Python 3 installer for explicit transfer and
 execution on that account; OMG does not log in or silently modify remote dotfiles.
+
+Agent glyphs use the template SVGs from LobeHub `lobe-icons` static package
+(version 1.94.0, MIT). OpenAI, Claude, and Pi names and marks remain trademarks
+of their respective owners.
 
 ### Terminal events
 
@@ -305,8 +314,9 @@ event bridge publishes them:
 - foreground process changed;
 - focus changed.
 
-`AgentProgressStatusReducer` translates progress events in unit tests. The
-planned status CLI and `OH_MY_GHOSTTY_SESSION` correlation are not implemented.
+The planned public status CLI and authenticated app IPC are not implemented.
+`OH_MY_GHOSTTY_SESSION` remains the stable Tab identity for the future process
+plugin path; the built-in hook bridge is correlated directly by Surface.
 
 ## Workspace and SSH provider (Experimental)
 

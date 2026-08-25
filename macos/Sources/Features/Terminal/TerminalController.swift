@@ -1,5 +1,6 @@
 import Foundation
 import Cocoa
+import Darwin
 import SwiftUI
 import Combine
 import GhosttyKit
@@ -95,6 +96,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     private var paneSessionObservers: [UUID: Set<AnyCancellable>] = [:]
     private var agentReducers: [UUID: AgentContextSignalReducer] = [:]
     private var agentValidationWorkItems: [UUID: DispatchWorkItem] = [:]
+    private var agentProcessPollCancellable: AnyCancellable?
+    private var observedForegroundProcessIDs: [UUID: Int] = [:]
+    private var detectedAgentInstances: [UUID: (id: String, processGroupID: Int)] = [:]
 
     var focusedPaneSessionContext: PaneSessionContext? {
         paneSessionContext(for: focusedSurface ?? surfaceTree.first)
@@ -239,6 +243,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             object: nil
         )
         synchronizePaneSessionContexts()
+        startAgentProcessPolling()
     }
 
     required init?(coder: NSCoder) {
@@ -248,6 +253,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     deinit {
         verticalTabWindowsObservation?.invalidate()
         verticalTabSelectionObservation?.invalidate()
+        agentProcessPollCancellable?.cancel()
 
         // Remove all of our notificationcenter subscriptions
         let center = NotificationCenter.default
@@ -291,6 +297,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         paneSessionContexts = paneSessionContexts.filter { activeIDs.contains($0.key) }
         agentActivities = agentActivities.filter { activeIDs.contains($0.key) }
         agentReducers = agentReducers.filter { activeIDs.contains($0.key) }
+        observedForegroundProcessIDs = observedForegroundProcessIDs.filter {
+            activeIDs.contains($0.key)
+        }
+        detectedAgentInstances = detectedAgentInstances.filter {
+            activeIDs.contains($0.key)
+        }
         for (surfaceID, workItem) in agentValidationWorkItems
         where !activeIDs.contains(surfaceID) {
             workItem.cancel()
@@ -344,6 +356,123 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
     }
 
+    private func startAgentProcessPolling() {
+        agentProcessPollCancellable = Timer.publish(
+            every: 1,
+            on: .main,
+            in: .common
+        ).autoconnect().sink { [weak self] _ in
+            self?.pollLocalAgentProcesses()
+        }
+    }
+
+    private func pollLocalAgentProcesses() {
+        guard AgentStatusPlugin.isEnabled else { return }
+        for surface in surfaceTree {
+            guard let context = paneSessionContexts[surface.id],
+                  case .local = context.state else {
+                clearDetectedAgent(for: surface.id, force: true)
+                observedForegroundProcessIDs.removeValue(forKey: surface.id)
+                continue
+            }
+            guard let processGroupID = surface.surfaceModel?.foregroundPID else {
+                continue
+            }
+            if let detected = detectedAgentInstances[surface.id],
+               detected.processGroupID != processGroupID,
+               !Self.processGroupExists(detected.processGroupID) {
+                clearDetectedAgent(for: surface.id, force: true)
+            }
+            guard observedForegroundProcessIDs[surface.id] != processGroupID else {
+                continue
+            }
+            observedForegroundProcessIDs[surface.id] = processGroupID
+            let surfaceID = surface.id
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                let commands = Self.processGroupCommandLines(processGroupID)
+                let agent = commands.flatMap {
+                    LocalAgentProcessDetector.detect(in: $0)
+                }
+                DispatchQueue.main.async { [weak self] in
+                    guard let self,
+                          observedForegroundProcessIDs[surfaceID] == processGroupID,
+                          let context = paneSessionContexts[surfaceID],
+                          case .local = context.state else { return }
+                    applyDetectedAgent(
+                        agent,
+                        processGroupID: processGroupID,
+                        surfaceID: surfaceID
+                    )
+                }
+            }
+        }
+    }
+
+    private func applyDetectedAgent(
+        _ agent: SupportedAgent?,
+        processGroupID: Int,
+        surfaceID: UUID
+    ) {
+        guard let agent else { return }
+        let id = "omg-agent-\(agent.rawValue)-\(processGroupID)"
+        detectedAgentInstances[surfaceID] = (id, processGroupID)
+        guard agentActivities[surfaceID] == nil else { return }
+        updateAgentActivity(.init(
+            action: .start,
+            id: id,
+            metadata: "type=app;omg_agent=\(agent.rawValue);" +
+                "omg_scope=local;omg_state=idle"
+        ), for: surfaceID)
+    }
+
+    private func clearDetectedAgent(for surfaceID: UUID, force: Bool) {
+        guard let detected = detectedAgentInstances[surfaceID],
+              force || !Self.processGroupExists(detected.processGroupID) else {
+            return
+        }
+        detectedAgentInstances.removeValue(forKey: surfaceID)
+        updateAgentActivity(.init(
+            action: .end,
+            id: detected.id,
+            metadata: "type=app"
+        ), for: surfaceID)
+    }
+
+    nonisolated private static func processGroupCommandLines(
+        _ processGroupID: Int
+    ) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = [
+            "-o", "command=",
+            "-g", String(processGroupID),
+        ]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            defer {
+                if process.isRunning {
+                    process.terminate()
+                    process.waitUntilExit()
+                }
+            }
+            let handle = output.fileHandleForReading
+            var captured = Data()
+            while let chunk = try handle.read(upToCount: 8 * 1024),
+                  !chunk.isEmpty {
+                let remaining = max(0, 64 * 1024 - captured.count)
+                if remaining > 0 { captured.append(chunk.prefix(remaining)) }
+            }
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return nil }
+            return String(data: captured, encoding: .utf8)
+        } catch {
+            return nil
+        }
+    }
+
     private func updateAgentActivity(
         _ signal: Ghostty.ContextSignal,
         for surfaceID: UUID
@@ -362,6 +491,15 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         agentReducers[surfaceID] = reducer
         applyAgentActivityUpdate(update, for: surfaceID)
         scheduleAgentValidation(for: surfaceID)
+    }
+
+    private func acknowledgeCompletedAgentActivities() {
+        for surfaceID in Array(agentReducers.keys) {
+            guard var reducer = agentReducers[surfaceID],
+                  let update = reducer.acknowledgeCompletion() else { continue }
+            agentReducers[surfaceID] = reducer
+            applyAgentActivityUpdate(update, for: surfaceID)
+        }
     }
 
     private func applyAgentActivityUpdate(
@@ -388,8 +526,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             guard let self,
                   let surface = surfaceTree.first(where: { $0.id == surfaceID }),
                   var reducer = agentReducers[surfaceID] else { return }
+            let processGroupIsAlive = reducer.validationProcessGroupID.map {
+                Self.processGroupExists($0)
+            }
             let update = reducer.reconcileLocalForegroundProcess(
-                surface.surfaceModel?.foregroundPID
+                surface.surfaceModel?.foregroundPID,
+                processGroupIsAlive: processGroupIsAlive
             )
             agentReducers[surfaceID] = reducer
             if let update { applyAgentActivityUpdate(update, for: surfaceID) }
@@ -400,6 +542,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             deadline: .now() + 1,
             execute: workItem
         )
+    }
+
+    private static func processGroupExists(_ processGroupID: Int) -> Bool {
+        guard processGroupID > 0,
+              let value = Int32(exactly: processGroupID) else { return false }
+        if kill(-value, 0) == 0 { return true }
+        return errno == EPERM
     }
 
     private func updatePaneSessionContext(
@@ -546,6 +695,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     func markTabActivated() {
+        acknowledgeCompletedAgentActivities()
         tabLastActivatedAt = Date()
         if tabLayoutState.orderingMode == .recentlyUsed,
            window?.tabGroup?.selectedWindow === window {
@@ -2052,6 +2202,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             if !settings.agentStatusHooksEnabled {
                 agentActivities = [:]
                 agentReducers = [:]
+                observedForegroundProcessIDs = [:]
+                detectedAgentInstances = [:]
                 agentValidationWorkItems.values.forEach { $0.cancel() }
                 agentValidationWorkItems = [:]
             }

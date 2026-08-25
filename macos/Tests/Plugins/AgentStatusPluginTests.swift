@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 @testable import Ghostty
@@ -20,6 +21,8 @@ struct AgentStatusPluginTests {
             #expect(idleActivity.source == agent.rawValue)
             #expect(idleActivity.state == .idle)
             #expect(idleActivity.icon == agent.icon)
+            #expect(idleActivity.icon?.kind == .bundledAsset)
+            #expect(idleActivity.icon?.name == agent.assetName)
 
             let waitingUpdate = reducer.consume(signal(
                 agent: agent,
@@ -39,6 +42,32 @@ struct AgentStatusPluginTests {
             ))
             let cleared = try #require(clearUpdate)
             #expect(cleared == .clear)
+        }
+    }
+
+    @Test func detectsLocalAgentForegroundCommandsWithoutFalseArguments() {
+        #expect(LocalAgentProcessDetector.detect(
+            in: "/Users/test/.local/bin/codex --model gpt-5\n"
+        ) == .codex)
+        #expect(LocalAgentProcessDetector.detect(
+            in: "/usr/bin/login -flp test claude\n/usr/local/bin/claude\n"
+        ) == .claude)
+        #expect(LocalAgentProcessDetector.detect(
+            in: "/usr/local/bin/node /opt/pi-coding-agent/dist/cli.js\n"
+        ) == .pi)
+        #expect(LocalAgentProcessDetector.detect(
+            in: "/usr/local/bin/node /opt/claude-code/cli.js\n"
+        ) == .claude)
+        #expect(LocalAgentProcessDetector.detect(
+            in: "/bin/cat pi\n"
+        ) == nil)
+    }
+
+    @Test @MainActor func bundledAgentAssetsLoadAsTemplateImages() {
+        for agent in SupportedAgent.allCases {
+            let image = NSImage(named: agent.assetName)
+            #expect(image != nil)
+            #expect(image?.isTemplate == true)
         }
     }
 
@@ -89,7 +118,7 @@ struct AgentStatusPluginTests {
         #expect(reducer.reconcileLocalForegroundProcess(200) == nil)
     }
 
-    @Test func localForegroundExitClearsAgent() throws {
+    @Test func localForegroundExitHonorsStartupGraceThenClears() throws {
         var reducer = AgentContextSignalReducer()
         _ = reducer.consume(signal(
             agent: .pi,
@@ -98,8 +127,31 @@ struct AgentStatusPluginTests {
         ))
         #expect(reducer.requiresForegroundValidation)
         #expect(reducer.reconcileLocalForegroundProcess(300) == nil)
-        #expect(reducer.reconcileLocalForegroundProcess(301) == .clear)
+        #expect(reducer.reconcileLocalForegroundProcess(301) == nil)
+        #expect(reducer.reconcileLocalForegroundProcess(
+            301,
+            processGroupIsAlive: true,
+            now: Date().addingTimeInterval(10)
+        ) == nil)
+        #expect(reducer.reconcileLocalForegroundProcess(
+            301,
+            processGroupIsAlive: false,
+            now: Date().addingTimeInterval(10)
+        ) == .clear)
         #expect(!reducer.requiresForegroundValidation)
+    }
+
+    @Test func acknowledgingCompletionRestoresIdleIdentity() throws {
+        var reducer = AgentContextSignalReducer()
+        _ = reducer.consume(signal(agent: .codex, state: "done"))
+        guard case .set(let activity) = reducer.acknowledgeCompletion() else {
+            Issue.record("Expected completion acknowledgement")
+            return
+        }
+        #expect(activity.state == .idle)
+        #expect(activity.icon == SupportedAgent.codex.icon)
+        #expect(activity.progress == nil)
+        #expect(reducer.acknowledgeCompletion() == nil)
     }
 
     @Test func remotePromptClearsOrphanedAgent() throws {
@@ -198,6 +250,20 @@ struct AgentStatusPluginTests {
                         ],
                     ],
                 ],
+                "Stop": [[
+                    "matcher": "other-stop",
+                    "hooks": [[
+                        "type": "command",
+                        "command": "preserve stop command verbatim",
+                    ]],
+                ]],
+                "Notification": [[
+                    "matcher": "other-notification",
+                    "hooks": [[
+                        "type": "command",
+                        "command": "preserve notification command verbatim",
+                    ]],
+                ]],
             ],
             "preserved": true,
         ]
@@ -250,6 +316,7 @@ struct AgentStatusPluginTests {
             #expect(command.contains("omg-agent-\(url == codexHooks ? "codex" : "claude")-%s"))
             #expect(command.contains("omg_scope=%s"))
             #expect(command.contains("> \"/dev/$omg_tty\""))
+            try assertUnrelatedHooksPreserved(at: url)
         }
         let config = try String(
             contentsOf: home.appendingPathComponent(".codex/config.toml"),
@@ -279,6 +346,11 @@ struct AgentStatusPluginTests {
         )
         #expect(preservedCommands.count == 1)
         #expect(preservedCommands[0]["command"] as? String == "keep shared hook")
+        try assertUnrelatedHooksPreserved(at: codexHooks)
+
+        try installer.uninstall(.claude)
+        #expect(!installer.isInstalled(.claude))
+        try assertUnrelatedHooksPreserved(at: claudeSettings)
     }
 
     @Test func refusesMalformedHooksWithoutOverwriting() throws {
@@ -425,6 +497,29 @@ struct AgentStatusPluginTests {
         #expect(mode.intValue == 0o600)
         try installer.uninstall(.pi)
         #expect(!installer.isInstalled(.pi))
+    }
+
+    private func assertUnrelatedHooksPreserved(at url: URL) throws {
+        let root = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+        )
+        let hooks = try #require(root["hooks"] as? [String: Any])
+        for (event, matcher, command) in [
+            ("Stop", "other-stop", "preserve stop command verbatim"),
+            (
+                "Notification",
+                "other-notification",
+                "preserve notification command verbatim"
+            ),
+        ] {
+            let entries = try #require(hooks[event] as? [[String: Any]])
+            let entry = try #require(entries.first {
+                $0["matcher"] as? String == matcher
+            })
+            let commands = try #require(entry["hooks"] as? [[String: Any]])
+            #expect(commands.count == 1)
+            #expect(commands[0]["command"] as? String == command)
+        }
     }
 
     private func signal(

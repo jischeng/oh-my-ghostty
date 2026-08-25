@@ -15,16 +15,16 @@ enum SupportedAgent: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    var systemImage: String {
+    var assetName: String {
         switch self {
-        case .codex: "chevron.left.forwardslash.chevron.right"
-        case .claude: "sparkles"
-        case .pi: "function"
+        case .codex: "AgentOpenAI"
+        case .claude: "AgentClaude"
+        case .pi: "AgentPi"
         }
     }
 
     var icon: PluginTabIcon {
-        .init(kind: .systemSymbol, name: systemImage)
+        .init(kind: .bundledAsset, name: assetName)
     }
 
     func normalizedTitle(_ title: String) -> String {
@@ -53,6 +53,41 @@ enum SupportedAgent: String, CaseIterable, Identifiable, Sendable {
 enum AgentStatusPlugin {
     @MainActor static var isEnabled: Bool {
         OhMyGhosttySettings.shared.agentStatusHooksEnabled
+    }
+}
+
+enum LocalAgentProcessDetector {
+    static func detect(in commandLines: String) -> SupportedAgent? {
+        for line in commandLines.split(separator: "\n") {
+            let tokens = line.split(whereSeparator: \.isWhitespace).map(String.init)
+            guard let executable = tokens.first else { continue }
+            if let agent = exactAgent(executable) { return agent }
+            let basename = URL(fileURLWithPath: executable).lastPathComponent.lowercased()
+            if ["login", "env", "sh", "bash", "zsh", "fish"].contains(basename),
+               let agent = tokens.dropFirst().compactMap(exactAgent).last {
+                return agent
+            }
+            if ["node", "bun", "deno"].contains(basename) {
+                let runtimeArguments = tokens.dropFirst().prefix(4)
+                    .map { $0.lowercased() }
+                    .joined(separator: " ")
+                if runtimeArguments.contains("claude") { return .claude }
+                if runtimeArguments.contains("pi-coding-agent") ||
+                    runtimeArguments.contains("/pi/") { return .pi }
+                if runtimeArguments.contains("codex") { return .codex }
+            }
+        }
+        return nil
+    }
+
+    private static func exactAgent(_ token: String) -> SupportedAgent? {
+        let name = URL(fileURLWithPath: token).lastPathComponent.lowercased()
+        return switch name {
+        case "codex": .codex
+        case "claude": .claude
+        case "pi": .pi
+        default: nil
+        }
     }
 }
 
@@ -721,14 +756,21 @@ struct AgentContextSignalReducer: Sendable {
         let activity: TabActivity
         let scope: Scope
         let processGroupID: Int?
+        let updatedAt: Date
     }
 
+    private static let startupValidationGrace: TimeInterval = 4
     private var activities: [String: Record] = [:]
     private var order: [String] = []
 
+    var validationProcessGroupID: Int? {
+        guard let current = currentRecord,
+              current.scope == .local else { return nil }
+        return current.processGroupID
+    }
+
     var requiresForegroundValidation: Bool {
-        guard let current = currentRecord else { return false }
-        return current.scope == .local && current.processGroupID != nil
+        validationProcessGroupID != nil
     }
 
     mutating func consume(_ signal: Ghostty.ContextSignal) -> AgentActivityUpdate? {
@@ -761,7 +803,8 @@ struct AgentContextSignalReducer: Sendable {
             activities[signal.id] = Record(
                 activity: activity,
                 scope: scope,
-                processGroupID: identity.processGroupID
+                processGroupID: identity.processGroupID,
+                updatedAt: Date()
             )
             order.removeAll { $0 == signal.id }
             order.append(signal.id)
@@ -770,21 +813,48 @@ struct AgentContextSignalReducer: Sendable {
     }
 
     mutating func reconcileLocalForegroundProcess(
-        _ foregroundPID: Int?
+        _ foregroundPID: Int?,
+        processGroupIsAlive: Bool? = nil,
+        now: Date = Date()
     ) -> AgentActivityUpdate? {
-        guard let foregroundPID else { return nil }
         var removedCurrent = false
         while let currentID = order.last,
               let current = activities[currentID],
               current.scope == .local,
-              let processGroupID = current.processGroupID,
-              processGroupID != foregroundPID {
+              let processGroupID = current.processGroupID {
+            if processGroupIsAlive == true || processGroupID == foregroundPID {
+                break
+            }
+            guard now.timeIntervalSince(current.updatedAt) >=
+                    Self.startupValidationGrace else { return nil }
             activities.removeValue(forKey: currentID)
             order.removeLast()
             removedCurrent = true
         }
         guard removedCurrent else { return nil }
         return currentRecord.map { .set($0.activity) } ?? .clear
+    }
+
+    mutating func acknowledgeCompletion() -> AgentActivityUpdate? {
+        guard let currentID = order.last,
+              let current = activities[currentID],
+              current.activity.state == .done else { return nil }
+        let idle = TabActivity(
+            source: current.activity.source,
+            state: .idle,
+            label: current.activity.label,
+            message: nil,
+            detail: nil,
+            progress: nil,
+            icon: current.activity.icon
+        )
+        activities[currentID] = Record(
+            activity: idle,
+            scope: current.scope,
+            processGroupID: current.processGroupID,
+            updatedAt: current.updatedAt
+        )
+        return .set(idle)
     }
 
     mutating func consumeRemotePrompt(

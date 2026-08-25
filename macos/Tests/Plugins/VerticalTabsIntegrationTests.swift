@@ -269,6 +269,19 @@ struct VerticalTabsIntegrationTests {
         #expect(eighth.agentActivity(for: inspectorSurface)?.source == "codex")
         #expect(eighth.agentActivity(for: inspectorSurface)?.state == .working)
         inspectorSurface.contextSignal = .init(
+            action: .start,
+            id: "omg-agent-codex",
+            metadata: "type=app;omg_agent=codex;omg_state=done"
+        )
+        for _ in 0..<20
+        where eighth.agentActivity(for: inspectorSurface)?.state != .done {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(eighth.agentActivity(for: inspectorSurface)?.state == .done)
+        eighth.markTabActivated()
+        #expect(eighth.agentActivity(for: inspectorSurface)?.state == .idle)
+        #expect(eighth.agentActivity(for: inspectorSurface)?.icon?.name == "AgentOpenAI")
+        inspectorSurface.contextSignal = .init(
             action: .end,
             id: "omg-agent-codex",
             metadata: "type=app;omg_agent=codex"

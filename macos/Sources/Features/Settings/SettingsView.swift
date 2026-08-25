@@ -562,8 +562,10 @@ struct SettingsView: View {
         case .current: "Hooks Installed"
         }
         HStack {
-            Image(systemName: agent.systemImage)
-                .frame(width: 20)
+            Image(agent.assetName)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 16, height: 16)
             VStack(alignment: .leading, spacing: 2) {
                 Text(agent.displayName)
                 Text(statusText)

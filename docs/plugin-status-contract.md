@@ -67,13 +67,15 @@ A plugin may request a system symbol or a host-bundled asset by name. Names are 
 2. host metadata provider icon
 3. terminal fallback
 
-The host keeps the existing left icon slot. When an agent context is active, its validated identity icon replaces terminal/cloud; working state renders a compact progress ring around that icon. Waiting, completed and failed states additionally use the existing trailing status slot with theme-aware attention/check/error symbols. Clearing the agent context restores the canonical SSH cloud or terminal icon. Notification and Dock badge behavior are separate consumers controlled by host settings.
+The host keeps the existing left icon slot. When an agent context is active, its validated OpenAI, Claude, or Pi bundled glyph replaces terminal/cloud. Idle has no ring; indeterminate working uses a rotating quarter-circle indicator and determinate progress uses the normalized ring fraction. Waiting, completed and failed states additionally use the existing trailing status slot with theme-aware attention/check/error symbols. Selecting a completed Tab acknowledges `done` to `idle`, immediately removing completion presentation while retaining identity. Clearing the agent context restores the canonical SSH cloud or terminal icon. Notification and Dock badge behavior are separate consumers controlled by host settings.
 
 ## Adapter Responsibilities
 
 A Codex, Claude or Pi adapter owns only dialect translation:
 
-- detect the agent-specific lifecycle event;
+- detect the agent-specific lifecycle event; for local startup only, the host may
+  synthesize `idle` when a changed foreground process group resolves to the
+  explicit `codex`, `claude`, or `pi` executable;
 - map it to `idle`, `working`, `needsAttention`, `done` or `error`;
 - emit one bounded typed context event to its controlling TTY.
 

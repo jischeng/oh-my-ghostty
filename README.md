@@ -104,8 +104,10 @@ explicit options, and folder context without keystroke injection.
 
 The built-in Agent Status integration supports Codex, Claude Code, and Pi hooks.
 In Vertical Tabs, the highest-priority activity across every split replaces the
-terminal/cloud icon; working uses a compact progress ring, while approval,
-completion, and failure use the trailing status slot. Horizontal Tabs remain the
+terminal/cloud icon with the OpenAI, Claude, or Pi glyph. Idle has no ring;
+working uses a rotating quarter-circle progress indicator, while approval,
+completion, and failure use the trailing status slot. Selecting a completed Tab
+acknowledges it back to idle without losing agent identity. Horizontal Tabs remain the
 unmodified Ghostty native presentation. Instance-scoped bounded OSC events follow
 the owning Surface and also work in SSH when hooks are installed explicitly in
 the remote account. Settings can export an auditable remote installer; OMG never

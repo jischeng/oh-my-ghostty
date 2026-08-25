@@ -1419,7 +1419,7 @@ private struct AgentTabIconView: View {
     private func ringProgress(_ activity: TabActivity) -> Double {
         switch activity.state {
         case .idle: 0
-        case .working: activity.progress.map { max(0.05, $0) } ?? 0.72
+        case .working: activity.progress.map { max(0.05, $0) } ?? 0.25
         case .done, .needsAttention, .error: 1
         }
     }

@@ -5,6 +5,60 @@ import Testing
 
 @MainActor
 struct OhMyGhosttySettingsTests {
+    @Test func developmentChannelSeedsButDoesNotShareStableSettings() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let stable = OMGApplicationEnvironment.settingsFileURL(
+            homeURL: home,
+            development: false
+        )
+        let development = OMGApplicationEnvironment.settingsFileURL(
+            homeURL: home,
+            development: true
+        )
+        #expect(stable.path.contains("/.config/oh-my-ghostty/"))
+        #expect(development.path.contains("/.config/oh-my-ghostty-dev/"))
+        try FileManager.default.createDirectory(
+            at: stable.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try #"{"tabs.sidebarWidth":280}"#.write(
+            to: stable,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        OhMyGhosttySettings.seedDevelopmentSettingsIfNeeded(
+            homeURL: home,
+            development: true
+        )
+        #expect(try String(contentsOf: development, encoding: .utf8).contains("280"))
+        try #"{"tabs.sidebarWidth":320}"#.write(
+            to: development,
+            atomically: true,
+            encoding: .utf8
+        )
+        OhMyGhosttySettings.seedDevelopmentSettingsIfNeeded(
+            homeURL: home,
+            development: true
+        )
+        #expect(try String(contentsOf: development, encoding: .utf8).contains("320"))
+        #expect(try String(contentsOf: stable, encoding: .utf8).contains("280"))
+    }
+
+    @Test func applicationSupportIsSeparatedByChannel() {
+        let base = URL(fileURLWithPath: "/tmp/omg-channel-test", isDirectory: true)
+        #expect(OMGApplicationEnvironment.applicationSupportURL(
+            baseURL: base,
+            development: false
+        ).lastPathComponent == "OMG")
+        #expect(OMGApplicationEnvironment.applicationSupportURL(
+            baseURL: base,
+            development: true
+        ).lastPathComponent == "OMG Dev")
+    }
+
     @Test func typedSettingsRoundTripThroughHumanReadableFile() throws {
         let (settings, url) = temporarySettings()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }

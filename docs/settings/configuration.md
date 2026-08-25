@@ -1,10 +1,20 @@
 # OMG Settings
 
-Fork-specific preferences are stored in:
+Stable OMG preferences are stored in:
 
 ```text
 ~/.config/oh-my-ghostty/settings.json
 ```
+
+Development builds use an isolated file:
+
+```text
+~/.config/oh-my-ghostty-dev/settings.json
+```
+
+On first launch, OMG Dev copies the stable file as a starting point when the
+Dev file does not exist. The files are independent after that copy, so local
+builds and tests cannot rewrite the main terminal's preferences.
 
 The file is a flat, sorted JSON object. Only values explicitly chosen by the user are written. It is safe to edit with a text editor, script, or configuration-management tool.
 

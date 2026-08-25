@@ -72,10 +72,7 @@ final class PluginInstallationManager: ObservableObject {
     let dataDirectory: URL
 
     init(applicationSupport: URL? = nil) {
-        let support = applicationSupport ?? FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        )[0].appendingPathComponent("OMG", isDirectory: true)
+        let support = applicationSupport ?? OMGApplicationEnvironment.applicationSupportURL()
         self.pluginsDirectory = support.appendingPathComponent("Plugins", isDirectory: true)
         self.dataDirectory = support.appendingPathComponent("PluginData", isDirectory: true)
         reload()

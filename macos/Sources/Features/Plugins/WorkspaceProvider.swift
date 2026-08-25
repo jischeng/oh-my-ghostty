@@ -263,10 +263,8 @@ enum SSHReplayStore {
               connectionID.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" }) else {
             return nil
         }
-        let support = applicationSupportURL ?? FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        )[0].appendingPathComponent("OMG", isDirectory: true)
+        let support = applicationSupportURL ??
+            OMGApplicationEnvironment.applicationSupportURL()
         return support
             .appendingPathComponent("SSHReplay", isDirectory: true)
             .appendingPathComponent("\(connectionID).json")
@@ -465,10 +463,8 @@ struct SSHPlugin: Sendable {
         if UserDefaults.standard.object(forKey: defaultsKey) != nil {
             return UserDefaults.standard.bool(forKey: defaultsKey)
         }
-        let supportURL = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        )[0].appendingPathComponent("OMG/Plugins", isDirectory: true)
+        let supportURL = OMGApplicationEnvironment.applicationSupportURL()
+            .appendingPathComponent("Plugins", isDirectory: true)
         return FileManager.default.fileExists(
             atPath: supportURL
                 .appendingPathComponent(pluginID, isDirectory: true)

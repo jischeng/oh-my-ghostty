@@ -223,7 +223,11 @@ macos/build/Debug/OMG.app
 ```
 
 The Xcode target/scheme and Swift module retain the internal name `Ghostty` for
-upstream compatibility. The shipped product remains `OMG.app`.
+upstream compatibility. The shipped product remains `OMG.app`. Install local
+builds only as `/Applications/OMG Dev.app`; Debug uses a separate bundle ID and
+separate mutable storage, so development builds do not overwrite the stable
+`/Applications/OMG.app` terminal or its settings, restoration, plugins, and SSH
+replay state.
 
 Project commands and validation requirements are also documented in
 `AGENTS.md` and `macos/AGENTS.md`. Validate documentation links, protocol

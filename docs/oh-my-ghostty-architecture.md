@@ -256,7 +256,7 @@ OMG 不另造第二个 CLI binary。现有 app executable `omg` 是统一 CLI �
 - 每个 `TerminalController` 拥有可恢复的 `tabSessionID`，新 PTY 注入 `OH_MY_GHOSTTY_SESSION`；cwd/title 只用于 project presentation，不用于 status correlation。
 - 尺寸 HUD 根因是旧 tab presentation 在切换时改变 content frame（per-tab width 与 native accessory 进入/退出布局），进而改变 terminal rows/columns；修复后快速切换前后所有 surface dimensions 保持不变，不隐藏 HUD 本身。
 - 将 OSC 9;4 progress 生命周期映射为 running/waiting/completed/failed wire 状态，再归一为 host-owned idle/working/done/needsAttention/error activity model。
-- `~/.config/oh-my-ghostty/settings.json`、typed settings model、machine-readable schema 与原生 Settings Window；fork preference 不再散落在 UserDefaults，Ghostty config 仅作为未显式设置项的 fallback。
+- Release 使用 `~/.config/oh-my-ghostty/settings.json`，Debug 使用 `~/.config/oh-my-ghostty-dev/settings.json`；Dev 首次单向复制 stable 设置，随后 settings、appearance overlay、plugin package/data、SSH replay、UserDefaults 与 restoration 全部按 channel 隔离。typed settings model、machine-readable schema 与原生 Settings Window 保持一致；Ghostty config 仅作为未显式设置项的 fallback。
 - Host-owned tab icon/metadata/activity presentation contracts；plugin 只能贡献已验证的数据，不能访问 SwiftUI/AppKit/PTY/renderer 对象。
 - Core-owned `InspectorRegistry` / `RightInspectorHost`；Horizontal/Vertical 共用 `NSWindowTabGroup` layout state，`InspectorPresentationStore` 持久化 UI state，titlebar pane switch 按宽度稳定收纳到 `…` menu 并预留 Git/SSH 扩展；Plugin Inspector 仅贡献经过 owner validation 的 typed snapshot/action，`builtin.files` 按稳定 tab ID 跟随 live cwd，node-scoped 异步合并 subtree，保留 scroll/selection/expanded identity，并提供递归 tree 与 type-aware icons。
 - 修复 AppKit appearance KVO 自激：effective appearance observer 不再反写 app/window appearance，Debug idle CPU 从 83–93% 恢复至约 0.5–1.0%。

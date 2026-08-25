@@ -596,6 +596,13 @@ const ReplayDescriptor = struct {
     args: []const []const u8,
 };
 
+fn replaySupportName(channel: ?[]const u8) []const u8 {
+    if (channel) |value| {
+        if (std.mem.eql(u8, value, "debug")) return "OMG Dev";
+    }
+    return "OMG";
+}
+
 fn writeReplayDescriptor(
     alloc: Allocator,
     opts: *const Options,
@@ -611,7 +618,7 @@ fn writeReplayDescriptor(
         home,
         "Library",
         "Application Support",
-        "OMG",
+        replaySupportName(env.get("OH_MY_GHOSTTY_CHANNEL")),
         "SSHReplay",
     }) catch return null;
     std.Io.Dir.cwd().createDirPath(global.io(), directory_path) catch return null;
@@ -884,6 +891,12 @@ test remoteShellCommand {
         "'/home/user/project\\'s code'",
         fish_buffer[0..fish_writer.end],
     );
+}
+
+test "replay support directory is isolated by application channel" {
+    try std.testing.expectEqualStrings("OMG", replaySupportName(null));
+    try std.testing.expectEqualStrings("OMG", replaySupportName("release"));
+    try std.testing.expectEqualStrings("OMG Dev", replaySupportName("debug"));
 }
 
 test "session end emits typed lifecycle and local cwd resync" {

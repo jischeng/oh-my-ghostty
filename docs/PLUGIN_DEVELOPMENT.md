@@ -394,7 +394,9 @@ to local IO at a remote-looking path.
 
 While an interactive SSH connection is active, `+ssh` also writes a bounded,
 mode-0600 replay descriptor under
-`~/Library/Application Support/OMG/SSHReplay/<connection-id>.json`. It contains
+`~/Library/Application Support/OMG/SSHReplay/<connection-id>.json` for Release
+or `~/Library/Application Support/OMG Dev/SSHReplay/<connection-id>.json` for
+Debug. It contains
 the original OpenSSH executable, wrapper policy flags, and exact argv. A split
 created from that Surface reads only the matching active connection ID and
 launches a new `omg +ssh` child through `SurfaceConfiguration.command`; it does
@@ -640,13 +642,19 @@ Do not claim process isolation until those runtime pieces exist.
 
 ## Packaging and installation (Experimental storage only)
 
-The first storage contract is:
+The first storage contract is channel-specific:
 
 ```text
-~/Library/Application Support/OMG/
+~/Library/Application Support/OMG/       # Release
+~/Library/Application Support/OMG Dev/   # Debug
 ├── Plugins/<plugin-id>/manifest.json + plugin code
 └── PluginData/<plugin-id>/              user data/config boundary
 ```
+
+Debug and Release never update each other's plugin packages, disabled state,
+data, or SSH replay descriptors. Global vendor Agent hooks are intentionally
+outside this directory because they belong to each Agent's own configuration;
+they must remain backward-compatible across OMG channels.
 
 `PluginInstallationManager` provides `install(from:)`, `update(_:from:)`,
 `disable(_:)`, `enable(_:)`, `uninstall(_:removeData:)`, and `dataURL(for:)`.

@@ -1,6 +1,37 @@
 import Combine
 import Foundation
 
+enum OMGApplicationEnvironment {
+    static var isDevelopment: Bool {
+        Bundle.main.bundleIdentifier == "com.jischeng.omg.debug"
+    }
+
+    static func settingsFileURL(
+        homeURL: URL = FileManager.default.homeDirectoryForCurrentUser,
+        development: Bool = isDevelopment
+    ) -> URL {
+        homeURL.appendingPathComponent(
+            development
+                ? ".config/oh-my-ghostty-dev/settings.json"
+                : ".config/oh-my-ghostty/settings.json"
+        )
+    }
+
+    static func applicationSupportURL(
+        baseURL: URL? = nil,
+        development: Bool = isDevelopment
+    ) -> URL {
+        let base = baseURL ?? FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        )[0]
+        return base.appendingPathComponent(
+            development ? "OMG Dev" : "OMG",
+            isDirectory: true
+        )
+    }
+}
+
 struct OhMyGhosttySettingDescriptor: Codable, Identifiable, Sendable {
     enum ValueType: String, Codable, Sendable {
         case boolean
@@ -172,8 +203,7 @@ final class OhMyGhosttySettings: ObservableObject {
     )
 
     static var fileURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".config/oh-my-ghostty/settings.json")
+        OMGApplicationEnvironment.settingsFileURL()
     }
 
     static var ghosttyAppearanceOverlayURL: URL {
@@ -412,11 +442,38 @@ final class OhMyGhosttySettings: ObservableObject {
     private var appearanceNotificationWorkItem: DispatchWorkItem?
 
     init(fileURL: URL? = nil) {
+        if fileURL == nil { Self.seedDevelopmentSettingsIfNeeded() }
         let fileURL = fileURL ?? Self.fileURL
         self.fileURL = fileURL
         self.appearanceOverlayURL = fileURL.deletingLastPathComponent()
             .appendingPathComponent("appearance.ghostty")
         reloadFromDisk()
+    }
+
+    static func seedDevelopmentSettingsIfNeeded(
+        homeURL: URL = FileManager.default.homeDirectoryForCurrentUser,
+        development: Bool = OMGApplicationEnvironment.isDevelopment
+    ) {
+        guard development else { return }
+        let destination = OMGApplicationEnvironment.settingsFileURL(
+            homeURL: homeURL,
+            development: true
+        )
+        guard !FileManager.default.fileExists(atPath: destination.path) else { return }
+        let source = OMGApplicationEnvironment.settingsFileURL(
+            homeURL: homeURL,
+            development: false
+        )
+        guard FileManager.default.fileExists(atPath: source.path) else { return }
+        do {
+            try FileManager.default.createDirectory(
+                at: destination.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try FileManager.default.copyItem(at: source, to: destination)
+        } catch {
+            // Loading defaults remains safe when the optional seed cannot be copied.
+        }
     }
 
     func configureGhosttyFallback(tabLayout: Ghostty.Config.MacOSTabLayout) {

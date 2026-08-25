@@ -30,7 +30,7 @@ Core App Shell owns:
 
 `VerticalTabWindowLayoutState` currently carries the shared shell state for compatibility with the existing tab implementation. Despite the historical name, the instance is associated with `NSWindowTabGroup` and shared by Horizontal and Vertical tabs. Inspector state never belongs to one terminal tab.
 
-`InspectorPresentationStore` is the typed persistence boundary for last-used visibility, committed width, and active pane. It uses the application UserDefaults domain because these are UI runtime state, not portable user configuration. The values are intentionally absent from Ghostty config and `~/.config/oh-my-ghostty/settings.json`.
+`InspectorPresentationStore` is the typed persistence boundary for last-used visibility, committed width, and active pane. It uses the application UserDefaults domain because these are UI runtime state, not portable user configuration. Release and Debug have separate bundle domains. The values are intentionally absent from Ghostty config and the channel-specific OMG settings file.
 
 Inspector context is derived from the controller's published focused `Surface`,
 not merely the active tab. A split-pane focus change therefore updates the

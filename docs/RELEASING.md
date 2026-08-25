@@ -15,6 +15,13 @@ Bundle identifier: com.jischeng.omg
 Debug identifier:  com.jischeng.omg.debug
 ```
 
+Release and Debug are separate operating channels. Maintainer builds may only
+overwrite `/Applications/OMG Dev.app`; they must never replace or terminate
+`/Applications/OMG.app`. Their UserDefaults, window restoration, settings,
+appearance overlay, plugin package/data, and SSH replay directories are
+isolated. Vendor Agent hooks are the sole intentionally shared integration and
+must only be changed through the versioned owner-marker installer.
+
 ## Current automation status
 
 OMG releases are currently a **maintainer-run macOS workflow**. The inherited

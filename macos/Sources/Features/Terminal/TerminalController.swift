@@ -310,6 +310,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     ) -> Ghostty.SurfaceConfiguration {
         var configuration = base ?? Ghostty.SurfaceConfiguration()
         configuration.environmentVariables["OH_MY_GHOSTTY_SESSION"] = sessionID.uuidString
+        configuration.environmentVariables["OH_MY_GHOSTTY_CHANNEL"] =
+            OMGApplicationEnvironment.isDevelopment ? "debug" : "release"
         return configuration
     }
 

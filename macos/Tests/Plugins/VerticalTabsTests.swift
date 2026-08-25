@@ -23,6 +23,8 @@ struct VerticalTabsTests {
         let configured = TerminalController.injectingSessionID(sessionID, into: base)
 
         #expect(configured.environmentVariables["OH_MY_GHOSTTY_SESSION"] == sessionID.uuidString)
+        #expect(configured.environmentVariables["OH_MY_GHOSTTY_CHANNEL"] ==
+            (OMGApplicationEnvironment.isDevelopment ? "debug" : "release"))
         #expect(configured.environmentVariables["EXISTING"] == "value")
     }
 

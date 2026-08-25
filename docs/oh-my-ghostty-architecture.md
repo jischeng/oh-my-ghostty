@@ -246,9 +246,9 @@ OMG 不另造第二个 CLI binary。现有 app executable `omg` 是统一 CLI �
 - Vertical tab bar 直接使用聚焦 terminal 的实际背景色，hover/active 仅由共享前景语义低透明度叠层派生，自动适配配置主题和 OSC 动态背景。
 - `GhosttyTabPresentation`、`GhosttyTabStyle` 和 `GhosttyTabIconProviding`；默认 icon provider 可被插件 metadata provider 覆盖。
 - `NSWindowTabGroup` 关联的 window layout state：显隐、176-480pt 宽度和 last-width 持久化；新 window 从 last width 初始化，同组 tab 不拥有独立宽度。
-- 1pt divider + 8pt native `NSView` mouse tracking/cursor rect；selected tab 使用约 60Hz 合并后的 live width，隐藏 tabs 保持 committed width，mouseUp 一次同步最终 width 到整个 tab group 且只在此时写 UserDefaults。
+- 1pt divider + 8pt native `NSView` mouse tracking/cursor rect；selected tab 使用 frame-boundary 合并后的 live width（同一 runloop turn 内的 drag 事件合并为一次 apply，无固定 16ms timer 延迟），隐藏 tabs 保持 committed width；mouseUp 立即同步最终 width 到整个 tab group，settings/UserDefaults 写入延迟 200ms 并可被下一次拖动取消，不阻塞指针抬起。
 - `SurfaceScrollView` 只在 framebuffer size 实际改变时调用 `ghostty_surface_set_size`，避免 duplicate layout pass 重复触发 renderer resize；连续 resize 不 remove/add view，也不重建 Surface。
-- titlebar accessory 根据 close/minimize/zoom button 的实际 window-space centerY 布局 Sidebar Toggle 与 New Tab controls，不依赖固定 y offset，适配 fullscreen 和 display scale 变化。
+- titlebar accessory 根据 close/minimize/zoom button 的实际 window-space centerY 布局 Sidebar Toggle 与 New Tab controls，不依赖固定 y offset，适配 fullscreen 和 display scale 变化。Right Inspector titlebar controls 在展开与收起两种状态都填满 accessory frame 并垂直居中，因此收起态 toggle 与展开态、红绿灯保持同一水平线，不使用 optical offset 补偿。
 - Vertical organization menu 支持 No Grouping、By Project、By Date、Created Time 与 Recently Used；grouping/order 存在 `NSWindowTabGroup` 共享 layout state，last-used mode 通过 UserDefaults 持久化，collapsed group 只属于当前 window state。
 - By Project 从 cwd 向上查找 `.git` repository root 并按 cwd 缓存结果，非 Git cwd 回退到目录名；group presentation 使用可扩展的 title/icon/id 模型，不执行 `git` 子进程。
 - `NSWindowTabGroup.windows` 是唯一 canonical tab order。Ghostty `move_tab`、Vertical drag、Horizontal native UI、`goto_tab` 和 shortcut labels 都消费同一顺序；Created/Recently Used 会先重排 canonical windows，开始手动 drag 时 ordering 切换为 Manual。

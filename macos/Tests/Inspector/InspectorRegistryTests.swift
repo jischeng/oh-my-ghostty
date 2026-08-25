@@ -43,11 +43,6 @@ struct InspectorRegistryTests {
         ))
     }
 
-    @Test func collapsedInspectorToggleUsesOpticalCenterCorrection() {
-        #expect(InspectorContentMetrics.toggleVerticalOffset(isVisible: false) == 1)
-        #expect(InspectorContentMetrics.toggleVerticalOffset(isVisible: true) == 0)
-    }
-
     @Test func inspectorContentSharesLeadingBaseline() {
         let activeTitlebarContent = InspectorContentMetrics.titlebarLeadingInset(
             firstItemHasTitle: true

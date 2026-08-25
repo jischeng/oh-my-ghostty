@@ -203,10 +203,12 @@ final class VerticalTabWindowLayoutState: ObservableObject {
             self.applySidebarWidth(width)
         }
         resizeWorkItem = workItem
-        DispatchQueue.main.asyncAfter(
-            deadline: .now() + 1.0 / 60.0,
-            execute: workItem
-        )
+        // Apply at the end of the current runloop turn rather than on a fixed
+        // 16ms timer. A fixed delay adds a full frame of pointer lag and drifts
+        // out of phase with the display, which reads as a hitch on the selected
+        // tab while dragging. Frame-boundary scheduling coalesces all drag
+        // events in the current turn into one apply with near-zero latency.
+        DispatchQueue.main.async(execute: workItem)
     }
 
     private func scheduleSidebarWidthPersistence(_ width: CGFloat) {
@@ -259,10 +261,9 @@ final class VerticalTabWindowLayoutState: ObservableObject {
             self.applyInspectorWidth(width)
         }
         inspectorResizeWorkItem = workItem
-        DispatchQueue.main.asyncAfter(
-            deadline: .now() + 1.0 / 60.0,
-            execute: workItem
-        )
+        // Same rationale as the sidebar: frame-boundary scheduling avoids the
+        // fixed-timer pointer lag while still coalescing per-turn.
+        DispatchQueue.main.async(execute: workItem)
     }
 
     private func applySidebarWidth(_ width: CGFloat) {

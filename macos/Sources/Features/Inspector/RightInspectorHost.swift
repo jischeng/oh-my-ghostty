@@ -29,10 +29,6 @@ enum InspectorContentMetrics {
     static let treeOuterInset: CGFloat = 4
     static let treeRowLeadingInset = leadingInset - treeOuterInset
 
-    static func toggleVerticalOffset(isVisible: Bool) -> CGFloat {
-        isVisible ? 0 : 1
-    }
-
     static func titlebarLeadingInset(firstItemHasTitle: Bool) -> CGFloat {
         let buttonInset = firstItemHasTitle
             ? SidebarToolbarStyle.horizontalLabelPadding
@@ -378,9 +374,6 @@ private struct InspectorTitlebarControls: View {
                         help: inspectorVisible ? "Hide Inspector" : "Show Inspector",
                         action: toggleInspector
                     )
-                    .offset(y: InspectorContentMetrics.toggleVerticalOffset(
-                        isVisible: inspectorVisible
-                    ))
                     .disabled(registry.isEmpty)
                     .opacity(
                         registry.isEmpty ? SidebarToolbarStyle.disabledOpacity : 1
@@ -389,6 +382,10 @@ private struct InspectorTitlebarControls: View {
                 .padding(.leading, titlebarLeadingInset)
                 .padding(.trailing, 10)
             }
+            // Fill the titlebar accessory so controls center vertically in both
+            // expanded and collapsed states. GeometryReader otherwise pins the
+            // collapsed control to the top edge.
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 

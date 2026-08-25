@@ -743,13 +743,11 @@ struct VerticalTabsIntegrationTests {
         #expect(transparentDividerColor.distance(to: expectedTransparentDividerColor) < 0.001)
         #expect(transparentDividerColor.alphaComponent == 1)
         #expect(transparentDividerColor.distance(to: lightDividerColor) > 0.1)
-        try capture(
+        let verticalAlpha = try await settledScreenshotAlpha(
             window: try #require(eighth.window),
-            path: transparencyVerticalScreenshotPath
-        )
-        let verticalAlpha = try screenshotAlpha(
-            at: [CGPoint(x: 0.1, y: 0.5), CGPoint(x: 0.75, y: 0.5)],
-            path: transparencyVerticalScreenshotPath
+            path: transparencyVerticalScreenshotPath,
+            points: [CGPoint(x: 0.1, y: 0.5), CGPoint(x: 0.75, y: 0.5)],
+            target: 0.58
         )
         #expect(verticalAlpha.allSatisfy { abs($0 - 0.58) < 0.01 })
 
@@ -858,10 +856,11 @@ struct VerticalTabsIntegrationTests {
         })
         horizontalThird.toggleInspectorPane()
         try capture(window: nativeWindow, path: horizontalScreenshotPath)
-        try capture(window: nativeWindow, path: transparencyHorizontalScreenshotPath)
-        let horizontalAlpha = try screenshotAlpha(
-            at: [CGPoint(x: 0.5, y: 0.5)],
-            path: transparencyHorizontalScreenshotPath
+        let horizontalAlpha = try await settledScreenshotAlpha(
+            window: nativeWindow,
+            path: transparencyHorizontalScreenshotPath,
+            points: [CGPoint(x: 0.5, y: 0.5)],
+            target: 0.58
         )
         #expect(horizontalAlpha.allSatisfy { abs($0 - 0.58) < 0.01 })
 
@@ -1037,7 +1036,28 @@ struct VerticalTabsIntegrationTests {
         try await Task.sleep(for: .milliseconds(150))
     }
 
+    /// Captures and measures screenshot alpha repeatedly until it settles on
+    /// the expected composited value. The terminal's Metal layer may need a few
+    /// frames to present a new background-opacity, so a single-shot capture can
+    /// observe a stale opaque frame when the window is occluded or mid-reload.
+    private func settledScreenshotAlpha(
+        window: NSWindow,
+        path: String,
+        points: [CGPoint],
+        target: CGFloat
+    ) async throws -> [CGFloat] {
+        var alpha: [CGFloat] = []
+        for _ in 0..<30 {
+            try capture(window: window, path: path)
+            alpha = try screenshotAlpha(at: points, path: path)
+            if alpha.allSatisfy({ abs($0 - target) < 0.01 }) { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        return alpha
+    }
+
     private func screenshotAlpha(at points: [CGPoint], path: String) throws -> [CGFloat] {
+
         let data = try Data(contentsOf: URL(fileURLWithPath: path))
         let image = try #require(NSBitmapImageRep(data: data))
         return try points.map { point in

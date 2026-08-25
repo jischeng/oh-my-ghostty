@@ -900,13 +900,20 @@ extension Ghostty {
             setSurfaceSize(width: UInt32(scaledSize.width), height: UInt32(scaledSize.height))
         }
 
+        private func acknowledgeAgentCompletionFromUserInput() {
+            (window?.windowController as? TerminalController)?
+                .acknowledgeCompletedAgentActivityFromUserInput(on: self)
+        }
+
         override func mouseDown(with event: NSEvent) {
+            acknowledgeAgentCompletionFromUserInput()
             guard let surface = self.surface else { return }
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
             ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, mods)
         }
 
         override func mouseUp(with event: NSEvent) {
+            acknowledgeAgentCompletionFromUserInput()
             // If this mouse-up corresponds to a focus-only click transfer,
             // suppress it so we don't emit a release without a press.
             if suppressNextLeftMouseUp {
@@ -927,6 +934,7 @@ extension Ghostty {
         }
 
         override func otherMouseDown(with event: NSEvent) {
+            acknowledgeAgentCompletionFromUserInput()
             guard let surface = self.surface else { return }
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
             let button = Ghostty.Input.MouseButton(fromNSEventButtonNumber: event.buttonNumber)
@@ -934,6 +942,7 @@ extension Ghostty {
         }
 
         override func otherMouseUp(with event: NSEvent) {
+            acknowledgeAgentCompletionFromUserInput()
             guard let surface = self.surface else { return }
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
             let button = Ghostty.Input.MouseButton(fromNSEventButtonNumber: event.buttonNumber)
@@ -941,6 +950,7 @@ extension Ghostty {
         }
 
         override func rightMouseDown(with event: NSEvent) {
+            acknowledgeAgentCompletionFromUserInput()
             guard let surface = self.surface else { return super.rightMouseDown(with: event) }
 
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
@@ -959,6 +969,7 @@ extension Ghostty {
         }
 
         override func rightMouseUp(with event: NSEvent) {
+            acknowledgeAgentCompletionFromUserInput()
             guard let surface = self.surface else { return super.rightMouseUp(with: event) }
 
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
@@ -1056,6 +1067,7 @@ extension Ghostty {
         }
 
         override func scrollWheel(with event: NSEvent) {
+            acknowledgeAgentCompletionFromUserInput()
             guard let surfaceModel else { return }
 
             var x = event.scrollingDeltaX
@@ -1099,6 +1111,7 @@ extension Ghostty {
         }
 
         override func keyDown(with event: NSEvent) {
+            acknowledgeAgentCompletionFromUserInput()
             guard let surface = self.surface else {
                 self.interpretKeyEvents([event])
                 return

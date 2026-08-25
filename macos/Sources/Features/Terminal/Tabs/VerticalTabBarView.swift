@@ -65,6 +65,7 @@ final class VerticalTabWindowLayoutState: ObservableObject {
 
     private var pendingSidebarWidth: CGFloat?
     private var resizeWorkItem: DispatchWorkItem?
+    private var sidebarPersistenceWorkItem: DispatchWorkItem?
     private var pendingInspectorWidth: CGFloat?
     private var inspectorResizeWorkItem: DispatchWorkItem?
     private(set) var appliedResizeCount = 0
@@ -116,6 +117,8 @@ final class VerticalTabWindowLayoutState: ObservableObject {
         )
         resizeWorkItem?.cancel()
         resizeWorkItem = nil
+        sidebarPersistenceWorkItem?.cancel()
+        sidebarPersistenceWorkItem = nil
         pendingSidebarWidth = nil
         applySidebarWidth(width)
         committedSidebarWidth = width
@@ -184,12 +187,12 @@ final class VerticalTabWindowLayoutState: ObservableObject {
             if committedSidebarWidth != width {
                 committedSidebarWidth = width
             }
-            if settings.rememberSidebarWidth {
-                settings.defaultSidebarWidth = Double(width)
-            }
+            scheduleSidebarWidthPersistence(width)
             return
         }
 
+        sidebarPersistenceWorkItem?.cancel()
+        sidebarPersistenceWorkItem = nil
         pendingSidebarWidth = width
         guard resizeWorkItem == nil else { return }
         let workItem = DispatchWorkItem { [weak self] in
@@ -202,6 +205,25 @@ final class VerticalTabWindowLayoutState: ObservableObject {
         resizeWorkItem = workItem
         DispatchQueue.main.asyncAfter(
             deadline: .now() + 1.0 / 60.0,
+            execute: workItem
+        )
+    }
+
+    private func scheduleSidebarWidthPersistence(_ width: CGFloat) {
+        sidebarPersistenceWorkItem?.cancel()
+        guard settings.rememberSidebarWidth else {
+            sidebarPersistenceWorkItem = nil
+            return
+        }
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.sidebarPersistenceWorkItem = nil
+            guard self.committedSidebarWidth == width else { return }
+            self.settings.defaultSidebarWidth = Double(width)
+        }
+        sidebarPersistenceWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + 0.2,
             execute: workItem
         )
     }

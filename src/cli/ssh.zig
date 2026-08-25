@@ -374,8 +374,8 @@ fn runInner(
         };
     };
 
-    // A simple interactive Fish destination can provide a typed pane lifecycle
-    // and remote cwd without a remote service. +ssh owns the final OpenSSH child
+    // A simple interactive Fish, bash, or zsh destination can provide a typed
+    // pane lifecycle and remote cwd without a remote service. +ssh owns the final OpenSSH child
     // lifetime; the transient remote prompt only updates the active context.
     const lifecycle: ?struct {
         id: []const u8,
@@ -386,11 +386,6 @@ fn runInner(
     } = if (interactiveSSHDestination(opts._ssh_args.items)) |destination| lifecycle: {
         const label = sshDestinationLabel(destination) orelse
             break :lifecycle null;
-        const shell = detectRemoteShell(
-            alloc,
-            opts.ssh,
-            opts._ssh_args.items,
-        ) orelse break :lifecycle null;
         const id = std.fmt.allocPrint(
             alloc,
             "omg-ssh-{d}",
@@ -398,7 +393,6 @@ fn runInner(
         ) catch break :lifecycle null;
         const remote_command = remoteShellCommand(
             alloc,
-            shell,
             label,
             id,
             opts.@"remote-working-directory",
@@ -569,24 +563,6 @@ fn checkExit(term: std.process.Child.Term, label: []const u8) error{ChildFailed}
     }
 }
 
-/// Run `ssh -G <args>` and parse the output for `user` and `hostname`.
-/// Returns the resolved `user@hostname`, or null if the destination
-/// could not be resolved.
-fn detectRemoteShell(
-    alloc: Allocator,
-    ssh: []const u8,
-    args: []const []const u8,
-) ?[]const u8 {
-    const argv = std.mem.concat(alloc, []const u8, &.{
-        &.{ssh},
-        args,
-        &.{"printf '%s' \"$SHELL\""},
-    }) catch return null;
-    const result = std.process.run(alloc, global.io(), .{ .argv = argv }) catch return null;
-    checkExit(result.term, "ssh shell detection") catch return null;
-    return std.mem.trim(u8, result.stdout, &std.ascii.whitespace);
-}
-
 const ReplayDescriptor = struct {
     version: u8 = 1,
     ssh: []const u8,
@@ -723,16 +699,69 @@ fn validAgentSessionID(value: []const u8) bool {
 
 fn remoteShellCommand(
     alloc: Allocator,
-    shell: []const u8,
     label: []const u8,
     context_id: []const u8,
     remote_working_directory: ?[]const u8,
     remote_agent: ?RemoteAgent,
     remote_agent_session: ?[]const u8,
 ) ?[]const u8 {
-    const name = std.fs.path.basename(shell);
-    if (!std.mem.eql(u8, name, "fish")) return null;
+    const fish = remoteFishCommand(
+        alloc,
+        label,
+        context_id,
+        remote_working_directory,
+        remote_agent,
+        remote_agent_session,
+    ) orelse return null;
+    defer alloc.free(fish);
+    const bash = remoteStartupFileCommand(
+        alloc,
+        "bash",
+        label,
+        context_id,
+        remote_working_directory,
+        remote_agent,
+        remote_agent_session,
+    ) orelse return null;
+    defer alloc.free(bash);
+    const zsh = remoteStartupFileCommand(
+        alloc,
+        "zsh",
+        label,
+        context_id,
+        remote_working_directory,
+        remote_agent,
+        remote_agent_session,
+    ) orelse return null;
+    defer alloc.free(zsh);
 
+    var script: std.Io.Writer.Allocating = .init(alloc);
+    defer script.deinit();
+    script.writer.writeAll("case ${SHELL##*/} in\nfish) ") catch return null;
+    script.writer.writeAll(fish) catch return null;
+    script.writer.writeAll(" ;;\nbash) ") catch return null;
+    script.writer.writeAll(bash) catch return null;
+    script.writer.writeAll("\n;;\nzsh) ") catch return null;
+    script.writer.writeAll(zsh) catch return null;
+    script.writer.writeAll(
+        "\n;;\n*) exec \"${SHELL:-/bin/sh}\" -l ;;\nesac",
+    ) catch return null;
+
+    var command: std.Io.Writer.Allocating = .init(alloc);
+    defer command.deinit();
+    command.writer.writeAll("exec /bin/sh -c ") catch return null;
+    writeShellSingleQuoted(&command.writer, script.written()) catch return null;
+    return command.toOwnedSlice() catch null;
+}
+
+fn remoteFishCommand(
+    alloc: Allocator,
+    label: []const u8,
+    context_id: []const u8,
+    remote_working_directory: ?[]const u8,
+    remote_agent: ?RemoteAgent,
+    remote_agent_session: ?[]const u8,
+) ?[]const u8 {
     var fish_command: std.Io.Writer.Allocating = .init(alloc);
     defer fish_command.deinit();
     if (remote_working_directory) |cwd| {
@@ -746,27 +775,187 @@ fn remoteShellCommand(
     ) catch return null;
     if (remote_agent) |agent| {
         fish_command.writer.writeAll("; __omg_report_pwd; command ") catch return null;
-        fish_command.writer.writeAll(agent.commandName()) catch return null;
-        if (remote_agent_session) |session_id| {
-            switch (agent) {
-                .codex => fish_command.writer.writeAll(" resume ") catch return null,
-                .claude => fish_command.writer.writeAll(" --resume ") catch return null,
-                .pi => fish_command.writer.writeAll(" --session-id ") catch return null,
-                .qoder => fish_command.writer.writeAll(" --resume ") catch return null,
-                .reasonix => fish_command.writer.writeAll(" --resume ") catch return null,
-                .omp => fish_command.writer.writeAll(" --resume=") catch return null,
-                .opencode => fish_command.writer.writeAll(" --session ") catch return null,
-                .grok, .qwen => fish_command.writer.writeAll(" --resume ") catch return null,
-                .amp, .antigravity, .cline, .copilot, .crush, .cursor, .droid, .hermes, .kimi => return null,
-            }
-            writeFishSingleQuoted(&fish_command.writer, session_id) catch return null;
-        }
+        writeRemoteAgentInvocation(
+            &fish_command.writer,
+            agent,
+            remote_agent_session,
+            .fish,
+        ) catch return null;
     }
 
     var command: std.Io.Writer.Allocating = .init(alloc);
     defer command.deinit();
     command.writer.writeAll("exec fish -l -C ") catch return null;
     writeShellSingleQuoted(&command.writer, fish_command.written()) catch return null;
+    return command.toOwnedSlice() catch null;
+}
+
+const RemoteQuoteStyle = enum { fish, shell };
+
+fn writeRemoteAgentInvocation(
+    writer: *std.Io.Writer,
+    agent: RemoteAgent,
+    session_id: ?[]const u8,
+    quote_style: RemoteQuoteStyle,
+) !void {
+    try writer.writeAll(agent.commandName());
+    if (session_id) |session| {
+        switch (agent) {
+            .codex => try writer.writeAll(" resume "),
+            .claude => try writer.writeAll(" --resume "),
+            .pi => try writer.writeAll(" --session-id "),
+            .qoder => try writer.writeAll(" --resume "),
+            .reasonix => try writer.writeAll(" --resume "),
+            .omp => try writer.writeAll(" --resume="),
+            .opencode => try writer.writeAll(" --session "),
+            .grok, .qwen => try writer.writeAll(" --resume "),
+            .amp, .antigravity, .cline, .copilot, .crush, .cursor, .droid, .hermes, .kimi => return error.UnsupportedAgentResume,
+        }
+        switch (quote_style) {
+            .fish => try writeFishSingleQuoted(writer, session),
+            .shell => try writeShellSingleQuoted(writer, session),
+        }
+    }
+}
+
+fn writeRemotePromptFunction(
+    writer: *std.Io.Writer,
+    context_id: []const u8,
+    label: []const u8,
+) !void {
+    try writer.writeAll(
+        \\__omg_report_pwd() {
+        \\  local __omg_hex __omg_uri='' __omg_byte
+        \\  __omg_hex=$(printf '%s' "$PWD" | od -An -tx1 | tr -d ' \n')
+        \\  for __omg_byte in $(printf '%s' "$PWD" | od -An -tx1); do
+        \\    if [ "$__omg_byte" = 2f ]; then
+        \\      __omg_uri="${__omg_uri}/"
+        \\    else
+        \\      __omg_uri="${__omg_uri}%${__omg_byte}"
+        \\    fi
+        \\  done
+        \\  printf '\033]3008;start=
+    );
+    try writer.writeAll(context_id);
+    try writer.writeAll(";type=remote;targethost=");
+    try writer.writeAll(label);
+    try writer.writeAll(
+        \\;cwdhex=%s\007\033]7;file://localhost%s\007' "$__omg_hex" "$__omg_uri"
+        \\}
+        \\
+    );
+}
+
+fn remoteStartupFileCommand(
+    alloc: Allocator,
+    shell_name: []const u8,
+    label: []const u8,
+    context_id: []const u8,
+    remote_working_directory: ?[]const u8,
+    remote_agent: ?RemoteAgent,
+    remote_agent_session: ?[]const u8,
+) ?[]const u8 {
+    var startup: std.Io.Writer.Allocating = .init(alloc);
+    defer startup.deinit();
+
+    if (std.mem.eql(u8, shell_name, "bash")) {
+        startup.writer.writeAll(
+            \\__omg_bootstrap_rc=$OMG_SSH_RC
+            \\if [ -r "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi
+            \\
+        ) catch return null;
+        writeRemotePromptFunction(&startup.writer, context_id, label) catch return null;
+        startup.writer.writeAll(
+            \\if [[ $(declare -p PROMPT_COMMAND 2>/dev/null) == "declare -a"* ]]; then
+            \\  PROMPT_COMMAND+=(__omg_report_pwd)
+            \\else
+            \\  PROMPT_COMMAND="__omg_report_pwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+            \\fi
+            \\
+        ) catch return null;
+    } else {
+        startup.writer.writeAll(
+            \\__omg_bootstrap_dir=$OMG_SSH_ZDOTDIR
+            \\__omg_bootstrap_root=${TMPDIR:-/tmp}
+            \\ZDOTDIR=$OMG_ORIGINAL_ZDOTDIR
+            \\export ZDOTDIR
+            \\if [[ -r "$ZDOTDIR/.zshrc" ]]; then source "$ZDOTDIR/.zshrc"; fi
+            \\
+        ) catch return null;
+        writeRemotePromptFunction(&startup.writer, context_id, label) catch return null;
+        startup.writer.writeAll(
+            \\typeset -ga precmd_functions
+            \\if (( ${precmd_functions[(I)__omg_report_pwd]} == 0 )); then
+            \\  precmd_functions+=(__omg_report_pwd)
+            \\fi
+            \\
+        ) catch return null;
+    }
+
+    startup.writer.writeAll(
+        \\if [ -n "${OMG_REMOTE_CWD-}" ]; then
+        \\  cd -- "$OMG_REMOTE_CWD" 2>/dev/null || true
+        \\  unset OMG_REMOTE_CWD
+        \\fi
+        \\
+    ) catch return null;
+    if (std.mem.eql(u8, shell_name, "bash")) {
+        startup.writer.writeAll(
+            \\rm -f -- "$__omg_bootstrap_rc"
+            \\unset OMG_SSH_RC __omg_bootstrap_rc
+            \\
+        ) catch return null;
+    } else {
+        startup.writer.writeAll(
+            \\if [[ -d "$__omg_bootstrap_dir" && -O "$__omg_bootstrap_dir" &&
+            \\      "$__omg_bootstrap_dir" == "$__omg_bootstrap_root"/omg-ssh.* ]]; then
+            \\  rm -rf -- "$__omg_bootstrap_dir"
+            \\fi
+            \\unset OMG_ORIGINAL_ZDOTDIR OMG_SSH_ZDOTDIR __omg_bootstrap_dir __omg_bootstrap_root
+            \\
+        ) catch return null;
+    }
+    if (remote_agent) |agent| {
+        startup.writer.writeAll("__omg_report_pwd\ncommand ") catch return null;
+        writeRemoteAgentInvocation(
+            &startup.writer,
+            agent,
+            remote_agent_session,
+            .shell,
+        ) catch return null;
+        startup.writer.writeByte('\n') catch return null;
+    }
+
+    var command: std.Io.Writer.Allocating = .init(alloc);
+    defer command.deinit();
+    command.writer.writeAll("umask 077; ") catch return null;
+    if (remote_working_directory) |cwd| {
+        command.writer.writeAll("OMG_REMOTE_CWD=") catch return null;
+        writeShellSingleQuoted(&command.writer, cwd) catch return null;
+        command.writer.writeAll("; export OMG_REMOTE_CWD; ") catch return null;
+    }
+    if (std.mem.eql(u8, shell_name, "bash")) {
+        command.writer.writeAll(
+            "__omg_rc=$(mktemp \"${TMPDIR:-/tmp}/omg-ssh.XXXXXX\") || exit 1; " ++
+                "OMG_SSH_RC=$__omg_rc; export OMG_SSH_RC; " ++
+                "cat > \"$__omg_rc\" <<'__OMG_BASHRC__'\n",
+        ) catch return null;
+        command.writer.writeAll(startup.written()) catch return null;
+        command.writer.writeAll(
+            "__OMG_BASHRC__\nexec bash --rcfile \"$__omg_rc\" -i",
+        ) catch return null;
+    } else {
+        command.writer.writeAll(
+            "__omg_dir=$(mktemp -d \"${TMPDIR:-/tmp}/omg-ssh.XXXXXX\") || exit 1; " ++
+                "OMG_ORIGINAL_ZDOTDIR=${ZDOTDIR:-$HOME}; OMG_SSH_ZDOTDIR=$__omg_dir; " ++
+                "export OMG_ORIGINAL_ZDOTDIR OMG_SSH_ZDOTDIR; " ++
+                "cat > \"$__omg_dir/.zshrc\" <<'__OMG_ZSHRC__'\n",
+        ) catch return null;
+        command.writer.writeAll(startup.written()) catch return null;
+        command.writer.writeAll(
+            "__OMG_ZSHRC__\nZDOTDIR=$__omg_dir; export ZDOTDIR; exec zsh -l",
+        ) catch return null;
+    }
     return command.toOwnedSlice() catch null;
 }
 
@@ -841,19 +1030,41 @@ test remoteShellCommand {
     const testing = std.testing;
     try testing.expect(sshDestinationLabel("user@cloud").?.len == "cloud".len);
     try testing.expect(sshDestinationLabel("bad;host") == null);
-    try testing.expect(remoteShellCommand(
+    const bash_command = remoteStartupFileCommand(
         testing.allocator,
-        "/bin/bash",
-        "cloud",
-        "omg-ssh-1",
+        "bash",
+        "vps-jump",
+        "omg-ssh-bash",
+        "/home/user/project's code",
+        .codex,
+        "019f-session_1",
+    ).?;
+    defer testing.allocator.free(bash_command);
+    try testing.expect(std.mem.indexOf(u8, bash_command, "__OMG_BASHRC__") != null);
+    try testing.expect(std.mem.indexOf(u8, bash_command, "PROMPT_COMMAND") != null);
+    try testing.expect(std.mem.indexOf(u8, bash_command, "cwdhex=%s") != null);
+    try testing.expect(std.mem.indexOf(u8, bash_command, "targethost=vps-jump") != null);
+    try testing.expect(std.mem.indexOf(u8, bash_command, "command codex resume") != null);
+    try testing.expect(std.mem.indexOf(u8, bash_command, "project'\\''s code") != null);
+
+    const zsh_command = remoteStartupFileCommand(
+        testing.allocator,
+        "zsh",
+        "train",
+        "omg-ssh-zsh",
         null,
         null,
         null,
-    ) == null);
+    ).?;
+    defer testing.allocator.free(zsh_command);
+    try testing.expect(std.mem.indexOf(u8, zsh_command, "__OMG_ZSHRC__") != null);
+    try testing.expect(std.mem.indexOf(u8, zsh_command, "precmd_functions") != null);
+    try testing.expect(std.mem.indexOf(u8, zsh_command, "targethost=train") != null);
+    try testing.expect(std.mem.indexOf(u8, zsh_command, "-O") != null);
+    try testing.expect(std.mem.indexOf(u8, zsh_command, "rm -rf --") != null);
 
     const command = remoteShellCommand(
         testing.allocator,
-        "/usr/bin/fish",
         "cloud",
         "omg-ssh-1",
         null,
@@ -861,14 +1072,15 @@ test remoteShellCommand {
         null,
     ).?;
     defer testing.allocator.free(command);
+    try testing.expect(std.mem.indexOf(u8, command, "exec /bin/sh -c") != null);
+    try testing.expect(std.mem.indexOf(u8, command, "case ${SHELL##*/}") != null);
     try testing.expect(std.mem.indexOf(u8, command, "]3008;start=omg-ssh-1") != null);
     try testing.expect(std.mem.indexOf(u8, command, "targethost=cloud") != null);
     try testing.expect(std.mem.indexOf(u8, command, "]7;") != null);
     try testing.expect(std.mem.indexOf(u8, command, "file://localhost") != null);
 
-    const cwd_command = remoteShellCommand(
+    const cwd_command = remoteFishCommand(
         testing.allocator,
-        "/usr/bin/fish",
         "cloud",
         "omg-ssh-2",
         "/home/user/project's code",

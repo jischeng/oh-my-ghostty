@@ -169,7 +169,7 @@ struct VerticalTabsTests {
         #expect(updates[1].1 == true)
     }
 
-    @Test @MainActor func resizePersistsOnlyTheFinalWidth() {
+    @Test @MainActor func resizePersistsOnlyTheFinalWidth() async throws {
         let (settings, url) = temporarySettings()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         settings.defaultSidebarWidth = 240
@@ -185,7 +185,30 @@ struct VerticalTabsTests {
         #expect(settings.defaultSidebarWidth == 240)
         #expect(state.committedSidebarWidth == 240)
         state.updateSidebarWidth(317, availableWidth: 1_000, persist: true)
+        #expect(settings.defaultSidebarWidth == 240)
+        #expect(state.sidebarWidth == 317)
+        #expect(state.committedSidebarWidth == 317)
+        try await Task.sleep(for: .milliseconds(250))
         #expect(settings.defaultSidebarWidth == 317)
+    }
+
+    @Test @MainActor func subsequentDragCancelsPendingWidthPersistence() async throws {
+        let (settings, url) = temporarySettings()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        settings.defaultSidebarWidth = 240
+        settings.rememberSidebarWidth = true
+        let state = VerticalTabWindowLayoutState(
+            isSidebarVisible: true,
+            sidebarWidth: 240,
+            settings: settings
+        )
+
+        state.updateSidebarWidth(317, availableWidth: 1_000, persist: true)
+        state.updateSidebarWidth(330, availableWidth: 1_000, persist: false)
+        try await Task.sleep(for: .milliseconds(250))
+
+        #expect(settings.defaultSidebarWidth == 240)
+        #expect(state.sidebarWidth == 330)
         #expect(state.committedSidebarWidth == 317)
     }
 

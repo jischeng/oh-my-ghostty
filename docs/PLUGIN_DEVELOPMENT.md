@@ -374,10 +374,16 @@ an end event only clears the matching active ID, preventing late host-A events
 from clearing host B.
 
 The lifecycle transport is typed OSC 3008 hierarchical context signalling. For
-a simple interactive Fish destination, OMG's existing `+ssh` action emits a
-`type=remote` start immediately before launching the final OpenSSH child. The
-transient remote Fish prompt updates that same context ID with `targethost` and
-percent-encoded `cwd`, and also emits standard OSC 7. After `childExec` returns
+a simple interactive Fish, bash, or zsh destination, OMG's existing `+ssh`
+action emits a `type=remote` start immediately before launching the final
+OpenSSH child. The transient remote prompt updates that same context ID with
+`targethost` and a bounded cwd (`cwd` percent encoding for Fish or `cwdhex` for
+shell-neutral startup hooks), and also emits standard OSC 7. Bash and zsh use a
+mode-0600 temporary rc file/directory that sources the user's normal rc, installs
+one prompt callback, and deletes itself before the first prompt; no persistent
+remote file or service is installed. Shell selection happens inside the final
+OpenSSH child, so multi-hop aliases do not incur a separate shell-detection
+login. After `childExec` returns
 for normal `exit`, Ctrl-D, authentication/network failure, or remote close,
 `+ssh` emits the matching end from the actual child-process wait path and then
 re-emits the inherited local cwd as OSC 7. It never parses `Connection closed`
@@ -402,7 +408,7 @@ created from that Surface reads only the matching active connection ID and
 launches a new `omg +ssh` child through `SurfaceConfiguration.command`; it does
 not inject keystrokes, reconstruct options from `~/.ssh/config`, or connect to
 the resolved IP. The ready remote cwd is passed as a separately shell-quoted
-wrapper option so the independent Fish session starts in the same folder.
+wrapper option so the independent remote shell starts in the same folder.
 Therefore config aliases retain ProxyJump and other OpenSSH configuration, and
 explicit direct invocations retain their original arguments.
 The descriptor is removed when the owning OpenSSH child exits and stale files
@@ -411,9 +417,9 @@ not plugin storage or a public plugin API.
 
 This first provider does not install a remote service and does not manage
 credentials. It depends on the system SSH/SFTP client and configured
-`ssh-agent`/known_hosts. Other remote shells do not yet publish a ready remote
-cwd and remain Experimental. Remote `sftp ls -la` parsing is bounded and is not
-yet a general remote file protocol.
+`ssh-agent`/known_hosts. Shells other than Fish, bash, and zsh do not yet publish
+a ready remote cwd and remain Experimental. Remote `sftp ls -la` parsing is
+bounded and is not yet a general remote file protocol.
 
 ## Inspector API (Internal)
 

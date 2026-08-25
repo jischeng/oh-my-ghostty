@@ -283,9 +283,24 @@ struct VerticalTabsIntegrationTests {
             try await Task.sleep(for: .milliseconds(10))
         }
         #expect(eighth.agentActivity(for: inspectorSurface)?.state == .done)
+        eighth.updateAgentTitleActivity("Codex ⠋ working", for: inspectorSurface.id)
+        #expect(eighth.agentActivity(for: inspectorSurface)?.state == .done)
         #expect(eighth.agentResumeDescriptor(
             for: inspectorSurface
         )?.conversationID?.rawValue == "019f-rotated")
+
+        let completionInputs = try terminalCompletionInputs()
+        for input in completionInputs {
+            input(inspectorSurface)
+            #expect(eighth.agentActivity(for: inspectorSurface)?.state == .idle)
+            inspectorSurface.contextSignal = .init(
+                action: .start,
+                id: "omg-agent-codex",
+                metadata: "type=app;omg_agent=codex;omg_scope=local;" +
+                    "omg_state=done;omg_conversation=019f-rotated"
+            )
+            #expect(eighth.agentActivity(for: inspectorSurface)?.state == .done)
+        }
         eighth.markTabActivated()
         #expect(eighth.agentActivity(for: inspectorSurface)?.state == .idle)
         #expect(eighth.agentActivity(for: inspectorSurface)?.icon?.name == "AgentOpenAI")
@@ -595,11 +610,12 @@ struct VerticalTabsIntegrationTests {
 
         eighth.updateSidebarWidth(340, persist: true)
         #expect(controllers.allSatisfy { $0.sidebarWidth == 340 })
-        #expect(VerticalTabSidebarMetrics.persistedWidth == 340)
+        #expect(VerticalTabSidebarMetrics.persistedWidth != 340)
         #expect(ObjectIdentifier(try #require(eighth.window?.contentView)) == contentViewID)
         #expect(controllers.compactMap { $0.surfaceTree.first.map(ObjectIdentifier.init) } == surfaceObjectIDs)
         #expect(controllers.map { $0.surfaceTree.first?.id } == surfaceIDs)
         try await Task.sleep(for: .milliseconds(300))
+        #expect(VerticalTabSidebarMetrics.persistedWidth == 340)
         let resizedSurfaceSizes = controllers.map(surfaceSize)
         for index in switchOrder {
             eighth.selectVerticalTab(controllers[index])
@@ -890,6 +906,45 @@ struct VerticalTabsIntegrationTests {
         #expect(appearanceSettingsWindow.appearance == nil)
         settings.windowThemeOverride = nil
         appearanceSettingsWindow.close()
+    }
+
+    private func terminalCompletionInputs() throws -> [(Ghostty.SurfaceView) -> Void] {
+        let mouse = try #require(NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1
+        ))
+        let scroll = try #require(CGEvent(
+            scrollWheelEvent2Source: nil,
+            units: .pixel,
+            wheelCount: 1,
+            wheel1: 1,
+            wheel2: 0,
+            wheel3: 0
+        ).flatMap(NSEvent.init(cgEvent:)))
+        let key = try #require(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "a",
+            charactersIgnoringModifiers: "a",
+            isARepeat: false,
+            keyCode: 0
+        ))
+        return [
+            { $0.mouseDown(with: mouse) },
+            { $0.scrollWheel(with: scroll) },
+            { $0.keyDown(with: key) },
+        ]
     }
 
     private func menuItem(withAction action: Selector, in menu: NSMenu?) -> NSMenuItem? {

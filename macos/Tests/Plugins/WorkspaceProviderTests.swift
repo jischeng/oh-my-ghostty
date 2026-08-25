@@ -107,6 +107,52 @@ struct WorkspaceProviderTests {
         #expect(context.presentationTitle == "code")
     }
 
+    @Test func shellNeutralSSHPromptDecodesBoundedHexCWD() {
+        var context = PaneSessionContext(
+            workingDirectory: "/Users/test/code",
+            terminalTitle: "code"
+        )
+        let remotePath = "/remote/project; \u{4F60}\u{597D} % done"
+        let encoded = remotePath.utf8.map { String(format: "%02x", $0) }.joined()
+        context.apply(
+            .init(
+                action: .start,
+                id: "omg-ssh-train",
+                metadata: "type=remote;targethost=train;cwdhex=\(encoded)"
+            ),
+            currentWorkingDirectory: "/Users/test/code",
+            currentTerminalTitle: "train"
+        )
+
+        guard case .sshReady(let ssh, let cwd) = context.state else {
+            Issue.record("Expected shell-neutral SSH prompt to become ready")
+            return
+        }
+        #expect(ssh.alias == "train")
+        #expect(cwd == remotePath)
+        #expect(context.tabIconSystemName == "cloud")
+
+        for invalid in ["0", "zz", String(repeating: "00", count: 4_097)] {
+            var rejected = PaneSessionContext(
+                workingDirectory: "/Users/test/code",
+                terminalTitle: "code"
+            )
+            rejected.apply(
+                .init(
+                    action: .start,
+                    id: "omg-ssh-invalid",
+                    metadata: "type=remote;targethost=train;cwdhex=\(invalid)"
+                ),
+                currentWorkingDirectory: "/Users/test/code",
+                currentTerminalTitle: "train"
+            )
+            guard case .sshConnecting = rejected.state else {
+                Issue.record("Expected invalid remote cwd hex to be rejected")
+                return
+            }
+        }
+    }
+
     @Test func staleSSHDisconnectCannotClearNewConnection() {
         var context = PaneSessionContext(
             workingDirectory: "/Users/test/code",

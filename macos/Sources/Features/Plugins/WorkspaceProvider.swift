@@ -141,8 +141,7 @@ struct PaneSessionContext: Equatable, Sendable {
                         : currentTerminalTitle
                 )
             }
-            if let workingDirectory = metadata["cwd"]?.removingPercentEncoding,
-               !workingDirectory.isEmpty {
+            if let workingDirectory = Self.remoteWorkingDirectory(metadata) {
                 state = .sshReady(ssh, workingDirectory: workingDirectory)
             } else {
                 state = .sshConnecting(ssh)
@@ -164,6 +163,40 @@ struct PaneSessionContext: Equatable, Sendable {
             staleRemoteTerminalTitle = currentTerminalTitle
             state = .local
             revision &+= 1
+        }
+    }
+
+    private static func remoteWorkingDirectory(
+        _ metadata: [String: String]
+    ) -> String? {
+        if let cwd = metadata["cwd"]?.removingPercentEncoding,
+           !cwd.isEmpty {
+            return cwd
+        }
+        guard let raw = metadata["cwdhex"] else { return nil }
+        let hex = Array(raw.utf8)
+        guard !hex.isEmpty,
+              hex.count <= 8_192,
+              hex.count.isMultiple(of: 2) else { return nil }
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(hex.count / 2)
+        for index in stride(from: 0, to: hex.count, by: 2) {
+            guard let high = hexNibble(hex[index]),
+                  let low = hexNibble(hex[index + 1]) else { return nil }
+            bytes.append(high << 4 | low)
+        }
+        guard let value = String(bytes: bytes, encoding: .utf8),
+              !value.isEmpty,
+              !value.contains("\0") else { return nil }
+        return value
+    }
+
+    private static func hexNibble(_ byte: UInt8) -> UInt8? {
+        switch byte {
+        case 48...57: byte - 48
+        case 65...70: byte - 55
+        case 97...102: byte - 87
+        default: nil
         }
     }
 
@@ -452,7 +485,7 @@ struct SSHPlugin: Sendable {
     static let pluginID = "builtin.ssh"
     static let manifest = PluginManifest(
         id: pluginID,
-        version: "0.2.1",
+        version: "0.3.0",
         executable: "builtin",
         capabilities: [.terminalEvents, .tabMetadata, .tabIcon, .inspectorPane],
         minimumHostVersion: "0.1.0"

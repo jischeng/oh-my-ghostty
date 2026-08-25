@@ -97,6 +97,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     private var agentResumeContextIDs: [UUID: String] = [:]
     private var paneSessionObservers: [UUID: Set<AnyCancellable>] = [:]
     private var agentReducers: [UUID: AgentContextSignalReducer] = [:]
+    private var typedAgentHookContextIDs: [UUID: String] = [:]
     private var agentValidationWorkItems: [UUID: DispatchWorkItem] = [:]
     private struct DetectedAgentInstance {
         let id: String
@@ -328,6 +329,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             activeIDs.contains($0.key)
         }
         agentReducers = agentReducers.filter { activeIDs.contains($0.key) }
+        typedAgentHookContextIDs = typedAgentHookContextIDs.filter {
+            activeIDs.contains($0.key)
+        }
         observedForegroundProcessIDs = observedForegroundProcessIDs.filter {
             activeIDs.contains($0.key)
         }
@@ -391,6 +395,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                         currentTerminalTitle: surface.title
                     )
                     updatePaneSessionContext(context, for: surface.id)
+                    registerTypedAgentHookSignal(signal, for: surface.id)
                     updateAgentActivity(signal, for: surface.id)
                 }
                 .store(in: &observers)
@@ -585,6 +590,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return
         }
         detectedAgentInstances.removeValue(forKey: surfaceID)
+        if typedAgentHookContextIDs[surfaceID] == detected.id {
+            typedAgentHookContextIDs.removeValue(forKey: surfaceID)
+        }
         agentScreenSignatures.removeValue(forKey: surfaceID)
         agentScreenStableTicks.removeValue(forKey: surfaceID)
         updateAgentActivity(.init(
@@ -629,12 +637,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
     }
 
-    private func updateAgentTitleActivity(
+    func updateAgentTitleActivity(
         _ title: String,
         for surfaceID: UUID
     ) {
         guard let descriptor = agentResumeDescriptors[surfaceID],
               let contextID = agentResumeContextIDs[surfaceID],
+              typedAgentHookContextIDs[surfaceID] != contextID,
               let state = AgentScreenStatusDetector.detect(
                   status: descriptor.agent.definition.titleStatus,
                   text: title
@@ -647,12 +656,30 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         ), for: surfaceID)
     }
 
+    private func registerTypedAgentHookSignal(
+        _ signal: Ghostty.ContextSignal,
+        for surfaceID: UUID
+    ) {
+        guard signal.id.hasPrefix("omg-agent-") else { return }
+        switch signal.action {
+        case .start:
+            guard AgentContextSignalReducer.sessionSignal(from: signal) != nil else {
+                return
+            }
+            typedAgentHookContextIDs[surfaceID] = signal.id
+        case .end:
+            guard typedAgentHookContextIDs[surfaceID] == signal.id else { return }
+            typedAgentHookContextIDs.removeValue(forKey: surfaceID)
+        }
+    }
+
     private func updateAgentActivity(
         _ signal: Ghostty.ContextSignal,
         for surfaceID: UUID
     ) {
         guard AgentStatusPlugin.isEnabled else {
             agentReducers.removeValue(forKey: surfaceID)
+            typedAgentHookContextIDs.removeValue(forKey: surfaceID)
             agentValidationWorkItems.removeValue(forKey: surfaceID)?.cancel()
             clearAgentResumeDescriptor(for: surfaceID)
             if agentActivities.removeValue(forKey: surfaceID) != nil {
@@ -755,6 +782,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         surfaceTree.first(where: { $0.id == surfaceID })?
             .agentResumeDescriptor = nil
         invalidateRestorableState()
+    }
+
+    func acknowledgeCompletedAgentActivityFromUserInput(
+        on surface: Ghostty.SurfaceView
+    ) {
+        guard focusedSurface === surface else { return }
+        acknowledgeCompletedAgentActivity(for: surface)
     }
 
     private func acknowledgeCompletedAgentActivity(
@@ -2470,6 +2504,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             if !settings.agentStatusHooksEnabled {
                 agentActivities = [:]
                 agentReducers = [:]
+                typedAgentHookContextIDs = [:]
                 agentResumeDescriptors = [:]
                 agentResumeContextIDs = [:]
                 observedForegroundProcessIDs = [:]

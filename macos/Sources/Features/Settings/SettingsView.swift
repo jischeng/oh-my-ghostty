@@ -38,7 +38,7 @@ final class OhMyGhosttySettingsWindowController: NSWindowController {
         let root = SettingsView(settings: settings, initialSelection: initialSelection)
         let hostingController = NSHostingController(rootView: root)
         let window = NSWindow(contentViewController: hostingController)
-        window.title = "Settings"
+        window.title = SettingsStrings(language: settings.language).windowTitle
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.toolbarStyle = .unified
         window.setContentSize(NSSize(width: 820, height: 560))
@@ -62,6 +62,10 @@ final class OhMyGhosttySettingsWindowController: NSWindowController {
 
     private func applyAppearance(_ settings: OhMyGhosttySettings) {
         guard let window else { return }
+        let title = SettingsStrings(language: settings.language).windowTitle
+        if window.title != title {
+            window.title = title
+        }
         let appearance: NSAppearance?
         switch settings.windowThemeOverride {
         case .light:
@@ -92,6 +96,10 @@ struct SettingsView: View {
     @State private var agentHookOperation: SupportedAgent?
     @State private var agentHookError: String?
 
+    private var strings: SettingsStrings {
+        SettingsStrings(language: settings.language)
+    }
+
     init(
         settings: OhMyGhosttySettings,
         initialSelection: OhMyGhosttySettingsTab = .tabs
@@ -108,6 +116,7 @@ struct SettingsView: View {
                     ForEach(OhMyGhosttySettingsTab.allCases) { tab in
                         SettingsSidebarRow(
                             tab: tab,
+                            title: strings.tabTitle(tab),
                             selected: selection == tab,
                             select: { selection = tab }
                         )
@@ -121,7 +130,7 @@ struct SettingsView: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 0) {
-                Text(selection.title)
+                Text(strings.tabTitle(selection))
                     .font(.title2.weight(.semibold))
                     .padding(.horizontal, 24)
                     .frame(height: 52)
@@ -145,19 +154,29 @@ struct SettingsView: View {
         switch selection {
         case .general:
             Form {
-                Section("Sessions") {
-                    Toggle(
-                        "Restore Windows and Agent Sessions",
-                        isOn: $settings.restoreSessionsOnLaunch
-                    )
-                    Text("Restores open windows, tabs, splits, working directories, and agents that were still running when OMG quit.")
+                Section(strings.languageSection) {
+                    Picker(strings.languageLabel, selection: $settings.language) {
+                        Text(strings.languageSystem).tag(OhMyGhosttyLanguage.system)
+                        Text("English").tag(OhMyGhosttyLanguage.english)
+                        Text("简体中文").tag(OhMyGhosttyLanguage.simplifiedChinese)
+                    }
+                    Text(strings.languageCaption)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Section("Configuration") {
-                    LabeledContent("OMG Settings", value: OhMyGhosttySettings.fileURL.path)
-                    LabeledContent("Precedence", value: "Runtime → OMG → Ghostty → Defaults")
-                    Text("Tab layout, appearance, and plugin preferences each have one canonical page.")
+                Section(strings.sessionsSection) {
+                    Toggle(
+                        strings.restoreSessionsLabel,
+                        isOn: $settings.restoreSessionsOnLaunch
+                    )
+                    Text(strings.restoreSessionsCaption)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Section(strings.configurationSection) {
+                    LabeledContent(strings.settingsFileLabel, value: OhMyGhosttySettings.fileURL.path)
+                    LabeledContent(strings.precedenceLabel, value: strings.precedenceValue)
+                    Text(strings.configurationCaption)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -168,46 +187,46 @@ struct SettingsView: View {
 
         case .tabs:
             Form {
-                Section("Layout") {
-                    Picker("Tab Layout", selection: $settings.tabLayout) {
-                        Text("Horizontal").tag(Ghostty.Config.MacOSTabLayout.horizontal)
-                        Text("Vertical").tag(Ghostty.Config.MacOSTabLayout.vertical)
+                Section(strings.layoutSection) {
+                    Picker(strings.tabLayoutLabel, selection: $settings.tabLayout) {
+                        Text(strings.horizontalOption).tag(Ghostty.Config.MacOSTabLayout.horizontal)
+                        Text(strings.verticalOption).tag(Ghostty.Config.MacOSTabLayout.vertical)
                     }
                     .pickerStyle(.segmented)
-                    Text("Applies to newly created windows; existing terminals are not rebuilt.")
+                    Text(strings.tabLayoutCaption)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Toggle("Show Sidebar", isOn: $settings.sidebarVisible)
+                    Toggle(strings.showSidebarLabel, isOn: $settings.sidebarVisible)
                     HStack {
-                        Text("Sidebar Width")
+                        Text(strings.sidebarWidthLabel)
                         Slider(value: $settings.defaultSidebarWidth, in: 176...480, step: 1)
                         Text("\(Int(settings.defaultSidebarWidth)) pt")
                             .monospacedDigit()
                             .frame(width: 52, alignment: .trailing)
                     }
-                    Toggle("Remember Resized Width", isOn: $settings.rememberSidebarWidth)
+                    Toggle(strings.rememberSidebarWidthLabel, isOn: $settings.rememberSidebarWidth)
                 }
-                Section("Organization") {
-                    Picker("Grouping", selection: $settings.groupingMode) {
+                Section(strings.organizationSection) {
+                    Picker(strings.groupingLabel, selection: $settings.groupingMode) {
                         ForEach(GhosttyTabGroupingMode.allCases, id: \.self) { mode in
-                            Text(mode.title).tag(mode)
+                            Text(strings.groupingTitle(mode)).tag(mode)
                         }
                     }
-                    Picker("Path Display", selection: $settings.tabPathDisplay) {
+                    Picker(strings.pathDisplayLabel, selection: $settings.tabPathDisplay) {
                         ForEach(OhMyGhosttyTabPathDisplay.allCases) { mode in
-                            Text(mode.title).tag(mode)
+                            Text(strings.pathDisplayTitle(mode)).tag(mode)
                         }
                     }
-                    Picker("Ordering", selection: $settings.orderingMode) {
+                    Picker(strings.orderingLabel, selection: $settings.orderingMode) {
                         ForEach(GhosttyTabOrderingMode.allCases, id: \.self) { mode in
-                            Text(mode.title).tag(mode)
+                            Text(strings.orderingTitle(mode)).tag(mode)
                         }
                     }
-                    Toggle("Show Shortcut Labels", isOn: $settings.showShortcutLabels)
+                    Toggle(strings.showShortcutLabelsLabel, isOn: $settings.showShortcutLabels)
                 }
                 HStack {
                     Spacer()
-                    Button("Reset Tabs Settings") {
+                    Button(strings.resetTabsButton) {
                         settings.resetTabs()
                     }
                 }
@@ -215,8 +234,8 @@ struct SettingsView: View {
 
         case .terminal:
             Form {
-                Section("Ghostty") {
-                    Button("Open Ghostty Configuration") {
+                Section(strings.ghosttySection) {
+                    Button(strings.openGhosttyConfigButton) {
                         (NSApp.delegate as? AppDelegate)?.ghostty.openConfig()
                     }
                 }
@@ -224,10 +243,10 @@ struct SettingsView: View {
 
         case .keyboard:
             Form {
-                Section("Ghostty Keybindings") {
-                    Text("Keyboard shortcuts are defined by Ghostty configuration. Position labels are configured once in Tabs.")
+                Section(strings.keybindingsSection) {
+                    Text(strings.keybindingsCaption)
                         .foregroundStyle(.secondary)
-                    Button("Open Ghostty Configuration") {
+                    Button(strings.openGhosttyConfigButton) {
                         (NSApp.delegate as? AppDelegate)?.ghostty.openConfig()
                     }
                 }
@@ -238,17 +257,17 @@ struct SettingsView: View {
 
         case .advanced:
             Form {
-                Section("Fork Settings") {
-                    LabeledContent("File", value: OhMyGhosttySettings.fileURL.path)
+                Section(strings.forkSettingsSection) {
+                    LabeledContent(strings.fileLabel, value: OhMyGhosttySettings.fileURL.path)
                     HStack {
-                        Button("Open File") {
+                        Button(strings.openFileButton) {
                             settings.ensureFileExists()
                             NSWorkspace.shared.open(OhMyGhosttySettings.fileURL)
                         }
-                        Button("Reload") {
+                        Button(strings.reloadButton) {
                             settings.reloadFromDisk()
                         }
-                        Button("Reveal") {
+                        Button(strings.revealButton) {
                             settings.ensureFileExists()
                             NSWorkspace.shared.activateFileViewerSelecting([
                                 OhMyGhosttySettings.fileURL,
@@ -267,9 +286,10 @@ struct SettingsView: View {
 
     private var pluginsForm: some View {
         Form {
-            Section("Official Plugins") {
+            Section(strings.officialPluginsSection) {
                 ForEach(PluginInstallationManager.officialPlugins, id: \.id) { manifest in
                     PluginManagementRow(
+                        strings: strings,
                         manifest: manifest,
                         installed: pluginManager.isInstalled(manifest.id),
                         enabled: pluginManager.isEnabled(manifest.id),
@@ -280,23 +300,23 @@ struct SettingsView: View {
                         uninstall: { uninstall(manifest) }
                     )
                 }
-                Text("Official plugins are installed independently from the OMG app. SSH uses your existing OpenSSH configuration and credentials. Built-in agent hook adapters are configured below.")
+                Text(strings.officialPluginsCaption)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
-            Section("Install from GitHub") {
+            Section(strings.installFromGitHubSection) {
                 TextField("https://github.com/owner/omg-plugin", text: $githubRepository)
                     .textFieldStyle(.roundedBorder)
                 HStack {
-                    Button("Install") { installFromGitHub() }
+                    Button(strings.installButton) { installFromGitHub() }
                         .disabled(githubRepository.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || pluginOperation != nil)
                     if let pluginOperation {
-                        ProgressView(pluginOperation)
+                        ProgressView(strings.pluginOperationLabel(pluginOperation))
                             .controlSize(.small)
                     }
                 }
-                Text("Only HTTPS GitHub repositories with a validated manifest.json are accepted. Installed external executables remain disabled until the supervised runtime is available.")
+                Text(strings.installFromGitHubCaption)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if let pluginError {
@@ -306,16 +326,16 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Agent Integration") {
-                Toggle("Enable Normalized Status Events", isOn: $settings.agentStatusHooksEnabled)
+            Section(strings.agentIntegrationSection) {
+                Toggle(strings.agentStatusHooksLabel, isOn: $settings.agentStatusHooksEnabled)
                 ForEach(SupportedAgent.allCases) { agent in
                     agentHookRow(agent)
                 }
-                Button("Export SSH Installer…", systemImage: "square.and.arrow.up") {
+                Button(strings.exportSSHInstallerButton, systemImage: "square.and.arrow.up") {
                     exportRemoteAgentInstaller()
                 }
                 .disabled(agentHookOperation != nil)
-                Text("Hooks write bounded presentation-only OSC events to the owning terminal. Exported hooks can be reviewed and run explicitly in an SSH account. Agent icons and status are presented by Vertical Tabs; Horizontal keeps Ghostty's native tab UI.")
+                Text(strings.agentHooksCaption)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if let agentHookError {
@@ -324,10 +344,10 @@ struct SettingsView: View {
                         .textSelection(.enabled)
                 }
             }
-            Section("Notifications") {
-                Toggle("Task Complete", isOn: $settings.notifyTaskComplete)
-                Toggle("Attention Required", isOn: $settings.notifyAttention)
-                Toggle("Play Sound", isOn: $settings.notificationSound)
+            Section(strings.notificationsSection) {
+                Toggle(strings.notifyTaskCompleteLabel, isOn: $settings.notifyTaskComplete)
+                Toggle(strings.notifyAttentionLabel, isOn: $settings.notifyAttention)
+                Toggle(strings.notificationSoundLabel, isOn: $settings.notificationSound)
             }
         }
     }
@@ -366,7 +386,7 @@ struct SettingsView: View {
 
     private func installFromGitHub() {
         guard let url = URL(string: githubRepository.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-            pluginError = "Enter a valid HTTPS GitHub repository URL."
+            pluginError = strings.invalidGitHubURL
             return
         }
         pluginError = nil
@@ -385,43 +405,45 @@ struct SettingsView: View {
     private var appearanceForm: some View {
         let appearance = settings.effectiveAppearance(using: inheritedGhosttyConfig)
         return Form {
-            Section("Window") {
-                Picker("Appearance", selection: $settings.windowThemeOverride) {
-                    Text("Ghostty config").tag(OhMyGhosttyWindowTheme?.none)
+            Section(strings.windowSection) {
+                Picker(strings.appearancePickerLabel, selection: $settings.windowThemeOverride) {
+                    Text(strings.ghosttyConfigOption).tag(OhMyGhosttyWindowTheme?.none)
                     ForEach(OhMyGhosttyWindowTheme.allCases) { theme in
-                        Text(theme.title).tag(Optional(theme))
+                        Text(strings.windowThemeTitle(theme)).tag(Optional(theme))
                     }
                 }
                 resolutionRow(appearance.windowTheme)
             }
 
-            Section("Terminal Theme") {
+            Section(strings.terminalThemeSection) {
                 GhosttyThemeField(
-                    title: "Light Theme",
+                    strings: strings,
+                    title: strings.lightThemeLabel,
                     value: optionalStringBinding(\.lightThemeOverride)
                 )
                 GhosttyThemeField(
-                    title: "Dark Theme",
+                    strings: strings,
+                    title: strings.darkThemeLabel,
                     value: optionalStringBinding(\.darkThemeOverride)
                 )
                 resolutionRow(appearance.theme)
                 HStack {
-                    Text("Resolved Background")
+                    Text(strings.resolvedBackgroundLabel)
                     Spacer()
                     Circle()
                         .fill(inheritedGhosttyConfig.backgroundColor)
                         .overlay(Circle().stroke(Color.primary.opacity(0.15)))
                         .frame(width: 18, height: 18)
                 }
-                Text("Foreground, selection, and palette remain owned by the selected Ghostty theme.")
+                Text(strings.themeCaption)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
-            Section("Font") {
-                LabeledContent("Font Family") {
+            Section(strings.fontSection) {
+                LabeledContent(strings.fontFamilyLabel) {
                     TextField(
-                        "Inherit Ghostty config",
+                        strings.inheritGhosttyPlaceholder,
                         text: optionalStringBinding(\.fontFamilyOverride)
                     )
                     .textFieldStyle(.roundedBorder)
@@ -429,7 +451,7 @@ struct SettingsView: View {
                     .multilineTextAlignment(.trailing)
                 }
                 optionalSlider(
-                    "Font Size",
+                    strings.fontSizeLabel,
                     value: $settings.fontSizeOverride,
                     inherited: appearance.fontSize.inheritedValue ?? appearance.fontSize.defaultValue,
                     range: 6...72,
@@ -439,9 +461,9 @@ struct SettingsView: View {
                 resolutionRow(appearance.fontFamily)
             }
 
-            Section("Transparency") {
+            Section(strings.transparencySection) {
                 optionalSlider(
-                    "Background Opacity",
+                    strings.backgroundOpacityLabel,
                     value: $settings.backgroundOpacityOverride,
                     inherited: appearance.backgroundOpacity.inheritedValue ?? 1,
                     range: 0.05...1,
@@ -449,34 +471,34 @@ struct SettingsView: View {
                     suffix: "%",
                     displayScale: 100
                 )
-                Picker("Background Blur", selection: $settings.backgroundBlurOverride) {
-                    Text("Ghostty config").tag(OhMyGhosttyBackgroundBlur?.none)
+                Picker(strings.backgroundBlurLabel, selection: $settings.backgroundBlurOverride) {
+                    Text(strings.ghosttyConfigOption).tag(OhMyGhosttyBackgroundBlur?.none)
                     ForEach(OhMyGhosttyBackgroundBlur.allCases) { blur in
-                        Text(blur.title).tag(Optional(blur))
+                        Text(strings.blurTitle(blur)).tag(Optional(blur))
                     }
                 }
                 resolutionRow(appearance.backgroundOpacity)
                 resolutionRow(appearance.backgroundBlur)
             }
 
-            Section("Cursor") {
-                Picker("Style", selection: $settings.cursorStyleOverride) {
-                    Text("Ghostty config").tag(OhMyGhosttyCursorStyle?.none)
+            Section(strings.cursorSection) {
+                Picker(strings.cursorStyleLabel, selection: $settings.cursorStyleOverride) {
+                    Text(strings.ghosttyConfigOption).tag(OhMyGhosttyCursorStyle?.none)
                     ForEach(OhMyGhosttyCursorStyle.allCases) { cursor in
-                        Text(cursor.title).tag(Optional(cursor))
+                        Text(strings.cursorTitle(cursor)).tag(Optional(cursor))
                     }
                 }
                 resolutionRow(appearance.cursorStyle)
             }
 
-            Section("Tabs") {
-                Picker("Row Density", selection: $settings.tabRowDensity) {
+            Section(strings.appearanceTabsSection) {
+                Picker(strings.rowDensityLabel, selection: $settings.tabRowDensity) {
                     ForEach(OhMyGhosttyTabRowDensity.allCases) { density in
-                        Text(density.title).tag(density)
+                        Text(strings.densityTitle(density)).tag(density)
                     }
                 }
                 HStack {
-                    Text("Icon Size")
+                    Text(strings.tabIconSizeLabel)
                     Slider(value: $settings.tabIconSize, in: 12...20, step: 1)
                     Text("\(Int(settings.tabIconSize)) pt")
                         .monospacedDigit()
@@ -485,11 +507,11 @@ struct SettingsView: View {
             }
 
             HStack {
-                Text("Changes apply live to existing terminals without restarting the shell.")
+                Text(strings.appearanceLiveCaption)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button("Reset to Ghostty") {
+                Button(strings.resetAppearanceButton) {
                     settings.resetAppearance()
                 }
             }
@@ -552,9 +574,9 @@ struct SettingsView: View {
 
     private func resolutionRow<Value>(_ setting: ResolvedSetting<Value>) -> some View {
         HStack(spacing: 5) {
-            Text("Effective: \(String(describing: setting.effectiveValue))")
+            Text("\(strings.effectivePrefix): \(String(describing: setting.effectiveValue))")
             Text("•")
-            Text(setting.source.title)
+            Text(strings.appearanceSourceTitle(setting.source))
         }
         .font(.caption)
         .foregroundStyle(.secondary)
@@ -567,12 +589,12 @@ struct SettingsView: View {
         let managedHooks = agent.definition.hook.kind != .none
         let installed = installationState.isInstalled
         let statusText: String = if !managedHooks {
-            "Built-in Detection"
+            strings.agentBuiltInDetection
         } else {
             switch installationState {
-            case .missing: "Hooks Not Installed"
-            case .updateAvailable: "Hook Update Required"
-            case .current: "Hooks Installed"
+            case .missing: strings.agentHooksMissing
+            case .updateAvailable: strings.agentHooksUpdateRequired
+            case .current: strings.agentHooksCurrent
             }
         }
         HStack {
@@ -592,13 +614,13 @@ struct SettingsView: View {
                     .controlSize(.small)
             }
             if managedHooks {
-                Button(installed ? "Update" : "Install") {
+                Button(installed ? strings.agentUpdateButton : strings.agentInstallButton) {
                     updateAgentHook(agent, remove: false)
                 }
                 .disabled(agentHookOperation != nil)
             }
             if managedHooks && installed {
-                Button("Remove") {
+                Button(strings.agentRemoveButton) {
                     updateAgentHook(agent, remove: true)
                 }
                 .disabled(agentHookOperation != nil)
@@ -658,6 +680,7 @@ struct SettingsView: View {
 }
 
 private struct PluginManagementRow: View {
+    let strings: SettingsStrings
     let manifest: PluginManifest
     let installed: Bool
     let enabled: Bool
@@ -682,21 +705,21 @@ private struct PluginManagementRow: View {
                 Spacer()
                 if installed {
                     Menu {
-                        Button(enabled ? "Disable" : "Enable", action: toggle)
-                        Button("Update", action: update)
+                        Button(enabled ? strings.pluginDisableButton : strings.pluginEnableButton, action: toggle)
+                        Button(strings.pluginUpdateButton, action: update)
                         Divider()
-                        Button("Uninstall", role: .destructive, action: uninstall)
+                        Button(strings.pluginUninstallButton, role: .destructive, action: uninstall)
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
                     .menuStyle(.borderlessButton)
                 } else {
-                    Button("Install", action: install)
+                    Button(strings.installButton, action: install)
                 }
             }
             Text(manifest.id == SSHPlugin.pluginID
-                ? "SSH aliases and remote Files through the system OpenSSH/SFTP client."
-                : "OMG plugin")
+                ? strings.sshPluginCaption
+                : strings.genericPluginCaption)
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -718,17 +741,19 @@ private struct PluginManagementRow: View {
     }
 
     private var status: String {
-        guard installed else { return "Not Installed" }
-        return enabled ? "Enabled" : "Disabled"
+        guard installed else { return strings.pluginNotInstalled }
+        return enabled ? strings.pluginEnabled : strings.pluginDisabled
     }
 }
 
 private struct GhosttyThemeField: View {
+    let strings: SettingsStrings
     let title: String
     @Binding var value: String
     private let themes = GhosttyThemeCatalog.availableThemes()
 
-    init(title: String, value: Binding<String>) {
+    init(strings: SettingsStrings, title: String, value: Binding<String>) {
+        self.strings = strings
         self.title = title
         self._value = value
     }
@@ -736,7 +761,7 @@ private struct GhosttyThemeField: View {
     var body: some View {
         LabeledContent(title) {
             HStack(spacing: 6) {
-                TextField("Inherit Ghostty config", text: $value)
+                TextField(strings.inheritGhosttyPlaceholder, text: $value)
                     .textFieldStyle(.roundedBorder)
                     .frame(maxWidth: 360)
                     .multilineTextAlignment(.trailing)
@@ -758,7 +783,7 @@ private struct GhosttyThemeField: View {
                         Image(systemName: "arrow.uturn.backward")
                     }
                     .buttonStyle(.borderless)
-                    .help("Reset to Ghostty config")
+                    .help(strings.resetThemeHelp)
                 }
             }
         }
@@ -767,12 +792,13 @@ private struct GhosttyThemeField: View {
 
 private struct SettingsSidebarRow: View {
     let tab: OhMyGhosttySettingsTab
+    let title: String
     let selected: Bool
     let select: () -> Void
 
     var body: some View {
         Button(action: select) {
-            Label(tab.title, systemImage: tab.systemImage)
+            Label(title, systemImage: tab.systemImage)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 8)
                 .frame(height: 28)

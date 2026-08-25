@@ -248,10 +248,66 @@ struct OhMyGhosttySettingsTests {
         #expect(descriptors.contains { $0.id == "tabs.sidebarVisible" })
         #expect(descriptors.contains { $0.id == "agents.statusHooks" })
         #expect(descriptors.contains { $0.id == "sessions.restoreOnLaunch" })
+        #expect(descriptors.contains { $0.id == "general.language" })
         #expect(descriptors.contains { $0.id == "appearance.backgroundOpacity" })
         #expect(descriptors.contains { $0.id == "appearance.cursorStyle" })
         let schema = try settings.schemaData()
         #expect(!schema.isEmpty)
+    }
+
+    @Test func languageSettingRoundTripsAndDefaultsToSystem() throws {
+        let (settings, url) = temporarySettings()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        #expect(settings.language == .system)
+
+        settings.language = .simplifiedChinese
+        let data = try Data(contentsOf: url)
+        let object = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        #expect(object["general.language"] as? String == "zh-Hans")
+
+        let restored = OhMyGhosttySettings(fileURL: url)
+        #expect(restored.language == .simplifiedChinese)
+    }
+
+    @Test func settingsLanguageResolvesSystemPreferenceAndExplicitPins() {
+        #expect(SettingsStrings(
+            language: .system,
+            preferredLanguages: ["zh-Hans-CN", "en"]
+        ).languageCode == "zh-Hans")
+        #expect(SettingsStrings(
+            language: .system,
+            preferredLanguages: ["en-US"]
+        ).languageCode == "en")
+        #expect(SettingsStrings(
+            language: .system,
+            preferredLanguages: []
+        ).languageCode == "en")
+        #expect(SettingsStrings(
+            language: .english,
+            preferredLanguages: ["zh-Hans-CN"]
+        ).languageCode == "en")
+        #expect(SettingsStrings(
+            language: .simplifiedChinese,
+            preferredLanguages: ["en-US"]
+        ).languageCode == "zh-Hans")
+    }
+
+    @Test func settingsStringsTranslateTheSettingsPage() {
+        let zh = SettingsStrings(language: .simplifiedChinese, preferredLanguages: [])
+        let en = SettingsStrings(language: .english, preferredLanguages: [])
+
+        #expect(zh.windowTitle == "设置")
+        #expect(en.windowTitle == "Settings")
+        #expect(zh.tabTitle(.general) == "通用")
+        #expect(zh.tabTitle(.plugins) == "插件")
+        #expect(zh.languageSystem == "跟随系统")
+        #expect(zh.groupingTitle(.project) == "按项目")
+        #expect(en.groupingTitle(.project) == "By Project")
+        #expect(zh.pathDisplayTitle(.folderName) == "当前文件夹")
+        #expect(zh.orderingTitle(.recentlyUsed) == "最近使用")
+        #expect(zh.agentHooksUpdateRequired == "需要更新 Hooks")
     }
 
     private func temporarySettings() -> (OhMyGhosttySettings, URL) {

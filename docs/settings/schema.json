@@ -1,163 +1,205 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "additionalProperties": true,
-  "properties": {
-    "agents.statusHooks": {
-      "category": "plugins",
-      "default": true,
-      "description": "Accept normalized activity events from agent adapters.",
-      "type": "boolean"
-    },
-    "appearance.backgroundBlur": {
-      "category": "appearance",
-      "description": "Optional Ghostty background blur override.",
-      "enum": ["disabled", "enabled", "macosGlassRegular", "macosGlassClear"],
-      "fallback": "ghostty:background-blur",
-      "type": "string"
-    },
-    "appearance.backgroundOpacity": {
-      "category": "appearance",
-      "description": "Optional terminal and app-shell background opacity override.",
-      "fallback": "ghostty:background-opacity",
-      "maximum": 1,
-      "minimum": 0.05,
-      "type": "number"
-    },
-    "appearance.cursorStyle": {
-      "category": "appearance",
-      "description": "Optional terminal cursor style override.",
-      "enum": ["block", "bar", "underline", "block_hollow"],
-      "fallback": "ghostty:cursor-style",
-      "type": "string"
-    },
-    "appearance.darkTheme": {
-      "category": "appearance",
-      "description": "Optional Ghostty theme used in Dark appearance.",
-      "fallback": "ghostty:theme",
-      "type": "string"
-    },
-    "appearance.fontFamily": {
-      "category": "appearance",
-      "description": "Optional terminal font family override.",
-      "fallback": "ghostty:font-family",
-      "type": "string"
-    },
-    "appearance.fontSize": {
-      "category": "appearance",
-      "description": "Optional terminal font size override in points.",
-      "fallback": "ghostty:font-size",
-      "maximum": 72,
-      "minimum": 6,
-      "type": "number"
-    },
-    "appearance.lightTheme": {
-      "category": "appearance",
-      "description": "Optional Ghostty theme used in Light appearance.",
-      "fallback": "ghostty:theme",
-      "type": "string"
-    },
-    "appearance.tabIconSize": {
-      "category": "appearance",
-      "default": 16,
-      "description": "Vertical tab icon size in points.",
-      "maximum": 20,
-      "minimum": 12,
-      "type": "number"
-    },
-    "appearance.tabRowDensity": {
-      "category": "appearance",
-      "default": "compact",
-      "description": "Vertical tab row density.",
-      "enum": ["compact", "comfortable"],
-      "type": "string"
-    },
-    "appearance.windowTheme": {
-      "category": "appearance",
-      "description": "Optional window appearance override.",
-      "enum": ["system", "light", "dark"],
-      "fallback": "ghostty:window-theme",
-      "type": "string"
-    },
-    "notifications.attention": {
-      "category": "plugins",
-      "default": true,
-      "description": "Allow attention events to request a notification.",
-      "type": "boolean"
-    },
-    "notifications.sound": {
-      "category": "plugins",
-      "default": false,
-      "description": "Play a sound for enabled agent notifications.",
-      "type": "boolean"
-    },
-    "notifications.taskComplete": {
-      "category": "plugins",
-      "default": true,
-      "description": "Allow completion events to request a notification.",
-      "type": "boolean"
-    },
-    "sessions.restoreOnLaunch": {
-      "category": "general",
-      "default": true,
-      "description": "Restore open windows, tabs, splits, and active agent sessions.",
-      "type": "boolean"
-    },
-    "tabs.grouping": {
-      "category": "tabs",
-      "default": "none",
-      "description": "Derived grouping applied to Vertical Tabs.",
-      "enum": ["none", "project", "date"],
-      "type": "string"
-    },
-    "tabs.layout": {
-      "apply": "new-window",
-      "category": "tabs",
-      "description": "Tab presentation used by newly created windows.",
-      "enum": ["horizontal", "vertical"],
-      "fallback": "ghostty:macos-tab-layout",
-      "type": "string"
-    },
-    "tabs.ordering": {
-      "category": "tabs",
-      "default": "manual",
-      "description": "Canonical tab ordering policy.",
-      "enum": ["manual", "created", "recentlyUsed"],
-      "type": "string"
-    },
-    "tabs.pathDisplay": {
-      "category": "tabs",
-      "default": "folderName",
-      "description": "Display the full working path or only the current folder in Vertical Tabs.",
-      "enum": ["fullPath", "folderName"],
-      "type": "string"
-    },
-    "tabs.rememberSidebarWidth": {
-      "category": "tabs",
-      "default": true,
-      "description": "Use the last committed sidebar width as the next window default.",
-      "type": "boolean"
-    },
-    "tabs.sidebarVisible": {
-      "category": "tabs",
-      "default": true,
-      "description": "Show the Vertical Tabs sidebar by default.",
-      "type": "boolean"
-    },
-    "tabs.showShortcutLabels": {
-      "category": "tabs",
-      "default": true,
-      "description": "Show configured position shortcuts for the first nine tabs.",
-      "type": "boolean"
-    },
-    "tabs.sidebarWidth": {
-      "category": "tabs",
-      "default": 240,
-      "description": "Default width of the Vertical Tabs sidebar in points.",
-      "maximum": 480,
-      "minimum": 176,
-      "type": "number"
-    }
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "additionalProperties": true,
+ "properties": {
+  "agents.statusHooks": {
+   "category": "plugins",
+   "default": true,
+   "description": "Accept normalized activity events from agent adapters.",
+   "type": "boolean"
   },
-  "title": "OMG Settings",
-  "type": "object"
+  "appearance.backgroundBlur": {
+   "category": "appearance",
+   "description": "Optional Ghostty background blur override.",
+   "enum": [
+    "disabled",
+    "enabled",
+    "macosGlassRegular",
+    "macosGlassClear"
+   ],
+   "fallback": "ghostty:background-blur",
+   "type": "string"
+  },
+  "appearance.backgroundOpacity": {
+   "category": "appearance",
+   "description": "Optional terminal and app-shell background opacity override.",
+   "fallback": "ghostty:background-opacity",
+   "maximum": 1,
+   "minimum": 0.05,
+   "type": "number"
+  },
+  "appearance.cursorStyle": {
+   "category": "appearance",
+   "description": "Optional terminal cursor style override.",
+   "enum": [
+    "block",
+    "bar",
+    "underline",
+    "block_hollow"
+   ],
+   "fallback": "ghostty:cursor-style",
+   "type": "string"
+  },
+  "appearance.darkTheme": {
+   "category": "appearance",
+   "description": "Optional Ghostty theme used in Dark appearance.",
+   "fallback": "ghostty:theme",
+   "type": "string"
+  },
+  "appearance.fontFamily": {
+   "category": "appearance",
+   "description": "Optional terminal font family override.",
+   "fallback": "ghostty:font-family",
+   "type": "string"
+  },
+  "appearance.fontSize": {
+   "category": "appearance",
+   "description": "Optional terminal font size override in points.",
+   "fallback": "ghostty:font-size",
+   "maximum": 72,
+   "minimum": 6,
+   "type": "number"
+  },
+  "appearance.lightTheme": {
+   "category": "appearance",
+   "description": "Optional Ghostty theme used in Light appearance.",
+   "fallback": "ghostty:theme",
+   "type": "string"
+  },
+  "appearance.tabIconSize": {
+   "category": "appearance",
+   "default": 16,
+   "description": "Vertical tab icon size in points.",
+   "maximum": 20,
+   "minimum": 12,
+   "type": "number"
+  },
+  "appearance.tabRowDensity": {
+   "category": "appearance",
+   "default": "compact",
+   "description": "Vertical tab row density.",
+   "enum": [
+    "compact",
+    "comfortable"
+   ],
+   "type": "string"
+  },
+  "appearance.windowTheme": {
+   "category": "appearance",
+   "description": "Optional window appearance override.",
+   "enum": [
+    "system",
+    "light",
+    "dark"
+   ],
+   "fallback": "ghostty:window-theme",
+   "type": "string"
+  },
+  "general.language": {
+   "category": "general",
+   "default": "system",
+   "description": "Settings display language. system follows the macOS preferred language.",
+   "enum": [
+    "system",
+    "en",
+    "zh-Hans"
+   ],
+   "type": "string"
+  },
+  "notifications.attention": {
+   "category": "plugins",
+   "default": true,
+   "description": "Allow attention events to request a notification.",
+   "type": "boolean"
+  },
+  "notifications.sound": {
+   "category": "plugins",
+   "default": false,
+   "description": "Play a sound for enabled agent notifications.",
+   "type": "boolean"
+  },
+  "notifications.taskComplete": {
+   "category": "plugins",
+   "default": true,
+   "description": "Allow completion events to request a notification.",
+   "type": "boolean"
+  },
+  "sessions.restoreOnLaunch": {
+   "category": "general",
+   "default": true,
+   "description": "Restore open windows, tabs, splits, and active agent sessions.",
+   "type": "boolean"
+  },
+  "tabs.grouping": {
+   "category": "tabs",
+   "default": "none",
+   "description": "Derived grouping applied to Vertical Tabs.",
+   "enum": [
+    "none",
+    "project",
+    "date"
+   ],
+   "type": "string"
+  },
+  "tabs.layout": {
+   "apply": "new-window",
+   "category": "tabs",
+   "description": "Tab presentation used by newly created windows.",
+   "enum": [
+    "horizontal",
+    "vertical"
+   ],
+   "fallback": "ghostty:macos-tab-layout",
+   "type": "string"
+  },
+  "tabs.ordering": {
+   "category": "tabs",
+   "default": "manual",
+   "description": "Canonical tab ordering policy.",
+   "enum": [
+    "manual",
+    "created",
+    "recentlyUsed"
+   ],
+   "type": "string"
+  },
+  "tabs.pathDisplay": {
+   "category": "tabs",
+   "default": "folderName",
+   "description": "Display the full working path or only the current folder in Vertical Tabs.",
+   "enum": [
+    "fullPath",
+    "folderName"
+   ],
+   "type": "string"
+  },
+  "tabs.rememberSidebarWidth": {
+   "category": "tabs",
+   "default": true,
+   "description": "Use the last committed sidebar width as the next window default.",
+   "type": "boolean"
+  },
+  "tabs.showShortcutLabels": {
+   "category": "tabs",
+   "default": true,
+   "description": "Show configured position shortcuts for the first nine tabs.",
+   "type": "boolean"
+  },
+  "tabs.sidebarVisible": {
+   "category": "tabs",
+   "default": true,
+   "description": "Show the Vertical Tabs sidebar by default.",
+   "type": "boolean"
+  },
+  "tabs.sidebarWidth": {
+   "category": "tabs",
+   "default": 240,
+   "description": "Default width of the Vertical Tabs sidebar in points.",
+   "maximum": 480,
+   "minimum": 176,
+   "type": "number"
+  }
+ },
+ "title": "OMG Settings",
+ "type": "object"
 }

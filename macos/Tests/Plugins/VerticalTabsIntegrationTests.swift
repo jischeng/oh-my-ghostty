@@ -43,6 +43,7 @@ struct VerticalTabsIntegrationTests {
             OhMyGhosttySettings.shared.reloadFromDisk()
         }
         let settings = OhMyGhosttySettings.shared
+        settings.language = .english
         settings.tabLayout = .vertical
         settings.defaultSidebarWidth = 240
         settings.sidebarVisible = true
@@ -871,7 +872,8 @@ struct VerticalTabsIntegrationTests {
         #expect(settingsItem.action == #selector(AppDelegate.openSettings(_:)))
         #expect(NSApp.sendAction(settingsItem.action!, to: settingsItem.target, from: settingsItem))
         try await Task.sleep(for: .milliseconds(300))
-        let settingsWindow = try #require(NSApp.windows.first { $0.title == "Settings" })
+        let expectedSettingsTitle = SettingsStrings(language: settings.language).windowTitle
+        let settingsWindow = try #require(NSApp.windows.first { $0.title == expectedSettingsTitle })
         #expect(settingsWindow.isVisible)
         try capture(window: settingsWindow, path: settingsScreenshotPath)
         settingsWindow.close()

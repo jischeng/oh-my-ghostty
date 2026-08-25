@@ -323,6 +323,11 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Accept normalized activity events from agent adapters.",
             requiresNewWindow: false, category: "plugins"),
         .init(
+            id: "general.language", type: .enumeration, defaultValue: "system",
+            allowedValues: OhMyGhosttyLanguage.allCases.map(\.rawValue), minimum: nil, maximum: nil,
+            description: "Settings display language. system follows the macOS preferred language.",
+            requiresNewWindow: false, category: "general"),
+        .init(
             id: "sessions.restoreOnLaunch", type: .boolean, defaultValue: "true",
             allowedValues: nil, minimum: nil, maximum: nil,
             description: "Restore open windows, tabs, splits, and active agent sessions.",
@@ -431,6 +436,9 @@ final class OhMyGhosttySettings: ObservableObject {
     }
     @Published var restoreSessionsOnLaunch = true {
         didSet { persist("sessions.restoreOnLaunch", restoreSessionsOnLaunch) }
+    }
+    @Published var language: OhMyGhosttyLanguage = .system {
+        didSet { persist("general.language", language.rawValue) }
     }
     @Published private(set) var lastError: String?
 
@@ -628,6 +636,7 @@ final class OhMyGhosttySettings: ObservableObject {
                 "sessions.restoreOnLaunch",
                 fallback: true
             )
+            language = enumValue("general.language", fallback: .system)
         }
     }
 

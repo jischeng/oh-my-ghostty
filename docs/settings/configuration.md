@@ -77,6 +77,7 @@ Window UI state is intentionally separate: `InspectorPresentationStore` owns las
 | `notifications.sound` | boolean | `false` | `true`, `false` | Settings > Plugins | Runtime policy |
 | `agents.statusHooks` | boolean | `true` | `true`, `false` | Settings > Plugins | Runtime ingress policy |
 | `sessions.restoreOnLaunch` | boolean | `true` | `true`, `false` | Settings > General | Next launch |
+| `general.language` | enum | `system` | `system`, `en`, `zh-Hans` | Settings > General | Live (Settings UI) |
 
 Appearance controls resolve each value as `OMG override > Ghostty config > built-in default`. The UI reports the effective value and source, and **Reset to Ghostty** removes only OMG Appearance keys. The app writes a generated `appearance.ghostty` overlay beside `settings.json`; it never edits the user's Ghostty config. The overlay is loaded last and applied with Ghostty's existing live config update API, so current surfaces keep their PTY, shell, and scrollback.
 
@@ -87,6 +88,8 @@ Vertical tabs and the Right Inspector use the active terminal background color a
 Settings > Plugins > Agent Integration installs the versioned, removable JSON/plugin/TOML/script integration declared by each bundled Agent manifest. `agents.statusHooks` controls both normalized event ingress and the bounded local foreground-PID fallback used when an agent does not emit `SessionStart`. Vertical Tabs use the focused pane's bundled Agent glyph/title/ring and keep other panes' attention/error/done as trailing alerts; idle has no ring, and focusing a completed pane acknowledges only that pane. Horizontal Tabs keep Ghostty's native presentation. **Export SSH Installer…** writes an auditable Python 3 script that the user can explicitly transfer and run in a remote account. Remote hooks work through SSH because they write the bounded event to that remote TTY; OMG does not log in or alter remote accounts automatically.
 
 Settings > General > Sessions controls `sessions.restoreOnLaunch`. When enabled, AppKit restores every open window, canonical tab order, split tree, cwd, and typed Agent resume descriptor. Only Agents still running at quit are resumed with an exact validated conversation ID; a tab whose Agent already exited restores as a shell. SSH restore reuses original OpenSSH argv and never stores credentials or an arbitrary remote command.
+
+Settings > General > Language controls `general.language`. `system` (the default) follows the macOS preferred language; `en` pins English and `zh-Hans` pins Simplified Chinese. The language applies live to the Settings window only; terminal content, titles, and Agent events are not translated.
 
 ## Machine-readable Schema
 

@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import SwiftUI
+import UniformTypeIdentifiers
 
 enum OhMyGhosttySettingsTab: String, CaseIterable, Identifiable {
     case general
@@ -301,7 +302,11 @@ struct SettingsView: View {
                 ForEach(SupportedAgent.allCases) { agent in
                     agentHookRow(agent)
                 }
-                Text("Hooks write bounded presentation-only OSC events to the owning terminal. The same hooks work inside SSH when installed in the remote account. Codex may require approving the new entries with /hooks after installation.")
+                Button("Export SSH Installer…", systemImage: "square.and.arrow.up") {
+                    exportRemoteAgentInstaller()
+                }
+                .disabled(agentHookOperation != nil)
+                Text("Hooks write bounded presentation-only OSC events to the owning terminal. Exported hooks can be reviewed and run explicitly in an SSH account. Agent icons and status are presented by Vertical Tabs; Horizontal keeps Ghostty's native tab UI.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if let agentHookError {
@@ -549,15 +554,21 @@ struct SettingsView: View {
     @ViewBuilder
     private func agentHookRow(_ agent: SupportedAgent) -> some View {
         let revision = agentHookRevision
-        let installed = AgentHookInstaller().isInstalled(agent)
+        let installationState = AgentHookInstaller().installationState(agent)
+        let installed = installationState.isInstalled
+        let statusText: String = switch installationState {
+        case .missing: "Hooks Not Installed"
+        case .updateAvailable: "Hook Update Required"
+        case .current: "Hooks Installed"
+        }
         HStack {
             Image(systemName: agent.systemImage)
                 .frame(width: 20)
             VStack(alignment: .leading, spacing: 2) {
                 Text(agent.displayName)
-                Text(installed ? "Hooks Installed" : "Hooks Not Installed")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Text(statusText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
             Spacer()
             if agentHookOperation == agent {
@@ -595,6 +606,26 @@ struct SettingsView: View {
             } else {
                 try installer.install(agent)
             }
+        } catch {
+            agentHookError = error.localizedDescription
+        }
+    }
+
+    private func exportRemoteAgentInstaller() {
+        agentHookError = nil
+        do {
+            let script = try AgentHookInstaller.remoteInstallerScript()
+            let panel = NSSavePanel()
+            panel.nameFieldStringValue = "omg-agent-hooks.py"
+            panel.allowedContentTypes = [.plainText]
+            panel.canCreateDirectories = true
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            try script.write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: url.path
+            )
+            NSWorkspace.shared.activateFileViewerSelecting([url])
         } catch {
             agentHookError = error.localizedDescription
         }

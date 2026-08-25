@@ -103,11 +103,14 @@ OpenSSH argv and ready remote cwd, preserving config aliases, ProxyJump,
 explicit options, and folder context without keystroke injection.
 
 The built-in Agent Status integration supports Codex, Claude Code, and Pi hooks.
-An active agent replaces the terminal/cloud icon in the existing tab slot;
-working state uses a compact progress ring, while approval, completion, and
-failure use the trailing status slot. The bounded OSC transport follows the
-owning Surface and therefore also works in SSH when hooks are installed in the
-remote account. These in-tree providers are not installable third-party plugins.
+In Vertical Tabs, the highest-priority activity across every split replaces the
+terminal/cloud icon; working uses a compact progress ring, while approval,
+completion, and failure use the trailing status slot. Horizontal Tabs remain the
+unmodified Ghostty native presentation. Instance-scoped bounded OSC events follow
+the owning Surface and also work in SSH when hooks are installed explicitly in
+the remote account. Settings can export an auditable remote installer; OMG never
+silently changes remote dotfiles. These in-tree providers are not installable
+third-party plugins.
 A public third-party executable loader is **not implemented yet**; see
 [Plugin Development](docs/PLUGIN_DEVELOPMENT.md) for exact Stable,
 Experimental, Internal, and Planned status.

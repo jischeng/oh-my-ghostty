@@ -25,7 +25,7 @@ OH_MY_GHOSTTY_SESSION=<uuid>
 
 The UUID is stored in TerminalRestorable v8 and is independent of cwd, title and process name. Two agents in the same repository therefore remain distinguishable.
 
-The built-in first-party adapters do not require a status socket. Codex and Claude Code command hooks plus the Pi extension emit bounded OSC 3008 presentation events to the owning TTY. Because correlation is the terminal Surface that receives the sequence, the same transport works through SSH without forwarding `OH_MY_GHOSTTY_SESSION` or installing an OMG executable remotely. Hooks must be installed in the account where the agent runs; Settings can install and merge local hooks without replacing other integrations.
+The built-in first-party adapters do not require a status socket. Codex and Claude Code command hooks plus the Pi extension emit bounded, process-instance-scoped OSC 3008 presentation events to the owning TTY. Because correlation is the terminal Surface that receives the sequence, the same transport works through SSH without forwarding `OH_MY_GHOSTTY_SESSION` or installing an OMG executable remotely. Hooks must be installed in the account where the agent runs; Settings can merge local hooks without replacing other integrations and can export an auditable Python 3 installer for explicit remote use.
 
 A future public `omg status` CLI may expose the same normalized contract over authenticated app IPC. It is not required by the built-in adapters and must not become an unauthenticated terminal-control channel.
 

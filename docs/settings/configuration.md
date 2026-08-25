@@ -73,7 +73,7 @@ Vertical tabs and the Right Inspector use the active terminal background color a
 
 `tabs.pathDisplay` applies to the path portion of every Vertical Tab label. Local and SSH panes use the same policy: `fullPath` preserves the current full-path presentation, while `folderName` displays only the final folder component. SSH keeps its alias prefix, for example `cloud /home/user/code` becomes `cloud code`.
 
-Settings > Plugins > Agent Integration installs marked, removable hooks for Codex and Claude Code plus a readable Pi extension. `agents.statusHooks` controls whether OMG accepts those normalized presentation events. Hooks installed in a remote account work through SSH because they write the bounded event to that remote TTY; local hook installation does not alter remote accounts.
+Settings > Plugins > Agent Integration installs versioned, removable local hooks for Codex and Claude Code plus a readable Pi extension. `agents.statusHooks` controls whether OMG accepts those normalized presentation events. Vertical Tabs aggregate agent state across all splits; Horizontal Tabs keep Ghostty's native presentation. **Export SSH Installer…** writes an auditable Python 3 script that the user can explicitly transfer and run in a remote account. Remote hooks work through SSH because they write the bounded event to that remote TTY; OMG does not log in or alter remote accounts automatically.
 
 ## Machine-readable Schema
 

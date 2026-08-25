@@ -678,7 +678,7 @@ struct TerminalTabSidebarView: View {
         let selected = controller.selectedTabID == tabID
         let hovered = controller.hoveredTabID == tabID
         if let surface = tab.focusedSurface ?? tab.surfaceTree.first {
-            let activity = tab.agentActivity(for: surface) ??
+            let activity = tab.preferredAgentActivity() ??
                 statusStore.activity(for: tab.tabSessionID)
             VerticalTabRow(
                 controller: tab,
@@ -1226,7 +1226,7 @@ private struct VerticalTabRow: View {
             workingDirectory: surface.pwd,
             terminalTitle: surface.title
         )
-        let agentActivity = controller.agentActivity(for: surface)
+        let agentActivity = controller.preferredAgentActivity()
         let icon: GhosttyTabIcon = if let requested = agentActivity?.icon {
             switch requested.kind {
             case .systemSymbol: .systemSymbol(requested.name)

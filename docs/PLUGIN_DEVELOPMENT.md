@@ -269,23 +269,30 @@ request sequence; failures return a typed `PluginProtocolFailure`.
 
 ### Built-in agent hook bridge (Internal)
 
-`AgentHookInstaller` merges marked entries into user Codex and Claude JSON hook
-files without removing unrelated integrations, ensures Codex's hooks feature is
-enabled, and installs one readable Pi TypeScript extension. Installation is an
-explicit Settings action and keeps a one-time `.omg-backup` beside each existing
-file. Removal deletes only commands carrying the `_omg_agent_status` marker.
+`AgentHookInstaller` merges versioned, owner-marked entries into user Codex and
+Claude JSON hook files without removing unrelated integrations, strictly updates
+Codex's hooks feature, and installs one readable Pi TypeScript extension. It
+rejects malformed JSON/TOML rather than replacing unknown shapes, preserves
+co-located third-party commands while migrating old OMG entries, uses atomic
+mode-preserving writes (0600 for new files), and keeps a one-time `.omg-backup`
+beside each existing file. Removal deletes only OMG-owned commands.
 
-Adapters emit OSC 3008 contexts with IDs `omg-agent-codex`,
-`omg-agent-claude`, or `omg-agent-pi`, `type=app`, and a bounded
-`omg_state`. The host accepts only the built-in agent allowlist and normalized
-states, then associates the event with the Surface that parsed it. These events
-can change only host-owned tab presentation; they do not authorize terminal
-input, filesystem, network, or plugin execution. A remote process can spoof its
-own tab badge, but cannot use this channel to gain capabilities.
+Adapters emit OSC 3008 contexts with IDs
+`omg-agent-<codex|claude|pi>-<process-group-id>`, `type=app`, a bounded
+`omg_state`, and `omg_scope=local|remote`. The host verifies that ID and metadata
+name the same built-in agent, then associates the event with the Surface that
+parsed it. A one-second validation runs only while a local agent context is
+active and clears state when the PTY foreground process group changes. In SSH,
+the next authenticated remote Fish prompt clears orphaned remote agent state.
+Unique instance IDs prevent an old `end` from clearing a newer same-agent
+session. These events can change only host-owned tab presentation; they do not
+authorize terminal input, filesystem, network, or plugin execution. A process
+can spoof its own tab badge, but cannot use this channel to gain capabilities.
 
-Because the event is written to `/dev/tty`, the same installed hook works through
-OpenSSH. Hooks must be installed in the account where the agent executable runs;
-local installation does not silently modify remote dotfiles.
+Because the event is written to the owning TTY, the same hook works through
+OpenSSH. Hooks must be installed in the account where the agent executable runs.
+Settings can export an auditable Python 3 installer for explicit transfer and
+execution on that account; OMG does not log in or silently modify remote dotfiles.
 
 ### Terminal events
 

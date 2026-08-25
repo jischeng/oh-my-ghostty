@@ -94,6 +94,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     @Published private(set) var agentActivities: [UUID: TabActivity] = [:]
     private var paneSessionObservers: [UUID: Set<AnyCancellable>] = [:]
     private var agentReducers: [UUID: AgentContextSignalReducer] = [:]
+    private var agentValidationWorkItems: [UUID: DispatchWorkItem] = [:]
 
     var focusedPaneSessionContext: PaneSessionContext? {
         paneSessionContext(for: focusedSurface ?? surfaceTree.first)
@@ -107,6 +108,17 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     func agentActivity(for surface: Ghostty.SurfaceView?) -> TabActivity? {
         guard let surface else { return nil }
         return agentActivities[surface.id]
+    }
+
+    func preferredAgentActivity() -> TabActivity? {
+        let focusedID = focusedSurface?.id
+        return AgentActivitySelection.preferred(surfaceTree.compactMap { surface in
+            guard let activity = agentActivities[surface.id] else { return nil }
+            return AgentActivityCandidate(
+                activity: activity,
+                isFocused: surface.id == focusedID
+            )
+        })
     }
 
     func paneSessionContext(
@@ -279,6 +291,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         paneSessionContexts = paneSessionContexts.filter { activeIDs.contains($0.key) }
         agentActivities = agentActivities.filter { activeIDs.contains($0.key) }
         agentReducers = agentReducers.filter { activeIDs.contains($0.key) }
+        for (surfaceID, workItem) in agentValidationWorkItems
+        where !activeIDs.contains(surfaceID) {
+            workItem.cancel()
+        }
+        agentValidationWorkItems = agentValidationWorkItems.filter {
+            activeIDs.contains($0.key)
+        }
 
         for surface in surfaces where paneSessionObservers[surface.id] == nil {
             paneSessionContexts[surface.id] = .init(
@@ -330,14 +349,25 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         for surfaceID: UUID
     ) {
         guard AgentStatusPlugin.isEnabled else {
+            agentReducers.removeValue(forKey: surfaceID)
+            agentValidationWorkItems.removeValue(forKey: surfaceID)?.cancel()
             if agentActivities.removeValue(forKey: surfaceID) != nil {
                 objectWillChange.send()
             }
             return
         }
         var reducer = agentReducers[surfaceID] ?? AgentContextSignalReducer()
-        guard let update = reducer.consume(signal) else { return }
+        let update = reducer.consume(signal) ?? reducer.consumeRemotePrompt(signal)
+        guard let update else { return }
         agentReducers[surfaceID] = reducer
+        applyAgentActivityUpdate(update, for: surfaceID)
+        scheduleAgentValidation(for: surfaceID)
+    }
+
+    private func applyAgentActivityUpdate(
+        _ update: AgentActivityUpdate,
+        for surfaceID: UUID
+    ) {
         var next = agentActivities
         switch update {
         case .set(let activity):
@@ -347,6 +377,29 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
         guard next != agentActivities else { return }
         agentActivities = next
+    }
+
+    private func scheduleAgentValidation(for surfaceID: UUID) {
+        agentValidationWorkItems.removeValue(forKey: surfaceID)?.cancel()
+        guard agentReducers[surfaceID]?.requiresForegroundValidation == true else {
+            return
+        }
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self,
+                  let surface = surfaceTree.first(where: { $0.id == surfaceID }),
+                  var reducer = agentReducers[surfaceID] else { return }
+            let update = reducer.reconcileLocalForegroundProcess(
+                surface.surfaceModel?.foregroundPID
+            )
+            agentReducers[surfaceID] = reducer
+            if let update { applyAgentActivityUpdate(update, for: surfaceID) }
+            scheduleAgentValidation(for: surfaceID)
+        }
+        agentValidationWorkItems[surfaceID] = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + 1,
+            execute: workItem
+        )
     }
 
     private func updatePaneSessionContext(
@@ -1999,6 +2052,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             if !settings.agentStatusHooksEnabled {
                 agentActivities = [:]
                 agentReducers = [:]
+                agentValidationWorkItems.values.forEach { $0.cancel() }
+                agentValidationWorkItems = [:]
             }
         }
         guard supportsSidebar,

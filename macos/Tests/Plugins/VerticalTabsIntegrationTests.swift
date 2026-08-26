@@ -634,8 +634,17 @@ struct VerticalTabsIntegrationTests {
         #expect(dateGroups[0].title == "Today")
 
         eighth.setTabOrderingMode(.recentlyUsed)
+        for index in 0..<40 {
+            let target = controllers[index.isMultiple(of: 2) ? 0 : 1]
+            eighth.selectVerticalTab(target)
+            await Task.yield()
+            #expect(tabGroup.selectedWindow === target.window)
+        }
         eighth.selectVerticalTab(controllers[2])
         controllers[2].markTabActivated()
+        for _ in 0..<50 where tabGroup.windows.first !== controllers[2].window {
+            try await Task.sleep(for: .milliseconds(2))
+        }
         let recent = organizer.groups(
             tabs: eighth.tabControllers,
             grouping: .none,

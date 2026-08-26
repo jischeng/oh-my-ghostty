@@ -56,6 +56,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// re-showing a tab that was already closed.
     private var pendingInitialPresentation: DispatchWorkItem?
 
+    /// Recently-used ordering must never mutate NSWindowTabGroup from inside
+    /// AppKit's selectedWindow/becomeKey stack. Coalesce it onto the next
+    /// runloop turn after selection has settled.
+    private var pendingTabOrganizationWorkItem: DispatchWorkItem?
+
     /// This is set to false by init if the window managed by this controller should not be restorable.
     /// For example, terminals executing custom scripts are not restorable.
     private var restorable: Bool = true
@@ -283,6 +288,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         verticalTabWindowsObservation?.invalidate()
         verticalTabSelectionObservation?.invalidate()
         agentProcessPollCancellable?.cancel()
+        pendingTabOrganizationWorkItem?.cancel()
 
         // Remove all of our notificationcenter subscriptions
         let center = NotificationCenter.default
@@ -1025,32 +1031,27 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         guard tabControllers.contains(where: { $0 === controller }),
               let targetWindow = controller.window else { return }
         let tabGroup = window?.tabGroup
-        if let tabGroup {
-            Self.selectTabWindowImmediately(targetWindow, in: tabGroup)
-        }
+        tabGroup?.selectedWindow = targetWindow
         controller.markTabActivated()
         targetWindow.makeKeyAndOrderFront(nil)
         Self.refreshTabs(in: tabGroup)
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private static func selectTabWindowImmediately(
-        _ targetWindow: NSWindow,
-        in tabGroup: NSWindowTabGroup
-    ) {
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0
-            context.allowsImplicitAnimation = false
-            tabGroup.selectedWindow = targetWindow
-        }
-    }
-
     func markTabActivated() {
         tabLastActivatedAt = Date()
-        if tabLayoutState.orderingMode == .recentlyUsed,
-           window?.tabGroup?.selectedWindow === window {
+        guard tabLayoutState.orderingMode == .recentlyUsed,
+              window?.tabGroup?.selectedWindow === window else { return }
+        pendingTabOrganizationWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            defer { pendingTabOrganizationWorkItem = nil }
+            guard tabLayoutState.orderingMode == .recentlyUsed,
+                  window?.tabGroup?.selectedWindow === window else { return }
             reconcileTabOrganization()
         }
+        pendingTabOrganizationWorkItem = workItem
+        DispatchQueue.main.async(execute: workItem)
     }
 
     @discardableResult
@@ -2721,7 +2722,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         guard finalIndex >= 0 else { return }
         let targetWindow = tabbedWindows[finalIndex]
-        Self.selectTabWindowImmediately(targetWindow, in: tabGroup)
+        tabGroup.selectedWindow = targetWindow
         (targetWindow.windowController as? TerminalController)?.markTabActivated()
         targetWindow.makeKeyAndOrderFront(nil)
         Self.refreshTabs(in: tabGroup)

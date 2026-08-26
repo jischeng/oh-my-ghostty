@@ -163,7 +163,7 @@ Pi 不依赖 Sidebar 或状态插件，但依赖 IPC、QuickInput 和 Terminal C
 
 OMG 不另造第二个 CLI binary。现有 app executable `omg` 是统一 CLI 入口，Ghostty upstream actions 继续使用 `+ssh` 等兼容形式。后续面向用户的 `omg pane split`、`omg config get/set` 应建立在经过认证的 app IPC 上；在此之前，SSH split replay 是宿主内部 launch handoff，不是可由插件调用的 Terminal Control API。
 
-剪贴板粘贴在没有文本/文件内容但包含图片时，会把图片写成 `NSTemporaryDirectory()/omg-paste/omg-paste-<uuid>.png` 并把 shell-escaped 绝对路径作为文本粘贴，便于 Agent（如 Pi）把路径当作图片文件读取；该目录在每次写入时清理超过 7 天的旧文件。有文本/文件内容时行为不变，不会触发图片回退。
+剪贴板粘贴在没有文本/文件内容但包含图片时，会把图片写成 `NSTemporaryDirectory()/omg-paste/omg-paste-<uuid>.png` 并把 shell-escaped 绝对路径作为文本粘贴，便于 Agent（如 Pi）把路径当作图片文件读取；目录强制 mode 0700、PNG 强制 mode 0600，并拒绝 symlink/非目录重定向。该目录在每次写入时只清理超过 7 天的 regular PNG 文件。有文本/文件内容时行为不变，不会触发图片回退。
 
 ## 7. 权限模型
 

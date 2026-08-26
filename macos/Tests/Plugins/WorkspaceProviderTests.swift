@@ -27,13 +27,39 @@ struct WorkspaceProviderTests {
         )
         pasteboard.declareTypes([.png], owner: nil)
         pasteboard.setData(png, forType: .png)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-image-paste-test-\(UUID().uuidString)")
+        let directory = root.appendingPathComponent("omg-paste", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
 
         // No text/file content, so the string path is nil and the image
         // fallback produces a temp file path.
         #expect(pasteboard.getOpinionatedStringContents() == nil)
-        let escaped = try #require(pasteboard.imagePastePath())
+        let escaped = try #require(pasteboard.imagePastePath(directory: directory))
         #expect(escaped.hasSuffix(".png"))
         #expect(FileManager.default.fileExists(atPath: escaped))
+        let directoryAttributes = try FileManager.default.attributesOfItem(
+            atPath: directory.path
+        )
+        let fileAttributes = try FileManager.default.attributesOfItem(
+            atPath: escaped
+        )
+        #expect((directoryAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o700)
+        #expect((fileAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+
+        // A pre-existing symlink must not redirect private image data.
+        try FileManager.default.removeItem(at: directory)
+        let target = root.appendingPathComponent("redirect-target", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: target,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createSymbolicLink(
+            at: directory,
+            withDestinationURL: target
+        )
+        #expect(pasteboard.imagePastePath(directory: directory) == nil)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: target.path).isEmpty)
 
         // Text content takes precedence over the image fallback.
         pasteboard.declareTypes([.string], owner: nil)

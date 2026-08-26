@@ -71,7 +71,7 @@ enum AgentHookInstallationState: Equatable, Sendable {
 
 struct AgentHookInstaller {
     static let marker = "_omg_agent_status"
-    static let hookVersion = 4
+    static let hookVersion = 5
     static let detectorMarkerVersion = 1
     static let didChangeNotification = Notification.Name(
         "com.oh-my-ghostty.agentIntegrationDidChange"

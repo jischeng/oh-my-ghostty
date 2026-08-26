@@ -293,6 +293,20 @@ struct AgentDefinition: Codable, Equatable, Sendable {
     }
 }
 
+enum AgentTitleStatusReconciler {
+    static func nextState(
+        status: AgentDefinition.StatusSpec?,
+        title: String,
+        current: TabActivityState?,
+        typedHookOwnsContext: Bool
+    ) -> TabActivityState? {
+        guard !typedHookOwnsContext, status != nil else { return nil }
+        let detected = AgentScreenStatusDetector.detect(status: status, text: title)
+        if let detected, detected != .idle { return detected }
+        return current == .working ? .idle : nil
+    }
+}
+
 enum AgentScreenStatusDetector {
     static func detect(
         definition: AgentDefinition,

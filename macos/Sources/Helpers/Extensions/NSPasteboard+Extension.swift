@@ -58,7 +58,10 @@ extension NSPasteboard {
     /// image as PNG into a dedicated temporary directory and return the
     /// shell-escaped absolute path so agents can consume it as a file. Returns
     /// nil when there is no usable image. Stored files are pruned after 7 days.
-    func imagePastePath() -> String? {
+    func imagePastePath(
+        directory: URL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-paste", isDirectory: true)
+    ) -> String? {
         guard let image = NSImage(pasteboard: self),
               let tiff = image.tiffRepresentation,
               let rep = NSBitmapImageRep(data: tiff),
@@ -66,12 +69,23 @@ extension NSPasteboard {
             return nil
         }
 
-        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("omg-paste", isDirectory: true)
+        let fileManager = FileManager.default
         do {
-            try FileManager.default.createDirectory(
-                at: directory,
-                withIntermediateDirectories: true
+            if fileManager.fileExists(atPath: directory.path) {
+                let attributes = try fileManager.attributesOfItem(atPath: directory.path)
+                guard attributes[.type] as? FileAttributeType == .typeDirectory else {
+                    return nil
+                }
+            } else {
+                try fileManager.createDirectory(
+                    at: directory,
+                    withIntermediateDirectories: true,
+                    attributes: [.posixPermissions: 0o700]
+                )
+            }
+            try fileManager.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: directory.path
             )
         } catch {
             return nil
@@ -81,9 +95,18 @@ extension NSPasteboard {
 
         let file = directory
             .appendingPathComponent("omg-paste-\(UUID().uuidString).png")
+        guard fileManager.createFile(
+            atPath: file.path,
+            contents: png,
+            attributes: [.posixPermissions: 0o600]
+        ) else { return nil }
         do {
-            try png.write(to: file, options: .atomic)
+            try fileManager.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: file.path
+            )
         } catch {
+            try? fileManager.removeItem(at: file)
             return nil
         }
         return Ghostty.Shell.escape(file.path)
@@ -94,14 +117,18 @@ extension NSPasteboard {
         let cutoff = Date(timeIntervalSinceNow: -7 * 24 * 60 * 60)
         guard let entries = try? FileManager.default.contentsOfDirectory(
             at: directory,
-            includingPropertiesForKeys: [.contentModificationDateKey],
+            includingPropertiesForKeys: [
+                .contentModificationDateKey,
+                .isRegularFileKey,
+            ],
             options: [.skipsHiddenFiles]
         ) else { return }
         for entry in entries {
             guard entry.pathExtension == "png",
                   let values = try? entry.resourceValues(
-                      forKeys: [.contentModificationDateKey]
+                      forKeys: [.contentModificationDateKey, .isRegularFileKey]
                   ),
+                  values.isRegularFile == true,
                   let modified = values.contentModificationDate,
                   modified < cutoff else { continue }
             try? FileManager.default.removeItem(at: entry)

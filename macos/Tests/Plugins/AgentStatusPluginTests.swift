@@ -230,6 +230,34 @@ struct AgentStatusPluginTests {
         ) == .working)
     }
 
+    @Test func clearsOnlyTitleDerivedWorkingWhenTitleSettles() {
+        let codexStatus = SupportedAgent.codex.definition.titleStatus
+        #expect(AgentTitleStatusReconciler.nextState(
+            status: codexStatus,
+            title: "Codex ⠋ active",
+            current: .idle,
+            typedHookOwnsContext: false
+        ) == .working)
+        #expect(AgentTitleStatusReconciler.nextState(
+            status: codexStatus,
+            title: "Codex",
+            current: .working,
+            typedHookOwnsContext: false
+        ) == .idle)
+        #expect(AgentTitleStatusReconciler.nextState(
+            status: codexStatus,
+            title: "Codex",
+            current: .working,
+            typedHookOwnsContext: true
+        ) == nil)
+        #expect(AgentTitleStatusReconciler.nextState(
+            status: SupportedAgent.crush.definition.titleStatus,
+            title: "Ready",
+            current: .working,
+            typedHookOwnsContext: false
+        ) == nil)
+    }
+
     @Test func detectsLocalAgentForegroundCommandsWithoutFalseArguments() {
         for agent in SupportedAgent.allCases {
             let command = agent.definition.command
@@ -684,6 +712,30 @@ struct AgentStatusPluginTests {
         #expect(isDirectory.boolValue)
     }
 
+    @Test func hookCommandFallsBackToControllingTTY() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let installer = AgentHookInstaller(homeURL: home)
+        try installer.install(.codex)
+        let root = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf:
+                home.appendingPathComponent(".codex/hooks.json")
+            )) as? [String: Any]
+        )
+        let hooks = try #require(root["hooks"] as? [String: Any])
+        let starts = try #require(hooks["SessionStart"] as? [[String: Any]])
+        let omg = try #require(starts.first {
+            $0[AgentHookInstaller.marker] as? Int == AgentHookInstaller.hookVersion
+        })
+        let commands = try #require(omg["hooks"] as? [[String: Any]])
+        let command = try #require(commands.first?["command"] as? String)
+        #expect(command.contains(
+            "case \"$omg_tty\" in ''|*[!A-Za-z0-9/._-]*) omg_tty=tty;; esac"
+        ))
+        #expect(command.contains("> \"/dev/$omg_tty\""))
+    }
+
     @Test func oldOwnerVersionRequiresHookCommandUpgrade() throws {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
@@ -700,7 +752,7 @@ struct AgentStatusPluginTests {
             for index in entries.indices
             where entries[index][AgentHookInstaller.marker] as? Int ==
                 AgentHookInstaller.hookVersion {
-                entries[index][AgentHookInstaller.marker] = 3
+                entries[index][AgentHookInstaller.marker] = 4
                 var commands = try #require(
                     entries[index]["hooks"] as? [[String: Any]]
                 )
@@ -709,8 +761,8 @@ struct AgentStatusPluginTests {
                         commands[commandIndex]["command"] as? String
                     )
                     commands[commandIndex]["command"] = command.replacingOccurrences(
-                        of: "_omg_agent_status_v4",
-                        with: "_omg_agent_status_v3"
+                        of: "_omg_agent_status_v5",
+                        with: "_omg_agent_status_v4"
                     )
                 }
                 entries[index]["hooks"] = commands

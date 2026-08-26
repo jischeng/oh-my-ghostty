@@ -150,9 +150,11 @@ Based on Ghostty <GHOSTTY_VERSION>
 Ghostty revision <GHOSTTY_REVISION>
 ```
 
-OMG SemVer controls OMG release/update ordering. A Ghostty synchronization
-updates the separate base fields and increments OMG normally; it never embeds
-the Ghostty version into SemVer precedence.
+OMG SemVer controls OMG release/update ordering. Before 1.0, bug-fix-only
+releases bump PATCH; any new user-visible feature or any Ghostty base/revision
+sync bumps MINOR. Version 1.0 is never automatic and requires an explicit stable
+product/API milestone decision. Ghostty versions remain separate metadata and
+never enter OMG SemVer precedence.
 
 Upstream project:
 

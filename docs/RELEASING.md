@@ -45,13 +45,21 @@ OMG and Ghostty have independent version lifecycles.
 
 ### OMG version
 
-OMG uses SemVer (`MAJOR.MINOR.PATCH`) and controls application/update ordering:
+OMG uses SemVer (`MAJOR.MINOR.PATCH`) and controls application/update ordering.
+Until an explicit 1.0 product decision, releases remain in `0.x.y` and select the
+next version by this mandatory policy:
 
 ```text
-0.1.0 -> 0.1.1     OMG fix
-0.1.1 -> 0.2.0     OMG feature release
-0.x.y -> 1.0.0     stable public API/product milestone
+0.3.0 -> 0.3.1     bug fixes only; Ghostty base unchanged
+0.3.1 -> 0.4.0     any new user-visible feature or capability
+0.3.1 -> 0.4.0     any Ghostty base version/revision update
+0.x.y -> 1.0.0     only an explicit stable product/API milestone decision
 ```
+
+A release containing both fixes and features takes the minor bump. Automation
+must never infer or publish `1.0.0`; reaching 1.0 requires an explicit human
+product decision and release-plan update. "Automatic bump" means applying the
+rules above when preparing a requested release, not publishing without approval.
 
 The tag and `CFBundleShortVersionString` contain only this value:
 
@@ -71,12 +79,14 @@ GhosttyBaseVersion  = upstream release or development version
 GhosttyBaseRevision = exact full upstream commit
 ```
 
-A normal OMG update increments only OMG when the base is unchanged. A Ghostty
-sync is still a normal OMG release:
+A normal OMG update increments only OMG when the base is unchanged. Any change
+to `GhosttyBaseVersion` or `GhosttyBaseRevision` requires the next OMG **minor**
+release while OMG remains pre-1.0, even if the sync is itself only upstream bug
+fixes:
 
 ```text
-OMG 0.1.2 · Ghostty 1.x.x
-OMG 0.1.3 · Ghostty 1.x.y   # after syncing upstream
+OMG 0.3.1 · Ghostty 1.x.x
+OMG 0.4.0 · Ghostty 1.x.y   # after any upstream base/revision sync
 ```
 
 The Ghostty change never resets or replaces OMG SemVer. Release titles use:
@@ -92,10 +102,13 @@ Before release, update and cross-check:
 1. Main app target `MARKETING_VERSION` in
    `macos/Ghostty.xcodeproj/project.pbxproj` for Debug, Release, and
    ReleaseLocal.
-2. `OMGVersion`, `GhosttyBaseVersion`, and `GhosttyBaseRevision` in
+2. Main app target `CURRENT_PROJECT_VERSION` (Sparkle/CFBundleVersion) in those
+   same three configurations. It is a monotonically increasing integer for
+   every published OMG release and never resets on minor bumps.
+3. `OMGVersion`, `GhosttyBaseVersion`, and `GhosttyBaseRevision` in
    `macos/Ghostty-Info.plist`.
-3. Ghostty's source version in `build.zig.zon`.
-4. The actual base revision from `git rev-parse upstream/main` (or the selected
+4. Ghostty's source version in `build.zig.zon`.
+5. The actual base revision from `git rev-parse upstream/main` (or the selected
    upstream release commit).
 
 The Zig `-Dversion-string` remains the Ghostty core version. Never pass the OMG
@@ -106,7 +119,7 @@ Verification:
 ```bash
 xcodebuild -project macos/Ghostty.xcodeproj \
   -target Ghostty -configuration Release -showBuildSettings \
-  | grep MARKETING_VERSION
+  | grep -E 'MARKETING_VERSION|CURRENT_PROJECT_VERSION'
 
 head -n 6 build.zig.zon
 git rev-parse upstream/main
@@ -433,26 +446,47 @@ gh release create "v$OMG_VERSION" \
 gh release upload "v$OMG_VERSION" \
   -R jischeng/oh-my-ghostty \
   "$OMG_BUILD_ROOT"/artifacts/*.dmg \
-  "$OMG_BUILD_ROOT/artifacts/SHA256SUMS.txt"
+  "$OMG_BUILD_ROOT/artifacts/SHA256SUMS.txt" \
+  "$OMG_BUILD_ROOT/artifacts/appcast.xml"
 ```
 
 Release notes must include highlights, OMG version, Ghostty version, full
 Ghostty revision, architecture test evidence, and signing/notarization status.
 
-## 9. Updater status
+## 9. Updater and Sparkle signing
 
 OMG's Sparkle delegate points only to the OMG-owned GitHub Release appcast URL.
 It must never use Ghostty's `1.x` appcast because OMG has independent SemVer.
 
-OMG does not yet publish a signed `appcast.xml`. Therefore automatic update
-checks are not a release success criterion today. Do not enable automatic
-checks until all of the following exist:
+OMG uses a dedicated EdDSA key stored in the login Keychain under Sparkle
+account `com.jischeng.omg`. The public key is the `SUPublicEDKey` value in
+`macos/Ghostty-Info.plist`; never commit or print the private key. Generate the
+signed appcast from the verified architecture DMGs with Sparkle's bundled tool:
 
-- a dedicated OMG Sparkle private/public key pair;
-- a release job that signs enclosures and publishes `appcast.xml` as a GitHub
-  Release asset;
-- update tests covering version ordering and signature validation.
+```bash
+generate_appcast \
+  --account com.jischeng.omg \
+  --download-url-prefix "https://github.com/jischeng/oh-my-ghostty/releases/download/v$OMG_VERSION/" \
+  --embed-release-notes \
+  "$OMG_BUILD_ROOT/artifacts"
+```
 
+Before future generations, copy the currently published `appcast.xml` into the
+artifacts directory so Sparkle preserves recent entries. Verify that every new
+enclosure has `sparkle:edSignature`, architecture/system requirements, the
+expected `sparkle:shortVersionString`, and a strictly larger numeric
+`sparkle:version` (`CFBundleVersion`). Upload the generated `appcast.xml` as a
+GitHub Release asset alongside the signed enclosures.
+
+Migration limitation: OMG 0.3.0 inherited Ghostty's upstream public key, whose
+private key is not owned by OMG. It cannot securely validate an OMG-signed
+0.3.1 enclosure. Version 0.3.1 is therefore the one-time manual bridge release;
+once manually installed, its new OMG public key supports signed update checks
+to later releases. Do not publish an unsigned or mismatched appcast to pretend
+0.3.0 can update.
+
+`SUEnableAutomaticChecks` remains false; users can invoke Check for Updates
+manually. Enabling automatic periodic checks is a separate product decision.
 The inherited `dist/macos/update_appcast_tag.py` targets Ghostty infrastructure
 and artifact names; it is not an OMG publishing script.
 

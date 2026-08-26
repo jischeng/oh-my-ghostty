@@ -27,4 +27,4 @@ OMG 0.3.1 introduces an OMG-owned Sparkle EdDSA public key and a signed GitHub R
 
 ## Distribution status
 
-The attached architecture-specific DMGs are locally ad-hoc signed and are not Apple-notarized. Sparkle enclosure integrity uses the dedicated OMG EdDSA signature; this does not replace Apple Developer ID signing or notarization.
+The attached arm64/x86_64 manual-download DMGs and universal Sparkle updater DMG are locally ad-hoc signed and are not Apple-notarized. Sparkle enclosure integrity uses the dedicated OMG EdDSA signature; this does not replace Apple Developer ID signing or notarization.

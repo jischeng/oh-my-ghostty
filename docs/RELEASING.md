@@ -34,7 +34,7 @@ The checked-in scripts that are authoritative for OMG are:
 
 - `macos/build.nu` — Xcode development/test wrapper;
 - `dist/macos/sign_omg_app.sh` — consistent nested code signing;
-- `dist/macos/package_omg_dmg.sh` — single-architecture DMG packaging.
+- `dist/macos/package_omg_dmg.sh` — architecture-specific and universal DMG packaging.
 
 A future OMG GitHub Actions release workflow must implement this document; it
 must not enable the inherited Ghostty publishing jobs.
@@ -248,11 +248,26 @@ for arch in arm64 x86_64; do
 done
 ```
 
+Build one additional universal App for the single Sparkle enclosure:
+
+```bash
+xcodebuild \
+  -project macos/Ghostty.xcodeproj \
+  -target Ghostty \
+  -configuration Release \
+  ARCHS="arm64 x86_64" \
+  ONLY_ACTIVE_ARCH=NO \
+  SYMROOT="$OMG_BUILD_ROOT/universal" \
+  OBJROOT="$OMG_BUILD_ROOT/obj-universal" \
+  build
+```
+
 Outputs:
 
 ```text
 $OMG_BUILD_ROOT/arm64/Release/OMG.app
 $OMG_BUILD_ROOT/x86_64/Release/OMG.app
+$OMG_BUILD_ROOT/universal/Release/OMG.app
 ```
 
 Verify architecture and metadata:
@@ -268,9 +283,11 @@ for arch in arm64 x86_64; do
 done
 ```
 
-Each binary must contain exactly its named architecture. An `arm64` archive in
-an x86_64 link produces ignored-object warnings followed by undefined Ghostty
-symbols; rebuild the universal XCFramework instead of suppressing the warning.
+Each architecture-specific binary must contain exactly its named architecture;
+the universal updater binary must contain both `arm64` and `x86_64`. An `arm64`
+archive in an x86_64 link produces ignored-object warnings followed by undefined
+Ghostty symbols; rebuild the universal XCFramework instead of suppressing the
+warning.
 
 ## 3. Validation gate
 
@@ -361,13 +378,12 @@ log with `xcrun notarytool log` and fix signing/entitlements first.
 
 ```bash
 mkdir -p "$OMG_BUILD_ROOT/artifacts"
-for arch in arm64 x86_64; do
+for arch in arm64 x86_64 universal; do
   dist/macos/package_omg_dmg.sh \
     "$OMG_VERSION" \
     "$arch" \
     "$OMG_BUILD_ROOT/$arch/Release/OMG.app" \
     "$OMG_BUILD_ROOT/artifacts"
-
 done
 
 for dmg in "$OMG_BUILD_ROOT"/artifacts/*.dmg; do
@@ -381,13 +397,16 @@ done
 (cd "$OMG_BUILD_ROOT/artifacts" && shasum -a 256 *.dmg > SHA256SUMS.txt)
 ```
 
-The DMG script verifies bundle ID, OMG version, signature, and one architecture;
-it creates an `Applications` symlink and names artifacts:
+The DMG script verifies bundle ID, OMG version, signature, and either one named
+architecture or the exact universal pair; it creates an `Applications` symlink
+and names artifacts:
 
 ```text
 OMG-<version>-macos-arm64.dmg
 OMG-<version>-macos-x86_64.dmg
+OMG-<version>-macos-universal.dmg
 SHA256SUMS.txt
+appcast.xml
 ```
 
 Mount each DMG read-only and launch the contained app before publishing. Test

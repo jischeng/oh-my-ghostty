@@ -1,5 +1,5 @@
 #!/bin/bash
-# Package one verified single-architecture OMG.app as a release DMG.
+# Package one verified architecture-specific or universal OMG.app as a release DMG.
 set -euo pipefail
 
 if [[ $# -ne 4 ]]; then
@@ -13,7 +13,7 @@ app_path=$3
 output_dir=$4
 
 case "$arch" in
-  arm64|x86_64) ;;
+  arm64|x86_64|universal) ;;
   *) echo "unsupported architecture: $arch" >&2; exit 64 ;;
 esac
 
@@ -22,7 +22,16 @@ if [[ ! -x "$binary" ]]; then
   echo "missing OMG executable: $binary" >&2
   exit 1
 fi
-if [[ "$(lipo -archs "$binary")" != "$arch" ]]; then
+actual_archs=$(lipo -archs "$binary")
+if [[ "$arch" == universal ]]; then
+  read -r -a arch_list <<< "$actual_archs"
+  if [[ ${#arch_list[@]} -ne 2 ]] ||
+     [[ " ${arch_list[*]} " != *" arm64 "* ]] ||
+     [[ " ${arch_list[*]} " != *" x86_64 "* ]]; then
+    echo "OMG.app is not an arm64+x86_64 universal build: $actual_archs" >&2
+    exit 1
+  fi
+elif [[ "$actual_archs" != "$arch" ]]; then
   echo "OMG.app is not a single-architecture $arch build" >&2
   exit 1
 fi

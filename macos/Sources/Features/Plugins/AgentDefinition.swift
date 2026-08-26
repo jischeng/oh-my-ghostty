@@ -164,7 +164,15 @@ struct AgentResumeDescriptor: Codable, Equatable, Sendable {
             return nil
         }
         let invocation = argv.map(Self.shellQuote).joined(separator: " ")
-        return "\(invocation); exec \"${SHELL:-/bin/zsh}\" -l"
+        // Ghostty executes surface commands through /bin/sh, whose PATH does
+        // not include shell-managed tools (Homebrew, mise, npm, etc.). Run the
+        // allowlisted Agent invocation inside the user's login+interactive
+        // shell so its normal PATH is available. When the Agent exits, the
+        // outer /bin/sh replaces itself with a login shell so the pane remains
+        // usable instead of showing a child-exited message.
+        let shell = "\"${SHELL:-/bin/zsh}\""
+        return "\(shell) -l -i -c \(Self.shellQuote(invocation)); " +
+            "exec \(shell) -l"
     }
 
     private static func shellQuote(_ value: String) -> String {

@@ -346,8 +346,12 @@ mechanisms; they cannot inject Swift, shell, or arbitrary remote commands.
 `AgentResumeDescriptor` persists only a version, allowlisted agent, bounded ASCII
 conversation ID, local/remote scope, cwd, and validated `SSHReplayDescriptor`.
 Terminal restoration v9 stores this descriptor on its owning Surface. Local
-restore builds only `codex resume <id>`, `claude --resume <id>`, or
-`pi --session-id <id>` and falls back to the login shell when the Agent exits.
+restore builds only allowlisted resume argv such as `codex resume <id>`,
+`claude --resume <id>`, or `pi --session-id <id>`. Ghostty's outer `/bin/sh`
+does not inherit shell-managed PATH entries, so the argv is executed by the
+user's login+interactive shell; this resolves Homebrew/mise/npm-installed Agent
+binaries without storing arbitrary PATH or command data. The pane falls back to
+the login shell when the Agent exits.
 Remote restore replays original OpenSSH argv and passes only typed
 `--remote-agent` / `--remote-agent-session` options to `+ssh`; the detected
 Fish/bash/zsh shell restores cwd, emits a ready context, runs the allowlisted

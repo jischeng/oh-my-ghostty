@@ -1025,11 +1025,24 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         guard tabControllers.contains(where: { $0 === controller }),
               let targetWindow = controller.window else { return }
         let tabGroup = window?.tabGroup
-        tabGroup?.selectedWindow = targetWindow
+        if let tabGroup {
+            Self.selectTabWindowImmediately(targetWindow, in: tabGroup)
+        }
         controller.markTabActivated()
         targetWindow.makeKeyAndOrderFront(nil)
         Self.refreshTabs(in: tabGroup)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private static func selectTabWindowImmediately(
+        _ targetWindow: NSWindow,
+        in tabGroup: NSWindowTabGroup
+    ) {
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            context.allowsImplicitAnimation = false
+            tabGroup.selectedWindow = targetWindow
+        }
     }
 
     func markTabActivated() {
@@ -2708,7 +2721,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         guard finalIndex >= 0 else { return }
         let targetWindow = tabbedWindows[finalIndex]
-        tabGroup.selectedWindow = targetWindow
+        Self.selectTabWindowImmediately(targetWindow, in: tabGroup)
         (targetWindow.windowController as? TerminalController)?.markTabActivated()
         targetWindow.makeKeyAndOrderFront(nil)
         Self.refreshTabs(in: tabGroup)

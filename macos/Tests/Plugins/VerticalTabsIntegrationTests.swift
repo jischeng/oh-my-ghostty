@@ -532,6 +532,21 @@ struct VerticalTabsIntegrationTests {
         #expect(controllers.map(surfaceSize) == initialSurfaceSizes)
 
         let firstSurface = try #require(controllers[0].focusedSurface?.surfaceModel)
+        let actionStart = clock.now
+        for _ in 0..<10 {
+            for index in switchOrder {
+                #expect(firstSurface.perform(action: "goto_tab:\(index + 1)"))
+                for _ in 0..<50
+                where tabGroup.selectedWindow !== controllers[index].window {
+                    try await Task.sleep(for: .milliseconds(1))
+                }
+                #expect(tabGroup.selectedWindow === controllers[index].window)
+            }
+        }
+        let actionDuration = actionStart.duration(to: clock.now)
+        print("Goto-tab actions: 60 switches in \(actionDuration)")
+        #expect(actionDuration < .seconds(2))
+
         for index in 1...8 {
             let configured = appDelegate.ghostty.config.keyboardShortcut(for: "goto_tab:\(index)")
             #expect(controllers[index - 1].tabShortcutLabel(for: index) == configured.map { "\($0)" })

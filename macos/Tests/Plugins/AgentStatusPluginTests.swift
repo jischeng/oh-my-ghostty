@@ -99,7 +99,10 @@ struct AgentStatusPluginTests {
             executablePath: "/Applications/OMG.app/Contents/MacOS/omg",
             verifyLocalStore: false
         ))
-        #expect(command.contains("'codex' 'resume' '019f-test_session'"))
+        for token in ["codex", "resume", "019f-test_session"] {
+            #expect(command.contains(token))
+        }
+        #expect(command.contains("\"${SHELL:-/bin/zsh}\" -l -i -c"))
         #expect(command.contains("exec \"${SHELL:-/bin/zsh}\" -l"))
         let remote = AgentResumeDescriptor(
             agent: .pi,
@@ -126,16 +129,16 @@ struct AgentStatusPluginTests {
             AgentResumeDescriptor.self,
             from: encoded
         ) == remote)
-        let expectedResumeFragments: [SupportedAgent: String] = [
-            .claude: "'claude' '--resume' '019f-test_session'",
-            .qoder: "'qodercli' '--resume' '019f-test_session'",
-            .reasonix: "'reasonix' '--resume' '019f-test_session'",
-            .omp: "'omp' '--resume=019f-test_session'",
-            .opencode: "'opencode' '--session' '019f-test_session'",
-            .grok: "'grok' '--resume' '019f-test_session'",
-            .qwen: "'qwen' '--resume' '019f-test_session'",
+        let expectedResumeTokens: [SupportedAgent: [String]] = [
+            .claude: ["claude", "--resume", "019f-test_session"],
+            .qoder: ["qodercli", "--resume", "019f-test_session"],
+            .reasonix: ["reasonix", "--resume", "019f-test_session"],
+            .omp: ["omp", "--resume=019f-test_session"],
+            .opencode: ["opencode", "--session", "019f-test_session"],
+            .grok: ["grok", "--resume", "019f-test_session"],
+            .qwen: ["qwen", "--resume", "019f-test_session"],
         ]
-        for (agent, fragment) in expectedResumeFragments {
+        for (agent, tokens) in expectedResumeTokens {
             let descriptor = AgentResumeDescriptor(
                 agent: agent,
                 conversationID: conversation,
@@ -146,10 +149,81 @@ struct AgentStatusPluginTests {
                 executablePath: "/Applications/OMG.app/Contents/MacOS/omg",
                 verifyLocalStore: false
             ))
-            #expect(command.contains(fragment))
+            for token in tokens {
+                #expect(command.contains(token))
+            }
         }
         #expect(AgentConversationID("bad session") == nil)
         #expect(AgentConversationID("../escape") == nil)
+    }
+
+    @Test func localRestoreLoadsAgentFromLoginShellPATH() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-agent-restore-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: true
+        )
+        let shell = root.appendingPathComponent("test-shell")
+        let pi = root.appendingPathComponent("pi")
+        let output = root.appendingPathComponent("pi-args.txt")
+        try """
+        #!/bin/sh
+        PATH="$OMG_TEST_BIN:$PATH"
+        export PATH
+        command_string=
+        while [ "$#" -gt 0 ]; do
+          if [ "$1" = "-c" ]; then
+            shift
+            command_string=$1
+            break
+          fi
+          shift
+        done
+        if [ -n "$command_string" ]; then
+          exec /bin/sh -c "$command_string"
+        fi
+        exit 0
+        """.write(to: shell, atomically: true, encoding: .utf8)
+        try """
+        #!/bin/sh
+        printf '%s\\n' "$*" > "$OMG_TEST_OUTPUT"
+        exit 0
+        """.write(to: pi, atomically: true, encoding: .utf8)
+        for url in [shell, pi] {
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: url.path
+            )
+        }
+
+        let conversation = try #require(AgentConversationID("019f-path-test"))
+        let descriptor = AgentResumeDescriptor(
+            agent: .pi,
+            conversationID: conversation,
+            scope: .local,
+            workingDirectory: root.path
+        )
+        let command = try #require(descriptor.restorationCommand(
+            executablePath: "/Applications/OMG.app/Contents/MacOS/omg",
+            verifyLocalStore: false
+        ))
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", command]
+        process.environment = [
+            "SHELL": shell.path,
+            "PATH": "/usr/bin:/bin",
+            "OMG_TEST_BIN": root.path,
+            "OMG_TEST_OUTPUT": output.path,
+        ]
+        try process.run()
+        process.waitUntilExit()
+        #expect(process.terminationStatus == 0)
+        #expect(try String(contentsOf: output, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines) ==
+            "--session-id 019f-path-test")
     }
 
     @Test func extractsValidatedConversationIdentityFromContextSignal() throws {

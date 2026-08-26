@@ -308,6 +308,13 @@ session. These events can change only host-owned tab presentation; they do not
 authorize terminal input, filesystem, network, or plugin execution. A process
 can spoof its own tab badge, but cannot use this channel to gain capabilities.
 
+Agents that declare `titleStatus` patterns also derive activity from the
+terminal title while no typed hook event owns the context. When the title no
+longer matches a working pattern the host downgrades that title-derived
+`working` state to `idle`, so the ring clears once the agent settles instead of
+spinning forever. Agents without `titleStatus` (including the screen-detected
+Antigravity/Crush/Hermes) are unaffected by this title path.
+
 Because the event is written to the owning TTY, the same hook works through
 OpenSSH. Shell hooks resolve the target TTY from the parent process with
 `ps -o tty=` and keep the process-group ID for the instance context; when that

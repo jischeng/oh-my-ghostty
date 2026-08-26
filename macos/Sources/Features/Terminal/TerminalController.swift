@@ -658,10 +658,24 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         guard let descriptor = agentResumeDescriptors[surfaceID],
               let contextID = agentResumeContextIDs[surfaceID],
               typedAgentHookContextIDs[surfaceID] != contextID,
-              let state = AgentScreenStatusDetector.detect(
-                  status: descriptor.agent.definition.titleStatus,
-                  text: title
-              ), state != .idle else { return }
+              descriptor.agent.definition.titleStatus != nil else { return }
+        let detected = AgentScreenStatusDetector.detect(
+            status: descriptor.agent.definition.titleStatus,
+            text: title
+        )
+        let state: TabActivityState
+        if let detected, detected != .idle {
+            state = detected
+        } else if agentActivities[surfaceID]?.state == .working {
+            // The title no longer indicates activity. Typed hook events have not
+            // taken over this context, and this agent has title patterns, so the
+            // stuck working state could only have come from title detection.
+            // Downgrade it so the ring clears once the agent settles instead of
+            // spinning forever.
+            state = .idle
+        } else {
+            return
+        }
         updateAgentActivity(.init(
             action: .start,
             id: contextID,

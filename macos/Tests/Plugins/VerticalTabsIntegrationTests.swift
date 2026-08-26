@@ -358,6 +358,8 @@ struct VerticalTabsIntegrationTests {
         )?.conversationID?.rawValue == "019f-rotated")
 
         let completionInputs = try terminalCompletionInputs()
+        try terminalScrollInput()(inspectorSurface)
+        #expect(eighth.agentActivity(for: inspectorSurface)?.state == .done)
         for input in completionInputs {
             input(inspectorSurface)
             #expect(eighth.agentActivity(for: inspectorSurface)?.state == .idle)
@@ -370,16 +372,29 @@ struct VerticalTabsIntegrationTests {
             #expect(eighth.agentActivity(for: inspectorSurface)?.state == .done)
         }
         eighth.markTabActivated()
-        #expect(eighth.agentActivity(for: inspectorSurface)?.state == .idle)
+        #expect(eighth.agentActivity(for: inspectorSurface)?.state == .done)
         #expect(eighth.agentActivity(for: inspectorSurface)?.icon?.name == "AgentOpenAI")
+
+        inspectorSurface.contextSignal = .init(
+            action: .start,
+            id: "omg-agent-codex",
+            metadata: "type=app;omg_agent=codex;omg_scope=local;" +
+                "omg_state=working;omg_conversation=019f-rotated"
+        )
+        #expect(eighth.agentActivity(for: inspectorSurface)?.state == .working)
         inspectorSurface.contextSignal = .init(
             action: .end,
             id: "omg-agent-codex",
-            metadata: "type=app;omg_agent=codex"
+            metadata: "type=app;omg_agent=codex;omg_scope=local"
         )
-        for _ in 0..<20 where eighth.agentActivity(for: inspectorSurface) != nil {
+        for _ in 0..<20
+        where eighth.agentActivity(for: inspectorSurface)?.state != .error {
             try await Task.sleep(for: .milliseconds(10))
         }
+        #expect(eighth.agentActivity(for: inspectorSurface)?.state == .error)
+        eighth.markTabActivated()
+        #expect(eighth.agentActivity(for: inspectorSurface)?.state == .error)
+        completionInputs[0](inspectorSurface)
         #expect(eighth.agentActivity(for: inspectorSurface) == nil)
         #expect(eighth.agentResumeDescriptor(for: inspectorSurface) == nil)
 
@@ -990,14 +1005,6 @@ struct VerticalTabsIntegrationTests {
             clickCount: 1,
             pressure: 1
         ))
-        let scroll = try #require(CGEvent(
-            scrollWheelEvent2Source: nil,
-            units: .pixel,
-            wheelCount: 1,
-            wheel1: 1,
-            wheel2: 0,
-            wheel3: 0
-        ).flatMap(NSEvent.init(cgEvent:)))
         let key = try #require(NSEvent.keyEvent(
             with: .keyDown,
             location: .zero,
@@ -1012,9 +1019,20 @@ struct VerticalTabsIntegrationTests {
         ))
         return [
             { $0.mouseDown(with: mouse) },
-            { $0.scrollWheel(with: scroll) },
             { $0.keyDown(with: key) },
         ]
+    }
+
+    private func terminalScrollInput() throws -> (Ghostty.SurfaceView) -> Void {
+        let scroll = try #require(CGEvent(
+            scrollWheelEvent2Source: nil,
+            units: .pixel,
+            wheelCount: 1,
+            wheel1: 1,
+            wheel2: 0,
+            wheel3: 0
+        ).flatMap(NSEvent.init(cgEvent:)))
+        return { $0.scrollWheel(with: scroll) }
     }
 
     private func menuItem(withAction action: Selector, in menu: NSMenu?) -> NSMenuItem? {

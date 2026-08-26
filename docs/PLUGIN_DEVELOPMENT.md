@@ -304,9 +304,14 @@ while its process group exists and clears it when that group exits. In SSH, no
 local process-name fallback is attempted; the next authenticated remote
 Fish/bash/zsh prompt clears orphaned remote agent state.
 Unique instance IDs prevent an old `end` from clearing a newer same-agent
-session. These events can change only host-owned tab presentation; they do not
-authorize terminal input, filesystem, network, or plugin execution. A process
-can spoof its own tab badge, but cannot use this channel to gain capabilities.
+session. An `end` or failed local liveness check while the current state is
+`working`/`needsAttention` becomes a terminal `error` rather than silently
+clearing; normal completion remains `done`. Tab selection and pane focus do not
+acknowledge either state. Only mouse click or keyboard input delivered to the
+owning focused terminal clears `done`/`error`. These events can change
+only host-owned tab presentation; they do not authorize terminal input,
+filesystem, network, or plugin execution. A process can spoof its own tab badge,
+but cannot use this channel to gain capabilities.
 
 Agents that declare `titleStatus` patterns also derive activity from the
 terminal title while no typed hook event owns the context. When the title no

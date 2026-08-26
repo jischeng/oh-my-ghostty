@@ -902,7 +902,7 @@ extension Ghostty {
 
         private func acknowledgeAgentCompletionFromUserInput() {
             (window?.windowController as? TerminalController)?
-                .acknowledgeCompletedAgentActivityFromUserInput(on: self)
+                .acknowledgeTerminalAgentStateFromUserInput(on: self)
         }
 
         override func mouseDown(with event: NSEvent) {
@@ -1067,7 +1067,6 @@ extension Ghostty {
         }
 
         override func scrollWheel(with event: NSEvent) {
-            acknowledgeAgentCompletionFromUserInput()
             guard let surfaceModel else { return }
 
             var x = event.scrollingDeltaX

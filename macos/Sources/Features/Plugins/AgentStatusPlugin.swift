@@ -1277,6 +1277,7 @@ struct AgentContextSignalReducer: Sendable {
         let scope: Scope
         let processGroupID: Int?
         let updatedAt: Date
+        let terminated: Bool
     }
 
     private static let startupValidationGrace: TimeInterval = 4
@@ -1319,7 +1320,7 @@ struct AgentContextSignalReducer: Sendable {
         guard signal.id.hasPrefix("omg-agent-") else { return nil }
         switch signal.action {
         case .end:
-            return remove(signal.id)
+            return consumeEnd(signal.id)
 
         case .start:
             let metadata = Self.metadata(signal.metadata)
@@ -1350,7 +1351,8 @@ struct AgentContextSignalReducer: Sendable {
                 activity: activity,
                 scope: scope,
                 processGroupID: identity.processGroupID,
-                updatedAt: Date()
+                updatedAt: Date(),
+                terminated: false
             )
             order.removeAll { $0 == signal.id }
             order.append(signal.id)
@@ -1373,6 +1375,14 @@ struct AgentContextSignalReducer: Sendable {
             }
             guard now.timeIntervalSince(current.updatedAt) >=
                     Self.startupValidationGrace else { return nil }
+            if current.activity.state == .working ||
+                current.activity.state == .needsAttention {
+                return markUnexpectedInterruption(
+                    currentID,
+                    record: current,
+                    now: now
+                )
+            }
             activities.removeValue(forKey: currentID)
             order.removeLast()
             removedCurrent = true
@@ -1381,10 +1391,16 @@ struct AgentContextSignalReducer: Sendable {
         return currentRecord.map { .set($0.activity) } ?? .clear
     }
 
-    mutating func acknowledgeCompletion() -> AgentActivityUpdate? {
+    mutating func acknowledgeTerminalState() -> AgentActivityUpdate? {
         guard let currentID = order.last,
               let current = activities[currentID],
-              current.activity.state == .done else { return nil }
+              current.activity.state == .done ||
+                current.activity.state == .error else { return nil }
+        if current.terminated {
+            activities.removeValue(forKey: currentID)
+            order.removeLast()
+            return currentRecord.map { .set($0.activity) } ?? .clear
+        }
         let idle = TabActivity(
             source: current.activity.source,
             state: .idle,
@@ -1398,7 +1414,8 @@ struct AgentContextSignalReducer: Sendable {
             activity: idle,
             scope: current.scope,
             processGroupID: current.processGroupID,
-            updatedAt: current.updatedAt
+            updatedAt: current.updatedAt,
+            terminated: false
         )
         return .set(idle)
     }
@@ -1418,6 +1435,59 @@ struct AgentContextSignalReducer: Sendable {
 
     private var currentRecord: Record? {
         order.last.flatMap { activities[$0] }
+    }
+
+    private mutating func consumeEnd(_ id: String) -> AgentActivityUpdate? {
+        guard let current = activities[id] else { return nil }
+        guard order.last == id else {
+            activities.removeValue(forKey: id)
+            order.removeAll { $0 == id }
+            return nil
+        }
+        if current.activity.state == .working ||
+            current.activity.state == .needsAttention {
+            return markUnexpectedInterruption(id, record: current)
+        }
+        if current.activity.state == .done {
+            if current.terminated { return nil }
+            activities[id] = Record(
+                activity: current.activity,
+                scope: current.scope,
+                processGroupID: nil,
+                updatedAt: Date(),
+                terminated: true
+            )
+            return .set(current.activity)
+        }
+        if current.activity.state == .error,
+           current.terminated {
+            return nil
+        }
+        return remove(id)
+    }
+
+    private mutating func markUnexpectedInterruption(
+        _ id: String,
+        record: Record,
+        now: Date = Date()
+    ) -> AgentActivityUpdate {
+        let error = TabActivity(
+            source: record.activity.source,
+            state: .error,
+            label: record.activity.label,
+            message: "Agent process exited unexpectedly.",
+            detail: nil,
+            progress: nil,
+            icon: record.activity.icon
+        )
+        activities[id] = Record(
+            activity: error,
+            scope: record.scope,
+            processGroupID: nil,
+            updatedAt: now,
+            terminated: true
+        )
+        return .set(error)
     }
 
     private mutating func remove(_ id: String) -> AgentActivityUpdate? {

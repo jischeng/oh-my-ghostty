@@ -1289,8 +1289,15 @@ private struct VerticalTabRow: View {
             SupportedAgent(rawValue: $0.source) == nil ? $0 : nil
         }
         let statusActivity = controller.preferredAgentActivity() ?? pluginActivity
-        HStack(spacing: 4) {
+        ZStack {
             Button(action: select) {
+                Color.clear
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            HStack(spacing: 4) {
                 HStack(spacing: GhosttyTabStyle.contentSpacing) {
                     AgentTabIconView(
                         icon: presentation.icon,
@@ -1308,35 +1315,39 @@ private struct VerticalTabRow: View {
 
                     Spacer(minLength: 4)
                 }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+                .allowsHitTesting(false)
 
-            if let statusActivity,
-               statusActivity.state != .idle,
-               !(SupportedAgent(rawValue: statusActivity.source) != nil &&
-                    statusActivity.state == .working) {
-                TabActivityIndicator(activity: statusActivity)
-            }
+                if let statusActivity,
+                   statusActivity.state != .idle,
+                   !(SupportedAgent(rawValue: statusActivity.source) != nil &&
+                        statusActivity.state == .working) {
+                    TabActivityIndicator(activity: statusActivity)
+                        .allowsHitTesting(false)
+                }
 
-            if presentation.hovered && canClose {
-                SidebarIconButton(
-                    systemName: "xmark",
-                    help: "Close Tab",
-                    action: close
-                )
-                .scaleEffect(0.8)
-            } else if let shortcut = presentation.shortcut, !shortcut.isEmpty {
-                Text(shortcut)
-                    .font(.system(size: GhosttyTabStyle.shortcutFontSize))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 28, alignment: .trailing)
-            } else {
-                Color.clear.frame(width: 28, height: 1)
+                if presentation.hovered && canClose {
+                    SidebarIconButton(
+                        systemName: "xmark",
+                        help: "Close Tab",
+                        action: close
+                    )
+                    .scaleEffect(0.8)
+                } else if let shortcut = presentation.shortcut, !shortcut.isEmpty {
+                    Text(shortcut)
+                        .font(.system(size: GhosttyTabStyle.shortcutFontSize))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, alignment: .trailing)
+                        .allowsHitTesting(false)
+                } else {
+                    Color.clear
+                        .frame(width: 28, height: 1)
+                        .allowsHitTesting(false)
+                }
             }
+            .padding(.horizontal, GhosttyTabStyle.horizontalPadding)
         }
-        .padding(.horizontal, GhosttyTabStyle.horizontalPadding)
         .frame(height: OhMyGhosttySettings.shared.tabRowDensity.rowHeight)
+        .contentShape(Rectangle())
         .background(
             RoundedRectangle(cornerRadius: GhosttyTabStyle.cornerRadius)
                 .fill(Color.primary.opacity(GhosttyTabStyle.backgroundOpacity(

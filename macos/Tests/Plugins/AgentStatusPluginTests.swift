@@ -37,13 +37,17 @@ struct AgentStatusPluginTests {
             #expect(waitingActivity.state == .needsAttention)
             #expect(waitingActivity.attentionKind == .permission)
 
-            let clearUpdate = reducer.consume(.init(
+            let endUpdate = reducer.consume(.init(
                 action: .end,
                 id: "omg-agent-\(agent.rawValue)",
                 metadata: "type=app;omg_agent=\(agent.rawValue)"
             ))
-            let cleared = try #require(clearUpdate)
-            #expect(cleared == .clear)
+            guard case .set(let interrupted) = endUpdate else {
+                Issue.record("Expected interruption error for \(agent.rawValue)")
+                continue
+            }
+            #expect(interrupted.state == .error)
+            #expect(reducer.acknowledgeTerminalState() == .clear)
         }
     }
 
@@ -364,7 +368,7 @@ struct AgentStatusPluginTests {
         #expect(reducer.reconcileLocalForegroundProcess(200) == nil)
     }
 
-    @Test func localForegroundExitHonorsStartupGraceThenClears() throws {
+    @Test func localForegroundExitHonorsStartupGraceThenReportsError() throws {
         var reducer = AgentContextSignalReducer()
         _ = reducer.consume(signal(
             agent: .pi,
@@ -379,25 +383,81 @@ struct AgentStatusPluginTests {
             processGroupIsAlive: true,
             now: Date().addingTimeInterval(10)
         ) == nil)
-        #expect(reducer.reconcileLocalForegroundProcess(
+        guard case .set(let error) = reducer.reconcileLocalForegroundProcess(
             301,
             processGroupIsAlive: false,
             now: Date().addingTimeInterval(10)
-        ) == .clear)
+        ) else {
+            Issue.record("Expected an interruption error")
+            return
+        }
+        #expect(error.state == .error)
+        #expect(error.message == "Agent process exited unexpectedly.")
         #expect(!reducer.requiresForegroundValidation)
+        #expect(reducer.acknowledgeTerminalState() == .clear)
+    }
+
+    @Test func unexpectedHookEndReportsErrorUntilAcknowledged() throws {
+        var reducer = AgentContextSignalReducer()
+        _ = reducer.consume(signal(
+            agent: .pi,
+            state: "working",
+            instance: 302,
+            scope: "remote"
+        ))
+        guard case .set(let error) = reducer.consume(.init(
+            action: .end,
+            id: "omg-agent-pi-302",
+            metadata: "type=app;omg_agent=pi;omg_scope=remote"
+        )) else {
+            Issue.record("Expected remote interruption error")
+            return
+        }
+        #expect(error.state == .error)
+        #expect(reducer.consume(.init(
+            action: .end,
+            id: "omg-agent-pi-302",
+            metadata: "type=app;omg_agent=pi;omg_scope=remote"
+        )) == nil)
+        #expect(reducer.acknowledgeTerminalState() == .clear)
+    }
+
+    @Test func completedAgentEndStaysDoneUntilInputAcknowledgement() throws {
+        var reducer = AgentContextSignalReducer()
+        _ = reducer.consume(signal(
+            agent: .pi,
+            state: "done",
+            instance: 303
+        ))
+        guard case .set(let done) = reducer.consume(.init(
+            action: .end,
+            id: "omg-agent-pi-303",
+            metadata: "type=app;omg_agent=pi;omg_scope=local"
+        )) else {
+            Issue.record("Expected terminated completion to remain visible")
+            return
+        }
+        #expect(done.state == .done)
+        #expect(!reducer.requiresForegroundValidation)
+        #expect(reducer.consume(.init(
+            action: .end,
+            id: "omg-agent-pi-303",
+            metadata: "type=app;omg_agent=pi;omg_scope=local"
+        )) == nil)
+        #expect(reducer.acknowledgeTerminalState() == .clear)
     }
 
     @Test func acknowledgingCompletionRestoresIdleIdentity() throws {
         var reducer = AgentContextSignalReducer()
         _ = reducer.consume(signal(agent: .codex, state: "done"))
-        guard case .set(let activity) = reducer.acknowledgeCompletion() else {
+        guard case .set(let activity) = reducer.acknowledgeTerminalState() else {
             Issue.record("Expected completion acknowledgement")
             return
         }
         #expect(activity.state == .idle)
         #expect(activity.icon == SupportedAgent.codex.icon)
         #expect(activity.progress == nil)
-        #expect(reducer.acknowledgeCompletion() == nil)
+        #expect(reducer.acknowledgeTerminalState() == nil)
     }
 
     @Test func remotePromptClearsOrphanedAgent() throws {
@@ -416,7 +476,7 @@ struct AgentStatusPluginTests {
         #expect(update == .clear)
     }
 
-    @Test func nestedAgentEndRestoresPreviousAgent() throws {
+    @Test func nestedAgentInterruptionRestoresPreviousAfterAcknowledgement() throws {
         var reducer = AgentContextSignalReducer()
         _ = reducer.consume(signal(agent: .codex, state: "working"))
         _ = reducer.consume(signal(agent: .pi, state: "working"))
@@ -425,8 +485,14 @@ struct AgentStatusPluginTests {
             id: "omg-agent-pi",
             metadata: "type=app;omg_agent=pi"
         ))
-        guard case .set(let restored) = update else {
-            Issue.record("Expected parent agent activity to be restored")
+        guard case .set(let interrupted) = update else {
+            Issue.record("Expected nested interruption error")
+            return
+        }
+        #expect(interrupted.source == "pi")
+        #expect(interrupted.state == .error)
+        guard case .set(let restored) = reducer.acknowledgeTerminalState() else {
+            Issue.record("Expected parent agent activity after acknowledgement")
             return
         }
         #expect(restored.source == "codex")

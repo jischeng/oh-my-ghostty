@@ -799,19 +799,19 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         invalidateRestorableState()
     }
 
-    func acknowledgeCompletedAgentActivityFromUserInput(
+    func acknowledgeTerminalAgentStateFromUserInput(
         on surface: Ghostty.SurfaceView
     ) {
         guard focusedSurface === surface else { return }
-        acknowledgeCompletedAgentActivity(for: surface)
+        acknowledgeTerminalAgentState(for: surface)
     }
 
-    private func acknowledgeCompletedAgentActivity(
+    private func acknowledgeTerminalAgentState(
         for surface: Ghostty.SurfaceView?
     ) {
         guard let surface,
               var reducer = agentReducers[surface.id],
-              let update = reducer.acknowledgeCompletion() else { return }
+              let update = reducer.acknowledgeTerminalState() else { return }
         agentReducers[surface.id] = reducer
         applyAgentActivityUpdate(update, for: surface.id)
     }
@@ -850,7 +850,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             agentReducers[surfaceID] = reducer
             if let update {
                 applyAgentActivityUpdate(update, for: surfaceID)
-                if update == .clear { clearAgentResumeDescriptor(for: surfaceID) }
+                if update == .clear {
+                    clearAgentResumeDescriptor(for: surfaceID)
+                } else if case .set(let activity) = update,
+                          activity.state == .error {
+                    clearAgentResumeDescriptor(for: surfaceID)
+                }
             }
             scheduleAgentValidation(for: surfaceID)
         }
@@ -1028,7 +1033,6 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     func markTabActivated() {
-        acknowledgeCompletedAgentActivity(for: focusedSurface ?? surfaceTree.first)
         tabLastActivatedAt = Date()
         if tabLayoutState.orderingMode == .recentlyUsed,
            window?.tabGroup?.selectedWindow === window {
@@ -2498,9 +2502,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // We always cancel our event listener
         surfaceAppearanceCancellables.removeAll()
 
-        // Focus changes acknowledge only the pane the user actually entered.
         guard let focusedSurface else { return }
-        acknowledgeCompletedAgentActivity(for: focusedSurface)
         syncAppearance(focusedSurface.derivedConfig)
 
         // We also want to get notified of certain changes to update our appearance.

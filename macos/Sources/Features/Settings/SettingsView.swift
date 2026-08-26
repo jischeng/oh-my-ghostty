@@ -586,16 +586,15 @@ struct SettingsView: View {
     private func agentHookRow(_ agent: SupportedAgent) -> some View {
         let revision = agentHookRevision
         let installationState = AgentHookInstaller().installationState(agent)
-        let managedHooks = agent.definition.hook.kind != .none
+        let detectorOnly = agent.definition.hook.kind == .none
         let installed = installationState.isInstalled
-        let statusText: String = if !managedHooks {
-            strings.agentBuiltInDetection
-        } else {
-            switch installationState {
-            case .missing: strings.agentHooksMissing
-            case .updateAvailable: strings.agentHooksUpdateRequired
-            case .current: strings.agentHooksCurrent
-            }
+        let statusText: String = switch (detectorOnly, installationState) {
+        case (true, .missing): strings.agentDetectorMissing
+        case (true, .updateAvailable): strings.agentDetectorUpdateRequired
+        case (true, .current): strings.agentDetectorCurrent
+        case (false, .missing): strings.agentHooksMissing
+        case (false, .updateAvailable): strings.agentHooksUpdateRequired
+        case (false, .current): strings.agentHooksCurrent
         }
         HStack {
             Image(agent.assetName)
@@ -613,13 +612,11 @@ struct SettingsView: View {
                 ProgressView()
                     .controlSize(.small)
             }
-            if managedHooks {
-                Button(installed ? strings.agentUpdateButton : strings.agentInstallButton) {
-                    updateAgentHook(agent, remove: false)
-                }
-                .disabled(agentHookOperation != nil)
+            Button(installed ? strings.agentUpdateButton : strings.agentInstallButton) {
+                updateAgentHook(agent, remove: false)
             }
-            if managedHooks && installed {
+            .disabled(agentHookOperation != nil)
+            if installed {
                 Button(strings.agentRemoveButton) {
                     updateAgentHook(agent, remove: true)
                 }

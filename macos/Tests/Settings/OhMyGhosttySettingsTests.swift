@@ -308,6 +308,7 @@ struct OhMyGhosttySettingsTests {
         #expect(zh.pathDisplayTitle(.folderName) == "当前文件夹")
         #expect(zh.orderingTitle(.recentlyUsed) == "最近使用")
         #expect(zh.agentHooksUpdateRequired == "需要更新 Hooks")
+        #expect(zh.agentDetectorMissing == "未安装检测器")
     }
 
     private func temporarySettings() -> (OhMyGhosttySettings, URL) {

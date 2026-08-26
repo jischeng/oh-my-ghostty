@@ -573,6 +573,117 @@ struct AgentStatusPluginTests {
         try assertUnrelatedHooksPreserved(at: claudeSettings)
     }
 
+    @Test func detectorOnlyAgentsHaveInstallUpdateAndRemoveLifecycle() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let installer = AgentHookInstaller(homeURL: home)
+        let detectors = SupportedAgent.allCases.filter {
+            $0.definition.hook.kind == .none
+        }
+        #expect(Set(detectors) == [.antigravity, .crush, .hermes])
+
+        for agent in detectors {
+            #expect(installer.installationState(agent) == .missing)
+            try installer.install(agent)
+            #expect(installer.installationState(agent) == .current)
+
+            let url = home
+                .appendingPathComponent(".config/oh-my-ghostty/agent-detectors")
+                .appendingPathComponent("\(agent.rawValue).json")
+            let attributes = try FileManager.default.attributesOfItem(
+                atPath: url.path
+            )
+            #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+            let marker = try #require(
+                JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+            )
+            #expect(marker["owner"] as? String == AgentHookInstaller.marker)
+            #expect(marker["agent"] as? String == agent.rawValue)
+            #expect(marker["version"] as? Int == AgentHookInstaller.detectorMarkerVersion)
+
+            var stale = marker
+            stale["version"] = 0
+            try JSONSerialization.data(withJSONObject: stale).write(
+                to: url,
+                options: .atomic
+            )
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: url.path
+            )
+            #expect(installer.installationState(agent) == .updateAvailable)
+
+            try installer.install(agent)
+            #expect(installer.installationState(agent) == .current)
+            try installer.uninstall(agent)
+            #expect(installer.installationState(agent) == .missing)
+            #expect(!FileManager.default.fileExists(atPath: url.path))
+        }
+    }
+
+    @Test func implicitDetectorMigrationRunsOnceAndRespectsLaterRemoval() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let installer = AgentHookInstaller(homeURL: home)
+
+        try installer.migrateImplicitDetectorsIfNeeded()
+        for agent in [SupportedAgent.antigravity, .crush, .hermes] {
+            #expect(installer.installationState(agent) == .current)
+        }
+        let migrationURL = home
+            .appendingPathComponent(".config/oh-my-ghostty/agent-detectors")
+            .appendingPathComponent(".implicit-detectors-v1.json")
+        let attributes = try FileManager.default.attributesOfItem(
+            atPath: migrationURL.path
+        )
+        #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+
+        try installer.uninstall(.crush)
+        #expect(installer.installationState(.crush) == .missing)
+        try installer.migrateImplicitDetectorsIfNeeded()
+        #expect(installer.installationState(.crush) == .missing)
+        #expect(installer.installationState(.antigravity) == .current)
+        #expect(installer.installationState(.hermes) == .current)
+    }
+
+    @Test func detectorRemovalPreservesUnownedOrNonFileContent() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let installer = AgentHookInstaller(homeURL: home)
+        try installer.install(.crush)
+        let url = home
+            .appendingPathComponent(".config/oh-my-ghostty/agent-detectors")
+            .appendingPathComponent("crush.json")
+        try #"{"owner":"someone-else","version":1,"agent":"crush"}"#.write(
+            to: url,
+            atomically: true,
+            encoding: .utf8
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: url.path
+        )
+        #expect(throws: AgentHookInstallerError.self) {
+            try installer.uninstall(.crush)
+        }
+        #expect(FileManager.default.fileExists(atPath: url.path))
+
+        try FileManager.default.removeItem(at: url)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+        #expect(throws: AgentHookInstallerError.self) {
+            try installer.uninstall(.crush)
+        }
+        var isDirectory: ObjCBool = false
+        #expect(FileManager.default.fileExists(
+            atPath: url.path,
+            isDirectory: &isDirectory
+        ))
+        #expect(isDirectory.boolValue)
+    }
+
     @Test func oldOwnerVersionRequiresHookCommandUpgrade() throws {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)

@@ -230,16 +230,28 @@ class AppDelegate: NSObject,
     }
 
     @objc private func ohMyGhosttySettingsDidChange(_ notification: Notification) {
-        let key = MainActor.assumeIsolated {
-            notification.userInfo?[
+        MainActor.assumeIsolated {
+            let key = notification.userInfo?[
                 OhMyGhosttySettings.changedKeyUserInfoKey
             ] as? String
+            if key == nil || key == "general.language" {
+                applyMenuLocalization()
+            }
+            if key == nil || key == "sessions.restoreOnLaunch" {
+                UserDefaults.ghostty.setValue(
+                    OhMyGhosttySettings.shared.restoreSessionsOnLaunch,
+                    forKey: "NSQuitAlwaysKeepsWindows"
+                )
+            }
         }
-        guard key == nil || key == "sessions.restoreOnLaunch" else { return }
-        let enabled = MainActor.assumeIsolated {
-            OhMyGhosttySettings.shared.restoreSessionsOnLaunch
-        }
-        UserDefaults.ghostty.setValue(enabled, forKey: "NSQuitAlwaysKeepsWindows")
+    }
+
+    @MainActor
+    private func applyMenuLocalization() {
+        SettingsMenuLocalizer.apply(
+            to: NSApp.mainMenu,
+            strings: SettingsStrings(language: OhMyGhosttySettings.shared.language)
+        )
     }
 
     @objc private func ohMyGhosttyAppearanceDidChange(_ notification: Notification) {
@@ -249,6 +261,14 @@ class AppDelegate: NSObject,
     // MARK: - NSApplicationDelegate
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        MainActor.assumeIsolated { applyMenuLocalization() }
+        do {
+            try AgentHookInstaller().migrateImplicitDetectorsIfNeeded()
+        } catch {
+            Self.logger.error(
+                "failed to migrate implicit Agent detectors: \(error, privacy: .public)"
+            )
+        }
         #if DEBUG
         if
             let suite = UserDefaults.ghosttySuite,

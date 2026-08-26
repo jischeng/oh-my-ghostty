@@ -1048,6 +1048,10 @@ struct VerticalTabsIntegrationTests {
         points: [CGPoint],
         target: CGFloat
     ) async throws -> [CGFloat] {
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+        try await Task.sleep(for: .milliseconds(100))
         var alpha: [CGFloat] = []
         for _ in 0..<30 {
             try capture(window: window, path: path)

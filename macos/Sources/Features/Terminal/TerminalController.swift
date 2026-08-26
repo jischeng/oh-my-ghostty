@@ -225,6 +225,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             object: nil)
         center.addObserver(
             self,
+            selector: #selector(onAgentIntegrationChanged),
+            name: AgentHookInstaller.didChangeNotification,
+            object: nil)
+        center.addObserver(
+            self,
             selector: #selector(onGotoTab),
             name: Ghostty.Notification.ghosttyGotoTab,
             object: nil)
@@ -427,8 +432,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 continue
             }
             if let detected = detectedAgentInstances[surface.id] {
-                if detected.processGroupID != processGroupID,
-                   !Self.processGroupExists(detected.processGroupID) {
+                if detected.agent.definition.hook.kind == .none,
+                   !AgentHookInstaller().isInstalled(detected.agent) {
+                    clearDetectedAgent(for: surface.id, force: true)
+                    observedForegroundProcessIDs.removeValue(forKey: surface.id)
+                } else if detected.processGroupID != processGroupID,
+                          !Self.processGroupExists(detected.processGroupID) {
                     clearDetectedAgent(for: surface.id, force: true)
                 } else {
                     updateScreenFallback(for: surface, detected: detected)
@@ -465,6 +474,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         surfaceID: UUID
     ) {
         guard let agent else { return }
+        if agent.definition.hook.kind == .none,
+           !AgentHookInstaller().isInstalled(agent) {
+            clearDetectedAgent(for: surfaceID, force: true)
+            return
+        }
         let id = "omg-agent-\(agent.rawValue)-\(processGroupID)"
         let launchedAt = detectedAgentInstances[surfaceID]?.processGroupID == processGroupID
             ? detectedAgentInstances[surfaceID]?.launchedAt ?? Date()
@@ -2494,6 +2508,23 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     // MARK: - Notifications
+
+    @objc private func onAgentIntegrationChanged(_ notification: SwiftUI.Notification) {
+        guard let rawAgent = notification.userInfo?[
+            AgentHookInstaller.changedAgentUserInfoKey
+        ] as? String,
+        let agent = SupportedAgent(rawValue: rawAgent) else { return }
+        let installer = AgentHookInstaller()
+        let staleSurfaceIDs = detectedAgentInstances.compactMap { surfaceID, detected in
+            detected.agent == agent && !installer.isInstalled(agent)
+                ? surfaceID : nil
+        }
+        for surfaceID in staleSurfaceIDs {
+            clearDetectedAgent(for: surfaceID, force: true)
+        }
+        observedForegroundProcessIDs = [:]
+        pollLocalAgentProcesses()
+    }
 
     @objc private func onOhMyGhosttySettingsChanged(_ notification: SwiftUI.Notification) {
         let settings = OhMyGhosttySettings.shared

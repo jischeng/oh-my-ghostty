@@ -44,6 +44,7 @@ enum LocalAgentProcessDetector {
 enum AgentHookInstallerError: LocalizedError {
     case invalidConfiguration
     case invalidHooks(String)
+    case invalidDetectorMarker(String)
     case duplicateCodexHooksSetting
 
     var errorDescription: String? {
@@ -52,6 +53,8 @@ enum AgentHookInstallerError: LocalizedError {
             "The existing agent configuration is not a JSON object."
         case .invalidHooks(let event):
             "The existing hooks configuration for \(event) is not an array."
+        case .invalidDetectorMarker(let agent):
+            "The existing detector marker for \(agent) is not owned by OMG."
         case .duplicateCodexHooksSetting:
             "Codex config.toml contains more than one hooks setting in [features]."
         }
@@ -69,6 +72,17 @@ enum AgentHookInstallationState: Equatable, Sendable {
 struct AgentHookInstaller {
     static let marker = "_omg_agent_status"
     static let hookVersion = 4
+    static let detectorMarkerVersion = 1
+    static let didChangeNotification = Notification.Name(
+        "com.oh-my-ghostty.agentIntegrationDidChange"
+    )
+    static let changedAgentUserInfoKey = "agent"
+
+    private struct DetectorMarker: Codable, Equatable {
+        let owner: String
+        let version: Int
+        let agent: String
+    }
 
     let homeURL: URL
 
@@ -78,6 +92,32 @@ struct AgentHookInstaller {
 
     func isInstalled(_ agent: SupportedAgent) -> Bool {
         installationState(agent).isInstalled
+    }
+
+    /// Preserves the pre-marker behavior exactly once. Detector-only agents were
+    /// implicitly enabled before explicit Install/Remove controls existed, so
+    /// the first upgraded launch records them as installed. The global sentinel
+    /// prevents a later launch from reinstalling a detector the user removed.
+    func migrateImplicitDetectorsIfNeeded() throws {
+        let migrationURL = detectorMigrationURL
+        if FileManager.default.fileExists(atPath: migrationURL.path) {
+            guard let marker = validDetectorMarker(
+                at: migrationURL,
+                expectedAgent: "implicit-detectors"
+            ), marker.version == Self.detectorMarkerVersion else {
+                throw AgentHookInstallerError.invalidDetectorMarker("migration")
+            }
+            return
+        }
+        for agent in SupportedAgent.allCases
+        where agent.definition.hook.kind == .none &&
+            !FileManager.default.fileExists(atPath: detectorMarkerURL(agent).path) {
+            try installDetectorMarker(agent)
+        }
+        try writeDetectorMarker(
+            agent: "implicit-detectors",
+            to: migrationURL
+        )
     }
 
     func installationState(
@@ -120,7 +160,7 @@ struct AgentHookInstaller {
             }
             return current ? .current : .missing
         case .none:
-            return .missing
+            return detectorInstallationState(agent)
         }
     }
 
@@ -418,8 +458,9 @@ print("Installed current OMG agent hooks.")
         case .scripts:
             try installScriptHooks(at: url, agent: agent)
         case .none:
-            throw AgentHookInstallerError.invalidConfiguration
+            try installDetectorMarker(agent)
         }
+        notifyChanged(agent)
     }
 
     func uninstall(_ agent: SupportedAgent) throws {
@@ -428,15 +469,116 @@ print("Installed current OMG agent hooks.")
         case .json:
             try removeJSONHooks(at: url)
         case .plugin:
-            guard FileManager.default.fileExists(atPath: url.path) else { return }
-            try FileManager.default.removeItem(at: url)
+            if FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+            }
         case .toml:
             try removeTOMLHooks(at: url)
         case .scripts:
             try removeScriptHooks(at: url, agent: agent)
         case .none:
-            return
+            try removeDetectorMarker(agent)
         }
+        notifyChanged(agent)
+    }
+
+    private func notifyChanged(_ agent: SupportedAgent) {
+        let post = {
+            NotificationCenter.default.post(
+                name: Self.didChangeNotification,
+                object: nil,
+                userInfo: [Self.changedAgentUserInfoKey: agent.rawValue]
+            )
+        }
+        if Thread.isMainThread {
+            post()
+        } else {
+            DispatchQueue.main.async(execute: post)
+        }
+    }
+
+    private func detectorInstallationState(
+        _ agent: SupportedAgent
+    ) -> AgentHookInstallationState {
+        let url = detectorMarkerURL(agent)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return .missing
+        }
+        guard let marker = validDetectorMarker(
+            at: url,
+            expectedAgent: agent.rawValue
+        ) else { return .updateAvailable }
+        return marker.version == Self.detectorMarkerVersion
+            ? .current : .updateAvailable
+    }
+
+    private func installDetectorMarker(_ agent: SupportedAgent) throws {
+        try writeDetectorMarker(agent: agent.rawValue, to: detectorMarkerURL(agent))
+    }
+
+    private func writeDetectorMarker(agent: String, to url: URL) throws {
+        let directory = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: directory.path
+        )
+        var data = try JSONEncoder().encode(DetectorMarker(
+            owner: Self.marker,
+            version: Self.detectorMarkerVersion,
+            agent: agent
+        ))
+        data.append(0x0A)
+        try data.write(to: url, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: url.path
+        )
+    }
+
+    private func removeDetectorMarker(_ agent: SupportedAgent) throws {
+        let url = detectorMarkerURL(agent)
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        guard validDetectorMarker(
+            at: url,
+            expectedAgent: agent.rawValue
+        ) != nil else {
+            throw AgentHookInstallerError.invalidDetectorMarker(agent.rawValue)
+        }
+        try FileManager.default.removeItem(at: url)
+    }
+
+    private func validDetectorMarker(
+        at url: URL,
+        expectedAgent: String
+    ) -> DetectorMarker? {
+        guard let attributes = try? FileManager.default.attributesOfItem(
+            atPath: url.path
+        ),
+        attributes[.type] as? FileAttributeType == .typeRegular,
+        ((attributes[.size] as? NSNumber)?.intValue ?? 4_097) <= 4_096,
+        (attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600,
+        let data = try? Data(contentsOf: url),
+        let marker = try? JSONDecoder().decode(DetectorMarker.self, from: data),
+        marker.owner == Self.marker,
+        marker.agent == expectedAgent else { return nil }
+        return marker
+    }
+
+    private var detectorDirectoryURL: URL {
+        homeURL.appendingPathComponent(".config/oh-my-ghostty/agent-detectors")
+    }
+
+    private var detectorMigrationURL: URL {
+        detectorDirectoryURL.appendingPathComponent(".implicit-detectors-v1.json")
+    }
+
+    private func detectorMarkerURL(_ agent: SupportedAgent) -> URL {
+        detectorDirectoryURL.appendingPathComponent("\(agent.rawValue).json")
     }
 
     private static let tomlBlockBegin =

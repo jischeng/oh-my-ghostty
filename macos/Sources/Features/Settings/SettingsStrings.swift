@@ -287,7 +287,11 @@ struct SettingsStrings: Equatable, Sendable {
     var agentStatusHooksLabel: String {
         t("Enable Normalized Status Events", "启用规范化状态事件")
     }
-    var agentBuiltInDetection: String { t("Built-in Detection", "内置检测") }
+    var agentDetectorMissing: String { t("Detector Not Installed", "未安装检测器") }
+    var agentDetectorUpdateRequired: String {
+        t("Detector Update Required", "需要更新检测器")
+    }
+    var agentDetectorCurrent: String { t("Detector Installed", "已安装检测器") }
     var agentHooksMissing: String { t("Hooks Not Installed", "未安装 Hooks") }
     var agentHooksUpdateRequired: String { t("Hook Update Required", "需要更新 Hooks") }
     var agentHooksCurrent: String { t("Hooks Installed", "已安装 Hooks") }

@@ -277,19 +277,32 @@ script, rejects malformed config rather than replacing it, uses atomic
 mode-preserving writes (0600 for new files), and keeps a one-time `.omg-backup`
 beside each existing file. Removal deletes only OMG-owned commands or blocks.
 
+Antigravity, Crush, and Hermes do not expose a supported vendor hook path. Their
+Install action therefore creates a Host-owned, versioned detector marker under
+`~/.config/oh-my-ghostty/agent-detectors/<agent>.json`; the directory is mode
+0700 and each exact allowlisted marker is mode 0600. The host enables process and
+bounded screen detection for these agents only while the current marker exists.
+Remove deletes only a regular marker whose owner/agent fields match OMG, and
+Update replaces stale marker content. A one-time global sentinel migrates the
+three previously implicit detectors to Installed; after that, a user removal is
+never auto-installed again. Conflicting or non-file content fails closed. These
+markers are local Host policy and are intentionally excluded from
+the exported remote hook installer; OMG does not claim to install a vendor hook
+that does not exist.
+
 Adapters emit OSC 3008 contexts with IDs
-`omg-agent-<codex|claude|pi>-<process-group-id>`, `type=app`, a bounded
+`omg-agent-<allowlisted-agent>-<process-group-id>`, `type=app`, a bounded
 `omg_state`, `omg_scope=local|remote`, optional validated
 `omg_conversation`, and optional `omg_attention=question|permission`. The host verifies that ID and metadata
 name the same built-in agent, then associates the event with the Surface that
 parsed it. Because some agent versions defer or omit `SessionStart`, the macOS
 host samples Ghostty's foreground process-group PID once per second; only when
-that PID changes does a utility-queue `ps` lookup recognize a local
-`codex`/`claude`/`pi` command and synthesize `idle`. Local startup then gets a
+that PID changes does a utility-queue `ps` lookup apply manifest process markers
+and synthesize `idle` for an enabled integration. Local startup then gets a
 four-second foreground handoff grace, after which validation keeps the identity
 while its process group exists and clears it when that group exits. In SSH, no
-local process-name fallback is attempted; the next authenticated remote Fish
-prompt clears orphaned remote agent state.
+local process-name fallback is attempted; the next authenticated remote
+Fish/bash/zsh prompt clears orphaned remote agent state.
 Unique instance IDs prevent an old `end` from clearing a newer same-agent
 session. These events can change only host-owned tab presentation; they do not
 authorize terminal input, filesystem, network, or plugin execution. A process
@@ -320,9 +333,9 @@ Terminal restoration v9 stores this descriptor on its owning Surface. Local
 restore builds only `codex resume <id>`, `claude --resume <id>`, or
 `pi --session-id <id>` and falls back to the login shell when the Agent exits.
 Remote restore replays original OpenSSH argv and passes only typed
-`--remote-agent` / `--remote-agent-session` options to `+ssh`; Fish restores cwd,
-emits a ready context, runs the allowlisted resume command, then returns to its
-interactive prompt.
+`--remote-agent` / `--remote-agent-session` options to `+ssh`; the detected
+Fish/bash/zsh shell restores cwd, emits a ready context, runs the allowlisted
+resume command, then returns to its interactive prompt.
 
 Conversation identity comes from hook stdin (`session_id`), Pi-compatible
 `sessionManager.getSessionId()`, OpenCode events, Reasonix's bounded machine JSON

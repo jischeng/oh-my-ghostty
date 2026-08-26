@@ -76,6 +76,15 @@ struct VerticalTabsTests {
             "'--remote-working-directory=/remote/project'"
         ) == true)
         #expect(configured.command?.contains("'-J' 'jump' 'cloud'") == true)
+        // SSH splits must survive a remote disconnect: the replay command runs
+        // first, then an interactive login shell is exec'd so the pane returns
+        // to a usable shell instead of dying with the connection.
+        #expect(configured.command?.contains("; exec ") == true)
+        let execIndex = configured.command?.range(of: "; exec ")?.lowerBound
+        let sshIndex = configured.command?.range(of: "'+ssh'")?.lowerBound
+        if let execIndex, let sshIndex {
+            #expect(sshIndex < execIndex)
+        }
     }
 
     @Test func sshSplitWithoutReplayFallsBackToSafeLocalShell() throws {

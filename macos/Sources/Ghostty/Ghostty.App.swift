@@ -304,9 +304,16 @@ extension Ghostty {
             // Get our pasteboard
             guard let pasteboard = NSPasteboard.ghostty(location) else { return false }
 
-            // Return false if there is no text-like clipboard content so
-            // performable paste bindings can pass through to the terminal.
-            guard let str = pasteboard.getOpinionatedStringContents() else { return false }
+            // If there is no text-like content, fall back to an image-only
+            // clipboard: write the image to a temp file and paste its path so
+            // agents can read it as a file argument. Return false only when
+            // neither text nor image is available so performable paste bindings
+            // can pass through to the terminal.
+            guard let str = pasteboard.getOpinionatedStringContents() else {
+                guard let path = pasteboard.imagePastePath() else { return false }
+                completeClipboardRequest(surface, data: path, state: state)
+                return true
+            }
 
             completeClipboardRequest(surface, data: str, state: state)
             return true

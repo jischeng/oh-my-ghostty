@@ -309,7 +309,11 @@ authorize terminal input, filesystem, network, or plugin execution. A process
 can spoof its own tab badge, but cannot use this channel to gain capabilities.
 
 Because the event is written to the owning TTY, the same hook works through
-OpenSSH. Hooks must be installed in the account where the agent executable runs.
+OpenSSH. Shell hooks resolve the target TTY from the parent process with
+`ps -o tty=` and keep the process-group ID for the instance context; when that
+lookup yields no usable TTY they fall back to `/dev/tty` rather than silently
+exiting, which is what Pi-compatible extensions already use. Hooks must be
+installed in the account where the agent executable runs.
 Settings can export an auditable Python 3 installer for explicit transfer and
 execution on that account; OMG does not log in or silently modify remote dotfiles.
 

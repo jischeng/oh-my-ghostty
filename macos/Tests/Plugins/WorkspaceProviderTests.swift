@@ -1,8 +1,46 @@
+import AppKit
 import Foundation
 import Testing
 @testable import Ghostty
 
 struct WorkspaceProviderTests {
+    @Test @MainActor func imageOnlyClipboardWritesTempFileAndPastesPath() throws {
+        let rep = try #require(NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: 4,
+            pixelsHigh: 4,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ))
+        let png = try #require(rep.representation(
+            using: NSBitmapImageRep.FileType.png,
+            properties: [:]
+        ))
+
+        let pasteboard = NSPasteboard(
+            name: NSPasteboard.Name("omg-image-paste-test-\(UUID().uuidString)")
+        )
+        pasteboard.declareTypes([.png], owner: nil)
+        pasteboard.setData(png, forType: .png)
+
+        // No text/file content, so the string path is nil and the image
+        // fallback produces a temp file path.
+        #expect(pasteboard.getOpinionatedStringContents() == nil)
+        let escaped = try #require(pasteboard.imagePastePath())
+        #expect(escaped.hasSuffix(".png"))
+        #expect(FileManager.default.fileExists(atPath: escaped))
+
+        // Text content takes precedence over the image fallback.
+        pasteboard.declareTypes([.string], owner: nil)
+        pasteboard.setString("hello", forType: .string)
+        #expect(pasteboard.getOpinionatedStringContents() == "hello")
+    }
+
     @Test func parsesSSHConfigAliasesWithoutSecrets() throws {
         let previous = UserDefaults.standard.object(forKey: "OMG.Plugin.Enabled.builtin.ssh")
         UserDefaults.standard.set(true, forKey: "OMG.Plugin.Enabled.builtin.ssh")

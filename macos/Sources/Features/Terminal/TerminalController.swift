@@ -954,8 +954,24 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
               ) else {
             return result
         }
-        result.command = command
+        // Ghostty executes a surface `command` through `/bin/sh -c`, so the
+        // pane dies the moment `+ssh` exits (e.g. a network drop). Append
+        // `exec <login shell>` so that when the remote connection ends the
+        // wrapper is replaced by an interactive shell, matching a pane where
+        // SSH was launched by hand. Shell integration survives because it is
+        // injected via environment variables that persist across `exec`.
+        result.command = "\(command); exec \(Ghostty.Shell.quote(Self.survivalShell))"
         return result
+    }
+
+    /// The user's login shell, used to keep an SSH split pane alive after the
+    /// remote connection ends.
+    private static var survivalShell: String {
+        if let pw = getpwuid(getuid()), let shell = pw.pointee.pw_shell {
+            let path = String(cString: shell)
+            if !path.isEmpty { return path }
+        }
+        return "/bin/zsh"
     }
 
     override func surfaceTreeDidChange(from: SplitTree<Ghostty.SurfaceView>, to: SplitTree<Ghostty.SurfaceView>) {

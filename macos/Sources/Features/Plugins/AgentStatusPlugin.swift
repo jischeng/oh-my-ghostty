@@ -1038,8 +1038,8 @@ print("Installed current OMG agent hooks.")
         return ": \(marker); : _omg_agent_status_v\(hookVersion); " + setup +
             "omg_tty=$(ps -o tty= -p \"$PPID\" 2>/dev/null | tr -d ' '); " +
             "omg_pgid=$(ps -o pgid= -p \"$PPID\" 2>/dev/null | tr -d ' '); " +
-            "case \"$omg_tty\" in ''|*[!A-Za-z0-9/._-]*) exit 0;; esac; " +
             "case \"$omg_pgid\" in ''|*[!0-9]*) exit 0;; esac; " +
+            "case \"$omg_tty\" in ''|*[!A-Za-z0-9/._-]*) omg_tty=tty;; esac; " +
             "omg_scope=local; test -n \"${SSH_CONNECTION-}\" && omg_scope=remote; " +
             "printf '\\033]3008;\(action)=omg-agent-\(agent.rawValue)-%s;" +
             "\(metadata)\\007' \(arguments) > \"/dev/$omg_tty\" " +

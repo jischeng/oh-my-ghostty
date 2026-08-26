@@ -1,5 +1,8 @@
 #!/bin/bash
-# Sign OMG.app and every nested executable with one distribution identity.
+# Sign OMG.app and every nested executable with one identity.
+# Developer ID builds use hardened runtime. Local ad-hoc builds deliberately do
+# not: hardened runtime library validation cannot treat independently ad-hoc
+# signed embedded frameworks as members of the same Team ID.
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
@@ -17,6 +20,13 @@ if [[ ! -x "$app_path/Contents/MacOS/omg" ]]; then
 fi
 
 sparkle="$app_path/Contents/Frameworks/Sparkle.framework/Versions/B"
+sign_options=(--force --sign "$OMG_SIGNING_IDENTITY")
+if [[ "$OMG_SIGNING_IDENTITY" != "-" ]]; then
+  sign_options+=(--options runtime)
+else
+  echo "warning: creating a local ad-hoc build without hardened runtime" >&2
+fi
+
 components=(
   "$sparkle/XPCServices/Downloader.xpc"
   "$sparkle/XPCServices/Installer.xpc"
@@ -28,13 +38,11 @@ components=(
 
 for component in "${components[@]}"; do
   [[ -e "$component" ]] || continue
-  codesign --force --sign "$OMG_SIGNING_IDENTITY" --options runtime "$component"
+  codesign "${sign_options[@]}" "$component"
 done
 
 codesign \
-  --force \
-  --sign "$OMG_SIGNING_IDENTITY" \
-  --options runtime \
+  "${sign_options[@]}" \
   --entitlements "$repo_root/macos/Ghostty.entitlements" \
   "$app_path"
 

@@ -37,6 +37,33 @@ elif [[ "$actual_archs" != "$arch" ]]; then
 fi
 
 codesign --verify --deep --strict "$app_path"
+
+app_signature=$(codesign -dv --verbose=4 "$app_path" 2>&1)
+if grep -q '^Signature=adhoc$' <<< "$app_signature" &&
+   grep -Eq '^CodeDirectory .*flags=.*runtime' <<< "$app_signature"; then
+  echo "ad-hoc OMG.app cannot use hardened runtime: embedded Sparkle will fail library validation" >&2
+  exit 1
+fi
+app_team=$(sed -n 's/^TeamIdentifier=//p' <<< "$app_signature")
+sparkle="$app_path/Contents/Frameworks/Sparkle.framework/Versions/B"
+signed_components=(
+  "$sparkle/Sparkle"
+  "$sparkle/XPCServices/Downloader.xpc"
+  "$sparkle/XPCServices/Installer.xpc"
+  "$sparkle/Autoupdate"
+  "$sparkle/Updater.app"
+  "$app_path/Contents/PlugIns/DockTilePlugin.plugin"
+)
+for component in "${signed_components[@]}"; do
+  [[ -e "$component" ]] || continue
+  component_signature=$(codesign -dv --verbose=4 "$component" 2>&1)
+  component_team=$(sed -n 's/^TeamIdentifier=//p' <<< "$component_signature")
+  if [[ "$app_team" != "$component_team" ]]; then
+    echo "OMG.app and $component have different Team IDs: $app_team != $component_team" >&2
+    exit 1
+  fi
+done
+
 test "$(plutil -extract OMGVersion raw "$app_path/Contents/Info.plist")" = "$version"
 test "$(plutil -extract CFBundleIdentifier raw "$app_path/Contents/Info.plist")" = "com.jischeng.omg"
 

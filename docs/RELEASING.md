@@ -330,17 +330,26 @@ Success criteria:
 
 ## 4. Signing
 
-Sign every nested Sparkle component and the app with the same Developer ID.
+Sign every nested Sparkle component and the app with the same identity.
 Mixing Team IDs can pass superficial bundle inspection but fail at launch with
-`Library not loaded: Sparkle` and a dyld signature error.
+`Library not loaded: Sparkle` and a dyld signature error. The universal updater
+app must be signed too; signing only the two manual-download apps leaves the
+Sparkle enclosure unusable.
+
+Public releases require one Developer ID identity and hardened runtime. For a
+local preflight only, set `OMG_SIGNING_IDENTITY=-`; the signing script then
+removes hardened runtime from every ad-hoc signature. Hardened runtime library
+validation cannot assign independently ad-hoc signed embedded frameworks a
+shared Team ID, so combining ad-hoc signatures with runtime makes the app pass
+`codesign --verify --deep` but abort in dyld before `main`.
 
 ```bash
 export OMG_SIGNING_IDENTITY="<Developer ID Application identity>"
 
-dist/macos/sign_omg_app.sh \
-  "$OMG_BUILD_ROOT/arm64/Release/OMG.app"
-dist/macos/sign_omg_app.sh \
-  "$OMG_BUILD_ROOT/x86_64/Release/OMG.app"
+for arch in arm64 x86_64 universal; do
+  dist/macos/sign_omg_app.sh \
+    "$OMG_BUILD_ROOT/$arch/Release/OMG.app"
+done
 ```
 
 Success:
@@ -350,6 +359,9 @@ codesign --verify --deep --strict --verbose=2 \
   "$OMG_BUILD_ROOT/arm64/Release/OMG.app"
 codesign -dv --verbose=4 \
   "$OMG_BUILD_ROOT/arm64/Release/OMG.app"
+
+# Mandatory launch probe; static signature verification alone is insufficient.
+"$OMG_BUILD_ROOT/arm64/Release/OMG.app/Contents/MacOS/omg" --version
 ```
 
 The identity must be Developer ID Application for distribution. Do not put the
@@ -360,7 +372,7 @@ real identity, certificate, Team ID, or keychain password in source files.
 Notarize a zip of each signed app, staple the ticket, then package the DMG:
 
 ```bash
-for arch in arm64 x86_64; do
+for arch in arm64 x86_64 universal; do
   app="$OMG_BUILD_ROOT/$arch/Release/OMG.app"
   zip="$OMG_BUILD_ROOT/OMG-$OMG_VERSION-macos-$arch.zip"
   ditto -c -k --keepParent "$app" "$zip"
@@ -514,7 +526,7 @@ and artifact names; it is not an OMG publishing script.
 | Symptom | Cause | Required action |
 | --- | --- | --- |
 | x86_64 undefined `_ghostty_*` symbols | arm64-only GhosttyKit | rebuild universal XCFramework |
-| dyld refuses Sparkle at launch | nested Team IDs differ | re-sign all nested components with one identity |
+| dyld refuses Sparkle at launch | nested Team IDs differ, or hardened runtime was retained on an ad-hoc build | re-sign all nested components with one Developer ID, or remove runtime for local ad-hoc preflight |
 | Gatekeeper rejects public DMG | Development/ad-hoc signature or no notarization | use Developer ID and complete notarization |
 | `Ghostty.app` appears in output | stale build or old product settings | clean build; expected product is `OMG.app` |
 | Release sorts below same version | tag used prerelease suffix | use plain `vX.Y.Z` OMG tag |

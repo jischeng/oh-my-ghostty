@@ -71,7 +71,7 @@ enum AgentHookInstallationState: Equatable, Sendable {
 
 struct AgentHookInstaller {
     static let marker = "_omg_agent_status"
-    static let hookVersion = 5
+    static let hookVersion = 6
     static let detectorMarkerVersion = 1
     static let didChangeNotification = Notification.Name(
         "com.oh-my-ghostty.agentIntegrationDidChange"
@@ -1092,8 +1092,18 @@ export default function (pi: any) {
     report(waiting ? "needsAttention" : "working", false, context, waiting ? "question" : undefined);
   });
   pi.on("tool_execution_end", async (_event: any, context: any) => report("working", false, context));
-  pi.on("agent_settled", async (_event: any, context: any) => report("done", false, context));
-  pi.on("session_shutdown", async (_event: any, context: any) => report(undefined, true, context));
+  pi.on("agent_settled", async (_event: any, context: any) => {
+    // A previous run can settle after Esc just as a resumed prompt starts.
+    // Never let that stale completion overwrite the newer working state.
+    if (!context.isIdle()) return;
+    report("done", false, context);
+  });
+  pi.on("session_shutdown", async (_event: any, context: any) => {
+    // OMG intentionally treats ending a still-working context as an unexpected
+    // process loss. Mark normal Pi teardown complete before ending the context.
+    report("done", false, context);
+    report(undefined, true, context);
+  });
 }
 """#
 

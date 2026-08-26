@@ -1073,6 +1073,9 @@ struct AgentStatusPluginTests {
         #expect(source.contains("sessionManager?.getSessionId"))
         #expect(source.contains("omg_conversation="))
         #expect(source.contains("agent_settled"))
+        #expect(source.contains("if (!context.isIdle()) return"))
+        #expect(source.contains("Mark normal Pi teardown complete"))
+        #expect(source.contains("report(\"done\", false, context);\n    report(undefined, true, context);"))
         #expect(source.contains("ask_user_question"))
         let mode = try #require(
             FileManager.default.attributesOfItem(atPath: home.appendingPathComponent(

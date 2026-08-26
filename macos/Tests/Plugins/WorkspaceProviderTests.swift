@@ -306,7 +306,12 @@ struct WorkspaceProviderTests {
     @Test func folderDisplayNameIsSharedByLocalAndRemoteFiles() {
         #expect(WorkspacePathPresentation.folderName("/Users/test/code") == "code")
         #expect(WorkspacePathPresentation.folderName("/home/test/project/omg") == "omg")
+        #expect(WorkspacePathPresentation.folderName("/remote/path/that/does/not/exist") == "exist")
+        #expect(WorkspacePathPresentation.folderName("/home/test/project/") == "project")
+        #expect(WorkspacePathPresentation.folderName("relative/path") == "path")
         #expect(WorkspacePathPresentation.folderName("/") == "/")
+        #expect(WorkspacePathPresentation.folderName("///") == "/")
+        #expect(WorkspacePathPresentation.folderName("") == "")
     }
 
     @Test func sshReplayDescriptorPreservesExactArgumentsAndQuotesCommand() throws {

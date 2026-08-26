@@ -389,6 +389,14 @@ known_hosts, ProxyJump, or ssh-agent state. `SSHWorkspaceFilesystem` uses the
 system `/usr/bin/sftp` client and the user's OpenSSH configuration for bounded
 remote directory operations and file/folder creation.
 
+Tab presentation is a zero-I/O consumer of this boundary: remote folder names
+are derived with pure POSIX string handling, and `WorkspaceDescriptor` identity
+comes directly from the validated `sshReady` alias/cwd. It does not call
+`URL(fileURLWithPath:)`, `lstat`, or parse `~/.ssh/config` from a SwiftUI row
+body. OpenSSH configuration is resolved only when `WorkspaceFilesystemFactory`
+actually creates the Files provider; a missing alias yields an unavailable SSH
+filesystem and never falls back to local I/O.
+
 The production path does not infer active SSH ownership from a GUI-process
 environment variable or a human-readable terminal title. Each Surface has one
 `PaneSessionContext` with these transient states:

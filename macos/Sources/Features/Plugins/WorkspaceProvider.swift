@@ -216,9 +216,23 @@ struct PaneSessionContext: Equatable, Sendable {
 }
 
 enum WorkspacePathPresentation {
+    /// Returns the final POSIX path component without touching the filesystem.
+    /// URL(fileURLWithPath:) performs lstat work even for presentation-only
+    /// remote paths, and VerticalTabRow may be recomputed every display frame.
     static func folderName(_ path: String) -> String {
-        let url = URL(fileURLWithPath: path).standardizedFileURL
-        return url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent
+        guard !path.isEmpty else { return "" }
+        var end = path.endIndex
+        while end > path.startIndex,
+              path[path.index(before: end)] == "/" {
+            end = path.index(before: end)
+        }
+        let trimmed = path[..<end]
+        guard !trimmed.isEmpty else { return "/" }
+        guard let separator = trimmed.lastIndex(of: "/") else {
+            return String(trimmed)
+        }
+        let component = trimmed[trimmed.index(after: separator)...]
+        return component.isEmpty ? "/" : String(component)
     }
 }
 
@@ -569,11 +583,14 @@ struct SSHPlugin: Sendable {
         alias: String,
         workingDirectory: String
     ) -> WorkspaceDescriptor? {
-        guard isEnabled, let host = configuration(alias: alias) else { return nil }
+        guard isEnabled, validAlias(alias) else { return nil }
+        // Workspace identity comes from the typed SSH lifecycle. Resolving the
+        // OpenSSH host belongs to WorkspaceFilesystemFactory when Files is
+        // actually requested, not to every VerticalTabRow body evaluation.
         return .init(
             kind: .ssh,
-            id: host.workspaceID,
-            displayName: host.alias,
+            id: "ssh:\(alias)",
+            displayName: alias,
             workingDirectory: workingDirectory
         )
     }

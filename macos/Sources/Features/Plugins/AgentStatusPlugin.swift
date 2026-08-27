@@ -71,7 +71,7 @@ enum AgentHookInstallationState: Equatable, Sendable {
 
 struct AgentHookInstaller {
     static let marker = "_omg_agent_status"
-    static let hookVersion = 6
+    static let hookVersion = 7
     static let detectorMarkerVersion = 1
     static let didChangeNotification = Notification.Name(
         "com.oh-my-ghostty.agentIntegrationDidChange"
@@ -170,37 +170,21 @@ struct AgentHookInstaller {
         }
         let spec = Dictionary(uniqueKeysWithValues: jsonAgents.map { agent in
             let entries = hookEvents(agent).map { event, state, matcher in
-                let command = hookCommand(
-                    agent: agent,
-                    state: state,
-                    attentionKind: attentionKind(
+                [
+                    "event": event,
+                    "entry": jsonHookEntry(
+                        agent: agent,
                         event: event,
-                        matcher: matcher,
-                        state: state
-                    )
-                )
-                var entry: [String: Any]
-                let dialect = agent.definition.hook.dialect
-                if ["flat", "cursor", "copilot"].contains(dialect) {
-                    entry = ["command": command]
-                    if dialect == "flat" {
-                        entry["description"] = "OMG Agent Status"
-                    } else if dialect == "copilot" {
-                        entry["type"] = "command"
-                    }
-                    if let matcher { entry["match"] = matcher }
-                } else {
-                    entry = [
-                        marker: hookVersion,
-                        "hooks": [["type": "command", "command": command]],
-                    ]
-                    if let matcher { entry["matcher"] = matcher }
-                }
-                return ["event": event, "entry": entry]
+                        state: state,
+                        matcher: matcher
+                    ),
+                ]
             }
             return (agent.rawValue, [
                 "path": agent.definition.hook.path,
-                "dialect": agent.definition.hook.dialect ?? "nested",
+                "dialect": (
+                    agent.definition.hook.dialect ?? .nested
+                ).rawValue,
                 "entries": entries,
             ] as [String: Any])
         })
@@ -773,41 +757,17 @@ print("Installed current OMG agent hooks.")
         for (event, state, matcher) in Self.hookEvents(agent) {
             let existing = try hookEntries(hooks[event], event: event)
             var entries = existing.compactMap(Self.removingOMGCommands)
-            let command = Self.hookCommand(
+            entries.append(Self.jsonHookEntry(
                 agent: agent,
+                event: event,
                 state: state,
-                attentionKind: Self.attentionKind(
-                    event: event,
-                    matcher: matcher,
-                    state: state
-                )
-            )
-            var entry: [String: Any]
-            let dialect = agent.definition.hook.dialect
-            if ["flat", "cursor", "copilot"].contains(dialect) {
-                entry = ["command": command]
-                if dialect == "flat" {
-                    entry["description"] = "OMG Agent Status"
-                } else if dialect == "copilot" {
-                    entry["type"] = "command"
-                }
-                if let matcher { entry["match"] = matcher }
-            } else {
-                entry = [
-                    Self.marker: Self.hookVersion,
-                    "hooks": [[
-                        "type": "command",
-                        "command": command,
-                    ]],
-                ]
-                if let matcher { entry["matcher"] = matcher }
-            }
-            entries.append(entry)
+                matcher: matcher
+            ))
             hooks[event] = entries
         }
         root["hooks"] = hooks
-        let dialect = agent.definition.hook.dialect
-        if ["cursor", "copilot"].contains(dialect), root["version"] == nil {
+        if Self.jsonHookUsesRootVersion(agent.definition.hook.dialect),
+           root["version"] == nil {
             root["version"] = 1
         }
         try writeJSONObject(root, to: url)
@@ -998,6 +958,48 @@ print("Installed current OMG agent hooks.")
         }
     }
 
+    private static func jsonHookEntry(
+        agent: SupportedAgent,
+        event: String,
+        state: TabActivityState?,
+        matcher: String?
+    ) -> [String: Any] {
+        let command = hookCommand(
+            agent: agent,
+            state: state,
+            attentionKind: attentionKind(
+                event: event,
+                matcher: matcher,
+                state: state
+            )
+        )
+        switch agent.definition.hook.dialect ?? .nested {
+        case .flat, .cursor, .copilot:
+            var entry: [String: Any] = ["command": command]
+            if agent.definition.hook.dialect == .flat {
+                entry["description"] = "OMG Agent Status"
+            } else if agent.definition.hook.dialect == .copilot {
+                entry["type"] = "command"
+            }
+            if let matcher { entry["match"] = matcher }
+            return entry
+
+        default:
+            var entry: [String: Any] = [
+                marker: hookVersion,
+                "hooks": [["type": "command", "command": command]],
+            ]
+            if let matcher { entry["matcher"] = matcher }
+            return entry
+        }
+    }
+
+    private static func jsonHookUsesRootVersion(
+        _ dialect: AgentDefinition.HookSpec.Dialect?
+    ) -> Bool {
+        dialect == .cursor || dialect == .copilot
+    }
+
     private static func attentionKind(
         event: String,
         matcher: String?,
@@ -1020,7 +1022,8 @@ print("Installed current OMG agent hooks.")
         attentionKind: TabAttentionKind? = nil
     ) -> String {
         let action = state == nil ? "end" : "start"
-        var metadata = "type=app;omg_agent=\(agent.rawValue);omg_scope=%s"
+        var metadata = "type=app;omg_agent=\(agent.rawValue);" +
+            "omg_scope=%s;omg_liveness=pgid"
         if let state { metadata += ";omg_state=\(state.rawValue)" }
         if let attentionKind {
             metadata += ";omg_attention=\(attentionKind.rawValue)"
@@ -1048,9 +1051,9 @@ print("Installed current OMG agent hooks.")
 
     private static func pluginSource(for agent: SupportedAgent) -> String? {
         switch agent.definition.hook.dialect {
-        case "pi": agent == .omp ? ompExtension : piExtension
-        case "opencode": openCodeExtension
-        case "amp": ampExtension
+        case .pi: agent == .omp ? ompExtension : piExtension
+        case .opencode: openCodeExtension
+        case .amp: ampExtension
         default: nil
         }
     }
@@ -1071,8 +1074,8 @@ function report(state?: string, end = false, context?: any, attention?: string) 
     const attentionKind = attention ? `;omg_attention=${attention}` : "";
     fd = openSync("/dev/tty", "w");
     const sequence = end
-      ? `\u001b]3008;end=${contextId};type=app;omg_agent=pi;omg_scope=${scope}${conversation}\u0007`
-      : `\u001b]3008;start=${contextId};type=app;omg_agent=pi;omg_scope=${scope};omg_state=${state}${conversation}${attentionKind}\u0007`;
+      ? `\u001b]3008;end=${contextId};type=app;omg_agent=pi;omg_scope=${scope};omg_liveness=pid${conversation}\u0007`
+      : `\u001b]3008;start=${contextId};type=app;omg_agent=pi;omg_scope=${scope};omg_liveness=pid;omg_state=${state}${conversation}${attentionKind}\u0007`;
     writeSync(fd, sequence);
   } catch {
   } finally {
@@ -1119,8 +1122,8 @@ function report(state, end = false) {
   try {
     fd = openSync("/dev/tty", "w");
     const sequence = end
-      ? `\u001b]3008;end=${contextId};type=app;omg_agent=amp;omg_scope=${scope}\u0007`
-      : `\u001b]3008;start=${contextId};type=app;omg_agent=amp;omg_scope=${scope};omg_state=${state}\u0007`;
+      ? `\u001b]3008;end=${contextId};type=app;omg_agent=amp;omg_scope=${scope};omg_liveness=pid\u0007`
+      : `\u001b]3008;start=${contextId};type=app;omg_agent=amp;omg_scope=${scope};omg_liveness=pid;omg_state=${state}\u0007`;
     writeSync(fd, sequence);
   } catch {
   } finally {
@@ -1152,8 +1155,8 @@ function report(state?: string, end = false, context?: any, attention?: string) 
     const attentionKind = attention ? `;omg_attention=${attention}` : "";
     fd = openSync("/dev/tty", "w");
     const sequence = end
-      ? `\u001b]3008;end=${contextId};type=app;omg_agent=omp;omg_scope=${scope}${conversation}\u0007`
-      : `\u001b]3008;start=${contextId};type=app;omg_agent=omp;omg_scope=${scope};omg_state=${state}${conversation}${attentionKind}\u0007`;
+      ? `\u001b]3008;end=${contextId};type=app;omg_agent=omp;omg_scope=${scope};omg_liveness=pid${conversation}\u0007`
+      : `\u001b]3008;start=${contextId};type=app;omg_agent=omp;omg_scope=${scope};omg_liveness=pid;omg_state=${state}${conversation}${attentionKind}\u0007`;
     writeSync(fd, sequence);
   } catch {
   } finally {
@@ -1192,8 +1195,8 @@ function report(state, conversation, end = false, attention) {
     const attentionKind = attention ? `;omg_attention=${attention}` : "";
     fd = openSync("/dev/tty", "w");
     const sequence = end
-      ? `\u001b]3008;end=${contextId};type=app;omg_agent=opencode;omg_scope=${scope}${safe}\u0007`
-      : `\u001b]3008;start=${contextId};type=app;omg_agent=opencode;omg_scope=${scope};omg_state=${state}${safe}${attentionKind}\u0007`;
+      ? `\u001b]3008;end=${contextId};type=app;omg_agent=opencode;omg_scope=${scope};omg_liveness=pid${safe}\u0007`
+      : `\u001b]3008;start=${contextId};type=app;omg_agent=opencode;omg_scope=${scope};omg_liveness=pid;omg_state=${state}${safe}${attentionKind}\u0007`;
     writeSync(fd, sequence);
   } catch {
   } finally {
@@ -1271,6 +1274,16 @@ enum AgentActivitySelection {
     }
 }
 
+enum AgentLivenessIdentity: Equatable, Sendable {
+    case process(Int)
+    case processGroup(Int)
+
+    func matchesProcessGroup(_ value: Int?) -> Bool {
+        guard case .processGroup(let processGroupID) = self else { return false }
+        return processGroupID == value
+    }
+}
+
 struct AgentContextSignalReducer: Sendable {
     private enum Scope: String, Sendable {
         case local
@@ -1279,29 +1292,32 @@ struct AgentContextSignalReducer: Sendable {
     }
 
     private struct Identity: Sendable {
-        let processGroupID: Int?
+        let value: Int?
     }
 
     private struct Record: Sendable {
+        let id: String
         let activity: TabActivity
         let scope: Scope
-        let processGroupID: Int?
+        let liveness: AgentLivenessIdentity?
         let updatedAt: Date
         let terminated: Bool
     }
 
+    static let maximumTrackedContexts = 32
     private static let startupValidationGrace: TimeInterval = 4
-    private var activities: [String: Record] = [:]
-    private var order: [String] = []
+    private var activities: [Record] = []
 
-    var validationProcessGroupID: Int? {
+    var trackedContextCount: Int { activities.count }
+
+    var validationIdentity: AgentLivenessIdentity? {
         guard let current = currentRecord,
               current.scope == .local else { return nil }
-        return current.processGroupID
+        return current.liveness
     }
 
     var requiresForegroundValidation: Bool {
-        validationProcessGroupID != nil
+        validationIdentity != nil
     }
 
     static func sessionSignal(
@@ -1341,6 +1357,12 @@ struct AgentContextSignalReducer: Sendable {
                   let rawState = metadata["omg_state"],
                   let state = Self.state(rawState) else { return nil }
             let scope = metadata["omg_scope"].flatMap(Scope.init) ?? .legacy
+            let liveness = Self.liveness(
+                identity: identity,
+                agent: agent,
+                scope: scope,
+                metadata: metadata
+            )
             let progress = metadata["progress"].flatMap(Double.init).flatMap {
                 (0...1).contains($0) ? $0 : nil
             }
@@ -1357,44 +1379,44 @@ struct AgentContextSignalReducer: Sendable {
                 progress: progress,
                 icon: agent.icon
             )
-            activities[signal.id] = Record(
+            activities.removeAll { $0.id == signal.id }
+            if activities.count >= Self.maximumTrackedContexts {
+                activities.removeFirst(
+                    activities.count - Self.maximumTrackedContexts + 1
+                )
+            }
+            activities.append(Record(
+                id: signal.id,
                 activity: activity,
                 scope: scope,
-                processGroupID: identity.processGroupID,
+                liveness: liveness,
                 updatedAt: Date(),
                 terminated: false
-            )
-            order.removeAll { $0 == signal.id }
-            order.append(signal.id)
+            ))
             return .set(activity)
         }
     }
 
     mutating func reconcileLocalForegroundProcess(
         _ foregroundPID: Int?,
-        processGroupIsAlive: Bool? = nil,
+        livenessIsAlive: Bool? = nil,
         now: Date = Date()
     ) -> AgentActivityUpdate? {
         var removedCurrent = false
-        while let currentID = order.last,
-              let current = activities[currentID],
+        while let current = currentRecord,
               current.scope == .local,
-              let processGroupID = current.processGroupID {
-            if processGroupIsAlive == true || processGroupID == foregroundPID {
+              let liveness = current.liveness {
+            if livenessIsAlive == true || liveness.matchesProcessGroup(foregroundPID) {
                 break
             }
+            guard livenessIsAlive != nil else { return nil }
             guard now.timeIntervalSince(current.updatedAt) >=
                     Self.startupValidationGrace else { return nil }
             if current.activity.state == .working ||
                 current.activity.state == .needsAttention {
-                return markUnexpectedInterruption(
-                    currentID,
-                    record: current,
-                    now: now
-                )
+                return markUnexpectedInterruption(record: current, now: now)
             }
-            activities.removeValue(forKey: currentID)
-            order.removeLast()
+            activities.removeLast()
             removedCurrent = true
         }
         guard removedCurrent else { return nil }
@@ -1402,13 +1424,11 @@ struct AgentContextSignalReducer: Sendable {
     }
 
     mutating func acknowledgeTerminalState() -> AgentActivityUpdate? {
-        guard let currentID = order.last,
-              let current = activities[currentID],
+        guard let current = currentRecord,
               current.activity.state == .done ||
                 current.activity.state == .error else { return nil }
         if current.terminated {
-            activities.removeValue(forKey: currentID)
-            order.removeLast()
+            activities.removeLast()
             return currentRecord.map { .set($0.activity) } ?? .clear
         }
         let idle = TabActivity(
@@ -1420,10 +1440,11 @@ struct AgentContextSignalReducer: Sendable {
             progress: nil,
             icon: current.activity.icon
         )
-        activities[currentID] = Record(
+        activities[activities.count - 1] = Record(
+            id: current.id,
             activity: idle,
             scope: current.scope,
-            processGroupID: current.processGroupID,
+            liveness: current.liveness,
             updatedAt: current.updatedAt,
             terminated: false
         )
@@ -1436,34 +1457,34 @@ struct AgentContextSignalReducer: Sendable {
         guard signal.action == .start,
               signal.id.hasPrefix("omg-ssh-"),
               Self.metadata(signal.metadata)["cwd"] != nil else { return nil }
-        let previousID = order.last
-        activities = activities.filter { $0.value.scope != .remote }
-        order.removeAll { activities[$0] == nil }
-        guard previousID != order.last else { return nil }
+        let previousID = currentRecord?.id
+        activities.removeAll { $0.scope == .remote }
+        guard previousID != currentRecord?.id else { return nil }
         return currentRecord.map { .set($0.activity) } ?? .clear
     }
 
-    private var currentRecord: Record? {
-        order.last.flatMap { activities[$0] }
-    }
+    private var currentRecord: Record? { activities.last }
 
     private mutating func consumeEnd(_ id: String) -> AgentActivityUpdate? {
-        guard let current = activities[id] else { return nil }
-        guard order.last == id else {
-            activities.removeValue(forKey: id)
-            order.removeAll { $0 == id }
+        guard let index = activities.firstIndex(where: { $0.id == id }) else {
+            return nil
+        }
+        let current = activities[index]
+        guard index == activities.count - 1 else {
+            activities.remove(at: index)
             return nil
         }
         if current.activity.state == .working ||
             current.activity.state == .needsAttention {
-            return markUnexpectedInterruption(id, record: current)
+            return markUnexpectedInterruption(record: current)
         }
         if current.activity.state == .done {
             if current.terminated { return nil }
-            activities[id] = Record(
+            activities[index] = Record(
+                id: current.id,
                 activity: current.activity,
                 scope: current.scope,
-                processGroupID: nil,
+                liveness: nil,
                 updatedAt: Date(),
                 terminated: true
             )
@@ -1477,7 +1498,6 @@ struct AgentContextSignalReducer: Sendable {
     }
 
     private mutating func markUnexpectedInterruption(
-        _ id: String,
         record: Record,
         now: Date = Date()
     ) -> AgentActivityUpdate {
@@ -1490,20 +1510,25 @@ struct AgentContextSignalReducer: Sendable {
             progress: nil,
             icon: record.activity.icon
         )
-        activities[id] = Record(
-            activity: error,
-            scope: record.scope,
-            processGroupID: nil,
-            updatedAt: now,
-            terminated: true
-        )
+        if let index = activities.firstIndex(where: { $0.id == record.id }) {
+            activities[index] = Record(
+                id: record.id,
+                activity: error,
+                scope: record.scope,
+                liveness: nil,
+                updatedAt: now,
+                terminated: true
+            )
+        }
         return .set(error)
     }
 
     private mutating func remove(_ id: String) -> AgentActivityUpdate? {
-        guard activities.removeValue(forKey: id) != nil else { return nil }
-        let wasActive = order.last == id
-        order.removeAll { $0 == id }
+        guard let index = activities.firstIndex(where: { $0.id == id }) else {
+            return nil
+        }
+        let wasActive = index == activities.count - 1
+        activities.remove(at: index)
         guard wasActive else { return nil }
         return currentRecord.map { .set($0.activity) } ?? .clear
     }
@@ -1513,7 +1538,7 @@ struct AgentContextSignalReducer: Sendable {
         agent: SupportedAgent
     ) -> Identity? {
         let prefix = "omg-agent-\(agent.rawValue)"
-        if id == prefix { return Identity(processGroupID: nil) }
+        if id == prefix { return Identity(value: nil) }
         guard id.hasPrefix(prefix + "-") else { return nil }
         let raw = id.dropFirst(prefix.count + 1)
         guard !raw.isEmpty,
@@ -1521,7 +1546,28 @@ struct AgentContextSignalReducer: Sendable {
               raw.allSatisfy(\.isNumber),
               let value = Int(raw),
               value > 0 else { return nil }
-        return Identity(processGroupID: value)
+        return Identity(value: value)
+    }
+
+    private static func liveness(
+        identity: Identity,
+        agent: SupportedAgent,
+        scope: Scope,
+        metadata: [String: String]
+    ) -> AgentLivenessIdentity? {
+        guard scope == .local, let value = identity.value else { return nil }
+        switch metadata["omg_liveness"] {
+        case "pid": return .process(value)
+        case "pgid": return .processGroup(value)
+        case nil:
+            // Hook plugins historically used their process PID in the context
+            // suffix, while shell/config hooks and foreground synthesis used a
+            // process-group ID. Preserve both old formats during hook upgrades.
+            return agent.definition.hook.kind == .plugin
+                ? .process(value)
+                : .processGroup(value)
+        default: return nil
+        }
     }
 
     private static func state(_ raw: String) -> TabActivityState? {

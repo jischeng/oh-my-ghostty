@@ -36,6 +36,20 @@ must update `docs/PLUGIN_DEVELOPMENT.md` and relevant tests in the same commit.
 - macOS app: `macos/`
 - GTK (Linux and FreeBSD) app: `src/apprt/gtk`
 
+## OMG Architecture Principles
+
+- Keep the complete Ghostty macOS app as the host; do not rewrite OMG around
+  `libghostty-internal` or `libghostty-vt` without a separately approved
+  migration to a stable, public, full embedder API.
+- Put OMG features and business logic in fork-owned files.
+- Limit edits to upstream-owned files to small adapters, registration points,
+  or the minimum missing lower-level capability.
+- Gradually compress OMG changes to `TerminalController`, `AppDelegate`, and
+  `TerminalView` into protocols, extensions, or centralized adapters.
+- Sync `upstream` frequently and resolve conflicts in small batches.
+
+See `docs/oh-my-ghostty-architecture.md` for the detailed architecture baseline.
+
 ## Issue and PR Guidelines
 
 - Never create an issue.

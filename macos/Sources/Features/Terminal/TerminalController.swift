@@ -506,7 +506,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             action: .start,
             id: id,
             metadata: "type=app;omg_agent=\(agent.rawValue);" +
-                "omg_scope=local;omg_state=idle"
+                "omg_scope=local;omg_liveness=pgid;omg_state=idle"
         ), for: surfaceID)
     }
 
@@ -548,7 +548,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             action: .start,
             id: detected.id,
             metadata: "type=app;omg_agent=\(detected.agent.rawValue);" +
-                "omg_scope=local;omg_state=\(nextState.rawValue)\(attention)"
+                "omg_scope=local;omg_liveness=pgid;" +
+                "omg_state=\(nextState.rawValue)\(attention)"
         ), for: surface.id)
     }
 
@@ -846,12 +847,16 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             guard let self,
                   let surface = surfaceTree.first(where: { $0.id == surfaceID }),
                   var reducer = agentReducers[surfaceID] else { return }
-            let processGroupIsAlive = reducer.validationProcessGroupID.map {
-                Self.processGroupExists($0)
+            let livenessIsAlive = reducer.validationIdentity.map {
+                switch $0 {
+                case .process(let processID): Self.processExists(processID)
+                case .processGroup(let processGroupID):
+                    Self.processGroupExists(processGroupID)
+                }
             }
             let update = reducer.reconcileLocalForegroundProcess(
                 surface.surfaceModel?.foregroundPID,
-                processGroupIsAlive: processGroupIsAlive
+                livenessIsAlive: livenessIsAlive
             )
             agentReducers[surfaceID] = reducer
             if let update {
@@ -870,6 +875,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             deadline: .now() + 1,
             execute: workItem
         )
+    }
+
+    private static func processExists(_ processID: Int) -> Bool {
+        guard processID > 0,
+              let value = Int32(exactly: processID) else { return false }
+        if kill(value, 0) == 0 { return true }
+        return errno == EPERM
     }
 
     private static func processGroupExists(_ processGroupID: Int) -> Bool {

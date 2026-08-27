@@ -1099,6 +1099,7 @@ struct SidebarResizeInteraction: NSViewRepresentable {
         var direction: Direction
         private var startWidth: CGFloat = 0
         private var startX: CGFloat = 0
+        private(set) var registeredCursorBounds: NSRect?
 
         init(
             currentWidth: @escaping () -> CGFloat,
@@ -1121,7 +1122,16 @@ struct SidebarResizeInteraction: NSViewRepresentable {
             window?.invalidateCursorRects(for: self)
         }
 
+        override func setFrameSize(_ newSize: NSSize) {
+            let sizeChanged = frame.size != newSize
+            super.setFrameSize(newSize)
+            if sizeChanged {
+                window?.invalidateCursorRects(for: self)
+            }
+        }
+
         override func resetCursorRects() {
+            registeredCursorBounds = bounds
             addCursorRect(bounds, cursor: .resizeLeftRight)
         }
 
@@ -1153,85 +1163,6 @@ struct SidebarResizeInteraction: NSViewRepresentable {
 }
 
 typealias VerticalTabResizeInteraction = SidebarResizeInteraction
-
-enum SidebarToolbarStyle {
-    static let iconSize: CGFloat = 16
-    static let iconFontSize: CGFloat = 12
-    static let controlHeight: CGFloat = 24
-    static let iconControlWidth: CGFloat = 24
-    static let cornerRadius: CGFloat = 4
-    static let itemSpacing: CGFloat = 4
-    static let labelFontSize: CGFloat = 11.5
-    static let labelWeight = Font.Weight.medium
-    static let iconHorizontalPadding: CGFloat = 4
-    static let horizontalLabelPadding: CGFloat = 8
-    static let hoverOpacity = 0.06
-    static let disabledOpacity = 0.45
-}
-
-struct SidebarToolbarButton: View {
-    let systemName: String
-    let title: String?
-    let help: String
-    let action: () -> Void
-    @State private var hovered = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 5) {
-                Image(systemName: systemName)
-                    .font(.system(size: SidebarToolbarStyle.iconFontSize))
-                    .frame(
-                        width: SidebarToolbarStyle.iconSize,
-                        height: SidebarToolbarStyle.iconSize
-                    )
-                if let title {
-                    Text(title)
-                        .font(.system(
-                            size: SidebarToolbarStyle.labelFontSize,
-                            weight: SidebarToolbarStyle.labelWeight
-                        ))
-                        .lineLimit(1)
-                }
-            }
-            .padding(
-                .horizontal,
-                title == nil
-                    ? SidebarToolbarStyle.iconHorizontalPadding
-                    : SidebarToolbarStyle.horizontalLabelPadding
-            )
-            .frame(
-                minWidth: SidebarToolbarStyle.iconControlWidth,
-                minHeight: SidebarToolbarStyle.controlHeight
-            )
-            .background(
-                RoundedRectangle(cornerRadius: SidebarToolbarStyle.cornerRadius)
-                    .fill(Color.primary.opacity(
-                        hovered ? SidebarToolbarStyle.hoverOpacity : 0
-                    ))
-            )
-        }
-        .buttonStyle(.plain)
-        .onHover { hovered = $0 }
-        .help(help)
-        .accessibilityLabel(help)
-    }
-}
-
-struct SidebarIconButton: View {
-    let systemName: String
-    let help: String
-    let action: () -> Void
-
-    var body: some View {
-        SidebarToolbarButton(
-            systemName: systemName,
-            title: nil,
-            help: help,
-            action: action
-        )
-    }
-}
 
 private struct VerticalTabRow: View {
     @ObservedObject var controller: TerminalController
@@ -1326,7 +1257,7 @@ private struct VerticalTabRow: View {
                 }
 
                 if presentation.hovered && canClose {
-                    SidebarIconButton(
+                    TerminalTitlebarIconButton(
                         systemName: "xmark",
                         help: "Close Tab",
                         action: close

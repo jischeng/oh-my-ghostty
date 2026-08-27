@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftUI
 import Testing
 @testable import Ghostty
 
@@ -13,6 +14,26 @@ struct VerticalTabsTests {
         #expect(!VerticalTabDropPolicy.allows(source: nil, in: [projectA]))
         #expect(VerticalTabDropPolicy.insertionIndex(destinationIndex: 2, after: false) == 2)
         #expect(VerticalTabDropPolicy.insertionIndex(destinationIndex: 2, after: true) == 3)
+    }
+
+    @Test func titlebarControlBridgeProvidesOnlyTheAppKitMinimumWidth() {
+        let view = AlignedTerminalTitlebarControlsView(
+            minimumWidth: TerminalTitlebarMetrics.inspectorCollapsedWidth,
+            rootView: EmptyView()
+        )
+        #expect(
+            view.intrinsicContentSize.width ==
+                TerminalTitlebarMetrics.inspectorCollapsedWidth
+        )
+        #expect(
+            view.intrinsicContentSize.height ==
+                TerminalTitlebarMetrics.minimumHeight
+        )
+
+        view.setTitlebarWidth(300)
+        #expect(view.titlebarWidth == 300)
+        #expect(view.intrinsicContentSize.width == 300)
+        #expect(view.frame.width == 300)
     }
 
     @Test func stableSessionIDIsInjectedIntoNewPTYConfiguration() {
@@ -163,6 +184,13 @@ struct VerticalTabsTests {
             resize: { updates.append(($0, $1)) },
             direction: .trailing
         )
+        view.setFrameSize(NSSize(width: 8, height: 320))
+        view.resetCursorRects()
+        #expect(view.registeredCursorBounds == NSRect(x: 0, y: 0, width: 8, height: 320))
+        view.setFrameSize(NSSize(width: 8, height: 400))
+        view.resetCursorRects()
+        #expect(view.registeredCursorBounds == NSRect(x: 0, y: 0, width: 8, height: 400))
+
         let down = try #require(mouseEvent(type: .leftMouseDown, x: 100))
         let dragged = try #require(mouseEvent(type: .leftMouseDragged, x: 160))
         let up = try #require(mouseEvent(type: .leftMouseUp, x: 160))

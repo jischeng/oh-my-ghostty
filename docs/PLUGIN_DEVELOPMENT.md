@@ -291,20 +291,30 @@ the exported remote hook installer; OMG does not claim to install a vendor hook
 that does not exist.
 
 Adapters emit OSC 3008 contexts with IDs
-`omg-agent-<allowlisted-agent>-<process-group-id>`, `type=app`, a bounded
-`omg_state`, `omg_scope=local|remote`, optional validated
-`omg_conversation`, and optional `omg_attention=question|permission`. The host verifies that ID and metadata
-name the same built-in agent, then associates the event with the Surface that
-parsed it. Because some agent versions defer or omit `SessionStart`, the macOS
-host samples Ghostty's foreground process-group PID once per second; only when
-that PID changes does a utility-queue `ps` lookup apply manifest process markers
-and synthesize `idle` for an enabled integration. Local startup then gets a
-four-second foreground handoff grace, after which validation keeps the identity
-while its process group exists and clears it when that group exits. In SSH, no
+`omg-agent-<allowlisted-agent>-<numeric-instance-id>`, `type=app`, a bounded
+`omg_state`, `omg_scope=local|remote`, `omg_liveness=pid|pgid`, optional
+validated `omg_conversation`, and optional
+`omg_attention=question|permission`. Pi-compatible and other in-process Plugin
+adapters use their process PID as the instance/liveness identity; shell/config
+hooks and host foreground synthesis use the process-group ID. The host verifies
+that ID and metadata name the same built-in agent, then associates the event
+with the Surface that parsed it. During migration, missing `omg_liveness`
+retains the historical meaning based on the manifest hook kind. Because some
+agent versions defer or omit `SessionStart`, the macOS host samples Ghostty's
+foreground process-group PID once per second; only when that PID changes does a
+utility-queue `ps` lookup apply manifest process markers and synthesize `idle`
+for an enabled integration. Local startup then gets a four-second foreground
+handoff grace, after which validation keeps the identity while its declared PID
+or process group exists and clears it when that identity exits. A Plugin PID is
+not compared directly with the foreground process-group ID, so wrappers and
+child tool execution cannot create a false `error` while the Agent is alive. In SSH, no
 local process-name fallback is attempted; the next authenticated remote
 Fish/bash/zsh prompt clears orphaned remote agent state.
 Unique instance IDs prevent an old `end` from clearing a newer same-agent
-session. An `end` or failed local liveness check while the current state is
+session. Each Surface keeps one ordered, 32-context reducer; exceeding the bound
+evicts the oldest identity while preserving the newest presentation, and later
+signals for an evicted identity are ignored. An `end` or failed local liveness
+check while the current state is
 `working`/`needsAttention` becomes a terminal `error` rather than silently
 clearing; normal completion remains `done`. Tab selection and pane focus do not
 acknowledge either state. Only mouse click or keyboard input delivered to the
@@ -341,7 +351,12 @@ kind/dialect/path/events/identity fields, status rules, resume argv, and on-disk
 store/discovery mechanism. The roster covers Codex, Claude Code, Pi, Qoder CLI,
 Reasonix, OMP, OpenCode, Amp, Antigravity, Cline, Copilot, Crush, Cursor Agent,
 Droid, Grok, Hermes, Kimi, and Qwen Code. Manifests can select only closed host
-mechanisms; they cannot inject Swift, shell, or arbitrary remote commands.
+mechanisms; they cannot inject Swift, shell, or arbitrary remote commands. Hook
+`dialect` is a closed, decoded enum (`amp`, `cline`, `copilot`, `cursor`, `flat`,
+`kimi`, `nested`, `opencode`, or `pi`); unknown values reject the bundled
+manifest instead of silently falling through to another hook shape. Local hook
+installation and the exported remote installer derive JSON hook entries from
+the same typed builder.
 
 `AgentResumeDescriptor` persists only a version, allowlisted agent, bounded ASCII
 conversation ID, local/remote scope, cwd, and validated `SSHReplayDescriptor`.

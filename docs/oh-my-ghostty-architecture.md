@@ -123,7 +123,7 @@ WebView 不是首批架构依赖。它只可能在第三方生态开放后作为
 
 ### 6.1 Agent 状态提醒
 
-官方状态层由 bundle manifests 驱动，覆盖 Codex、Claude Code、Pi、Qoder CLI、Reasonix、OMP、OpenCode、Amp、Antigravity、Cline、Copilot、Crush、Cursor Agent、Droid、Grok、Hermes、Kimi 与 Qwen Code，并将各自 hook/plugin/TOML/scripts/screen signals 归一为 `idle`、`working`、`needsAttention`、`done`、`error`。事件使用 `omg-agent-<tool>-<process-group-id>` 的 bounded OSC 3008 presentation context，由 agent 所在 TTY 接收，因此 Local 和 SSH Pane 使用同一 Surface correlation；hook 可附带经过白名单校验的 `omg_conversation`，用于精确恢复。部分 agent 版本会延迟或不发送 `SessionStart`，因此 macOS Host 每秒只读取一次 Ghostty 已有的 foreground process-group PID；仅当 PID 改变时，才在 utility queue 执行一次 `ps`，识别本地 `codex`/`claude`/`pi` 并合成 `idle`。唯一实例 ID 阻止旧 session 的 `end` 清理新 session；Local 启动有 4 秒 foreground handoff grace，之后以 process-group 存活性清理异常退出。SSH 不做本地 process-name fallback，而在下一个 authenticated remote Fish/bash/zsh prompt 到达时清理异常残留；远端不依赖 OMG executable。
+官方状态层由 bundle manifests 驱动，覆盖 Codex、Claude Code、Pi、Qoder CLI、Reasonix、OMP、OpenCode、Amp、Antigravity、Cline、Copilot、Crush、Cursor Agent、Droid、Grok、Hermes、Kimi 与 Qwen Code，并将各自 hook/plugin/TOML/scripts/screen signals 归一为 `idle`、`working`、`needsAttention`、`done`、`error`。事件使用 `omg-agent-<tool>-<numeric-instance-id>` 的 bounded OSC 3008 presentation context，并以 `omg_liveness=pid|pgid` 区分 Plugin 进程 PID 与 shell/config/foreground synthesis 的进程组 ID；事件由 agent 所在 TTY 接收，因此 Local 和 SSH Pane 使用同一 Surface correlation，hook 可附带经过白名单校验的 `omg_conversation` 用于精确恢复。部分 agent 版本会延迟或不发送 `SessionStart`，因此 macOS Host 每秒只读取一次 Ghostty 已有的 foreground process-group PID；仅当 PID 改变时，才在 utility queue 执行一次 `ps`，识别本地 `codex`/`claude`/`pi` 并合成 `idle`。唯一实例 ID 阻止旧 session 的 `end` 清理新 session；Local 启动有 4 秒 handoff grace，之后按声明的 PID 或 PGID 检查存活性。PID-backed Plugin 在子工具改变 foreground process group 时仍保持有效，只有声明的进程本身退出才进入 `error`。SSH 不做本地 process-name fallback，而在下一个 authenticated remote Fish/bash/zsh prompt 到达时清理异常残留；远端不依赖 OMG executable。
 
 Vertical Tabs 的 logo、title、cwd 和 working ring 严格消费 focused Surface；同 Tab 的其他 pane 只能贡献 trailing `needsAttention`/`error`/`done`。Agent manifests 提供 optical scale，使品牌 glyph 与 terminal/cloud 图标保持一致视觉尺寸。Agent 启动时 OpenAI/Claude/Pi template glyph 替换 terminal/cloud；idle 不显示 ring，working 使用旋转的四分之一圆 progress indicator；等待审批、完成和失败继续使用右侧 status slot。正常完成即使发生在当前 focused Tab 也保留 `done`；Tab 选择或 pane focus 本身不 acknowledge，只有 owning focused terminal 收到鼠标点击或键盘输入才清除 `done`/`error`。Agent 在 `working`/`needsAttention` 时意外退出会转为 `error`，不会静默消失。Agent context 清理后恢复 canonical terminal/cloud icon。Horizontal Tabs 保持 Ghostty 原生 presentation，不注入自定义状态 UI。Hook 只能改变展示状态，不获得 Terminal Control、文件系统或网络能力。
 
@@ -181,13 +181,17 @@ OMG 不另造第二个 CLI binary。现有 app executable `omg` 是统一 CLI �
 
 首版官方插件仍按最小权限授权。官方身份不是授予全部能力的理由。
 
-## 8. 上游同步策略
+## 8. 宿主边界与上游同步策略
 
-- 新代码优先放在 `macos/Sources/Features/Plugins` 和对应测试目录。
-- 与 `AppDelegate`、`BaseTerminalController`、`SurfaceView` 的改动保持为小型适配点。
-- 首发不修改 renderer，不访问私有 tab view，不引入 WKWebView。
-- 只有实现事件所必需时才修改 Zig/C 边界，并为新增 C API 增加 Zig 测试。
-- 每次同步 upstream 后优先运行协议单测、macOS 构建和插件进程崩溃/重连测试。
+以下原则是 OMG 的长期架构约束：
+
+1. 继续使用 Ghostty 完整 macOS App 作为宿主，复用其 renderer、PTY、输入、IME、accessibility、窗口、Tab、Split、恢复与平台集成。
+2. OMG 功能及其业务逻辑放入 fork-owned 文件；新代码优先位于 `macos/Sources/Features` 下的 OMG 模块和对应测试目录。
+3. Ghostty 上游文件只保留小型 adapter、registration point 或上层缺失能力所必需的最小接入改动，不在其中扩散 OMG 业务逻辑。
+4. 对 `TerminalController`、`AppDelegate`、`TerminalView` 等上游核心类型的修改应逐步压缩为协议边界、extension 或集中式 adapter，使 OMG 模块不直接依赖更多宿主内部实现。
+5. 定期同步 `upstream`，小批量解决冲突并运行相关协议测试、macOS 构建及生命周期测试，避免长期积累一次性大合并。
+
+OMG 基本不基于内部 `libghostty-internal` 或尚未稳定的 `libghostty-vt` 重写独立 App。只有 Ghostty 提供稳定、公开且覆盖完整 macOS embedder 能力的 API，并经过单独迁移评审后，才重新考虑独立宿主。首发仍不修改 renderer、不访问私有 tab view、不引入 WKWebView；只有实现上层事件确实缺少可靠接入点时才修改 Zig/C 边界，并为新增 C API 增加 Zig 测试。
 
 ## 9. 实施阶段与退出条件
 
@@ -250,7 +254,7 @@ OMG 不另造第二个 CLI binary。现有 app executable `omg` 是统一 CLI �
 - `NSWindowTabGroup` 关联的 window layout state：显隐、176-480pt 宽度和 last-width 持久化；新 window 从 last width 初始化，同组 tab 不拥有独立宽度。
 - 1pt divider + 8pt native `NSView` mouse tracking/cursor rect；selected tab 使用 frame-boundary 合并后的 live width（同一 runloop turn 内的 drag 事件合并为一次 apply，无固定 16ms timer 延迟），隐藏 tabs 保持 committed width；mouseUp 立即同步最终 width 到整个 tab group，settings/UserDefaults 写入延迟 200ms 并可被下一次拖动取消，不阻塞指针抬起。
 - `SurfaceScrollView` 只在 framebuffer size 实际改变时调用 `ghostty_surface_set_size`，避免 duplicate layout pass 重复触发 renderer resize；连续 resize 不 remove/add view，也不重建 Surface。
-- titlebar accessory 根据 close/minimize/zoom button 的实际 window-space centerY 布局 Sidebar Toggle 与 New Tab controls，不依赖固定 y offset，适配 fullscreen 和 display scale 变化。Right Inspector titlebar controls 在展开与收起两种状态都填满 accessory frame 并垂直居中，因此收起态 toggle 与展开态、红绿灯保持同一水平线，不使用 optical offset 补偿。
+- titlebar accessory 根据 close/minimize/zoom button 的实际 window-space centerY 布局 Sidebar Toggle 与 New Tab controls，不依赖固定 y offset，适配 fullscreen 和 display scale 变化。标题栏保持统一 chrome，不再复制左右内容区 divider；divider 只存在于 SwiftUI content shell 的 8pt resize boundary。Right Inspector 的 `sidebar.right` toggle 永久占据最右侧固定 44pt slot，结构上独立于 Plugin pane/overflow 区域，不随展开宽度移动，也不会折叠进 `…`；只有 Files 等 Plugin 项可以进入 overflow menu。共享 AppKit/SwiftUI titlebar bridge 负责纵向对齐，并发布首次窗口可靠挂载所需的最小 intrinsic width；每次展开/收起都同步更新 host Auto Layout constraint、accessory intrinsic width 与实际 AppKit frame，确保 Plugin 区获得完整展开宽度而不会溢出仍停留在 44pt 的旧 frame。Host 在更新 AppKit constraint 的同时显式发布 titlebar presentation width/visibility，SwiftUI Plugin controls 不再依赖 reopen 后可能停留在旧值的 `GeometryReader` proposal；reveal 时先展开 accessory，下一 runloop 再以与 pane 相同的 0.18s opacity/6pt transition 显示 Plugin controls，hide 时先动画移除 controls 再收缩 accessory；收起时 SwiftUI 先移除 Plugin pane/overflow controls，下一 runloop turn 再将 accessory 缩为 44pt toggle。
 - Vertical organization menu 支持 No Grouping、By Project、By Date、Created Time 与 Recently Used；grouping/order 存在 `NSWindowTabGroup` 共享 layout state，last-used mode 通过 UserDefaults 持久化，collapsed group 只属于当前 window state。
 - By Project 从 cwd 向上查找 `.git` repository root 并按 cwd 缓存结果，非 Git cwd 回退到目录名；group presentation 使用可扩展的 title/icon/id 模型，不执行 `git` 子进程。
 - `NSWindowTabGroup.windows` 是唯一 canonical tab order。Ghostty `move_tab`、Vertical drag、Horizontal native UI、`goto_tab` 和 shortcut labels 都消费同一顺序；Created/Recently Used 会先重排 canonical windows，开始手动 drag 时 ordering 切换为 Manual。

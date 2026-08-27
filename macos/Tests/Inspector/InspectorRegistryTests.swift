@@ -4,6 +4,13 @@ import Testing
 
 @MainActor
 struct InspectorRegistryTests {
+    @Test func inspectorToggleOwnsAFixedTrailingSlot() {
+        #expect(InspectorTitlebarLayout.pluginWidth(
+            totalWidth: TerminalTitlebarMetrics.inspectorCollapsedWidth
+        ) == 0)
+        #expect(InspectorTitlebarLayout.pluginWidth(totalWidth: 300) == 256)
+    }
+
     @Test func pluginBarUsesStableOverflowBuckets() {
         let descriptors = [
             paneDescriptor(id: "files", source: .coreFeature("files"), title: "Files"),
@@ -23,7 +30,7 @@ struct InspectorRegistryTests {
         let medium = InspectorPluginBarLayout.resolve(
             descriptors: descriptors,
             selectedID: "files",
-            availableWidth: 170
+            availableWidth: 120
         )
         #expect(medium.visibleIDs == ["files"])
         #expect(medium.overflowIDs == ["git", "ssh", "info"])
@@ -31,7 +38,7 @@ struct InspectorRegistryTests {
         let selectedOverflow = InspectorPluginBarLayout.resolve(
             descriptors: descriptors,
             selectedID: "git",
-            availableWidth: 130
+            availableWidth: 100
         )
         #expect(selectedOverflow.visibleIDs == ["files"])
         #expect(selectedOverflow.overflowIDs.contains("git"))
@@ -39,17 +46,17 @@ struct InspectorRegistryTests {
         #expect(medium == InspectorPluginBarLayout.resolve(
             descriptors: descriptors,
             selectedID: "files",
-            availableWidth: 179
+            availableWidth: 127
         ))
     }
 
     @Test func inspectorContentSharesLeadingBaseline() {
         let activeTitlebarContent = InspectorContentMetrics.titlebarLeadingInset(
             firstItemHasTitle: true
-        ) + SidebarToolbarStyle.horizontalLabelPadding
+        ) + TerminalTitlebarControlStyle.horizontalLabelPadding
         let iconOnlyTitlebarContent = InspectorContentMetrics.titlebarLeadingInset(
             firstItemHasTitle: false
-        ) + SidebarToolbarStyle.iconHorizontalPadding
+        ) + TerminalTitlebarControlStyle.iconHorizontalPadding
         let rootTreeContent = InspectorContentMetrics.treeOuterInset +
             InspectorContentMetrics.treeRowLeadingInset
 

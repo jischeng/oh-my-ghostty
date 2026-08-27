@@ -86,7 +86,6 @@ final class OhMyGhosttySettingsWindowController: NSWindowController {
 
 struct SettingsView: View {
     @ObservedObject var settings: OhMyGhosttySettings
-    @Environment(\.colorScheme) private var colorScheme
     @StateObject private var pluginManager: PluginInstallationManager
     @State private var selection: OhMyGhosttySettingsTab
     @State private var githubRepository = ""
@@ -100,6 +99,13 @@ struct SettingsView: View {
         SettingsStrings(language: settings.language)
     }
 
+    private var sidebarSelection: Binding<OhMyGhosttySettingsTab?> {
+        Binding(
+            get: { selection },
+            set: { if let selection = $0 { self.selection = selection } }
+        )
+    }
+
     init(
         settings: OhMyGhosttySettings,
         initialSelection: OhMyGhosttySettingsTab = .tabs
@@ -111,21 +117,14 @@ struct SettingsView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            ScrollView {
-                VStack(spacing: 2) {
-                    ForEach(OhMyGhosttySettingsTab.allCases) { tab in
-                        SettingsSidebarRow(
-                            tab: tab,
-                            title: strings.tabTitle(tab),
-                            selected: selection == tab,
-                            select: { selection = tab }
-                        )
-                    }
-                }
-                .padding(8)
+            List(OhMyGhosttySettingsTab.allCases, selection: sidebarSelection) { tab in
+                Label(strings.tabTitle(tab), systemImage: tab.systemImage)
+                    .tag(tab)
             }
+            .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
             .frame(width: 190)
-            .background(sidebarBackground)
+            .background(Color(nsColor: .controlBackgroundColor))
 
             Divider()
 
@@ -141,12 +140,6 @@ struct SettingsView: View {
             }
         }
         .frame(minWidth: 720, minHeight: 480)
-    }
-
-    private var sidebarBackground: Color {
-        colorScheme == .dark
-            ? Color(red: 0.11, green: 0.11, blue: 0.12)
-            : Color(nsColor: .controlBackgroundColor)
     }
 
     @ViewBuilder
@@ -784,29 +777,6 @@ private struct GhosttyThemeField: View {
                 }
             }
         }
-    }
-}
-
-private struct SettingsSidebarRow: View {
-    let tab: OhMyGhosttySettingsTab
-    let title: String
-    let selected: Bool
-    let select: () -> Void
-
-    var body: some View {
-        Button(action: select) {
-            Label(title, systemImage: tab.systemImage)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 8)
-                .frame(height: 28)
-                .contentShape(Rectangle())
-                .background(
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(Color.accentColor.opacity(selected ? 0.20 : 0))
-                )
-        }
-        .buttonStyle(.plain)
-        .accessibilityValue(selected ? "Selected" : "")
     }
 }
 

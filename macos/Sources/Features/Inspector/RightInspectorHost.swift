@@ -31,8 +31,8 @@ enum InspectorContentMetrics {
 
     static func titlebarLeadingInset(firstItemHasTitle: Bool) -> CGFloat {
         let buttonInset = firstItemHasTitle
-            ? SidebarToolbarStyle.horizontalLabelPadding
-            : SidebarToolbarStyle.iconHorizontalPadding
+            ? TerminalTitlebarControlStyle.horizontalLabelPadding
+            : TerminalTitlebarControlStyle.iconHorizontalPadding
         return max(0, leadingInset - buttonInset)
     }
 }
@@ -155,6 +155,27 @@ private struct TerminalSidebarTransitionContainer<Content: View>: View {
     }
 }
 
+final class InspectorTitlebarPresentation: ObservableObject {
+    @Published private(set) var width = TerminalTitlebarMetrics.inspectorCollapsedWidth
+    @Published private(set) var isVisible = false
+
+    func setWidth(_ width: CGFloat) {
+        guard self.width != width else { return }
+        self.width = width
+    }
+
+    func setVisible(_ visible: Bool) {
+        guard isVisible != visible else { return }
+        isVisible = visible
+    }
+}
+
+enum InspectorTitlebarLayout {
+    static func pluginWidth(totalWidth: CGFloat) -> CGFloat {
+        max(0, totalWidth - TerminalTitlebarMetrics.inspectorCollapsedWidth)
+    }
+}
+
 struct InspectorPluginBarLayout: Equatable {
     let visibleIDs: [String]
     let overflowIDs: [String]
@@ -164,20 +185,24 @@ struct InspectorPluginBarLayout: Equatable {
         selectedID: String?,
         availableWidth: CGFloat
     ) -> Self {
-        let bucketedWidth = floor(max(availableWidth, 0) / 12) * 12
-        let horizontalPadding: CGFloat = 18
-        let toggleWidth: CGFloat = 28
-        let overflowWidth: CGFloat = 28
-        let spacing = SidebarToolbarStyle.itemSpacing
-        let usable = max(0, bucketedWidth - horizontalPadding)
+        let bucket = TerminalTitlebarMetrics.inspectorOverflowBucket
+        let bucketedWidth = floor(max(availableWidth, 0) / bucket) * bucket
+        let firstItemHasTitle = descriptors.first?.id == selectedID
+        let leadingInset = InspectorContentMetrics.titlebarLeadingInset(
+            firstItemHasTitle: firstItemHasTitle
+        )
+        let overflowWidth = TerminalTitlebarControlStyle.controlWidth(title: nil)
+        let spacing = TerminalTitlebarControlStyle.itemSpacing
+        let usable = max(0, bucketedWidth - leadingInset)
 
         func itemWidth(_ descriptor: InspectorPaneDescriptor) -> CGFloat {
-            guard descriptor.id == selectedID else { return 28 }
-            return max(52, 34 + CGFloat(descriptor.title.count) * 6.5)
+            TerminalTitlebarControlStyle.controlWidth(
+                title: descriptor.id == selectedID ? descriptor.title : nil
+            )
         }
 
-        let allItemsWidth = descriptors.reduce(toggleWidth) { result, descriptor in
-            result + spacing + itemWidth(descriptor)
+        let allItemsWidth = descriptors.enumerated().reduce(0) { result, item in
+            result + (item.offset == 0 ? 0 : spacing) + itemWidth(item.element)
         }
         if allItemsWidth <= usable {
             return .init(
@@ -187,9 +212,9 @@ struct InspectorPluginBarLayout: Equatable {
         }
 
         var visible: [String] = []
-        var used = toggleWidth + overflowWidth + spacing * 2
+        var used = overflowWidth
         for descriptor in descriptors {
-            let candidate = itemWidth(descriptor) + (visible.isEmpty ? 0 : spacing)
+            let candidate = itemWidth(descriptor) + spacing
             guard used + candidate <= usable else { break }
             visible.append(descriptor.id)
             used += candidate
@@ -208,26 +233,30 @@ extension TerminalWindow {
     ) {
         let installed = titlebarAccessoryViewControllers.contains(inspectorToggleAccessory)
         inspectorToggleAccessory.layoutAttribute = .right
-        inspectorToggleAccessory.view = AlignedTitlebarControlsView(
-            width: 190,
+        inspectorToggleAccessory.view = AlignedTerminalTitlebarControlsView(
+            minimumWidth: TerminalTitlebarMetrics.inspectorCollapsedWidth,
             rootView: InspectorTitlebarControls(
-                controller: controller,
                 layoutState: controller.tabLayoutState,
+                presentation: inspectorTitlebarPresentation,
                 registry: registry,
                 toggleInspector: { [weak controller] in controller?.toggleInspectorPane() }
             )
         )
-        if !installed {
-            addTitlebarAccessoryViewController(inspectorToggleAccessory)
-        }
         inspectorToggleAccessory.view.translatesAutoresizingMaskIntoConstraints = false
         inspectorToggleWidthConstraint?.isActive = false
         let widthConstraint = inspectorToggleAccessory.view.widthAnchor.constraint(
-            equalToConstant: 190
+            equalToConstant: TerminalTitlebarMetrics.inspectorCollapsedWidth
         )
         inspectorToggleWidthConstraint = widthConstraint
         widthConstraint.isActive = true
+        if !installed {
+            addTitlebarAccessoryViewController(inspectorToggleAccessory)
+        }
         let state = controller.tabLayoutState
+        inspectorTitlebarPresentation.setVisible(false)
+        inspectorTitlebarPresentation.setWidth(
+            TerminalTitlebarMetrics.inspectorCollapsedWidth
+        )
         let layoutChanges = Publishers.CombineLatest3(
             state.$isInspectorVisible,
             state.$inspectorWidth,
@@ -256,22 +285,68 @@ extension TerminalWindow {
                 leadingWidth: leadingWidth
             )
             let targetWidth = isVisible
-                ? presentedWidth + TerminalShellStyle.resizeHitWidth
-                : 44
-            guard self.inspectorToggleWidthConstraint?.constant != targetWidth else {
-                return
+                ? presentedWidth
+                : TerminalTitlebarMetrics.inspectorCollapsedWidth
+            self.inspectorCollapseWorkItem?.cancel()
+            self.inspectorCollapseWorkItem = nil
+            if isVisible {
+                // Expand the AppKit accessory before revealing Plugin controls.
+                // The next-turn reveal then animates with the content pane rather
+                // than appearing in the old collapsed frame first.
+                self.applyInspectorAccessoryWidth(
+                    targetWidth,
+                    controller: controller
+                )
+                guard !self.inspectorTitlebarPresentation.isVisible else { return }
+                let workItem = DispatchWorkItem { [weak self, weak controller] in
+                    guard let self, let controller,
+                          controller.tabLayoutState.isInspectorVisible else { return }
+                    self.inspectorCollapseWorkItem = nil
+                    self.inspectorTitlebarPresentation.setVisible(true)
+                }
+                self.inspectorCollapseWorkItem = workItem
+                DispatchQueue.main.async(execute: workItem)
+            } else {
+                // Animate Plugin controls out with the pane, then contract the
+                // accessory only after the shared transition duration.
+                self.inspectorTitlebarPresentation.setVisible(false)
+                let workItem = DispatchWorkItem { [weak self, weak controller] in
+                    guard let self, let controller,
+                          !controller.tabLayoutState.isInspectorVisible else { return }
+                    self.inspectorCollapseWorkItem = nil
+                    self.applyInspectorAccessoryWidth(
+                        targetWidth,
+                        controller: controller
+                    )
+                }
+                self.inspectorCollapseWorkItem = workItem
+                DispatchQueue.main.asyncAfter(
+                    deadline: .now() + TerminalShellStyle.sidebarTransitionDuration,
+                    execute: workItem
+                )
             }
-            self.inspectorToggleWidthConstraint?.constant = targetWidth
-            self.inspectorToggleAccessory.view.needsLayout = true
-            self.titlebarContainer?.needsLayout = true
-            self.titlebarContainer?.layoutSubtreeIfNeeded()
-            self.inspectorToggleAccessory.view.layoutSubtreeIfNeeded()
-            self.scheduleInspectorAppearanceSync(controller: controller)
         }
 
         // AppKit may reset an already-visible transparent window to opaque when
         // adding or resizing a trailing titlebar accessory. Restore appearance
         // once the titlebar layout has settled rather than on every resize event.
+        scheduleInspectorAppearanceSync(controller: controller)
+    }
+
+    private func applyInspectorAccessoryWidth(
+        _ width: CGFloat,
+        controller: TerminalController
+    ) {
+        let sizing = inspectorToggleAccessory.view as? TerminalTitlebarWidthSynchronizing
+        guard inspectorToggleWidthConstraint?.constant != width ||
+                sizing?.titlebarWidth != width else { return }
+        inspectorToggleWidthConstraint?.constant = width
+        inspectorTitlebarPresentation.setWidth(width)
+        sizing?.setTitlebarWidth(width)
+        inspectorToggleAccessory.view.needsLayout = true
+        titlebarContainer?.needsLayout = true
+        titlebarContainer?.layoutSubtreeIfNeeded()
+        inspectorToggleAccessory.view.layoutSubtreeIfNeeded()
         scheduleInspectorAppearanceSync(controller: controller)
     }
 
@@ -293,7 +368,7 @@ extension TerminalWindow {
     }
 
     var inspectorControlsCenterY: CGFloat? {
-        (inspectorToggleAccessory.view as? TitlebarControlsCentering)?.contentCenterYInWindow
+        (inspectorToggleAccessory.view as? TerminalTitlebarControlsCentering)?.contentCenterYInWindow
     }
 
     var inspectorControlsHeight: CGFloat? {
@@ -301,21 +376,16 @@ extension TerminalWindow {
         return inspectorToggleAccessory.view.bounds.height
     }
 
-    var inspectorDividerCenterX: CGFloat? {
+    var inspectorControlsWidth: CGFloat? {
         guard inspectorToggleAccessory.view.window != nil else { return nil }
-        return inspectorToggleAccessory.view.convert(
-            NSPoint(
-                x: TerminalShellStyle.resizeHitWidth / 2,
-                y: inspectorToggleAccessory.view.bounds.midY
-            ),
-            to: nil
-        ).x
+        return inspectorToggleAccessory.view.bounds.width
     }
+
 }
 
 private struct InspectorTitlebarControls: View {
-    @ObservedObject var controller: TerminalController
     @ObservedObject var layoutState: VerticalTabWindowLayoutState
+    @ObservedObject var presentation: InspectorTitlebarPresentation
     @ObservedObject var registry: InspectorRegistry
     let toggleInspector: () -> Void
 
@@ -328,28 +398,24 @@ private struct InspectorTitlebarControls: View {
     }
 
     var body: some View {
-        GeometryReader { geometry in
-            let inspectorVisible = layoutState.isInspectorVisible
-            let descriptors = inspectorVisible
-                ? registry.entries.map(\.descriptor)
-                : []
-            let dividerSlotWidth = inspectorVisible
-                ? TerminalShellStyle.resizeHitWidth
-                : 0
-            let layout = InspectorPluginBarLayout.resolve(
-                descriptors: descriptors,
-                selectedID: selectedPaneID,
-                availableWidth: max(0, geometry.size.width - dividerSlotWidth)
-            )
-            let titlebarLeadingInset = InspectorContentMetrics.titlebarLeadingInset(
-                firstItemHasTitle: layout.visibleIDs.first == selectedPaneID
-            )
-            HStack(spacing: 0) {
-                if inspectorVisible {
-                    TerminalSidebarDividerLine(color: controller.sidebarDividerColor)
-                        .frame(width: dividerSlotWidth)
-                }
-                HStack(spacing: SidebarToolbarStyle.itemSpacing) {
+        let inspectorVisible = presentation.isVisible
+        let descriptors = inspectorVisible
+            ? registry.entries.map(\.descriptor)
+            : []
+        let pluginWidth = InspectorTitlebarLayout.pluginWidth(
+            totalWidth: presentation.width
+        )
+        let layout = InspectorPluginBarLayout.resolve(
+            descriptors: descriptors,
+            selectedID: selectedPaneID,
+            availableWidth: pluginWidth
+        )
+        let titlebarLeadingInset = InspectorContentMetrics.titlebarLeadingInset(
+            firstItemHasTitle: layout.visibleIDs.first == selectedPaneID
+        )
+        HStack(spacing: 0) {
+            if inspectorVisible {
+                HStack(spacing: TerminalTitlebarControlStyle.itemSpacing) {
                     ForEach(layout.visibleIDs, id: \.self) { id in
                         if let descriptor = registry.descriptor(id: id) {
                             InspectorTitlebarPaneButton(
@@ -368,25 +434,31 @@ private struct InspectorTitlebarControls: View {
                             select: select
                         )
                     }
-                    Spacer(minLength: 0)
-                    SidebarIconButton(
-                        systemName: "sidebar.right",
-                        help: inspectorVisible ? "Hide Inspector" : "Show Inspector",
-                        action: toggleInspector
-                    )
-                    .disabled(registry.isEmpty)
-                    .opacity(
-                        registry.isEmpty ? SidebarToolbarStyle.disabledOpacity : 1
-                    )
                 }
                 .padding(.leading, titlebarLeadingInset)
-                .padding(.trailing, 10)
+                .frame(width: pluginWidth, alignment: .leading)
+                .transition(.opacity.combined(with: .offset(x: 6, y: 0)))
+            } else {
+                Spacer(minLength: 0)
             }
-            // Fill the titlebar accessory so controls center vertically in both
-            // expanded and collapsed states. GeometryReader otherwise pins the
-            // collapsed control to the top edge.
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            TerminalTitlebarIconButton(
+                systemName: "sidebar.right",
+                help: inspectorVisible ? "Hide Inspector" : "Show Inspector",
+                action: toggleInspector
+            )
+            .frame(width: TerminalTitlebarMetrics.inspectorCollapsedWidth)
+            .disabled(registry.isEmpty)
+            .opacity(
+                registry.isEmpty ? TerminalTitlebarControlStyle.disabledOpacity : 1
+            )
         }
+        .frame(width: presentation.width, alignment: .trailing)
+        .frame(maxHeight: .infinity)
+        .animation(
+            TerminalShellStyle.sidebarTransitionAnimation,
+            value: inspectorVisible
+        )
     }
 
     private func select(_ paneID: String) {
@@ -401,7 +473,7 @@ private struct InspectorTitlebarPaneButton: View {
     let select: () -> Void
 
     var body: some View {
-        SidebarToolbarButton(
+        TerminalTitlebarButton(
             systemName: descriptor.systemImage,
             title: selected ? descriptor.title : nil,
             help: descriptor.title,
@@ -712,22 +784,11 @@ private struct InspectorPluginOverflowMenu: View {
                 }
             }
         } label: {
-            Image(systemName: "ellipsis")
-                .font(.system(size: SidebarToolbarStyle.iconFontSize))
-                .frame(
-                    width: SidebarToolbarStyle.iconSize,
-                    height: SidebarToolbarStyle.iconSize
-                )
-                .frame(
-                    width: SidebarToolbarStyle.iconControlWidth,
-                    height: SidebarToolbarStyle.controlHeight
-                )
-                .background(
-                    RoundedRectangle(cornerRadius: SidebarToolbarStyle.cornerRadius)
-                        .fill(Color.primary.opacity(
-                            hovered ? SidebarToolbarStyle.hoverOpacity : 0
-                        ))
-                )
+            TerminalTitlebarControlLabel(
+                systemName: "ellipsis",
+                title: nil,
+                hovered: hovered
+            )
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)

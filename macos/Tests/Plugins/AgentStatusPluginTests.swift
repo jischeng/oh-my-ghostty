@@ -51,6 +51,42 @@ struct AgentStatusPluginTests {
         }
     }
 
+    @Test func boundsTrackedAgentContextsAndEvictsOldest() {
+        var reducer = AgentContextSignalReducer()
+        let overflow = 5
+        for instance in 1...(AgentContextSignalReducer.maximumTrackedContexts + overflow) {
+            _ = reducer.consume(signal(
+                agent: .pi,
+                state: "idle",
+                instance: instance
+            ))
+        }
+
+        #expect(
+            reducer.trackedContextCount ==
+                AgentContextSignalReducer.maximumTrackedContexts
+        )
+        #expect(reducer.consume(.init(
+            action: .end,
+            id: "omg-agent-pi-1",
+            metadata: "type=app;omg_agent=pi"
+        )) == nil)
+        #expect(
+            reducer.trackedContextCount ==
+                AgentContextSignalReducer.maximumTrackedContexts
+        )
+
+        _ = reducer.consume(.init(
+            action: .end,
+            id: "omg-agent-pi-\(AgentContextSignalReducer.maximumTrackedContexts + overflow)",
+            metadata: "type=app;omg_agent=pi"
+        ))
+        #expect(
+            reducer.trackedContextCount ==
+                AgentContextSignalReducer.maximumTrackedContexts - 1
+        )
+    }
+
     @Test func bundledAgentCatalogDefinesHooksAndResume() {
         let expected: [SupportedAgent: (String, String, Int)] = [
             .codex: ("codex", "AgentOpenAI", 7),
@@ -80,6 +116,10 @@ struct AgentStatusPluginTests {
             #expect(definition.iconAsset == value?.1)
             #expect(definition.hook.events.count == value?.2)
         }
+        let bundledDialects = Set(SupportedAgent.allCases.compactMap {
+            $0.definition.hook.dialect
+        })
+        #expect(bundledDialects == Set(AgentDefinition.HookSpec.Dialect.allCases))
         #expect(SupportedAgent.codex.definition.resume.discover != nil)
         #expect(SupportedAgent.claude.definition.resume.store != nil)
         #expect(SupportedAgent.pi.definition.resume.seed == "pi-session-file")
@@ -442,24 +482,36 @@ struct AgentStatusPluginTests {
         #expect(reducer.reconcileLocalForegroundProcess(200) == nil)
     }
 
-    @Test func localForegroundExitHonorsStartupGraceThenReportsError() throws {
+    @Test func explicitProcessGroupLivenessUsesForegroundIdentity() {
+        var reducer = AgentContextSignalReducer()
+        _ = reducer.consume(signal(
+            agent: .pi,
+            state: "working",
+            instance: 299,
+            liveness: "pgid"
+        ))
+        #expect(reducer.validationIdentity == .processGroup(299))
+        #expect(reducer.reconcileLocalForegroundProcess(299) == nil)
+    }
+
+    @Test func livePiPIDSurvivesForegroundProcessGroupChanges() throws {
         var reducer = AgentContextSignalReducer()
         _ = reducer.consume(signal(
             agent: .pi,
             state: "working",
             instance: 300
         ))
+        #expect(reducer.validationIdentity == .process(300))
         #expect(reducer.requiresForegroundValidation)
-        #expect(reducer.reconcileLocalForegroundProcess(300) == nil)
         #expect(reducer.reconcileLocalForegroundProcess(301) == nil)
         #expect(reducer.reconcileLocalForegroundProcess(
-            301,
-            processGroupIsAlive: true,
+            999,
+            livenessIsAlive: true,
             now: Date().addingTimeInterval(10)
         ) == nil)
         guard case .set(let error) = reducer.reconcileLocalForegroundProcess(
-            301,
-            processGroupIsAlive: false,
+            999,
+            livenessIsAlive: false,
             now: Date().addingTimeInterval(10)
         ) else {
             Issue.record("Expected an interruption error")
@@ -701,6 +753,7 @@ struct AgentStatusPluginTests {
             #expect(command.contains("ps -o pgid= -p \"$PPID\""))
             #expect(command.contains("omg-agent-\(url == codexHooks ? "codex" : "claude")-%s"))
             #expect(command.contains("omg_scope=%s"))
+            #expect(command.contains("omg_liveness=pgid"))
             #expect(command.contains("omg_conversation=%s"))
             #expect(command.contains("session_id"))
             #expect(command.contains("> \"/dev/$omg_tty\""))
@@ -1069,6 +1122,7 @@ struct AgentStatusPluginTests {
         )
         #expect(source.contains("marker: \(AgentHookInstaller.marker)"))
         #expect(source.contains("omg-agent-pi-${process.pid}"))
+        #expect(source.contains("omg_liveness=pid"))
         #expect(source.contains("process.env.SSH_CONNECTION"))
         #expect(source.contains("sessionManager?.getSessionId"))
         #expect(source.contains("omg_conversation="))
@@ -1147,6 +1201,7 @@ struct AgentStatusPluginTests {
         state: String,
         instance: Int? = nil,
         scope: String? = nil,
+        liveness: String? = nil,
         attention: TabAttentionKind? = nil
     ) -> Ghostty.ContextSignal {
         let id = "omg-agent-\(agent.rawValue)" + (instance.map { "-\($0)" } ?? "")
@@ -1154,6 +1209,7 @@ struct AgentStatusPluginTests {
         if let scope = scope ?? (instance == nil ? nil : "local") {
             metadata += ";omg_scope=\(scope)"
         }
+        if let liveness { metadata += ";omg_liveness=\(liveness)" }
         if let attention { metadata += ";omg_attention=\(attention.rawValue)" }
         return .init(action: .start, id: id, metadata: metadata)
     }

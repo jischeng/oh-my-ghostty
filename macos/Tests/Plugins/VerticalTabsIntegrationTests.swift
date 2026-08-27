@@ -23,6 +23,8 @@ struct VerticalTabsIntegrationTests {
         "/tmp/oh-my-ghostty-settings-appearance-light.png"
     private let reorderScreenshotPath = "/tmp/oh-my-ghostty-vertical-tabs-reordered.png"
     private let inspectorScreenshotPath = "/tmp/oh-my-ghostty-inspector-files.png"
+    private let reopenedInspectorScreenshotPath =
+        "/tmp/oh-my-ghostty-inspector-files-reopened.png"
 
     @Test func remoteSessionMetadataDoesNotAddScrollDispatchJank() async throws {
         let appDelegate = try #require(NSApp.delegate as? AppDelegate)
@@ -155,7 +157,20 @@ struct VerticalTabsIntegrationTests {
         )
         first.titleOverride = titles[0]
         controllers.append(first)
-        _ = try #require(first.window)
+        let initialWindow = try #require(first.window as? VerticalTabsTerminalWindow)
+        first.showWindow(nil)
+        try await settle([first])
+        initialWindow.contentView?.superview?.layoutSubtreeIfNeeded()
+        #expect(initialWindow.sidebarToggleIsInstalled)
+        #expect(initialWindow.inspectorToggleIsInstalled)
+        #expect(
+            initialWindow.titlebarControlsWidth ==
+                TerminalTitlebarMetrics.leftAccessoryWidth
+        )
+        #expect(
+            initialWindow.inspectorControlsWidth ==
+                TerminalTitlebarMetrics.inspectorCollapsedWidth
+        )
 
         for title in titles.dropFirst() {
             let parent = try #require(controllers.last?.window)
@@ -214,6 +229,18 @@ struct VerticalTabsIntegrationTests {
         #expect(controllers.compactMap {
             ($0.window as? VerticalTabsTerminalWindow)?.nativeTabBarRejectionCount
         }.reduce(0, +) > 0)
+
+        tabGroup.selectedWindow = initialWindow
+        try await Task.sleep(for: .milliseconds(150))
+        initialWindow.contentView?.superview?.layoutSubtreeIfNeeded()
+        #expect(initialWindow.titlebarControlsWidth ==
+            TerminalTitlebarMetrics.leftAccessoryWidth)
+        #expect(initialWindow.inspectorControlsWidth ==
+            TerminalTitlebarMetrics.inspectorCollapsedWidth)
+
+        let eighthWindow = try #require(eighth.window)
+        tabGroup.selectedWindow = eighthWindow
+        try await Task.sleep(for: .milliseconds(150))
         let alignedWindow = try #require(eighth.window as? VerticalTabsTerminalWindow)
         alignedWindow.contentView?.superview?.layoutSubtreeIfNeeded()
         let controlsCenterY = try #require(alignedWindow.titlebarControlsCenterY)
@@ -226,18 +253,6 @@ struct VerticalTabsIntegrationTests {
         #expect(abs((alignedWindow.inspectorControlsHeight ?? 0) - titlebarHeight) < 0.5)
         #expect(alignedWindow.inspectorToggleIsInstalled)
         let alignedContentView = try #require(alignedWindow.contentView)
-        let expectedLeftDividerCenterX = alignedContentView.convert(
-            NSPoint(
-                x: eighth.tabLayoutState.sidebarWidth +
-                    TerminalShellStyle.resizeHitWidth / 2,
-                y: alignedContentView.bounds.midY
-            ),
-            to: nil
-        ).x
-        let leftDividerCenterX = try #require(
-            alignedWindow.titlebarSidebarDividerCenterX
-        )
-        #expect(abs(leftDividerCenterX - expectedLeftDividerCenterX) < 0.5)
 
         let surfaceIDs = controllers.map { $0.surfaceTree.first?.id }
         #expect(Set(controllers.map(\.tabSessionID)).count == controllers.count)
@@ -283,14 +298,19 @@ struct VerticalTabsIntegrationTests {
         let terminalWindow = try #require(eighth.window as? TerminalWindow)
         for _ in 0..<20 where
             !eighth.tabLayoutState.isInspectorVisible ||
+                !terminalWindow.inspectorTitlebarPresentation.isVisible ||
                 eighth.tabLayoutState.selectedInspectorPaneID == nil ||
-                (terminalWindow.inspectorToggleWidthConstraint?.constant ?? 0) <= 44 {
+                (terminalWindow.inspectorToggleWidthConstraint?.constant ?? 0) <=
+                    TerminalTitlebarMetrics.inspectorCollapsedWidth {
             try await Task.sleep(for: .milliseconds(50))
         }
         #expect(eighth.tabLayoutState.isInspectorVisible)
         #expect(eighth.tabLayoutState.selectedInspectorPaneID ==
             BuiltInFilesInspectorProvider.paneID)
-        #expect((terminalWindow.inspectorToggleWidthConstraint?.constant ?? 0) > 44)
+        #expect(
+            (terminalWindow.inspectorToggleWidthConstraint?.constant ?? 0) >
+                TerminalTitlebarMetrics.inspectorCollapsedWidth
+        )
         eighth.updateInspectorWidth(380, persist: true)
         #expect(eighth.tabLayoutState.inspectorWidth == 380)
         #expect(inspectorPresentation.snapshot.width == 380)
@@ -300,8 +320,7 @@ struct VerticalTabsIntegrationTests {
             leadingWidth: eighth.tabLayoutState.sidebarWidth +
                 TerminalShellStyle.resizeHitWidth
         )
-        let expectedAccessoryWidth = presentedInspectorWidth +
-            TerminalShellStyle.resizeHitWidth
+        let expectedAccessoryWidth = presentedInspectorWidth
         for _ in 0..<20 where abs(
             (terminalWindow.inspectorToggleWidthConstraint?.constant ?? 0) -
                 expectedAccessoryWidth
@@ -313,16 +332,10 @@ struct VerticalTabsIntegrationTests {
             (terminalWindow.inspectorToggleWidthConstraint?.constant ?? 0) -
                 expectedAccessoryWidth
         ) < 0.5)
-        let expectedRightDividerCenterX = alignedContentView.convert(
-            NSPoint(
-                x: alignedContentView.bounds.maxX - presentedInspectorWidth -
-                    TerminalShellStyle.resizeHitWidth / 2,
-                y: alignedContentView.bounds.midY
-            ),
-            to: nil
-        ).x
-        let rightDividerCenterX = try #require(terminalWindow.inspectorDividerCenterX)
-        #expect(abs(rightDividerCenterX - expectedRightDividerCenterX) < 0.5)
+        #expect(abs(
+            (terminalWindow.inspectorControlsWidth ?? 0) -
+                expectedAccessoryWidth
+        ) < 0.5)
         #expect(controllers.map { $0.surfaceTree.first?.id } == surfaceIDs)
 
         let inspectorSurface = try #require(eighth.focusedSurface ?? eighth.surfaceTree.first)
@@ -495,16 +508,38 @@ struct VerticalTabsIntegrationTests {
         #expect(switchedTree.nodes.map(\.name) == ["switched.json"])
         inspectorSurface.pwd = originalPWD
         try await Task.sleep(for: .milliseconds(100))
+        let expandedInspectorAccessoryWidth = try #require(
+            terminalWindow.inspectorToggleWidthConstraint?.constant
+        )
+        #expect(
+            expandedInspectorAccessoryWidth >
+                TerminalTitlebarMetrics.inspectorCollapsedWidth
+        )
         eighth.toggleInspectorPane()
+        #expect(!eighth.tabLayoutState.isInspectorVisible)
+        #expect(!terminalWindow.inspectorTitlebarPresentation.isVisible)
+        #expect(
+            terminalWindow.inspectorToggleWidthConstraint?.constant ==
+                expandedInspectorAccessoryWidth
+        )
         for _ in 0..<20 where
             eighth.tabLayoutState.isInspectorVisible ||
-                terminalWindow.inspectorToggleWidthConstraint?.constant != 44 ||
+                terminalWindow.inspectorTitlebarPresentation.isVisible ||
+                terminalWindow.inspectorToggleWidthConstraint?.constant !=
+                    TerminalTitlebarMetrics.inspectorCollapsedWidth ||
                 controllers.map(surfaceSize) != initialSurfaceSizes {
             try await Task.sleep(for: .milliseconds(50))
         }
         #expect(!eighth.tabLayoutState.isInspectorVisible)
-        #expect(terminalWindow.inspectorToggleWidthConstraint?.constant == 44)
+        #expect(
+            terminalWindow.inspectorToggleWidthConstraint?.constant ==
+                TerminalTitlebarMetrics.inspectorCollapsedWidth
+        )
         terminalWindow.contentView?.superview?.layoutSubtreeIfNeeded()
+        #expect(
+            terminalWindow.inspectorControlsWidth ==
+                TerminalTitlebarMetrics.inspectorCollapsedWidth
+        )
         let collapsedInspectorCenterY = try #require(
             terminalWindow.inspectorControlsCenterY
         )
@@ -512,6 +547,51 @@ struct VerticalTabsIntegrationTests {
         #expect(abs(collapsedInspectorCenterY - collapsedTrafficCenterY) < 0.5)
         #expect(controllers.map { $0.surfaceTree.first?.id } == surfaceIDs)
         #expect(controllers.map(surfaceSize) == initialSurfaceSizes)
+
+        eighth.toggleInspectorPane()
+        for _ in 0..<20 where
+            !eighth.tabLayoutState.isInspectorVisible ||
+                !terminalWindow.inspectorTitlebarPresentation.isVisible ||
+                (terminalWindow.inspectorControlsWidth ?? 0) <=
+                    TerminalTitlebarMetrics.inspectorCollapsedWidth {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try await Task.sleep(for: .milliseconds(250))
+        let reopenedAccessoryWidth = try #require(terminalWindow.inspectorControlsWidth)
+        let reopenedPluginWidth = InspectorTitlebarLayout.pluginWidth(
+            totalWidth: reopenedAccessoryWidth
+        )
+        let reopenedLayout = InspectorPluginBarLayout.resolve(
+            descriptors: appDelegate.inspectorRegistry.entries.map(\.descriptor),
+            selectedID: eighth.tabLayoutState.selectedInspectorPaneID,
+            availableWidth: reopenedPluginWidth
+        )
+        #expect(eighth.tabLayoutState.isInspectorVisible)
+        #expect(terminalWindow.inspectorTitlebarPresentation.isVisible)
+        #expect(terminalWindow.inspectorTitlebarPresentation.width ==
+            reopenedAccessoryWidth)
+        #expect(reopenedPluginWidth > 0)
+        #expect(reopenedLayout.visibleIDs.contains(BuiltInFilesInspectorProvider.paneID))
+        try capture(
+            window: try #require(eighth.window),
+            path: reopenedInspectorScreenshotPath
+        )
+
+        eighth.toggleInspectorPane()
+        for _ in 0..<20 where
+            eighth.tabLayoutState.isInspectorVisible ||
+                terminalWindow.inspectorTitlebarPresentation.isVisible ||
+                terminalWindow.inspectorControlsWidth !=
+                    TerminalTitlebarMetrics.inspectorCollapsedWidth {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(!eighth.tabLayoutState.isInspectorVisible)
+        #expect(!terminalWindow.inspectorTitlebarPresentation.isVisible)
+        #expect(terminalWindow.inspectorTitlebarPresentation.width ==
+            TerminalTitlebarMetrics.inspectorCollapsedWidth)
+        try await Task.sleep(for: .milliseconds(250))
+        #expect(controllers.map(surfaceSize) == initialSurfaceSizes)
+
         let expectedFrameSize = try #require(eighth.window).frame.size
         let switchOrder = [0, 4, 1, 7, 2, 5]
         let clock = ContinuousClock()

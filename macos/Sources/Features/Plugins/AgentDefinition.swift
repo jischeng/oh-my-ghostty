@@ -229,6 +229,18 @@ struct AgentDefinition: Codable, Equatable, Sendable {
             case scripts
         }
 
+        enum Dialect: String, CaseIterable, Codable, Sendable {
+            case amp
+            case cline
+            case copilot
+            case cursor
+            case flat
+            case kimi
+            case nested
+            case opencode
+            case pi
+        }
+
         struct Event: Codable, Equatable, Sendable {
             let name: String
             let state: TabActivityState?
@@ -236,7 +248,7 @@ struct AgentDefinition: Codable, Equatable, Sendable {
         }
 
         let kind: Kind
-        let dialect: String?
+        let dialect: Dialect?
         let path: String
         let conversationField: String?
         let transcriptField: String?

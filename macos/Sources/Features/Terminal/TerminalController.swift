@@ -1158,6 +1158,38 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         paneSessionContext(for: surface)?.presentationTitle ?? terminalTitle
     }
 
+    func tabConfiguration(
+        inherited config: Ghostty.SurfaceConfiguration?,
+        from source: Ghostty.SurfaceView
+    ) -> Ghostty.SurfaceConfiguration? {
+        guard let session = paneSessionContext(for: source) else { return config }
+        return Self.tabConfiguration(
+            inherited: config,
+            session: session,
+            fallbackWorkingDirectory: FileManager.default.homeDirectoryForCurrentUser.path
+        )
+    }
+
+    static func tabConfiguration(
+        inherited config: Ghostty.SurfaceConfiguration?,
+        session: PaneSessionContext,
+        fallbackWorkingDirectory: String
+    ) -> Ghostty.SurfaceConfiguration? {
+        // A nil inherited directory means tab inheritance is disabled. Leave it
+        // nil so Ghostty applies the configured home/custom/default directory.
+        guard var result = config, result.workingDirectory != nil else {
+            return config
+        }
+        guard case .local = session.state else {
+            // The inherited pwd belongs to the remote host and may not exist
+            // locally. Start a normal local tab from the pre-SSH snapshot.
+            result.workingDirectory = session.local.workingDirectory
+                ?? fallbackWorkingDirectory
+            return result
+        }
+        return config
+    }
+
     @discardableResult
     override func newSplit(
         at oldView: Ghostty.SurfaceView,
@@ -1201,7 +1233,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         inherited config: Ghostty.SurfaceConfiguration?,
         session: PaneSessionContext,
         replay: SSHReplayDescriptor?,
-        executablePath: String?
+        executablePath: String?,
+        fallbackWorkingDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
     ) -> Ghostty.SurfaceConfiguration? {
         let remoteWorkingDirectory: String?
         switch session.state {
@@ -1215,6 +1248,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         var result = config ?? Ghostty.SurfaceConfiguration()
         result.workingDirectory = session.local.workingDirectory
+            ?? fallbackWorkingDirectory
         result.command = nil
         guard let executablePath,
               let command = replay?.command(
@@ -2202,10 +2236,29 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return nil
         }
 
+        // Menu and vertical-tab actions arrive without a base configuration.
+        // Resolve the tab inheritance from the focused Surface here so those
+        // paths receive the same SSH-safe local-directory handling as a core
+        // new_tab notification.
+        let resolvedBaseConfig: Ghostty.SurfaceConfiguration? = if let baseConfig {
+            baseConfig
+        } else if let source = parentController.focusedSurface,
+                  let surface = source.surface {
+            parentController.tabConfiguration(
+                inherited: .init(from: ghostty_surface_inherited_config(
+                    surface,
+                    GHOSTTY_SURFACE_CONTEXT_TAB
+                )),
+                from: source
+            )
+        } else {
+            nil
+        }
+
         // Create a new window and add it to the parent
         let controller = TerminalController.init(
             ghostty,
-            withBaseConfig: baseConfig,
+            withBaseConfig: resolvedBaseConfig,
             withSurfaceTree: surfaceTree,
             tabLayout: parentController.tabLayout
         )
@@ -2320,7 +2373,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                     _ = TerminalController.newTab(
                         ghostty,
                         from: parent,
-                        withBaseConfig: baseConfig,
+                        withBaseConfig: resolvedBaseConfig,
                         withSurfaceTree: surfaceTree,
                         registerUndo: registerUndo)
                 }

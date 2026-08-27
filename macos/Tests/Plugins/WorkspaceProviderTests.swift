@@ -171,6 +171,34 @@ struct WorkspaceProviderTests {
         #expect(context.presentationTitle == "code")
     }
 
+    @Test func sshStartUsesExplicitLocalCWDEvenAfterRemotePwdWinsRace() {
+        var context = PaneSessionContext(
+            workingDirectory: nil,
+            terminalTitle: "Terminal"
+        )
+        context.apply(
+            .init(
+                action: .start,
+                id: "omg-ssh-1",
+                metadata: "type=remote;targethost=cloud;localcwd=/Users/test/my%20project"
+            ),
+            currentWorkingDirectory: "/remote/project",
+            currentTerminalTitle: "remote"
+        )
+        context.apply(
+            .init(
+                action: .start,
+                id: "omg-ssh-1",
+                metadata: "type=remote;targethost=cloud;cwd=/remote/project"
+            ),
+            currentWorkingDirectory: "/remote/project",
+            currentTerminalTitle: "remote"
+        )
+
+        #expect(context.local.workingDirectory == "/Users/test/my project")
+        #expect(context.workingDirectory == "/remote/project")
+    }
+
     @Test func shellNeutralSSHPromptDecodesBoundedHexCWD() {
         var context = PaneSessionContext(
             workingDirectory: "/Users/test/code",

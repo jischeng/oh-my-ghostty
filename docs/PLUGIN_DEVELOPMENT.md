@@ -432,9 +432,11 @@ from clearing host B.
 The lifecycle transport is typed OSC 3008 hierarchical context signalling. For
 a simple interactive Fish, bash, or zsh destination, OMG's existing `+ssh`
 action emits a `type=remote` start immediately before launching the final
-OpenSSH child. The transient remote prompt updates that same context ID with
-`targethost` and a bounded cwd (`cwd` percent encoding for Fish or `cwdhex` for
-shell-neutral startup hooks), and also emits standard OSC 7. Bash and zsh use a
+OpenSSH child. That local start includes the percent-encoded pre-SSH cwd as
+`localcwd`, so the snapshot does not depend on the ordering of asynchronous pwd
+and context callbacks. The transient remote prompt updates that same context ID
+with `targethost` and a bounded cwd (`cwd` percent encoding for Fish or `cwdhex`
+for shell-neutral startup hooks), and also emits standard OSC 7. Bash and zsh use a
 mode-0600 temporary rc file/directory that sources the user's normal rc, installs
 one prompt callback, and deletes itself before the first prompt; no persistent
 remote file or service is installed. Shell selection happens inside the final
@@ -466,7 +468,11 @@ not inject keystrokes, reconstruct options from `~/.ssh/config`, or connect to
 the resolved IP. The ready remote cwd is passed as a separately shell-quoted
 wrapper option so the independent remote shell starts in the same folder.
 Therefore config aliases retain ProxyJump and other OpenSSH configuration, and
-explicit direct invocations retain their original arguments.
+explicit direct invocations retain their original arguments. A new split uses
+this replay path, while a new tab remains a local session: when tab cwd
+inheritance is enabled it replaces the remote pwd with the `localcwd` snapshot;
+when inheritance is disabled it leaves the directory unset so Ghostty applies
+the configured home/custom/default working directory.
 The descriptor is removed when the owning OpenSSH child exits and stale files
 older than 24 hours are rejected. This is an internal first-party launch handoff,
 not plugin storage or a public plugin API.

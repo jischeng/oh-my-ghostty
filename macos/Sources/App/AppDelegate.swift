@@ -821,10 +821,14 @@ class AppDelegate: NSObject,
 
         // We only want to listen to new tabs if the focused parent is
         // a regular terminal controller.
-        guard window.windowController is TerminalController else { return }
+        guard let controller = window.windowController as? TerminalController else { return }
 
         let configAny = notification.userInfo?[Ghostty.Notification.NewSurfaceConfigKey]
-        let config = configAny as? Ghostty.SurfaceConfiguration
+        let inheritedConfig = configAny as? Ghostty.SurfaceConfiguration
+        let config = controller.tabConfiguration(
+            inherited: inheritedConfig,
+            from: surfaceView
+        )
 
         _ = TerminalController.newTab(ghostty, from: window, withBaseConfig: config)
     }

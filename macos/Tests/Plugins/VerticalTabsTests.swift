@@ -276,6 +276,90 @@ struct VerticalTabsTests {
         #expect(configured.environmentVariables["EXISTING"] == "value")
     }
 
+    @Test func sshNewTabUsesPreConnectionLocalDirectory() throws {
+        var session = PaneSessionContext(
+            workingDirectory: "/Users/test/code",
+            terminalTitle: "code"
+        )
+        session.apply(
+            .init(
+                action: .start,
+                id: "omg-ssh-1",
+                metadata: "type=remote;targethost=cloud;cwd=/remote/project"
+            ),
+            currentWorkingDirectory: "/remote/project",
+            currentTerminalTitle: "remote"
+        )
+        var inherited = Ghostty.SurfaceConfiguration()
+        inherited.workingDirectory = "/remote/project"
+
+        let configured = try #require(TerminalController.tabConfiguration(
+            inherited: inherited,
+            session: session,
+            fallbackWorkingDirectory: "/Users/test"
+        ))
+        #expect(configured.workingDirectory == "/Users/test/code")
+    }
+
+    @Test func sshNewTabRespectsDisabledDirectoryInheritance() {
+        var session = PaneSessionContext(
+            workingDirectory: "/Users/test/code",
+            terminalTitle: "code"
+        )
+        session.apply(
+            .init(
+                action: .start,
+                id: "omg-ssh-1",
+                metadata: "type=remote;targethost=cloud;cwd=/remote/project"
+            ),
+            currentWorkingDirectory: "/remote/project",
+            currentTerminalTitle: "remote"
+        )
+        let inherited = Ghostty.SurfaceConfiguration()
+
+        let configured = TerminalController.tabConfiguration(
+            inherited: inherited,
+            session: session,
+            fallbackWorkingDirectory: "/Users/test"
+        )
+        #expect(configured?.workingDirectory == nil)
+    }
+
+    @Test func sshNewTabFallsBackToLocalHomeWhenSnapshotIsUnavailable() throws {
+        var session = PaneSessionContext(
+            workingDirectory: nil,
+            terminalTitle: "Terminal"
+        )
+        session.apply(
+            .init(
+                action: .start,
+                id: "omg-ssh-1",
+                metadata: "type=remote;targethost=cloud;cwd=/remote/project"
+            ),
+            currentWorkingDirectory: nil,
+            currentTerminalTitle: "remote"
+        )
+        var inherited = Ghostty.SurfaceConfiguration()
+        inherited.workingDirectory = "/remote/project"
+
+        let configured = try #require(TerminalController.tabConfiguration(
+            inherited: inherited,
+            session: session,
+            fallbackWorkingDirectory: "/Users/test"
+        ))
+        #expect(configured.workingDirectory == "/Users/test")
+
+        let split = try #require(TerminalController.splitConfiguration(
+            inherited: inherited,
+            session: session,
+            replay: nil,
+            executablePath: "/Applications/OMG.app/Contents/MacOS/omg",
+            fallbackWorkingDirectory: "/Users/test"
+        ))
+        #expect(split.workingDirectory == "/Users/test")
+        #expect(split.command == nil)
+    }
+
     @Test func sshSplitReplaysExactLaunchInsteadOfInheritedRemotePath() throws {
         var session = PaneSessionContext(
             workingDirectory: "/Users/test/code",

@@ -134,8 +134,11 @@ struct PaneSessionContext: Equatable, Sendable {
                 false
             }
             if !isCurrentConnection, case .local = state {
+                let localWorkingDirectory = metadata["localcwd"]?.removingPercentEncoding
                 local = .init(
-                    workingDirectory: currentWorkingDirectory ?? local.workingDirectory,
+                    workingDirectory: localWorkingDirectory.flatMap { $0.isEmpty ? nil : $0 }
+                        ?? currentWorkingDirectory
+                        ?? local.workingDirectory,
                     terminalTitle: currentTerminalTitle.isEmpty
                         ? local.terminalTitle
                         : currentTerminalTitle

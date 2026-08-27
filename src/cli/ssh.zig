@@ -443,7 +443,7 @@ fn runInner(
     var exit_code: u8 = 1;
     var lifecycle_ended = false;
     if (lifecycle) |value| {
-        writeSessionStart(stdout, value.id, value.label) catch {};
+        writeSessionStart(stdout, value.id, value.label, value.local_cwd) catch {};
         stdout.flush() catch {};
     }
     defer if (!lifecycle_ended) if (lifecycle) |value| {
@@ -980,11 +980,14 @@ fn writeSessionStart(
     writer: *std.Io.Writer,
     context_id: []const u8,
     label: []const u8,
+    local_cwd: []const u8,
 ) !void {
     try writer.print(
-        "\x1b]3008;start={s};type=remote;targethost={s}\x07",
+        "\x1b]3008;start={s};type=remote;targethost={s};localcwd=",
         .{ context_id, label },
     );
+    try string_encoding.urlPercentEncode(writer, local_cwd);
+    try writer.writeByte('\x07');
 }
 
 fn writeSessionEnd(
@@ -1109,6 +1112,22 @@ test "replay support directory is isolated by application channel" {
     try std.testing.expectEqualStrings("OMG", replaySupportName(null));
     try std.testing.expectEqualStrings("OMG", replaySupportName("release"));
     try std.testing.expectEqualStrings("OMG Dev", replaySupportName("debug"));
+}
+
+test "session start carries the pre-SSH local cwd" {
+    const testing = std.testing;
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try writeSessionStart(
+        &writer,
+        "omg-ssh-1",
+        "cloud",
+        "/Users/test/my project",
+    );
+    const output = buffer[0..writer.end];
+    try testing.expect(std.mem.indexOf(u8, output, "]3008;start=omg-ssh-1") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "targethost=cloud") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "localcwd=/Users/test/my%20project") != null);
 }
 
 test "session end emits typed lifecycle and local cwd resync" {

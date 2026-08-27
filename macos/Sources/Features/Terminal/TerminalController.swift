@@ -502,7 +502,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         var configuration = base ?? Ghostty.SurfaceConfiguration()
         configuration.environmentVariables["OH_MY_GHOSTTY_SESSION"] = sessionID.uuidString
         configuration.environmentVariables["OH_MY_GHOSTTY_CHANNEL"] =
-            OMGApplicationEnvironment.isDevelopment ? "debug" : "release"
+            OMGApplicationEnvironment.channel()
         return configuration
     }
 
@@ -645,10 +645,17 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                         workingDirectory: surface.pwd,
                         terminalTitle: surface.title
                     )
+                    let sshReplay: SSHReplayDescriptor? = if signal.action == .start,
+                       signal.id.hasPrefix("omg-ssh-") {
+                        SSHReplayStore.load(connectionID: signal.id)
+                    } else {
+                        nil
+                    }
                     context.apply(
                         signal,
                         currentWorkingDirectory: surface.pwd,
-                        currentTerminalTitle: surface.title
+                        currentTerminalTitle: surface.title,
+                        sshReplay: sshReplay
                     )
                     updatePaneSessionContext(context, for: surface.id)
                     registerTypedAgentHookSignal(signal, for: surface.id)
@@ -998,7 +1005,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             case .local:
                 nil
             case .sshConnecting(let ssh), .sshReady(let ssh, _):
-                SSHReplayStore.load(connectionID: ssh.connectionID)
+                ssh.replay ?? SSHReplayStore.load(connectionID: ssh.connectionID)
             }
         } else {
             nil
@@ -1211,14 +1218,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         from source: Ghostty.SurfaceView
     ) -> Ghostty.SurfaceConfiguration? {
         guard let session = paneSessionContext(for: source) else { return config }
-        let connectionID: String? = switch session.state {
+        let replay: SSHReplayDescriptor? = switch session.state {
         case .local:
             nil
         case .sshConnecting(let ssh), .sshReady(let ssh, _):
-            ssh.connectionID
-        }
-        let replay = connectionID.flatMap {
-            SSHReplayStore.load(connectionID: $0)
+            ssh.replay ?? SSHReplayStore.load(connectionID: ssh.connectionID)
         }
         let split = Self.splitConfiguration(
             inherited: config,
@@ -1237,13 +1241,16 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         fallbackWorkingDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
     ) -> Ghostty.SurfaceConfiguration? {
         let remoteWorkingDirectory: String?
+        let activeReplay: SSHReplayDescriptor?
         switch session.state {
         case .local:
             return config
-        case .sshConnecting:
+        case .sshConnecting(let ssh):
             remoteWorkingDirectory = nil
-        case .sshReady(_, let workingDirectory):
+            activeReplay = replay ?? ssh.replay
+        case .sshReady(let ssh, let workingDirectory):
             remoteWorkingDirectory = workingDirectory
+            activeReplay = replay ?? ssh.replay
         }
 
         var result = config ?? Ghostty.SurfaceConfiguration()
@@ -1251,20 +1258,28 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             ?? fallbackWorkingDirectory
         result.command = nil
         guard let executablePath,
-              let command = replay?.command(
+              let command = activeReplay?.command(
                 executablePath: executablePath,
                 remoteWorkingDirectory: remoteWorkingDirectory
               ) else {
             return result
         }
-        // Ghostty executes a surface `command` through `/bin/sh -c`, so the
-        // pane dies the moment `+ssh` exits (e.g. a network drop). Append
-        // `exec <login shell>` so that when the remote connection ends the
-        // wrapper is replaced by an interactive shell, matching a pane where
-        // SSH was launched by hand. Shell integration survives because it is
-        // injected via environment variables that persist across `exec`.
-        result.command = "\(command); exec \(Ghostty.Shell.quote(Self.survivalShell))"
+        result.command = replaySurvivalCommand(
+            command,
+            survivalShell: Self.survivalShell
+        )
         return result
+    }
+
+    static func replaySurvivalCommand(
+        _ command: String,
+        survivalShell: String
+    ) -> String {
+        // macOS wraps SurfaceConfiguration.command as `exec -l <command>`.
+        // Put the sequence inside its own shell so that replacing the outer
+        // bash process does not discard the post-SSH survival command.
+        let script = "\(command); exec \(Ghostty.Shell.quote(survivalShell))"
+        return "/bin/sh -c \(Ghostty.Shell.quote(script))"
     }
 
     /// The user's login shell, used to keep an SSH split pane alive after the

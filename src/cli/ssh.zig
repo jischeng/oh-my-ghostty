@@ -579,6 +579,13 @@ fn replaySupportName(channel: ?[]const u8) []const u8 {
     return "OMG";
 }
 
+fn shouldWriteReplayDescriptor(
+    session_id: ?[]const u8,
+    channel: ?[]const u8,
+) bool {
+    return session_id != null or channel != null;
+}
+
 fn writeReplayDescriptor(
     alloc: Allocator,
     opts: *const Options,
@@ -588,13 +595,17 @@ fn writeReplayDescriptor(
 
     var env = global.environMap() catch return null;
     defer env.deinit();
-    _ = env.get("OH_MY_GHOSTTY_SESSION") orelse return null;
+    const channel = env.get("OH_MY_GHOSTTY_CHANNEL");
+    if (!shouldWriteReplayDescriptor(
+        env.get("OH_MY_GHOSTTY_SESSION"),
+        channel,
+    )) return null;
     const home = env.get("HOME") orelse return null;
     const directory_path = std.fs.path.join(alloc, &.{
         home,
         "Library",
         "Application Support",
-        replaySupportName(env.get("OH_MY_GHOSTTY_CHANNEL")),
+        replaySupportName(channel),
         "SSHReplay",
     }) catch return null;
     std.Io.Dir.cwd().createDirPath(global.io(), directory_path) catch return null;
@@ -1112,6 +1123,10 @@ test "replay support directory is isolated by application channel" {
     try std.testing.expectEqualStrings("OMG", replaySupportName(null));
     try std.testing.expectEqualStrings("OMG", replaySupportName("release"));
     try std.testing.expectEqualStrings("OMG Dev", replaySupportName("debug"));
+
+    try std.testing.expect(shouldWriteReplayDescriptor("tab-id", null));
+    try std.testing.expect(shouldWriteReplayDescriptor(null, "debug"));
+    try std.testing.expect(!shouldWriteReplayDescriptor(null, null));
 }
 
 test "session start carries the pre-SSH local cwd" {

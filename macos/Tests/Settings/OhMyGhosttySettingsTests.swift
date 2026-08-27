@@ -48,6 +48,9 @@ struct OhMyGhosttySettingsTests {
     }
 
     @Test func applicationSupportIsSeparatedByChannel() {
+        #expect(OMGApplicationEnvironment.channel(development: false) == "release")
+        #expect(OMGApplicationEnvironment.channel(development: true) == "debug")
+
         let base = URL(fileURLWithPath: "/tmp/omg-channel-test", isDirectory: true)
         #expect(OMGApplicationEnvironment.applicationSupportURL(
             baseURL: base,

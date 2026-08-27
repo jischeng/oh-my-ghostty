@@ -9,6 +9,7 @@ struct PaneSessionContext: Equatable, Sendable {
     struct SSH: Equatable, Sendable {
         let connectionID: String
         let alias: String
+        let replay: SSHReplayDescriptor?
     }
 
     enum State: Equatable, Sendable {
@@ -116,7 +117,8 @@ struct PaneSessionContext: Equatable, Sendable {
     mutating func apply(
         _ signal: Ghostty.ContextSignal,
         currentWorkingDirectory: String?,
-        currentTerminalTitle: String
+        currentTerminalTitle: String,
+        sshReplay: SSHReplayDescriptor? = nil
     ) {
         guard signal.id.hasPrefix("omg-ssh-") else { return }
         let metadata = Self.metadata(signal.metadata)
@@ -126,13 +128,18 @@ struct PaneSessionContext: Equatable, Sendable {
             guard metadata["type"] == "remote",
                   let alias = metadata["targethost"],
                   SSHPlugin.validAlias(alias) else { return }
-            let ssh = SSH(connectionID: signal.id, alias: alias)
-            let isCurrentConnection: Bool = switch state {
+            let activeSSH: SSH? = switch state {
             case .sshConnecting(let active), .sshReady(let active, _):
-                active.connectionID == signal.id
+                active.connectionID == signal.id ? active : nil
             case .local:
-                false
+                nil
             }
+            let ssh = SSH(
+                connectionID: signal.id,
+                alias: alias,
+                replay: sshReplay ?? activeSSH?.replay
+            )
+            let isCurrentConnection = activeSSH != nil
             if !isCurrentConnection, case .local = state {
                 let localWorkingDirectory = metadata["localcwd"]?.removingPercentEncoding
                 local = .init(

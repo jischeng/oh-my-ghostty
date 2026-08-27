@@ -1895,6 +1895,11 @@ extension Ghostty {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             let uuid = UUID(uuidString: try container.decode(String.self, forKey: .uuid))
             var config = Ghostty.SurfaceConfiguration()
+            // Restored Surfaces bypass TerminalController's fresh-tab base
+            // configuration. Preserve the app channel explicitly so +ssh
+            // writes replay descriptors to the matching OMG/OMG Dev store.
+            config.environmentVariables["OH_MY_GHOSTTY_CHANNEL"] =
+                OMGApplicationEnvironment.channel()
             config.workingDirectory = try container.decode(String?.self, forKey: .pwd)
             let resume = try container.decodeIfPresent(
                 AgentResumeDescriptor.self,

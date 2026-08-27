@@ -434,7 +434,11 @@ a simple interactive Fish, bash, or zsh destination, OMG's existing `+ssh`
 action emits a `type=remote` start immediately before launching the final
 OpenSSH child. That local start includes the percent-encoded pre-SSH cwd as
 `localcwd`, so the snapshot does not depend on the ordering of asynchronous pwd
-and context callbacks. The transient remote prompt updates that same context ID
+and context callbacks. Surface restoration explicitly injects
+`OH_MY_GHOSTTY_CHANNEL` into each reconstructed PTY configuration. Restored
+split trees therefore retain the correct `OMG` versus `OMG Dev` replay-storage
+boundary even though they do not receive the fresh tab's per-Surface session
+configuration. The transient remote prompt updates that same context ID
 with `targethost` and a bounded cwd (`cwd` percent encoding for Fish or `cwdhex`
 for shell-neutral startup hooks), and also emits standard OSC 7. Bash and zsh use a
 mode-0600 temporary rc file/directory that sources the user's normal rc, installs
@@ -460,13 +464,21 @@ While an interactive SSH connection is active, `+ssh` also writes a bounded,
 mode-0600 replay descriptor under
 `~/Library/Application Support/OMG/SSHReplay/<connection-id>.json` for Release
 or `~/Library/Application Support/OMG Dev/SSHReplay/<connection-id>.json` for
-Debug. It contains
-the original OpenSSH executable, wrapper policy flags, and exact argv. A split
-created from that Surface reads only the matching active connection ID and
-launches a new `omg +ssh` child through `SurfaceConfiguration.command`; it does
-not inject keystrokes, reconstruct options from `~/.ssh/config`, or connect to
-the resolved IP. The ready remote cwd is passed as a separately shell-quoted
-wrapper option so the independent remote shell starts in the same folder.
+Debug. Replay writing requires either a per-tab `OH_MY_GHOSTTY_SESSION` or the
+process-level channel marker, so restored Surfaces remain eligible without
+making arbitrary standalone `+ssh` invocations part of app session state. It contains
+the original OpenSSH executable, wrapper policy flags, and exact argv. The
+validated descriptor is captured on the matching `PaneSessionContext.SSH` when
+the lifecycle starts, so later Agent contexts and descriptor-file timing cannot
+turn an active SSH split into a local shell. A split created from that Surface
+uses only this matching active lifecycle and launches a new `omg +ssh` child
+through `SurfaceConfiguration.command`; it does not inject keystrokes,
+reconstruct options from `~/.ssh/config`, or connect to the resolved IP. The
+ready remote cwd is passed as a separately shell-quoted wrapper option so the
+independent remote shell starts in the same folder. On macOS the replay and its
+post-disconnect interactive shell are grouped inside `/bin/sh -c`, because the
+platform command launcher prepends an outer `exec -l`; without that inner shell,
+the outer exec discards the post-SSH command and the split exits.
 Therefore config aliases retain ProxyJump and other OpenSSH configuration, and
 explicit direct invocations retain their original arguments. A new split uses
 this replay path, while a new tab remains a local session: when tab cwd

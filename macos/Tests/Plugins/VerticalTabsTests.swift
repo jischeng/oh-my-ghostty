@@ -272,7 +272,7 @@ struct VerticalTabsTests {
 
         #expect(configured.environmentVariables["OH_MY_GHOSTTY_SESSION"] == sessionID.uuidString)
         #expect(configured.environmentVariables["OH_MY_GHOSTTY_CHANNEL"] ==
-            (OMGApplicationEnvironment.isDevelopment ? "debug" : "release"))
+            OMGApplicationEnvironment.channel())
         #expect(configured.environmentVariables["EXISTING"] == "value")
     }
 
@@ -285,7 +285,7 @@ struct VerticalTabsTests {
             .init(
                 action: .start,
                 id: "omg-ssh-1",
-                metadata: "type=remote;targethost=cloud;cwd=/remote/project"
+                metadata: "type=remote;targethost=cloud;cwd=/remote/project;localcwd=/Users/test/code"
             ),
             currentWorkingDirectory: "/remote/project",
             currentTerminalTitle: "remote"
@@ -407,7 +407,9 @@ struct VerticalTabsTests {
         #expect(configured.command?.contains(
             "'--remote-working-directory=/remote/project'"
         ) == true)
-        #expect(configured.command?.contains("'-J' 'jump' 'cloud'") == true)
+        #expect(configured.command?.contains("-J") == true)
+        #expect(configured.command?.contains("jump") == true)
+        #expect(configured.command?.contains("cloud") == true)
         // SSH splits must survive a remote disconnect: the replay command runs
         // first, then an interactive login shell is exec'd so the pane returns
         // to a usable shell instead of dying with the connection.
@@ -417,6 +419,85 @@ struct VerticalTabsTests {
         if let execIndex, let sshIndex {
             #expect(sshIndex < execIndex)
         }
+    }
+
+    @Test func sshSplitUsesCanonicalReplayWhileRemoteAgentIsActive() throws {
+        let replay = SSHReplayDescriptor(
+            version: 1,
+            ssh: "/usr/bin/ssh",
+            forwardEnv: true,
+            terminfo: true,
+            cache: true,
+            args: ["cloud"]
+        )
+        var session = PaneSessionContext(
+            workingDirectory: "/Users/test/code",
+            terminalTitle: "code"
+        )
+        session.apply(
+            .init(
+                action: .start,
+                id: "omg-ssh-agent",
+                metadata: "type=remote;targethost=cloud"
+            ),
+            currentWorkingDirectory: "/Users/test/code",
+            currentTerminalTitle: "code",
+            sshReplay: replay
+        )
+        session.apply(
+            .init(
+                action: .start,
+                id: "omg-ssh-agent",
+                metadata: "type=remote;targethost=cloud;cwd=/remote/agent-project"
+            ),
+            currentWorkingDirectory: "/remote/agent-project",
+            currentTerminalTitle: "remote"
+        )
+        session.apply(
+            .init(
+                action: .start,
+                id: "omg-agent-pi-42",
+                metadata: "agent=pi;scope=remote;state=working"
+            ),
+            currentWorkingDirectory: "/remote/agent-project",
+            currentTerminalTitle: "pi"
+        )
+
+        let configured = try #require(TerminalController.splitConfiguration(
+            inherited: Ghostty.SurfaceConfiguration(),
+            session: session,
+            replay: nil,
+            executablePath: "/Applications/OMG.app/Contents/MacOS/omg"
+        ))
+        #expect(configured.workingDirectory == "/Users/test/code")
+        #expect(configured.command?.contains("'+ssh'") == true)
+        #expect(configured.command?.contains(
+            "'--remote-working-directory=/remote/agent-project'"
+        ) == true)
+    }
+
+    @Test func replaySurvivalWrapperRunsAfterSSHCommandExits() throws {
+        let command = TerminalController.replaySurvivalCommand(
+            "/usr/bin/true",
+            survivalShell: "/usr/bin/false"
+        )
+        #expect(command.hasPrefix("/bin/sh -c "))
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [
+            "--noprofile",
+            "--norc",
+            "-c",
+            "exec -l \(command)",
+        ]
+        try process.run()
+        process.waitUntilExit()
+
+        // `false` proves the post-SSH exec ran. Without the inner /bin/sh,
+        // macOS's outer `exec -l` returns true's zero status and skips it.
+        #expect(process.terminationReason == .exit)
+        #expect(process.terminationStatus == 1)
     }
 
     @Test func sshSplitWithoutReplayFallsBackToSafeLocalShell() throws {

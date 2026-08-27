@@ -6,6 +6,10 @@ enum OMGApplicationEnvironment {
         Bundle.main.bundleIdentifier == "com.jischeng.omg.debug"
     }
 
+    static func channel(development: Bool = isDevelopment) -> String {
+        development ? "debug" : "release"
+    }
+
     static func settingsFileURL(
         homeURL: URL = FileManager.default.homeDirectoryForCurrentUser,
         development: Bool = isDevelopment

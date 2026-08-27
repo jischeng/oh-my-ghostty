@@ -570,6 +570,66 @@ final class GhosttyTabOrganizationModel: ObservableObject {
     }
 }
 
+enum VerticalTabDragLifecyclePolicy {
+    static func shouldFinish(eventType: NSEvent.EventType, keyCode: UInt16) -> Bool {
+        eventType == .leftMouseUp || (eventType == .keyDown && keyCode == 53)
+    }
+}
+
+/// Tracks the source-side end of a SwiftUI tab drag. DropDelegate callbacks are
+/// destination-scoped, so a cancelled drag or a release outside the app may not
+/// receive dropExited or performDrop and must be cleaned up from the mouse/key
+/// lifecycle instead.
+@MainActor
+final class VerticalTabDragLifecycleMonitor: ObservableObject {
+    private var localMonitor: Any?
+    private var globalMonitor: Any?
+    private var cleanup: (() -> Void)?
+
+    func begin(cleanup: @escaping () -> Void) {
+        finish()
+        self.cleanup = cleanup
+        localMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseUp, .keyDown]
+        ) { [weak self] event in
+            guard VerticalTabDragLifecyclePolicy.shouldFinish(
+                eventType: event.type,
+                keyCode: event.keyCode
+            ) else { return event }
+            DispatchQueue.main.async { self?.finish() }
+            return event
+        }
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseUp]
+        ) { [weak self] event in
+            guard VerticalTabDragLifecyclePolicy.shouldFinish(
+                eventType: event.type,
+                keyCode: event.keyCode
+            ) else { return }
+            DispatchQueue.main.async { self?.finish() }
+        }
+    }
+
+    func finish() {
+        if let localMonitor {
+            NSEvent.removeMonitor(localMonitor)
+            self.localMonitor = nil
+        }
+        if let globalMonitor {
+            NSEvent.removeMonitor(globalMonitor)
+            self.globalMonitor = nil
+        }
+        let cleanup = self.cleanup
+        self.cleanup = nil
+        cleanup?()
+    }
+
+    deinit {
+        if let localMonitor { NSEvent.removeMonitor(localMonitor) }
+        if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
+    }
+}
+
 struct TerminalTabSidebarView: View {
     @ObservedObject var controller: TerminalController
     @ObservedObject var layoutState: VerticalTabWindowLayoutState
@@ -580,9 +640,12 @@ struct TerminalTabSidebarView: View {
     let iconProvider: AnyGhosttyTabIconProvider
 
     @StateObject private var organizationModel = GhosttyTabOrganizationModel()
+    @StateObject private var tabDragLifecycle = VerticalTabDragLifecycleMonitor()
     @State private var metadataRevision = 0
     @State private var draggedTabSessionID: UUID?
     @State private var dropTarget: VerticalTabDropTarget?
+    @State private var tabDropActivity: VerticalTabDropActivity = .idle
+    @State private var surfaceDropActivity: VerticalTabDropActivity = .idle
 
     init(
         controller: TerminalController,
@@ -637,6 +700,33 @@ struct TerminalTabSidebarView: View {
                             }
                         }
                     }
+                    // Keep the end target as a sibling of the rows. A drop target on
+                    // the whole sidebar shadows the rows' plain-text tab targets,
+                    // preventing tab reordering from receiving drag updates.
+                    Color.clear
+                        .frame(maxWidth: .infinity)
+                        .frame(height: max(
+                            OhMyGhosttySettings.shared.tabRowDensity.rowHeight,
+                            24
+                        ))
+                        .contentShape(Rectangle())
+                        .onDrop(
+                            of: [.ghosttySurfaceId],
+                            delegate: VerticalTabSurfaceDropDelegate(
+                                controller: controller,
+                                destination: controller,
+                                groupID: nil,
+                                placement: .end,
+                                dropTarget: $dropTarget,
+                                dropActivity: $surfaceDropActivity
+                            )
+                        )
+                        .overlay {
+                            VerticalTabInsertionIndicator(
+                                target: dropTarget,
+                                tabSessionID: nil
+                            )
+                        }
                 }
                 .padding(.horizontal, 8)
                 .padding(.top, 2)
@@ -699,7 +789,8 @@ struct TerminalTabSidebarView: View {
         let tab = organizedTab.controller
         let tabID = ObjectIdentifier(tab)
         let selected = controller.selectedTabID == tabID
-        let hovered = controller.hoveredTabID == tabID
+        let dragIsActive = tabDropActivity != .idle || surfaceDropActivity != .idle
+        let hovered = !dragIsActive && controller.hoveredTabID == tabID
         if let surface = tab.focusedSurface ?? tab.surfaceTree.first {
             let activity = tab.focusedAgentActivity() ??
                 statusStore.activity(for: tab.tabSessionID)
@@ -718,24 +809,43 @@ struct TerminalTabSidebarView: View {
                 select: { controller.selectVerticalTab(tab) },
                 close: { controller.closeVerticalTab(tab) },
                 hoverChanged: {
+                    guard tabDropActivity == .idle,
+                          surfaceDropActivity == .idle else { return }
                     controller.setVerticalTabHovered(tab, hovered: $0)
                 }
             )
             .contentShape(Rectangle())
             .onDrag {
                 controller.beginManualTabDrag()
+                controller.clearVerticalTabHover()
                 draggedTabSessionID = tab.tabSessionID
+                tabDropActivity = .active
+                tabDragLifecycle.begin { [weak controller] in
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
+                        draggedTabSessionID = nil
+                        dropTarget = nil
+                        tabDropActivity = .idle
+                    }
+                    controller?.clearVerticalTabHover()
+                }
                 return NSItemProvider(object: tab.tabSessionID.uuidString as NSString)
             }
+            // A SwiftUI view must expose one drop destination for this hit area.
+            // Stacking separate pane and tab onDrop modifiers causes one payload
+            // type to shadow the other, so route both through one delegate.
             .onDrop(
-                of: [UTType.utf8PlainText],
+                of: [.ghosttySurfaceId, UTType.utf8PlainText],
                 delegate: VerticalTabRowDropDelegate(
                     controller: controller,
                     destination: tab,
                     groupID: groupID,
                     allowedSessionIDs: groupSessionIDs,
                     draggedSessionID: $draggedTabSessionID,
-                    dropTarget: $dropTarget
+                    dropTarget: $dropTarget,
+                    tabDropActivity: $tabDropActivity,
+                    surfaceDropActivity: $surfaceDropActivity
                 )
             )
             .overlay {
@@ -784,26 +894,102 @@ struct TerminalTabSidebarView: View {
 }
 
 struct VerticalTabDropPolicy {
+    enum Placement: Equatable {
+        case before
+        case after
+        case end
+    }
+
     static func allows(source: UUID?, in allowedSessionIDs: Set<UUID>) -> Bool {
         source.map(allowedSessionIDs.contains) ?? false
     }
 
-    static func insertionIndex(destinationIndex: Int, after: Bool) -> Int {
-        destinationIndex + (after ? 1 : 0)
+    static func placement(y: CGFloat, rowHeight: CGFloat) -> Placement {
+        y < max(rowHeight, 0) / 2 ? .before : .after
+    }
+
+    static func insertionIndex(
+        destinationIndex: Int,
+        placement: Placement
+    ) -> Int {
+        switch placement {
+        case .before, .end: destinationIndex
+        case .after: destinationIndex + 1
+        }
+    }
+
+    static func destinationIndex(
+        sourceIndex: Int,
+        insertionIndex: Int,
+        tabCount: Int
+    ) -> Int {
+        guard tabCount > 0 else { return 0 }
+        var destination = min(max(insertionIndex, 0), tabCount)
+        if sourceIndex < destination { destination -= 1 }
+        return min(max(destination, 0), tabCount - 1)
     }
 }
 
-private struct VerticalTabDropTarget: Equatable {
-    enum Placement {
-        case before
-        case after
+/// The index contract for the mutating portion of a pane-to-tab move.
+///
+/// AppKit may place an attached window anywhere in the destination group. The
+/// transaction therefore computes the final index from the post-attach state
+/// and only commits when that exact index is observed afterward.
+struct VerticalTabMoveTransactionPlan: Equatable {
+    let insertionIndex: Int
+    let destinationIndex: Int
+    let tabCount: Int
+
+    init?(sourceIndexAfterAttach: Int?, insertionIndex: Int, tabCount: Int) {
+        guard let sourceIndexAfterAttach,
+              tabCount > 0,
+              (0..<tabCount).contains(sourceIndexAfterAttach) else { return nil }
+
+        self.insertionIndex = insertionIndex
+        self.destinationIndex = VerticalTabDropPolicy.destinationIndex(
+            sourceIndex: sourceIndexAfterAttach,
+            insertionIndex: insertionIndex,
+            tabCount: tabCount
+        )
+        self.tabCount = tabCount
     }
 
-    let tabSessionID: UUID
-    let groupID: String
-    let placement: Placement
+    func validates(actualIndex: Int?, tabCount actualTabCount: Int) -> Bool {
+        actualTabCount == tabCount && actualIndex == destinationIndex
+    }
 }
 
+enum VerticalTabDropActivity: Equatable {
+    case idle
+    case active
+    case performed
+
+    // SwiftUI tab drags can deliver dropUpdated without a preceding
+    // dropEntered when moving between sibling row destinations. Idle must
+    // therefore accept updates; only a completed drop rejects late callbacks.
+    var acceptsUpdates: Bool { self != .performed }
+}
+
+struct VerticalTabDropTarget: Equatable {
+    let tabSessionID: UUID?
+    let groupID: String?
+    let placement: VerticalTabDropPolicy.Placement
+}
+
+enum VerticalTabDropPayload: Equatable {
+    case surface
+    case tab
+
+    static func resolve(hasSurface: Bool, hasTab: Bool) -> Self? {
+        if hasSurface { return .surface }
+        if hasTab { return .tab }
+        return nil
+    }
+}
+
+/// Routes both pane and tab payloads through a single SwiftUI drop destination.
+/// Multiple onDrop modifiers on the same row compete for the same hit area and
+/// can prevent the plain-text tab payload from ever reaching its delegate.
 private struct VerticalTabRowDropDelegate: DropDelegate {
     let controller: TerminalController
     let destination: TerminalController
@@ -811,56 +997,172 @@ private struct VerticalTabRowDropDelegate: DropDelegate {
     let allowedSessionIDs: Set<UUID>
     @Binding var draggedSessionID: UUID?
     @Binding var dropTarget: VerticalTabDropTarget?
+    @Binding var tabDropActivity: VerticalTabDropActivity
+    @Binding var surfaceDropActivity: VerticalTabDropActivity
+
+    private var tabDelegate: VerticalTabReorderDropDelegate {
+        .init(
+            controller: controller,
+            destination: destination,
+            groupID: groupID,
+            allowedSessionIDs: allowedSessionIDs,
+            draggedSessionID: $draggedSessionID,
+            dropTarget: $dropTarget,
+            dropActivity: $tabDropActivity
+        )
+    }
+
+    private var surfaceDelegate: VerticalTabSurfaceDropDelegate {
+        .init(
+            controller: controller,
+            destination: destination,
+            groupID: groupID,
+            placement: nil,
+            dropTarget: $dropTarget,
+            dropActivity: $surfaceDropActivity
+        )
+    }
 
     func validateDrop(info: DropInfo) -> Bool {
-        VerticalTabDropPolicy.allows(
+        switch payload(info) {
+        case .surface: surfaceDelegate.validateDrop(info: info)
+        case .tab: tabDelegate.validateDrop(info: info)
+        case nil: false
+        }
+    }
+
+    func dropEntered(info: DropInfo) {
+        switch payload(info) {
+        case .surface: surfaceDelegate.dropEntered(info: info)
+        case .tab: tabDelegate.dropEntered(info: info)
+        case nil: break
+        }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        switch payload(info) {
+        case .surface: surfaceDelegate.dropUpdated(info: info)
+        case .tab: tabDelegate.dropUpdated(info: info)
+        case nil: DropProposal(operation: .forbidden)
+        }
+    }
+
+    func dropExited(info: DropInfo) {
+        switch payload(info) {
+        case .surface: surfaceDelegate.dropExited(info: info)
+        case .tab: tabDelegate.dropExited(info: info)
+        case nil: break
+        }
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        switch payload(info) {
+        case .surface: surfaceDelegate.performDrop(info: info)
+        case .tab: tabDelegate.performDrop(info: info)
+        case nil: false
+        }
+    }
+
+    private func payload(_ info: DropInfo) -> VerticalTabDropPayload? {
+        VerticalTabDropPayload.resolve(
+            hasSurface: info.hasItemsConforming(to: [.ghosttySurfaceId]),
+            hasTab: info.hasItemsConforming(to: [UTType.utf8PlainText])
+        )
+    }
+}
+
+private struct VerticalTabReorderDropDelegate: DropDelegate {
+    let controller: TerminalController
+    let destination: TerminalController
+    let groupID: String
+    let allowedSessionIDs: Set<UUID>
+    @Binding var draggedSessionID: UUID?
+    @Binding var dropTarget: VerticalTabDropTarget?
+    @Binding var dropActivity: VerticalTabDropActivity
+
+    func validateDrop(info: DropInfo) -> Bool {
+        dropActivity != .performed && VerticalTabDropPolicy.allows(
             source: draggedSessionID,
             in: allowedSessionIDs
         )
     }
 
     func dropEntered(info: DropInfo) {
+        guard dropActivity != .performed else { return }
+        dropActivity = .active
         updateTarget(info)
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        guard VerticalTabDropPolicy.allows(
-            source: draggedSessionID,
-            in: allowedSessionIDs
-        ) else {
+        guard dropActivity.acceptsUpdates,
+              VerticalTabDropPolicy.allows(
+                  source: draggedSessionID,
+                  in: allowedSessionIDs
+              ) else {
             return DropProposal(operation: .forbidden)
         }
+        dropActivity = .active
         updateTarget(info)
         return DropProposal(operation: .move)
     }
 
     func dropExited(info: DropInfo) {
+        controller.clearVerticalTabHover()
+        if dropActivity == .performed {
+            dropActivity = .idle
+            return
+        }
         guard dropTarget?.tabSessionID == destination.tabSessionID else { return }
         dropTarget = nil
+        dropActivity = .idle
     }
 
     func performDrop(info: DropInfo) -> Bool {
-        defer {
+        controller.clearVerticalTabHover()
+        let sourceID = draggedSessionID
+        let source = sourceID.flatMap { sourceID in
+            controller.tabControllers.first { $0.tabSessionID == sourceID }
+        }
+        let destinationIndex = controller.tabControllers.firstIndex {
+            $0 === destination
+        }
+        let placement = dropTarget?.tabSessionID == destination.tabSessionID
+            ? dropTarget?.placement
+            : VerticalTabDropPolicy.placement(
+                y: info.location.y,
+                rowHeight: OhMyGhosttySettings.shared.tabRowDensity.rowHeight
+            )
+        let insertionIndex = destinationIndex.map {
+            VerticalTabDropPolicy.insertionIndex(
+                destinationIndex: $0,
+                placement: placement ?? .before
+            )
+        }
+
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
             dropTarget = nil
             draggedSessionID = nil
+            dropActivity = .performed
         }
-        guard let draggedSessionID,
+        DispatchQueue.main.async {
+            if dropActivity == .performed { dropActivity = .idle }
+        }
+
+        guard let sourceID,
               VerticalTabDropPolicy.allows(
-                  source: draggedSessionID,
+                  source: sourceID,
                   in: allowedSessionIDs
               ),
-              let source = controller.tabControllers.first(where: {
-                  $0.tabSessionID == draggedSessionID
-              }),
-              let destinationIndex = controller.tabControllers.firstIndex(where: {
-                  $0 === destination
-              }) else { return false }
+              let source,
+              let insertionIndex else { return false }
 
-        let placement = dropTarget?.placement ?? .before
-        let insertionIndex = VerticalTabDropPolicy.insertionIndex(
-            destinationIndex: destinationIndex,
-            after: placement == .after
-        )
+        // Commit the native tab order before returning from performDrop. If we
+        // defer this to the next runloop, SwiftUI finishes the drop preview at
+        // the old row first and then moves the real row one frame later, which
+        // reads as a hitch. The visual state above is already cleared before
+        // this synchronous, zero-duration AppKit reorder.
         _ = controller.reorderTab(source, toInsertionIndex: insertionIndex)
         return true
     }
@@ -873,16 +1175,108 @@ private struct VerticalTabRowDropDelegate: DropDelegate {
         dropTarget = .init(
             tabSessionID: destination.tabSessionID,
             groupID: groupID,
-            placement: info.location.y < OhMyGhosttySettings.shared.tabRowDensity.rowHeight / 2
-                ? .before
-                : .after
+            placement: VerticalTabDropPolicy.placement(
+                y: info.location.y,
+                rowHeight: OhMyGhosttySettings.shared.tabRowDensity.rowHeight
+            )
+        )
+    }
+}
+
+private struct VerticalTabSurfaceDropDelegate: DropDelegate {
+    let controller: TerminalController
+    let destination: TerminalController
+    let groupID: String?
+    let placement: VerticalTabDropPolicy.Placement?
+    @Binding var dropTarget: VerticalTabDropTarget?
+    @Binding var dropActivity: VerticalTabDropActivity
+
+    func validateDrop(info: DropInfo) -> Bool {
+        dropActivity != .performed && info.hasItemsConforming(to: [.ghosttySurfaceId])
+    }
+
+    func dropEntered(info: DropInfo) {
+        guard dropActivity != .performed else { return }
+        dropActivity = .active
+        updateTarget(info)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        guard dropActivity.acceptsUpdates,
+              info.hasItemsConforming(to: [.ghosttySurfaceId]) else {
+            return DropProposal(operation: .forbidden)
+        }
+        dropActivity = .active
+        updateTarget(info)
+        return DropProposal(operation: .move)
+    }
+
+    func dropExited(info: DropInfo) {
+        controller.clearVerticalTabHover()
+        if dropActivity == .performed {
+            dropActivity = .idle
+            return
+        }
+        guard targetBelongsToDelegate else { return }
+        dropTarget = nil
+        dropActivity = .idle
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        controller.clearVerticalTabHover()
+        let resolvedPlacement = placement ?? VerticalTabDropPolicy.placement(
+            y: info.location.y,
+            rowHeight: OhMyGhosttySettings.shared.tabRowDensity.rowHeight
+        )
+        let provider = info.itemProviders(for: [.ghosttySurfaceId]).first
+
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            dropTarget = nil
+            dropActivity = .performed
+        }
+        DispatchQueue.main.async {
+            if dropActivity == .performed { dropActivity = .idle }
+        }
+
+        guard let provider else { return false }
+        _ = provider.loadTransferable(type: Ghostty.SurfaceView.self) { [weak controller, weak destination] result in
+            guard case .success(let surface) = result else { return }
+            DispatchQueue.main.async {
+                guard let controller, let destination else { return }
+                if !controller.moveSurfaceToNewTab(
+                    surface,
+                    relativeTo: destination,
+                    placement: resolvedPlacement
+                ) {
+                    Ghostty.logger.warning("failed to move dropped surface into a tab")
+                }
+            }
+        }
+        return true
+    }
+
+    private var targetBelongsToDelegate: Bool {
+        if placement == .end { return dropTarget?.placement == .end }
+        return dropTarget?.tabSessionID == destination.tabSessionID
+    }
+
+    private func updateTarget(_ info: DropInfo) {
+        dropTarget = .init(
+            tabSessionID: placement == .end ? nil : destination.tabSessionID,
+            groupID: groupID,
+            placement: placement ?? VerticalTabDropPolicy.placement(
+                y: info.location.y,
+                rowHeight: OhMyGhosttySettings.shared.tabRowDensity.rowHeight
+            )
         )
     }
 }
 
 private struct VerticalTabInsertionIndicator: View {
     let target: VerticalTabDropTarget?
-    let tabSessionID: UUID
+    let tabSessionID: UUID?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -892,7 +1286,8 @@ private struct VerticalTabInsertionIndicator: View {
             }
             Spacer(minLength: 0)
             if target?.tabSessionID == tabSessionID,
-               target?.placement == .after {
+               target?.placement == .after ||
+                (tabSessionID == nil && target?.placement == .end) {
                 line
             }
         }

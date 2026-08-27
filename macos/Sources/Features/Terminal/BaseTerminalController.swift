@@ -572,7 +572,11 @@ class BaseTerminalController: NSWindowController,
     /// This also updates the undo manager to support restoring this node.
     ///
     /// This does no confirmation and assumes confirmation is already done.
-    private func removeSurfaceNode(_ node: SplitTree<Ghostty.SurfaceView>.Node) {
+    func removeSurfaceNode(
+        _ node: SplitTree<Ghostty.SurfaceView>.Node,
+        undoAction: String? = "Close Terminal",
+        registerUndo: Bool = true
+    ) {
         // Move focus if the closed surface was focused and we have a next target
         let nextFocus: Ghostty.SurfaceView? = if node.contains(
             where: { $0 == focusedSurface }
@@ -582,15 +586,27 @@ class BaseTerminalController: NSWindowController,
             nil
         }
 
+        let newTree = surfaceTree.removing(node)
+        let nextFocusedSurface = nextFocus ?? focusedSurface
+        guard registerUndo else {
+            surfaceTree = newTree
+            if let nextFocusedSurface {
+                DispatchQueue.main.async {
+                    Ghostty.moveFocus(to: nextFocusedSurface)
+                }
+            }
+            return
+        }
+
         replaceSurfaceTree(
-            surfaceTree.removing(node),
+            newTree,
             // When a non-focused surface is removed and this window stays as the key window,
             // we should refocus the `focusedSurface` to make sure the window's firstResponder remains as it is.
             //
             // This is a weird workaround, since `resignFirstResponder` wasn't called on `focusedSurface` after drag,
             // but the first responder became the window itself.
-            moveFocusTo: nextFocus ?? focusedSurface,
-            undoAction: "Close Terminal"
+            moveFocusTo: nextFocusedSurface,
+            undoAction: undoAction
         )
     }
 

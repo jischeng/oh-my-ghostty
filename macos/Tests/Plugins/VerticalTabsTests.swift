@@ -12,8 +12,235 @@ struct VerticalTabsTests {
         #expect(VerticalTabDropPolicy.allows(source: projectA, in: [projectA]))
         #expect(!VerticalTabDropPolicy.allows(source: projectB, in: [projectA]))
         #expect(!VerticalTabDropPolicy.allows(source: nil, in: [projectA]))
-        #expect(VerticalTabDropPolicy.insertionIndex(destinationIndex: 2, after: false) == 2)
-        #expect(VerticalTabDropPolicy.insertionIndex(destinationIndex: 2, after: true) == 3)
+    }
+
+    @Test func rowHalfBoundarySelectsBeforeAndAfter() {
+        #expect(VerticalTabDropPolicy.placement(y: 0, rowHeight: 40) == .before)
+        #expect(VerticalTabDropPolicy.placement(y: 19.999, rowHeight: 40) == .before)
+        #expect(VerticalTabDropPolicy.placement(y: 20, rowHeight: 40) == .after)
+        #expect(VerticalTabDropPolicy.placement(y: 40, rowHeight: 40) == .after)
+    }
+
+    @Test func beforeAfterAndEndResolveInsertionIndices() {
+        #expect(VerticalTabDropPolicy.insertionIndex(
+            destinationIndex: 2,
+            placement: .before
+        ) == 2)
+        #expect(VerticalTabDropPolicy.insertionIndex(
+            destinationIndex: 2,
+            placement: .after
+        ) == 3)
+        #expect(VerticalTabDropPolicy.insertionIndex(
+            destinationIndex: 4,
+            placement: .end
+        ) == 4)
+    }
+
+    @Test func insertionCorrectsWhenSourcePrecedesDestination() {
+        #expect(VerticalTabDropPolicy.destinationIndex(
+            sourceIndex: 1,
+            insertionIndex: 4,
+            tabCount: 5
+        ) == 3)
+        #expect(VerticalTabDropPolicy.destinationIndex(
+            sourceIndex: 4,
+            insertionIndex: 1,
+            tabCount: 5
+        ) == 1)
+        #expect(VerticalTabDropPolicy.destinationIndex(
+            sourceIndex: 0,
+            insertionIndex: 5,
+            tabCount: 5
+        ) == 4)
+    }
+
+    @Test func transactionPlanCommitsOnlyAtItsExactPostAttachIndex() throws {
+        let plan = try #require(VerticalTabMoveTransactionPlan(
+            sourceIndexAfterAttach: 1,
+            insertionIndex: 4,
+            tabCount: 5
+        ))
+
+        #expect(plan.destinationIndex == 3)
+        #expect(plan.validates(actualIndex: 3, tabCount: 5))
+        #expect(!plan.validates(actualIndex: 4, tabCount: 5))
+        #expect(!plan.validates(actualIndex: 3, tabCount: 4))
+        #expect(!plan.validates(actualIndex: nil, tabCount: 5))
+        #expect(VerticalTabMoveTransactionPlan(
+            sourceIndexAfterAttach: nil,
+            insertionIndex: 2,
+            tabCount: 4
+        ) == nil)
+        #expect(VerticalTabMoveTransactionPlan(
+            sourceIndexAfterAttach: 4,
+            insertionIndex: 2,
+            tabCount: 4
+        ) == nil)
+    }
+
+    @Test func onlyPerformedDropRejectsUpdates() {
+        var activity = VerticalTabDropActivity.idle
+        #expect(activity.acceptsUpdates)
+        activity = .active
+        #expect(activity.acceptsUpdates)
+        activity = .performed
+        #expect(!activity.acceptsUpdates)
+    }
+
+    @Test func rowDropPayloadRoutesPaneAndTabThroughOneDestination() {
+        #expect(VerticalTabDropPayload.resolve(
+            hasSurface: false,
+            hasTab: true
+        ) == .tab)
+        #expect(VerticalTabDropPayload.resolve(
+            hasSurface: true,
+            hasTab: false
+        ) == .surface)
+        #expect(VerticalTabDropPayload.resolve(
+            hasSurface: true,
+            hasTab: true
+        ) == .surface)
+        #expect(VerticalTabDropPayload.resolve(
+            hasSurface: false,
+            hasTab: false
+        ) == nil)
+    }
+
+    @Test func tabDragLifecycleEndsOnMouseUpOrEscape() {
+        #expect(VerticalTabDragLifecyclePolicy.shouldFinish(
+            eventType: .leftMouseUp,
+            keyCode: 0
+        ))
+        #expect(VerticalTabDragLifecyclePolicy.shouldFinish(
+            eventType: .keyDown,
+            keyCode: 53
+        ))
+        #expect(!VerticalTabDragLifecyclePolicy.shouldFinish(
+            eventType: .keyDown,
+            keyCode: 36
+        ))
+        #expect(!VerticalTabDragLifecyclePolicy.shouldFinish(
+            eventType: .mouseMoved,
+            keyCode: 0
+        ))
+    }
+
+    @Test func stableMoveDescriptorResolvesRecreatedValuesBySessionID() throws {
+        struct Value {
+            let generation: Int
+            let sessionID: UUID
+        }
+        let sourceID = UUID()
+        let destinationID = UUID()
+        let movedID = UUID()
+        let descriptor = VerticalTabMoveTransactionDescriptor(
+            sourceTabSessionID: sourceID,
+            sourceSurfaceID: UUID(),
+            destinationTabSessionID: destinationID,
+            placement: .after,
+            movedTabSessionID: movedID
+        )
+        let recreated = [
+            Value(generation: 2, sessionID: movedID),
+            Value(generation: 2, sessionID: sourceID),
+            Value(generation: 2, sessionID: destinationID),
+        ]
+
+        let redo = try #require(VerticalTabStableResolver.resolve(
+            sessionIDs: descriptor.redoSessionIDs,
+            in: recreated,
+            sessionID: \.sessionID
+        ))
+        let undoSessionIDs = try #require(descriptor.undoSessionIDs)
+        let undo = try #require(VerticalTabStableResolver.resolve(
+            sessionIDs: undoSessionIDs,
+            in: recreated,
+            sessionID: \.sessionID
+        ))
+        #expect(redo.map(\.sessionID) == [sourceID, destinationID])
+        #expect(undo.map(\.sessionID) == [sourceID, destinationID, movedID])
+        #expect(undo.allSatisfy { $0.generation == 2 })
+        #expect(VerticalTabStableResolver.resolve(
+            sessionIDs: descriptor.redoSessionIDs,
+            in: Array(recreated.dropLast()),
+            sessionID: \.sessionID
+        ) == nil)
+        #expect(VerticalTabStableResolver.resolve(
+            sessionIDs: [sourceID],
+            in: recreated + [Value(generation: 1, sessionID: sourceID)],
+            sessionID: \.sessionID
+        ) == nil)
+    }
+
+    @Test func paneMoveSnapshotCarriesSSHAndAgentCanonicalValues() throws {
+        var context = PaneSessionContext(
+            workingDirectory: "/Users/test/project",
+            terminalTitle: "project"
+        )
+        context.apply(
+            .init(
+                action: .start,
+                id: "omg-ssh-transfer",
+                metadata: "type=remote;targethost=build"
+            ),
+            currentWorkingDirectory: "/Users/test/project",
+            currentTerminalTitle: "project"
+        )
+        context.apply(
+            .init(
+                action: .start,
+                id: "omg-ssh-transfer",
+                metadata: "type=remote;targethost=build;cwd=/srv/project"
+            ),
+            currentWorkingDirectory: "/srv/project",
+            currentTerminalTitle: "build"
+        )
+        let activity = TabActivity(
+            source: SupportedAgent.claude.rawValue,
+            state: .working,
+            label: "Claude",
+            message: "Running",
+            detail: nil,
+            progress: nil,
+            icon: nil
+        )
+        let descriptor = AgentResumeDescriptor(
+            agent: .claude,
+            scope: .remote,
+            workingDirectory: "/srv/project",
+            sshReplay: .init(
+                version: 1,
+                ssh: "/usr/bin/ssh",
+                forwardEnv: true,
+                terminfo: true,
+                cache: true,
+                args: ["build"]
+            )
+        )
+        var reducer = AgentContextSignalReducer()
+        _ = reducer.consume(.init(
+            action: .start,
+            id: "omg-agent-claude-123",
+            metadata: "type=app;omg_agent=claude;omg_scope=remote;omg_state=working"
+        ))
+        let snapshot = PaneSessionStateSnapshot(
+            context: context,
+            activity: activity,
+            resumeDescriptor: descriptor,
+            resumeContextID: "omg-agent-claude-123",
+            reducer: reducer,
+            typedHookContextID: "omg-agent-claude-123",
+            observedForegroundProcessID: nil,
+            detectedAgent: nil,
+            screenSignature: nil,
+            screenStableTicks: nil
+        )
+
+        #expect(snapshot.context == context)
+        #expect(snapshot.activity == activity)
+        #expect(snapshot.resumeDescriptor == descriptor)
+        #expect(snapshot.reducer?.trackedContextCount == 1)
+        #expect(snapshot.typedHookContextID == "omg-agent-claude-123")
     }
 
     @Test func titlebarControlBridgeProvidesOnlyTheAppKitMinimumWidth() {

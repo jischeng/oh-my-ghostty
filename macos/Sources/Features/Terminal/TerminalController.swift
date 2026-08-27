@@ -6,6 +6,191 @@ import Combine
 import GhosttyKit
 import ObjectiveC
 
+/// Resolves transaction identities without retaining a controller or window.
+struct VerticalTabStableResolver {
+    static func resolve<Value>(
+        sessionIDs: [UUID],
+        in values: [Value],
+        sessionID: (Value) -> UUID
+    ) -> [Value]? {
+        var resolved: [Value] = []
+        for expectedID in sessionIDs {
+            let matches = values.filter { sessionID($0) == expectedID }
+            guard matches.count == 1, let match = matches.first else { return nil }
+            resolved.append(match)
+        }
+        return resolved
+    }
+}
+
+/// Stable identities needed to execute either side of a pane move.
+struct VerticalTabMoveTransactionDescriptor: Equatable {
+    let sourceTabSessionID: UUID
+    let sourceSurfaceID: UUID
+    let destinationTabSessionID: UUID
+    let placement: VerticalTabDropPolicy.Placement
+    var movedTabSessionID: UUID?
+
+    var redoSessionIDs: [UUID] {
+        [sourceTabSessionID, destinationTabSessionID]
+    }
+
+    var undoSessionIDs: [UUID]? {
+        guard let movedTabSessionID else { return nil }
+        return [sourceTabSessionID, destinationTabSessionID, movedTabSessionID]
+    }
+}
+
+/// Canonical per-surface state that can safely change controller ownership.
+/// Observer subscriptions and delayed validation work are intentionally absent;
+/// the receiving controller creates those again from this value state.
+struct PaneSessionStateSnapshot {
+    let context: PaneSessionContext
+    let activity: TabActivity?
+    let resumeDescriptor: AgentResumeDescriptor?
+    let resumeContextID: String?
+    let reducer: AgentContextSignalReducer?
+    let typedHookContextID: String?
+    let observedForegroundProcessID: Int?
+    let detectedAgent: PaneDetectedAgentState?
+    let screenSignature: Int?
+    let screenStableTicks: Int?
+}
+
+struct PaneDetectedAgentState {
+    let id: String
+    let processGroupID: Int
+    let agent: SupportedAgent
+    let launchedAt: Date
+}
+
+/// Native tab membership and layout captured before a pane-to-tab transaction.
+/// All membership is represented by stable tab session IDs so close-window undo
+/// may recreate the controllers without invalidating this snapshot.
+@MainActor
+struct VerticalTabWindowGroupSnapshot {
+    struct Restoration {
+        let controller: TerminalController
+        let group: NSWindowTabGroup?
+        let memberControllers: [TerminalController]
+        let selectedWindow: NSWindow?
+    }
+
+    let memberSessionIDs: [UUID]
+    let index: Int
+    let selectedSessionID: UUID
+    let layoutState: VerticalTabWindowLayoutState
+
+    init(controller: TerminalController) {
+        let window = controller.window
+        if let group = window?.tabGroup,
+           group.windows.count > 1,
+           let window,
+           let index = group.windows.firstIndex(of: window) {
+            let members = group.windows.compactMap {
+                $0.windowController as? TerminalController
+            }
+            self.memberSessionIDs = members.map(\.tabSessionID)
+            self.index = index
+            self.selectedSessionID = (group.selectedWindow?.windowController as? TerminalController)?
+                .tabSessionID ?? controller.tabSessionID
+        } else {
+            self.memberSessionIDs = []
+            self.index = 0
+            self.selectedSessionID = controller.tabSessionID
+        }
+        self.layoutState = controller.tabLayoutState
+    }
+
+    /// Preflight every controller, window, and original group before mutation.
+    func resolveRestoration(
+        of controller: TerminalController,
+        in controllers: [TerminalController]
+    ) -> Restoration? {
+        let expectedControllerID: UUID
+        if memberSessionIDs.isEmpty {
+            expectedControllerID = selectedSessionID
+        } else {
+            guard memberSessionIDs.indices.contains(index) else { return nil }
+            expectedControllerID = memberSessionIDs[index]
+        }
+        guard controller.tabSessionID == expectedControllerID,
+              controller.window != nil else { return nil }
+
+        guard !memberSessionIDs.isEmpty else {
+            return .init(
+                controller: controller,
+                group: nil,
+                memberControllers: [controller],
+                selectedWindow: controller.window
+            )
+        }
+        guard let members = VerticalTabStableResolver.resolve(
+                  sessionIDs: memberSessionIDs,
+                  in: controllers,
+                  sessionID: \.tabSessionID
+              ),
+              let selected = members.first(where: {
+                  $0.tabSessionID == selectedSessionID
+              }),
+              let selectedWindow = selected.window,
+              let anchor = members.first(where: { $0 !== controller }),
+              let group = anchor.window?.tabGroup else { return nil }
+        for member in members where member !== controller {
+            guard let window = member.window,
+                  window.tabGroup === group,
+                  group.windows.contains(window) else { return nil }
+        }
+        return .init(
+            controller: controller,
+            group: group,
+            memberControllers: members,
+            selectedWindow: selectedWindow
+        )
+    }
+
+    /// Restores membership, exact ordering, selection, and the original shared
+    /// (or standalone) window layout state.
+    func restore(_ restoration: Restoration) -> Bool {
+        guard let window = restoration.controller.window else { return false }
+        if let group = restoration.group {
+            if window.tabGroup !== group || !group.windows.contains(window) {
+                window.tabGroup?.removeWindow(window)
+                guard let anchor = restoration.memberControllers
+                    .first(where: { $0 !== restoration.controller })?.window,
+                      anchor.addTabbedWindowSafely(window, ordered: .above),
+                      window.tabGroup === group,
+                      group.windows.contains(window) else { return false }
+            }
+            guard group.windows.indices.contains(index) else { return false }
+            if group.windows[index] !== window {
+                group.removeWindow(window)
+                group.insertWindow(window, at: index)
+            }
+            group.setGhosttyTerminalShellLayoutState(layoutState)
+            for controller in restoration.memberControllers {
+                controller.tabLayoutState = layoutState
+            }
+            guard let selectedWindow = restoration.selectedWindow,
+                  group.windows.contains(selectedWindow) else { return false }
+            group.selectedWindow = selectedWindow
+            return window.tabGroup === group &&
+                group.windows.indices.contains(index) &&
+                group.windows[index] === window &&
+                group.selectedWindow === selectedWindow
+        }
+
+        if let currentGroup = window.tabGroup, currentGroup.windows.count > 1 {
+            currentGroup.removeWindow(window)
+        }
+        window.tabGroup?.setGhosttyTerminalShellLayoutState(layoutState)
+        restoration.controller.tabLayoutState = layoutState
+        guard let standaloneGroup = window.tabGroup else { return true }
+        return standaloneGroup.windows.count == 1 &&
+            standaloneGroup.windows.first === window
+    }
+}
+
 /// A classic, tabbed terminal experience.
 class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Controller {
     let tabLayout: Ghostty.Config.MacOSTabLayout
@@ -104,16 +289,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     private var agentReducers: [UUID: AgentContextSignalReducer] = [:]
     private var typedAgentHookContextIDs: [UUID: String] = [:]
     private var agentValidationWorkItems: [UUID: DispatchWorkItem] = [:]
-    private struct DetectedAgentInstance {
-        let id: String
-        let processGroupID: Int
-        let agent: SupportedAgent
-        let launchedAt: Date
-    }
 
     private var agentProcessPollCancellable: AnyCancellable?
     private var observedForegroundProcessIDs: [UUID: Int] = [:]
-    private var detectedAgentInstances: [UUID: DetectedAgentInstance] = [:]
+    private var detectedAgentInstances: [UUID: PaneDetectedAgentState] = [:]
     private var conversationDiscoveryPending = Set<UUID>()
     private var agentScreenSignatures: [UUID: Int] = [:]
     private var agentScreenStableTicks: [UUID: Int] = [:]
@@ -327,6 +506,72 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         return configuration
     }
 
+    func capturePaneSessionState(
+        for surfaceID: UUID
+    ) -> PaneSessionStateSnapshot? {
+        guard let context = paneSessionContexts[surfaceID] else { return nil }
+        return .init(
+            context: context,
+            activity: agentActivities[surfaceID],
+            resumeDescriptor: agentResumeDescriptors[surfaceID],
+            resumeContextID: agentResumeContextIDs[surfaceID],
+            reducer: agentReducers[surfaceID],
+            typedHookContextID: typedAgentHookContextIDs[surfaceID],
+            observedForegroundProcessID: observedForegroundProcessIDs[surfaceID],
+            detectedAgent: detectedAgentInstances[surfaceID],
+            screenSignature: agentScreenSignatures[surfaceID],
+            screenStableTicks: agentScreenStableTicks[surfaceID]
+        )
+    }
+
+    /// Installs canonical values after the surface has changed owner. Existing
+    /// target observers remain local to this controller; validation work is
+    /// cancelled and recreated from the transferred reducer state.
+    func restorePaneSessionState(
+        _ snapshot: PaneSessionStateSnapshot,
+        for surfaceID: UUID
+    ) {
+        guard surfaceTree.contains(where: { $0.id == surfaceID }) else { return }
+        agentValidationWorkItems.removeValue(forKey: surfaceID)?.cancel()
+        paneSessionContexts[surfaceID] = snapshot.context
+        if let activity = snapshot.activity {
+            agentActivities[surfaceID] = activity
+        } else {
+            agentActivities.removeValue(forKey: surfaceID)
+        }
+        if let descriptor = snapshot.resumeDescriptor {
+            agentResumeDescriptors[surfaceID] = descriptor
+        } else {
+            agentResumeDescriptors.removeValue(forKey: surfaceID)
+        }
+        surfaceTree.first(where: { $0.id == surfaceID })?
+            .agentResumeDescriptor = snapshot.resumeDescriptor
+        agentResumeContextIDs[surfaceID] = snapshot.resumeContextID
+        agentReducers[surfaceID] = snapshot.reducer
+        typedAgentHookContextIDs[surfaceID] = snapshot.typedHookContextID
+        observedForegroundProcessIDs[surfaceID] = snapshot.observedForegroundProcessID
+        detectedAgentInstances[surfaceID] = snapshot.detectedAgent
+        agentScreenSignatures[surfaceID] = snapshot.screenSignature
+        agentScreenStableTicks[surfaceID] = snapshot.screenStableTicks
+        if snapshot.reducer?.requiresForegroundValidation == true {
+            scheduleAgentValidation(for: surfaceID)
+        }
+        if let detected = snapshot.detectedAgent,
+           let descriptor = snapshot.resumeDescriptor,
+           descriptor.scope == .local,
+           descriptor.conversationID == nil,
+           descriptor.agent == detected.agent {
+            scheduleConversationDiscovery(
+                agent: detected.agent,
+                surfaceID: surfaceID,
+                processGroupID: detected.processGroupID,
+                launchedAt: detected.launchedAt
+            )
+        }
+        objectWillChange.send()
+        refreshPresentedTerminalTitle()
+    }
+
     private func synchronizePaneSessionContexts() {
         let surfaces = surfaceTree.map { $0 }
         let activeIDs = Set(surfaces.map(\.id))
@@ -512,7 +757,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     private func updateScreenFallback(
         for surface: Ghostty.SurfaceView,
-        detected: DetectedAgentInstance
+        detected: PaneDetectedAgentState
     ) {
         let definition = detected.agent.definition
         guard definition.hook.kind == .none else { return }
@@ -1075,9 +1320,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         var reordered = windows
         reordered.remove(at: sourceIndex)
-        var destination = min(max(insertionIndex, 0), windows.count)
-        if sourceIndex < destination { destination -= 1 }
-        destination = min(max(destination, 0), reordered.count)
+        let destination = VerticalTabDropPolicy.destinationIndex(
+            sourceIndex: sourceIndex,
+            insertionIndex: insertionIndex,
+            tabCount: windows.count
+        )
         reordered.insert(movedWindow, at: destination)
         guard reordered != windows else { return false }
 
@@ -1149,6 +1396,446 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         _ = Self.newTab(ghostty, from: window)
     }
 
+    /// Detach a dragged pane into its own tab at a stable sidebar destination.
+    ///
+    /// The remove, attach, reorder, and undo registration are one transaction;
+    /// the lower-level split and new-tab operations must not register competing
+    /// undo actions of their own.
+    @discardableResult
+    func moveSurfaceToNewTab(
+        _ surface: Ghostty.SurfaceView,
+        relativeTo destinationController: TerminalController,
+        placement: VerticalTabDropPolicy.Placement,
+        registerUndo: Bool = true
+    ) -> Bool {
+        guard let destinationWindow = destinationController.window,
+              let sourceController = BaseTerminalController.controller(owning: surface)
+                as? TerminalController,
+              let sourceWindow = sourceController.window else { return false }
+
+        var descriptor = VerticalTabMoveTransactionDescriptor(
+            sourceTabSessionID: sourceController.tabSessionID,
+            sourceSurfaceID: surface.id,
+            destinationTabSessionID: destinationController.tabSessionID,
+            placement: placement,
+            movedTabSessionID: nil
+        )
+
+        if !sourceController.surfaceTree.isSplit {
+            let alreadyGrouped: Bool = if let sourceGroup = sourceWindow.tabGroup,
+                let destinationGroup = destinationWindow.tabGroup {
+                sourceGroup === destinationGroup
+            } else {
+                false
+            }
+            guard sourceWindow !== destinationWindow, !alreadyGrouped else { return false }
+
+            let sourceSnapshot = VerticalTabWindowGroupSnapshot(
+                controller: sourceController
+            )
+            let destinationSnapshot = VerticalTabWindowGroupSnapshot(
+                controller: destinationController
+            )
+            guard destinationWindow.addTabbedWindowSafely(
+                sourceWindow,
+                ordered: .above
+            ) else {
+                _ = Self.restoreSinglePaneMove(
+                    descriptor: descriptor,
+                    sourceSnapshot: sourceSnapshot,
+                    destinationSnapshot: destinationSnapshot
+                )
+                return false
+            }
+
+            guard let destinationGroup = destinationWindow.tabGroup,
+                  sourceWindow.tabGroup === destinationGroup,
+                  destinationGroup.windows.contains(sourceWindow),
+                  let insertionIndex = verticalTabInsertionIndex(
+                      relativeTo: destinationController,
+                      placement: placement,
+                      in: destinationGroup
+                  ),
+                  let plan = VerticalTabMoveTransactionPlan(
+                      sourceIndexAfterAttach: destinationGroup.windows.firstIndex(of: sourceWindow),
+                      insertionIndex: insertionIndex,
+                      tabCount: destinationGroup.windows.count
+                  ) else {
+                _ = Self.restoreSinglePaneMove(
+                    descriptor: descriptor,
+                    sourceSnapshot: sourceSnapshot,
+                    destinationSnapshot: destinationSnapshot
+                )
+                return false
+            }
+
+            _ = destinationController.reorderTab(
+                sourceController,
+                toInsertionIndex: plan.insertionIndex
+            )
+            guard plan.validates(
+                actualIndex: destinationGroup.windows.firstIndex(of: sourceWindow),
+                tabCount: destinationGroup.windows.count
+            ) else {
+                _ = Self.restoreSinglePaneMove(
+                    descriptor: descriptor,
+                    sourceSnapshot: sourceSnapshot,
+                    destinationSnapshot: destinationSnapshot
+                )
+                return false
+            }
+
+            Self.refreshTabs(in: destinationGroup)
+            destinationController.selectVerticalTab(sourceController)
+            guard destinationGroup.selectedWindow === sourceWindow else {
+                _ = Self.restoreSinglePaneMove(
+                    descriptor: descriptor,
+                    sourceSnapshot: sourceSnapshot,
+                    destinationSnapshot: destinationSnapshot
+                )
+                return false
+            }
+
+            if registerUndo {
+                registerSinglePaneMoveUndo(
+                    descriptor: descriptor,
+                    sourceSnapshot: sourceSnapshot,
+                    destinationSnapshot: destinationSnapshot
+                )
+            }
+            return true
+        }
+
+        guard let sourceNode = sourceController.surfaceTree.root?.node(view: surface),
+              let sessionSnapshot = sourceController.capturePaneSessionState(
+                  for: surface.id
+              ) else { return false }
+        if let fullscreenStyle = destinationController.fullscreenStyle,
+           fullscreenStyle.isFullscreen && !fullscreenStyle.supportsTabs {
+            return false
+        }
+
+        let oldTree = sourceController.surfaceTree
+        let oldFocusedSurfaceID = sourceController.focusedSurface?.id
+        let destinationSnapshot = VerticalTabWindowGroupSnapshot(
+            controller: destinationController
+        )
+        sourceController.removeSurfaceNode(
+            sourceNode,
+            undoAction: nil,
+            registerUndo: false
+        )
+
+        let newTree = SplitTree<Ghostty.SurfaceView>(view: surface)
+        guard let newController = Self.newTab(
+            ghostty,
+            from: destinationWindow,
+            withSurfaceTree: newTree,
+            registerUndo: false
+        ) else {
+            Self.restoreSurfaceTree(
+                oldTree,
+                focusedSurfaceID: oldFocusedSurfaceID,
+                to: sourceController
+            )
+            sourceController.restorePaneSessionState(sessionSnapshot, for: surface.id)
+            return false
+        }
+        newController.restorePaneSessionState(sessionSnapshot, for: surface.id)
+        descriptor.movedTabSessionID = newController.tabSessionID
+
+        guard let destinationGroup = destinationWindow.tabGroup,
+              let newWindow = newController.window,
+              newWindow.tabGroup === destinationGroup,
+              destinationGroup.windows.contains(newWindow),
+              let insertionIndex = verticalTabInsertionIndex(
+                  relativeTo: destinationController,
+                  placement: placement,
+                  in: destinationGroup
+              ),
+              let plan = VerticalTabMoveTransactionPlan(
+                  sourceIndexAfterAttach: destinationGroup.windows.firstIndex(of: newWindow),
+                  insertionIndex: insertionIndex,
+                  tabCount: destinationGroup.windows.count
+              ) else {
+            Self.discardMovedPaneTab(newController)
+            Self.restoreSurfaceTree(
+                oldTree,
+                focusedSurfaceID: oldFocusedSurfaceID,
+                to: sourceController
+            )
+            sourceController.restorePaneSessionState(sessionSnapshot, for: surface.id)
+            _ = Self.restoreWindowSnapshot(
+                destinationSnapshot,
+                controllerID: destinationController.tabSessionID
+            )
+            return false
+        }
+
+        _ = destinationController.reorderTab(
+            newController,
+            toInsertionIndex: plan.insertionIndex
+        )
+        Self.refreshTabs(in: destinationGroup)
+        destinationController.selectVerticalTab(newController)
+        guard plan.validates(
+            actualIndex: destinationGroup.windows.firstIndex(of: newWindow),
+            tabCount: destinationGroup.windows.count
+        ), destinationGroup.selectedWindow === newWindow else {
+            Self.discardMovedPaneTab(newController)
+            Self.restoreSurfaceTree(
+                oldTree,
+                focusedSurfaceID: oldFocusedSurfaceID,
+                to: sourceController
+            )
+            sourceController.restorePaneSessionState(sessionSnapshot, for: surface.id)
+            _ = Self.restoreWindowSnapshot(
+                destinationSnapshot,
+                controllerID: destinationController.tabSessionID
+            )
+            return false
+        }
+
+        if registerUndo {
+            registerSplitPaneMoveUndo(
+                descriptor: descriptor,
+                oldTree: oldTree,
+                oldFocusedSurfaceID: oldFocusedSurfaceID,
+                initialSessionSnapshot: sessionSnapshot,
+                destinationSnapshot: destinationSnapshot
+            )
+        }
+        return true
+    }
+
+    private func verticalTabInsertionIndex(
+        relativeTo destinationController: TerminalController,
+        placement: VerticalTabDropPolicy.Placement,
+        in tabGroup: NSWindowTabGroup
+    ) -> Int? {
+        if placement == .end { return tabGroup.windows.count }
+        guard let destinationWindow = destinationController.window,
+              let destinationIndex = tabGroup.windows.firstIndex(of: destinationWindow) else {
+            return nil
+        }
+        return VerticalTabDropPolicy.insertionIndex(
+            destinationIndex: destinationIndex,
+            placement: placement
+        )
+    }
+
+    private static func resolvedControllers(
+        sessionIDs: [UUID]
+    ) -> [TerminalController]? {
+        VerticalTabStableResolver.resolve(
+            sessionIDs: sessionIDs,
+            in: TerminalController.all,
+            sessionID: \.tabSessionID
+        )
+    }
+
+    private static func restoreWindowSnapshot(
+        _ snapshot: VerticalTabWindowGroupSnapshot,
+        controllerID: UUID
+    ) -> Bool {
+        let controllers = TerminalController.all
+        guard let controller = controllers.first(where: {
+            $0.tabSessionID == controllerID
+        }),
+              let restoration = snapshot.resolveRestoration(
+                  of: controller,
+                  in: controllers
+              ),
+              snapshot.restore(restoration) else { return false }
+        refreshTabs(in: restoration.group)
+        controller.setupTabObservation()
+        return true
+    }
+
+    private static func restoreSinglePaneMove(
+        descriptor: VerticalTabMoveTransactionDescriptor,
+        sourceSnapshot: VerticalTabWindowGroupSnapshot,
+        destinationSnapshot: VerticalTabWindowGroupSnapshot
+    ) -> Bool {
+        let controllers = TerminalController.all
+        guard let resolved = VerticalTabStableResolver.resolve(
+            sessionIDs: descriptor.redoSessionIDs,
+            in: controllers,
+            sessionID: \.tabSessionID
+        ), resolved.count == 2 else { return false }
+        let source = resolved[0]
+        let destination = resolved[1]
+        guard source.surfaceTree.contains(where: {
+            $0.id == descriptor.sourceSurfaceID
+        }),
+              let sourceRestoration = sourceSnapshot.resolveRestoration(
+                  of: source,
+                  in: controllers
+              ),
+              let destinationRestoration = destinationSnapshot.resolveRestoration(
+                  of: destination,
+                  in: controllers
+              ) else { return false }
+
+        guard sourceSnapshot.restore(sourceRestoration),
+              destinationSnapshot.restore(destinationRestoration) else { return false }
+        refreshTabs(in: sourceRestoration.group)
+        refreshTabs(in: destinationRestoration.group)
+        source.setupTabObservation()
+        destination.setupTabObservation()
+        return true
+    }
+
+    private func registerSinglePaneMoveUndo(
+        descriptor: VerticalTabMoveTransactionDescriptor,
+        sourceSnapshot: VerticalTabWindowGroupSnapshot,
+        destinationSnapshot: VerticalTabWindowGroupSnapshot
+    ) {
+        guard let appDelegate = NSApp.delegate as? AppDelegate else { return }
+        let undoManager = appDelegate.undoManager
+        let expiration = undoExpiration
+        undoManager.setActionName("Move Split")
+        undoManager.registerUndo(
+            withTarget: ghostty,
+            expiresAfter: expiration
+        ) { ghostty in
+            guard Self.restoreSinglePaneMove(
+                descriptor: descriptor,
+                sourceSnapshot: sourceSnapshot,
+                destinationSnapshot: destinationSnapshot
+            ) else { return }
+            Self.registerPaneMoveRedo(
+                descriptor: descriptor,
+                ghostty: ghostty,
+                undoManager: undoManager,
+                expiration: expiration
+            )
+        }
+    }
+
+    private func registerSplitPaneMoveUndo(
+        descriptor: VerticalTabMoveTransactionDescriptor,
+        oldTree: SplitTree<Ghostty.SurfaceView>,
+        oldFocusedSurfaceID: UUID?,
+        initialSessionSnapshot: PaneSessionStateSnapshot,
+        destinationSnapshot: VerticalTabWindowGroupSnapshot
+    ) {
+        guard let appDelegate = NSApp.delegate as? AppDelegate,
+              let undoIDs = descriptor.undoSessionIDs else { return }
+        let undoManager = appDelegate.undoManager
+        undoManager.setActionName("Move Split")
+        let expiration = undoExpiration
+        undoManager.registerUndo(
+            withTarget: ghostty,
+            expiresAfter: expiration
+        ) { ghostty in
+            let controllers = TerminalController.all
+            guard let resolved = VerticalTabStableResolver.resolve(
+                sessionIDs: undoIDs,
+                in: controllers,
+                sessionID: \.tabSessionID
+            ), resolved.count == 3 else { return }
+            let source = resolved[0]
+            let destination = resolved[1]
+            let moved = resolved[2]
+            guard let movedSurface = moved.surfaceTree.first(where: {
+                $0.id == descriptor.sourceSurfaceID
+            }),
+                  !source.surfaceTree.contains(where: {
+                      $0.id == descriptor.sourceSurfaceID
+                  }),
+                  let restoredTree = Self.replacingSurface(
+                      descriptor.sourceSurfaceID,
+                      with: movedSurface,
+                      in: oldTree
+                  ),
+                  let destinationRestoration = destinationSnapshot.resolveRestoration(
+                      of: destination,
+                      in: controllers
+                  ) else { return }
+
+            let transferredState = moved.capturePaneSessionState(
+                for: descriptor.sourceSurfaceID
+            ) ?? initialSessionSnapshot
+            Self.discardMovedPaneTab(moved)
+            Self.restoreSurfaceTree(
+                restoredTree,
+                focusedSurfaceID: oldFocusedSurfaceID,
+                to: source
+            )
+            source.restorePaneSessionState(
+                transferredState,
+                for: descriptor.sourceSurfaceID
+            )
+            guard destinationSnapshot.restore(destinationRestoration) else { return }
+            Self.refreshTabs(in: destinationRestoration.group)
+            Self.registerPaneMoveRedo(
+                descriptor: descriptor,
+                ghostty: ghostty,
+                undoManager: undoManager,
+                expiration: expiration
+            )
+        }
+    }
+
+    private static func registerPaneMoveRedo(
+        descriptor: VerticalTabMoveTransactionDescriptor,
+        ghostty: Ghostty.App,
+        undoManager: ExpiringUndoManager,
+        expiration: Duration
+    ) {
+        undoManager.registerUndo(
+            withTarget: ghostty,
+            expiresAfter: expiration
+        ) { _ in
+            guard let resolved = resolvedControllers(
+                sessionIDs: descriptor.redoSessionIDs
+            ), resolved.count == 2 else { return }
+            let source = resolved[0]
+            let destination = resolved[1]
+            guard let surface = source.surfaceTree.first(where: {
+                $0.id == descriptor.sourceSurfaceID
+            }) else { return }
+            _ = source.moveSurfaceToNewTab(
+                surface,
+                relativeTo: destination,
+                placement: descriptor.placement
+            )
+        }
+    }
+
+    private static func replacingSurface(
+        _ surfaceID: UUID,
+        with surface: Ghostty.SurfaceView,
+        in tree: SplitTree<Ghostty.SurfaceView>
+    ) -> SplitTree<Ghostty.SurfaceView>? {
+        guard let node = tree.find(id: surfaceID) else { return nil }
+        if tree.contains(surface) { return tree }
+        return try? tree.replacing(node: node, with: .leaf(view: surface))
+    }
+
+    private static func discardMovedPaneTab(_ controller: TerminalController) {
+        controller.cancelPendingInitialPresentation()
+        controller.surfaceTree = .init()
+        controller.window?.close()
+    }
+
+    private static func restoreSurfaceTree(
+        _ tree: SplitTree<Ghostty.SurfaceView>,
+        focusedSurfaceID: UUID?,
+        to controller: TerminalController
+    ) {
+        controller.surfaceTree = tree
+        controller.focusedSurface = focusedSurfaceID.flatMap { focusedID in
+            tree.first(where: { $0.id == focusedID })
+        }
+        if let focusedSurface = controller.focusedSurface {
+            DispatchQueue.main.async {
+                Ghostty.moveFocus(to: focusedSurface)
+            }
+        }
+    }
+
     func setVerticalTabHovered(_ controller: TerminalController, hovered: Bool) {
         let id = ObjectIdentifier(controller)
         if hovered {
@@ -1156,6 +1843,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         } else if hoveredTabID == id {
             hoveredTabID = nil
         }
+    }
+
+    func clearVerticalTabHover() {
+        hoveredTabID = nil
     }
 
     func updateSidebarWidth(_ proposedWidth: CGFloat, persist: Bool) {
@@ -1483,12 +2174,18 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     static func newTab(
         _ ghostty: Ghostty.App,
         from parent: NSWindow? = nil,
-        withBaseConfig baseConfig: Ghostty.SurfaceConfiguration? = nil
+        withBaseConfig baseConfig: Ghostty.SurfaceConfiguration? = nil,
+        withSurfaceTree surfaceTree: SplitTree<Ghostty.SurfaceView>? = nil,
+        registerUndo: Bool = true
     ) -> TerminalController? {
         // Making sure that we're dealing with a TerminalController. If not,
         // then we just create a new window.
         guard let parent,
               let parentController = parent.windowController as? TerminalController else {
+            // A caller-owned tree must remain with its caller when there is no
+            // valid tab parent; falling back to newWindow would register an
+            // independent undo and break the pane-move transaction.
+            guard surfaceTree == nil else { return nil }
             return newWindow(ghostty, withBaseConfig: baseConfig, withParent: parent)
         }
 
@@ -1509,11 +2206,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let controller = TerminalController.init(
             ghostty,
             withBaseConfig: baseConfig,
+            withSurfaceTree: surfaceTree,
             tabLayout: parentController.tabLayout
         )
         controller.isBackgroundOpaque = parentController.isBackgroundOpaque
         controller.tabLayoutState = parentController.tabLayoutState
-        guard let window = controller.window else { return controller }
+        guard let window = controller.window else { return nil }
 
         // If the parent is miniaturized, then macOS exhibits really strange behaviors
         // so we have to bring it back out.
@@ -1534,21 +2232,42 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // If we don't allow tabs then we create a new window instead.
         if window.tabbingMode != .disallowed {
             // Add the window to the tab group and show it.
+            let addedToTabGroup: Bool
             switch ghostty.config.windowNewTabPosition {
             case "end":
                 // If we already have a tab group and we want the new tab to open at the end,
                 // then we use the last window in the tab group as the parent.
                 if let last = parent.tabGroup?.windows.last {
-                    last.addTabbedWindowSafely(window, ordered: .above)
+                    addedToTabGroup = last.addTabbedWindowSafely(
+                        window,
+                        ordered: .above
+                    )
                 } else {
-                    fallthrough
+                    addedToTabGroup = parent.addTabbedWindowSafely(
+                        window,
+                        ordered: .above
+                    )
                 }
 
             case "current": fallthrough
             default:
-                parent.addTabbedWindowSafely(window, ordered: .above)
+                addedToTabGroup = parent.addTabbedWindowSafely(
+                    window,
+                    ordered: .above
+                )
             }
-            Self.refreshTabs(in: window.tabGroup)
+
+            guard addedToTabGroup,
+                  let tabGroup = parent.tabGroup,
+                  window.tabGroup === tabGroup,
+                  tabGroup.windows.contains(window) else {
+                // Detach any caller-owned surface before closing the failed tab.
+                // The caller can then restore its original split tree safely.
+                controller.surfaceTree = .init()
+                window.close()
+                return nil
+            }
+            Self.refreshTabs(in: tabGroup)
         }
 
         // We're dispatching this async because otherwise the lastCascadePoint doesn't
@@ -1582,7 +2301,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
 
         // Setup our undo
-        if let undoManager = parentController.undoManager {
+        if registerUndo, let undoManager = parentController.undoManager {
             undoManager.setActionName("New Tab")
             undoManager.registerUndo(
                 withTarget: controller,
@@ -1601,7 +2320,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                     _ = TerminalController.newTab(
                         ghostty,
                         from: parent,
-                        withBaseConfig: baseConfig)
+                        withBaseConfig: baseConfig,
+                        withSurfaceTree: surfaceTree,
+                        registerUndo: registerUndo)
                 }
             }
         }
@@ -2090,10 +2811,21 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let tabIndex: Int?
         weak var tabGroup: NSWindowTabGroup?
         let tabColor: TerminalTabColor
+        let tabSessionID: UUID
+        let tabCreatedAt: Date
+        let paneSessionStates: [UUID: PaneSessionStateSnapshot]
     }
 
     convenience init(_ ghostty: Ghostty.App, with undoState: UndoState) {
-        self.init(ghostty, withSurfaceTree: undoState.surfaceTree)
+        self.init(
+            ghostty,
+            withSurfaceTree: undoState.surfaceTree,
+            tabSessionID: undoState.tabSessionID,
+            tabCreatedAt: undoState.tabCreatedAt
+        )
+        for (surfaceID, snapshot) in undoState.paneSessionStates {
+            restorePaneSessionState(snapshot, for: surfaceID)
+        }
 
         // Show the window and restore its frame
         showWindow(nil)
@@ -2145,7 +2877,17 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             focusedSurface: focusedSurface?.id,
             tabIndex: window.tabGroup?.windows.firstIndex(of: window),
             tabGroup: window.tabGroup,
-            tabColor: (window as? TerminalWindow)?.tabColor ?? .none)
+            tabColor: (window as? TerminalWindow)?.tabColor ?? .none,
+            tabSessionID: tabSessionID,
+            tabCreatedAt: tabCreatedAt,
+            paneSessionStates: Dictionary(
+                uniqueKeysWithValues: surfaceTree.compactMap { surface in
+                    capturePaneSessionState(for: surface.id).map {
+                        (surface.id, $0)
+                    }
+                }
+            )
+        )
     }
 
     // MARK: - NSWindowController
@@ -2819,6 +3561,18 @@ private nonisolated(unsafe) var verticalTabLayoutStateAssociationKey: UInt8 = 0
 
 extension NSWindowTabGroup {
     @MainActor
+    func setGhosttyTerminalShellLayoutState(
+        _ state: VerticalTabWindowLayoutState
+    ) {
+        objc_setAssociatedObject(
+            self,
+            &verticalTabLayoutStateAssociationKey,
+            state,
+            .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        )
+    }
+
+    @MainActor
     var ghosttyTerminalShellLayoutState: VerticalTabWindowLayoutState {
         if let state = objc_getAssociatedObject(
             self,
@@ -2834,12 +3588,7 @@ extension NSWindowTabGroup {
                 isSidebarVisible: OhMyGhosttySettings.shared.tabLayout == .vertical &&
                     OhMyGhosttySettings.shared.sidebarVisible
             )
-        objc_setAssociatedObject(
-            self,
-            &verticalTabLayoutStateAssociationKey,
-            state,
-            .OBJC_ASSOCIATION_RETAIN_NONATOMIC
-        )
+        setGhosttyTerminalShellLayoutState(state)
         return state
     }
 

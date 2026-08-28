@@ -478,7 +478,11 @@ ready remote cwd is passed as a separately shell-quoted wrapper option so the
 independent remote shell starts in the same folder. On macOS the replay and its
 post-disconnect interactive shell are grouped inside `/bin/sh -c`, because the
 platform command launcher prepends an outer `exec -l`; without that inner shell,
-the outer exec discards the post-SSH command and the split exits.
+the outer exec discards the post-SSH command and the split exits. Embedded
+surface commands now honor `wait_after_command` independently instead of
+forcing it on whenever `command` is present. SSH replay splits leave it off, so
+the first EOF returns to the local survival shell and a second EOF closes the
+split normally rather than showing a terminal `Process exited` hold screen.
 Therefore config aliases retain ProxyJump and other OpenSSH configuration, and
 explicit direct invocations retain their original arguments. A new split uses
 this replay path, while a new tab remains a local session: when tab cwd

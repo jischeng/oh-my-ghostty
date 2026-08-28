@@ -403,6 +403,7 @@ struct VerticalTabsTests {
         ))
         #expect(configured.workingDirectory == "/Users/test/code")
         #expect(configured.environmentVariables["KEEP"] == "value")
+        #expect(!configured.waitAfterCommand)
         #expect(configured.command?.contains("'+ssh'") == true)
         #expect(configured.command?.contains(
             "'--remote-working-directory=/remote/project'"

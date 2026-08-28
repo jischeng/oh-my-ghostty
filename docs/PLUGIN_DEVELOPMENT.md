@@ -366,11 +366,26 @@ restore builds only allowlisted resume argv such as `codex resume <id>`,
 does not inherit shell-managed PATH entries, so the argv is executed by the
 user's login+interactive shell; this resolves Homebrew/mise/npm-installed Agent
 binaries without storing arbitrary PATH or command data. The pane falls back to
-the login shell when the Agent exits.
+the login shell when the Agent exits. macOS wraps every Surface command as
+`exec -l <command>`, so restored commands are grouped inside a
+`/bin/sh -c '<command>; exec <login shell>'` survival wrapper; without that
+inner shell the outer exec discards the post-Agent command and the pane closes
+the moment the Agent exits.
 Remote restore replays original OpenSSH argv and passes only typed
 `--remote-agent` / `--remote-agent-session` options to `+ssh`; the detected
 Fish/bash/zsh shell restores cwd, emits a ready context, runs the allowlisted
-resume command, then returns to its interactive prompt.
+resume command, then returns to its interactive prompt. When the conversation
+ID is absent (the Agent exited back to a remote shell), the restore command
+reconnects `+ssh` without `--remote-agent` so the pane lands in the remote
+shell instead of spawning a fresh Agent session.
+
+Each Surface also persists an `SSHResumeDescriptor` (validated SSH replay argv,
+last ready remote cwd, and pre-SSH local cwd) whenever an `omg +ssh` connection
+is active, independent of any Agent session. On restore, panes without a
+usable Agent resume descriptor replay `+ssh` with the recorded remote cwd and
+survival wrapper, so plain SSH tabs reconnect instead of degrading to a local
+shell. The descriptor clears when the connection ends, matching the split
+replay lifecycle.
 
 Conversation identity comes from hook stdin (`session_id`), Pi-compatible
 `sessionManager.getSessionId()`, OpenCode events, Reasonix's bounded machine JSON
@@ -490,7 +505,10 @@ inheritance is enabled it replaces the remote pwd with the `localcwd` snapshot;
 when inheritance is disabled it leaves the directory unset so Ghostty applies
 the configured home/custom/default working directory.
 The descriptor is removed when the owning OpenSSH child exits and stale files
-older than 24 hours are rejected. This is an internal first-party launch handoff,
+older than 24 hours are rejected. The same validated replay snapshot is
+persisted on the Surface as `SSHResumeDescriptor` (with the ready remote cwd and
+the pre-SSH local cwd) so app restoration can reconnect plain SSH tabs after a
+relaunch, not only Agent and split panes. This is an internal first-party launch handoff,
 not plugin storage or a public plugin API.
 
 This first provider does not install a remote service and does not manage

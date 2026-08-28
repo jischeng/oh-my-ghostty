@@ -392,6 +392,59 @@ struct WorkspaceProviderTests {
         ))
     }
 
+    @Test func sshResumeDescriptorBuildsReconnectCommandAndRoundTrips() throws {
+        let descriptor = SSHResumeDescriptor(
+            sshReplay: .init(
+                version: 1,
+                ssh: "/usr/bin/ssh",
+                forwardEnv: true,
+                terminfo: false,
+                cache: true,
+                args: ["cloud"]
+            ),
+            remoteWorkingDirectory: "/home/test/project",
+            localWorkingDirectory: "/Users/test/code"
+        )
+        let command = try #require(descriptor.command(
+            executablePath: "/Applications/OMG.app/Contents/MacOS/omg"
+        ))
+        #expect(command.contains("'+ssh'"))
+        #expect(command.contains("'--remote-working-directory=/home/test/project'"))
+        #expect(!command.contains("--remote-agent"))
+
+        let encoded = try JSONEncoder().encode(descriptor)
+        #expect(try JSONDecoder().decode(
+            SSHResumeDescriptor.self,
+            from: encoded
+        ) == descriptor)
+
+        let noRemoteCWD = SSHResumeDescriptor(
+            sshReplay: descriptor.sshReplay,
+            remoteWorkingDirectory: nil,
+            localWorkingDirectory: "/Users/test/code"
+        )
+        let reconnect = try #require(noRemoteCWD.command(
+            executablePath: "/Applications/OMG.app/Contents/MacOS/omg"
+        ))
+        #expect(!reconnect.contains("--remote-working-directory"))
+
+        let invalid = SSHResumeDescriptor(
+            sshReplay: .init(
+                version: 2,
+                ssh: "/usr/bin/ssh",
+                forwardEnv: true,
+                terminfo: false,
+                cache: true,
+                args: ["cloud"]
+            ),
+            remoteWorkingDirectory: nil,
+            localWorkingDirectory: nil
+        )
+        #expect(invalid.command(
+            executablePath: "/Applications/OMG.app/Contents/MacOS/omg"
+        ) == nil)
+    }
+
     @Test func sshReplayStoreRejectsInvalidOrStaleDescriptors() throws {
         let support = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)

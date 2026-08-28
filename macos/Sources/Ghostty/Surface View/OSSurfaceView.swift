@@ -30,6 +30,10 @@ extension Ghostty {
         // Typed, allowlisted launch state used only for app restoration.
         var agentResumeDescriptor: AgentResumeDescriptor?
 
+        // SSH session replay state used to restore plain SSH panes that do not
+        // have an active agent resume descriptor.
+        var sshResumeDescriptor: SSHResumeDescriptor?
+
         // The cell size of this surface. This is set by the core when the
         // surface is first created and any time the cell size changes (i.e.
         // when the font size changes). This is used to allow windows to be

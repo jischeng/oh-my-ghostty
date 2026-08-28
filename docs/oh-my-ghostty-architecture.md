@@ -129,7 +129,7 @@ Vertical Tabs 的 logo、title、cwd 和 working ring 严格消费 focused Surfa
 
 Settings 根据 manifest 显式安装/移除 nested/flat JSON hooks、Pi-compatible/OpenCode/Amp plugins、Kimi TOML block 或 Cline scripts，并保留所有非 OMG 配置。SSH 上可导出 Python 3 installer，由用户审阅、传输并在 agent 实际运行的远端账户显式执行；本地 App 不登录或静默修改远端 dotfiles。
 
-每个内建 Agent 由 bundle manifest 声明 command、icon、process markers、hook dialect/events/identity fields 和 resume/store 机制。Host 只实现固定机制，manifest 不能携带任意代码。Terminal restoration v9 在每个 Surface 上保存 typed `AgentResumeDescriptor`；默认开启的 `sessions.restoreOnLaunch` 让 AppKit 恢复原有 window/tab/split tree，并对退出 OMG 时仍运行的 Agent 使用 exact conversation ID。Local 只生成 allowlisted resume argv；SSH 只重放 original OpenSSH argv、cwd 和 typed agent/session options。Agent 已 `/quit` 回 shell 时 descriptor 被清除，下次只恢复 shell。
+每个内建 Agent 由 bundle manifest 声明 command、icon、process markers、hook dialect/events/identity fields 和 resume/store 机制。Host 只实现固定机制，manifest 不能携带任意代码。Terminal restoration v9 在每个 Surface 上保存 typed `AgentResumeDescriptor`；默认开启的 `sessions.restoreOnLaunch` 让 AppKit 恢复原有 window/tab/split tree，并对退出 OMG 时仍运行的 Agent 使用 exact conversation ID。Local 只生成 allowlisted resume argv；SSH 只重放 original OpenSSH argv、cwd 和 typed agent/session options。Agent 已 `/quit` 回 shell 时 descriptor 被清除；conversation ID 缺失时 SSH 恢复不携带 `--remote-agent`，pane 回到远端 shell 而不是本地 shell。每个处于活跃 `omg +ssh` 连接的 Surface 额外保存 typed `SSHResumeDescriptor`（validated replay argv、ready remote cwd、pre-SSH local cwd），恢复时无可用 Agent descriptor 的 pane 重放 `+ssh` 连接，纯 SSH 标签页不再退化为本地 shell。恢复命令统一包在 `/bin/sh -c '<command>; exec <login shell>'` survival wrapper 中，避免 macOS `exec -l` 丢弃命令尾，Agent 或 SSH 退出后 pane 回到可交互 login shell 而不是随子进程关闭。
 
 ### 6.2 Tab Layout
 

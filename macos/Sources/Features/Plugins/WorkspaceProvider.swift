@@ -325,6 +325,21 @@ struct SSHReplayDescriptor: Codable, Equatable, Sendable {
     }
 }
 
+/// Snapshot of an SSH pane session used to restore the connection after the
+/// app relaunches, even when no agent resume descriptor is present.
+struct SSHResumeDescriptor: Codable, Equatable, Sendable {
+    let sshReplay: SSHReplayDescriptor
+    let remoteWorkingDirectory: String?
+    let localWorkingDirectory: String?
+
+    func command(executablePath: String) -> String? {
+        sshReplay.command(
+            executablePath: executablePath,
+            remoteWorkingDirectory: remoteWorkingDirectory
+        )
+    }
+}
+
 enum SSHReplayStore {
     static func url(
         for connectionID: String,

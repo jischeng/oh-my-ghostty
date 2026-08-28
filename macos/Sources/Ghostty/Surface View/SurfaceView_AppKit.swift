@@ -1882,6 +1882,7 @@ extension Ghostty {
             case title
             case isUserSetTitle
             case agentResumeDescriptor
+            case sshResumeDescriptor
         }
 
         required convenience init(from decoder: Decoder) throws {
@@ -1905,20 +1906,33 @@ extension Ghostty {
                 AgentResumeDescriptor.self,
                 forKey: .agentResumeDescriptor
             )
-            if let resume, resume.isValid,
-               let executablePath = Bundle.main.executablePath {
-                config.workingDirectory = resume.scope == .local
-                    ? resume.workingDirectory ?? config.workingDirectory
-                    : nil
-                config.command = resume.restorationCommand(
-                    executablePath: executablePath
-                )
+            if let executablePath = Bundle.main.executablePath {
+                if let resume, resume.isValid,
+                   let command = resume.restorationCommand(
+                       executablePath: executablePath
+                   ) {
+                    config.workingDirectory = resume.scope == .local
+                        ? resume.workingDirectory ?? config.workingDirectory
+                        : nil
+                    config.command = TerminalController.replaySurvivalCommand(command)
+                } else if let sshResume = try container.decodeIfPresent(
+                    SSHResumeDescriptor.self,
+                    forKey: .sshResumeDescriptor
+                ),
+                   let command = sshResume.command(executablePath: executablePath) {
+                    config.workingDirectory = sshResume.localWorkingDirectory
+                    config.command = TerminalController.replaySurvivalCommand(command)
+                }
             }
             let savedTitle = try container.decodeIfPresent(String.self, forKey: .title)
             let isUserSetTitle = try container.decodeIfPresent(Bool.self, forKey: .isUserSetTitle) ?? false
 
             self.init(app, baseConfig: config, uuid: uuid)
             self.agentResumeDescriptor = resume
+            self.sshResumeDescriptor = try container.decodeIfPresent(
+                SSHResumeDescriptor.self,
+                forKey: .sshResumeDescriptor
+            )
 
             // Restore the saved title after initialization
             if let title = savedTitle {
@@ -1939,6 +1953,10 @@ extension Ghostty {
             try container.encodeIfPresent(
                 agentResumeDescriptor,
                 forKey: .agentResumeDescriptor
+            )
+            try container.encodeIfPresent(
+                sshResumeDescriptor,
+                forKey: .sshResumeDescriptor
             )
         }
     }

@@ -133,10 +133,13 @@ struct AgentResumeDescriptor: Codable, Equatable, Sendable {
             let resumableConversation = agent.definition.resume.resumeArguments.isEmpty
                 ? nil
                 : conversationID
+            // When the conversation ID is gone (agent exited back to a remote
+            // shell), reconnect SSH without restarting the agent so the pane
+            // restores to the remote shell instead of a local one.
             return sshReplay.command(
                 executablePath: executablePath,
                 remoteWorkingDirectory: workingDirectory,
-                remoteAgent: agent,
+                remoteAgent: resumableConversation != nil ? agent : nil,
                 conversationID: resumableConversation
             )
         }

@@ -164,6 +164,28 @@ struct AgentStatusPluginTests {
         #expect(remoteCommand.contains("--remote-agent=pi"))
         #expect(remoteCommand.contains("--remote-agent-session=019f-test_session"))
         #expect(remoteCommand.contains("--remote-working-directory=/home/user/project"))
+
+        let remoteWithoutConversation = AgentResumeDescriptor(
+            agent: .pi,
+            conversationID: nil,
+            scope: .remote,
+            workingDirectory: "/home/user/project",
+            sshReplay: .init(
+                version: 1,
+                ssh: "/usr/bin/ssh",
+                forwardEnv: true,
+                terminfo: true,
+                cache: true,
+                args: ["cloud"]
+            )
+        )
+        let reconnectCommand = try #require(remoteWithoutConversation.restorationCommand(
+            executablePath: "/Applications/OMG.app/Contents/MacOS/omg"
+        ))
+        #expect(reconnectCommand.contains("'+ssh'"))
+        #expect(reconnectCommand.contains("'--'"))
+        #expect(!reconnectCommand.contains("--remote-agent"))
+        #expect(!reconnectCommand.contains("--remote-agent-session"))
         let encoded = try JSONEncoder().encode(remote)
         #expect(try JSONDecoder().decode(
             AgentResumeDescriptor.self,

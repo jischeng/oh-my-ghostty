@@ -658,6 +658,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                         sshReplay: sshReplay
                     )
                     updatePaneSessionContext(context, for: surface.id)
+                    updateSSHResumeDescriptor(context, for: surface.id)
                     registerTypedAgentHookSignal(signal, for: surface.id)
                     updateAgentActivity(signal, for: surface.id)
                 }
@@ -970,6 +971,39 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         scheduleAgentValidation(for: surfaceID)
     }
 
+    private func updateSSHResumeDescriptor(
+        _ context: PaneSessionContext,
+        for surfaceID: UUID
+    ) {
+        guard let surface = surfaceTree.first(where: { $0.id == surfaceID }) else { return }
+        // The remote cwd is only known once the first remote prompt reports
+        // it; during .sshConnecting `context.workingDirectory` is still the
+        // local pre-SSH directory and must not be replayed remotely.
+        let remoteWorkingDirectory: String? = switch context.state {
+        case .sshReady(_, let workingDirectory):
+            workingDirectory
+        case .local, .sshConnecting:
+            nil
+        }
+        let next: SSHResumeDescriptor? = switch context.state {
+        case .local:
+            nil
+        case .sshConnecting(let ssh), .sshReady(let ssh, _):
+            if let replay = ssh.replay ?? SSHReplayStore.load(connectionID: ssh.connectionID) {
+                .init(
+                    sshReplay: replay,
+                    remoteWorkingDirectory: remoteWorkingDirectory,
+                    localWorkingDirectory: context.local.workingDirectory
+                )
+            } else {
+                nil
+            }
+        }
+        guard surface.sshResumeDescriptor != next else { return }
+        surface.sshResumeDescriptor = next
+        invalidateRestorableState()
+    }
+
     private func updateAgentResumeDescriptor(
         _ signal: Ghostty.ContextSignal,
         for surfaceID: UUID
@@ -1280,6 +1314,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // bash process does not discard the post-SSH survival command.
         let script = "\(command); exec \(Ghostty.Shell.quote(survivalShell))"
         return "/bin/sh -c \(Ghostty.Shell.quote(script))"
+    }
+
+    /// Convenience overload that uses the user's login shell as the survival shell.
+    static func replaySurvivalCommand(_ command: String) -> String {
+        replaySurvivalCommand(command, survivalShell: survivalShell)
     }
 
     /// The user's login shell, used to keep an SSH split pane alive after the

@@ -4,8 +4,7 @@ import SwiftUI
 struct CyclingIconView: View {
     var body: some View {
         ghosttyIconImage()
-            .resizable()
-            .aspectRatio(contentMode: .fit)
+            .resizable().scaledToFit()
             .frame(height: 128)
             .accessibilityLabel("OMG Application Icon")
     }

@@ -6,7 +6,7 @@ struct OhMyGhosttyVersionTests {
     @Test func appBundlePublishesReleaseMetadata() {
         let versions = OhMyGhosttyVersion()
 
-        #expect(versions.omg == "0.5.0")
+        #expect(versions.omg == "0.5.1")
         #expect(versions.ghostty == "1.3.2-dev")
         #expect(versions.ghosttyRevision == "9ae02a326f62bd88f7f5508cf1807c67e7775cb5")
     }
@@ -18,7 +18,7 @@ struct OhMyGhosttyVersionTests {
         #expect(bundle.bundleIdentifier == "com.jischeng.omg.debug")
         #expect(bundle.bundleURL.lastPathComponent == "OMG.app")
         #expect(info["CFBundleExecutable"] as? String == "omg")
-        #expect(info["CFBundleVersion"] as? String == "7")
+        #expect(info["CFBundleVersion"] as? String == "8")
         #expect(info["SUPublicEDKey"] as? String ==
             "5oid6CANuDnOWeNWfNljTv/mzdKBVGMw1o5j7naHwYY=")
         #expect(OhMyGhosttyVersion.updateFeedURL?.absoluteString ==
@@ -43,13 +43,13 @@ struct OhMyGhosttyVersionTests {
 
     @Test func fallsBackToBundleMarketingVersion() {
         let versions = OhMyGhosttyVersion(infoDictionary: [
-            "CFBundleShortVersionString": "0.5.0",
+            "CFBundleShortVersionString": "0.5.1",
         ])
 
-        #expect(versions.omg == "0.5.0")
+        #expect(versions.omg == "0.5.1")
         #expect(versions.ghostty == "unknown")
         #expect(versions.ghosttyRevision == "unknown")
-        #expect(versions.releaseTag == "v0.5.0")
+        #expect(versions.releaseTag == "v0.5.1")
     }
 
     @Test func nonSemverOMGVersionDoesNotProduceReleaseTag() {

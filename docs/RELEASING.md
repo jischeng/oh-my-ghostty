@@ -174,7 +174,13 @@ The keychain profile name may be documented; credential values may not.
 - `mise` can resolve Zig 0.16.0;
 - Xcode and SwiftLint are installed.
 
-When Zig/core/build files changed, rebuild GhosttyKit first:
+When Zig/core/build files changed, rebuild GhosttyKit first. Routine OMG
+host/UI/SSH/Agent development and acceptance testing should keep the Swift app
+in Debug but use a ReleaseFast GhosttyKit core; this preserves app-layer
+debuggability without enabling Debug-only terminal page integrity checks. Build
+a Debug GhosttyKit only when intentionally investigating Zig terminal-core,
+page, parser, or renderer behavior; never use that artifact for release
+packaging.
 
 ```bash
 env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
@@ -199,11 +205,17 @@ Output:
 macos/build/Debug/OMG.app
 ```
 
-Success means `xcodebuild` exits zero and this executable exists:
+Success for a routine development or acceptance build means `xcodebuild` exits
+zero, this executable exists, and the GhosttyKit core reports ReleaseFast:
 
-```text
-macos/build/Debug/OMG.app/Contents/MacOS/omg
+```bash
+macos/build/Debug/OMG.app/Contents/MacOS/omg --version \
+  | grep -F 'build mode    : .ReleaseFast'
 ```
+
+A deliberately core-debug build may report `.Debug`; label it as such and do
+not treat its large-output performance as representative of OMG release
+artifacts.
 
 Common failures:
 
@@ -273,13 +285,15 @@ $OMG_BUILD_ROOT/universal/Release/OMG.app
 Verify architecture and metadata:
 
 ```bash
-for arch in arm64 x86_64; do
+for arch in arm64 x86_64 universal; do
   app="$OMG_BUILD_ROOT/$arch/Release/OMG.app"
   lipo -archs "$app/Contents/MacOS/omg"
   plutil -extract CFBundleIdentifier raw "$app/Contents/Info.plist"
   plutil -extract OMGVersion raw "$app/Contents/Info.plist"
   plutil -extract GhosttyBaseVersion raw "$app/Contents/Info.plist"
   plutil -extract GhosttyBaseRevision raw "$app/Contents/Info.plist"
+  "$app/Contents/MacOS/omg" --version \
+    | grep -F 'build mode    : .ReleaseFast'
 done
 ```
 

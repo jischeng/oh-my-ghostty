@@ -1071,11 +1071,18 @@ function report(state?: string, end = false, context?: any, attention?: string) 
     const raw = context?.sessionManager?.getSessionId?.();
     const conversation = raw && /^[A-Za-z0-9._-]{1,128}$/.test(String(raw))
       ? `;omg_conversation=${encodeURIComponent(String(raw))}` : "";
+    // The session's own project directory can differ from the shell's cwd
+    // (for example when `pi resume` picks a session from another project).
+    // Restoring the conversation requires resuming it in this directory.
+    const rawCwd = context?.sessionManager?.getCwd?.();
+    const sessionCwd = rawCwd && String(rawCwd).startsWith("/") &&
+        String(rawCwd).length <= 4096 && !String(rawCwd).includes("\0")
+      ? `;omg_cwd=${encodeURIComponent(String(rawCwd))}` : "";
     const attentionKind = attention ? `;omg_attention=${attention}` : "";
     fd = openSync("/dev/tty", "w");
     const sequence = end
       ? `\u001b]3008;end=${contextId};type=app;omg_agent=pi;omg_scope=${scope};omg_liveness=pid${conversation}\u0007`
-      : `\u001b]3008;start=${contextId};type=app;omg_agent=pi;omg_scope=${scope};omg_liveness=pid;omg_state=${state}${conversation}${attentionKind}\u0007`;
+      : `\u001b]3008;start=${contextId};type=app;omg_agent=pi;omg_scope=${scope};omg_liveness=pid;omg_state=${state}${conversation}${sessionCwd}${attentionKind}\u0007`;
     writeSync(fd, sequence);
   } catch {
   } finally {
@@ -1152,11 +1159,17 @@ function report(state?: string, end = false, context?: any, attention?: string) 
     const raw = context?.sessionManager?.getSessionId?.();
     const conversation = raw && /^[A-Za-z0-9._-]{1,128}$/.test(String(raw))
       ? `;omg_conversation=${encodeURIComponent(String(raw))}` : "";
+    // Report the session's project directory so restoration resumes the
+    // conversation in the directory that owns it, not the shell's cwd.
+    const rawCwd = context?.sessionManager?.getCwd?.();
+    const sessionCwd = rawCwd && String(rawCwd).startsWith("/") &&
+        String(rawCwd).length <= 4096 && !String(rawCwd).includes("\0")
+      ? `;omg_cwd=${encodeURIComponent(String(rawCwd))}` : "";
     const attentionKind = attention ? `;omg_attention=${attention}` : "";
     fd = openSync("/dev/tty", "w");
     const sequence = end
       ? `\u001b]3008;end=${contextId};type=app;omg_agent=omp;omg_scope=${scope};omg_liveness=pid${conversation}\u0007`
-      : `\u001b]3008;start=${contextId};type=app;omg_agent=omp;omg_scope=${scope};omg_liveness=pid;omg_state=${state}${conversation}${attentionKind}\u0007`;
+      : `\u001b]3008;start=${contextId};type=app;omg_agent=omp;omg_scope=${scope};omg_liveness=pid;omg_state=${state}${conversation}${sessionCwd}${attentionKind}\u0007`;
     writeSync(fd, sequence);
   } catch {
   } finally {
@@ -1241,6 +1254,11 @@ struct AgentSessionSignal: Equatable, Sendable {
     let agent: SupportedAgent
     let scope: AgentExecutionScope
     let conversationID: AgentConversationID?
+    /// The session's own project directory reported by the agent hook via
+    /// `omg_cwd`, when the hook supports it. Resuming a conversation is
+    /// directory-scoped for agents such as Pi, so restoration must prefer
+    /// this over the pane's shell working directory.
+    let workingDirectory: String?
 }
 
 struct AgentActivityCandidate: Sendable {
@@ -1334,12 +1352,29 @@ struct AgentContextSignalReducer: Sendable {
         let conversationID = metadata["omg_conversation"]?
             .removingPercentEncoding
             .flatMap(AgentConversationID.init)
+        let workingDirectory = metadata["omg_cwd"]?
+            .removingPercentEncoding
+            .flatMap(Self.validatedSessionWorkingDirectory)
         return .init(
             contextID: signal.id,
             agent: agent,
             scope: scope,
-            conversationID: conversationID
+            conversationID: conversationID,
+            workingDirectory: workingDirectory
         )
+    }
+
+    /// Validates a session working directory reported via `omg_cwd`. The
+    /// value must be an absolute POSIX path with bounded length and no NUL
+    /// bytes; anything else is treated as absent so restoration falls back
+    /// to the pane's shell working directory.
+    private static func validatedSessionWorkingDirectory(
+        _ value: String
+    ) -> String? {
+        guard value.hasPrefix("/"),
+              !value.contains("\0"),
+              value.utf8.count <= 4_096 else { return nil }
+        return value
     }
 
     mutating func consume(_ signal: Ghostty.ContextSignal) -> AgentActivityUpdate? {

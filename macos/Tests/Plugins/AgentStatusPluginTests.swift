@@ -299,6 +299,39 @@ struct AgentStatusPluginTests {
         #expect(signal.agent == .codex)
         #expect(signal.scope == .local)
         #expect(signal.conversationID?.rawValue == "019f-test_session")
+        #expect(signal.workingDirectory == nil)
+    }
+
+    @Test func extractsSessionWorkingDirectoryFromContextSignal() throws {
+        // Mirrors how the Pi extension encodes the value with
+        // encodeURIComponent ("/" becomes %2F, spaces become %20).
+        let signal = try #require(AgentContextSignalReducer.sessionSignal(from: .init(
+            action: .start,
+            id: "omg-agent-pi-42",
+            metadata: "type=app;omg_agent=pi;omg_scope=remote;" +
+                "omg_state=working;omg_conversation=019f-test_session;" +
+                "omg_cwd=%2Fhome%2Fuser%2Fcode%2Fsome%20project"
+        )))
+        #expect(signal.conversationID?.rawValue == "019f-test_session")
+        #expect(signal.workingDirectory == "/home/user/code/some project")
+    }
+
+    @Test func rejectsInvalidSessionWorkingDirectoryFromContextSignal() throws {
+        for rawCwd in [
+            "relative/path",
+            "",
+            "/nul\u{0}byte",
+            "/" + String(repeating: "a", count: 4_097),
+        ] {
+            let signal = try #require(AgentContextSignalReducer.sessionSignal(from: .init(
+                action: .start,
+                id: "omg-agent-pi-42",
+                metadata: "type=app;omg_agent=pi;omg_scope=local;" +
+                    "omg_state=working;omg_conversation=019f-test_session;" +
+                    "omg_cwd=\(rawCwd)"
+            )))
+            #expect(signal.workingDirectory == nil)
+        }
     }
 
     @Test func discoversExactConversationFromBoundedSessionStore() throws {
@@ -1148,6 +1181,8 @@ struct AgentStatusPluginTests {
         #expect(source.contains("process.env.SSH_CONNECTION"))
         #expect(source.contains("sessionManager?.getSessionId"))
         #expect(source.contains("omg_conversation="))
+        #expect(source.contains("sessionManager?.getCwd"))
+        #expect(source.contains("omg_cwd="))
         #expect(source.contains("agent_settled"))
         #expect(source.contains("if (!context.isIdle()) return"))
         #expect(source.contains("Mark normal Pi teardown complete"))

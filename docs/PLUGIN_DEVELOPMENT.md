@@ -293,7 +293,8 @@ that does not exist.
 Adapters emit OSC 3008 contexts with IDs
 `omg-agent-<allowlisted-agent>-<numeric-instance-id>`, `type=app`, a bounded
 `omg_state`, `omg_scope=local|remote`, `omg_liveness=pid|pgid`, optional
-validated `omg_conversation`, and optional
+validated `omg_conversation`, optional validated `omg_cwd` (the session's
+own project directory, used for directory-scoped resume), and optional
 `omg_attention=question|permission`. Pi-compatible and other in-process Plugin
 adapters use their process PID as the instance/liveness identity; shell/config
 hooks and host foreground synthesis use the process-group ID. The host verifies
@@ -393,6 +394,17 @@ command, or bounded cwd+creation-time JSONL discovery.
 Multiple candidates are ambiguous and never resolved using `--last` or
 `--continue`. Agent end or the first resumed SSH prompt clears the descriptor,
 so a tab whose user explicitly ran `/quit` restores as a shell.
+
+Resume lookup is directory-scoped for agents such as Pi (`pi --session-id <id>`
+searches only the current project's sessions), and `pi resume` can start a
+conversation owned by a directory other than the shell's current one. Hooks
+that can observe the session's own project directory report it as validated
+`omg_cwd` on the session signal (Pi-compatible adapters read
+`sessionManager.getCwd()`); the resume descriptor prefers that directory over
+the pane's shell cwd for both local and remote restoration, so the resumed
+agent lands in the directory that owns the conversation instead of creating a
+new one. When `omg_cwd` is absent (older hook, or an agent that cannot report
+it), restoration keeps using the pane cwd.
 
 ### Terminal events
 

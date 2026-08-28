@@ -1032,7 +1032,14 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             previous = nil
         }
         let conversationID = session.conversationID ?? previous?.conversationID
-        let workingDirectory = paneSessionContexts[surfaceID]?.workingDirectory
+        // Prefer the session's own project directory (reported via `omg_cwd`)
+        // over the pane's shell working directory: conversations are
+        // directory-scoped for agents such as Pi, and `pi resume` can start
+        // a conversation that belongs to a directory other than the shell's
+        // current one. Restoring in the shell directory would make the agent
+        // create a brand-new conversation instead of resuming this one.
+        let workingDirectory = session.workingDirectory
+            ?? paneSessionContexts[surfaceID]?.workingDirectory
         let sshReplay: SSHReplayDescriptor? = if session.scope == .remote,
            let context = paneSessionContexts[surfaceID] {
             switch context.state {

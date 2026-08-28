@@ -412,6 +412,7 @@ struct CompositeGhosttyTabIconProvider: GhosttyTabIconProviding {
 
 struct GhosttyTabPresentation {
     let title: String
+    let remoteBreadcrumb: RemoteTabBreadcrumb?
     let shortcut: String?
     let icon: GhosttyTabIcon
     let activity: TabActivity?
@@ -884,6 +885,9 @@ struct TerminalTabSidebarView: View {
         )
         return .init(
             title: resolvedTitle,
+            remoteBreadcrumb: tab.titleOverride == nil
+                ? session.remoteTabBreadcrumb
+                : nil,
             shortcut: settings.showShortcutLabels ? tab.tabShortcutLabel(for: index) : nil,
             icon: iconProvider.icon(for: context) ?? .systemSymbol("terminal"),
             activity: activity,
@@ -1601,6 +1605,9 @@ private struct VerticalTabRow: View {
             .normalizedTitle(baseTitle) ?? baseTitle
         return .init(
             title: title,
+            remoteBreadcrumb: controller.titleOverride == nil
+                ? session.remoteTabBreadcrumb
+                : nil,
             shortcut: presentation.shortcut,
             icon: icon,
             activity: activity,
@@ -1634,10 +1641,14 @@ private struct VerticalTabRow: View {
                         activity: presentation.activity
                     )
 
-                    Text(presentation.title)
-                        .font(.system(size: 12.5))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    if let breadcrumb = presentation.remoteBreadcrumb {
+                        RemoteTabBreadcrumbView(breadcrumb: breadcrumb)
+                    } else {
+                        Text(presentation.title)
+                            .font(.system(size: 12.5))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
 
                     Spacer(minLength: 4)
                 }
@@ -1684,6 +1695,32 @@ private struct VerticalTabRow: View {
         .onHover(perform: hoverChanged)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(presentation.title)
+    }
+}
+
+private struct RemoteTabBreadcrumbView: View {
+    let breadcrumb: RemoteTabBreadcrumb
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Text(breadcrumb.host)
+                .font(.system(size: 11.75, weight: .regular))
+                .foregroundStyle(Color.primary.opacity(0.6))
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            Text("›")
+                .font(.system(size: 10.75, weight: .regular))
+                .foregroundStyle(Color.primary.opacity(0.35))
+                .fixedSize()
+
+            Text(breadcrumb.directory)
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundStyle(Color.primary.opacity(0.96))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .layoutPriority(1)
+        }
     }
 }
 

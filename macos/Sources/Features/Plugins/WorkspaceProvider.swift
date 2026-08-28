@@ -1,5 +1,12 @@
 import Foundation
 
+struct RemoteTabBreadcrumb: Equatable, Sendable {
+    let host: String
+    let directory: String
+
+    var title: String { "\(host) › \(directory)" }
+}
+
 struct PaneSessionContext: Equatable, Sendable {
     struct Local: Equatable, Sendable {
         var workingDirectory: String?
@@ -50,6 +57,16 @@ struct PaneSessionContext: Equatable, Sendable {
         )
     }
 
+    var remoteTabBreadcrumb: RemoteTabBreadcrumb? {
+        guard case .sshReady(let ssh, let workingDirectory) = state else {
+            return nil
+        }
+        return .init(
+            host: ssh.alias,
+            directory: WorkspacePathPresentation.folderName(workingDirectory)
+        )
+    }
+
     var presentationTitle: String {
         presentationTitle(pathDisplay: .fullPath)
     }
@@ -64,11 +81,8 @@ struct PaneSessionContext: Equatable, Sendable {
             }
             if !local.terminalTitle.isEmpty { return local.terminalTitle }
             return local.workingDirectory.map(WorkspacePathPresentation.folderName) ?? "Terminal"
-        case .sshReady(let ssh, let workingDirectory):
-            let path = pathDisplay == .folderName
-                ? WorkspacePathPresentation.folderName(workingDirectory)
-                : workingDirectory
-            return "\(ssh.alias) \(path)"
+        case .sshReady(let ssh, _):
+            return remoteTabBreadcrumb?.title ?? ssh.alias
         }
     }
 
@@ -86,7 +100,7 @@ struct PaneSessionContext: Equatable, Sendable {
         case .sshConnecting(let ssh):
             return path.map { "\(ssh.alias) \($0)" } ?? ssh.alias
         case .sshReady(let ssh, _):
-            return path.map { "\(ssh.alias) \($0)" } ?? ssh.alias
+            return remoteTabBreadcrumb?.title ?? ssh.alias
         }
     }
 

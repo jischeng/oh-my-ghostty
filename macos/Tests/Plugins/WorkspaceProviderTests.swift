@@ -125,6 +125,7 @@ struct WorkspaceProviderTests {
         #expect(connecting.alias == "cloud")
         #expect(context.workingDirectory == "/Users/test/code")
         #expect(context.presentationTitle == "~/code")
+        #expect(context.remoteTabBreadcrumb == nil)
         #expect(context.tabIconSystemName == "terminal")
 
         context.apply(
@@ -142,7 +143,8 @@ struct WorkspaceProviderTests {
         }
         #expect(ready.alias == "cloud")
         #expect(remoteCWD == "/tmp")
-        #expect(context.presentationTitle == "cloud /tmp")
+        #expect(context.presentationTitle == "cloud › tmp")
+        #expect(context.remoteTabBreadcrumb == .init(host: "cloud", directory: "tmp"))
         #expect(context.tabIconSystemName == "cloud")
 
         context.apply(
@@ -157,6 +159,7 @@ struct WorkspaceProviderTests {
         #expect(context.state == .local)
         #expect(context.workingDirectory == "/Users/test/code")
         #expect(context.presentationTitle == "~/code")
+        #expect(context.remoteTabBreadcrumb == nil)
         #expect(context.tabIconSystemName == "terminal")
 
         context.updateLocalMetadata(
@@ -272,6 +275,8 @@ struct WorkspaceProviderTests {
         }
         #expect(active.connectionID == "omg-ssh-b")
         #expect(active.alias == "build")
+        #expect(context.presentationTitle == "build › tmp")
+        #expect(context.remoteTabBreadcrumb == .init(host: "build", directory: "tmp"))
     }
 
     @Test func unresolvedReadySSHNeverFallsBackToLocalFilesystem() {
@@ -300,7 +305,7 @@ struct WorkspaceProviderTests {
         #expect(filesystem.descriptor.workingDirectory == "/remote/path")
     }
 
-    @Test func tabPathDisplayIsSharedByLocalAndSSHContexts() {
+    @Test func remoteBreadcrumbAlwaysUsesCurrentFolder() {
         var local = PaneSessionContext(
             workingDirectory: "/Users/test/code",
             terminalTitle: "~/code"
@@ -319,16 +324,11 @@ struct WorkspaceProviderTests {
             currentWorkingDirectory: "/home/test/project/omg",
             currentTerminalTitle: "remote"
         )
-        #expect(
-            local.presentationTitle(pathDisplay: .fullPath) ==
-                "cloud /home/test/project/omg"
-        )
-        #expect(local.presentationTitle(pathDisplay: .folderName) == "cloud omg")
-        #expect(
-            local.agentPathTitle(pathDisplay: .fullPath) ==
-                "cloud /home/test/project/omg"
-        )
-        #expect(local.agentPathTitle(pathDisplay: .folderName) == "cloud omg")
+        #expect(local.presentationTitle(pathDisplay: .fullPath) == "cloud › omg")
+        #expect(local.presentationTitle(pathDisplay: .folderName) == "cloud › omg")
+        #expect(local.agentPathTitle(pathDisplay: .fullPath) == "cloud › omg")
+        #expect(local.agentPathTitle(pathDisplay: .folderName) == "cloud › omg")
+        #expect(local.remoteTabBreadcrumb == .init(host: "cloud", directory: "omg"))
     }
 
     @Test func folderDisplayNameIsSharedByLocalAndRemoteFiles() {

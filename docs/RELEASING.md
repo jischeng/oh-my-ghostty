@@ -506,18 +506,32 @@ It must never use Ghostty's `1.x` appcast because OMG has independent SemVer.
 OMG uses a dedicated EdDSA key stored in the login Keychain under Sparkle
 account `com.jischeng.omg`. The public key is the `SUPublicEDKey` value in
 `macos/Ghostty-Info.plist`; never commit or print the private key. Generate the
-signed appcast from the verified architecture DMGs with Sparkle's bundled tool:
+signed appcast from a staging directory that contains the previous appcast and
+only the verified universal DMG:
 
 ```bash
+appcast_work="$OMG_BUILD_ROOT/appcast-work"
+rm -rf "$appcast_work"
+mkdir -p "$appcast_work"
+cp "$OMG_BUILD_ROOT/artifacts/appcast.xml" "$appcast_work/appcast.xml"
+cp "$OMG_BUILD_ROOT/artifacts/OMG-$OMG_VERSION-macos-universal.dmg" \
+  "$appcast_work/"
+
 generate_appcast \
   --account com.jischeng.omg \
   --download-url-prefix "https://github.com/jischeng/oh-my-ghostty/releases/download/v$OMG_VERSION/" \
   --embed-release-notes \
-  "$OMG_BUILD_ROOT/artifacts"
+  "$appcast_work"
+cp "$appcast_work/appcast.xml" "$OMG_BUILD_ROOT/artifacts/appcast.xml"
 ```
 
-Before future generations, copy the currently published `appcast.xml` into the
-artifacts directory so Sparkle preserves recent entries. Verify that every new
+Do not put the arm64, x86_64, and universal DMGs in the appcast input together:
+they share one bundle version, and Sparkle rejects them as duplicate updates.
+The architecture-specific DMGs are manual-download assets; the universal DMG
+is the single updater enclosure.
+
+Before generation, copy the currently published `appcast.xml` into the artifacts
+directory so Sparkle preserves recent entries. Verify that every new
 enclosure has `sparkle:edSignature`, architecture/system requirements, the
 expected `sparkle:shortVersionString`, and a strictly larger numeric
 `sparkle:version` (`CFBundleVersion`). Upload the generated `appcast.xml` as a

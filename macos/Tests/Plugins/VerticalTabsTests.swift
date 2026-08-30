@@ -483,6 +483,7 @@ struct VerticalTabsTests {
             survivalShell: "/usr/bin/false"
         )
         #expect(command.hasPrefix("/bin/sh -c "))
+        #expect(command.contains("; exec -l /usr/bin/false"))
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -497,6 +498,8 @@ struct VerticalTabsTests {
 
         // `false` proves the post-SSH exec ran. Without the inner /bin/sh,
         // macOS's outer `exec -l` returns true's zero status and skips it.
+        // The command assertion above also ensures the replacement shell is
+        // itself a login shell, matching a normally launched terminal pane.
         #expect(process.terminationReason == .exit)
         #expect(process.terminationStatus == 1)
     }

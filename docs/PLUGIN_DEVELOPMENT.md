@@ -369,8 +369,9 @@ user's login+interactive shell; this resolves Homebrew/mise/npm-installed Agent
 binaries without storing arbitrary PATH or command data. The pane falls back to
 the login shell when the Agent exits. macOS wraps every Surface command as
 `exec -l <command>`, so restored commands are grouped inside a
-`/bin/sh -c '<command>; exec <login shell>'` survival wrapper; without that
-inner shell the outer exec discards the post-Agent command and the pane closes
+`/bin/sh -c '<command>; exec -l <login shell>'` survival wrapper. The inner
+login exec matches a normal terminal launch and reloads login-only prompt setup;
+without the inner shell the outer exec discards the post-Agent command and the pane closes
 the moment the Agent exits.
 Remote restore replays original OpenSSH argv and passes only typed
 `--remote-agent` / `--remote-agent-session` options to `+ssh`; the detected
@@ -504,8 +505,10 @@ reconstruct options from `~/.ssh/config`, or connect to the resolved IP. The
 ready remote cwd is passed as a separately shell-quoted wrapper option so the
 independent remote shell starts in the same folder. On macOS the replay and its
 post-disconnect interactive shell are grouped inside `/bin/sh -c`, because the
-platform command launcher prepends an outer `exec -l`; without that inner shell,
-the outer exec discards the post-SSH command and the split exits. Embedded
+platform command launcher prepends an outer `exec -l`. After SSH disconnects,
+the inner shell uses `exec -l` as well so fish/zsh login prompt setup is restored;
+without that inner shell, the outer exec discards the post-SSH command and the
+split exits. Embedded
 surface commands now honor `wait_after_command` independently instead of
 forcing it on whenever `command` is present. SSH replay splits leave it off, so
 the first EOF returns to the local survival shell and a second EOF closes the

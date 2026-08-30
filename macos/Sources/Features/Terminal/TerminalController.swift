@@ -1318,8 +1318,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     ) -> String {
         // macOS wraps SurfaceConfiguration.command as `exec -l <command>`.
         // Put the sequence inside its own shell so that replacing the outer
-        // bash process does not discard the post-SSH survival command.
-        let script = "\(command); exec \(Ghostty.Shell.quote(survivalShell))"
+        // bash process does not discard the post-SSH survival command. Start
+        // the replacement as a login shell, matching a normal Ghostty pane;
+        // otherwise login-only fish/zsh setup (including prompts) is skipped.
+        let script = "\(command); exec -l \(Ghostty.Shell.quote(survivalShell))"
         return "/bin/sh -c \(Ghostty.Shell.quote(script))"
     }
 

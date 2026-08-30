@@ -233,7 +233,8 @@ struct VerticalTabsTests {
             observedForegroundProcessID: nil,
             detectedAgent: nil,
             screenSignature: nil,
-            screenStableTicks: nil
+            screenStableTicks: nil,
+            quickInputState: nil
         )
 
         #expect(snapshot.context == context)
@@ -552,6 +553,12 @@ struct VerticalTabsTests {
         #expect(activeAndHover == active)
     }
 
+    @Test func sharedResizeBoundaryConsumesOnlyTheDividerWidth() {
+        #expect(TerminalShellStyle.resizeHitWidth == 8)
+        #expect(TerminalShellStyle.dividerWidth == 1)
+        #expect(TerminalShellStyle.resizeOverlap == 7)
+    }
+
     @Test @MainActor func nativeDragPersistsOnlyOnMouseUp() throws {
         var updates: [(CGFloat, Bool)] = []
         let view = VerticalTabResizeInteraction.DragView(
@@ -599,6 +606,32 @@ struct VerticalTabsTests {
         #expect(updates[0].0 == 180)
         #expect(updates[0].1 == false)
         #expect(updates[1].0 == 180)
+        #expect(updates[1].1 == true)
+    }
+
+    @Test @MainActor func sharedTopDividerUsesVerticalResizeContract() throws {
+        var updates: [(CGFloat, Bool)] = []
+        let view = SidebarResizeInteraction.DragView(
+            currentWidth: { 252 },
+            resize: { updates.append(($0, $1)) },
+            direction: .top
+        )
+        view.setFrameSize(NSSize(width: 640, height: 8))
+        view.resetCursorRects()
+        #expect(view.registeredCursorBounds == NSRect(x: 0, y: 0, width: 640, height: 8))
+
+        let down = try #require(mouseEvent(type: .leftMouseDown, x: 0, y: 100))
+        let dragged = try #require(mouseEvent(type: .leftMouseDragged, x: 0, y: 160))
+        let up = try #require(mouseEvent(type: .leftMouseUp, x: 0, y: 160))
+
+        view.mouseDown(with: down)
+        view.mouseDragged(with: dragged)
+        view.mouseUp(with: up)
+
+        #expect(updates.count == 2)
+        #expect(updates[0].0 == 312)
+        #expect(updates[0].1 == false)
+        #expect(updates[1].0 == 312)
         #expect(updates[1].1 == true)
     }
 
@@ -784,10 +817,14 @@ struct VerticalTabsTests {
         return (OhMyGhosttySettings(fileURL: url), url)
     }
 
-    private func mouseEvent(type: NSEvent.EventType, x: CGFloat) -> NSEvent? {
+    private func mouseEvent(
+        type: NSEvent.EventType,
+        x: CGFloat,
+        y: CGFloat = 0
+    ) -> NSEvent? {
         NSEvent.mouseEvent(
             with: type,
-            location: NSPoint(x: x, y: 0),
+            location: NSPoint(x: x, y: y),
             modifierFlags: [],
             timestamp: 0,
             windowNumber: 0,

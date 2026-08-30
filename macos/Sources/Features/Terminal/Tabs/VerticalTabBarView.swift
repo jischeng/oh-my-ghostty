@@ -1447,17 +1447,14 @@ struct VerticalTabSidebarDivider: View {
     var background: Color = .clear
 
     var body: some View {
-        ZStack {
-            TerminalSidebarDividerLine(color: color)
-            SidebarResizeInteraction(
-                currentWidth: { layoutState.sidebarWidth },
-                resize: controller.updateSidebarWidth,
-                direction: .leading
-            )
-        }
-        .frame(width: TerminalShellStyle.resizeHitWidth)
+        TerminalResizeBoundary(
+            edge: .trailing,
+            color: color,
+            currentExtent: { layoutState.sidebarWidth },
+            resize: controller.updateSidebarWidth,
+            accessibilityLabel: "Resize Tabs Sidebar"
+        )
         .background(background)
-        .accessibilityLabel("Resize Tabs Sidebar")
     }
 }
 
@@ -1465,6 +1462,8 @@ struct SidebarResizeInteraction: NSViewRepresentable {
     enum Direction {
         case leading
         case trailing
+        case top
+        case bottom
     }
 
     let currentWidth: () -> CGFloat
@@ -1497,7 +1496,7 @@ struct SidebarResizeInteraction: NSViewRepresentable {
         var resize: (CGFloat, Bool) -> Void
         var direction: Direction
         private var startWidth: CGFloat = 0
-        private var startX: CGFloat = 0
+        private var startPosition: CGPoint = .zero
         private(set) var registeredCursorBounds: NSRect?
 
         init(
@@ -1531,12 +1530,16 @@ struct SidebarResizeInteraction: NSViewRepresentable {
 
         override func resetCursorRects() {
             registeredCursorBounds = bounds
-            addCursorRect(bounds, cursor: .resizeLeftRight)
+            let cursor: NSCursor = switch direction {
+            case .leading, .trailing: .resizeLeftRight
+            case .top, .bottom: .resizeUpDown
+            }
+            addCursorRect(bounds, cursor: cursor)
         }
 
         override func mouseDown(with event: NSEvent) {
             startWidth = currentWidth()
-            startX = event.locationInWindow.x
+            startPosition = event.locationInWindow
         }
 
         override func mouseDragged(with event: NSEvent) {
@@ -1552,10 +1555,16 @@ struct SidebarResizeInteraction: NSViewRepresentable {
         }
 
         private func proposedWidth(for event: NSEvent) -> CGFloat {
-            let delta = event.locationInWindow.x - startX
+            let position = event.locationInWindow
             switch direction {
-            case .leading: return startWidth + delta
-            case .trailing: return startWidth - delta
+            case .leading:
+                return startWidth + position.x - startPosition.x
+            case .trailing:
+                return startWidth - position.x + startPosition.x
+            case .top:
+                return startWidth + position.y - startPosition.y
+            case .bottom:
+                return startWidth - position.y + startPosition.y
             }
         }
     }

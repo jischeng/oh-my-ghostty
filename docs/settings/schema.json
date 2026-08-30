@@ -106,6 +106,21 @@
    ],
    "type": "string"
   },
+  "keyboard.quickInput": {
+   "category": "keyboard",
+   "default": "shift+command+e",
+   "description": "Shortcut that toggles the Agent Quick Input composer.",
+   "pattern": "^(control\\+|option\\+|shift\\+|command\\+)+[^+]$",
+   "type": "string"
+  },
+  "keyboard.quickInputHeight": {
+   "category": "keyboard",
+   "default": 252,
+   "description": "Last committed Agent Quick Input dock height in points.",
+   "maximum": 480,
+   "minimum": 140,
+   "type": "number"
+  },
   "notifications.attention": {
    "category": "plugins",
    "default": true,

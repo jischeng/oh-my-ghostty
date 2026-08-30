@@ -6,6 +6,7 @@ enum TerminalShellStyle {
     static let resizeHitWidth: CGFloat = 8
     static let dividerWidth: CGFloat = 1
     static let minimumTerminalWidth: CGFloat = 320
+    static let resizeOverlap = resizeHitWidth - dividerWidth
     static let sidebarTransitionDuration = 0.18
     static let sidebarTransitionAnimation = Animation.easeOut(
         duration: sidebarTransitionDuration
@@ -18,7 +19,7 @@ enum TerminalShellStyle {
     ) -> CGFloat {
         let maximum = max(
             RightInspectorMetrics.minimumWidth,
-            totalWidth - leadingWidth - minimumTerminalWidth - resizeHitWidth
+            totalWidth - leadingWidth - minimumTerminalWidth - dividerWidth
         )
         return min(preferred, maximum)
     }
@@ -45,6 +46,64 @@ struct TerminalSidebarDividerLine: View {
             .fill(color)
             .frame(width: TerminalShellStyle.dividerWidth)
             .frame(maxHeight: .infinity)
+    }
+}
+
+struct TerminalResizeBoundary: View {
+    enum Edge {
+        case leading
+        case trailing
+        case top
+    }
+
+    let edge: Edge
+    let color: Color
+    let currentExtent: () -> CGFloat
+    let resize: (CGFloat, Bool) -> Void
+    let accessibilityLabel: String
+
+    @ViewBuilder
+    var body: some View {
+        switch edge {
+        case .leading:
+            ZStack(alignment: .leading) {
+                TerminalSidebarDividerLine(color: color)
+                interaction(direction: .trailing)
+            }
+            .frame(width: TerminalShellStyle.resizeHitWidth)
+            .padding(.trailing, -TerminalShellStyle.resizeOverlap)
+
+        case .trailing:
+            ZStack(alignment: .trailing) {
+                TerminalSidebarDividerLine(color: color)
+                interaction(direction: .leading)
+            }
+            .frame(width: TerminalShellStyle.resizeHitWidth)
+            .padding(.leading, -TerminalShellStyle.resizeOverlap)
+
+        case .top:
+            ZStack(alignment: .top) {
+                Rectangle()
+                    .fill(color)
+                    .frame(height: TerminalShellStyle.dividerWidth)
+                    .frame(maxWidth: .infinity)
+                interaction(direction: .top)
+            }
+            .frame(height: TerminalShellStyle.resizeHitWidth)
+            .padding(.bottom, -TerminalShellStyle.resizeOverlap)
+        }
+    }
+
+    private func interaction(
+        direction: SidebarResizeInteraction.Direction
+    ) -> some View {
+        SidebarResizeInteraction(
+            currentWidth: currentExtent,
+            resize: resize,
+            direction: direction
+        )
+        .contentShape(Rectangle())
+        .accessibilityLabel(accessibilityLabel)
     }
 }
 
@@ -277,7 +336,7 @@ extension TerminalWindow {
             let (isVisible, inspectorWidth, sidebarWidth) = layout
             let totalWidth = self.contentLayoutRect.width
             let leadingWidth = controller.supportsSidebar
-                ? sidebarWidth + TerminalShellStyle.resizeHitWidth
+                ? sidebarWidth + TerminalShellStyle.dividerWidth
                 : 0
             let presentedWidth = TerminalShellStyle.presentedInspectorWidth(
                 preferred: inspectorWidth,
@@ -517,10 +576,10 @@ struct TerminalShellLayoutContainer<Content: View>: View {
         GeometryReader { geometry in
             let selectedPresentation = controller.selectedTabID == ObjectIdentifier(controller)
             let leftVisible = showsTabSidebar && layoutState.isSidebarVisible
-            let leftWidth = presentedSidebarWidth + TerminalShellStyle.resizeHitWidth
+            let leftWidth = presentedSidebarWidth + TerminalShellStyle.dividerWidth
             let inspectorWidth = presentedInspectorWidth(totalWidth: geometry.size.width)
             let rightVisible = layoutState.isInspectorVisible && !inspectorRegistry.isEmpty
-            let rightWidth = inspectorWidth + TerminalShellStyle.resizeHitWidth
+            let rightWidth = inspectorWidth + TerminalShellStyle.dividerWidth
 
             HStack(spacing: 0) {
                 TerminalSidebarTransitionContainer(
@@ -548,7 +607,14 @@ struct TerminalShellLayoutContainer<Content: View>: View {
                     }
                 }
 
-                content
+                AgentQuickInputDock(
+                    controller: controller,
+                    model: controller.quickInputModel,
+                    backgroundColor: backgroundColor,
+                    backgroundOpacity: backgroundOpacity
+                ) {
+                    content
+                }
 
                 TerminalSidebarTransitionContainer(
                     isVisible: rightVisible,
@@ -589,7 +655,7 @@ struct TerminalShellLayoutContainer<Content: View>: View {
             ? layoutState.inspectorWidth
             : layoutState.committedInspectorWidth
         let leadingWidth = showsTabSidebar
-            ? presentedSidebarWidth + TerminalShellStyle.resizeHitWidth
+            ? presentedSidebarWidth + TerminalShellStyle.dividerWidth
             : 0
         return TerminalShellStyle.presentedInspectorWidth(
             preferred: preferred,
@@ -952,16 +1018,13 @@ private struct RightInspectorResizeHandle: View {
     let resize: (CGFloat, Bool) -> Void
 
     var body: some View {
-        ZStack {
-            TerminalSidebarDividerLine(color: color)
-            SidebarResizeInteraction(
-                currentWidth: currentWidth,
-                resize: resize,
-                direction: .trailing
-            )
-        }
-        .frame(width: TerminalShellStyle.resizeHitWidth)
+        TerminalResizeBoundary(
+            edge: .leading,
+            color: color,
+            currentExtent: currentWidth,
+            resize: resize,
+            accessibilityLabel: "Resize Inspector"
+        )
         .background(background)
-        .accessibilityLabel("Resize Inspector")
     }
 }

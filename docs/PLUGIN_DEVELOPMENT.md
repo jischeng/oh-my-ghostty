@@ -235,8 +235,8 @@ hooks into a separate bounded, presentation-only OSC path owned by Core.
 | `settingsContribution` | manifest descriptors only | Stub |
 | `commands` | capability name only | Stub |
 | `sidebarModel` | capability name only | Stub |
-| `quickInput` | capability name only | Stub |
-| `terminalControl` | capability name only | Planned, high risk |
+| `quickInput` | built-in host composer and per-Surface queue work; no process-plugin wire messages | Internal / process stub |
+| `terminalControl` | built-in user-confirmed QuickInput writes work; no process-plugin wire messages | Planned, high risk |
 | `rawTerminalOutput` | capability name only | Planned, high risk, default deny |
 
 ### Session status API

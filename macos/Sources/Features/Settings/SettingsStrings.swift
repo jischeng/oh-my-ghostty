@@ -228,11 +228,33 @@ struct SettingsStrings: Equatable, Sendable {
 
     var ghosttySection: String { "Ghostty" }
     var openGhosttyConfigButton: String { t("Open Ghostty Configuration", "打开 Ghostty 配置") }
+    var quickInputSection: String { t("Agent Quick Input", "Agent 快速输入") }
+    var quickInputShortcutLabel: String { t("Open Composer", "打开输入框") }
+    var quickInputShortcutCaption: String {
+        t(
+            "Click the shortcut, then press a new key combination. The default is Command-Shift-E.",
+            "点击快捷键后按下新的组合键。默认快捷键为 Command-Shift-E。"
+        )
+    }
+    var quickInputHeightLabel: String { t("Composer Height", "输入框高度") }
+    var quickInputHeightCaption: String {
+        t(
+            "Drag the divider above the composer to resize it. The last committed height is remembered.",
+            "拖动输入框上方的分隔线可调整高度，并会记住最后确认的高度。"
+        )
+    }
+    var resetShortcutButton: String { t("Reset", "重置") }
+    func shortcutConflictCaption(_ title: String) -> String {
+        t(
+            "This shortcut is also used by “\(title)”. Quick Input takes precedence in terminal windows.",
+            "此快捷键也用于“\(title)”。在终端窗口中，快速输入会优先处理。"
+        )
+    }
     var keybindingsSection: String { t("Ghostty Keybindings", "Ghostty 快捷键") }
     var keybindingsCaption: String {
         t(
-            "Keyboard shortcuts are defined by Ghostty configuration. Position labels are configured once in Tabs.",
-            "键盘快捷键由 Ghostty 配置定义。位置标签在“标签页”中统一设置。"
+            "Other keyboard shortcuts are defined by Ghostty configuration. Position labels are configured once in Tabs.",
+            "其他键盘快捷键由 Ghostty 配置定义。位置标签在“标签页”中统一设置。"
         )
     }
 

@@ -318,7 +318,7 @@ struct VerticalTabsIntegrationTests {
             preferred: 380,
             totalWidth: alignedContentView.bounds.width,
             leadingWidth: eighth.tabLayoutState.sidebarWidth +
-                TerminalShellStyle.resizeHitWidth
+                TerminalShellStyle.dividerWidth
         )
         let expectedAccessoryWidth = presentedInspectorWidth
         for _ in 0..<20 where abs(

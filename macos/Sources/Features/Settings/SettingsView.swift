@@ -236,6 +236,47 @@ struct SettingsView: View {
 
         case .keyboard:
             Form {
+                Section(strings.quickInputSection) {
+                    LabeledContent(strings.quickInputShortcutLabel) {
+                        HStack(spacing: 8) {
+                            OMGShortcutRecorder(storageValue: $settings.quickInputShortcut)
+                                .frame(width: 112, height: 24)
+                            Button(strings.resetShortcutButton) {
+                                settings.quickInputShortcut =
+                                    OMGKeyboardShortcut.defaultQuickInput.storageValue
+                            }
+                        }
+                    }
+                    Text(strings.quickInputShortcutCaption)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Text(strings.quickInputHeightLabel)
+                        Slider(
+                            value: $settings.quickInputHeight,
+                            in: Double(AgentQuickInputMetrics.minimumHeight)...Double(
+                                AgentQuickInputMetrics.maximumHeight
+                            ),
+                            step: 1
+                        )
+                        Text("\(Int(settings.quickInputHeight)) pt")
+                            .monospacedDigit()
+                            .frame(width: 52, alignment: .trailing)
+                    }
+                    Text(strings.quickInputHeightCaption)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let shortcut = OMGKeyboardShortcut(
+                        storageValue: settings.quickInputShortcut
+                    ), let conflict = shortcut.conflictingMenuItemTitle() {
+                        Label(
+                            strings.shortcutConflictCaption(conflict),
+                            systemImage: "exclamationmark.triangle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    }
+                }
                 Section(strings.keybindingsSection) {
                     Text(strings.keybindingsCaption)
                         .foregroundStyle(.secondary)

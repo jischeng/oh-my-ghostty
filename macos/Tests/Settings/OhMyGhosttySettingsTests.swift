@@ -73,6 +73,8 @@ struct OhMyGhosttySettingsTests {
         settings.orderingMode = .manual
         settings.tabPathDisplay = .folderName
         settings.notifyTaskComplete = false
+        settings.quickInputShortcut = "control+option+q"
+        settings.quickInputHeight = 318
         settings.restoreSessionsOnLaunch = false
 
         let data = try Data(contentsOf: url)
@@ -86,6 +88,8 @@ struct OhMyGhosttySettingsTests {
         #expect(object["tabs.ordering"] as? String == "manual")
         #expect(object["tabs.pathDisplay"] as? String == "folderName")
         #expect(object["notifications.taskComplete"] as? Bool == false)
+        #expect(object["keyboard.quickInput"] as? String == "control+option+q")
+        #expect((object["keyboard.quickInputHeight"] as? NSNumber)?.doubleValue == 318)
         #expect(object["sessions.restoreOnLaunch"] as? Bool == false)
 
         let restored = OhMyGhosttySettings(fileURL: url)
@@ -96,6 +100,8 @@ struct OhMyGhosttySettingsTests {
         #expect(restored.orderingMode == .manual)
         #expect(restored.tabPathDisplay == .folderName)
         #expect(!restored.notifyTaskComplete)
+        #expect(restored.quickInputShortcut == "control+option+q")
+        #expect(restored.quickInputHeight == 318)
         #expect(!restored.restoreSessionsOnLaunch)
     }
 
@@ -250,6 +256,8 @@ struct OhMyGhosttySettingsTests {
         #expect(descriptors.contains { $0.id == "tabs.pathDisplay" })
         #expect(descriptors.contains { $0.id == "tabs.sidebarVisible" })
         #expect(descriptors.contains { $0.id == "agents.statusHooks" })
+        #expect(descriptors.contains { $0.id == "keyboard.quickInput" })
+        #expect(descriptors.contains { $0.id == "keyboard.quickInputHeight" })
         #expect(descriptors.contains { $0.id == "sessions.restoreOnLaunch" })
         #expect(descriptors.contains { $0.id == "general.language" })
         #expect(descriptors.contains { $0.id == "appearance.backgroundOpacity" })

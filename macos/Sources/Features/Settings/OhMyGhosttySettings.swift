@@ -327,6 +327,17 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Accept normalized activity events from agent adapters.",
             requiresNewWindow: false, category: "plugins"),
         .init(
+            id: "keyboard.quickInput", type: .string,
+            defaultValue: OMGKeyboardShortcut.defaultQuickInput.storageValue,
+            allowedValues: nil, minimum: nil, maximum: nil,
+            description: "Shortcut that toggles the Agent Quick Input composer.",
+            requiresNewWindow: false, category: "keyboard"),
+        .init(
+            id: "keyboard.quickInputHeight", type: .number, defaultValue: "252",
+            allowedValues: nil, minimum: 140, maximum: 480,
+            description: "Last committed Agent Quick Input dock height in points.",
+            requiresNewWindow: false, category: "keyboard"),
+        .init(
             id: "general.language", type: .enumeration, defaultValue: "system",
             allowedValues: OhMyGhosttyLanguage.allCases.map(\.rawValue), minimum: nil, maximum: nil,
             description: "Settings display language. system follows the macOS preferred language.",
@@ -437,6 +448,27 @@ final class OhMyGhosttySettings: ObservableObject {
     }
     @Published var agentStatusHooksEnabled = true {
         didSet { persist("agents.statusHooks", agentStatusHooksEnabled) }
+    }
+    @Published var quickInputShortcut = OMGKeyboardShortcut.defaultQuickInput.storageValue {
+        didSet {
+            let normalized = OMGKeyboardShortcut(storageValue: quickInputShortcut)?.storageValue
+                ?? OMGKeyboardShortcut.defaultQuickInput.storageValue
+            if quickInputShortcut != normalized {
+                quickInputShortcut = normalized
+            } else {
+                persist("keyboard.quickInput", normalized)
+            }
+        }
+    }
+    @Published var quickInputHeight = Double(AgentQuickInputMetrics.defaultHeight) {
+        didSet {
+            let clamped = min(max(quickInputHeight, 140), 480)
+            if quickInputHeight != clamped {
+                quickInputHeight = clamped
+            } else {
+                persist("keyboard.quickInputHeight", clamped)
+            }
+        }
     }
     @Published var restoreSessionsOnLaunch = true {
         didSet { persist("sessions.restoreOnLaunch", restoreSessionsOnLaunch) }
@@ -636,6 +668,15 @@ final class OhMyGhosttySettings: ObservableObject {
             notifyAttention = boolValue("notifications.attention", fallback: true)
             notificationSound = boolValue("notifications.sound", fallback: false)
             agentStatusHooksEnabled = boolValue("agents.statusHooks", fallback: true)
+            quickInputShortcut = validatedShortcutValue(
+                "keyboard.quickInput",
+                fallback: OMGKeyboardShortcut.defaultQuickInput.storageValue
+            )
+            quickInputHeight = numberValue(
+                "keyboard.quickInputHeight",
+                fallback: Double(AgentQuickInputMetrics.defaultHeight),
+                range: 140...480
+            )
             restoreSessionsOnLaunch = boolValue(
                 "sessions.restoreOnLaunch",
                 fallback: true
@@ -664,6 +705,14 @@ final class OhMyGhosttySettings: ObservableObject {
         guard let raw = chosen[key] as? String else { return nil }
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         return value.isEmpty ? nil : value
+    }
+
+    private func validatedShortcutValue(_ key: String, fallback: String) -> String {
+        guard let raw = chosen[key] as? String,
+              let shortcut = OMGKeyboardShortcut(storageValue: raw) else {
+            return fallback
+        }
+        return shortcut.storageValue
     }
 
     private func optionalNumberValue(

@@ -55,6 +55,7 @@ struct PaneSessionStateSnapshot {
     let detectedAgent: PaneDetectedAgentState?
     let screenSignature: Int?
     let screenStableTicks: Int?
+    let quickInputState: AgentQuickInputPaneState?
 }
 
 struct PaneDetectedAgentState {
@@ -284,6 +285,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     @Published private(set) var paneSessionContexts: [UUID: PaneSessionContext] = [:]
     @Published private(set) var agentActivities: [UUID: TabActivity] = [:]
     @Published private(set) var agentResumeDescriptors: [UUID: AgentResumeDescriptor] = [:]
+    let quickInputModel = AgentQuickInputModel()
+    private var quickInputEventMonitor: Any?
+    private var quickInputSecureInputCancellable: AnyCancellable?
     private var agentResumeContextIDs: [UUID: String] = [:]
     private var paneSessionObservers: [UUID: Set<AnyCancellable>] = [:]
     private var agentReducers: [UUID: AgentContextSignalReducer] = [:]
@@ -331,6 +335,143 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 isFocused: surface.id == focusedID
             )
         })
+    }
+
+    func toggleQuickInput() {
+        if quickInputModel.isPresented {
+            dismissQuickInput()
+            return
+        }
+        guard let surface = focusedSurface ?? surfaceTree.first else { return }
+        quickInputModel.present(for: surface.id)
+        _ = surface.resignFirstResponder()
+    }
+
+    func sendQuickInputDraft() {
+        guard let surfaceID = quickInputModel.targetSurfaceID else { return }
+        if quickInputModel.isEditingQueuedItem {
+            guard quickInputModel.confirmQueuedItemEdit(moveToEnd: false) else {
+                return
+            }
+            restoreTerminalFocus(surfaceID: surfaceID)
+            return
+        }
+        let text = quickInputModel.draft
+        guard submitQuickInputText(text, to: surfaceID, restoreFocus: true) else {
+            return
+        }
+        quickInputModel.dismiss(preservingDraft: false)
+    }
+
+    func queueQuickInputDraft() {
+        guard let surfaceID = quickInputModel.targetSurfaceID else { return }
+        if quickInputModel.isEditingQueuedItem {
+            guard quickInputModel.confirmQueuedItemEdit(moveToEnd: true) else {
+                return
+            }
+            restoreTerminalFocus(surfaceID: surfaceID)
+            return
+        }
+        guard quickInputModel.enqueueDraft() != nil else { return }
+        quickInputModel.dismiss()
+        if agentActivities[surfaceID]?.state == .done {
+            dispatchNextQuickInput(for: surfaceID)
+        }
+        restoreTerminalFocus(surfaceID: surfaceID)
+    }
+
+    func dismissQuickInput() {
+        let surfaceID = quickInputModel.targetSurfaceID
+        quickInputModel.dismiss()
+        restoreTerminalFocus(surfaceID: surfaceID)
+    }
+
+    func sendQueuedQuickInput(_ itemID: UUID, from surfaceID: UUID) {
+        guard let item = quickInputModel.state(for: surfaceID)?.queue
+            .first(where: { $0.id == itemID }),
+              submitQuickInputText(item.text, to: surfaceID, restoreFocus: false) else {
+            return
+        }
+        quickInputModel.removeQueuedItem(itemID, for: surfaceID)
+    }
+
+    private func handleQuickInputKeyEvent(_ event: NSEvent) -> NSEvent? {
+        let eventController = event.window?.windowController as? TerminalController
+        guard eventController === self ||
+                (event.window == nil && NSApp.keyWindow?.windowController === self) else {
+            return event
+        }
+
+        let shortcut = OMGKeyboardShortcut(
+            storageValue: OhMyGhosttySettings.shared.quickInputShortcut
+        ) ?? .defaultQuickInput
+        if shortcut.matches(event) {
+            toggleQuickInput()
+            return nil
+        }
+
+        return event
+    }
+
+    @discardableResult
+    private func submitQuickInputText(
+        _ text: String,
+        to surfaceID: UUID,
+        restoreFocus: Bool
+    ) -> Bool {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            quickInputModel.setStatusMessage("Enter a message first.")
+            return false
+        }
+        guard text.utf8.count <= PluginProtocolContract.maximumFrameLength else {
+            quickInputModel.setStatusMessage("Message exceeds the 1 MiB limit.")
+            return false
+        }
+        guard !SecureInput.shared.enabled else {
+            quickInputModel.setStatusMessage("Paused while Secure Input is enabled.")
+            return false
+        }
+        guard let surface = surfaceTree.first(where: { $0.id == surfaceID }),
+              let terminal = surface.surfaceModel else {
+            quickInputModel.setStatusMessage("The target terminal is no longer available.")
+            quickInputModel.removeState(for: surfaceID)
+            return false
+        }
+
+        terminal.sendText(text)
+        terminal.sendKeyEvent(.init(key: .enter))
+        acknowledgeTerminalAgentState(for: surface)
+        quickInputModel.setStatusMessage(nil)
+        if restoreFocus {
+            restoreTerminalFocus(surfaceID: surfaceID)
+        }
+        return true
+    }
+
+    private func restoreTerminalFocus(surfaceID: UUID?) {
+        guard let surfaceID,
+              let surface = surfaceTree.first(where: { $0.id == surfaceID }) else {
+            return
+        }
+        DispatchQueue.main.async { [weak self, weak surface] in
+            guard let self, let surface, self.window?.isKeyWindow == true else { return }
+            self.window?.makeFirstResponder(surface)
+        }
+    }
+
+    private func dispatchNextQuickInput(for surfaceID: UUID) {
+        guard agentActivities[surfaceID]?.state == .done,
+              let item = quickInputModel.state(for: surfaceID)?.queue.first,
+              submitQuickInputText(item.text, to: surfaceID, restoreFocus: false) else {
+            return
+        }
+        _ = quickInputModel.dequeue(for: surfaceID)
+    }
+
+    private func dispatchCompletedQuickInputQueues() {
+        for (surfaceID, activity) in agentActivities where activity.state == .done {
+            dispatchNextQuickInput(for: surfaceID)
+        }
     }
 
     func paneSessionContext(
@@ -455,6 +596,17 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             name: .ghosttyCloseWindow,
             object: nil
         )
+        quickInputEventMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.keyDown]
+        ) { [weak self] event in
+            self?.handleQuickInputKeyEvent(event) ?? event
+        }
+        quickInputSecureInputCancellable = SecureInput.shared.$enabled
+            .dropFirst()
+            .filter { !$0 }
+            .sink { [weak self] _ in
+                self?.dispatchCompletedQuickInputQueues()
+            }
         synchronizePaneSessionContexts()
         startAgentProcessPolling()
     }
@@ -468,6 +620,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         verticalTabSelectionObservation?.invalidate()
         agentProcessPollCancellable?.cancel()
         pendingTabOrganizationWorkItem?.cancel()
+        quickInputSecureInputCancellable?.cancel()
+        if let quickInputEventMonitor {
+            NSEvent.removeMonitor(quickInputEventMonitor)
+        }
 
         // Remove all of our notificationcenter subscriptions
         let center = NotificationCenter.default
@@ -520,7 +676,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             observedForegroundProcessID: observedForegroundProcessIDs[surfaceID],
             detectedAgent: detectedAgentInstances[surfaceID],
             screenSignature: agentScreenSignatures[surfaceID],
-            screenStableTicks: agentScreenStableTicks[surfaceID]
+            screenStableTicks: agentScreenStableTicks[surfaceID],
+            quickInputState: quickInputModel.state(for: surfaceID)
         )
     }
 
@@ -553,6 +710,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         detectedAgentInstances[surfaceID] = snapshot.detectedAgent
         agentScreenSignatures[surfaceID] = snapshot.screenSignature
         agentScreenStableTicks[surfaceID] = snapshot.screenStableTicks
+        quickInputModel.restore(snapshot.quickInputState, for: surfaceID)
         if snapshot.reducer?.requiresForegroundValidation == true {
             scheduleAgentValidation(for: surfaceID)
         }
@@ -600,6 +758,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
         agentScreenStableTicks = agentScreenStableTicks.filter {
             activeIDs.contains($0.key)
+        }
+        for surfaceID in quickInputModel.paneStates.keys
+        where !activeIDs.contains(surfaceID) {
+            quickInputModel.removeState(for: surfaceID)
         }
         for (surfaceID, workItem) in agentValidationWorkItems
         where !activeIDs.contains(surfaceID) {
@@ -1120,6 +1282,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         _ update: AgentActivityUpdate,
         for surfaceID: UUID
     ) {
+        let previousState = agentActivities[surfaceID]?.state
         var next = agentActivities
         switch update {
         case .set(let activity):
@@ -1129,6 +1292,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
         guard next != agentActivities else { return }
         agentActivities = next
+        if AgentQuickInputDispatchPolicy.shouldDispatch(
+            previous: previousState,
+            next: next[surfaceID]?.state
+        ) {
+            dispatchNextQuickInput(for: surfaceID)
+        }
     }
 
     private func scheduleAgentValidation(for surfaceID: UUID) {
@@ -1960,6 +2129,16 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         tabLayoutState.updateInspectorWidth(
             proposedWidth,
             availableWidth: contentWidth,
+            persist: persist
+        )
+    }
+
+    func updateQuickInputHeight(_ proposedHeight: CGFloat, persist: Bool) {
+        let contentHeight = window?.contentLayoutRect.height ??
+            AgentQuickInputMetrics.maximumHeight * 2
+        quickInputModel.updateDockHeight(
+            proposedHeight,
+            availableHeight: contentHeight,
             persist: persist
         )
     }
@@ -3449,6 +3628,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 agentValidationWorkItems.values.forEach { $0.cancel() }
                 agentValidationWorkItems = [:]
             }
+        }
+        if changedKey == nil || changedKey == "keyboard.quickInputHeight" {
+            quickInputModel.applyConfiguredDockHeight(
+                CGFloat(settings.quickInputHeight),
+                availableHeight: window?.contentLayoutRect.height ?? 720
+            )
         }
         guard supportsSidebar,
               window?.tabGroup?.selectedWindow === window else { return }

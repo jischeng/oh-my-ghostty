@@ -249,6 +249,30 @@ struct AgentQuickInputTests {
         #expect(AgentQuickInputMetrics.queueHoverDelayMilliseconds == 300)
     }
 
+    @Test func accessoryHeightReservesFinalLayoutWithoutAnimationSteps() {
+        let divider = TerminalShellStyle.dividerWidth
+        #expect(AgentQuickInputMetrics.reservedAccessoryHeight(
+            dockHeight: 252,
+            isDockPresented: false,
+            hasQueue: false
+        ) == 0)
+        #expect(AgentQuickInputMetrics.reservedAccessoryHeight(
+            dockHeight: 252,
+            isDockPresented: true,
+            hasQueue: false
+        ) == 252 + divider)
+        #expect(AgentQuickInputMetrics.reservedAccessoryHeight(
+            dockHeight: 252,
+            isDockPresented: false,
+            hasQueue: true
+        ) == AgentQuickInputMetrics.queueLaneHeight + divider)
+        #expect(AgentQuickInputMetrics.reservedAccessoryHeight(
+            dockHeight: 252,
+            isDockPresented: true,
+            hasQueue: true
+        ) == 252 + AgentQuickInputMetrics.queueLaneHeight + divider * 2)
+    }
+
     @Test @MainActor func placeholderUsesRealWindowCaretGeometry() throws {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 500, height: 180),

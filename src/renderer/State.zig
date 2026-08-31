@@ -8,7 +8,7 @@ const Allocator = std.mem.Allocator;
 const Inspector = @import("../inspector/main.zig").Inspector;
 const terminalpkg = @import("../terminal/main.zig");
 const inputpkg = @import("../input.zig");
-const renderer = @import("../renderer.zig");
+const ScrollPhysics = @import("ScrollPhysics.zig");
 
 /// The mutex that must be held while reading any of the data in the
 /// members of this state. Note that the state itself is NOT protected
@@ -18,6 +18,14 @@ mutex: *std.Io.Mutex,
 
 /// The terminal data.
 terminal: *terminalpkg.Terminal,
+
+/// Host-scrollback physics. Mutated under `mutex` by the surface (impulses)
+/// and the renderer (integration). Unused when `smooth-scroll` is off.
+scroll: ScrollPhysics = .{},
+
+/// Pixel Y offset for fractional scrolling, packed as f32 bits so the UI
+/// thread can read it without the terminal mutex. Written by the renderer.
+visual_offset_y: std.atomic.Value(u32) = .init(0),
 
 /// The terminal inspector, if any. This will be null while the inspector
 /// is not active and will be set when it is active.

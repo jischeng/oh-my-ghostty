@@ -315,6 +315,7 @@ const DerivedConfig = struct {
     mouse_hide_while_typing: bool,
     mouse_reporting: bool,
     mouse_scroll_multiplier: configpkg.MouseScrollMultiplier,
+    smooth_scroll: configpkg.Config.SmoothScroll,
     mouse_shift_capture: configpkg.MouseShiftCapture,
     fullscreen: configpkg.Fullscreen,
     macos_non_native_fullscreen: configpkg.NonNativeFullscreen,
@@ -395,6 +396,7 @@ const DerivedConfig = struct {
             .mouse_hide_while_typing = config.@"mouse-hide-while-typing",
             .mouse_reporting = config.@"mouse-reporting",
             .mouse_scroll_multiplier = config.@"mouse-scroll-multiplier",
+            .smooth_scroll = config.@"smooth-scroll",
             .mouse_shift_capture = config.@"mouse-shift-capture",
             .fullscreen = config.fullscreen,
             .macos_non_native_fullscreen = config.@"macos-non-native-fullscreen",
@@ -2877,7 +2879,12 @@ pub fn keyCallback(
             try self.setSelection(null);
         }
 
-        if (self.config.scroll_to_bottom.keystroke) self.io.terminal.scrollViewport(.bottom);
+        if (self.config.scroll_to_bottom.keystroke) {
+            self.io.terminal.scrollViewport(.bottom);
+            if (self.config.smooth_scroll.any()) {
+                self.renderer_state.scroll.pinBottom(self.scrollbarMaxOffsetLocked());
+            }
+        }
 
         try self.queueRender();
     }
@@ -3500,37 +3507,37 @@ pub fn scrollCallback(
     // Always show the mouse again if it is hidden
     if (self.mouse.hidden) self.showMouse();
 
+    // We use cell height to determine if we have accumulated enough to trigger a scroll
+    const cell_height: f64 = @floatFromInt(self.size.cell.height);
+
+    // If we have precision scroll, yoff is the number of pixels to scroll. In non-precision
+    // scroll, yoff is the number of wheel ticks. Some mice are capable of reporting fractional
+    // wheel ticks, which don't necessarily get reported as precision scrolls. We normalize all
+    // scroll events to pixels by multiplying the wheel tick value and the cell size. This means
+    // that a wheel tick of 1 results in single scroll event.
+    const yoff_adjusted: f64 = if (yoff == 0) 0 else if (scroll_mods.precision)
+        yoff * self.config.mouse_scroll_multiplier.precision
+    else yoff_adjusted: {
+        if (comptime builtin.target.os.tag.isDarwin()) {
+            // Round out the yoff to an absolute minimum of 1. macos tries to
+            // simulate precision scrolling with non precision events by
+            // ramping up the magnitude of the offsets as it detects faster
+            // scrolling. Single click (very slow) scrolls are reported with a
+            // magnitude of 0.1 which would normally require a few clicks
+            // before we register an actual scroll event (depending on cell
+            // height and the mouse_scroll_multiplier setting).
+            const yoff_max: f64 = if (yoff > 0)
+                @max(yoff, 1)
+            else
+                @min(yoff, -1);
+
+            break :yoff_adjusted yoff_max * cell_height * self.config.mouse_scroll_multiplier.discrete;
+        } else {
+            break :yoff_adjusted yoff * cell_height * self.config.mouse_scroll_multiplier.discrete;
+        }
+    };
+
     const y: ScrollAmount = if (yoff == 0) .{} else y: {
-        // We use cell_size to determine if we have accumulated enough to trigger a scroll
-        const cell_size: f64 = @floatFromInt(self.size.cell.height);
-
-        // If we have precision scroll, yoff is the number of pixels to scroll. In non-precision
-        // scroll, yoff is the number of wheel ticks. Some mice are capable of reporting fractional
-        // wheel ticks, which don't necessarily get reported as precision scrolls. We normalize all
-        // scroll events to pixels by multiplying the wheel tick value and the cell size. This means
-        // that a wheel tick of 1 results in single scroll event.
-        const yoff_adjusted: f64 = if (scroll_mods.precision)
-            yoff * self.config.mouse_scroll_multiplier.precision
-        else yoff_adjusted: {
-            if (comptime builtin.target.os.tag.isDarwin()) {
-                // Round out the yoff to an absolute minimum of 1. macos tries to
-                // simulate precision scrolling with non precision events by
-                // ramping up the magnitude of the offsets as it detects faster
-                // scrolling. Single click (very slow) scrolls are reported with a
-                // magnitude of 0.1 which would normally require a few clicks
-                // before we register an actual scroll event (depending on cell
-                // height and the mouse_scroll_multiplier setting).
-                const yoff_max: f64 = if (yoff > 0)
-                    @max(yoff, 1)
-                else
-                    @min(yoff, -1);
-
-                break :yoff_adjusted yoff_max * cell_size * self.config.mouse_scroll_multiplier.discrete;
-            } else {
-                break :yoff_adjusted yoff * cell_size * self.config.mouse_scroll_multiplier.discrete;
-            }
-        };
-
         // Add our previously saved pending amount to the offset to get the
         // new offset value. The signs of the pending and yoff should match
         // so that we move further away from zero, but we don't assert
@@ -3540,15 +3547,15 @@ pub fn scrollCallback(
 
         // If the new offset is less than a single unit of scroll, we save
         // the new pending value and do not scroll yet.
-        if (@abs(poff) < cell_size) {
+        if (@abs(poff) < cell_height) {
             self.mouse.pending_scroll_y = poff;
             break :y .{};
         }
 
         // We scroll by the number of rows in the offset and save the remainder
-        const amount = poff / cell_size;
+        const amount = poff / cell_height;
         assert(@abs(amount) >= 1);
-        self.mouse.pending_scroll_y = poff - (amount * cell_size);
+        self.mouse.pending_scroll_y = poff - (amount * cell_height);
 
         // Round towards zero.
         const delta: isize = @intFromFloat(@trunc(amount));
@@ -3653,7 +3660,26 @@ pub fn scrollCallback(
             return;
         }
 
-        if (y.delta != 0) {
+        if (self.smoothScrollbackLocked(.mouse)) {
+            switch (scroll_mods.momentum) {
+                // Tap-to-stop (or a rest) interrupted OS inertia.
+                .cancelled, .stationary => {
+                    self.renderer_state.scroll.brake();
+                    self.mouse.pending_scroll_y = 0;
+                },
+                // Finger-down and OS momentum: follow the pixel delta.
+                // Discrete wheels still use velocity so they can coast.
+                .none, .began, .changed, .ended, .may_begin => if (yoff_adjusted != 0) {
+                    const delta_rows = yoff_adjusted / cell_height;
+                    if (scroll_mods.precision) {
+                        self.renderer_state.scroll.applyMousePan(delta_rows);
+                    } else {
+                        self.renderer_state.scroll.applyMouseImpulse(delta_rows);
+                    }
+                    self.mouse.pending_scroll_y = 0;
+                },
+            }
+        } else if (y.delta != 0) {
             // Modify our viewport, this requires a lock since it affects
             // rendering. We have to switch signs here because our delta
             // is negative down but our viewport is positive down.
@@ -4782,10 +4808,68 @@ pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) !void {
 }
 
 pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordinate {
-    // Get our grid cell
+    // Get our grid cell. Fractional scroll shifts glyphs; hit testing
+    // uses the same pixel offset. A nonzero offset may include one
+    // extra row below the viewport.
     const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = xpos, .y = ypos } };
-    const grid = coord.convert(.grid, self.size).grid;
-    return .{ .x = grid.x, .y = grid.y };
+    const offset_px: f64 = @as(f32, @bitCast(self.renderer_state.visual_offset_y.load(.monotonic)));
+    const term = coord.convert(.terminal, self.size).terminal;
+    const grid = self.size.grid();
+    const cell_width: f64 = @floatFromInt(self.size.cell.width);
+    const cell_height: f64 = @floatFromInt(self.size.cell.height);
+    const col: rendererpkg.GridSize.Unit = @intFromFloat(@max(0, term.x) / cell_width);
+    const row: rendererpkg.GridSize.Unit = @intFromFloat(@max(0, term.y - offset_px) / cell_height);
+    const max_row: rendererpkg.GridSize.Unit = if (offset_px == 0)
+        grid.rows - 1
+    else
+        grid.rows;
+    return .{
+        .x = @min(col, grid.columns - 1),
+        .y = @min(row, max_row),
+    };
+}
+
+/// Max scroll offset in rows (`scrollbar.total - scrollbar.len`).
+/// Precondition: renderer_state.mutex is held.
+fn scrollbarMaxOffsetLocked(self: *Surface) f64 {
+    const sb = self.io.terminal.screens.active.pages.scrollbar();
+    return @floatFromInt(sb.total -| sb.len);
+}
+
+/// True when this input should drive physics instead of snapping.
+/// Precondition: renderer_state.mutex is held.
+fn smoothScrollbackLocked(self: *const Surface, source: enum { mouse, key }) bool {
+    const enabled = switch (source) {
+        .mouse => self.config.smooth_scroll.mouse,
+        .key => self.config.smooth_scroll.key,
+    };
+    if (!enabled) return false;
+    if (self.io.terminal.screens.active_key == .alternate) return false;
+    if (self.isMouseReporting()) return false;
+    return true;
+}
+
+/// Apply a scrollback physics gesture. Returns true if consumed.
+fn smoothScrollback(self: *Surface, action: union(enum) {
+    top,
+    bottom,
+    page_up,
+    page_down,
+    impulse: f64,
+}) !bool {
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
+    if (!self.smoothScrollbackLocked(.key)) return false;
+    const rows: f64 = @floatFromInt(@max(self.size.grid().rows, 1));
+    switch (action) {
+        .top => self.renderer_state.scroll.seekExtreme(1),
+        .bottom => self.renderer_state.scroll.seekExtreme(-1),
+        .page_up => self.renderer_state.scroll.applyPageImpulse(1, rows),
+        .page_down => self.renderer_state.scroll.applyPageImpulse(-1, rows),
+        .impulse => |d| self.renderer_state.scroll.applyImpulse(d),
+    }
+    try self.queueRender();
+    return true;
 }
 
 /// Scroll to the bottom of the viewport.
@@ -4793,6 +4877,9 @@ pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordin
 /// Precondition: the render_state mutex must be held.
 fn scrollToBottom(self: *Surface) !void {
     self.io.terminal.scrollViewport(.{ .bottom = {} });
+    if (self.config.smooth_scroll.any()) {
+        self.renderer_state.scroll.pinBottom(self.scrollbarMaxOffsetLocked());
+    }
     try self.queueRender();
 }
 
@@ -5255,13 +5342,13 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         },
 
         .scroll_to_top => {
-            self.queueIo(.{
+            if (!try self.smoothScrollback(.top)) self.queueIo(.{
                 .scroll_viewport = .{ .top = {} },
             }, .unlocked);
         },
 
         .scroll_to_bottom => {
-            self.queueIo(.{
+            if (!try self.smoothScrollback(.bottom)) self.queueIo(.{
                 .scroll_viewport = .{ .bottom = {} },
             }, .unlocked);
         },
@@ -5271,7 +5358,12 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 self.renderer_state.mutex.lockUncancelable(global.io());
                 defer self.renderer_state.mutex.unlock(global.io());
                 const t: *terminal.Terminal = self.renderer_state.terminal;
+                const max_o = self.scrollbarMaxOffsetLocked();
+                const row: f64 = @floatFromInt(n);
                 t.screens.active.scroll(.{ .row = n });
+                if (self.config.smooth_scroll.any()) {
+                    self.renderer_state.scroll.snapTo(row, max_o);
+                }
             }
 
             try self.queueRender();
@@ -5290,31 +5382,40 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         },
 
         .scroll_page_up => {
-            const rows: isize = @intCast(self.size.grid().rows);
-            self.queueIo(.{
-                .scroll_viewport = .{ .delta = -1 * rows },
-            }, .unlocked);
+            if (!try self.smoothScrollback(.page_up)) {
+                const rows: isize = @intCast(self.size.grid().rows);
+                self.queueIo(.{
+                    .scroll_viewport = .{ .delta = -1 * rows },
+                }, .unlocked);
+            }
         },
 
         .scroll_page_down => {
-            const rows: isize = @intCast(self.size.grid().rows);
-            self.queueIo(.{
-                .scroll_viewport = .{ .delta = rows },
-            }, .unlocked);
+            if (!try self.smoothScrollback(.page_down)) {
+                const rows: isize = @intCast(self.size.grid().rows);
+                self.queueIo(.{
+                    .scroll_viewport = .{ .delta = rows },
+                }, .unlocked);
+            }
         },
 
         .scroll_page_fractional => |fraction| {
-            const rows: f32 = @floatFromInt(self.size.grid().rows);
-            const delta: isize = @intFromFloat(@trunc(fraction * rows));
-            self.queueIo(.{
-                .scroll_viewport = .{ .delta = delta },
-            }, .unlocked);
+            const rows: f64 = @floatFromInt(@max(self.size.grid().rows, 1));
+            if (!try self.smoothScrollback(.{ .impulse = -@as(f64, fraction) * rows })) {
+                const grid_rows: f32 = @floatFromInt(self.size.grid().rows);
+                const delta: isize = @intFromFloat(@trunc(fraction * grid_rows));
+                self.queueIo(.{
+                    .scroll_viewport = .{ .delta = delta },
+                }, .unlocked);
+            }
         },
 
         .scroll_page_lines => |lines| {
-            self.queueIo(.{
-                .scroll_viewport = .{ .delta = lines },
-            }, .unlocked);
+            if (!try self.smoothScrollback(.{ .impulse = @floatFromInt(-lines) })) {
+                self.queueIo(.{
+                    .scroll_viewport = .{ .delta = lines },
+                }, .unlocked);
+            }
         },
 
         .jump_to_prompt => |delta| {

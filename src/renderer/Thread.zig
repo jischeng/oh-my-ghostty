@@ -311,6 +311,14 @@ fn setQosClass(self: *const Thread) void {
 
 fn syncDrawTimer(self: *Thread) void {
     skip: {
+        // Smooth scrolling integrates terminal state on every tick and must
+        // continue even when custom shader animation is disabled or unfocused.
+        if (@hasDecl(rendererpkg.Renderer, "hasSmoothScrollAnimation") and
+            self.renderer.hasSmoothScrollAnimation())
+        {
+            break :skip;
+        }
+
         // If our renderer supports animations and has them, then we
         // can apply draw timer based on custom shader animation configuration.
         if (@hasDecl(rendererpkg.Renderer, "hasAnimations") and
@@ -563,6 +571,7 @@ fn wakeupCallback(
 
     // Render immediately
     _ = renderCallback(t, undefined, undefined, {});
+    t.syncDrawTimer();
 
     // PageList mutations maintain their own compression dirty state. Checking
     // it here covers output, resize, and viewport scrolling uniformly.
@@ -619,8 +628,21 @@ fn drawCallback(
         return .disarm;
     };
 
+    // Smooth scroll physics changes the viewport and frame data; custom
+    // shader animation only needs a cheaper redraw of the current frame.
+    if (@hasDecl(rendererpkg.Renderer, "hasSmoothScrollAnimation") and
+        t.renderer.hasSmoothScrollAnimation())
+    {
+        t.renderer.updateFrame(
+            t.state,
+            t.flags.cursor_blink_visible,
+        ) catch |err|
+            log.warn("error rendering smooth scroll frame err={}", .{err});
+    }
+
     // Draw
     t.drawFrame(false);
+    t.syncDrawTimer();
 
     // Only continue if we're still active
     if (t.draw_active) {

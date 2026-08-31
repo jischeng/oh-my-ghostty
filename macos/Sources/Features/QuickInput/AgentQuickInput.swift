@@ -149,6 +149,20 @@ enum AgentQuickInputMetrics {
         )
     }
 
+    static func reservedAccessoryHeight(
+        dockHeight: CGFloat,
+        isDockPresented: Bool,
+        hasQueue: Bool
+    ) -> CGFloat {
+        let dock = isDockPresented
+            ? dockHeight + TerminalShellStyle.dividerWidth
+            : 0
+        let queue = hasQueue
+            ? queueLaneHeight + TerminalShellStyle.dividerWidth
+            : 0
+        return dock + queue
+    }
+
 }
 
 enum AgentQuickInputMotion {
@@ -515,50 +529,63 @@ struct AgentQuickInputDock<Content: View>: View {
         VStack(spacing: 0) {
             content
 
-            VStack(spacing: 0) {
-                AgentQuickInputResizeHandle(
-                    controller: controller,
-                    model: model,
-                    color: controller.sidebarDividerColor
-                )
-                AgentQuickInputComposer(
-                    controller: controller,
-                    model: model,
-                    backgroundColor: backgroundColor,
-                    backgroundOpacity: backgroundOpacity
-                )
-                .frame(height: model.dockHeight)
-            }
-            .frame(
-                height: model.isPresented
-                    ? model.dockHeight + TerminalShellStyle.dividerWidth
-                    : 0,
-                alignment: .top
-            )
-            .clipped()
-            .opacity(model.isPresented ? 1 : 0)
-            .allowsHitTesting(model.isPresented)
-            .accessibilityHidden(!model.isPresented)
-
-            if let surfaceID = presentedQueueSurfaceID,
-               let queue = model.state(for: surfaceID)?.queue,
-               !queue.isEmpty {
-                AgentQuickInputQueueLane(
-                    items: queue,
-                    surfaceID: surfaceID,
-                    model: model,
-                    send: {
-                        controller.sendQueuedQuickInput($0, from: surfaceID)
-                    },
-                    dividerColor: controller.sidebarDividerColor,
-                    backgroundColor: backgroundColor,
-                    backgroundOpacity: backgroundOpacity
-                )
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
+            // Reserve the final accessory height immediately. Animating this
+            // layout value resizes the PTY and terminal grid on every spring
+            // frame, which becomes visibly expensive with deep scrollback.
+            Color.clear
+                .frame(height: reservedAccessoryHeight)
+                .accessibilityHidden(true)
         }
-        .animation(AgentQuickInputMotion.dock, value: model.isPresented)
-        .animation(AgentQuickInputMotion.dock, value: presentedQueueIDs.isEmpty)
+        .overlay(alignment: .bottom) {
+            // Animate only presentation properties in the overlay. The costly
+            // terminal resize above happens once, while the dock and queue can
+            // still move and fade smoothly on the compositor.
+            VStack(spacing: 0) {
+                VStack(spacing: 0) {
+                    AgentQuickInputResizeHandle(
+                        controller: controller,
+                        model: model,
+                        color: controller.sidebarDividerColor
+                    )
+                    AgentQuickInputComposer(
+                        controller: controller,
+                        model: model,
+                        backgroundColor: backgroundColor,
+                        backgroundOpacity: backgroundOpacity
+                    )
+                    .frame(height: model.dockHeight)
+                }
+                .frame(
+                    height: model.dockHeight + TerminalShellStyle.dividerWidth,
+                    alignment: .top
+                )
+                .offset(y: model.isPresented ? 0 : 18)
+                .opacity(model.isPresented ? 1 : 0)
+                .allowsHitTesting(model.isPresented)
+                .accessibilityHidden(!model.isPresented)
+                .animation(AgentQuickInputMotion.dock, value: model.isPresented)
+
+                if let surfaceID = presentedQueueSurfaceID,
+                   let queue = model.state(for: surfaceID)?.queue,
+                   !queue.isEmpty {
+                    AgentQuickInputQueueLane(
+                        items: queue,
+                        surfaceID: surfaceID,
+                        model: model,
+                        send: {
+                            controller.sendQueuedQuickInput($0, from: surfaceID)
+                        },
+                        dividerColor: controller.sidebarDividerColor,
+                        backgroundColor: backgroundColor,
+                        backgroundOpacity: backgroundOpacity
+                    )
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .animation(AgentQuickInputMotion.queue, value: presentedQueueIDs)
+        }
+        .clipped()
     }
 
     private var presentedQueueSurfaceID: UUID? {
@@ -569,6 +596,14 @@ struct AgentQuickInputDock<Content: View>: View {
     private var presentedQueueIDs: [UUID] {
         guard let surfaceID = presentedQueueSurfaceID else { return [] }
         return model.state(for: surfaceID)?.queue.map(\.id) ?? []
+    }
+
+    private var reservedAccessoryHeight: CGFloat {
+        AgentQuickInputMetrics.reservedAccessoryHeight(
+            dockHeight: model.dockHeight,
+            isDockPresented: model.isPresented,
+            hasQueue: !presentedQueueIDs.isEmpty
+        )
     }
 
 }

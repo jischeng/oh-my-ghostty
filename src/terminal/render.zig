@@ -82,13 +82,20 @@ pub const RenderState = struct {
     rows: size.CellCountInt,
     cols: size.CellCountInt,
 
+    /// Extra document rows to collect below the viewport so fractional
+    /// scrolling can fill the gap at the bottom. `row_data` is
+    /// `rows` plus however many of these exist below the viewport.
+    /// Set by the caller before `beginUpdate`; this is a maximum.
+    paint_extra_rows: u8 = 0,
+
     /// The color state for the terminal.
     colors: Colors,
 
     /// Cursor state within the viewport.
     cursor: Cursor,
 
-    /// The rows (y=0 is top) of the viewport. Guaranteed to be `rows` length.
+    /// The rows (y=0 is top) of the viewport, plus `paint_extra_rows`
+    /// trailing document rows when they exist.
     ///
     /// This is a MultiArrayList because only the update cares about
     /// the allocators. Callers care about all the other properties, and
@@ -147,6 +154,7 @@ pub const RenderState = struct {
         .row_data = .empty,
         .dirty = .false,
         .screen = .primary,
+        .paint_extra_rows = 0,
     };
 
     /// The color state for the terminal.
@@ -377,6 +385,18 @@ pub const RenderState = struct {
     ) Allocator.Error!void {
         const s: *Screen = t.screens.active;
         const viewport_pin = s.pages.getTopLeft(.viewport);
+        const extra: usize = extra: {
+            if (self.paint_extra_rows == 0) break :extra 0;
+            const br = s.pages.getBottomRight(.viewport) orelse break :extra 0;
+            var n: usize = 0;
+            var pin = br;
+            while (n < self.paint_extra_rows) {
+                pin = pin.down(1) orelse break :extra n;
+                n += 1;
+            }
+            break :extra n;
+        };
+        const paint_rows: usize = @as(usize, s.pages.rows) + extra;
         const redraw = redraw: {
             // If our screen key changed, we need to do a full rebuild
             // because our render state is viewport-specific.
@@ -400,7 +420,8 @@ pub const RenderState = struct {
 
             // If our dimensions changed, we do a full rebuild.
             if (self.rows != s.pages.rows or
-                self.cols != s.pages.cols)
+                self.cols != s.pages.cols or
+                self.row_data.len != paint_rows)
             {
                 break :redraw true;
             }
@@ -456,22 +477,21 @@ pub const RenderState = struct {
             }
         }
 
-        // Ensure our row length is exactly our height, freeing or allocating
-        // data as necessary. In most cases we'll have a perfectly matching
-        // size.
-        if (self.row_data.len != self.rows) {
+        // Ensure our row length is the viewport plus any extra rows
+        // collected for fractional scrolling.
+        if (self.row_data.len != paint_rows) {
             @branchHint(.unlikely);
 
-            if (self.row_data.len < self.rows) {
+            if (self.row_data.len < paint_rows) {
                 // Resize our rows to the desired length, marking any added
                 // values undefined.
                 const old_len = self.row_data.len;
-                try self.row_data.resize(alloc, self.rows);
+                try self.row_data.resize(alloc, paint_rows);
 
                 // Initialize all our values. Its faster to use slice() + set()
                 // because appendAssumeCapacity does this multiple times.
                 var row_data = self.row_data.slice();
-                for (old_len..self.rows) |y| {
+                for (old_len..paint_rows) |y| {
                     row_data.set(y, .{
                         .arena = .{},
                         .pin = undefined,
@@ -487,16 +507,16 @@ pub const RenderState = struct {
             } else {
                 const row_data = self.row_data.slice();
                 for (
-                    row_data.items(.arena)[self.rows..],
-                    row_data.items(.cells)[self.rows..],
-                    row_data.items(.applied_styles)[self.rows..],
+                    row_data.items(.arena)[paint_rows..],
+                    row_data.items(.cells)[paint_rows..],
+                    row_data.items(.applied_styles)[paint_rows..],
                 ) |state, *cell, *applied| {
                     var arena: ArenaAllocator = state.promote(alloc);
                     arena.deinit();
                     cell.deinit(alloc);
                     applied.deinit(alloc);
                 }
-                self.row_data.shrinkRetainingCapacity(self.rows);
+                self.row_data.shrinkRetainingCapacity(paint_rows);
             }
         }
 
@@ -538,18 +558,19 @@ pub const RenderState = struct {
         var y: usize = 0;
         var any_dirty: bool = false;
         var page_it = viewport_pin.pageIterator(.right_down, null);
-        while (y < self.rows) {
+        while (y < paint_rows) {
             const chunk = page_it.next() orelse break;
             const node = chunk.node;
             const node_serial = node.serial;
             const p: *page.Page = node.page();
 
             // The number of rows we consume from this chunk. The chunk
-            // may extend beyond the viewport (the viewport is always
-            // exactly `rows` tall) so we clamp.
+            // may extend beyond the viewport (we collect up to
+            // `paint_extra_rows` past the viewport for fractional
+            // scrolling) so we clamp.
             const take: usize = @min(
                 @as(usize, chunk.end - chunk.start),
-                self.rows - y,
+                paint_rows - y,
             );
 
             // Find our cursor if we haven't found it yet. We do this even
@@ -650,7 +671,7 @@ pub const RenderState = struct {
 
             y += take;
         }
-        assert(y == self.rows);
+        assert(y == paint_rows);
 
         // If our screen has a selection, then mark the rows with the
         // selection. We do this outside of the loop above because its unlikely

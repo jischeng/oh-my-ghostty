@@ -12,6 +12,7 @@ const build_config = @import("build_config.zig");
 const cursor = @import("renderer/cursor.zig");
 const message = @import("renderer/message.zig");
 const size = @import("renderer/size.zig");
+pub const ScrollPhysics = @import("renderer/ScrollPhysics.zig");
 pub const shadertoy = @import("renderer/shadertoy.zig");
 pub const Backend = @import("renderer/backend.zig").Backend;
 pub const GenericRenderer = @import("renderer/generic.zig").Renderer;
@@ -61,6 +62,7 @@ test {
     _ = message;
     _ = shadertoy;
     _ = size;
+    _ = ScrollPhysics;
     _ = Thread;
     _ = State;
 }

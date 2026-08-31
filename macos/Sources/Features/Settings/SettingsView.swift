@@ -227,6 +227,20 @@ struct SettingsView: View {
 
         case .terminal:
             Form {
+                Section(strings.resizeRenderingSection) {
+                    Picker(
+                        strings.terminalResizeRenderingLabel,
+                        selection: $settings.terminalResizeRendering
+                    ) {
+                        ForEach(TerminalResizeRenderingMode.allCases) { mode in
+                            Text(strings.terminalResizeRenderingTitle(mode))
+                                .tag(mode)
+                        }
+                    }
+                    Text(strings.terminalResizeRenderingCaption)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Section(strings.ghosttySection) {
                     Button(strings.openGhosttyConfigButton) {
                         (NSApp.delegate as? AppDelegate)?.ghostty.openConfig()

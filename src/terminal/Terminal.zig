@@ -3797,6 +3797,12 @@ pub const Resize = struct {
         width: u32,
         height: u32,
     } = null,
+
+    /// Override the shell-integration prompt redraw policy for this resize.
+    /// Null uses the terminal's configured shell capability. Visual-only host
+    /// resizes set this to false because the child cannot redraw until its PTY
+    /// geometry is separately committed.
+    prompt_redraw: ?osc.semantic_prompt.Redraw = null,
 };
 
 pub const ResizeError = error{
@@ -3897,7 +3903,7 @@ pub fn resize(
         .cols = opts.cols,
         .rows = opts.rows,
         .reflow = self.modes.get(.wraparound),
-        .prompt_redraw = self.flags.shell_redraws_prompt,
+        .prompt_redraw = opts.prompt_redraw orelse self.flags.shell_redraws_prompt,
     });
 
     // Alternate screen, if it exists, doesn't reflow. The primary resize

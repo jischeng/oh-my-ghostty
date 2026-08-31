@@ -716,7 +716,7 @@ pub fn init(
     // init stuff we should get rid of this. But this is required because
     // sizeCallback does retina-aware stuff we don't do here and don't want
     // to duplicate.
-    try self.resize(self.size.screen);
+    try self.resize(self.size.screen, false);
 
     // Give the renderer one more opportunity to finalize any surface
     // setup on the main thread prior to spinning up the rendering thread.
@@ -2514,6 +2514,20 @@ fn queueRender(self: *Surface) !void {
 }
 
 pub fn sizeCallback(self: *Surface, size: apprt.SurfaceSize) !void {
+    try self.sizeCallbackMode(size, false);
+}
+
+/// Update model/renderer geometry for an interactive host layout change while
+/// leaving the child PTY at its last published size.
+pub fn liveSizeCallback(self: *Surface, size: apprt.SurfaceSize) !void {
+    try self.sizeCallbackMode(size, true);
+}
+
+fn sizeCallbackMode(
+    self: *Surface,
+    size: apprt.SurfaceSize,
+    live: bool,
+) !void {
     // Crash metadata in case we crash in here
     crash.sentry.thread_state = self.crashThreadState();
     defer crash.sentry.thread_state = null;
@@ -2523,15 +2537,21 @@ pub fn sizeCallback(self: *Surface, size: apprt.SurfaceSize) !void {
         .height = size.height,
     };
 
-    // Update our screen size, but only if it actually changed. And if
-    // the screen size didn't change, then our grid size could not have
-    // changed, so we just return.
     if (self.size.screen.equals(new_screen_size)) return;
-
-    try self.resize(new_screen_size);
+    try self.resize(new_screen_size, live);
 }
 
-fn resize(self: *Surface, size: rendererpkg.ScreenSize) !void {
+/// Publish the current live-resize geometry to the child without repeating
+/// terminal reflow or renderer allocation.
+pub fn commitLiveSize(self: *Surface) void {
+    self.queueIo(.{ .resize_commit = self.size }, .unlocked);
+}
+
+fn resize(
+    self: *Surface,
+    size: rendererpkg.ScreenSize,
+    live: bool,
+) !void {
     // Save our screen size
     self.size.screen = size;
     self.balancePaddingIfNeeded();
@@ -2550,8 +2570,15 @@ fn resize(self: *Surface, size: rendererpkg.ScreenSize) !void {
             "set. Is your padding reasonable?", .{});
     }
 
-    // Mail the IO thread
-    self.queueIo(.{ .resize = self.size }, .unlocked);
+    // Mail the IO thread. Live shell-layout changes continuously reflow the
+    // model but publish the child PTY size only when separately committed.
+    self.queueIo(
+        if (live)
+            .{ .resize_live = self.size }
+        else
+            .{ .resize = self.size },
+        .unlocked,
+    );
 }
 
 /// Recalculate the balanced padding if needed.
@@ -3724,7 +3751,7 @@ pub fn contentScaleCallback(self: *Surface, content_scale: apprt.ContentScale) !
 
     // Force a resize event because the change in padding will affect
     // pixel-level changes to the renderer and viewport.
-    try self.resize(self.size.screen);
+    try self.resize(self.size.screen, false);
 }
 
 /// Returns true if mouse reporting is enabled both in the config and

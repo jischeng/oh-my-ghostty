@@ -8824,6 +8824,33 @@ test "Screen: resize more cols with cursor at prompt" {
     }
 }
 
+test "Screen: live resize preserves redrawable prompt" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var s = try init(io, alloc, .{ .cols = 10, .rows = 3, .max_scrollback_bytes = 5 });
+    defer s.deinit();
+
+    // A live visual-only resize does not notify the shell, so an OSC 133
+    // prompt must remain visible rather than waiting for a redraw that cannot
+    // arrive until the PTY size is committed.
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_eol });
+    try s.testWriteString("echo");
+
+    try s.resize(.{
+        .cols = 20,
+        .rows = 3,
+        .prompt_redraw = .false,
+    });
+
+    const contents = try s.dumpStringAlloc(alloc, .{ .viewport = .{} });
+    defer alloc.free(contents);
+    try testing.expectEqualStrings("> echo", contents);
+}
+
 test "Screen: resize more cols with cursor not at prompt" {
     const testing = std.testing;
     const alloc = testing.allocator;

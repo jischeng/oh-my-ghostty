@@ -1497,6 +1497,8 @@ struct SidebarResizeInteraction: NSViewRepresentable {
         var direction: Direction
         private var startWidth: CGFloat = 0
         private var startPosition: CGPoint = .zero
+        private weak var resizeWindow: NSWindow?
+        private var resizeDeferralActive = false
         private(set) var registeredCursorBounds: NSRect?
 
         init(
@@ -1518,6 +1520,9 @@ struct SidebarResizeInteraction: NSViewRepresentable {
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             window?.invalidateCursorRects(for: self)
+            if window == nil {
+                finishResizeDeferral()
+            }
         }
 
         override func setFrameSize(_ newSize: NSSize) {
@@ -1540,6 +1545,7 @@ struct SidebarResizeInteraction: NSViewRepresentable {
         override func mouseDown(with event: NSEvent) {
             startWidth = currentWidth()
             startPosition = event.locationInWindow
+            beginResizeDeferral()
         }
 
         override func mouseDragged(with event: NSEvent) {
@@ -1548,10 +1554,33 @@ struct SidebarResizeInteraction: NSViewRepresentable {
 
         override func mouseUp(with event: NSEvent) {
             resize(proposedWidth(for: event), true)
+            finishResizeDeferral()
         }
 
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
             true
+        }
+
+        private func beginResizeDeferral() {
+            if resizeDeferralActive {
+                finishResizeDeferral()
+            }
+            guard let window else { return }
+            resizeWindow = window
+            resizeDeferralActive = true
+            TerminalSurfaceResizeInteraction.begin(in: window)
+        }
+
+        private func finishResizeDeferral() {
+            guard resizeDeferralActive else { return }
+            let window = resizeWindow
+            resizeWindow = nil
+            resizeDeferralActive = false
+            // Let the final @Published layout commit before flushing its one
+            // terminal grid resize.
+            DispatchQueue.main.async {
+                TerminalSurfaceResizeInteraction.end(in: window)
+            }
         }
 
         private func proposedWidth(for event: NSEvent) -> CGFloat {

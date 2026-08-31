@@ -213,6 +213,16 @@
    "maximum": 480,
    "minimum": 176,
    "type": "number"
+  },
+  "terminal.resizeRendering": {
+   "category": "terminal",
+   "default": "onRelease",
+   "description": "Choose whether terminal content reflows during a resize or once on release.",
+   "enum": [
+    "duringDrag",
+    "onRelease"
+   ],
+   "type": "string"
   }
  },
  "title": "OMG Settings",

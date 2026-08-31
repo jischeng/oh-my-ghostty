@@ -21,6 +21,10 @@ struct SplitView<L: View, R: View>: View {
     let left: L
     let right: R
 
+    /// Called at the boundaries of an interactive divider resize.
+    let onResizeBegan: () -> Void
+    let onResizeEnded: () -> Void
+
     /// Called when the divider is double-tapped to equalize splits.
     let onEqualize: () -> Void
 
@@ -29,6 +33,7 @@ struct SplitView<L: View, R: View>: View {
 
     /// The current fractional width of the split view. 0.5 means L/R are equally sized, for example.
     @Binding var split: CGFloat
+    @State private var isResizing = false
 
     /// The visible size of the splitter, in points. The invisible size is a transparent hitbox that can still
     /// be used for getting a resize handle. The total width/height of the splitter is the sum of both.
@@ -65,6 +70,7 @@ struct SplitView<L: View, R: View>: View {
             }
             .accessibilityElement(children: .contain)
             .accessibilityLabel(splitViewLabel)
+            .onDisappear { finishResize() }
         }
     }
 
@@ -76,6 +82,8 @@ struct SplitView<L: View, R: View>: View {
         resizeIncrements: NSSize = .init(width: 1, height: 1),
         @ViewBuilder left: (() -> L),
         @ViewBuilder right: (() -> R),
+        onResizeBegan: @escaping () -> Void = {},
+        onResizeEnded: @escaping () -> Void = {},
         onEqualize: @escaping () -> Void
     ) {
         self.direction = direction
@@ -84,12 +92,18 @@ struct SplitView<L: View, R: View>: View {
         self.resizeIncrements = resizeIncrements
         self.left = left()
         self.right = right()
+        self.onResizeBegan = onResizeBegan
+        self.onResizeEnded = onResizeEnded
         self.onEqualize = onEqualize
     }
 
     private func dragGesture(_ size: CGSize, splitterPoint: CGPoint) -> some Gesture {
         return DragGesture()
             .onChanged { gesture in
+                if !isResizing {
+                    isResizing = true
+                    onResizeBegan()
+                }
                 switch direction {
                 case .horizontal:
                     let new = min(max(minSize, gesture.location.x), size.width - minSize)
@@ -100,6 +114,13 @@ struct SplitView<L: View, R: View>: View {
                     split = new / size.height
                 }
             }
+            .onEnded { _ in finishResize() }
+    }
+
+    private func finishResize() {
+        guard isResizing else { return }
+        isResizing = false
+        onResizeEnded()
     }
 
     /// Calculates the bounding rect for the left view.

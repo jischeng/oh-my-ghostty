@@ -26,11 +26,18 @@ const log = std.log.scoped(.io_thread);
 
 /// This stores the information that is coalesced.
 const Coalesce = struct {
-    /// The number of milliseconds to coalesce certain messages like resize for.
-    /// Not all message types are coalesced.
-    const min_ms = 25;
+    /// Ordinary resizes retain the upstream cadence. Interactive visual-only
+    /// resizes use a shorter cadence so they can follow a 60/120 Hz pointer
+    /// without making PTY resize notifications more frequent.
+    const resize_ms = 25;
+    const live_resize_ms = 8;
 
-    resize: ?renderer.Size = null,
+    const Resize = struct {
+        size: renderer.Size,
+        notify_child: bool,
+    };
+
+    resize: ?Resize = null,
 };
 
 /// The number of milliseconds before we reset the synchronized output flag
@@ -324,7 +331,9 @@ fn drainMailbox(
                 try io.changeConfig(data, config.ptr);
             },
             .inspector => |v| self.flags.has_inspector = v,
-            .resize => |v| self.handleResize(cb, v),
+            .resize => |v| self.handleResize(cb, v, true),
+            .resize_live => |v| self.handleResize(cb, v, false),
+            .resize_commit => |v| try self.commitResize(cb, v),
             .size_report => |v| try io.sizeReport(data, v),
             .clear_screen => |v| try io.clearScreen(data, v.history),
             .scroll_viewport => |v| io.scrollViewport(v),
@@ -379,23 +388,47 @@ fn startSynchronizedOutput(self: *Thread, cb: *CallbackData) void {
     );
 }
 
-fn handleResize(self: *Thread, cb: *CallbackData, resize: renderer.Size) void {
-    self.coalesce_data.resize = resize;
+fn handleResize(
+    self: *Thread,
+    cb: *CallbackData,
+    size: renderer.Size,
+    notify_child: bool,
+) void {
+    // Never let a later visual-only resize weaken a pending ordinary resize.
+    // The latest geometry still wins.
+    const pending_notify = if (self.coalesce_data.resize) |v|
+        v.notify_child
+    else
+        false;
+    self.coalesce_data.resize = .{
+        .size = size,
+        .notify_child = notify_child or pending_notify,
+    };
 
-    // If the timer is already active we just return. In the future we want
-    // to reset the timer up to a maximum wait time but for now this ensures
-    // relatively smooth resizing.
     if (self.coalesce_c.state() == .active) return;
 
     self.coalesce.reset(
         &self.loop,
         &self.coalesce_c,
         &self.coalesce_cancel_c,
-        Coalesce.min_ms,
+        if (notify_child) Coalesce.resize_ms else Coalesce.live_resize_ms,
         CallbackData,
         cb,
         coalesceCallback,
     );
+}
+
+fn commitResize(
+    self: *Thread,
+    cb: *CallbackData,
+    size: renderer.Size,
+) !void {
+    // A mouse-up/transition-end can race the short visual coalescing timer.
+    // Supersede its pending value, apply the exact final model geometry, then
+    // publish only that geometry to the child.
+    self.coalesce_data.resize = null;
+    try cb.io.resizeVisual(size, false);
+    try cb.io.commitResize(&cb.data, size);
 }
 
 fn syncResetCallback(
@@ -435,9 +468,15 @@ fn coalesceCallback(
 
     if (cb.self.coalesce_data.resize) |v| {
         cb.self.coalesce_data.resize = null;
-        cb.io.resize(&cb.data, v) catch |err| {
-            log.warn("error during resize err={}", .{err});
-        };
+        if (v.notify_child) {
+            cb.io.resize(&cb.data, v.size) catch |err| {
+                log.warn("error during resize err={}", .{err});
+            };
+        } else {
+            cb.io.resizeVisual(v.size, false) catch |err| {
+                log.warn("error during live resize err={}", .{err});
+            };
+        }
     }
 
     return .disarm;

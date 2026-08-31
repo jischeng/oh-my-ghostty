@@ -811,6 +811,19 @@ pub const Surface = struct {
     }
 
     pub fn updateSize(self: *Surface, width: u32, height: u32) void {
+        self.updateSizeMode(width, height, false);
+    }
+
+    pub fn updateLiveSize(self: *Surface, width: u32, height: u32) void {
+        self.updateSizeMode(width, height, true);
+    }
+
+    fn updateSizeMode(
+        self: *Surface,
+        width: u32,
+        height: u32,
+        live: bool,
+    ) void {
         // Runtimes sometimes generate superfluous resize events even
         // if the size did not actually change (SwiftUI). We check
         // that the size actually changed from what we last recorded
@@ -822,11 +835,21 @@ pub const Surface = struct {
             .height = height,
         };
 
-        // Call the primary callback.
-        self.core_surface.sizeCallback(self.size) catch |err| {
-            log.err("error in size callback err={}", .{err});
-            return;
-        };
+        if (live) {
+            self.core_surface.liveSizeCallback(self.size) catch |err| {
+                log.err("error in live size callback err={}", .{err});
+                return;
+            };
+        } else {
+            self.core_surface.sizeCallback(self.size) catch |err| {
+                log.err("error in size callback err={}", .{err});
+                return;
+            };
+        }
+    }
+
+    pub fn commitLiveSize(self: *Surface) void {
+        self.core_surface.commitLiveSize();
     }
 
     pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) void {
@@ -1705,6 +1728,17 @@ pub const CAPI = struct {
     /// to the pty and the renderer.
     export fn ghostty_surface_set_size(surface: *Surface, w: u32, h: u32) void {
         surface.updateSize(w, h);
+    }
+
+    /// Reflow the terminal model and renderer during an interactive host
+    /// layout resize without notifying the child PTY yet.
+    export fn ghostty_surface_set_size_live(surface: *Surface, w: u32, h: u32) void {
+        surface.updateLiveSize(w, h);
+    }
+
+    /// Publish the latest live size to the child PTY without repeating reflow.
+    export fn ghostty_surface_commit_size(surface: *Surface) void {
+        surface.commitLiveSize();
     }
 
     /// Return the size information a surface has.

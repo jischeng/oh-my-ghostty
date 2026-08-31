@@ -464,24 +464,36 @@ pub fn changeConfig(self: *Termio, td: *ThreadData, config: *DerivedConfig) !voi
     self.terminal.setKittyGraphicsLoadingLimits(.allWithTempDir(global.tmpDirPath()));
 }
 
-/// Resize the terminal.
+/// Resize the terminal grid and renderer, then publish the new geometry to
+/// the child PTY. Ordinary window/configuration resizes use this path.
 pub fn resize(
     self: *Termio,
     td: *ThreadData,
     size: renderer.Size,
 ) !void {
+    try self.resizeVisual(size, true);
+    try self.commitResize(td, size);
+}
+
+/// Resize the terminal model and renderer without notifying the child PTY.
+///
+/// Interactive app-shell layout changes use this to keep reflow continuous
+/// while avoiding repeated SIGWINCH-driven application redraws. This runs on
+/// the IO thread, so reflow never blocks AppKit's drag tracking.
+pub fn resizeVisual(
+    self: *Termio,
+    size: renderer.Size,
+    redraw_prompt: bool,
+) !void {
+    if (std.meta.eql(self.size, size)) return;
     self.size = size;
     const grid_size = size.grid();
 
-    // Update the size of our pty.
-    try self.backend.resize(grid_size, size.terminal());
-
-    // Enter the critical area that we want to keep small
+    // Enter the critical area that we want to keep small.
     {
         self.renderer_state.mutex.lockUncancelable(global.io());
         defer self.renderer_state.mutex.unlock(global.io());
 
-        // Update the size of our terminal state
         try self.terminal.resize(
             self.alloc,
             .{
@@ -491,18 +503,38 @@ pub fn resize(
                     .width = self.size.cell.width,
                     .height = self.size.cell.height,
                 },
+                // OSC 133 prompts are cleared only when the child will also
+                // receive this resize and can redraw them. Live visual-only
+                // reflow must preserve Starship/powerline prompt cells.
+                .prompt_redraw = if (redraw_prompt)
+                    self.terminal.flags.shell_redraws_prompt
+                else
+                    .false,
             },
         );
-
-        // If we have size reporting enabled we need to send a report.
-        if (self.terminal.modes.get(.in_band_size_reports)) {
-            try self.sizeReportLocked(td, .mode_2048);
-        }
     }
 
-    // Mail the renderer so that it can update the GPU and re-render
+    // Mail the renderer so that it can update the GPU and re-render.
     _ = self.renderer_mailbox.push(global.io(), .{ .resize = size }, .{ .forever = {} });
     self.renderer_wakeup.notify() catch {};
+}
+
+/// Publish an already-reflowed size to the child PTY. This deliberately does
+/// not resize the terminal model or renderer a second time.
+pub fn commitResize(
+    self: *Termio,
+    td: *ThreadData,
+    size: renderer.Size,
+) !void {
+    self.size = size;
+    const grid_size = size.grid();
+    try self.backend.resize(grid_size, size.terminal());
+
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
+    if (self.terminal.modes.get(.in_band_size_reports)) {
+        try self.sizeReportLocked(td, .mode_2048);
+    }
 }
 
 /// Make a size report.

@@ -1079,8 +1079,14 @@ class BaseTerminalController: NSWindowController,
 
     func performSplitAction(_ action: TerminalSplitOperation) {
         switch action {
+        case .resizeBegan:
+            TerminalSurfaceResizeInteraction.begin(in: window)
         case .resize(let resize):
             splitDidResize(node: resize.node, to: resize.ratio)
+        case .resizeEnded:
+            // The final tree ratio is already committed by the preceding
+            // resize event, so flushing now sends one final grid size.
+            TerminalSurfaceResizeInteraction.end(in: window)
         case .drop(let drop):
             splitDidDrop(source: drop.payload, destination: drop.destination, zone: drop.zone)
         }

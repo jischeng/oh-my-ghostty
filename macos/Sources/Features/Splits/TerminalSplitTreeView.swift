@@ -5,7 +5,9 @@ import SwiftUI
 /// Rather than binding the split tree (which is immutable), any mutable operations are
 /// exposed via this enum to the embedder to handle.
 enum TerminalSplitOperation {
+    case resizeBegan
     case resize(Resize)
+    case resizeEnded
     case drop(Drop)
 
     struct Resize {
@@ -76,6 +78,12 @@ private struct TerminalSplitSubtreeView: View {
                 },
                 right: {
                     TerminalSplitSubtreeView(node: split.right, action: action)
+                },
+                onResizeBegan: {
+                    action(.resizeBegan)
+                },
+                onResizeEnded: {
+                    action(.resizeEnded)
                 },
                 onEqualize: {
                     guard let surface = node.leftmostLeaf().surface else { return }

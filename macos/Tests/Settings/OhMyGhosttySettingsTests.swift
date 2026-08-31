@@ -62,6 +62,16 @@ struct OhMyGhosttySettingsTests {
         ).lastPathComponent == "OMG Dev")
     }
 
+    @Test func terminalResizeRenderingDefaultsToOnRelease() {
+        let (settings, url) = temporarySettings()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        #expect(settings.terminalResizeRendering == .onRelease)
+        let descriptor = OhMyGhosttySettings.descriptors.first {
+            $0.id == "terminal.resizeRendering"
+        }
+        #expect(descriptor?.defaultValue == "onRelease")
+    }
+
     @Test func typedSettingsRoundTripThroughHumanReadableFile() throws {
         let (settings, url) = temporarySettings()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
@@ -75,6 +85,7 @@ struct OhMyGhosttySettingsTests {
         settings.notifyTaskComplete = false
         settings.quickInputShortcut = "control+option+q"
         settings.quickInputHeight = 318
+        settings.terminalResizeRendering = .onRelease
         settings.restoreSessionsOnLaunch = false
 
         let data = try Data(contentsOf: url)
@@ -90,6 +101,7 @@ struct OhMyGhosttySettingsTests {
         #expect(object["notifications.taskComplete"] as? Bool == false)
         #expect(object["keyboard.quickInput"] as? String == "control+option+q")
         #expect((object["keyboard.quickInputHeight"] as? NSNumber)?.doubleValue == 318)
+        #expect(object["terminal.resizeRendering"] as? String == "onRelease")
         #expect(object["sessions.restoreOnLaunch"] as? Bool == false)
 
         let restored = OhMyGhosttySettings(fileURL: url)
@@ -102,7 +114,26 @@ struct OhMyGhosttySettingsTests {
         #expect(!restored.notifyTaskComplete)
         #expect(restored.quickInputShortcut == "control+option+q")
         #expect(restored.quickInputHeight == 318)
+        #expect(restored.terminalResizeRendering == .onRelease)
         #expect(!restored.restoreSessionsOnLaunch)
+    }
+
+    @Test func legacySmoothResizeBooleanMigratesToRenderingMode() throws {
+        let (_, url) = temporarySettings()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("{\"terminal.smoothResize\":false}".utf8).write(to: url)
+
+        let restored = OhMyGhosttySettings(fileURL: url)
+        #expect(restored.terminalResizeRendering == .onRelease)
+        let object = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+        )
+        #expect(object["terminal.resizeRendering"] as? String == "onRelease")
+        #expect(object["terminal.smoothResize"] == nil)
     }
 
     @Test func externalEditReloadsTheSameRuntimeModel() throws {
@@ -258,6 +289,7 @@ struct OhMyGhosttySettingsTests {
         #expect(descriptors.contains { $0.id == "agents.statusHooks" })
         #expect(descriptors.contains { $0.id == "keyboard.quickInput" })
         #expect(descriptors.contains { $0.id == "keyboard.quickInputHeight" })
+        #expect(descriptors.contains { $0.id == "terminal.resizeRendering" })
         #expect(descriptors.contains { $0.id == "sessions.restoreOnLaunch" })
         #expect(descriptors.contains { $0.id == "general.language" })
         #expect(descriptors.contains { $0.id == "appearance.backgroundOpacity" })

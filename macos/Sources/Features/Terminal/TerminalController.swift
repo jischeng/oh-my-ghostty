@@ -288,6 +288,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     let quickInputModel = AgentQuickInputModel()
     private var quickInputEventMonitor: Any?
     private var quickInputSecureInputCancellable: AnyCancellable?
+    private var quickInputResizeDeferralWorkItem: DispatchWorkItem?
+    private weak var quickInputResizeDeferralWindow: NSWindow?
+    private var quickInputResizeDeferralActive = false
     private var agentResumeContextIDs: [UUID: String] = [:]
     private var paneSessionObservers: [UUID: Set<AnyCancellable>] = [:]
     private var agentReducers: [UUID: AgentContextSignalReducer] = [:]
@@ -343,6 +346,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return
         }
         guard let surface = focusedSurface ?? surfaceTree.first else { return }
+        beginQuickInputResizeDeferral()
         quickInputModel.present(for: surface.id)
         _ = surface.resignFirstResponder()
     }
@@ -360,6 +364,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         guard submitQuickInputText(text, to: surfaceID, restoreFocus: true) else {
             return
         }
+        beginQuickInputResizeDeferral()
         quickInputModel.dismiss(preservingDraft: false)
     }
 
@@ -372,6 +377,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             restoreTerminalFocus(surfaceID: surfaceID)
             return
         }
+        beginQuickInputResizeDeferral()
         guard quickInputModel.enqueueDraft() != nil else { return }
         quickInputModel.dismiss()
         if agentActivities[surfaceID]?.state == .done {
@@ -382,8 +388,38 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     func dismissQuickInput() {
         let surfaceID = quickInputModel.targetSurfaceID
+        beginQuickInputResizeDeferral()
         quickInputModel.dismiss()
         restoreTerminalFocus(surfaceID: surfaceID)
+    }
+
+    private func beginQuickInputResizeDeferral() {
+        guard let window else { return }
+        quickInputResizeDeferralWorkItem?.cancel()
+        if !quickInputResizeDeferralActive {
+            quickInputResizeDeferralActive = true
+            quickInputResizeDeferralWindow = window
+            TerminalSurfaceResizeInteraction.begin(in: window)
+        }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.endQuickInputResizeDeferral()
+        }
+        quickInputResizeDeferralWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + AgentQuickInputMotion.terminalResizeDeferralDuration,
+            execute: workItem
+        )
+    }
+
+    private func endQuickInputResizeDeferral() {
+        quickInputResizeDeferralWorkItem?.cancel()
+        quickInputResizeDeferralWorkItem = nil
+        guard quickInputResizeDeferralActive else { return }
+        let window = quickInputResizeDeferralWindow
+        quickInputResizeDeferralWindow = nil
+        quickInputResizeDeferralActive = false
+        TerminalSurfaceResizeInteraction.end(in: window)
     }
 
     func sendQueuedQuickInput(_ itemID: UUID, from surfaceID: UUID) {
@@ -392,6 +428,17 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
               submitQuickInputText(item.text, to: surfaceID, restoreFocus: false) else {
             return
         }
+        beginQuickInputResizeDeferral()
+        quickInputModel.removeQueuedItem(itemID, for: surfaceID)
+    }
+
+    func editQueuedQuickInput(_ itemID: UUID, from surfaceID: UUID) {
+        beginQuickInputResizeDeferral()
+        quickInputModel.editQueuedItem(itemID, for: surfaceID)
+    }
+
+    func removeQueuedQuickInput(_ itemID: UUID, from surfaceID: UUID) {
+        beginQuickInputResizeDeferral()
         quickInputModel.removeQueuedItem(itemID, for: surfaceID)
     }
 
@@ -465,6 +512,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
               submitQuickInputText(item.text, to: surfaceID, restoreFocus: false) else {
             return
         }
+        beginQuickInputResizeDeferral()
         _ = quickInputModel.dequeue(for: surfaceID)
     }
 
@@ -621,6 +669,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         agentProcessPollCancellable?.cancel()
         pendingTabOrganizationWorkItem?.cancel()
         quickInputSecureInputCancellable?.cancel()
+        endQuickInputResizeDeferral()
         if let quickInputEventMonitor {
             NSEvent.removeMonitor(quickInputEventMonitor)
         }

@@ -228,6 +228,22 @@ struct SettingsStrings: Equatable, Sendable {
 
     var ghosttySection: String { "Ghostty" }
     var openGhosttyConfigButton: String { t("Open Ghostty Configuration", "打开 Ghostty 配置") }
+    var resizeRenderingSection: String { t("Resize Rendering", "尺寸调整渲染") }
+    var terminalResizeRenderingLabel: String {
+        t("Terminal Content Reflow", "终端内容重排")
+    }
+    var terminalResizeRenderingCaption: String {
+        t(
+            "Applies to Sidebars, split dividers, and Quick Input. During Drag feels continuous; On Release keeps terminal content fixed until resizing ends.",
+            "适用于侧边栏、分屏分隔线和快速输入框。“拖动时”会连续重排；“松开时”会在尺寸调整结束前保持终端内容不变。"
+        )
+    }
+    func terminalResizeRenderingTitle(_ mode: TerminalResizeRenderingMode) -> String {
+        switch mode {
+        case .duringDrag: t("During Drag", "拖动时重绘")
+        case .onRelease: t("On Release", "松开时重绘")
+        }
+    }
     var quickInputSection: String { t("Agent Quick Input", "Agent 快速输入") }
     var quickInputShortcutLabel: String { t("Open Composer", "打开输入框") }
     var quickInputShortcutCaption: String {

@@ -45,8 +45,17 @@ pub const Message = union(enum) {
     /// Activate or deactivate the inspector.
     inspector: bool,
 
-    /// Resize the window.
+    /// Resize the terminal grid, renderer, and child PTY.
     resize: renderer.Size,
+
+    /// Resize only the terminal grid and renderer during an interactive
+    /// presentation change. The child PTY is committed separately so a live
+    /// drag does not generate a SIGWINCH/output-redraw storm.
+    resize_live: renderer.Size,
+
+    /// Publish the final interactive size to the child PTY. The IO thread also
+    /// applies this visual size first if a coalesced live update is pending.
+    resize_commit: renderer.Size,
 
     /// Request a size report is sent to the PTY ([in-band
     /// size report, mode 2048](https://gist.github.com/rockorager/e695fb2924d36b2bcf1fff4a3704bd83) and

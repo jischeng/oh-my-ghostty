@@ -480,23 +480,47 @@ extension Ghostty {
         }
 
         override func sizeDidChange(_ size: CGSize) {
-            // Ghostty wants to know the actual framebuffer size... It is very important
-            // here that we use "size" and NOT the view frame. If we're in the middle of
-            // an animation (i.e. a fullscreen animation), the frame will not yet be updated.
-            // The size represents our final size we're going for.
-            let scaledSize = self.convertToBacking(size)
-            setSurfaceSize(width: UInt32(scaledSize.width), height: UInt32(scaledSize.height))
-            // Store this size so we can reuse it when backing properties change
+            setSurfaceSize(size, live: false)
+        }
+
+        /// Continuously reflow the terminal model/renderer during custom shell
+        /// layout interactions without publishing every intermediate grid to
+        /// the child PTY.
+        func liveSizeDidChange(_ size: CGSize) {
+            setSurfaceSize(size, live: true)
+        }
+
+        /// Publish the last live geometry to the child. The terminal model and
+        /// renderer are already at this size, so this does not cause a second
+        /// reflow on mouse-up/transition-end.
+        func commitLiveSize() {
+            guard let surface else { return }
+            ghostty_surface_commit_size(surface)
+        }
+
+        private func setSurfaceSize(_ size: CGSize, live: Bool) {
+            // Ghostty wants the actual framebuffer size. Use the supplied
+            // content size rather than the view frame because animations may
+            // not have committed their final AppKit frame yet.
+            let scaledSize = convertToBacking(size)
+            setSurfaceSize(
+                width: UInt32(scaledSize.width),
+                height: UInt32(scaledSize.height),
+                live: live
+            )
             contentSize = size
         }
 
-        private func setSurfaceSize(width: UInt32, height: UInt32) {
+        private func setSurfaceSize(width: UInt32, height: UInt32, live: Bool = false) {
             guard let surface = self.surface else { return }
 
-            // Update our core surface
-            ghostty_surface_set_size(surface, width, height)
+            if live {
+                ghostty_surface_set_size_live(surface, width, height)
+            } else {
+                ghostty_surface_set_size(surface, width, height)
+            }
 
-            // Update our cached size metrics
+            // Update our cached size metrics.
             let size = ghostty_surface_size(surface)
             DispatchQueue.main.async {
                 // DispatchQueue required since this may be called by SwiftUI off

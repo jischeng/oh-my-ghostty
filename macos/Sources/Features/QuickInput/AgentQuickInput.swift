@@ -166,8 +166,9 @@ enum AgentQuickInputMetrics {
 }
 
 enum AgentQuickInputMotion {
+    static let terminalResizeDeferralDuration = 0.34
     static let dock = Animation.spring(
-        response: 0.34,
+        response: terminalResizeDeferralDuration,
         dampingFraction: 0.92,
         blendDuration: 0.1
     )
@@ -575,6 +576,12 @@ struct AgentQuickInputDock<Content: View>: View {
                         send: {
                             controller.sendQueuedQuickInput($0, from: surfaceID)
                         },
+                        edit: {
+                            controller.editQueuedQuickInput($0, from: surfaceID)
+                        },
+                        remove: {
+                            controller.removeQueuedQuickInput($0, from: surfaceID)
+                        },
                         dividerColor: controller.sidebarDividerColor,
                         backgroundColor: backgroundColor,
                         backgroundOpacity: backgroundOpacity
@@ -629,6 +636,8 @@ private struct AgentQuickInputQueueLane: View {
     let surfaceID: UUID
     @ObservedObject var model: AgentQuickInputModel
     let send: (UUID) -> Void
+    let edit: (UUID) -> Void
+    let remove: (UUID) -> Void
     let dividerColor: Color
     let backgroundColor: Color
     let backgroundOpacity: Double
@@ -649,12 +658,8 @@ private struct AgentQuickInputQueueLane: View {
                                     item: item,
                                     isEditing: model.editingQueueItemID == item.id,
                                     send: { send(item.id) },
-                                    edit: {
-                                        model.editQueuedItem(item.id, for: surfaceID)
-                                    },
-                                    remove: {
-                                        model.removeQueuedItem(item.id, for: surfaceID)
-                                    }
+                                    edit: { edit(item.id) },
+                                    remove: { remove(item.id) }
                                 )
                                 .frame(width: AgentQuickInputMetrics.queueCardWidth(
                                     previewCount: item.preview.count,

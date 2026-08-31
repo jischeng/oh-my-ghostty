@@ -36,6 +36,13 @@ enum OMGApplicationEnvironment {
     }
 }
 
+enum TerminalResizeRenderingMode: String, CaseIterable, Identifiable, Sendable {
+    case duringDrag
+    case onRelease
+
+    var id: String { rawValue }
+}
+
 struct OhMyGhosttySettingDescriptor: Codable, Identifiable, Sendable {
     enum ValueType: String, Codable, Sendable {
         case boolean
@@ -338,6 +345,13 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Last committed Agent Quick Input dock height in points.",
             requiresNewWindow: false, category: "keyboard"),
         .init(
+            id: "terminal.resizeRendering", type: .enumeration,
+            defaultValue: TerminalResizeRenderingMode.onRelease.rawValue,
+            allowedValues: TerminalResizeRenderingMode.allCases.map(\.rawValue),
+            minimum: nil, maximum: nil,
+            description: "Choose whether terminal content reflows during a resize or once on release.",
+            requiresNewWindow: false, category: "terminal"),
+        .init(
             id: "general.language", type: .enumeration, defaultValue: "system",
             allowedValues: OhMyGhosttyLanguage.allCases.map(\.rawValue), minimum: nil, maximum: nil,
             description: "Settings display language. system follows the macOS preferred language.",
@@ -470,6 +484,9 @@ final class OhMyGhosttySettings: ObservableObject {
             }
         }
     }
+    @Published var terminalResizeRendering: TerminalResizeRenderingMode = .onRelease {
+        didSet { persist("terminal.resizeRendering", terminalResizeRendering.rawValue) }
+    }
     @Published var restoreSessionsOnLaunch = true {
         didSet { persist("sessions.restoreOnLaunch", restoreSessionsOnLaunch) }
     }
@@ -540,9 +557,10 @@ final class OhMyGhosttySettings: ObservableObject {
             } else {
                 chosen = [:]
             }
-            let migrated = migratePathDisplayDefault()
+            let migratedPathDisplay = migratePathDisplayDefault()
+            let migratedResizeRendering = migrateResizeRenderingSetting()
             applyChosenValues()
-            if migrated { save() }
+            if migratedPathDisplay || migratedResizeRendering { save() }
             lastError = nil
             writeAppearanceOverlay()
             notifyRuntime()
@@ -557,6 +575,18 @@ final class OhMyGhosttySettings: ObservableObject {
         guard chosen[marker] == nil else { return false }
         chosen["tabs.pathDisplay"] = OhMyGhosttyTabPathDisplay.folderName.rawValue
         chosen[marker] = 1
+        return true
+    }
+
+    private func migrateResizeRenderingSetting() -> Bool {
+        let legacyKey = "terminal.smoothResize"
+        guard chosen["terminal.resizeRendering"] == nil,
+              let enabled = chosen.removeValue(forKey: legacyKey) as? Bool else {
+            return false
+        }
+        chosen["terminal.resizeRendering"] = enabled
+            ? TerminalResizeRenderingMode.duringDrag.rawValue
+            : TerminalResizeRenderingMode.onRelease.rawValue
         return true
     }
 
@@ -676,6 +706,10 @@ final class OhMyGhosttySettings: ObservableObject {
                 "keyboard.quickInputHeight",
                 fallback: Double(AgentQuickInputMetrics.defaultHeight),
                 range: 140...480
+            )
+            terminalResizeRendering = enumValue(
+                "terminal.resizeRendering",
+                fallback: .onRelease
             )
             restoreSessionsOnLaunch = boolValue(
                 "sessions.restoreOnLaunch",

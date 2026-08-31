@@ -559,6 +559,81 @@ struct VerticalTabsTests {
         #expect(TerminalShellStyle.resizeOverlap == 7)
     }
 
+    @Test func liveCoreResizeReflowsContinuouslyAndCommitsOnce() {
+        var state = SurfaceCoreResizeState()
+        let initial = CGSize(width: 800, height: 600)
+        let middle = CGSize(width: 790, height: 600)
+        let final = CGSize(width: 760, height: 600)
+        #expect(state.request(initial) == .normal(initial))
+
+        state.beginInteraction(mode: .duringDrag)
+        #expect(state.request(middle) == .live(middle))
+        #expect(state.request(final) == .live(final))
+        #expect(state.appliedSize == final)
+        #expect(state.committedSize == initial)
+        #expect(state.endInteraction() == .commit)
+        #expect(state.committedSize == final)
+        #expect(!state.hasUncommittedLiveSize)
+    }
+
+    @Test func nestedLiveCoreResizeInteractionsRemainBalanced() {
+        var state = SurfaceCoreResizeState()
+        let final = CGSize(width: 700, height: 500)
+        _ = state.request(CGSize(width: 800, height: 600))
+        state.beginInteraction(mode: .duringDrag)
+        state.beginInteraction(mode: .duringDrag)
+        #expect(state.request(final) == .live(final))
+
+        #expect(state.endInteraction() == nil)
+        #expect(state.interactionDepth == 1)
+        #expect(state.endInteraction() == .commit)
+        #expect(state.interactionDepth == 0)
+    }
+
+    @Test func liveResizeStableCommitPreventsDuplicateEndCommit() {
+        var state = SurfaceCoreResizeState()
+        let initial = CGSize(width: 800, height: 600)
+        let final = CGSize(width: 720, height: 600)
+        _ = state.request(initial)
+        state.beginInteraction(mode: .duringDrag)
+        _ = state.request(final)
+
+        #expect(state.commitLiveSizeIfNeeded() == .commit)
+        #expect(state.committedSize == final)
+        #expect(state.endInteraction() == nil)
+    }
+
+    @Test func liveResizeReturningToCommittedSizeDoesNotCommit() {
+        var state = SurfaceCoreResizeState()
+        let initial = CGSize(width: 800, height: 600)
+        _ = state.request(initial)
+        state.beginInteraction(mode: .duringDrag)
+        _ = state.request(CGSize(width: 720, height: 600))
+        #expect(state.request(initial) == .live(initial))
+
+        #expect(!state.hasUncommittedLiveSize)
+        #expect(state.endInteraction() == nil)
+        #expect(state.appliedSize == initial)
+        #expect(state.committedSize == initial)
+    }
+
+    @Test func onReleaseCoreResizeKeepsContentFixedUntilEnd() {
+        var state = SurfaceCoreResizeState()
+        let initial = CGSize(width: 800, height: 600)
+        let middle = CGSize(width: 760, height: 600)
+        let final = CGSize(width: 700, height: 600)
+        _ = state.request(initial)
+        state.beginInteraction(mode: .onRelease)
+
+        #expect(state.request(middle) == nil)
+        #expect(state.request(final) == nil)
+        #expect(state.requestedSize == final)
+        #expect(state.appliedSize == initial)
+        #expect(state.endInteraction() == .normal(final))
+        #expect(state.appliedSize == final)
+        #expect(state.committedSize == final)
+    }
+
     @Test @MainActor func nativeDragPersistsOnlyOnMouseUp() throws {
         var updates: [(CGFloat, Bool)] = []
         let view = VerticalTabResizeInteraction.DragView(

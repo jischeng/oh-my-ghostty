@@ -2720,6 +2720,19 @@ pub fn keyEventIsBinding(
     };
 }
 
+/// Returns whether an encoded key event represents typing that should move the
+/// viewport to the live prompt. Release events can be synthesized when focus
+/// moves between tabs, and macOS Command combinations are application/UI
+/// shortcuts even when an enhanced keyboard protocol encodes them for the PTY.
+/// Neither should disturb a history viewport or its selection.
+fn isViewportTypingEvent(event: input.KeyEvent) bool {
+    if (event.action == .release or event.key.modifier()) return false;
+    if (comptime builtin.target.os.tag.isDarwin()) {
+        if (event.mods.super) return false;
+    }
+    return true;
+}
+
 /// Called for any key events. This handles keybindings, encoding and
 /// sending to the terminal, etc.
 pub fn keyCallback(
@@ -2893,10 +2906,11 @@ pub fn keyCallback(
         return .ignored;
     }
 
-    // If our event is any keypress that isn't a modifier and we generated
-    // some data to send to the pty, then we move the viewport down to the
-    // bottom. We also clear the selection for any key other then modifiers.
-    if (!event.key.modifier()) {
+    // If this is typing that generated data for the PTY, move the viewport to
+    // the bottom and clear the selection according to the configured behavior.
+    // Focus-synthesized releases and macOS Command shortcuts must preserve the
+    // history viewport.
+    if (isViewportTypingEvent(event)) {
         self.renderer_state.mutex.lockUncancelable(global.io());
         defer self.renderer_state.mutex.unlock(global.io());
 
@@ -6251,6 +6265,36 @@ fn presentSurface(self: *Surface) !void {
 /// not available on a particular platform.
 pub fn getProcessInfo(self: *Surface, comptime info: ProcessInfo) ?ProcessInfo.Type(info) {
     return self.io.getProcessInfo(info);
+}
+
+test "viewport typing ignores release events" {
+    const event: input.KeyEvent = .{
+        .action = .release,
+        .key = .key_x,
+        .utf8 = "x",
+    };
+    try std.testing.expect(!isViewportTypingEvent(event));
+}
+
+test "viewport typing accepts ordinary key presses" {
+    const event: input.KeyEvent = .{
+        .action = .press,
+        .key = .key_x,
+        .utf8 = "x",
+    };
+    try std.testing.expect(isViewportTypingEvent(event));
+}
+
+test "viewport typing ignores macOS Command shortcuts" {
+    if (comptime builtin.target.os.tag.isDarwin()) {
+        const event: input.KeyEvent = .{
+            .action = .press,
+            .key = .key_x,
+            .mods = .{ .super = true },
+            .utf8 = "x",
+        };
+        try std.testing.expect(!isViewportTypingEvent(event));
+    }
 }
 
 test "queueIo frees allocated writes in readonly mode" {

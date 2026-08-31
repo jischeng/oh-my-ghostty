@@ -204,6 +204,20 @@ pub fn trimTop(self: *ScrollPhysics, n: f64) void {
     }
 }
 
+/// Repair a stale bottom pin when the terminal's integer viewport has already
+/// moved into history through a path outside scroll physics (for example,
+/// selection work or a focus transition that queues a render). Without this,
+/// the next render-only wake can make `followBottomIfPinned` jump to the prompt.
+pub fn unpinIfViewportMoved(
+    self: *ScrollPhysics,
+    offset: f64,
+    max_offset: f64,
+    viewport_is_bottom: bool,
+) void {
+    if (!self.pinned_to_bottom or viewport_is_bottom) return;
+    self.snapTo(offset, max_offset);
+}
+
 /// When pinned, live output sticks to the bottom with no speed cap.
 pub fn followBottomIfPinned(self: *ScrollPhysics, max_offset: f64) void {
     if (!self.pinned_to_bottom) return;
@@ -634,6 +648,28 @@ test "ScrollPhysics trimTop shifts seek target" {
     p.trimTop(10);
     try testing.expectEqual(@as(f64, 70), p.position);
     try testing.expectEqual(@as(f64, 40), p.seek_target.?);
+}
+
+test "ScrollPhysics history viewport clears a stale bottom pin" {
+    const testing = std.testing;
+
+    var p: ScrollPhysics = .{};
+    p.pinBottom(100);
+    p.unpinIfViewportMoved(20, 100, false);
+    try testing.expect(!p.pinned_to_bottom);
+    try testing.expectEqual(@as(f64, 20), p.position);
+    try testing.expect(!p.step(1.0 / 60.0, 100));
+    try testing.expectEqual(@as(f64, 20), p.position);
+}
+
+test "ScrollPhysics live bottom keeps its bottom pin" {
+    const testing = std.testing;
+
+    var p: ScrollPhysics = .{};
+    p.pinBottom(100);
+    p.unpinIfViewportMoved(20, 100, true);
+    try testing.expect(p.pinned_to_bottom);
+    try testing.expectEqual(@as(f64, 100), p.position);
 }
 
 test "ScrollPhysics syncFromScrollbar history does not pin" {

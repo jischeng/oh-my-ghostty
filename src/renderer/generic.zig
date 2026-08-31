@@ -1551,6 +1551,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 );
             }
 
+            // A render-only wake (copy/selection/focus changes) must not let a
+            // stale physics pin override a terminal viewport already in history.
+            state.scroll.unpinIfViewportMoved(
+                @floatFromInt(sb.offset),
+                max_o,
+                t.screens.active.viewportIsBottom(),
+            );
             state.scroll.followBottomIfPinned(max_o);
             const moving = state.scroll.step(dt, max_o);
             const target: usize = @intCast(state.scroll.integerRow(max_o));

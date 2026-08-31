@@ -934,6 +934,8 @@ palette: Palette = .{},
 /// - `keystroke` If set, scroll the surface to the bottom when the user
 ///   presses a key that results in data being sent to the PTY (basically
 ///   anything but modifiers or keybinds that are processed by Ghostty).
+///   On macOS, Command shortcuts preserve a history viewport even when an
+///   enhanced keyboard protocol forwards the shortcut to the PTY.
 ///
 /// - `output` If set, scroll the surface to the bottom if there is new data
 ///   to display (e.g., when new lines are printed to the terminal).

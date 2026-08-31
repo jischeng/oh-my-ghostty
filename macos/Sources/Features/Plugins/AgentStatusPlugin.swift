@@ -71,7 +71,7 @@ enum AgentHookInstallationState: Equatable, Sendable {
 
 struct AgentHookInstaller {
     static let marker = "_omg_agent_status"
-    static let hookVersion = 7
+    static let hookVersion = 8
     static let detectorMarkerVersion = 1
     static let didChangeNotification = Notification.Name(
         "com.oh-my-ghostty.agentIntegrationDidChange"
@@ -1065,7 +1065,7 @@ import { closeSync, openSync, writeSync } from "node:fs";
 
 const contextId = `omg-agent-pi-${process.pid}`;
 const scope = process.env.SSH_CONNECTION ? "remote" : "local";
-function report(state?: string, end = false, context?: any, attention?: string) {
+function report(state?: string, end = false, context?: any, attention?: string, phase?: string) {
   let fd: number | undefined;
   try {
     const raw = context?.sessionManager?.getSessionId?.();
@@ -1079,10 +1079,11 @@ function report(state?: string, end = false, context?: any, attention?: string) 
         String(rawCwd).length <= 4096 && !String(rawCwd).includes("\0")
       ? `;omg_cwd=${encodeURIComponent(String(rawCwd))}` : "";
     const attentionKind = attention ? `;omg_attention=${attention}` : "";
+    const activityPhase = phase ? `;omg_phase=${phase};message=Background%20work%20running` : "";
     fd = openSync("/dev/tty", "w");
     const sequence = end
       ? `\u001b]3008;end=${contextId};type=app;omg_agent=pi;omg_scope=${scope};omg_liveness=pid${conversation}\u0007`
-      : `\u001b]3008;start=${contextId};type=app;omg_agent=pi;omg_scope=${scope};omg_liveness=pid;omg_state=${state}${conversation}${sessionCwd}${attentionKind}\u0007`;
+      : `\u001b]3008;start=${contextId};type=app;omg_agent=pi;omg_scope=${scope};omg_liveness=pid;omg_state=${state}${conversation}${sessionCwd}${attentionKind}${activityPhase}\u0007`;
     writeSync(fd, sequence);
   } catch {
   } finally {
@@ -1093,25 +1094,126 @@ function report(state?: string, end = false, context?: any, attention?: string) 
 }
 
 export default function (pi: any) {
-  pi.on("session_start", async (_event: any, context: any) => report("idle", false, context));
-  pi.on("before_agent_start", async (_event: any, context: any) => report("working", false, context));
-  pi.on("agent_start", async (_event: any, context: any) => report("working", false, context));
+  let currentContext: any;
+  let closing = false;
+  let requestSequence = 0;
+  const subagentRuns = new Set<string>();
+  const backgroundTasks = new Set<string>();
+  const backgroundToolNames = new Set([
+    "bg_run", "bg_run_pi_attested", "bg_delegate",
+    "fusion_reason", "fusion_investigate", "fusion_research", "fusion_validate",
+  ]);
+
+  const activeBackgroundCount = () => subagentRuns.size + backgroundTasks.size;
+  const updateSettledStatus = (context = currentContext) => {
+    currentContext = context ?? currentContext;
+    if (closing || !currentContext?.isIdle?.()) return;
+    report(activeBackgroundCount() > 0 ? "working" : "done", false, currentContext,
+      undefined, activeBackgroundCount() > 0 ? "background" : undefined);
+  };
+  const validID = (value: any) => typeof value === "string" && value.length > 0 && value.length <= 256;
+  const refreshBackgroundTasks = () => {
+    const requestId = `omg-agent-status-${process.pid}-${++requestSequence}`;
+    const unsubscribe = pi.events.on("pi-background-tasks:response:v1", (response: any) => {
+      if (response?.request_id !== requestId) return;
+      unsubscribe?.();
+      if (!response.ok || !Array.isArray(response.result?.tasks)) return;
+      backgroundTasks.clear();
+      for (const task of response.result.tasks) {
+        if (task?.status === "running" && validID(task.id)) backgroundTasks.add(task.id);
+      }
+      updateSettledStatus();
+    });
+    pi.events.emit("pi-background-tasks:request:v1", {
+      schema_version: "pi-background-tasks.extension-request.v1",
+      request_id: requestId,
+      operation: "status",
+      payload: {},
+    });
+  };
+  const refreshSubagents = () => {
+    const requestId = `omg-agent-status-${process.pid}-${++requestSequence}`;
+    const replyEvent = `subagents:rpc:v1:reply:${requestId}`;
+    const unsubscribe = pi.events.on(replyEvent, (reply: any) => {
+      unsubscribe?.();
+      const runs = reply?.success ? reply.data?.asyncSnapshot?.runs : undefined;
+      if (!Array.isArray(runs)) return;
+      subagentRuns.clear();
+      for (const run of runs) {
+        if ((run?.state === "queued" || run?.state === "running") && validID(run.id)) {
+          subagentRuns.add(run.id);
+        }
+      }
+      updateSettledStatus();
+    });
+    pi.events.emit("subagents:rpc:v1:request", {
+      version: 1,
+      requestId,
+      method: "status",
+      params: {},
+    });
+  };
+
+  pi.events.on("subagent:async-started", (event: any) => {
+    if (!validID(event?.id)) return;
+    subagentRuns.add(event.id);
+    updateSettledStatus();
+  });
+  pi.events.on("subagent:async-complete", (event: any) => {
+    const id = event?.runId ?? event?.id;
+    if (validID(id)) subagentRuns.delete(id);
+    updateSettledStatus();
+  });
+  pi.events.on("subagents:rpc:v1:ready", () => refreshSubagents());
+  pi.events.on("pi-background-tasks:terminal:v1", (event: any) => {
+    if (validID(event?.task?.id)) backgroundTasks.delete(event.task.id);
+    updateSettledStatus();
+  });
+
+  pi.on("session_start", async (_event: any, context: any) => {
+    closing = false;
+    currentContext = context;
+    report("idle", false, context);
+    refreshBackgroundTasks();
+  });
+  pi.on("before_agent_start", async (_event: any, context: any) => {
+    currentContext = context;
+    report("working", false, context);
+  });
+  pi.on("agent_start", async (_event: any, context: any) => {
+    currentContext = context;
+    report("working", false, context);
+  });
   pi.on("tool_execution_start", async (event: any, context: any) => {
+    currentContext = context;
     const waitingTools = new Set(["ask_user_question", "ask_question", "question", "confirm"]);
     const waiting = waitingTools.has(String(event.toolName));
     report(waiting ? "needsAttention" : "working", false, context, waiting ? "question" : undefined);
   });
-  pi.on("tool_execution_end", async (_event: any, context: any) => report("working", false, context));
+  pi.on("tool_execution_end", async (event: any, context: any) => {
+    currentContext = context;
+    const task = event?.result?.details?.task;
+    if (!event?.isError && task?.status === "running" && validID(task.id)) {
+      backgroundTasks.add(task.id);
+    }
+    if (!event?.isError && backgroundToolNames.has(String(event?.toolName))) {
+      refreshBackgroundTasks();
+    }
+    report("working", false, context);
+  });
   pi.on("agent_settled", async (_event: any, context: any) => {
     // A previous run can settle after Esc just as a resumed prompt starts.
     // Never let that stale completion overwrite the newer working state.
     if (!context.isIdle()) return;
-    report("done", false, context);
+    updateSettledStatus(context);
   });
   pi.on("session_shutdown", async (_event: any, context: any) => {
-    // OMG intentionally treats ending a still-working context as an unexpected
-    // process loss. Mark normal Pi teardown complete before ending the context.
-    report("done", false, context);
+    closing = true;
+    subagentRuns.clear();
+    backgroundTasks.clear();
+    // Session shutdown is lifecycle cleanup, not task completion. Clear Pi's
+    // identity so Ctrl-D, /new, /resume, /fork and /reload leave no done badge.
+    report("idle", false, context);
     report(undefined, true, context);
   });
 }
@@ -1404,9 +1506,13 @@ struct AgentContextSignalReducer: Sendable {
             let attentionKind = state == .needsAttention
                 ? metadata["omg_attention"].flatMap(TabAttentionKind.init)
                 : nil
+            let phase = state == .working
+                ? metadata["omg_phase"].flatMap(TabActivityPhase.init)
+                : nil
             let activity = TabActivity(
                 source: agent.rawValue,
                 state: state,
+                phase: phase,
                 attentionKind: attentionKind,
                 label: agent.displayName,
                 message: metadata["message"]?.removingPercentEncoding,

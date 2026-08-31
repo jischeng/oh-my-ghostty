@@ -33,6 +33,10 @@ enum TabActivityState: String, Codable, CaseIterable, Sendable {
     case error
 }
 
+enum TabActivityPhase: String, Codable, Sendable {
+    case background
+}
+
 struct PluginTabIcon: Codable, Equatable, Sendable {
     enum Kind: String, Codable, Sendable {
         case systemSymbol
@@ -46,6 +50,7 @@ struct PluginTabIcon: Codable, Equatable, Sendable {
 struct TabActivity: Equatable, Sendable {
     let source: String
     let state: TabActivityState
+    let phase: TabActivityPhase?
     let attentionKind: TabAttentionKind?
     let label: String?
     let message: String?
@@ -56,6 +61,7 @@ struct TabActivity: Equatable, Sendable {
     init(
         source: String,
         state: TabActivityState,
+        phase: TabActivityPhase? = nil,
         attentionKind: TabAttentionKind? = nil,
         label: String?,
         message: String?,
@@ -65,6 +71,7 @@ struct TabActivity: Equatable, Sendable {
     ) {
         self.source = source
         self.state = state
+        self.phase = phase
         self.attentionKind = attentionKind
         self.label = label
         self.message = message

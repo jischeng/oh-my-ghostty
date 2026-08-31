@@ -259,7 +259,9 @@ Wire states map to host activity:
 
 The in-tree OSC adapter can additionally retain an `idle` `TabActivity` so the
 agent identity icon remains visible while its TUI is connected but not running a
-turn. This is not a new v1 wire state.
+turn. A `working` activity may carry the internal `background` phase when Pi's
+foreground loop is idle but package-owned asynchronous work remains. Neither is
+a new v1 process-plugin wire state.
 
 Validation includes session existence, owner, increasing revision, progress
 `0...1`, bounded strings, bounded TTL (maximum 24 hours), and safe icon names.
@@ -294,8 +296,11 @@ Adapters emit OSC 3008 contexts with IDs
 `omg-agent-<allowlisted-agent>-<numeric-instance-id>`, `type=app`, a bounded
 `omg_state`, `omg_scope=local|remote`, `omg_liveness=pid|pgid`, optional
 validated `omg_conversation`, optional validated `omg_cwd` (the session's
-own project directory, used for directory-scoped resume), and optional
-`omg_attention=question|permission`. Pi-compatible and other in-process Plugin
+own project directory, used for directory-scoped resume), optional
+`omg_attention=question|permission`, and optional `omg_phase=background` for a
+`working` Pi context whose foreground loop is idle while an owned
+`pi-subagents` run or `pi-background-tasks` task remains active. Pi-compatible
+and other in-process Plugin
 adapters use their process PID as the instance/liveness identity; shell/config
 hooks and host foreground synthesis use the process-group ID. The host verifies
 that ID and metadata name the same built-in agent, then associates the event
@@ -317,7 +322,9 @@ evicts the oldest identity while preserving the newest presentation, and later
 signals for an evicted identity are ignored. An `end` or failed local liveness
 check while the current state is
 `working`/`needsAttention` becomes a terminal `error` rather than silently
-clearing; normal completion remains `done`. Tab selection and pane focus do not
+clearing; normal completion remains `done`. Pi `session_shutdown` first returns
+the context to `idle` and then ends it, so Ctrl-D and session replacement clear
+identity instead of leaving a false completion badge. Tab selection and pane focus do not
 acknowledge either state. Only mouse click or keyboard input delivered to the
 owning focused terminal clears `done`/`error`. These events can change
 only host-owned tab presentation; they do not authorize terminal input,

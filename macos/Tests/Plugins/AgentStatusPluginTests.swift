@@ -51,6 +51,33 @@ struct AgentStatusPluginTests {
         }
     }
 
+    @Test func mapsBackgroundPhaseOnlyForWorkingActivity() throws {
+        var reducer = AgentContextSignalReducer()
+        guard case .set(let background) = reducer.consume(.init(
+            action: .start,
+            id: "omg-agent-pi-41",
+            metadata: "type=app;omg_agent=pi;omg_scope=local;" +
+                "omg_state=working;omg_phase=background"
+        )) else {
+            Issue.record("Expected background working activity")
+            return
+        }
+        #expect(background.state == .working)
+        #expect(background.phase == .background)
+
+        guard case .set(let done) = reducer.consume(.init(
+            action: .start,
+            id: "omg-agent-pi-41",
+            metadata: "type=app;omg_agent=pi;omg_scope=local;" +
+                "omg_state=done;omg_phase=background"
+        )) else {
+            Issue.record("Expected done activity")
+            return
+        }
+        #expect(done.state == .done)
+        #expect(done.phase == nil)
+    }
+
     @Test func boundsTrackedAgentContextsAndEvictsOldest() {
         var reducer = AgentContextSignalReducer()
         let overflow = 5
@@ -576,6 +603,25 @@ struct AgentStatusPluginTests {
         #expect(error.message == "Agent process exited unexpectedly.")
         #expect(!reducer.requiresForegroundValidation)
         #expect(reducer.acknowledgeTerminalState() == .clear)
+    }
+
+    @Test func normalShutdownClearsIdentityWithoutCompletion() throws {
+        var reducer = AgentContextSignalReducer()
+        _ = reducer.consume(signal(
+            agent: .pi,
+            state: "done",
+            instance: 301
+        ))
+        _ = reducer.consume(signal(
+            agent: .pi,
+            state: "idle",
+            instance: 301
+        ))
+        #expect(reducer.consume(.init(
+            action: .end,
+            id: "omg-agent-pi-301",
+            metadata: "type=app;omg_agent=pi;omg_scope=local"
+        )) == .clear)
     }
 
     @Test func unexpectedHookEndReportsErrorUntilAcknowledged() throws {
@@ -1185,8 +1231,12 @@ struct AgentStatusPluginTests {
         #expect(source.contains("omg_cwd="))
         #expect(source.contains("agent_settled"))
         #expect(source.contains("if (!context.isIdle()) return"))
-        #expect(source.contains("Mark normal Pi teardown complete"))
-        #expect(source.contains("report(\"done\", false, context);\n    report(undefined, true, context);"))
+        #expect(source.contains("subagent:async-started"))
+        #expect(source.contains("subagent:async-complete"))
+        #expect(source.contains("pi-background-tasks:terminal:v1"))
+        #expect(source.contains("omg_phase=${phase}"))
+        #expect(source.contains("Session shutdown is lifecycle cleanup, not task completion"))
+        #expect(source.contains("report(\"idle\", false, context);\n    report(undefined, true, context);"))
         #expect(source.contains("ask_user_question"))
         let mode = try #require(
             FileManager.default.attributesOfItem(atPath: home.appendingPathComponent(

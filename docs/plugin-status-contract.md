@@ -40,7 +40,7 @@ Each Surface reducer keeps one ordered collection of at most 32 active Agent con
 | State | Meaning |
 | --- | --- |
 | `idle` | No visible activity state. |
-| `working` | The agent is actively processing or using a tool. |
+| `working` | The agent session has active foreground or background work. |
 | `done` | Work finished without requiring urgent action. |
 | `needsAttention` | The agent is blocked on the user; optional subtype is `question` or `permission`. |
 | `error` | The agent or task failed. |
@@ -49,6 +49,7 @@ Each Surface reducer keeps one ordered collection of at most 32 active Agent con
 
 - source/plugin id
 - state
+- optional activity phase (`background` while the foreground Pi loop is idle but owned asynchronous work remains)
 - optional label
 - optional message and detail
 - optional normalized progress (`0...1`)
@@ -71,7 +72,7 @@ A plugin may request a system symbol or a host-bundled asset by name. Names are 
 2. host metadata provider icon
 3. terminal fallback
 
-The host keeps the existing left icon slot. When an Agent context is active, its validated bundled brand glyph replaces terminal/cloud. Identity, title and ring follow only the focused pane; non-focused panes may contribute a trailing attention/error/done indicator but never replace focused identity. Idle has no ring; indeterminate working uses a rotating quarter-circle indicator and determinate progress uses the normalized ring fraction. Waiting, completed and failed states additionally use the existing trailing status slot. Questions use `questionmark.bubble.fill`, permission approvals use `lock.shield.fill`, and an untyped attention event keeps the generic exclamation symbol. Normal completion reports `done` even when its Tab is already focused. Tab selection and pane focus alone never acknowledge terminal states; only mouse click or keyboard input delivered to the owning focused terminal clears `done`/`error`. Confirmed loss of the declared PID or process group while `working` or `needsAttention` becomes `error` instead of disappearing; foreground-PGID changes alone never fail a live PID-backed Plugin context. Clearing the Agent context after acknowledgement restores the canonical SSH cloud or terminal icon. Notification and Dock badge behavior are separate consumers controlled by host settings.
+The host keeps the existing left icon slot. When an Agent context is active, its validated bundled brand glyph replaces terminal/cloud. Identity, title and ring follow only the focused pane; non-focused panes may contribute a trailing attention/error/done indicator but never replace focused identity. Idle has no ring; indeterminate working uses a rotating quarter-circle indicator and determinate progress uses the normalized ring fraction. Foreground work uses the accent color; the optional `background` phase uses purple so an idle parent with live child work is distinguishable without being shown as completed or user-blocked. Waiting, completed and failed states additionally use the existing trailing status slot. Questions use `questionmark.bubble.fill`, permission approvals use `lock.shield.fill`, and an untyped attention event keeps the generic exclamation symbol. Normal completion reports `done` even when its Tab is already focused. Tab selection and pane focus alone never acknowledge terminal states; only mouse click or keyboard input delivered to the owning focused terminal clears `done`/`error`. Confirmed loss of the declared PID or process group while `working` or `needsAttention` becomes `error` instead of disappearing; foreground-PGID changes alone never fail a live PID-backed Plugin context. Clearing the Agent context after acknowledgement restores the canonical SSH cloud or terminal icon. Notification and Dock badge behavior are separate consumers controlled by host settings.
 
 ## Adapter Responsibilities
 
@@ -91,7 +92,8 @@ Current mappings are:
 | UserPromptSubmit / agent_start | `working` |
 | PreToolUse / PostToolUse | `working` |
 | PermissionRequest / permission prompt / question tool | `needsAttention` |
-| Stop / agent_settled | `done` |
+| Stop / agent_settled with no owned async work | `done` |
+| Pi agent_settled with live subagent/background work | `working`, phase `background` |
 | SessionEnd / session_shutdown | clear agent identity |
 
 It does not parse terminal text or mutate the Sidebar. The host converts normalized activity into the shared tab presentation; adding a new hook adapter should not require another status renderer.

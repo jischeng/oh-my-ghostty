@@ -1882,7 +1882,8 @@ private struct AgentTabIconView: View {
     private func ringColor(_ activity: TabActivity) -> Color {
         switch activity.state {
         case .idle: .clear
-        case .working: .accentColor
+        case .working:
+            activity.phase == .background ? .purple : .accentColor
         case .done: .green
         case .needsAttention: .orange
         case .error: .red

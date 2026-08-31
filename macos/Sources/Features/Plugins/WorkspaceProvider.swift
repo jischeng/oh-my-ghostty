@@ -17,6 +17,10 @@ struct PaneSessionContext: Equatable, Sendable {
         let connectionID: String
         let alias: String
         let replay: SSHReplayDescriptor?
+        /// Non-nil only when the host inferred a plain interactive `ssh`
+        /// process from the Surface foreground process group. Typed `omg +ssh`
+        /// lifecycles keep this nil and remain authoritative.
+        let localProcessGroupID: Int?
     }
 
     enum State: Equatable, Sendable {
@@ -105,8 +109,24 @@ struct PaneSessionContext: Equatable, Sendable {
     }
 
     var tabIconSystemName: String {
-        if case .sshReady = state { return "cloud" }
-        return "terminal"
+        switch state {
+        case .local: "terminal"
+        case .sshConnecting, .sshReady: "cloud"
+        }
+    }
+
+    var inferredSSHProcessGroupID: Int? {
+        switch state {
+        case .local:
+            nil
+        case .sshConnecting(let ssh), .sshReady(let ssh, _):
+            ssh.localProcessGroupID
+        }
+    }
+
+    var isSSHSession: Bool {
+        if case .local = state { return false }
+        return true
     }
 
     mutating func updateLocalMetadata(
@@ -126,6 +146,93 @@ struct PaneSessionContext: Equatable, Sendable {
         guard next != local else { return }
         local = next
         revision &+= 1
+    }
+
+    /// Marks a simple interactive OpenSSH process observed directly in the
+    /// Surface foreground process group. This makes ordinary `ssh host`
+    /// sessions participate in remote presentation without rewriting the
+    /// user's command or requiring a shell alias.
+    mutating func observeForegroundSSH(
+        alias: String,
+        processGroupID: Int,
+        currentWorkingDirectory: String?,
+        currentTerminalTitle: String,
+        remoteWorkingDirectory: String? = nil
+    ) {
+        guard processGroupID > 0, SSHPlugin.validAlias(alias) else { return }
+        let activeSSH: SSH? = switch state {
+        case .local:
+            nil
+        case .sshConnecting(let ssh), .sshReady(let ssh, _):
+            ssh
+        }
+        // Never replace an authenticated `omg +ssh` lifecycle with heuristic
+        // foreground data.
+        guard activeSSH?.localProcessGroupID != nil || activeSSH == nil else {
+            return
+        }
+        let isCurrentConnection = activeSSH?.localProcessGroupID == processGroupID
+        if !isCurrentConnection, case .local = state {
+            local = .init(
+                workingDirectory: currentWorkingDirectory ?? local.workingDirectory,
+                terminalTitle: currentTerminalTitle.isEmpty
+                    ? local.terminalTitle
+                    : currentTerminalTitle
+            )
+        }
+        let ssh = SSH(
+            connectionID: "omg-ssh-foreground-\(processGroupID)",
+            alias: alias,
+            replay: nil,
+            localProcessGroupID: processGroupID
+        )
+        let next: State = if let remoteWorkingDirectory,
+                             !remoteWorkingDirectory.isEmpty,
+                             !remoteWorkingDirectory.contains("\0") {
+            .sshReady(ssh, workingDirectory: remoteWorkingDirectory)
+        } else {
+            .sshConnecting(ssh)
+        }
+        guard state != next else { return }
+        state = next
+        revision &+= 1
+    }
+
+    /// Uses a validated remote Agent cwd to complete a foreground-inferred SSH
+    /// session when ordinary SSH has no typed remote prompt lifecycle.
+    mutating func applyInferredRemoteWorkingDirectory(_ workingDirectory: String) {
+        guard !workingDirectory.isEmpty,
+              !workingDirectory.contains("\0") else { return }
+        switch state {
+        case .sshConnecting(let ssh) where ssh.localProcessGroupID != nil:
+            state = .sshReady(ssh, workingDirectory: workingDirectory)
+            revision &+= 1
+        case .sshReady(let ssh, let current) where ssh.localProcessGroupID != nil:
+            guard current != workingDirectory else { return }
+            state = .sshReady(ssh, workingDirectory: workingDirectory)
+            revision &+= 1
+        case .local, .sshConnecting, .sshReady:
+            return
+        }
+    }
+
+    /// Ends only the foreground-inferred SSH connection for this process
+    /// group. A stale observation can therefore never clear a newer SSH
+    /// connection on the same Surface.
+    @discardableResult
+    mutating func finishForegroundSSH(
+        processGroupID: Int,
+        currentWorkingDirectory: String?,
+        currentTerminalTitle: String
+    ) -> Bool {
+        guard inferredSSHProcessGroupID == processGroupID else { return false }
+        if let currentWorkingDirectory, !currentWorkingDirectory.isEmpty {
+            local.workingDirectory = currentWorkingDirectory
+        }
+        staleRemoteTerminalTitle = currentTerminalTitle
+        state = .local
+        revision &+= 1
+        return true
     }
 
     mutating func apply(
@@ -151,7 +258,8 @@ struct PaneSessionContext: Equatable, Sendable {
             let ssh = SSH(
                 connectionID: signal.id,
                 alias: alias,
-                replay: sshReplay ?? activeSSH?.replay
+                replay: sshReplay ?? activeSSH?.replay,
+                localProcessGroupID: nil
             )
             let isCurrentConnection = activeSSH != nil
             if !isCurrentConnection, case .local = state {
@@ -236,6 +344,70 @@ struct PaneSessionContext: Equatable, Sendable {
                   !parts[1].isEmpty else { return }
             result[String(parts[0])] = String(parts[1])
         }
+    }
+}
+
+enum ForegroundSSHProcessObservation: Equatable, Sendable {
+    case interactive(alias: String)
+    case ambiguous
+    case none
+}
+
+/// Conservative host-side recognition for a foreground OpenSSH client. This
+/// intentionally mirrors `+ssh`'s interactive-destination policy: forwarding,
+/// control, no-command, and explicit remote-command invocations are not
+/// classified as interactive panes.
+enum ForegroundSSHProcessDetector {
+    static func observe(in commandLines: String) -> ForegroundSSHProcessObservation {
+        var sawSSHProcess = false
+        for rawLine in commandLines.split(whereSeparator: \.isNewline) {
+            let argv = rawLine.split(whereSeparator: \.isWhitespace).map(String.init)
+            guard let executable = argv.first,
+                  executable.split(separator: "/").last == "ssh" else { continue }
+            sawSSHProcess = true
+            guard let destination = interactiveDestination(Array(argv.dropFirst())),
+                  let alias = destinationLabel(destination) else { continue }
+            return .interactive(alias: alias)
+        }
+        return sawSSHProcess ? .ambiguous : .none
+    }
+
+    private static func interactiveDestination(_ args: [String]) -> String? {
+        let optionsWithValue = "BbcDEeFIiJLlmOoPpQRSWw"
+        let noninteractiveOptions = "GNOQTVWfn"
+        var index = 0
+        while index < args.count {
+            let argument = args[index]
+            if argument == "--" {
+                index += 1
+                break
+            }
+            guard argument.first == "-", argument != "-" else { break }
+            guard let firstOption = argument.dropFirst().first else { return nil }
+            if noninteractiveOptions.contains(firstOption) { return nil }
+            if optionsWithValue.contains(firstOption) {
+                if argument.count == 2 {
+                    index += 1
+                    guard index < args.count else { return nil }
+                }
+                index += 1
+                continue
+            }
+            if argument.dropFirst().contains(where: noninteractiveOptions.contains) {
+                return nil
+            }
+            index += 1
+        }
+        guard index < args.count, index + 1 == args.count else { return nil }
+        return args[index]
+    }
+
+    private static func destinationLabel(_ destination: String) -> String? {
+        let label = destination.lastIndex(of: "@").map {
+            String(destination[destination.index(after: $0)...])
+        } ?? destination
+        guard SSHPlugin.validAlias(label) else { return nil }
+        return label
     }
 }
 

@@ -701,6 +701,31 @@ struct AgentStatusPluginTests {
             metadata: "type=remote;targethost=cloud;cwd=%2Ftmp"
         ))
         #expect(update == .clear)
+        #expect(!reducer.hasRemoteActivity)
+    }
+
+    @Test func SSHDisconnectClearsRemoteAgentAndRestoresLocalContext() throws {
+        var reducer = AgentContextSignalReducer()
+        _ = reducer.consume(signal(
+            agent: .codex,
+            state: "idle",
+            instance: 399,
+            scope: "local"
+        ))
+        _ = reducer.consume(signal(
+            agent: .pi,
+            state: "working",
+            instance: 400,
+            scope: "remote"
+        ))
+        #expect(reducer.hasRemoteActivity)
+        guard case .set(let restored) = reducer.clearRemoteActivities() else {
+            Issue.record("Expected local Agent context after SSH disconnect")
+            return
+        }
+        #expect(restored.source == SupportedAgent.codex.rawValue)
+        #expect(restored.state == .idle)
+        #expect(!reducer.hasRemoteActivity)
     }
 
     @Test func nestedAgentInterruptionRestoresPreviousAfterAcknowledgement() throws {

@@ -1429,6 +1429,7 @@ struct AgentContextSignalReducer: Sendable {
     private var activities: [Record] = []
 
     var trackedContextCount: Int { activities.count }
+    var hasRemoteActivity: Bool { activities.contains { $0.scope == .remote } }
 
     var validationIdentity: AgentLivenessIdentity? {
         guard let current = currentRecord,
@@ -1598,6 +1599,13 @@ struct AgentContextSignalReducer: Sendable {
         guard signal.action == .start,
               signal.id.hasPrefix("omg-ssh-"),
               Self.metadata(signal.metadata)["cwd"] != nil else { return nil }
+        return clearRemoteActivities()
+    }
+
+    /// Removes all remote-owned presentation after the local SSH transport is
+    /// known to have ended. Local nested contexts, if any, become visible
+    /// again instead of being discarded with the remote connection.
+    mutating func clearRemoteActivities() -> AgentActivityUpdate? {
         let previousID = currentRecord?.id
         activities.removeAll { $0.scope == .remote }
         guard previousID != currentRecord?.id else { return nil }

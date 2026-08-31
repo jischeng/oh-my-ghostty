@@ -104,6 +104,72 @@ struct WorkspaceProviderTests {
         #expect(filesystem.descriptor.workingDirectory == "/tmp/project")
     }
 
+    @Test func recognizesOnlyInteractiveForegroundSSHCommands() {
+        #expect(ForegroundSSHProcessDetector.observe(
+            in: "ssh cloud\n"
+        ) == .interactive(alias: "cloud"))
+        #expect(ForegroundSSHProcessDetector.observe(
+            in: "/usr/bin/ssh -p 2222 -J jump user@example.com\n"
+        ) == .interactive(alias: "example.com"))
+        #expect(ForegroundSSHProcessDetector.observe(
+            in: "ssh -W host:22 jump\nssh cloud\n"
+        ) == .interactive(alias: "cloud"))
+        #expect(ForegroundSSHProcessDetector.observe(
+            in: "ssh cloud uptime\n"
+        ) == .ambiguous)
+        #expect(ForegroundSSHProcessDetector.observe(
+            in: "ssh -N cloud\n"
+        ) == .ambiguous)
+        #expect(ForegroundSSHProcessDetector.observe(
+            in: "/bin/cat ssh cloud\n/usr/bin/ssh-agent -l\n"
+        ) == .none)
+    }
+
+    @Test func foregroundSSHAutomaticallyTransitionsBackToLocal() {
+        var context = PaneSessionContext(
+            workingDirectory: "/Users/test/code",
+            terminalTitle: "~/code"
+        )
+        context.observeForegroundSSH(
+            alias: "cloud",
+            processGroupID: 401,
+            currentWorkingDirectory: "/Users/test/code",
+            currentTerminalTitle: "~/code"
+        )
+        guard case .sshConnecting(let connecting) = context.state else {
+            Issue.record("Expected inferred SSH connecting state")
+            return
+        }
+        #expect(connecting.alias == "cloud")
+        #expect(connecting.localProcessGroupID == 401)
+        #expect(context.inferredSSHProcessGroupID == 401)
+        #expect(context.tabIconSystemName == "cloud")
+
+        context.applyInferredRemoteWorkingDirectory("/home/test/project")
+        guard case .sshReady(let ready, let remoteCWD) = context.state else {
+            Issue.record("Expected inferred SSH ready state")
+            return
+        }
+        #expect(ready.alias == "cloud")
+        #expect(remoteCWD == "/home/test/project")
+        let staleDisconnect = context.finishForegroundSSH(
+            processGroupID: 402,
+            currentWorkingDirectory: "/Users/test/code",
+            currentTerminalTitle: "remote title"
+        )
+        #expect(!staleDisconnect)
+        #expect(context.isSSHSession)
+        let activeDisconnect = context.finishForegroundSSH(
+            processGroupID: 401,
+            currentWorkingDirectory: "/Users/test/code",
+            currentTerminalTitle: "remote title"
+        )
+        #expect(activeDisconnect)
+        #expect(context.state == .local)
+        #expect(context.workingDirectory == "/Users/test/code")
+        #expect(context.tabIconSystemName == "terminal")
+    }
+
     @Test func paneSessionLifecycleRestoresLocalContextOnDisconnect() {
         var context = PaneSessionContext(
             workingDirectory: "/Users/test/code",
@@ -126,7 +192,8 @@ struct WorkspaceProviderTests {
         #expect(context.workingDirectory == "/Users/test/code")
         #expect(context.presentationTitle == "~/code")
         #expect(context.remoteTabBreadcrumb == nil)
-        #expect(context.tabIconSystemName == "terminal")
+        #expect(context.tabIconSystemName == "cloud")
+        #expect(connecting.localProcessGroupID == nil)
 
         context.apply(
             .init(

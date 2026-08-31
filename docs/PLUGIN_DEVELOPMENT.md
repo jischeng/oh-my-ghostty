@@ -313,9 +313,16 @@ for an enabled integration. Local startup then gets a four-second foreground
 handoff grace, after which validation keeps the identity while its declared PID
 or process group exists and clears it when that identity exits. A Plugin PID is
 not compared directly with the foreground process-group ID, so wrappers and
-child tool execution cannot create a false `error` while the Agent is alive. In SSH, no
-local process-name fallback is attempted; the next authenticated remote
-Fish/bash/zsh prompt clears orphaned remote agent state.
+child tool execution cannot create a false `error` while the Agent is alive. In
+SSH, the host never guesses a remote Agent from local process names. It does
+conservatively recognize a foreground interactive OpenSSH client (`ssh host`,
+excluding forwarding/control/no-command modes and explicit remote commands) as
+the pane transport. The destination becomes an inferred SSH context, a validated
+remote Agent `omg_cwd` can complete its remote workspace, and a foreground
+process-group transition back to the local shell atomically clears all remote
+Agent presentation and resume state. A matching typed `omg +ssh` end performs
+the same cleanup; the next authenticated remote Fish/bash/zsh prompt remains an
+additional orphan-recovery signal.
 Unique instance IDs prevent an old `end` from clearing a newer same-agent
 session. Each Surface keeps one ordered, 32-context reducer; exceeding the bound
 evicts the oldest identity while preserving the newest presentation, and later
@@ -392,9 +399,11 @@ Each Surface also persists an `SSHResumeDescriptor` (validated SSH replay argv,
 last ready remote cwd, and pre-SSH local cwd) whenever an `omg +ssh` connection
 is active, independent of any Agent session. On restore, panes without a
 usable Agent resume descriptor replay `+ssh` with the recorded remote cwd and
-survival wrapper, so plain SSH tabs reconnect instead of degrading to a local
-shell. The descriptor clears when the connection ends, matching the split
-replay lifecycle.
+survival wrapper, so agent-free `omg +ssh` tabs reconnect instead of degrading
+to a local shell. The descriptor clears when the connection ends, matching the
+split replay lifecycle. A directly typed ordinary `ssh host` is recognized at
+runtime from its foreground process group but has no validated replay argv, so
+it is deliberately not made restorable or silently rewritten through `+ssh`.
 
 Conversation identity comes from hook stdin (`session_id`), Pi-compatible
 `sessionManager.getSessionId()`, OpenCode events, Reasonix's bounded machine JSON

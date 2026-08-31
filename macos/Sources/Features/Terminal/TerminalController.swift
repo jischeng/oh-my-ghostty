@@ -856,6 +856,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                         workingDirectory: surface.pwd,
                         terminalTitle: surface.title
                     )
+                    let wasSSHSession = context.isSSHSession
                     let sshReplay: SSHReplayDescriptor? = if signal.action == .start,
                        signal.id.hasPrefix("omg-ssh-") {
                         SSHReplayStore.load(connectionID: signal.id)
@@ -868,10 +869,19 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                         currentTerminalTitle: surface.title,
                         sshReplay: sshReplay
                     )
+                    if let session = AgentContextSignalReducer.sessionSignal(from: signal),
+                       session.scope == .remote,
+                       let workingDirectory = session.workingDirectory {
+                        context.applyInferredRemoteWorkingDirectory(workingDirectory)
+                    }
+                    let didEndSSHSession = wasSSHSession && !context.isSSHSession
                     updatePaneSessionContext(context, for: surface.id)
                     updateSSHResumeDescriptor(context, for: surface.id)
                     registerTypedAgentHookSignal(signal, for: surface.id)
                     updateAgentActivity(signal, for: surface.id)
+                    if didEndSSHSession {
+                        clearRemoteAgentState(for: surface.id)
+                    }
                 }
                 .store(in: &observers)
 
@@ -890,20 +900,37 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     private func pollLocalAgentProcesses() {
-        guard AgentStatusPlugin.isEnabled else { return }
+        let detectsAgents = AgentStatusPlugin.isEnabled
+        guard detectsAgents || SSHPlugin.isEnabled else { return }
         for surface in surfaceTree {
-            guard let context = paneSessionContexts[surface.id],
-                  case .local = context.state else {
+            guard var context = paneSessionContexts[surface.id] else { continue }
+            guard let processGroupID = surface.surfaceModel?.foregroundPID else {
+                continue
+            }
+
+            if let inferredProcessGroupID = context.inferredSSHProcessGroupID {
+                guard inferredProcessGroupID != processGroupID else { continue }
+                if context.finishForegroundSSH(
+                    processGroupID: inferredProcessGroupID,
+                    currentWorkingDirectory: surface.pwd,
+                    currentTerminalTitle: surface.title
+                ) {
+                    updatePaneSessionContext(context, for: surface.id)
+                    updateSSHResumeDescriptor(context, for: surface.id)
+                    clearRemoteAgentState(for: surface.id)
+                    observedForegroundProcessIDs.removeValue(forKey: surface.id)
+                }
+            }
+
+            guard case .local = context.state else {
                 clearDetectedAgent(for: surface.id, force: true)
                 observedForegroundProcessIDs.removeValue(forKey: surface.id)
                 continue
             }
-            guard let processGroupID = surface.surfaceModel?.foregroundPID else {
-                continue
-            }
             if let detected = detectedAgentInstances[surface.id] {
-                if detected.agent.definition.hook.kind == .none,
-                   !AgentHookInstaller().isInstalled(detected.agent) {
+                if !detectsAgents ||
+                    (detected.agent.definition.hook.kind == .none &&
+                        !AgentHookInstaller().isInstalled(detected.agent)) {
                     clearDetectedAgent(for: surface.id, force: true)
                     observedForegroundProcessIDs.removeValue(forKey: surface.id)
                 } else if detected.processGroupID != processGroupID,
@@ -920,21 +947,75 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             let surfaceID = surface.id
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 let commands = Self.processGroupCommandLines(processGroupID)
-                let agent = commands.flatMap {
+                let agent = detectsAgents ? commands.flatMap {
                     LocalAgentProcessDetector.detect(in: $0)
-                }
+                } : nil
+                let ssh = commands.map {
+                    ForegroundSSHProcessDetector.observe(in: $0)
+                } ?? .none
                 DispatchQueue.main.async { [weak self] in
                     guard let self,
                           observedForegroundProcessIDs[surfaceID] == processGroupID,
                           let context = paneSessionContexts[surfaceID],
                           case .local = context.state else { return }
-                    applyDetectedAgent(
-                        agent,
+                    applyObservedForegroundProcess(
+                        agent: agent,
+                        ssh: ssh,
                         processGroupID: processGroupID,
                         surfaceID: surfaceID
                     )
                 }
             }
+        }
+    }
+
+    private func applyObservedForegroundProcess(
+        agent: SupportedAgent?,
+        ssh: ForegroundSSHProcessObservation,
+        processGroupID: Int,
+        surfaceID: UUID
+    ) {
+        switch ssh {
+        case .interactive(let alias):
+            clearDetectedAgent(for: surfaceID, force: true)
+            guard let surface = surfaceTree.first(where: { $0.id == surfaceID }) else {
+                return
+            }
+            var context = paneSessionContexts[surfaceID] ?? .init(
+                workingDirectory: surface.pwd,
+                terminalTitle: surface.title
+            )
+            let remoteWorkingDirectory: String? = if let descriptor =
+                agentResumeDescriptors[surfaceID],
+               descriptor.scope == .remote,
+               agentReducers[surfaceID]?.hasRemoteActivity == true {
+                descriptor.workingDirectory
+            } else {
+                nil
+            }
+            context.observeForegroundSSH(
+                alias: alias,
+                processGroupID: processGroupID,
+                currentWorkingDirectory: surface.pwd,
+                currentTerminalTitle: surface.title,
+                remoteWorkingDirectory: remoteWorkingDirectory
+            )
+            updatePaneSessionContext(context, for: surfaceID)
+            updateSSHResumeDescriptor(context, for: surfaceID)
+
+        case .ambiguous:
+            // An OpenSSH process exists but its argv does not prove an
+            // interactive pane. Preserve remote hook state conservatively,
+            // but do not expose a guessed host/workspace.
+            clearDetectedAgent(for: surfaceID, force: true)
+
+        case .none:
+            clearRemoteAgentState(for: surfaceID)
+            applyDetectedAgent(
+                agent,
+                processGroupID: processGroupID,
+                surfaceID: surfaceID
+            )
         }
     }
 
@@ -1175,11 +1256,39 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
         updateAgentResumeDescriptor(signal, for: surfaceID)
         var reducer = agentReducers[surfaceID] ?? AgentContextSignalReducer()
+        let hadRemoteActivity = reducer.hasRemoteActivity
         let update = reducer.consume(signal) ?? reducer.consumeRemotePrompt(signal)
-        guard let update else { return }
         agentReducers[surfaceID] = reducer
+        if !hadRemoteActivity,
+           reducer.hasRemoteActivity,
+           let context = paneSessionContexts[surfaceID],
+           case .local = context.state {
+            // A plain SSH Agent signal can arrive before the next one-second
+            // foreground sample. Force exactly one fresh lookup without
+            // turning unchanged-PID polling into repeated `ps` work.
+            observedForegroundProcessIDs.removeValue(forKey: surfaceID)
+        }
+        guard let update else { return }
         applyAgentActivityUpdate(update, for: surfaceID)
         scheduleAgentValidation(for: surfaceID)
+    }
+
+    private func clearRemoteAgentState(for surfaceID: UUID) {
+        var clearedRemoteActivity = false
+        if var reducer = agentReducers[surfaceID] {
+            clearedRemoteActivity = reducer.hasRemoteActivity
+            let update = reducer.clearRemoteActivities()
+            agentReducers[surfaceID] = reducer
+            if let update {
+                applyAgentActivityUpdate(update, for: surfaceID)
+            }
+        }
+        if clearedRemoteActivity {
+            typedAgentHookContextIDs.removeValue(forKey: surfaceID)
+        }
+        if agentResumeDescriptors[surfaceID]?.scope == .remote {
+            clearAgentResumeDescriptor(for: surfaceID)
+        }
     }
 
     private func updateSSHResumeDescriptor(

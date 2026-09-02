@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import UserNotifications
 import OSLog
@@ -116,6 +117,11 @@ class AppDelegate: NSObject,
     /// Built-in data provider that dogfoods the plugin-owned Inspector contract.
     @MainActor private lazy var builtInFilesInspector =
         BuiltInFilesInspectorProvider(registry: inspectorRegistry)
+
+    /// In-tree Info Inspector and app-owned SSH port-forward process lifecycle.
+    @MainActor private lazy var builtInInfoInspector =
+        BuiltInInfoInspectorProvider(registry: inspectorRegistry)
+    @MainActor private var pluginManagementCancellables = Set<AnyCancellable>()
 
     /// The global undo manager for app-level state such as window restoration.
     lazy var undoManager = ExpiringUndoManager()
@@ -316,6 +322,7 @@ class AppDelegate: NSObject,
         } catch {
             Self.logger.error("failed to register built-in Files Inspector: \(error)")
         }
+        observeSSHPluginState()
 
         // Start our update checker.
         updateController.startUpdater()
@@ -502,10 +509,30 @@ class AppDelegate: NSObject,
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        builtInInfoInspector.shutdown()
         // We have no notifications we want to persist after death,
         // so remove them all now. In the future we may want to be
         // more selective and only remove surface-targeted notifications.
         UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+    }
+
+    @MainActor
+    private func observeSSHPluginState() {
+        let manager = PluginInstallationManager.shared
+        Publishers.CombineLatest(manager.$installed, manager.$disabledIDs)
+            .sink { [weak self] installed, disabledIDs in
+                guard let self else { return }
+                let enabled = installed.contains { $0.id == SSHPlugin.pluginID } &&
+                    !disabledIDs.contains(SSHPlugin.pluginID)
+                do {
+                    try builtInInfoInspector.setEnabled(enabled)
+                } catch {
+                    Self.logger.error(
+                        "failed to update built-in SSH Inspector: \(error.localizedDescription, privacy: .public)"
+                    )
+                }
+            }
+            .store(in: &pluginManagementCancellables)
     }
 
     /// This is called when the application is already open and someone double-clicks the icon

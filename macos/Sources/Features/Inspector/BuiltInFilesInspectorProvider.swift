@@ -166,6 +166,10 @@ final class BuiltInFilesInspectorProvider {
 
         case .createFolder(let name):
             create(name: name, directory: true, context: context)
+
+        case .createPortForward, .openPortForward, .copyPortForward,
+             .removePortForward:
+            break
         }
     }
 
@@ -545,6 +549,8 @@ final class BuiltInFilesInspectorProvider {
         case .empty(let title, _): "empty title=\(title)"
         case .fields(let fields): "fields count=\(fields.count)"
         case .list(let items): "list count=\(items.count)"
+        case .info(let info):
+            "info host=\(info.portForwards.hostAlias) forwards=\(info.portForwards.items.count)"
         }
     }
 

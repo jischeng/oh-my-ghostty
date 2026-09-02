@@ -299,6 +299,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     private var agentProcessPollCancellable: AnyCancellable?
     private var observedForegroundProcessIDs: [UUID: Int] = [:]
+    private var observedSSHReconnectProcessIDs: [UUID: Int] = [:]
+    private var detectedSSHReconnectProcessIDs: [UUID: Int] = [:]
     private var detectedAgentInstances: [UUID: PaneDetectedAgentState] = [:]
     private var conversationDiscoveryPending = Set<UUID>()
     private var agentScreenSignatures: [UUID: Int] = [:]
@@ -780,6 +782,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     private func synchronizePaneSessionContexts() {
+        let previousContexts = paneSessionContexts
         let surfaces = surfaceTree.map { $0 }
         let activeIDs = Set(surfaces.map(\.id))
         paneSessionObservers = paneSessionObservers.filter { activeIDs.contains($0.key) }
@@ -796,6 +799,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             activeIDs.contains($0.key)
         }
         observedForegroundProcessIDs = observedForegroundProcessIDs.filter {
+            activeIDs.contains($0.key)
+        }
+        observedSSHReconnectProcessIDs = observedSSHReconnectProcessIDs.filter {
+            activeIDs.contains($0.key)
+        }
+        detectedSSHReconnectProcessIDs = detectedSSHReconnectProcessIDs.filter {
             activeIDs.contains($0.key)
         }
         detectedAgentInstances = detectedAgentInstances.filter {
@@ -887,6 +896,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
             paneSessionObservers[surface.id] = observers
         }
+        if paneSessionContexts != previousContexts {
+            NotificationCenter.default.post(
+                name: .terminalPaneSessionContextsDidChange,
+                object: self
+            )
+        }
     }
 
     private func startAgentProcessPolling() {
@@ -895,7 +910,59 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             on: .main,
             in: .common
         ).autoconnect().sink { [weak self] _ in
+            self?.pollSSHReconnectProcesses()
             self?.pollLocalAgentProcesses()
+        }
+    }
+
+    private func pollSSHReconnectProcesses() {
+        for surface in surfaceTree {
+            let surfaceID = surface.id
+            let processGroupID = surface.surfaceModel?.foregroundPID
+            guard var context = paneSessionContexts[surfaceID] else { continue }
+
+            if let detected = detectedSSHReconnectProcessIDs[surfaceID] {
+                if processGroupID == detected,
+                   Self.processGroupExists(detected),
+                   case .sshReady(let ssh, _) = context.state,
+                   ssh.connectionID == "omg-ssh-detected-\(detected)" {
+                    continue
+                }
+                context.endDetectedSSHReconnect(processGroupID: detected)
+                updatePaneSessionContext(context, for: surfaceID)
+                detectedSSHReconnectProcessIDs.removeValue(forKey: surfaceID)
+                observedSSHReconnectProcessIDs.removeValue(forKey: surfaceID)
+                continue
+            }
+
+            guard case .local = context.state,
+                  let alias = context.disconnectedSSH?.alias,
+                  let processGroupID else {
+                observedSSHReconnectProcessIDs.removeValue(forKey: surfaceID)
+                continue
+            }
+            guard observedSSHReconnectProcessIDs[surfaceID] != processGroupID else {
+                continue
+            }
+            observedSSHReconnectProcessIDs[surfaceID] = processGroupID
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                let commands = Self.processGroupCommandLines(processGroupID)
+                let isReconnect = commands.map {
+                    PaneSessionContext.isSSHReconnectCommand($0, alias: alias)
+                } ?? false
+                DispatchQueue.main.async { [weak self] in
+                    guard let self,
+                          isReconnect,
+                          observedSSHReconnectProcessIDs[surfaceID] == processGroupID,
+                          let currentSurface = surfaceTree.first(where: { $0.id == surfaceID }),
+                          currentSurface.surfaceModel?.foregroundPID == processGroupID,
+                          var current = paneSessionContexts[surfaceID],
+                          case .local = current.state else { return }
+                    current.applyDetectedSSHReconnect(processGroupID: processGroupID)
+                    updatePaneSessionContext(current, for: surfaceID)
+                    detectedSSHReconnectProcessIDs[surfaceID] = processGroupID
+                }
+            }
         }
     }
 
@@ -1519,6 +1586,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         var next = paneSessionContexts
         next[surfaceID] = context
         paneSessionContexts = next
+        NotificationCenter.default.post(
+            name: .terminalPaneSessionContextsDidChange,
+            object: self
+        )
         if (focusedSurface ?? surfaceTree.first)?.id == surfaceID {
             refreshPresentedTerminalTitle()
         }

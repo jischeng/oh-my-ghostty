@@ -16,6 +16,7 @@ struct PaneSessionContext: Equatable, Sendable {
     struct SSH: Equatable, Sendable {
         let connectionID: String
         let alias: String
+        let serverID: String?
         let replay: SSHReplayDescriptor?
         /// Non-nil only when the host inferred a plain interactive `ssh`
         /// process from the Surface foreground process group. Typed `omg +ssh`
@@ -32,6 +33,8 @@ struct PaneSessionContext: Equatable, Sendable {
     private(set) var revision: UInt64 = 0
     private(set) var local: Local
     private(set) var state: State = .local
+    private(set) var disconnectedSSH: SSH?
+    private(set) var disconnectedRemoteWorkingDirectory: String?
     private var staleRemoteTerminalTitle: String?
 
     init(workingDirectory: String?, terminalTitle: String) {
@@ -183,6 +186,7 @@ struct PaneSessionContext: Equatable, Sendable {
         let ssh = SSH(
             connectionID: "omg-ssh-foreground-\(processGroupID)",
             alias: alias,
+            serverID: nil,
             replay: nil,
             localProcessGroupID: processGroupID
         )
@@ -258,6 +262,8 @@ struct PaneSessionContext: Equatable, Sendable {
             let ssh = SSH(
                 connectionID: signal.id,
                 alias: alias,
+                serverID: metadata["serverid"].flatMap(Self.validServerID)
+                    ?? activeSSH?.serverID,
                 replay: sshReplay ?? activeSSH?.replay,
                 localProcessGroupID: nil
             )
@@ -278,6 +284,8 @@ struct PaneSessionContext: Equatable, Sendable {
             } else {
                 state = .sshConnecting(ssh)
             }
+            disconnectedSSH = nil
+            disconnectedRemoteWorkingDirectory = nil
             revision &+= 1
 
         case .end:
@@ -288,6 +296,15 @@ struct PaneSessionContext: Equatable, Sendable {
                 ssh.connectionID
             }
             guard activeID == signal.id else { return }
+            switch state {
+            case .local:
+                break
+            case .sshConnecting(let ssh):
+                disconnectedSSH = ssh
+            case .sshReady(let ssh, let workingDirectory):
+                disconnectedSSH = ssh
+                disconnectedRemoteWorkingDirectory = workingDirectory
+            }
             if let workingDirectory = metadata["cwd"]?.removingPercentEncoding,
                !workingDirectory.isEmpty {
                 local.workingDirectory = workingDirectory
@@ -296,6 +313,46 @@ struct PaneSessionContext: Equatable, Sendable {
             state = .local
             revision &+= 1
         }
+    }
+
+    mutating func applyDetectedSSHReconnect(processGroupID: Int) {
+        guard case .local = state,
+              let previous = disconnectedSSH,
+              let workingDirectory = disconnectedRemoteWorkingDirectory else { return }
+        state = .sshReady(.init(
+            connectionID: "omg-ssh-detected-\(processGroupID)",
+            alias: previous.alias,
+            serverID: previous.serverID,
+            replay: previous.replay,
+            localProcessGroupID: processGroupID
+        ), workingDirectory: workingDirectory)
+        revision &+= 1
+    }
+
+    mutating func endDetectedSSHReconnect(processGroupID: Int) {
+        guard case .sshReady(let ssh, _) = state,
+              ssh.connectionID == "omg-ssh-detected-\(processGroupID)" else { return }
+        state = .local
+        revision &+= 1
+    }
+
+    static func isSSHReconnectCommand(_ commandLines: String, alias: String) -> Bool {
+        let tokens = commandLines.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard tokens.contains(where: {
+            let executable = ($0 as NSString).lastPathComponent
+            return executable == "ssh" || executable == "omg"
+        }) else { return false }
+        return tokens.contains(alias) || tokens.contains { token in
+            token.hasSuffix("@\(alias)")
+        }
+    }
+
+    private static func validServerID(_ value: String) -> String? {
+        guard !value.isEmpty, value.count <= 256 else { return nil }
+        let allowed = CharacterSet.alphanumerics.union(
+            CharacterSet(charactersIn: ".:_+-/=")
+        )
+        return value.unicodeScalars.allSatisfy(allowed.contains) ? value : nil
     }
 
     private static func remoteWorkingDirectory(
@@ -710,7 +767,7 @@ struct SSHPlugin: Sendable {
     static let pluginID = "builtin.ssh"
     static let manifest = PluginManifest(
         id: pluginID,
-        version: "0.3.0",
+        version: "0.5.0",
         executable: "builtin",
         capabilities: [.terminalEvents, .tabMetadata, .tabIcon, .inspectorPane],
         minimumHostVersion: "0.1.0"

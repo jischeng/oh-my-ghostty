@@ -97,10 +97,17 @@ Core design rules:
 OMG includes tested protocol, capability, status, and Inspector registry
 components. The built-in Files provider dogfoods the typed Inspector boundary.
 An Experimental in-tree SSH workspace provider reads OpenSSH aliases and uses
-the system SFTP client for remote Files without owning credentials. Splitting
-an active SSH Pane launches a new independent `omg +ssh` child from the original
-OpenSSH argv and ready remote cwd, preserving config aliases, ProxyJump,
-explicit options, and folder context without keystroke injection.
+the system SFTP client for remote Files without owning credentials. Its Info
+Inspector pane reserves hidden future machine status/resources and session
+sections, and currently presents only localized VS Code-style port forwarding:
+port or `host:port` targets, same-port preference, remote loopback process names,
+hover browser/copy/stop actions, and detailed failures.
+Forwards are shared across Panes reaching the same cryptographically identified
+SSH server even through different aliases/direct IPs/jump routes and restore
+with restored SSH sessions.
+Splitting an active SSH Pane launches a new independent `omg +ssh` child from
+the original OpenSSH argv and ready remote cwd, preserving config aliases,
+ProxyJump, explicit options, and folder context without keystroke injection.
 
 The built-in Agent Status integration recognizes Codex, Claude Code, Pi, Qoder
 CLI, Reasonix, OMP, OpenCode, Amp, Antigravity, Cline, Copilot, Crush, Cursor
@@ -261,7 +268,7 @@ Planned work, not current features:
 - supervised out-of-process plugin discovery/loading and permissions;
 - public plugin package/install/update lifecycle;
 - external Inspector and status wire messages;
-- Git and SSH Inspector panes;
+- Git Inspector and expanded Info machine-resource sections;
 - official agent adapters and QuickInput/Pi integration;
 - dedicated signed/notarized CI and OMG Sparkle appcast;
 - additional developer and remote-workflow tools.

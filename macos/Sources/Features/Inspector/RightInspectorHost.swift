@@ -717,6 +717,7 @@ struct RightInspectorHost: View {
                     content: content,
                     paneID: paneID,
                     context: context,
+                    dividerColor: controller.sidebarDividerColor,
                     registry: registry
                 )
             }
@@ -767,6 +768,7 @@ private struct InspectorPaneContentView: View {
     let content: InspectorPaneContent
     let paneID: String
     let context: InspectorPaneContext
+    let dividerColor: Color
     @ObservedObject var registry: InspectorRegistry
 
     var body: some View {
@@ -829,7 +831,325 @@ private struct InspectorPaneContentView: View {
                     )
                 }
             )
+
+        case .info(let info):
+            InspectorInfoView(
+                info: info,
+                dividerColor: dividerColor,
+                perform: { kind in
+                    registry.performAction(
+                        paneID: paneID,
+                        action: .init(context: context, kind: kind)
+                    )
+                }
+            )
         }
+    }
+}
+
+private struct InspectorInfoView: View {
+    let info: InspectorInfoContent
+    let dividerColor: Color
+    let perform: (InspectorPaneActionKind) -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if info.status != nil || !info.fields.isEmpty {
+                if let status = info.status {
+                    HStack(spacing: 8) {
+                        Image(systemName: "circle.fill")
+                            .foregroundStyle(.green)
+                        Text(status.label)
+                        Spacer()
+                        Text(status.value)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(InspectorContentMetrics.leadingInset)
+                }
+
+                if !info.fields.isEmpty {
+                    Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) {
+                        ForEach(info.fields) { field in
+                            GridRow {
+                                Text(field.label)
+                                    .foregroundStyle(.secondary)
+                                Text(field.value)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                    }
+                    .padding(InspectorContentMetrics.leadingInset)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                Rectangle()
+                    .fill(dividerColor)
+                    .frame(height: TerminalShellStyle.dividerWidth)
+            }
+
+            InspectorPortForwardListView(
+                forwards: info.portForwards,
+                perform: perform
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+}
+
+private struct InspectorPortForwardListView: View {
+    private static let targetColumnWidth: CGFloat = 96
+    private static let actionColumnWidth: CGFloat = 64
+
+    let forwards: InspectorPortForwardList
+    let perform: (InspectorPaneActionKind) -> Void
+    @ObservedObject private var settings = OhMyGhosttySettings.shared
+    @State private var isAdding = false
+    @State private var targetValue = ""
+    @State private var hoveredID: String?
+
+    private var strings: InfoStrings {
+        .init(language: settings.language)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 7) {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .foregroundStyle(.secondary)
+                Text(forwards.hostAlias)
+                    .font(.headline)
+                    .lineLimit(1)
+                Text(String(forwardedCount))
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(.secondary.opacity(0.18), in: Capsule())
+                Spacer(minLength: 8)
+                Button {
+                    targetValue = ""
+                    isAdding = true
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .buttonStyle(.borderless)
+                .onHover { inside in
+                    (inside ? NSCursor.pointingHand : NSCursor.arrow).set()
+                }
+                .help(strings.forwardAPort)
+                .accessibilityLabel(strings.forwardAPort)
+            }
+            .padding(.horizontal, InspectorContentMetrics.leadingInset)
+            .padding(.vertical, 10)
+
+            if !forwards.items.isEmpty {
+                HStack(spacing: 8) {
+                    Color.clear.frame(width: 10, height: 1)
+                    Text(strings.remoteTargetColumn)
+                        .frame(width: Self.targetColumnWidth, alignment: .leading)
+                    Text(strings.forwardedAddressColumn)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Color.clear.frame(width: Self.actionColumnWidth, height: 1)
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, InspectorContentMetrics.leadingInset)
+                .padding(.bottom, 5)
+            }
+
+            if forwards.items.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "antenna.radiowaves.left.and.right")
+                        .font(.system(size: 25))
+                        .foregroundStyle(.secondary)
+                    Text(strings.noForwardedPorts)
+                        .font(.headline)
+                    Text(strings.noForwardedPortsMessage)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(forwards.items) { item in
+                            portRow(item)
+                            Divider()
+                                .padding(.leading, InspectorContentMetrics.leadingInset + 18)
+                        }
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $isAdding) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text(strings.forwardAPort)
+                    .font(.headline)
+                Text(strings.targetHelp(alias: forwards.hostAlias))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                TextField(strings.targetPlaceholder, text: $targetValue)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(addForward)
+                HStack {
+                    Spacer()
+                    Button(strings.cancel) { isAdding = false }
+                    Button(strings.forward) { addForward() }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(parsedTarget == nil)
+                }
+            }
+            .padding(20)
+            .frame(width: 380)
+        }
+    }
+
+    private func portRow(_ item: InspectorPortForwardItem) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(statusColor(item.status))
+                    .frame(width: 8, height: 8)
+                    .frame(width: 10)
+                Text(remoteTarget(item))
+                    .monospacedDigit()
+                    .frame(width: Self.targetColumnWidth, alignment: .leading)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(localAddress(item))
+                    .monospacedDigit()
+                    .foregroundStyle(item.status == .active ? .primary : .secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .lineLimit(1)
+                HStack(spacing: 2) {
+                    InspectorHoverIconButton(
+                        systemImage: "safari",
+                        help: strings.openInBrowser,
+                        enabled: item.status == .active
+                    ) {
+                        perform(.openPortForward(id: item.id))
+                    }
+                    InspectorHoverIconButton(
+                        systemImage: "doc.on.doc",
+                        help: strings.copyForwardedAddress,
+                        enabled: item.status == .active
+                    ) {
+                        perform(.copyPortForward(id: item.id))
+                    }
+                    InspectorHoverIconButton(
+                        systemImage: "xmark",
+                        help: strings.stopForwarding
+                    ) {
+                        perform(.removePortForward(id: item.id))
+                    }
+                }
+                .foregroundStyle(.secondary)
+                .frame(width: Self.actionColumnWidth, alignment: .trailing)
+                .opacity(hoveredID == item.id ? 1 : 0)
+            }
+
+            if let detail = detailTitle(item) {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(detailColor(item.status))
+                    .lineLimit(2)
+                    .padding(.leading, 18 + Self.targetColumnWidth + 8)
+            }
+        }
+        .padding(.horizontal, InspectorContentMetrics.leadingInset)
+        .padding(.vertical, 7)
+        .contentShape(Rectangle())
+        .onHover { hovered in
+            hoveredID = hovered ? item.id : (hoveredID == item.id ? nil : hoveredID)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(strings.remotePortAccessibility(
+            item.remotePort,
+            detail: detailTitle(item) ?? localAddress(item)
+        ))
+    }
+
+    private var forwardedCount: Int {
+        forwards.items.count { $0.status == .active }
+    }
+
+    private var parsedTarget: PortForwardTarget? {
+        PortForwardTarget.parse(targetValue)
+    }
+
+    private func addForward() {
+        guard parsedTarget != nil else { return }
+        perform(.createPortForward(target: targetValue))
+        isAdding = false
+    }
+
+    private func remoteTarget(_ item: InspectorPortForwardItem) -> String {
+        PortForwardTarget(
+            host: item.remoteHost,
+            port: item.remotePort
+        ).displayValue
+    }
+
+    private func localAddress(_ item: InspectorPortForwardItem) -> String {
+        item.localPort.map { "localhost:\($0)" } ?? "—"
+    }
+
+    private func detailTitle(_ item: InspectorPortForwardItem) -> String? {
+        switch item.status {
+        case .starting: strings.startingForward
+        case .active: item.processName
+        case .failed(let message): message
+        }
+    }
+
+    private func statusColor(_ status: InspectorPortForwardStatus) -> Color {
+        switch status {
+        case .starting: .secondary
+        case .active: .green
+        case .failed: .red
+        }
+    }
+
+    private func detailColor(_ status: InspectorPortForwardStatus) -> Color {
+        if case .failed = status { return .red }
+        return .secondary
+    }
+}
+
+private struct InspectorHoverIconButton: View {
+    let systemImage: String
+    let help: String
+    var enabled = true
+    let action: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .frame(width: 16, height: 16)
+                .padding(3)
+                .background(
+                    hovered && enabled ? Color.primary.opacity(0.12) : .clear,
+                    in: RoundedRectangle(cornerRadius: 4)
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .onHover { inside in
+            hovered = inside
+            if enabled {
+                (inside ? NSCursor.pointingHand : NSCursor.arrow).set()
+            }
+        }
+        .onDisappear {
+            if hovered { NSCursor.arrow.set() }
+        }
+        .help(help)
     }
 }
 

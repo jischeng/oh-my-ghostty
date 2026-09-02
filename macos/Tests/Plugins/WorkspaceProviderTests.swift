@@ -199,7 +199,7 @@ struct WorkspaceProviderTests {
             .init(
                 action: .start,
                 id: "omg-ssh-1",
-                metadata: "type=remote;targethost=cloud;cwd=/tmp"
+                metadata: "type=remote;targethost=cloud;serverid=hostkey-SHA256:test=;cwd=/tmp"
             ),
             currentWorkingDirectory: "/tmp",
             currentTerminalTitle: "remote title"
@@ -209,6 +209,7 @@ struct WorkspaceProviderTests {
             return
         }
         #expect(ready.alias == "cloud")
+        #expect(ready.serverID == "hostkey-SHA256:test=")
         #expect(remoteCWD == "/tmp")
         #expect(context.presentationTitle == "cloud › tmp")
         #expect(context.remoteTabBreadcrumb == .init(host: "cloud", directory: "tmp"))
@@ -228,6 +229,26 @@ struct WorkspaceProviderTests {
         #expect(context.presentationTitle == "~/code")
         #expect(context.remoteTabBreadcrumb == nil)
         #expect(context.tabIconSystemName == "terminal")
+        #expect(PaneSessionContext.isSSHReconnectCommand(
+            "/bin/zsh\n/usr/bin/ssh cloud",
+            alias: "cloud"
+        ))
+        #expect(!PaneSessionContext.isSSHReconnectCommand(
+            "/usr/bin/ssh another-host",
+            alias: "cloud"
+        ))
+
+        context.applyDetectedSSHReconnect(processGroupID: 42)
+        guard case .sshReady(let detected, let detectedCWD) = context.state else {
+            Issue.record("Expected a detected SSH reconnect")
+            return
+        }
+        #expect(detected.connectionID == "omg-ssh-detected-42")
+        #expect(detected.alias == "cloud")
+        #expect(detected.serverID == "hostkey-SHA256:test=")
+        #expect(detectedCWD == "/tmp")
+        context.endDetectedSSHReconnect(processGroupID: 42)
+        #expect(context.state == .local)
 
         context.updateLocalMetadata(
             workingDirectory: "/Users/test/code",

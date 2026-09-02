@@ -748,7 +748,29 @@ fn remoteShellCommand(
 
     var script: std.Io.Writer.Allocating = .init(alloc);
     defer script.deinit();
-    script.writer.writeAll("case ${SHELL##*/} in\nfish) ") catch return null;
+    script.writer.writeAll(
+        \\__omg_server_id=''
+        \\if command -v ssh-keygen >/dev/null 2>&1 && command -v awk >/dev/null 2>&1; then
+        \\  for __omg_host_key in /etc/ssh/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ecdsa_key.pub /etc/ssh/ssh_host_rsa_key.pub; do
+        \\    [ -r "$__omg_host_key" ] || continue
+        \\    __omg_fingerprint=$(ssh-keygen -lf "$__omg_host_key" -E sha256 2>/dev/null | awk 'NR == 1 { print $2 }')
+        \\    case "$__omg_fingerprint" in SHA256:*) __omg_server_id="hostkey-$__omg_fingerprint"; break ;; esac
+        \\  done
+        \\fi
+        \\if [ -z "$__omg_server_id" ]; then
+        \\  for __omg_machine_file in /etc/machine-id /var/lib/dbus/machine-id; do
+        \\    [ -r "$__omg_machine_file" ] || continue
+        \\    IFS= read -r __omg_machine_id < "$__omg_machine_file"
+        \\    case "$__omg_machine_id" in ''|*[!A-Fa-f0-9-]*) continue ;; esac
+        \\    __omg_server_id="machine-$__omg_machine_id"
+        \\    break
+        \\  done
+        \\fi
+        \\export OMG_SSH_SERVER_ID="$__omg_server_id"
+        \\
+        \\case ${SHELL##*/} in
+        \\fish)
+    ) catch return null;
     script.writer.writeAll(fish) catch return null;
     script.writer.writeAll(" ;;\nbash) ") catch return null;
     script.writer.writeAll(bash) catch return null;
@@ -781,7 +803,7 @@ fn remoteFishCommand(
         fish_command.writer.writeAll("; ") catch return null;
     }
     fish_command.writer.print(
-        "function __omg_report_pwd --on-event fish_prompt; set -l __omg_cwd (string escape --style=url \"$PWD\"); printf \"\\e]3008;start={s};type=remote;targethost={s};cwd=%s\\a\\e]7;file://localhost%s\\a\" \"$__omg_cwd\" \"$__omg_cwd\"; end",
+        "function __omg_report_pwd --on-event fish_prompt; set -l __omg_cwd (string escape --style=url \"$PWD\"); printf \"\\e]3008;start={s};type=remote;targethost={s};serverid=%s;cwd=%s\\a\\e]7;file://localhost%s\\a\" \"$OMG_SSH_SERVER_ID\" \"$__omg_cwd\" \"$__omg_cwd\"; end",
         .{ context_id, label },
     ) catch return null;
     if (remote_agent) |agent| {
@@ -851,7 +873,7 @@ fn writeRemotePromptFunction(
     try writer.writeAll(";type=remote;targethost=");
     try writer.writeAll(label);
     try writer.writeAll(
-        \\;cwdhex=%s\007\033]7;file://localhost%s\007' "$__omg_hex" "$__omg_uri"
+        \\;serverid=%s;cwdhex=%s\007\033]7;file://localhost%s\007' "$OMG_SSH_SERVER_ID" "$__omg_hex" "$__omg_uri"
         \\}
         \\
     );
@@ -1057,6 +1079,7 @@ test remoteShellCommand {
     try testing.expect(std.mem.indexOf(u8, bash_command, "__OMG_BASHRC__") != null);
     try testing.expect(std.mem.indexOf(u8, bash_command, "PROMPT_COMMAND") != null);
     try testing.expect(std.mem.indexOf(u8, bash_command, "cwdhex=%s") != null);
+    try testing.expect(std.mem.indexOf(u8, bash_command, "serverid=%s") != null);
     try testing.expect(std.mem.indexOf(u8, bash_command, "targethost=vps-jump") != null);
     try testing.expect(std.mem.indexOf(u8, bash_command, "command codex resume") != null);
     try testing.expect(std.mem.indexOf(u8, bash_command, "project'\\''s code") != null);
@@ -1089,7 +1112,10 @@ test remoteShellCommand {
     try testing.expect(std.mem.indexOf(u8, command, "exec /bin/sh -c") != null);
     try testing.expect(std.mem.indexOf(u8, command, "case ${SHELL##*/}") != null);
     try testing.expect(std.mem.indexOf(u8, command, "]3008;start=omg-ssh-1") != null);
+    try testing.expect(std.mem.indexOf(u8, command, "ssh_host_ed25519_key.pub") != null);
+    try testing.expect(std.mem.indexOf(u8, command, "/etc/machine-id") != null);
     try testing.expect(std.mem.indexOf(u8, command, "targethost=cloud") != null);
+    try testing.expect(std.mem.indexOf(u8, command, "serverid=%s") != null);
     try testing.expect(std.mem.indexOf(u8, command, "]7;") != null);
     try testing.expect(std.mem.indexOf(u8, command, "file://localhost") != null);
 

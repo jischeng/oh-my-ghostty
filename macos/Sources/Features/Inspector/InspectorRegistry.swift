@@ -72,6 +72,10 @@ enum InspectorPaneActionKind: Equatable, Sendable {
     case collapseAll
     case createFile(name: String)
     case createFolder(name: String)
+    case createPortForward(target: String)
+    case openPortForward(id: String)
+    case copyPortForward(id: String)
+    case removePortForward(id: String)
 }
 
 struct InspectorPaneAction: Equatable, Sendable {
@@ -84,6 +88,7 @@ enum InspectorPaneContent: Equatable, Sendable {
     case fields([InspectorField])
     case list([InspectorListItem])
     case fileTree(InspectorFileTree)
+    case info(InspectorInfoContent)
 }
 
 struct InspectorPaneContext: Equatable, Sendable {
@@ -200,6 +205,30 @@ final class InspectorRegistry: ObservableObject {
             lifecycle: lifecycle,
             action: action
         )
+    }
+
+    func updatePluginPaneTitle(
+        paneID: String,
+        pluginID: String,
+        title: String
+    ) throws {
+        guard let index = entries.firstIndex(where: { $0.id == paneID }) else {
+            throw RegistryError.paneNotFound
+        }
+        let descriptor = entries[index].descriptor
+        guard descriptor.source == .plugin(pluginID) else {
+            throw RegistryError.ownerMismatch
+        }
+        let updated = InspectorPaneDescriptor(
+            id: descriptor.id,
+            title: title,
+            systemImage: descriptor.systemImage,
+            source: descriptor.source,
+            preferredWidth: descriptor.preferredWidth,
+            minimumWidth: descriptor.minimumWidth
+        )
+        guard Self.validate(updated) else { throw RegistryError.invalidDescriptor }
+        entries[index] = .init(descriptor: updated)
     }
 
     func updatePluginContent(

@@ -68,7 +68,8 @@ These require compiling code into OMG and are not ABI/API-stable:
 - `GhosttyTabIconProviding`;
 - `MockAgentStatusAdapter`;
 - `AgentContextSignalReducer` and `AgentHookInstaller`;
-- `BuiltInFilesInspectorProvider`.
+- `BuiltInFilesInspectorProvider`;
+- `BuiltInInfoInspectorProvider` and its host-owned Info/port-forward lifecycle.
 
 ### Not yet supported
 
@@ -542,6 +543,55 @@ the pre-SSH local cwd) so app restoration can reconnect plain SSH tabs after a
 relaunch, not only Agent and split panes. This is an internal first-party launch handoff,
 not plugin storage or a public plugin API.
 
+The installed/enabled official SSH entry registers `builtin.info` beside Files
+in the Right Inspector. Info is an extensible host-rendered surface with
+optional machine-status and typed machine/session sections (both currently
+hidden) plus the SSH port-forwarding section. The forwarding header uses the
+antenna/radio-tower symbol and reports its active port count.
+
+For an `sshReady` Pane, users can enter either a port (shorthand for
+`127.0.0.1:<port>` on the SSH server) or an explicit `host:port` reachable from
+the SSH server, including bracketed IPv6. Targets are bounded/validated before
+forming `ssh -L`; persisted v1 entries without `remoteHost` migrate to loopback.
+The Host first tries the same local port, matching VS Code's default, and asks
+the OS for an available ephemeral port only when that port is occupied. It launches
+`/usr/bin/ssh -N` with `ExitOnForwardFailure` and waits for the local listener
+before reporting the forward active. Rows render remote port and forwarded
+address as separate columns only when at least one forward exists. A bounded
+five-second refresh resolves a loopback target's remote listener PID through
+fixed `lsof`/`ss`/`fuser` probes, then reports the executable from `ps`; no
+process subtitle is rendered when nothing is listening. Arbitrary `host:port`
+targets omit process discovery because the process may belong to another
+machine. The probe is explicitly wrapped
+in `/bin/sh -c` so Fish or another configured login shell cannot reinterpret its
+POSIX syntax. Hover actions explicitly open
+`http://127.0.0.1:<local-port>`, copy `localhost:<local-port>`, or stop the
+forward; clicking the row itself does not open a browser. SSH stderr is captured
+to a mode-0600 bounded temporary file and normalized into actionable failures
+such as local-port collision, authentication failure, host-key failure, DNS
+failure, refusal, and timeout. The forwarding command uses the validated
+OpenSSH alias, so user configuration continues to own HostName, User, Port,
+ProxyJump, keys, agent, and host verification.
+
+The remote bootstrap derives a bounded stable `serverid` from the remote
+sshd public host-key fingerprint (`ssh-keygen -lf ... -E sha256`). If the
+public key is unavailable it falls back to the remote OS machine ID. It never
+uses destination IP, resolved HostName, user-provided alias, ProxyJump route, or
+remote hostname as server identity. This groups config aliases and direct-IP or
+jump-host routes that terminate at the same SSH server while keeping distinct
+servers separate. If neither authenticated-host material nor a machine ID is
+readable, forwarding is disabled for that Pane instead of guessing from alias.
+
+Forward intent is stored per application channel under the SSH Plugin data
+directory as stable server ID plus remote port; it contains no credentials or
+route. One forwarding process is shared by every ready Pane/Tab reporting that
+server ID. It stops after the final matching connection ends and starts again,
+using whichever current alias reached that identity, after a restored Pane
+reaches `sshReady`. Normal app termination stops every process. The forwarding subprocess is also
+wrapped by a parent-PID monitor, so a forcibly killed OMG process cannot leave a
+long-lived standalone SSH forwarding process. No browser is opened when a
+forward is created; opening is an explicit row action.
+
 This first provider does not install a remote service and does not manage
 credentials. It depends on the system SSH/SFTP client and configured
 `ssh-agent`/known_hosts. Shells other than Fish, bash, and zsh do not yet publish
@@ -568,7 +618,10 @@ Host-rendered `InspectorPaneContent` supports:
 - empty title/message;
 - label/value fields;
 - lists with optional subtitle/system image;
-- recursive typed file trees.
+- recursive typed file trees;
+- extensible Info snapshots with an optional status, typed fields, and SSH
+  port-forward rows containing remote/local ports, remote process, and bounded
+  status/failure detail.
 
 A provider supplies data only. It cannot inject a SwiftUI `View`, `NSView`,
 window, controller, material, or arbitrary icon path.
@@ -578,13 +631,21 @@ window, controller, material, or arbitrary icon path.
 `InspectorPaneContext` contains tab/session presentation identity, title,
 optional working directory, workspace identity, and the canonical
 `PaneSessionContext`. Providers can therefore distinguish local,
-`sshConnecting`, and `sshReady` changes without parsing titles. A connection
-begin, remote cwd update, matching disconnect, focused Pane change, or local cwd
+`sshConnecting`, and `sshReady` changes without parsing titles. After a typed
+SSH disconnect, the last validated server identity/cwd remains as dormant
+reconnect metadata. If a replay survival shell no longer has the shell wrapper,
+the Host's bounded foreground-process poll recognizes only a matching `ssh`
+command for that previous alias and temporarily restores `sshReady`; process
+exit returns it to local. A connection begin, remote cwd update, matching
+disconnect, focused Pane change, or local cwd
 change produces a new context/lifecycle appearance for the selected provider;
 the previous appearance is discarded and its asynchronous work must not
 publish afterward. Supported action values are disclosure toggle, refresh,
-collapse all, create file, and create folder; whether they make sense is
-provider-specific.
+collapse all, create file/folder, and create/open/copy/remove SSH port
+forwarding; whether they make sense is provider-specific. Port creation accepts only a valid 1...65535 port or bounded `host:port` and is
+rejected outside an `sshReady` context. Info/port UI, hover help, empty states,
+connection messages, and normalized Host failures resolve live from
+`general.language` (English or Simplified Chinese).
 
 Actual in-process lifecycle:
 

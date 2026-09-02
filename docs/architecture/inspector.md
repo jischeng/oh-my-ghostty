@@ -2,7 +2,7 @@
 
 ## Status
 
-The Core host foundation and a minimal `builtin.files` provider are implemented. Git, Search, Issues, Pull Requests, AI Context Browser, and Marketplace panes remain out of scope.
+The Core host foundation, `builtin.files`, and the official in-tree `builtin.info` provider are implemented. Info currently contains SSH port forwarding; machine status/resources and machine/session fields remain reserved and hidden. Git, Search, Issues, Pull Requests, AI Context Browser, and Marketplace panes remain out of scope.
 
 ## Shell hierarchy
 
@@ -48,13 +48,16 @@ Core Features and Plugins own only pane-specific data and commands. They do not 
 - label/value fields;
 - list items;
 - recursive file-tree snapshots;
-- refresh, collapse, disclosure, and create actions.
+- extensible Info snapshots with optional status, fields, and port forwards;
+- refresh, collapse, disclosure, create, open, copy, and remove actions.
 
 Descriptors include stable ID, title, SF Symbol name, owner, preferred width, and minimum width. IDs, labels, and widths are validated before registration. Duplicate IDs are rejected.
 
 A Core Feature registers a typed content provider and may receive appeared/disappeared lifecycle events. A Plugin registers a data-only pane and updates its content through an owner-scoped API. Plugin ownership is checked on every update and all panes are removed on owner disconnect.
 
-`BuiltInFilesInspectorProvider` dogfoods the Plugin path under owner `builtin.files`. Content is isolated by stable tab ID. Pane appearance, tab switches, and live `SurfaceView.$pwd` changes asynchronously refresh the selected root; title-only context updates never reload the tree. Disclosure uses node-scoped tasks and merges only the affected subtree, retaining the mounted ScrollView, other node identities, selection, scroll position, cached children, and per-tab expansion state. Root rebuilds are reserved for cwd changes and explicit refresh/create actions. The provider accepts typed New File, New Folder, Refresh, Collapse All, and disclosure actions without injecting a View or performing filesystem I/O on the main actor. Filename/extension metadata selects host-owned Git, shell, language, config, document, and media icons.
+`BuiltInFilesInspectorProvider` dogfoods the Plugin path under owner `builtin.files`. The enabled official SSH Plugin registers `BuiltInInfoInspectorProvider` as the sibling `builtin.info` pane. Info reserves hidden optional status and machine/session sections; while they are empty, the antenna-labelled port-forward section begins at the top without an empty divider. Port rows split a remote target (`port` or `host:port`) and forwarded address into columns, show a bounded loopback listener process below, and reveal explicit browser/copy/stop actions on hover. Forwarding prefers the same local port, reports normalized SSH/bind failures, follows the live OMG English/Simplified-Chinese language setting, and never treats a row click as browser authorization. Forward intent is keyed by a remote-reported sshd host-key fingerprint (with OS machine ID fallback) plus remote port, never by alias, destination IP, HostName, or ProxyJump route. It is shared across every ready Pane reporting that stable server identity, persisted for restoration, and backed by an app-owned SSH process that ends only after the last matching SSH connection or the app exits.
+
+Files content is isolated by stable tab ID. Pane appearance, tab switches, and live `SurfaceView.$pwd` changes asynchronously refresh the selected root; title-only context updates never reload the tree. Disclosure uses node-scoped tasks and merges only the affected subtree, retaining the mounted ScrollView, other node identities, selection, scroll position, cached children, and per-tab expansion state. Root rebuilds are reserved for cwd changes and explicit refresh/create actions. The provider accepts typed New File, New Folder, Refresh, Collapse All, and disclosure actions without injecting a View or performing filesystem I/O on the main actor. Filename/extension metadata selects host-owned Git, shell, language, config, document, and media icons.
 
 During Debug/development builds the provider emits `OSLog` diagnostics under the `files-inspector` category for pane lifecycle, cwd/root changes, disclosure actions, root/subtree generation cancellation/discard, directory read depth/count, total elapsed time, refreshes, and rejected creation names. The bounded generation/task cancellation model ensures stale reads cannot publish into a newer tree. Release builds can filter this category without changing the data path.
 

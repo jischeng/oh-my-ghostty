@@ -334,6 +334,11 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Accept normalized activity events from agent adapters.",
             requiresNewWindow: false, category: "plugins"),
         .init(
+            id: "agents.openQuickInputOnStart", type: .boolean, defaultValue: "false",
+            allowedValues: nil, minimum: nil, maximum: nil,
+            description: "Open Quick Input when an agent starts without changing keyboard focus.",
+            requiresNewWindow: false, category: "keyboard"),
+        .init(
             id: "keyboard.quickInput", type: .string,
             defaultValue: OMGKeyboardShortcut.defaultQuickInput.storageValue,
             allowedValues: nil, minimum: nil, maximum: nil,
@@ -462,6 +467,11 @@ final class OhMyGhosttySettings: ObservableObject {
     }
     @Published var agentStatusHooksEnabled = true {
         didSet { persist("agents.statusHooks", agentStatusHooksEnabled) }
+    }
+    @Published var openQuickInputOnAgentStart = false {
+        didSet {
+            persist("agents.openQuickInputOnStart", openQuickInputOnAgentStart)
+        }
     }
     @Published var quickInputShortcut = OMGKeyboardShortcut.defaultQuickInput.storageValue {
         didSet {
@@ -698,6 +708,10 @@ final class OhMyGhosttySettings: ObservableObject {
             notifyAttention = boolValue("notifications.attention", fallback: true)
             notificationSound = boolValue("notifications.sound", fallback: false)
             agentStatusHooksEnabled = boolValue("agents.statusHooks", fallback: true)
+            openQuickInputOnAgentStart = boolValue(
+                "agents.openQuickInputOnStart",
+                fallback: false
+            )
             quickInputShortcut = validatedShortcutValue(
                 "keyboard.quickInput",
                 fallback: OMGKeyboardShortcut.defaultQuickInput.storageValue

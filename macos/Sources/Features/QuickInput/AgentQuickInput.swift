@@ -124,6 +124,52 @@ enum AgentQuickInputDispatchPolicy {
     }
 }
 
+enum AgentQuickInputPresentationPolicy {
+    static func shouldPresentForAgentStart(
+        previous: TabActivity?,
+        next: TabActivity?,
+        enabled: Bool,
+        isAlreadyPresented: Bool,
+        isTargetFocused: Bool
+    ) -> Bool {
+        enabled && previous == nil && next != nil &&
+            !isAlreadyPresented && isTargetFocused
+    }
+}
+
+enum AgentQuickInputFocusDirection: Equatable {
+    case up
+    case down
+    case left
+    case right
+
+    static func resolve(
+        keyCode: UInt16,
+        modifiers: NSEvent.ModifierFlags
+    ) -> Self? {
+        let relevant = modifiers.intersection([
+            .command, .shift, .option, .control,
+        ])
+        guard relevant == [.command, .option] else { return nil }
+        switch keyCode {
+        case 126: return .up
+        case 125: return .down
+        case 123: return .left
+        case 124: return .right
+        default: return nil
+        }
+    }
+
+    var splitDirection: Ghostty.SplitFocusDirection {
+        switch self {
+        case .up: .up
+        case .down: .down
+        case .left: .left
+        case .right: .right
+        }
+    }
+}
+
 enum AgentQuickInputMetrics {
     static let minimumHeight: CGFloat = 140
     static let defaultHeight: CGFloat = 252
@@ -220,6 +266,7 @@ final class AgentQuickInputModel: ObservableObject {
     @Published private(set) var statusMessage: String?
     @Published private(set) var dockHeight: CGFloat
     @Published private(set) var editingQueueItemID: UUID?
+    @Published private(set) var focusRequestID = 0
 
     private var draftBeforeEditing: String?
     private var isApplyingState = false
@@ -239,11 +286,17 @@ final class AgentQuickInputModel: ObservableObject {
 
     var isEditingQueuedItem: Bool { editingQueueItemID != nil }
 
-    func present(for surfaceID: UUID) {
+    func present(for surfaceID: UUID, requestFocus: Bool = true) {
         targetSurfaceID = surfaceID
         applyDraft(paneStates[surfaceID]?.draft ?? "")
         statusMessage = nil
         isPresented = true
+        if requestFocus { self.requestFocus() }
+    }
+
+    func requestFocus() {
+        guard isPresented else { return }
+        focusRequestID &+= 1
     }
 
     func dismiss(preservingDraft: Bool = true) {
@@ -860,6 +913,7 @@ private struct AgentQuickInputComposer: View {
                     ? "Edit queued message…"
                     : "Type here…",
                 isPresented: model.isPresented,
+                focusRequestID: model.focusRequestID,
                 onSend: controller.sendQuickInputDraft,
                 onQueue: controller.queueQuickInputDraft,
                 onCancel: controller.dismissQuickInput

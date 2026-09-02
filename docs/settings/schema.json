@@ -2,6 +2,12 @@
  "$schema": "https://json-schema.org/draft/2020-12/schema",
  "additionalProperties": true,
  "properties": {
+  "agents.openQuickInputOnStart": {
+   "category": "keyboard",
+   "default": false,
+   "description": "Open Quick Input when an agent starts without changing keyboard focus.",
+   "type": "boolean"
+  },
   "agents.statusHooks": {
    "category": "plugins",
    "default": true,

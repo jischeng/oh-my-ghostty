@@ -118,6 +118,25 @@ struct AgentQuickInputTests {
         #expect(queued == 1)
     }
 
+    @Test func optionCommandArrowsResolveAsComposerFocusNavigation() {
+        #expect(AgentQuickInputFocusDirection.resolve(
+            keyCode: 125,
+            modifiers: [.option, .command]
+        ) == .down)
+        #expect(AgentQuickInputFocusDirection.resolve(
+            keyCode: 126,
+            modifiers: [.option, .command]
+        ) == .up)
+        #expect(AgentQuickInputFocusDirection.resolve(
+            keyCode: 123,
+            modifiers: [.option]
+        ) == nil)
+        #expect(AgentQuickInputFocusDirection.resolve(
+            keyCode: 124,
+            modifiers: [.option, .command, .shift]
+        ) == nil)
+    }
+
     @Test func nativeEditorOptionArrowMovesByWord() throws {
         let editor = ComposerTextView()
         editor.string = "hello world"
@@ -325,6 +344,46 @@ struct AgentQuickInputTests {
             isARepeat: false,
             keyCode: keyCode
         )
+    }
+
+    @Test func agentStartPresentationPolicyRequiresOptInAndFocusedTarget() {
+        let activity = TabActivity(
+            source: "pi",
+            state: .idle,
+            label: nil,
+            message: nil,
+            detail: nil,
+            progress: nil,
+            icon: nil
+        )
+        #expect(AgentQuickInputPresentationPolicy.shouldPresentForAgentStart(
+            previous: nil,
+            next: activity,
+            enabled: true,
+            isAlreadyPresented: false,
+            isTargetFocused: true
+        ))
+        #expect(!AgentQuickInputPresentationPolicy.shouldPresentForAgentStart(
+            previous: activity,
+            next: activity,
+            enabled: true,
+            isAlreadyPresented: false,
+            isTargetFocused: true
+        ))
+        #expect(!AgentQuickInputPresentationPolicy.shouldPresentForAgentStart(
+            previous: nil,
+            next: activity,
+            enabled: false,
+            isAlreadyPresented: false,
+            isTargetFocused: true
+        ))
+        #expect(!AgentQuickInputPresentationPolicy.shouldPresentForAgentStart(
+            previous: nil,
+            next: activity,
+            enabled: true,
+            isAlreadyPresented: false,
+            isTargetFocused: false
+        ))
     }
 
     @Test func dispatchPolicyOnlyAcceptsNewDoneTransition() {

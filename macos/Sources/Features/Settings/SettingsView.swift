@@ -251,6 +251,13 @@ struct SettingsView: View {
         case .keyboard:
             Form {
                 Section(strings.quickInputSection) {
+                    Toggle(
+                        strings.openQuickInputOnAgentStartLabel,
+                        isOn: $settings.openQuickInputOnAgentStart
+                    )
+                    Text(strings.openQuickInputOnAgentStartCaption)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     LabeledContent(strings.quickInputShortcutLabel) {
                         HStack(spacing: 8) {
                             OMGShortcutRecorder(storageValue: $settings.quickInputShortcut)

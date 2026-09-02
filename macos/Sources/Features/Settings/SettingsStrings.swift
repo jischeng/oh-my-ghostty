@@ -245,6 +245,15 @@ struct SettingsStrings: Equatable, Sendable {
         }
     }
     var quickInputSection: String { t("Agent Quick Input", "Agent 快速输入") }
+    var openQuickInputOnAgentStartLabel: String {
+        t("Open Composer When Agent Starts", "打开 Agent 时展开输入框")
+    }
+    var openQuickInputOnAgentStartCaption: String {
+        t(
+            "Keeps terminal focus unchanged. Use Option-Command-arrow keys to move focus into or out of the composer.",
+            "不会改变终端焦点。使用 Option-Command-方向键在终端与输入框之间切换焦点。"
+        )
+    }
     var quickInputShortcutLabel: String { t("Open Composer", "打开输入框") }
     var quickInputShortcutCaption: String {
         t(

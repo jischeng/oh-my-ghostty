@@ -240,6 +240,8 @@ hooks into a separate bounded, presentation-only OSC path owned by Core.
 | `terminalControl` | built-in user-confirmed QuickInput writes work; no process-plugin wire messages | Planned, high risk |
 | `rawTerminalOutput` | capability name only | Planned, high risk, default deny |
 
+Quick Input presentation and focus remain Host-owned. The built-in composer participates in macOS `Option-Command` directional focus navigation, but this does not grant a plugin focus control. When the user enables `agents.openQuickInputOnStart`, the Host may expand Quick Input on the focused Pane's first Agent activity without changing first responder; plugin lifecycle messages cannot force focus or override that preference.
+
 ### Session status API
 
 `setSessionStatus` arguments:

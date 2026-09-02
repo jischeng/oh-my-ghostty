@@ -5,6 +5,7 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
     @Binding var text: String
     let placeholder: String
     let isPresented: Bool
+    let focusRequestID: Int
     let onSend: () -> Void
     let onQueue: () -> Void
     let onCancel: () -> Void
@@ -61,19 +62,20 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
         if !editor.hasMarkedText(), editor.string != text {
             editor.string = text
         }
-        if isPresented, !context.coordinator.wasPresented {
+        if isPresented,
+           focusRequestID != context.coordinator.handledFocusRequestID {
+            context.coordinator.handledFocusRequestID = focusRequestID
             DispatchQueue.main.async { [weak editor] in
                 guard let editor, editor.window != nil else { return }
                 editor.window?.makeFirstResponder(editor)
             }
         }
-        context.coordinator.wasPresented = isPresented
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         @Binding var text: String
         weak var editor: ComposerTextView?
-        var wasPresented = false
+        var handledFocusRequestID = 0
 
         init(text: Binding<String>) {
             self._text = text

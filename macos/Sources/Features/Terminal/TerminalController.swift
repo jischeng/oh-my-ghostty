@@ -288,6 +288,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     let quickInputModel = AgentQuickInputModel()
     private var quickInputEventMonitor: Any?
     private var quickInputSecureInputCancellable: AnyCancellable?
+    private var quickInputLastTerminalSurfaceID: UUID?
     private var quickInputResizeDeferralWorkItem: DispatchWorkItem?
     private weak var quickInputResizeDeferralWindow: NSWindow?
     private var quickInputResizeDeferralActive = false
@@ -348,9 +349,17 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return
         }
         guard let surface = focusedSurface ?? surfaceTree.first else { return }
+        presentQuickInput(for: surface, requestFocus: true)
+    }
+
+    private func presentQuickInput(
+        for surface: Ghostty.SurfaceView,
+        requestFocus: Bool
+    ) {
         beginQuickInputResizeDeferral()
-        quickInputModel.present(for: surface.id)
-        _ = surface.resignFirstResponder()
+        quickInputLastTerminalSurfaceID = surface.id
+        quickInputModel.present(for: surface.id, requestFocus: requestFocus)
+        if requestFocus { _ = surface.resignFirstResponder() }
     }
 
     func sendQuickInputDraft() {
@@ -459,7 +468,71 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return nil
         }
 
-        return event
+        guard quickInputModel.isPresented,
+              let direction = AgentQuickInputFocusDirection.resolve(
+                keyCode: event.keyCode,
+                modifiers: event.modifierFlags
+              ) else {
+            return event
+        }
+
+        if window?.firstResponder is ComposerTextView {
+            switch direction {
+            case .up:
+                restoreTerminalFocus(
+                    surfaceID: quickInputLastTerminalSurfaceID ??
+                        quickInputModel.targetSurfaceID
+                )
+            case .left, .right:
+                focusSplitFromQuickInput(direction: direction)
+            case .down:
+                break
+            }
+            return nil
+        }
+
+        guard direction == .down,
+              let surface = focusedSurface ?? surfaceTree.first,
+              !hasSplitFocusTarget(from: surface, direction: .down) else {
+            return event
+        }
+        quickInputLastTerminalSurfaceID = surface.id
+        quickInputModel.requestFocus()
+        _ = surface.resignFirstResponder()
+        return nil
+    }
+
+    private func hasSplitFocusTarget(
+        from surface: Ghostty.SurfaceView,
+        direction: Ghostty.SplitFocusDirection
+    ) -> Bool {
+        guard let node = surfaceTree.root?.node(view: surface) else { return false }
+        return surfaceTree.focusTarget(
+            for: direction.toSplitTreeFocusDirection(),
+            from: node
+        ) != nil
+    }
+
+    private func focusSplitFromQuickInput(
+        direction: AgentQuickInputFocusDirection
+    ) {
+        guard let anchorID = quickInputLastTerminalSurfaceID ??
+                quickInputModel.targetSurfaceID,
+              let anchor = surfaceTree.first(where: { $0.id == anchorID }),
+              hasSplitFocusTarget(
+                from: anchor,
+                direction: direction.splitDirection
+              ) else {
+            return
+        }
+        NotificationCenter.default.post(
+            name: Ghostty.Notification.ghosttyFocusSplit,
+            object: anchor,
+            userInfo: [
+                Ghostty.Notification.SplitDirectionKey: direction.splitDirection as Any,
+            ]
+        )
+        quickInputLastTerminalSurfaceID = focusedSurface?.id ?? anchorID
     }
 
     @discardableResult
@@ -1507,7 +1580,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         _ update: AgentActivityUpdate,
         for surfaceID: UUID
     ) {
-        let previousState = agentActivities[surfaceID]?.state
+        let previousActivity = agentActivities[surfaceID]
+        let previousState = previousActivity?.state
         var next = agentActivities
         switch update {
         case .set(let activity):
@@ -1517,6 +1591,15 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
         guard next != agentActivities else { return }
         agentActivities = next
+        if AgentQuickInputPresentationPolicy.shouldPresentForAgentStart(
+            previous: previousActivity,
+            next: next[surfaceID],
+            enabled: OhMyGhosttySettings.shared.openQuickInputOnAgentStart,
+            isAlreadyPresented: quickInputModel.isPresented,
+            isTargetFocused: (focusedSurface ?? surfaceTree.first)?.id == surfaceID
+        ), let surface = surfaceTree.first(where: { $0.id == surfaceID }) {
+            presentQuickInput(for: surface, requestFocus: false)
+        }
         if AgentQuickInputDispatchPolicy.shouldDispatch(
             previous: previousState,
             next: next[surfaceID]?.state

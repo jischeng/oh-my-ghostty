@@ -635,11 +635,12 @@ struct AgentHistoryInspectorTests {
         """
 
         let access = AgentHistoryRemoteAccess(alias: "cloud") { command in
-            if command.contains("printf '%s' \"$HOME\"") {
-                return "/home/test"
-            }
-            if command.contains("find") {
-                return remoteListing
+            if command.contains("find") || command.contains("OMG_FILE") {
+                return """
+                ===OMG_FILE===\(remoteListing)
+                \(remoteHeader)
+                ===OMG_END===
+                """
             }
             if command.contains("head -c") {
                 return remoteHeader

@@ -12,10 +12,14 @@ struct AgentHistoryRemoteFile: Equatable, Sendable {
     let modifiedAt: Date
 }
 
-/// Reads an Agent's session store on a remote host through a single portable
-/// mechanism: `ssh <alias> <command>` with stdout captured. This mirrors the
-/// existing in-tree SSH helpers (BatchMode, bounded timeouts) and never owns
-/// keys, passwords, or known_hosts.
+struct AgentHistoryRemoteChunk: Equatable, Sendable {
+    let file: AgentHistoryRemoteFile
+    let headerData: Data
+}
+
+/// Reads an Agent's session store on a remote host through portable SSH
+/// commands with stdout captured. This mirrors the existing in-tree SSH helpers
+/// (BatchMode, bounded timeouts) and never owns keys, passwords, or known_hosts.
 struct AgentHistoryRemoteAccess: Sendable {
     let alias: String
     let runCommand: @Sendable (String) async throws -> String
@@ -50,20 +54,34 @@ struct AgentHistoryRemoteAccess: Sendable {
         return home
     }
 
-    /// Lists `*.jsonl` files under the given absolute remote roots using a
-    /// POSIX `find -exec ls -ld` so the same command works on Linux and macOS
-    /// hosts. Directories that do not exist are ignored via stderr suppression.
-    func enumerate(
-        roots: [String],
-        maximumFiles: Int
-    ) async throws -> [AgentHistoryRemoteFile] {
-        let validRoots = roots.filter(Self.validRemotePath)
-        guard !validRoots.isEmpty else { return [] }
-        let quoted = validRoots.map(Self.shellQuote).joined(separator: " ")
-        let command = "find \(quoted) -type f -name '*.jsonl' -exec ls -ld {} \\; 2>/dev/null"
-        let output = try await runCommand(command)
-        let files = Self.parseLongListings(output)
-        return maximumFiles > 0 ? Array(files.prefix(maximumFiles)) : files
+    /// Discovers agent session files and reads their headers in a single remote
+    /// batch command over SSH. Existing directories are checked first so that
+    /// missing agent directories on the remote host never cause `find` to fail
+    /// or exit with a non-zero status.
+    func discoverSessions(
+        relativeRoots: [String],
+        maximumSessions: Int
+    ) async throws -> [AgentHistoryRemoteChunk] {
+        let safeRoots = relativeRoots.filter { !$0.isEmpty && !$0.contains("'") }
+        guard !safeRoots.isEmpty else { return [] }
+        let rootsList = safeRoots.map { "'\($0)'" }.joined(separator: " ")
+        let script = """
+        dirs=""
+        for rel in \(rootsList); do
+          d="$HOME/$rel"
+          [ -d "$d" ] && dirs="$dirs \\"$d\\""
+        done
+        [ -z "$dirs" ] && exit 0
+        eval "find $dirs -type f -name '*.jsonl' -exec ls -t {} + 2>/dev/null" | head -n \(maximumSessions) | while IFS= read -r f; do
+          [ -f "$f" ] || continue
+          info=$(ls -ld "$f" 2>/dev/null)
+          printf "\\n===OMG_FILE===%s\\n" "$info"
+          head -c 32768 "$f" 2>/dev/null
+          printf "\\n===OMG_END===\\n"
+        done
+        """
+        let output = try await runCommand(script)
+        return Self.parseBatchStream(output)
     }
 
     func read(path: String, maximumBytes: Int) async throws -> Data {
@@ -75,54 +93,68 @@ struct AgentHistoryRemoteAccess: Sendable {
         return Data(output.utf8)
     }
 
-    /// Parses `ls -ld` long listings (one per line) produced by
-    /// `find -exec ls -ld`. Columns are permissions, links, owner, group, size,
-    /// month, day, time/year, then the absolute path.
-    static func parseLongListings(_ output: String) -> [AgentHistoryRemoteFile] {
-        var files: [AgentHistoryRemoteFile] = []
+    static func parseBatchStream(_ output: String) -> [AgentHistoryRemoteChunk] {
+        var results: [AgentHistoryRemoteChunk] = []
+        let parts = output.components(separatedBy: "===OMG_FILE===")
+        for part in parts where !part.isEmpty {
+            guard let endRange = part.range(of: "\n===OMG_END===") ?? part.range(of: "===OMG_END===") else {
+                continue
+            }
+            let body = String(part[..<endRange.lowerBound])
+            guard let newlineIndex = body.firstIndex(of: "\n") else { continue }
+            let lsLine = String(body[..<newlineIndex]).trimmingCharacters(in: .whitespaces)
+            let headerText = String(body[body.index(after: newlineIndex)...])
+            guard let file = parseLongListingLine(lsLine) else { continue }
+            results.append(.init(file: file, headerData: Data(headerText.utf8)))
+        }
+        return results
+    }
+
+    /// Parses a single `ls -ld` long listing produced by `ls -ld`.
+    static func parseLongListingLine(_ line: String) -> AgentHistoryRemoteFile? {
+        guard line.count > 10, line.first != "t" else { return nil }
+        let columns = line.split(
+            maxSplits: 8,
+            whereSeparator: { $0 == " " || $0 == "\t" }
+        )
+        guard columns.count == 9 else { return nil }
+        guard let size = Int(columns[4]) else { return nil }
+        let name = String(columns[8])
+        guard validRemotePath(name) else { return nil }
+        let month = String(columns[5])
+        let day = String(columns[6])
+        let time = String(columns[7])
+
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone.current
 
-        for rawLine in output.split(whereSeparator: \.isNewline) {
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
-            guard line.count > 10, line.first != "t" else { continue }
-            let columns = line.split(
-                maxSplits: 8,
-                whereSeparator: { $0 == " " || $0 == "\t" }
-            )
-            guard columns.count == 9 else { continue }
-            guard let size = Int(columns[4]) else { continue }
-            let name = String(columns[8])
-            guard validRemotePath(name) else { continue }
-            let month = String(columns[5])
-            let day = String(columns[6])
-            let time = String(columns[7])
-
-            var date: Date?
-            if time.contains(":") {
-                formatter.dateFormat = "MMM dd HH:mm"
-                let parsed = formatter.date(from: "\(month) \(day) \(time)")
-                // `ls` prints the current year without a time; a future date
-                // means the file is from a previous year.
-                if let parsed, parsed > Date().addingTimeInterval(60) {
-                    formatter.dateFormat = "MMM dd yyyy"
-                    date = formatter.date(from: "\(month) \(day) \(time)")
-                } else {
-                    date = parsed
-                }
-            } else {
+        var date: Date?
+        if time.contains(":") {
+            formatter.dateFormat = "MMM dd HH:mm"
+            let parsed = formatter.date(from: "\(month) \(day) \(time)")
+            if let parsed, parsed > Date().addingTimeInterval(60) {
                 formatter.dateFormat = "MMM dd yyyy"
                 date = formatter.date(from: "\(month) \(day) \(time)")
+            } else {
+                date = parsed
             }
-
-            files.append(.init(
-                path: name,
-                size: size,
-                modifiedAt: date ?? .distantPast
-            ))
+        } else {
+            formatter.dateFormat = "MMM dd yyyy"
+            date = formatter.date(from: "\(month) \(day) \(time)")
         }
-        return files.sorted { $0.modifiedAt > $1.modifiedAt }
+
+        return .init(
+            path: name,
+            size: size,
+            modifiedAt: date ?? .distantPast
+        )
+    }
+
+    static func parseLongListings(_ output: String) -> [AgentHistoryRemoteFile] {
+        output.split(whereSeparator: \.isNewline)
+            .compactMap { parseLongListingLine(String($0)) }
+            .sorted { $0.modifiedAt > $1.modifiedAt }
     }
 
     static func validRemotePath(_ path: String) -> Bool {

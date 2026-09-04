@@ -692,58 +692,46 @@ enum AgentHistoryStore {
         maximumSessions: Int
     ) async -> [AgentHistorySession] {
         guard maximumSessions > 0, !Task.isCancelled else { return [] }
-        guard let home = try? await access.remoteHome() else { return [] }
-        guard !Task.isCancelled else { return [] }
 
-        var sources: [RemoteSource] = []
+        var roots: [String] = []
         for agent in agents {
-            guard let source = remoteSource(for: agent, remoteHome: home) else { continue }
-            sources.append(source)
+            if let rel = relativeRoot(for: agent), !roots.contains(rel) {
+                roots.append(rel)
+            }
         }
-        guard !sources.isEmpty else { return [] }
+        guard !roots.isEmpty else { return [] }
 
-        let roots = Array(Set(sources.map(\.rootPath)))
-        guard let files = try? await access.enumerate(
-            roots: roots,
-            maximumFiles: maximumHeaderCandidates
+        guard let chunks = try? await access.discoverSessions(
+            relativeRoots: roots,
+            maximumSessions: maximumSessions
         ) else { return [] }
 
-        var candidates: [RemoteCandidate] = []
-        for file in files {
-            guard !Task.isCancelled else { return [] }
-            guard let source = sources.first(where: { file.path.hasPrefix($0.rootPath + "/") }) else {
-                continue
-            }
+        var sessionsByID: [String: AgentHistorySession] = [:]
+        for chunk in chunks {
+            guard !Task.isCancelled, sessionsByID.count < maximumSessions else { break }
+            let records = headerRecords(from: chunk.headerData)
+            guard !records.isEmpty else { continue }
+
+            guard let matchedAgent = agents.first(where: { agent in
+                guard let rel = relativeRoot(for: agent) else { return false }
+                return chunk.file.path.contains("/" + rel + "/") || chunk.file.path.contains("/" + rel)
+            }) else { continue }
+
+            let pattern = matchedAgent.definition.resume.store?.entryPattern
+            let idKeyPath = matchedAgent.definition.resume.discover?.idKeyPath
+            let cwdKeyPath = matchedAgent.definition.resume.discover?.cwdKeyPath
+
             let filenameID: AgentConversationID?
-            if let pattern = source.entryPattern {
-                let relative = relativeRemotePath(file.path, under: source.rootPath)
-                guard let rawID = id(from: relative, pattern: pattern),
-                      let id = AgentConversationID(rawID) else { continue }
-                filenameID = id
+            if let pattern {
+                let filename = URL(fileURLWithPath: chunk.file.path).lastPathComponent
+                filenameID = id(from: filename, pattern: pattern).flatMap(AgentConversationID.init)
             } else {
                 filenameID = nil
             }
-            candidates.append(.init(
-                source: source,
-                file: file,
-                filenameID: filenameID
-            ))
-        }
 
-        var sessionsByID: [String: AgentHistorySession] = [:]
-        for candidate in candidates.prefix(maximumSessions) {
-            guard !Task.isCancelled, sessionsByID.count < maximumSessions else { break }
-            guard let headerData = try? await access.read(
-                path: candidate.file.path,
-                maximumBytes: maximumHeaderBytes
-            ) else { continue }
-            let records = headerRecords(from: headerData)
-            guard !records.isEmpty else { continue }
-
-            let metadataID: AgentConversationID? = if let keyPath =
-                candidate.source.idKeyPath {
+            let metadataID: AgentConversationID? = if let idKeyPath {
                 records.lazy.compactMap {
-                    stringValue(at: keyPath, in: $0).flatMap(AgentConversationID.init)
+                    stringValue(at: idKeyPath, in: $0).flatMap(AgentConversationID.init)
                 }.first
             } else {
                 records.lazy.compactMap { record in
@@ -755,16 +743,14 @@ enum AgentHistoryStore {
                     return AgentConversationID(value)
                 }.first
             }
-            if let filenameID = candidate.filenameID,
-               let metadataID,
-               filenameID != metadataID {
+            if let filenameID, let metadataID, filenameID != metadataID {
                 continue
             }
-            guard let conversationID = metadataID ?? candidate.filenameID else {
+            guard let conversationID = metadataID ?? filenameID else {
                 continue
             }
 
-            let configuredCwd = candidate.source.cwdKeyPath.flatMap { keyPath in
+            let configuredCwd = cwdKeyPath.flatMap { keyPath in
                 records.lazy.compactMap { stringValue(at: keyPath, in: $0) }.first
             }
             let workingDirectory = validWorkingDirectory(
@@ -804,12 +790,12 @@ enum AgentHistoryStore {
             }.prefix(10).joined(separator: "\n")
 
             let session = AgentHistorySession(
-                agent: candidate.source.agent,
+                agent: matchedAgent,
                 conversationID: conversationID,
                 title: title,
                 workingDirectory: workingDirectory,
-                updatedAt: candidate.file.modifiedAt,
-                sourcePath: candidate.file.path,
+                updatedAt: chunk.file.modifiedAt,
+                sourcePath: chunk.file.path,
                 remoteHost: access.alias,
                 isActive: false,
                 previewSnippet: previewSnippet.isEmpty ? nil : previewSnippet
@@ -827,59 +813,17 @@ enum AgentHistoryStore {
         }
     }
 
-    nonisolated private static func remoteSource(
-        for agent: SupportedAgent,
-        remoteHome: String
-    ) -> RemoteSource? {
+    nonisolated private static func relativeRoot(for agent: SupportedAgent) -> String? {
         let resume = agent.definition.resume
         guard !resume.resumeArguments.isEmpty else { return nil }
-
-        if let discovery = resume.discover, discovery.format == .jsonl {
-            let rootPath = expandRemoteHome(discovery.root, remoteHome: remoteHome)
-            guard AgentHistoryRemoteAccess.validRemotePath(rootPath) else { return nil }
-            return .init(
-                agent: agent,
-                rootPath: rootPath,
-                entryPattern: nil,
-                idKeyPath: discovery.idKeyPath,
-                cwdKeyPath: discovery.cwdKeyPath
-            )
+        let rawPath = resume.discover?.root ?? resume.store?.root
+        guard let rawPath else { return nil }
+        if rawPath.hasPrefix("~/") {
+            return String(rawPath.dropFirst(2))
+        } else if rawPath.hasPrefix("~") {
+            return String(rawPath.dropFirst(1)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         }
-
-        guard let store = resume.store,
-              store.entryPattern.lowercased().contains(".jsonl") else {
-            return nil
-        }
-        let rootPath = expandRemoteHome(store.root, remoteHome: remoteHome)
-        guard AgentHistoryRemoteAccess.validRemotePath(rootPath) else { return nil }
-        return .init(
-            agent: agent,
-            rootPath: rootPath,
-            entryPattern: store.entryPattern,
-            idKeyPath: nil,
-            cwdKeyPath: nil
-        )
-    }
-
-    nonisolated private static func expandRemoteHome(
-        _ path: String,
-        remoteHome: String
-    ) -> String {
-        if path == "~" { return remoteHome }
-        if path.hasPrefix("~/") {
-            let trimmed = remoteHome.hasSuffix("/") ? String(remoteHome.dropLast()) : remoteHome
-            return trimmed + String(path.dropFirst())
-        }
-        return path
-    }
-
-    nonisolated private static func relativeRemotePath(
-        _ path: String,
-        under root: String
-    ) -> String {
-        guard path.hasPrefix(root) else { return path }
-        let suffix = path.dropFirst(root.count)
-        return String(suffix).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return nil
     }
 
     nonisolated private static func headerRecords(from data: Data) -> [[String: Any]] {

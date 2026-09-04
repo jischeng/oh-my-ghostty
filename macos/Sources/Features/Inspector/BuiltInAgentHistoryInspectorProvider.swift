@@ -20,8 +20,6 @@ final class BuiltInAgentHistoryInspectorProvider {
 
     private struct TabState {
         var hostKey: String = "local"
-        var sessions: [AgentHistorySession]?
-        var isLoadingSessions = false
         var selectedSessionID: String?
         var transcript: AgentHistoryTranscript?
         var isLoadingTranscript = false
@@ -34,7 +32,8 @@ final class BuiltInAgentHistoryInspectorProvider {
     private let transcriptLoader: TranscriptLoader
     private let sessionResumer: SessionResumer
     private let sessionForker: SessionForker
-    private var loadGenerations: [UUID: UInt64] = [:]
+    private var sessionsByHost: [String: [AgentHistorySession]] = [:]
+    private var loadingHosts: Set<String> = []
     private var loadTasks: [UUID: Task<Void, Never>] = [:]
     private var transcriptTasks: [UUID: Task<Void, Never>] = [:]
     private var tabStates: [UUID: TabState] = [:]
@@ -90,12 +89,10 @@ final class BuiltInAgentHistoryInspectorProvider {
             } else if key == "agents.historyLimit" {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
-                    if presentedContexts.isEmpty {
-                        tabStates.removeAll()
-                    } else {
-                        for context in presentedContexts.values {
-                            reload(context: context)
-                        }
+                    sessionsByHost.removeAll()
+                    loadingHosts.removeAll()
+                    for context in presentedContexts.values {
+                        loadOnDemand(context: context)
                     }
                 }
             }
@@ -145,14 +142,14 @@ final class BuiltInAgentHistoryInspectorProvider {
         switch event {
         case .appeared(let context):
             presentedContexts[context.tabID] = context
-            var state = tabStates[context.tabID] ?? .init()
             let hostKey = hostKey(for: context)
+            var state = tabStates[context.tabID] ?? .init(hostKey: hostKey)
             if state.hostKey != hostKey {
                 state = .init(hostKey: hostKey)
                 tabStates[context.tabID] = state
             }
             publish(context)
-            if state.sessions == nil, !state.isLoadingSessions {
+            if sessionsByHost[hostKey] == nil && !loadingHosts.contains(hostKey) {
                 loadOnDemand(context: context)
             }
         case .disappeared(let context):
@@ -160,8 +157,6 @@ final class BuiltInAgentHistoryInspectorProvider {
             DispatchQueue.main.async { [weak self] in
                 guard let self,
                       presentedContexts[context.tabID] == nil else { return }
-                loadTasks[context.tabID]?.cancel()
-                loadTasks.removeValue(forKey: context.tabID)
                 transcriptTasks[context.tabID]?.cancel()
                 transcriptTasks.removeValue(forKey: context.tabID)
                 if presentedContexts.isEmpty {
@@ -172,6 +167,7 @@ final class BuiltInAgentHistoryInspectorProvider {
     }
 
     private func handle(_ action: InspectorPaneAction) {
+        let hostKey = hostKey(for: action.context)
         switch action.kind {
         case .refreshAgentHistory:
             reload(context: action.context)
@@ -180,13 +176,13 @@ final class BuiltInAgentHistoryInspectorProvider {
         case .clearAgentHistorySelection:
             clearSelection(context: action.context)
         case .resumeAgentHistorySession(let id):
-            guard let session = tabStates[action.context.tabID]?.sessions?.first(where: { $0.id == id }) else {
+            guard let session = sessionsByHost[hostKey]?.first(where: { $0.id == id }) else {
                 return
             }
             sessionResumer(session, action.context)
             publishPresentedContexts()
         case .forkAgentHistorySession(let id):
-            guard let session = tabStates[action.context.tabID]?.sessions?.first(where: { $0.id == id }) else {
+            guard let session = sessionsByHost[hostKey]?.first(where: { $0.id == id }) else {
                 return
             }
             sessionForker(session, action.context)
@@ -197,96 +193,63 @@ final class BuiltInAgentHistoryInspectorProvider {
     }
 
     private func loadOnDemand(context: InspectorPaneContext) {
-        let tabID = context.tabID
-        loadTasks[tabID]?.cancel()
-        let nextGen = (loadGenerations[tabID] ?? 0) &+ 1
-        loadGenerations[tabID] = nextGen
-        var state = tabStates[tabID] ?? .init(hostKey: hostKey(for: context))
-        state.isLoadingSessions = true
-        tabStates[tabID] = state
+        let hostKey = hostKey(for: context)
+        if sessionsByHost[hostKey] != nil {
+            publish(context)
+            return
+        }
+        guard !loadingHosts.contains(hostKey) else {
+            publish(context)
+            return
+        }
+        loadingHosts.insert(hostKey)
         publish(context)
 
-        let isSSH: String?
-        if case .sshReady(let ssh, _) = context.session.state {
-            isSSH = ssh.alias
+        let isSSH: String? = if case .sshReady(let ssh, _) = context.session.state {
+            ssh.alias
         } else {
-            isSSH = nil
+            nil
         }
 
-        loadTasks[tabID] = Task { [weak self] in
+        let taskID = UUID()
+        loadTasks[taskID] = Task { [weak self] in
             guard let self else { return }
             if let alias = isSSH {
                 let access = AgentHistoryRemoteAccess(alias: alias)
                 let loaded = await remoteSessionLoader(access)
-                guard !Task.isCancelled, loadGenerations[tabID] == nextGen else { return }
-                applyLoadedSessions(loaded, for: tabID)
-                loadTasks.removeValue(forKey: tabID)
-                if let current = presentedContexts[tabID] { publish(current) }
+                guard !Task.isCancelled else { return }
+                sessionsByHost[hostKey] = loaded
+                loadingHosts.remove(hostKey)
+                loadTasks.removeValue(forKey: taskID)
+                publishPresentedContexts()
             } else {
                 let cached = await cachedSessionLoader()
-                guard !Task.isCancelled, loadGenerations[tabID] == nextGen else { return }
-                if !cached.isEmpty {
-                    applyLoadedSessions(cached, for: tabID)
-                    if let current = presentedContexts[tabID] { publish(current) }
+                guard !Task.isCancelled else { return }
+                if !cached.isEmpty, sessionsByHost[hostKey] == nil {
+                    sessionsByHost[hostKey] = cached
+                    publishPresentedContexts()
                 }
 
-                guard presentedContexts[tabID] != nil else {
-                    loadTasks.removeValue(forKey: tabID)
+                guard presentedContexts[context.tabID] != nil else {
+                    loadingHosts.remove(hostKey)
+                    loadTasks.removeValue(forKey: taskID)
                     return
                 }
                 let refreshed = await sessionLoader()
-                guard !Task.isCancelled, loadGenerations[tabID] == nextGen else { return }
-                applyLoadedSessions(refreshed, for: tabID)
-                loadTasks.removeValue(forKey: tabID)
-                if let current = presentedContexts[tabID] { publish(current) }
+                guard !Task.isCancelled else { return }
+                sessionsByHost[hostKey] = refreshed
+                loadingHosts.remove(hostKey)
+                loadTasks.removeValue(forKey: taskID)
+                publishPresentedContexts()
             }
         }
     }
 
     private func reload(context: InspectorPaneContext) {
-        let tabID = context.tabID
-        loadTasks[tabID]?.cancel()
-        let nextGen = (loadGenerations[tabID] ?? 0) &+ 1
-        loadGenerations[tabID] = nextGen
-        var state = tabStates[tabID] ?? .init(hostKey: hostKey(for: context))
-        state.isLoadingSessions = true
-        tabStates[tabID] = state
-        publish(context)
-
-        let isSSH: String?
-        if case .sshReady(let ssh, _) = context.session.state {
-            isSSH = ssh.alias
-        } else {
-            isSSH = nil
-        }
-
-        loadTasks[tabID] = Task { [weak self] in
-            guard let self else { return }
-            let loaded: [AgentHistorySession]
-            if let alias = isSSH {
-                let access = AgentHistoryRemoteAccess(alias: alias)
-                loaded = await remoteSessionLoader(access)
-            } else {
-                loaded = await sessionLoader()
-            }
-            guard !Task.isCancelled, loadGenerations[tabID] == nextGen else { return }
-            applyLoadedSessions(loaded, for: tabID)
-            loadTasks.removeValue(forKey: tabID)
-            if let current = presentedContexts[tabID] { publish(current) }
-        }
-    }
-
-    private func applyLoadedSessions(_ loaded: [AgentHistorySession], for tabID: UUID) {
-        var state = tabStates[tabID] ?? .init()
-        state.sessions = loaded
-        state.isLoadingSessions = false
-        let availableIDs = Set(loaded.map(\.id))
-        if let selected = state.selectedSessionID, !availableIDs.contains(selected) {
-            state.selectedSessionID = nil
-            state.transcript = nil
-            state.isLoadingTranscript = false
-        }
-        tabStates[tabID] = state
+        let hostKey = hostKey(for: context)
+        sessionsByHost.removeValue(forKey: hostKey)
+        loadingHosts.remove(hostKey)
+        loadOnDemand(context: context)
     }
 
     private func hostKey(for context: InspectorPaneContext) -> String {
@@ -300,11 +263,12 @@ final class BuiltInAgentHistoryInspectorProvider {
         _ id: String,
         context: InspectorPaneContext
     ) {
-        guard let session = tabStates[context.tabID]?.sessions?.first(where: { $0.id == id }) else {
+        let hostKey = hostKey(for: context)
+        guard let session = sessionsByHost[hostKey]?.first(where: { $0.id == id }) else {
             return
         }
-        transcriptTasks.removeValue(forKey: context.tabID)?.cancel()
-        var state = tabStates[context.tabID] ?? .init()
+        transcriptTasks[context.tabID]?.cancel()
+        var state = tabStates[context.tabID] ?? .init(hostKey: hostKey)
         state.selectedSessionID = id
         if state.transcript?.sessionID == id {
             state.isLoadingTranscript = false
@@ -330,7 +294,7 @@ final class BuiltInAgentHistoryInspectorProvider {
     }
 
     private func clearSelection(context: InspectorPaneContext) {
-        transcriptTasks.removeValue(forKey: context.tabID)?.cancel()
+        transcriptTasks[context.tabID]?.cancel()
         tabStates[context.tabID]?.selectedSessionID = nil
         tabStates[context.tabID]?.transcript = nil
         tabStates[context.tabID]?.isLoadingTranscript = false
@@ -342,13 +306,16 @@ final class BuiltInAgentHistoryInspectorProvider {
     }
 
     private func publish(_ context: InspectorPaneContext) {
-        let state = tabStates[context.tabID] ?? .init()
+        let hostKey = hostKey(for: context)
+        let state = tabStates[context.tabID] ?? .init(hostKey: hostKey)
         let activeIDs = Self.activeSessionIDs()
-        let presentedSessions = (state.sessions ?? []).map { session in
+        let hostSessions = sessionsByHost[hostKey]
+        let presentedSessions = (hostSessions ?? []).map { session in
             var session = session
             session.isActive = activeIDs.contains(session.id)
             return session
         }
+        let isLoading = hostSessions == nil && loadingHosts.contains(hostKey)
         let hostLabel: String? = if case .sshReady(let ssh, _) = context.session.state {
             ssh.alias
         } else {
@@ -364,7 +331,7 @@ final class BuiltInAgentHistoryInspectorProvider {
                     sessions: presentedSessions,
                     selectedSessionID: state.selectedSessionID,
                     transcript: state.transcript,
-                    isLoadingSessions: state.isLoadingSessions,
+                    isLoadingSessions: isLoading,
                     isLoadingTranscript: state.isLoadingTranscript
                 ))
             )

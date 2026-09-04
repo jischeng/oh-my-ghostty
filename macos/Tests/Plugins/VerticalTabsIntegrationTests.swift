@@ -120,6 +120,8 @@ struct VerticalTabsIntegrationTests {
         settings.orderingMode = .manual
         settings.showShortcutLabels = true
         settings.rememberSidebarWidth = true
+        settings.openQuickInputOnAgentStart = false
+        settings.openQuickInputOnAgentComplete = false
         settings.resetAppearance()
 
         let appDelegate = try #require(NSApp.delegate as? AppDelegate)

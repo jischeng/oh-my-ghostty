@@ -307,7 +307,8 @@ struct BuiltInInfoInspectorProviderTests {
             copyAddress: { _ in }
         )
         try provider.setEnabled(true)
-        #expect(registry.descriptor(id: BuiltInInfoInspectorProvider.paneID)?.title == "Info")
+        let strings = InfoStrings.current
+        #expect(registry.descriptor(id: BuiltInInfoInspectorProvider.paneID)?.title == strings.infoTitle)
 
         let serverID = "hostkey-SHA256:failure="
         let context = sshContext(
@@ -336,7 +337,7 @@ struct BuiltInInfoInspectorProviderTests {
             Issue.record("Expected a detailed forwarding failure")
             return
         }
-        #expect(message == "Local port 5175 is already in use.")
+        #expect(message == strings.localPortInUse(5_175))
         provider.shutdown()
     }
 

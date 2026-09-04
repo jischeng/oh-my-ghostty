@@ -55,13 +55,13 @@ extension NSPasteboard {
     }
 
     /// If the pasteboard holds an image but no text/file content, write the
-    /// image as PNG into a dedicated temporary directory and return the
-    /// shell-escaped absolute path so agents can consume it as a file. Returns
-    /// nil when there is no usable image. Stored files are pruned after 7 days.
-    func imagePastePath(
+    /// image as PNG into a dedicated temporary directory and return its URL.
+    /// Returns nil when there is no usable image. Stored files are pruned after
+    /// 7 days.
+    func imagePasteFile(
         directory: URL = FileManager.default.temporaryDirectory
             .appendingPathComponent("omg-paste", isDirectory: true)
-    ) -> String? {
+    ) -> URL? {
         guard let image = NSImage(pasteboard: self),
               let tiff = image.tiffRepresentation,
               let rep = NSBitmapImageRep(data: tiff),
@@ -109,7 +109,16 @@ extension NSPasteboard {
             try? fileManager.removeItem(at: file)
             return nil
         }
-        return Ghostty.Shell.escape(file.path)
+        return file
+    }
+
+    /// Writes an image-only pasteboard item locally and returns the
+    /// shell-escaped path used by local terminal sessions.
+    func imagePastePath(
+        directory: URL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-paste", isDirectory: true)
+    ) -> String? {
+        imagePasteFile(directory: directory).map { Ghostty.Shell.escape($0.path) }
     }
 
     /// Removes image paste files older than the retention window.

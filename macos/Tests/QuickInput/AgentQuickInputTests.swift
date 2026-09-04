@@ -189,6 +189,40 @@ struct AgentQuickInputTests {
         try? FileManager.default.removeItem(atPath: editor.string)
     }
 
+    @Test func nativeEditorImagePasteUsesRemotePathResolver() throws {
+        let rep = try #require(NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: 2,
+            pixelsHigh: 2,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ))
+        let png = try #require(rep.representation(using: .png, properties: [:]))
+        let pasteboard = NSPasteboard(
+            name: .init("omg-quick-input-remote-image-\(UUID().uuidString)")
+        )
+        pasteboard.declareTypes([.png], owner: nil)
+        pasteboard.setData(png, forType: .png)
+        let editor = ComposerTextView()
+        editor.pasteboard = pasteboard
+        var localFile: URL?
+        editor.onPasteImage = { file, completion in
+            localFile = file
+            completion("/tmp/omg-paste-remote.png")
+        }
+
+        editor.paste(nil)
+
+        #expect(localFile?.pathExtension == "png")
+        #expect(editor.string == "/tmp/omg-paste-remote.png")
+        if let localFile { try? FileManager.default.removeItem(at: localFile) }
+    }
+
     @Test func standardEditingShortcutsAreRecognized() {
         #expect(AgentQuickInputEditingCommand.resolve(
             key: "c",

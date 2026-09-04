@@ -18,6 +18,10 @@ struct PaneSessionContext: Equatable, Sendable {
         let alias: String
         let serverID: String?
         let replay: SSHReplayDescriptor?
+        /// Exact OpenSSH destination used for host-owned auxiliary transfers.
+        /// This preserves `user@host` for foreground-inferred sessions while
+        /// keeping the shorter alias for presentation.
+        let transferTarget: String
         /// Non-nil only when the host inferred a plain interactive `ssh`
         /// process from the Surface foreground process group. Typed `omg +ssh`
         /// lifecycles keep this nil and remain authoritative.
@@ -157,6 +161,7 @@ struct PaneSessionContext: Equatable, Sendable {
     /// user's command or requiring a shell alias.
     mutating func observeForegroundSSH(
         alias: String,
+        transferTarget: String,
         processGroupID: Int,
         currentWorkingDirectory: String?,
         currentTerminalTitle: String,
@@ -188,6 +193,7 @@ struct PaneSessionContext: Equatable, Sendable {
             alias: alias,
             serverID: nil,
             replay: nil,
+            transferTarget: transferTarget,
             localProcessGroupID: processGroupID
         )
         let next: State = if let remoteWorkingDirectory,
@@ -265,6 +271,9 @@ struct PaneSessionContext: Equatable, Sendable {
                 serverID: metadata["serverid"].flatMap(Self.validServerID)
                     ?? activeSSH?.serverID,
                 replay: sshReplay ?? activeSSH?.replay,
+                transferTarget: sshReplay?.transferTarget
+                    ?? activeSSH?.transferTarget
+                    ?? alias,
                 localProcessGroupID: nil
             )
             let isCurrentConnection = activeSSH != nil
@@ -324,6 +333,7 @@ struct PaneSessionContext: Equatable, Sendable {
             alias: previous.alias,
             serverID: previous.serverID,
             replay: previous.replay,
+            transferTarget: previous.transferTarget,
             localProcessGroupID: processGroupID
         ), workingDirectory: workingDirectory)
         revision &+= 1
@@ -405,7 +415,7 @@ struct PaneSessionContext: Equatable, Sendable {
 }
 
 enum ForegroundSSHProcessObservation: Equatable, Sendable {
-    case interactive(alias: String)
+    case interactive(alias: String, transferTarget: String)
     case ambiguous
     case none
 }
@@ -424,12 +434,12 @@ enum ForegroundSSHProcessDetector {
             sawSSHProcess = true
             guard let destination = interactiveDestination(Array(argv.dropFirst())),
                   let alias = destinationLabel(destination) else { continue }
-            return .interactive(alias: alias)
+            return .interactive(alias: alias, transferTarget: destination)
         }
         return sawSSHProcess ? .ambiguous : .none
     }
 
-    private static func interactiveDestination(_ args: [String]) -> String? {
+    static func interactiveDestination(_ args: [String]) -> String? {
         let optionsWithValue = "BbcDEeFIiJLlmOoPpQRSWw"
         let noninteractiveOptions = "GNOQTVWfn"
         var index = 0
@@ -504,6 +514,11 @@ struct SSHReplayDescriptor: Codable, Equatable, Sendable {
         case terminfo
         case cache
         case args
+    }
+
+    var transferTarget: String? {
+        guard version == 1 else { return nil }
+        return ForegroundSSHProcessDetector.interactiveDestination(args)
     }
 
     func command(
@@ -889,40 +904,43 @@ enum WorkspaceFilesystemFactory {
     }
 }
 
-struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
-    let host: SSHHostConfiguration
-    let descriptor: WorkspaceDescriptor
-
-    init(host: SSHHostConfiguration, workingDirectory: String) {
-        self.host = host
-        self.descriptor = .init(
-            kind: .ssh,
-            id: host.workspaceID,
-            displayName: host.alias,
-            workingDirectory: workingDirectory
-        )
+struct SSHImagePasteTransfer {
+    static func upload(localFile: URL, to ssh: PaneSessionContext.SSH) async throws -> String {
+        guard localFile.isFileURL,
+              !ssh.transferTarget.isEmpty,
+              ssh.transferTarget.utf8.count <= 4_096,
+              !ssh.transferTarget.contains("\0"),
+              !ssh.transferTarget.contains("\n"),
+              let attributes = try? FileManager.default.attributesOfItem(
+                atPath: localFile.path
+              ),
+              attributes[.type] as? FileAttributeType == .typeRegular else {
+            throw WorkspaceFilesystemError.invalidPath
+        }
+        let remotePath = "/tmp/omg-paste-\(UUID().uuidString).png"
+        let batch = batch(localPath: localFile.path, remotePath: remotePath)
+        _ = try await SSHSFTPClient.run(batch: batch, host: ssh.transferTarget)
+        return Ghostty.Shell.escape(remotePath)
     }
 
-    func listDirectory(at path: String) async throws -> [WorkspaceFileEntry] {
-        let output = try await runSFTP(batch: "ls -la \(Self.quote(path))")
-        return try Self.parseLongListing(output, directory: path)
+    static func batch(localPath: String, remotePath: String) -> String {
+        [
+            "put \(quote(localPath)) \(quote(remotePath))",
+            "chmod 600 \(quote(remotePath))",
+        ].joined(separator: "\n")
     }
 
-    func createFile(named name: String, in directory: String) async throws {
-        guard Self.validChildName(name) else { throw WorkspaceFilesystemError.invalidPath }
-        _ = try await runSFTP(batch: "put /dev/null \(Self.quote(Self.join(directory, name)))")
+    private static func quote(_ path: String) -> String {
+        "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
+}
 
-    func createDirectory(named name: String, in directory: String) async throws {
-        guard Self.validChildName(name) else { throw WorkspaceFilesystemError.invalidPath }
-        _ = try await runSFTP(batch: "mkdir \(Self.quote(Self.join(directory, name)))")
-    }
-
-    private func runSFTP(batch: String) async throws -> String {
+enum SSHSFTPClient {
+    static func run(batch: String, host: String) async throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/sftp")
-        process.arguments = ["-q", "-b", "-", host.alias]
-        process.standardInput = Self.dataPipe(batch + "\n")
+        process.arguments = ["-q", "-b", "-", host]
+        process.standardInput = dataPipe(batch + "\n")
 
         return try await withTaskCancellationHandler {
             try await Task.detached(priority: .utility) {
@@ -971,6 +989,47 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
         }
     }
 
+    private static func dataPipe(_ string: String) -> Pipe {
+        let pipe = Pipe()
+        pipe.fileHandleForWriting.write(string.data(using: .utf8)!)
+        pipe.fileHandleForWriting.closeFile()
+        return pipe
+    }
+}
+
+struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
+    let host: SSHHostConfiguration
+    let descriptor: WorkspaceDescriptor
+
+    init(host: SSHHostConfiguration, workingDirectory: String) {
+        self.host = host
+        self.descriptor = .init(
+            kind: .ssh,
+            id: host.workspaceID,
+            displayName: host.alias,
+            workingDirectory: workingDirectory
+        )
+    }
+
+    func listDirectory(at path: String) async throws -> [WorkspaceFileEntry] {
+        let output = try await runSFTP(batch: "ls -la \(Self.quote(path))")
+        return try Self.parseLongListing(output, directory: path)
+    }
+
+    func createFile(named name: String, in directory: String) async throws {
+        guard Self.validChildName(name) else { throw WorkspaceFilesystemError.invalidPath }
+        _ = try await runSFTP(batch: "put /dev/null \(Self.quote(Self.join(directory, name)))")
+    }
+
+    func createDirectory(named name: String, in directory: String) async throws {
+        guard Self.validChildName(name) else { throw WorkspaceFilesystemError.invalidPath }
+        _ = try await runSFTP(batch: "mkdir \(Self.quote(Self.join(directory, name)))")
+    }
+
+    private func runSFTP(batch: String) async throws -> String {
+        try await SSHSFTPClient.run(batch: batch, host: host.alias)
+    }
+
     static func parseLongListing(
         _ output: String,
         directory: String
@@ -997,13 +1056,6 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
             if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
             return $0.name.localizedStandardCompare($1.name) == .orderedAscending
         }
-    }
-
-    private static func dataPipe(_ string: String) -> Pipe {
-        let pipe = Pipe()
-        pipe.fileHandleForWriting.write(string.data(using: .utf8)!)
-        pipe.fileHandleForWriting.closeFile()
-        return pipe
     }
 
     private static func quote(_ path: String) -> String {

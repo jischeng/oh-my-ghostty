@@ -927,6 +927,18 @@ private struct AgentQuickInputComposer: View {
                 isPresented: model.isPresented,
                 focusRequestID: model.focusRequestID,
                 font: editorFont,
+                onPasteImage: { file, completion in
+                    guard let surfaceID = model.targetSurfaceID else {
+                        completion(Ghostty.Shell.escape(file.path))
+                        return
+                    }
+                    controller.resolveImagePastePath(
+                        for: file,
+                        surfaceID: surfaceID,
+                        reportFailure: true,
+                        completion: completion
+                    )
+                },
                 onSend: controller.sendQuickInputDraft,
                 onQueue: controller.queueQuickInputDraft,
                 onCancel: controller.dismissQuickInput

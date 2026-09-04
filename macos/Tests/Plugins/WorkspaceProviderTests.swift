@@ -98,6 +98,17 @@ struct WorkspaceProviderTests {
         #expect(hosts.first?.workspaceID == "ssh:cloud")
     }
 
+    @Test func imageTransferBuildsPrivateRemoteSFTPBatch() {
+        let batch = SSHImagePasteTransfer.batch(
+            localPath: "/tmp/local image's.png",
+            remotePath: "/tmp/omg-paste-123.png"
+        )
+        #expect(batch == """
+        put '/tmp/local image'\\''s.png' '/tmp/omg-paste-123.png'
+        chmod 600 '/tmp/omg-paste-123.png'
+        """)
+    }
+
     @Test func createsGenericLocalWorkspaceDescriptor() {
         let filesystem = LocalWorkspaceFilesystem(workingDirectory: "/tmp/project")
         #expect(filesystem.descriptor.kind == .local)
@@ -107,13 +118,13 @@ struct WorkspaceProviderTests {
     @Test func recognizesOnlyInteractiveForegroundSSHCommands() {
         #expect(ForegroundSSHProcessDetector.observe(
             in: "ssh cloud\n"
-        ) == .interactive(alias: "cloud"))
+        ) == .interactive(alias: "cloud", transferTarget: "cloud"))
         #expect(ForegroundSSHProcessDetector.observe(
             in: "/usr/bin/ssh -p 2222 -J jump user@example.com\n"
-        ) == .interactive(alias: "example.com"))
+        ) == .interactive(alias: "example.com", transferTarget: "user@example.com"))
         #expect(ForegroundSSHProcessDetector.observe(
             in: "ssh -W host:22 jump\nssh cloud\n"
-        ) == .interactive(alias: "cloud"))
+        ) == .interactive(alias: "cloud", transferTarget: "cloud"))
         #expect(ForegroundSSHProcessDetector.observe(
             in: "ssh cloud uptime\n"
         ) == .ambiguous)
@@ -132,6 +143,7 @@ struct WorkspaceProviderTests {
         )
         context.observeForegroundSSH(
             alias: "cloud",
+            transferTarget: "json@cloud",
             processGroupID: 401,
             currentWorkingDirectory: "/Users/test/code",
             currentTerminalTitle: "~/code"
@@ -141,6 +153,7 @@ struct WorkspaceProviderTests {
             return
         }
         #expect(connecting.alias == "cloud")
+        #expect(connecting.transferTarget == "json@cloud")
         #expect(connecting.localProcessGroupID == 401)
         #expect(context.inferredSSHProcessGroupID == 401)
         #expect(context.tabIconSystemName == "cloud")

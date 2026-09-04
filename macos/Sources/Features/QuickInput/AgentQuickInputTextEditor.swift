@@ -7,6 +7,7 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
     let isPresented: Bool
     let focusRequestID: Int
     let font: NSFont
+    let onPasteImage: ((URL, @escaping (String) -> Void) -> Void)?
     let onSend: () -> Void
     let onQueue: () -> Void
     let onCancel: () -> Void
@@ -43,6 +44,7 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
         )
         editor.string = text
         configureTypography(for: editor)
+        editor.onPasteImage = onPasteImage
         editor.onSend = onSend
         editor.onQueue = onQueue
         editor.onCancel = onCancel
@@ -54,6 +56,7 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let editor = scrollView.documentView as? ComposerTextView else { return }
         editor.placeholder = placeholder
+        editor.onPasteImage = onPasteImage
         editor.onSend = onSend
         editor.onQueue = onQueue
         editor.onCancel = onCancel
@@ -157,6 +160,7 @@ final class ComposerTextView: NSTextView {
     var placeholder = "" {
         didSet { needsDisplay = true }
     }
+    var onPasteImage: ((URL, @escaping (String) -> Void) -> Void)?
     var onSend: (() -> Void)?
     var onQueue: (() -> Void)?
     var onCancel: (() -> Void)?
@@ -246,8 +250,16 @@ final class ComposerTextView: NSTextView {
 
     override func paste(_ sender: Any?) {
         if pasteboard.getOpinionatedStringContents() == nil,
-           let path = pasteboard.imagePastePath() {
-            insertText(path, replacementRange: selectedRange())
+           let file = pasteboard.imagePasteFile() {
+            let insertPath: (String) -> Void = { [weak self] path in
+                guard let self else { return }
+                self.insertText(path, replacementRange: self.selectedRange())
+            }
+            if let onPasteImage {
+                onPasteImage(file, insertPath)
+            } else {
+                insertPath(Ghostty.Shell.escape(file.path))
+            }
             return
         }
         super.paste(sender)

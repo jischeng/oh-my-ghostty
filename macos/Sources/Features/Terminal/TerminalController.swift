@@ -610,6 +610,37 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
     }
 
+    func resolveImagePastePath(
+        for localFile: URL,
+        surfaceID: UUID,
+        reportFailure: Bool = false,
+        completion: @escaping (String) -> Void
+    ) {
+        let localPath = Ghostty.Shell.escape(localFile.path)
+        guard let context = paneSessionContexts[surfaceID],
+              case .sshReady(let ssh, _) = context.state else {
+            completion(localPath)
+            return
+        }
+
+        Task { @MainActor [weak self] in
+            do {
+                let remotePath = try await SSHImagePasteTransfer.upload(
+                    localFile: localFile,
+                    to: ssh
+                )
+                completion(remotePath)
+            } catch {
+                if reportFailure {
+                    self?.quickInputModel.setStatusMessage(
+                        "Could not upload image to \(ssh.alias); pasted the local path."
+                    )
+                }
+                completion(localPath)
+            }
+        }
+    }
+
     func paneSessionContext(
         for surface: Ghostty.SurfaceView?
     ) -> PaneSessionContext? {
@@ -1129,7 +1160,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         surfaceID: UUID
     ) {
         switch ssh {
-        case .interactive(let alias):
+        case .interactive(let alias, let transferTarget):
             clearDetectedAgent(for: surfaceID, force: true)
             guard let surface = surfaceTree.first(where: { $0.id == surfaceID }) else {
                 return
@@ -1148,6 +1179,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             }
             context.observeForegroundSSH(
                 alias: alias,
+                transferTarget: transferTarget,
                 processGroupID: processGroupID,
                 currentWorkingDirectory: surface.pwd,
                 currentTerminalTitle: surface.title,

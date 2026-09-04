@@ -310,8 +310,22 @@ extension Ghostty {
             // neither text nor image is available so performable paste bindings
             // can pass through to the terminal.
             guard let str = pasteboard.getOpinionatedStringContents() else {
-                guard let path = pasteboard.imagePastePath() else { return false }
-                completeClipboardRequest(surface, data: path, state: state)
+                guard let file = pasteboard.imagePasteFile() else { return false }
+                guard let controller = surfaceView.window?.windowController
+                        as? TerminalController else {
+                    completeClipboardRequest(
+                        surface,
+                        data: Ghostty.Shell.escape(file.path),
+                        state: state
+                    )
+                    return true
+                }
+                controller.resolveImagePastePath(
+                    for: file,
+                    surfaceID: surfaceView.id
+                ) { path in
+                    completeClipboardRequest(surface, data: path, state: state)
+                }
                 return true
             }
 

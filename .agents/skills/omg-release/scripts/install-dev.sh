@@ -58,6 +58,17 @@ target_app="/Applications/OMG Dev.app"
 source_bin="$source_app/Contents/MacOS/omg"
 target_bin="$target_app/Contents/MacOS/omg"
 
+dev_signing_identity=${OMG_DEV_SIGNING_IDENTITY:-}
+if [[ -z "$dev_signing_identity" ]]; then
+  dev_signing_identity=$(security find-identity -v -p codesigning 2>/dev/null \
+    | awk '$1 ~ /^[0-9]+\)$/ { print $2; exit }')
+fi
+[[ -n "$dev_signing_identity" && "$dev_signing_identity" != "-" ]] || {
+  echo "OMG Dev requires a persistent code-signing identity so macOS can retain folder permissions across installs" >&2
+  echo "install one in Keychain Access or set OMG_DEV_SIGNING_IDENTITY explicitly" >&2
+  exit 1
+}
+
 if [[ "$skip_build" != true ]]; then
   macos/build.nu \
     --scheme Ghostty \
@@ -88,6 +99,15 @@ bundle_id=$(plutil -extract CFBundleIdentifier raw "$source_app/Contents/Info.pl
 source_version=$(plutil -extract CFBundleShortVersionString raw "$source_app/Contents/Info.plist")
 [[ "$source_version" == "$dev_version" ]] || {
   echo "Debug app version is $source_version, expected $dev_version" >&2
+  exit 1
+}
+
+OMG_SIGNING_IDENTITY="$dev_signing_identity" \
+OMG_SIGNING_ENTITLEMENTS="$repo_root/macos/GhosttyDebug.entitlements" \
+  dist/macos/sign_omg_app.sh "$source_app"
+designated_requirement=$(codesign -d -r- "$source_app" 2>&1)
+[[ "$designated_requirement" != *"cdhash"* ]] || {
+  echo "OMG Dev still has an unstable ad-hoc designated requirement" >&2
   exit 1
 }
 
@@ -143,7 +163,7 @@ else
 fi
 
 open "$target_app"
-printf 'installed=%s\nbundle_id=%s\nomg_version=%s\nbundle_version=%s\ndev_tag=%s\ntag_created=%s\ntag_scope=%s\ncommit=%s\nbuild_mode=%s\nsource_sha=%s\ninstalled_sha=%s\nlaunched=yes\n' \
+printf 'installed=%s\nbundle_id=%s\nomg_version=%s\nbundle_version=%s\ndev_tag=%s\ntag_created=%s\ntag_scope=%s\ncommit=%s\nbuild_mode=%s\nsigning_identity=%s\nsource_sha=%s\ninstalled_sha=%s\nlaunched=yes\n' \
   "$target_app" "$installed_bundle_id" "$installed_version" "$installed_build" \
   "$dev_tag" "$tag_created" "$tag_scope" "$head_commit" "$build_mode" \
-  "$source_sha" "$target_sha"
+  "$dev_signing_identity" "$source_sha" "$target_sha"

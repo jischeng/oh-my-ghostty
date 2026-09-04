@@ -215,6 +215,15 @@ installer instead of the raw build command:
 .agents/skills/omg-release/scripts/install-dev.sh
 ```
 
+The Dev installer requires a persistent code-signing identity so macOS TCC can
+recognize replacement builds and retain previously granted folder permissions.
+It selects the first valid code-signing identity from the login keychain by
+default; set `OMG_DEV_SIGNING_IDENTITY` to a certificate name or SHA-1 hash to
+choose one explicitly. The installer fails instead of falling back to ad-hoc
+signing when no identity is available. Dev signing keeps
+`GhosttyDebug.entitlements`; certificate material and names are never stored in
+the repository.
+
 Before using it, the agent must review and validate the intended test changes,
 commit them, and confirm that `HEAD` contains those changes with a completely
 clean worktree. Generated files, secrets, and unrelated user changes must not be

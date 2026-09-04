@@ -79,7 +79,16 @@ struct AgentHistoryRemoteAccess: Sendable {
           [ -f "$f" ] || continue
           info=$(ls -ld "$f" 2>/dev/null)
           printf "\\n===OMG_FILE===%s\\n" "$info"
-          head -c 32768 "$f" 2>/dev/null | sed '$d'
+          case "$f" in
+            */.codex/sessions/*) header_bytes=65536 ;;
+            *) header_bytes=32768 ;;
+          esac
+          file_size=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
+          if [ -n "$file_size" ] && [ "$file_size" -le "$header_bytes" ]; then
+            cat "$f" 2>/dev/null
+          else
+            head -c "$header_bytes" "$f" 2>/dev/null | sed '$d'
+          fi
           printf "\\n===OMG_END===\\n"
         done
         """

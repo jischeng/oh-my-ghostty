@@ -726,7 +726,7 @@ enum AgentHistoryStore {
                 let filename = URL(fileURLWithPath: chunk.file.path).lastPathComponent
                 filenameID = id(from: filename, pattern: pattern).flatMap(AgentConversationID.init)
             } else {
-                filenameID = nil
+                filenameID = conversationIDFromRemoteFilename(chunk.file.path)
             }
 
             let metadataID: AgentConversationID? = if let idKeyPath {
@@ -743,9 +743,10 @@ enum AgentHistoryStore {
                     return AgentConversationID(value)
                 }.first
             }
-            if let filenameID, let metadataID, filenameID != metadataID {
-                continue
-            }
+            // Remote stores have legitimate variants such as `session.jsonl`
+            // and `__advisor.jsonl` whose filename does not encode the real
+            // conversation ID. Validated metadata is authoritative remotely;
+            // filename parsing is only a fallback for truncated Codex headers.
             guard let conversationID = metadataID ?? filenameID else {
                 continue
             }
@@ -811,6 +812,16 @@ enum AgentHistoryStore {
             if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
             return lhs.id < rhs.id
         }
+    }
+
+    nonisolated private static func conversationIDFromRemoteFilename(
+        _ path: String
+    ) -> AgentConversationID? {
+        let name = URL(fileURLWithPath: path)
+            .deletingPathExtension()
+            .lastPathComponent
+        guard name.count >= 36 else { return nil }
+        return AgentConversationID(String(name.suffix(36)))
     }
 
     nonisolated private static func relativeRoot(for agent: SupportedAgent) -> String? {

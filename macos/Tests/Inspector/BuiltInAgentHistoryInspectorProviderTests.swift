@@ -668,6 +668,34 @@ struct AgentHistoryInspectorTests {
         #expect(transcript.messages[1].text == "这是远程的回复")
     }
 
+    @Test func remoteMetadataOverridesGenericSessionFilename() async throws {
+        let path = "/home/test/.pi/agent/sessions/project/session.jsonl"
+        let listing = "-rw-r--r-- 1 test test 120 Sep 04 12:00 \(path)"
+        let header = """
+        {"type":"session","id":"remote-generic-456","cwd":"/home/test/project"}
+        {"type":"message","message":{"role":"user","content":"Generic remote session"}}
+
+        """
+        let access = AgentHistoryRemoteAccess(alias: "cloud") { command in
+            guard command.contains("find") || command.contains("OMG_FILE") else {
+                return ""
+            }
+            return """
+            ===OMG_FILE===\(listing)
+            \(header)
+            ===OMG_END===
+            """
+        }
+
+        let sessions = await AgentHistoryStore.loadRemote(
+            access: access,
+            agents: [.pi]
+        )
+        let session = try #require(sessions.first)
+        #expect(session.conversationID.rawValue == "remote-generic-456")
+        #expect(session.title == "Generic remote session")
+    }
+
     private func writeJSONL(
         _ objects: [[String: Any]],
         to url: URL

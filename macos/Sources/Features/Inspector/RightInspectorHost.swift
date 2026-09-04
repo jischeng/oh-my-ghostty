@@ -1009,11 +1009,11 @@ private struct InspectorAgentHistoryView: View {
                 Image(systemName: history.hostLabel == nil ? "clock.arrow.circlepath" : "cloud")
                     .foregroundStyle(.secondary)
                 if let host = history.hostLabel {
-                    Text(strings.remoteSessionCount(history.sessions.count, host: host))
+                    Text(strings.remoteSessionCount(filteredAndOrderedSessions.count, host: host))
                         .font(.headline)
                         .lineLimit(1)
                 } else {
-                    Text(strings.sessionCount(history.sessions.count))
+                    Text(strings.sessionCount(filteredAndOrderedSessions.count))
                         .font(.headline)
                 }
                 Spacer(minLength: 8)
@@ -1040,6 +1040,7 @@ private struct InspectorAgentHistoryView: View {
                         .foregroundStyle(.secondary)
                     TextField(strings.searchPlaceholder, text: $query)
                         .textFieldStyle(.plain)
+                        .foregroundStyle(.primary)
                     if isSearching {
                         ProgressView().controlSize(.mini)
                     }
@@ -1047,9 +1048,13 @@ private struct InspectorAgentHistoryView: View {
                 .padding(.horizontal, 8)
                 .frame(height: 28)
                 .background(
-                    Color.primary.opacity(0.07),
+                    Color.primary.opacity(0.12),
                     in: RoundedRectangle(cornerRadius: 6)
                 )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.primary.opacity(0.18), lineWidth: 1)
+                }
 
                 filterAndOrganizeMenu
             }
@@ -1152,13 +1157,20 @@ private struct InspectorAgentHistoryView: View {
                 Button {
                     selectedAgent = nil
                 } label: {
-                    menuRow(strings.allAgents, selected: selectedAgent == nil)
+                    menuRow(
+                        "\(strings.allAgents) (\(history.sessions.count))",
+                        selected: selectedAgent == nil
+                    )
                 }
                 ForEach(availableAgents) { agent in
                     Button {
                         selectedAgent = agent
                     } label: {
-                        menuRow(agent.displayName, selected: selectedAgent == agent)
+                        let count = history.sessions.count { $0.agent == agent }
+                        menuRow(
+                            "\(agent.displayName) (\(count))",
+                            selected: selectedAgent == agent
+                        )
                     }
                 }
             }
@@ -1212,9 +1224,13 @@ private struct InspectorAgentHistoryView: View {
             }
             .frame(width: 28, height: 28)
             .background(
-                Color.primary.opacity(0.07),
+                Color.primary.opacity(0.12),
                 in: RoundedRectangle(cornerRadius: 6)
             )
+            .overlay {
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(Color.primary.opacity(0.18), lineWidth: 1)
+            }
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)

@@ -1006,10 +1006,16 @@ private struct InspectorAgentHistoryView: View {
     private var sessionList: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Image(systemName: "clock.arrow.circlepath")
+                Image(systemName: history.hostLabel == nil ? "clock.arrow.circlepath" : "cloud")
                     .foregroundStyle(.secondary)
-                Text(strings.sessionCount(history.sessions.count))
-                    .font(.headline)
+                if let host = history.hostLabel {
+                    Text(strings.remoteSessionCount(history.sessions.count, host: host))
+                        .font(.headline)
+                        .lineLimit(1)
+                } else {
+                    Text(strings.sessionCount(history.sessions.count))
+                        .font(.headline)
+                }
                 Spacer(minLength: 8)
                 Button {
                     perform(.refreshAgentHistory)
@@ -1324,8 +1330,10 @@ private struct InspectorAgentHistoryView: View {
             Button(session.isActive ? strings.openLive : strings.resume) {
                 perform(.resumeAgentHistorySession(id: session.id))
             }
-            Button(strings.forkSession) {
-                perform(.forkAgentHistorySession(id: session.id))
+            if session.remoteHost == nil {
+                Button(strings.forkSession) {
+                    perform(.forkAgentHistorySession(id: session.id))
+                }
             }
         }
     }

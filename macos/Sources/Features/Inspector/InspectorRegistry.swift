@@ -67,11 +67,28 @@ struct InspectorFileTree: Equatable, Sendable {
 }
 
 struct InspectorAgentHistoryContent: Equatable, Sendable {
+    let hostLabel: String?
     let sessions: [AgentHistorySession]
     let selectedSessionID: String?
     let transcript: AgentHistoryTranscript?
     let isLoadingSessions: Bool
     let isLoadingTranscript: Bool
+
+    init(
+        hostLabel: String? = nil,
+        sessions: [AgentHistorySession],
+        selectedSessionID: String?,
+        transcript: AgentHistoryTranscript?,
+        isLoadingSessions: Bool,
+        isLoadingTranscript: Bool
+    ) {
+        self.hostLabel = hostLabel
+        self.sessions = sessions
+        self.selectedSessionID = selectedSessionID
+        self.transcript = transcript
+        self.isLoadingSessions = isLoadingSessions
+        self.isLoadingTranscript = isLoadingTranscript
+    }
 }
 
 enum InspectorPaneActionKind: Equatable, Sendable {

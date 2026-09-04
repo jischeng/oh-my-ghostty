@@ -91,6 +91,10 @@ struct AgentHistoryStrings: Equatable, Sendable {
         t("\(count) sessions", "\(count) 个会话")
     }
 
+    func remoteSessionCount(_ count: Int, host: String) -> String {
+        t("\(host): \(count) sessions", "\(host)：\(count) 个会话")
+    }
+
     func relativeTime(from date: Date, now: Date = Date()) -> String {
         let seconds = max(0, now.timeIntervalSince(date))
         if seconds < 60 { return t("Just now", "刚刚") }

@@ -622,6 +622,51 @@ struct AgentHistoryInspectorTests {
         #expect(AgentHistoryStore.cleanMeaningfulText(isolatedPath) == "[Image/Attachment]")
     }
 
+    @Test func remoteSessionEnumerationAndTranscript() async throws {
+        let sessionFile = "/home/test/.pi/agent/sessions/--home-test-proj--/2026_remote-123.jsonl"
+        let remoteListing = """
+        -rw-r--r-- 1 test test 240 Sep 04 12:00 \(sessionFile)
+        """
+        let remoteHeader = """
+        {"type":"session","id":"remote-123","cwd":"/home/test/proj"}
+        {"type":"message","message":{"role":"user","content":"远程测试提问"}}
+        {"type":"message","message":{"role":"assistant","content":"这是远程的回复"}}
+
+        """
+
+        let access = AgentHistoryRemoteAccess(alias: "cloud") { command in
+            if command.contains("printf '%s' \"$HOME\"") {
+                return "/home/test"
+            }
+            if command.contains("find") {
+                return remoteListing
+            }
+            if command.contains("head -c") {
+                return remoteHeader
+            }
+            return ""
+        }
+
+        let sessions = await AgentHistoryStore.loadRemote(access: access, agents: [.pi])
+        #expect(sessions.count == 1)
+        let session = try #require(sessions.first)
+        #expect(session.agent == .pi)
+        #expect(session.remoteHost == "cloud")
+        #expect(session.conversationID.rawValue == "remote-123")
+        #expect(session.title == "远程测试提问")
+        #expect(session.workingDirectory == "/home/test/proj")
+
+        let transcript = await AgentHistoryStore.transcript(
+            for: session,
+            remoteAccess: access
+        )
+        #expect(transcript.messages.count == 2)
+        #expect(transcript.messages[0].role == .user)
+        #expect(transcript.messages[0].text == "远程测试提问")
+        #expect(transcript.messages[1].role == .assistant)
+        #expect(transcript.messages[1].text == "这是远程的回复")
+    }
+
     private func writeJSONL(
         _ objects: [[String: Any]],
         to url: URL

@@ -650,7 +650,10 @@ sense is provider-specific. Agent-history resume accepts only a host-discovered,
 `AgentConversationID`-validated local session whose manifest declares
 allowlisted resume arguments; it focuses a matching live Surface or creates a
 new typed resume tab. Agent-history metadata uses a versioned mtime cache and
-bounded configurable count. Registration starts no scan, timer, watcher, or
+bounded configurable count. When focused on a Pane with an active SSH session,
+Agent History automatically switches scope to the remote host using batch SSH
+queries and displays remote agent conversations; focusing a local Pane returns
+to local history. Registration starts no scan, timer, watcher, or
 helper process; appeared loads cached rows and runs one cancellable refresh,
 while disappearing from every tab cancels outstanding work. Search emits
 metadata matches, cached previews, and then progressive full-body matches;

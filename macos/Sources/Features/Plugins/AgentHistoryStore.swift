@@ -7,6 +7,9 @@ struct AgentHistorySession: Identifiable, Equatable, Codable, Sendable {
     let workingDirectory: String?
     let updatedAt: Date
     let sourcePath: String
+    /// Non-nil when the session lives on a remote host; the value is the SSH
+    /// alias used to reach it.
+    var remoteHost: String?
     var isActive: Bool
     var previewSnippet: String?
 
@@ -62,6 +65,20 @@ enum AgentHistoryStore {
         let updatedAt: Date
     }
 
+    private struct RemoteSource {
+        let agent: SupportedAgent
+        let rootPath: String
+        let entryPattern: String?
+        let idKeyPath: String?
+        let cwdKeyPath: String?
+    }
+
+    private struct RemoteCandidate {
+        let source: RemoteSource
+        let file: AgentHistoryRemoteFile
+        let filenameID: AgentConversationID?
+    }
+
     static func load(
         agents: [SupportedAgent] = SupportedAgent.allCases,
         rootURLs: [SupportedAgent: URL] = [:],
@@ -115,7 +132,46 @@ enum AgentHistoryStore {
         )
     }
 
-    static func transcript(for session: AgentHistorySession) async -> AgentHistoryTranscript {
+    static func loadRemote(
+        access: AgentHistoryRemoteAccess,
+        agents: [SupportedAgent] = SupportedAgent.allCases,
+        maximumSessions: Int = AgentHistoryStore.maximumSessions
+    ) async -> [AgentHistorySession] {
+        let diskTask = Task.detached(priority: .utility) {
+            await scanRemote(
+                access: access,
+                agents: agents,
+                maximumSessions: maximumSessions
+            )
+        }
+        return await withTaskCancellationHandler(
+            operation: { await diskTask.value },
+            onCancel: { diskTask.cancel() }
+        )
+    }
+
+    static func transcript(
+        for session: AgentHistorySession,
+        remoteAccess: AgentHistoryRemoteAccess? = nil
+    ) async -> AgentHistoryTranscript {
+        if let alias = session.remoteHost {
+            let access = remoteAccess ?? AgentHistoryRemoteAccess(alias: alias)
+            guard let data = try? await access.read(
+                path: session.sourcePath,
+                maximumBytes: 8 * 1_024 * 1_024
+            ) else {
+                return .init(
+                    sessionID: session.id,
+                    messages: [],
+                    wasTruncated: false
+                )
+            }
+            return parseTranscript(
+                data: data,
+                session: session,
+                sourceWasTruncated: data.count == 8 * 1_024 * 1_024
+            )
+        }
         let diskTask = Task.detached(priority: .utility) {
             parseTranscript(for: session)
         }
@@ -198,7 +254,11 @@ enum AgentHistoryStore {
                 // match instead of waiting for every historical file.
                 for (index, session) in sessions.enumerated() {
                     guard !Task.isCancelled else { break }
-                    guard matches[session.id] == nil else { continue }
+                    // Remote full-body search would otherwise open one SSH
+                    // process per session. Remote sessions use their bounded
+                    // metadata/preview index; local sessions keep deep search.
+                    guard session.remoteHost == nil,
+                          matches[session.id] == nil else { continue }
                     if let snippet = firstTranscriptMatch(
                         at: URL(fileURLWithPath: session.sourcePath),
                         query: needle
@@ -466,6 +526,76 @@ enum AgentHistoryStore {
     }
 
     nonisolated private static func parseTranscript(
+        data: Data,
+        session: AgentHistorySession,
+        sourceWasTruncated: Bool = false
+    ) -> AgentHistoryTranscript {
+        var messages: [AgentHistoryMessage] = []
+        var characterCount = 0
+        var truncated = sourceWasTruncated
+        let delimiter = UInt8(ascii: "\n")
+        var messageIndex = 0
+        var buffer = data
+
+        while let newlineIndex = buffer.firstIndex(of: delimiter) {
+            let lineData = buffer[buffer.startIndex..<newlineIndex]
+            buffer = buffer[buffer.index(after: newlineIndex)...]
+
+            guard lineData.count > 10,
+                  let lineString = String(data: lineData, encoding: .utf8),
+                  lineString.contains("\"role\"") || lineString.contains("\"type\""),
+                  let record = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                  let role = role(of: record),
+                  let rawText = text(of: record) else { continue }
+            let cleaned = cleanMeaningfulText(rawText)
+            guard !cleaned.isEmpty else { continue }
+
+            if messages.count >= maximumTranscriptMessages ||
+                characterCount >= maximumTranscriptCharacters {
+                truncated = true
+                break
+            }
+            let remaining = maximumTranscriptCharacters - characterCount
+            let limit = min(maximumMessageCharacters, remaining)
+            let value = String(cleaned.prefix(limit))
+            if value.count < cleaned.count { truncated = true }
+            characterCount += value.count
+
+            messages.append(.init(
+                id: "\(session.id):\(messageIndex)",
+                role: role,
+                text: value,
+                timestamp: timestamp(of: record)
+            ))
+            messageIndex += 1
+        }
+
+        if !truncated && !buffer.isEmpty,
+           let lineString = String(data: buffer, encoding: .utf8),
+           lineString.contains("\"role\"") || lineString.contains("\"type\""),
+           let record = try? JSONSerialization.jsonObject(with: buffer) as? [String: Any],
+           let role = role(of: record),
+           let rawText = text(of: record) {
+            let cleaned = cleanMeaningfulText(rawText)
+            if !cleaned.isEmpty {
+                let value = String(cleaned.prefix(maximumMessageCharacters))
+                messages.append(.init(
+                    id: "\(session.id):\(messageIndex)",
+                    role: role,
+                    text: value,
+                    timestamp: timestamp(of: record)
+                ))
+            }
+        }
+
+        return .init(
+            sessionID: session.id,
+            messages: messages,
+            wasTruncated: truncated
+        )
+    }
+
+    nonisolated private static func parseTranscript(
         for session: AgentHistorySession
     ) -> AgentHistoryTranscript {
         let url = URL(fileURLWithPath: session.sourcePath)
@@ -554,6 +684,209 @@ enum AgentHistoryStore {
             messages: messages,
             wasTruncated: truncated
         )
+    }
+
+    nonisolated private static func scanRemote(
+        access: AgentHistoryRemoteAccess,
+        agents: [SupportedAgent],
+        maximumSessions: Int
+    ) async -> [AgentHistorySession] {
+        guard maximumSessions > 0, !Task.isCancelled else { return [] }
+        guard let home = try? await access.remoteHome() else { return [] }
+        guard !Task.isCancelled else { return [] }
+
+        var sources: [RemoteSource] = []
+        for agent in agents {
+            guard let source = remoteSource(for: agent, remoteHome: home) else { continue }
+            sources.append(source)
+        }
+        guard !sources.isEmpty else { return [] }
+
+        let roots = Array(Set(sources.map(\.rootPath)))
+        guard let files = try? await access.enumerate(
+            roots: roots,
+            maximumFiles: maximumHeaderCandidates
+        ) else { return [] }
+
+        var candidates: [RemoteCandidate] = []
+        for file in files {
+            guard !Task.isCancelled else { return [] }
+            guard let source = sources.first(where: { file.path.hasPrefix($0.rootPath + "/") }) else {
+                continue
+            }
+            let filenameID: AgentConversationID?
+            if let pattern = source.entryPattern {
+                let relative = relativeRemotePath(file.path, under: source.rootPath)
+                guard let rawID = id(from: relative, pattern: pattern),
+                      let id = AgentConversationID(rawID) else { continue }
+                filenameID = id
+            } else {
+                filenameID = nil
+            }
+            candidates.append(.init(
+                source: source,
+                file: file,
+                filenameID: filenameID
+            ))
+        }
+
+        var sessionsByID: [String: AgentHistorySession] = [:]
+        for candidate in candidates.prefix(maximumSessions) {
+            guard !Task.isCancelled, sessionsByID.count < maximumSessions else { break }
+            guard let headerData = try? await access.read(
+                path: candidate.file.path,
+                maximumBytes: maximumHeaderBytes
+            ) else { continue }
+            let records = headerRecords(from: headerData)
+            guard !records.isEmpty else { continue }
+
+            let metadataID: AgentConversationID? = if let keyPath =
+                candidate.source.idKeyPath {
+                records.lazy.compactMap {
+                    stringValue(at: keyPath, in: $0).flatMap(AgentConversationID.init)
+                }.first
+            } else {
+                records.lazy.compactMap { record in
+                    if let value = record["sessionId"] as? String {
+                        return AgentConversationID(value)
+                    }
+                    guard record["type"] as? String == "session",
+                          let value = record["id"] as? String else { return nil }
+                    return AgentConversationID(value)
+                }.first
+            }
+            if let filenameID = candidate.filenameID,
+               let metadataID,
+               filenameID != metadataID {
+                continue
+            }
+            guard let conversationID = metadataID ?? candidate.filenameID else {
+                continue
+            }
+
+            let configuredCwd = candidate.source.cwdKeyPath.flatMap { keyPath in
+                records.lazy.compactMap { stringValue(at: keyPath, in: $0) }.first
+            }
+            let workingDirectory = validWorkingDirectory(
+                configuredCwd ?? records.lazy.compactMap { record in
+                    stringValue(at: "cwd", in: record) ??
+                        stringValue(at: "payload.cwd", in: record)
+                }.first
+            )
+            let explicitTitle = records.reduce(nil as String?) { current, record in
+                guard let type = record["type"] as? String,
+                      ["title", "title_change", "session"].contains(type),
+                      let title = record["title"] as? String,
+                      !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    return current
+                }
+                return title
+            }
+            let userTitle = records.lazy.compactMap { record -> String? in
+                guard role(of: record) == .user else { return nil }
+                return text(of: record)
+            }.compactMap { raw -> String? in
+                let cleaned = cleanMeaningfulText(raw)
+                guard !cleaned.isEmpty, cleaned != "[Image/Attachment]" else { return nil }
+                return cleaned
+            }.first
+            let title = normalizedTitle(
+                explicitTitle ?? userTitle,
+                workingDirectory: workingDirectory,
+                conversationID: conversationID
+            )
+            let previewSnippet = records.lazy.compactMap { record -> String? in
+                guard let raw = text(of: record) else { return nil }
+                let cleaned = cleanMeaningfulText(raw)
+                return cleaned.isEmpty || cleaned == "[Image/Attachment]"
+                    ? nil
+                    : String(cleaned.prefix(1_000))
+            }.prefix(10).joined(separator: "\n")
+
+            let session = AgentHistorySession(
+                agent: candidate.source.agent,
+                conversationID: conversationID,
+                title: title,
+                workingDirectory: workingDirectory,
+                updatedAt: candidate.file.modifiedAt,
+                sourcePath: candidate.file.path,
+                remoteHost: access.alias,
+                isActive: false,
+                previewSnippet: previewSnippet.isEmpty ? nil : previewSnippet
+            )
+            if let existing = sessionsByID[session.id],
+               existing.updatedAt >= session.updatedAt {
+                continue
+            }
+            sessionsByID[session.id] = session
+        }
+
+        return sessionsByID.values.sorted { lhs, rhs in
+            if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+            return lhs.id < rhs.id
+        }
+    }
+
+    nonisolated private static func remoteSource(
+        for agent: SupportedAgent,
+        remoteHome: String
+    ) -> RemoteSource? {
+        let resume = agent.definition.resume
+        guard !resume.resumeArguments.isEmpty else { return nil }
+
+        if let discovery = resume.discover, discovery.format == .jsonl {
+            let rootPath = expandRemoteHome(discovery.root, remoteHome: remoteHome)
+            guard AgentHistoryRemoteAccess.validRemotePath(rootPath) else { return nil }
+            return .init(
+                agent: agent,
+                rootPath: rootPath,
+                entryPattern: nil,
+                idKeyPath: discovery.idKeyPath,
+                cwdKeyPath: discovery.cwdKeyPath
+            )
+        }
+
+        guard let store = resume.store,
+              store.entryPattern.lowercased().contains(".jsonl") else {
+            return nil
+        }
+        let rootPath = expandRemoteHome(store.root, remoteHome: remoteHome)
+        guard AgentHistoryRemoteAccess.validRemotePath(rootPath) else { return nil }
+        return .init(
+            agent: agent,
+            rootPath: rootPath,
+            entryPattern: store.entryPattern,
+            idKeyPath: nil,
+            cwdKeyPath: nil
+        )
+    }
+
+    nonisolated private static func expandRemoteHome(
+        _ path: String,
+        remoteHome: String
+    ) -> String {
+        if path == "~" { return remoteHome }
+        if path.hasPrefix("~/") {
+            let trimmed = remoteHome.hasSuffix("/") ? String(remoteHome.dropLast()) : remoteHome
+            return trimmed + String(path.dropFirst())
+        }
+        return path
+    }
+
+    nonisolated private static func relativeRemotePath(
+        _ path: String,
+        under root: String
+    ) -> String {
+        guard path.hasPrefix(root) else { return path }
+        let suffix = path.dropFirst(root.count)
+        return String(suffix).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
+    nonisolated private static func headerRecords(from data: Data) -> [[String: Any]] {
+        data.split(separator: 0x0A, omittingEmptySubsequences: true)
+            .compactMap { line -> [String: Any]? in
+                try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any]
+            }
     }
 
     nonisolated private static func headerRecords(

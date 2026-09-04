@@ -82,6 +82,39 @@ enum AgentHistoryStore {
         )
     }
 
+    static func loadCached(
+        maximumSessions: Int = AgentHistoryStore.maximumSessions,
+        cacheURL: URL? = nil
+    ) async -> [AgentHistorySession] {
+        let resolvedURL = cacheURL ?? defaultCacheURL()
+        let diskTask = Task.detached(priority: .utility) { () -> [AgentHistorySession] in
+            guard maximumSessions > 0,
+                  let data = try? Data(contentsOf: resolvedURL),
+                  let cache = try? JSONDecoder().decode(DiskCache.self, from: data),
+                  cache.version == DiskCache.currentVersion else { return [] }
+            var sessionsByID: [String: AgentHistorySession] = [:]
+            for entry in cache.entries.values {
+                guard !Task.isCancelled else { return [] }
+                let session = entry.session
+                if let existing = sessionsByID[session.id],
+                   existing.updatedAt >= session.updatedAt {
+                    continue
+                }
+                sessionsByID[session.id] = session
+            }
+            return Array(sessionsByID.values.sorted { lhs, rhs in
+                if lhs.updatedAt != rhs.updatedAt {
+                    return lhs.updatedAt > rhs.updatedAt
+                }
+                return lhs.id < rhs.id
+            }.prefix(maximumSessions))
+        }
+        return await withTaskCancellationHandler(
+            operation: { await diskTask.value },
+            onCancel: { diskTask.cancel() }
+        )
+    }
+
     static func transcript(for session: AgentHistorySession) async -> AgentHistoryTranscript {
         let diskTask = Task.detached(priority: .utility) {
             parseTranscript(for: session)

@@ -304,6 +304,49 @@ struct AgentHistoryInspectorTests {
             "qwen-history")
     }
 
+    @Test func registrationDoesNotLoadHistoryUntilPaneAppears() async throws {
+        var cachedLoadCount = 0
+        var refreshLoadCount = 0
+        let registry = InspectorRegistry()
+        let provider = BuiltInAgentHistoryInspectorProvider(
+            registry: registry,
+            cachedSessionLoader: {
+                cachedLoadCount += 1
+                return []
+            },
+            sessionLoader: {
+                refreshLoadCount += 1
+                return []
+            },
+            transcriptLoader: { session in
+                .init(sessionID: session.id, messages: [], wasTruncated: false)
+            },
+            sessionResumer: { _, _ in },
+            sessionForker: { _, _ in }
+        )
+
+        try provider.register()
+        await Task.yield()
+        #expect(cachedLoadCount == 0)
+        #expect(refreshLoadCount == 0)
+
+        let context = InspectorPaneContext(
+            tabID: UUID(),
+            surfaceID: UUID(),
+            title: "Terminal",
+            workingDirectory: "/tmp"
+        )
+        registry.presentationDidChange(
+            to: BuiltInAgentHistoryInspectorProvider.paneID,
+            context: context
+        )
+        for _ in 0..<20 where refreshLoadCount == 0 {
+            await Task.yield()
+        }
+        #expect(cachedLoadCount == 1)
+        #expect(refreshLoadCount == 1)
+    }
+
     @Test func contextReplacementKeepsTranscriptLoadAlive() async throws {
         let session = AgentHistorySession(
             agent: .pi,
@@ -330,6 +373,7 @@ struct AgentHistoryInspectorTests {
         let registry = InspectorRegistry()
         let provider = BuiltInAgentHistoryInspectorProvider(
             registry: registry,
+            cachedSessionLoader: { [] },
             sessionLoader: { [session] },
             transcriptLoader: { _ in
                 await gate.wait()
@@ -423,6 +467,7 @@ struct AgentHistoryInspectorTests {
         let registry = InspectorRegistry()
         let provider = BuiltInAgentHistoryInspectorProvider(
             registry: registry,
+            cachedSessionLoader: { [] },
             sessionLoader: { [session] },
             transcriptLoader: { _ in transcript },
             sessionResumer: { session, _ in resumedIDs.append(session.id) },

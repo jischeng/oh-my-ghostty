@@ -912,10 +912,9 @@ private struct InspectorAgentHistoryView: View {
         }
         switch orderingMode {
         case .recentlyUpdated:
-            return matching.sorted {
-                if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
-                return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
-            }
+            // Store snapshots are already newest-first. Preserve that order to
+            // avoid sorting thousands of rows on every SwiftUI body update.
+            return matching
         case .title:
             return matching.sorted {
                 $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending

@@ -24,6 +24,7 @@ final class BuiltInAgentHistoryInspectorProvider {
     }
 
     private let registry: InspectorRegistry
+    private let cachedSessionLoader: SessionLoader
     private let sessionLoader: SessionLoader
     private let transcriptLoader: TranscriptLoader
     private let sessionResumer: SessionResumer
@@ -39,8 +40,15 @@ final class BuiltInAgentHistoryInspectorProvider {
 
     init(
         registry: InspectorRegistry,
+        cachedSessionLoader: @escaping SessionLoader = {
+            await AgentHistoryStore.loadCached(
+                maximumSessions: Int(OhMyGhosttySettings.shared.agentHistoryLimit)
+            )
+        },
         sessionLoader: @escaping SessionLoader = {
-            await AgentHistoryStore.load(maximumSessions: Int(OhMyGhosttySettings.shared.agentHistoryLimit))
+            await AgentHistoryStore.load(
+                maximumSessions: Int(OhMyGhosttySettings.shared.agentHistoryLimit)
+            )
         },
         transcriptLoader: @escaping TranscriptLoader = {
             await AgentHistoryStore.transcript(for: $0)
@@ -51,6 +59,7 @@ final class BuiltInAgentHistoryInspectorProvider {
             BuiltInAgentHistoryInspectorProvider.fork
     ) {
         self.registry = registry
+        self.cachedSessionLoader = cachedSessionLoader
         self.sessionLoader = sessionLoader
         self.transcriptLoader = transcriptLoader
         self.sessionResumer = sessionResumer
@@ -70,7 +79,12 @@ final class BuiltInAgentHistoryInspectorProvider {
                 }
             } else if key == "agents.historyLimit" {
                 Task { @MainActor [weak self] in
-                    self?.reload()
+                    guard let self else { return }
+                    if presentedContexts.isEmpty {
+                        sessions = nil
+                    } else {
+                        reload()
+                    }
                 }
             }
         })
@@ -98,9 +112,6 @@ final class BuiltInAgentHistoryInspectorProvider {
             lifecycle: { [weak self] event in self?.handle(event) },
             action: { [weak self] action in self?.handle(action) }
         )
-        // Prewarm the versioned metadata cache during app startup so opening
-        // Agent History only mounts already-loaded rows.
-        reload()
     }
 
     private func refreshLocalization() {
@@ -123,13 +134,27 @@ final class BuiltInAgentHistoryInspectorProvider {
         case .appeared(let context):
             presentedContexts[context.tabID] = context
             publish(context)
-            if sessions == nil, !isLoadingSessions { reload() }
+            if sessions == nil, !isLoadingSessions { loadOnDemand() }
         case .disappeared(let context):
             // Context replacement is delivered as disappeared + appeared for
-            // the same tab. Keep its bounded transcript read alive so a title,
-            // cwd, or focused-Pane update cannot strand the detail view in a
-            // permanent loading state.
+            // the same tab. Defer cleanup one runloop so replacement does not
+            // cancel useful work, while a genuinely hidden Inspector leaves no
+            // cache scan or transcript parser running in the background.
             presentedContexts.removeValue(forKey: context.tabID)
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      presentedContexts[context.tabID] == nil,
+                      presentedContexts.isEmpty else { return }
+                loadTask?.cancel()
+                loadTask = nil
+                isLoadingSessions = false
+                for task in transcriptTasks.values { task.cancel() }
+                transcriptTasks.removeAll()
+                for tabID in Array(tabStates.keys) where
+                    tabStates[tabID]?.isLoadingTranscript == true {
+                    tabStates[tabID] = .init()
+                }
+            }
         }
     }
 
@@ -158,6 +183,36 @@ final class BuiltInAgentHistoryInspectorProvider {
         }
     }
 
+    private func loadOnDemand() {
+        loadTask?.cancel()
+        loadGeneration &+= 1
+        let generation = loadGeneration
+        isLoadingSessions = true
+        publishPresentedContexts()
+        loadTask = Task { [weak self] in
+            guard let self else { return }
+            let cached = await cachedSessionLoader()
+            guard !Task.isCancelled, loadGeneration == generation else { return }
+            if !cached.isEmpty {
+                applyLoadedSessions(cached)
+                isLoadingSessions = false
+                publishPresentedContexts()
+            }
+
+            guard !presentedContexts.isEmpty else {
+                loadTask = nil
+                isLoadingSessions = false
+                return
+            }
+            let refreshed = await sessionLoader()
+            guard !Task.isCancelled, loadGeneration == generation else { return }
+            applyLoadedSessions(refreshed)
+            isLoadingSessions = false
+            loadTask = nil
+            publishPresentedContexts()
+        }
+    }
+
     private func reload() {
         loadTask?.cancel()
         loadGeneration &+= 1
@@ -168,17 +223,21 @@ final class BuiltInAgentHistoryInspectorProvider {
             guard let self else { return }
             let loaded = await sessionLoader()
             guard !Task.isCancelled, loadGeneration == generation else { return }
-            sessions = loaded
+            applyLoadedSessions(loaded)
             isLoadingSessions = false
             loadTask = nil
-            let availableIDs = Set(loaded.map(\.id))
-            for tabID in Array(tabStates.keys) where
-                tabStates[tabID]?.selectedSessionID.map({
-                    !availableIDs.contains($0)
-                }) == true {
-                tabStates[tabID] = .init()
-            }
             publishPresentedContexts()
+        }
+    }
+
+    private func applyLoadedSessions(_ loaded: [AgentHistorySession]) {
+        sessions = loaded
+        let availableIDs = Set(loaded.map(\.id))
+        for tabID in Array(tabStates.keys) where
+            tabStates[tabID]?.selectedSessionID.map({
+                !availableIDs.contains($0)
+            }) == true {
+            tabStates[tabID] = .init()
         }
     }
 

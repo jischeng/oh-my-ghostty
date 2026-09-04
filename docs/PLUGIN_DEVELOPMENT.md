@@ -650,9 +650,12 @@ sense is provider-specific. Agent-history resume accepts only a host-discovered,
 `AgentConversationID`-validated local session whose manifest declares
 allowlisted resume arguments; it focuses a matching live Surface or creates a
 new typed resume tab. Agent-history metadata uses a versioned mtime cache and
-bounded configurable count; full-body search and transcript parsing stream in
-background tasks, while the host renders transcript rows through a reusable
-AppKit table. Port creation accepts only a valid 1...65535 port or bounded `host:port` and is
+bounded configurable count. Registration starts no scan, timer, watcher, or
+helper process; appeared loads cached rows and runs one cancellable refresh,
+while disappearing from every tab cancels outstanding work. Search emits
+metadata matches, cached previews, and then progressive full-body matches;
+transcript parsing streams in background tasks, while the host renders rows
+through a reusable AppKit table. Port creation accepts only a valid 1...65535 port or bounded `host:port` and is
 rejected outside an `sshReady` context. Info/port UI, hover help, empty states,
 connection messages, and normalized Host failures resolve live from
 `general.language` (English or Simplified Chinese).

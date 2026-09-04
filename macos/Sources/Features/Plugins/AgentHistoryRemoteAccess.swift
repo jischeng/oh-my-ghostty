@@ -64,19 +64,22 @@ struct AgentHistoryRemoteAccess: Sendable {
     ) async throws -> [AgentHistoryRemoteChunk] {
         let safeRoots = relativeRoots.filter { !$0.isEmpty && !$0.contains("'") }
         guard !safeRoots.isEmpty else { return [] }
+        let boundedLimit = min(max(maximumSessions, 1), 500)
         let rootsList = safeRoots.map { "'\($0)'" }.joined(separator: " ")
         let script = """
+        LC_ALL=C
+        export LC_ALL
         dirs=""
         for rel in \(rootsList); do
           d="$HOME/$rel"
           [ -d "$d" ] && dirs="$dirs \\"$d\\""
         done
         [ -z "$dirs" ] && exit 0
-        eval "find $dirs -type f -name '*.jsonl' -exec ls -t {} + 2>/dev/null" | head -n \(maximumSessions) | while IFS= read -r f; do
+        eval "find $dirs -type f -name '*.jsonl' -exec ls -t {} + 2>/dev/null" | head -n \(boundedLimit) | while IFS= read -r f; do
           [ -f "$f" ] || continue
           info=$(ls -ld "$f" 2>/dev/null)
           printf "\\n===OMG_FILE===%s\\n" "$info"
-          head -c 32768 "$f" 2>/dev/null
+          head -c 32768 "$f" 2>/dev/null | sed '$d'
           printf "\\n===OMG_END===\\n"
         done
         """
@@ -88,7 +91,7 @@ struct AgentHistoryRemoteAccess: Sendable {
         guard Self.validRemotePath(path), maximumBytes > 0 else {
             throw AgentHistoryRemoteError.invalidPath
         }
-        let command = "head -c \(maximumBytes) \(Self.shellQuote(path)) 2>/dev/null"
+        let command = "head -c \(maximumBytes) \(Self.shellQuote(path)) 2>/dev/null | sed '$d'"
         let output = try await runCommand(command)
         return Data(output.utf8)
     }
@@ -175,35 +178,51 @@ struct AgentHistoryRemoteAccess: Sendable {
     ) async throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        let remoteCommand = "exec /bin/sh -c \(shellQuote(command))"
         process.arguments = [
             "-T",
             "-o", "BatchMode=yes",
             "-o", "ConnectTimeout=10",
             alias,
-            command,
+            remoteCommand,
         ]
-        let output = Pipe()
-        process.standardOutput = output
         process.standardError = FileHandle.nullDevice
 
         return try await withTaskCancellationHandler {
             try await Task.detached(priority: .utility) {
+                let outputURL = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("omg-agent-history-\(UUID().uuidString).out")
+                guard FileManager.default.createFile(
+                    atPath: outputURL.path,
+                    contents: nil,
+                    attributes: [.posixPermissions: 0o600]
+                ), let output = try? FileHandle(forWritingTo: outputURL) else {
+                    throw AgentHistoryRemoteError.unavailable
+                }
+                defer {
+                    try? output.close()
+                    try? FileManager.default.removeItem(at: outputURL)
+                }
+                process.standardOutput = output
                 do {
                     try process.run()
                 } catch {
                     throw AgentHistoryRemoteError.unavailable
                 }
                 let timeout = Task.detached {
-                    try? await Task.sleep(for: .seconds(15))
+                    try? await Task.sleep(for: .seconds(30))
                     if process.isRunning { process.terminate() }
                 }
                 process.waitUntilExit()
                 timeout.cancel()
-                let data = output.fileHandleForReading.readDataToEndOfFile()
-                guard process.terminationStatus == 0 else {
+                try? output.close()
+                guard process.terminationStatus == 0,
+                      let data = try? Data(contentsOf: outputURL) else {
                     throw AgentHistoryRemoteError.unavailable
                 }
-                guard let text = String(data: data, encoding: .utf8) else {
+                // Remote readers drop their potentially incomplete final line
+                // before transport, so the bounded JSONL stream stays valid UTF-8.
+                guard let text = String(bytes: data, encoding: .utf8) else {
                     throw AgentHistoryRemoteError.unavailable
                 }
                 return text

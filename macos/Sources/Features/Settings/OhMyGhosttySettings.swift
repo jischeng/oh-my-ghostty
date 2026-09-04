@@ -10,6 +10,12 @@ enum OMGApplicationEnvironment {
         development ? "debug" : "release"
     }
 
+    static func quitWithoutConfirmationDefault(
+        development: Bool = isDevelopment
+    ) -> Bool {
+        development
+    }
+
     static func settingsFileURL(
         homeURL: URL = FileManager.default.homeDirectoryForCurrentUser,
         development: Bool = isDevelopment
@@ -367,6 +373,14 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Settings display language. system follows the macOS preferred language.",
             requiresNewWindow: false, category: "general"),
         .init(
+            id: "general.quitWithoutConfirmation", type: .boolean,
+            defaultValue: String(
+                OMGApplicationEnvironment.quitWithoutConfirmationDefault()
+            ),
+            allowedValues: nil, minimum: nil, maximum: nil,
+            description: "Quit immediately without confirming running terminal processes.",
+            requiresNewWindow: false, category: "general"),
+        .init(
             id: "agents.historyLimit", type: .number, defaultValue: "10000",
             allowedValues: nil, minimum: 100, maximum: 50000,
             description: "Maximum number of historical agent sessions to index and display.",
@@ -524,6 +538,12 @@ final class OhMyGhosttySettings: ObservableObject {
     }
     @Published var restoreSessionsOnLaunch = true {
         didSet { persist("sessions.restoreOnLaunch", restoreSessionsOnLaunch) }
+    }
+    @Published var quitWithoutConfirmation =
+        OMGApplicationEnvironment.quitWithoutConfirmationDefault() {
+        didSet {
+            persist("general.quitWithoutConfirmation", quitWithoutConfirmation)
+        }
     }
     @Published var language: OhMyGhosttyLanguage = .system {
         didSet { persist("general.language", language.rawValue) }
@@ -762,6 +782,10 @@ final class OhMyGhosttySettings: ObservableObject {
             restoreSessionsOnLaunch = boolValue(
                 "sessions.restoreOnLaunch",
                 fallback: true
+            )
+            quitWithoutConfirmation = boolValue(
+                "general.quitWithoutConfirmation",
+                fallback: OMGApplicationEnvironment.quitWithoutConfirmationDefault()
             )
             language = enumValue("general.language", fallback: .system)
         }

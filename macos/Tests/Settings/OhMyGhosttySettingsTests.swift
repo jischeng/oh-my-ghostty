@@ -89,6 +89,7 @@ struct OhMyGhosttySettingsTests {
         settings.quickInputHeight = 318
         settings.terminalResizeRendering = .onRelease
         settings.restoreSessionsOnLaunch = false
+        settings.quitWithoutConfirmation = true
 
         let data = try Data(contentsOf: url)
         let object = try #require(
@@ -107,6 +108,7 @@ struct OhMyGhosttySettingsTests {
         #expect((object["keyboard.quickInputHeight"] as? NSNumber)?.doubleValue == 318)
         #expect(object["terminal.resizeRendering"] as? String == "onRelease")
         #expect(object["sessions.restoreOnLaunch"] as? Bool == false)
+        #expect(object["general.quitWithoutConfirmation"] as? Bool == true)
 
         let restored = OhMyGhosttySettings(fileURL: url)
         #expect(restored.tabLayout == .vertical)
@@ -122,6 +124,7 @@ struct OhMyGhosttySettingsTests {
         #expect(restored.quickInputHeight == 318)
         #expect(restored.terminalResizeRendering == .onRelease)
         #expect(!restored.restoreSessionsOnLaunch)
+        #expect(restored.quitWithoutConfirmation)
     }
 
     @Test func legacySmoothResizeBooleanMigratesToRenderingMode() throws {
@@ -301,10 +304,28 @@ struct OhMyGhosttySettingsTests {
         #expect(descriptors.contains { $0.id == "terminal.resizeRendering" })
         #expect(descriptors.contains { $0.id == "sessions.restoreOnLaunch" })
         #expect(descriptors.contains { $0.id == "general.language" })
+        #expect(descriptors.contains { $0.id == "general.quitWithoutConfirmation" })
         #expect(descriptors.contains { $0.id == "appearance.backgroundOpacity" })
         #expect(descriptors.contains { $0.id == "appearance.cursorStyle" })
         let schema = try settings.schemaData()
         #expect(!schema.isEmpty)
+    }
+
+    @Test func quitConfirmationDefaultTracksApplicationChannel() {
+        #expect(!OMGApplicationEnvironment.quitWithoutConfirmationDefault(
+            development: false
+        ))
+        #expect(OMGApplicationEnvironment.quitWithoutConfirmationDefault(
+            development: true
+        ))
+        let (settings, url) = temporarySettings()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let expected = OMGApplicationEnvironment.quitWithoutConfirmationDefault()
+        #expect(settings.quitWithoutConfirmation == expected)
+        let descriptor = OhMyGhosttySettings.descriptors.first {
+            $0.id == "general.quitWithoutConfirmation"
+        }
+        #expect(descriptor?.defaultValue == String(expected))
     }
 
     @Test func quickInputOnAgentStartDefaultsOff() {
@@ -375,6 +396,8 @@ struct OhMyGhosttySettingsTests {
         #expect(zh.tabTitle(.general) == "通用")
         #expect(zh.tabTitle(.plugins) == "插件")
         #expect(zh.languageSystem == "跟随系统")
+        #expect(zh.quitWithoutConfirmationLabel == "退出时无需确认")
+        #expect(en.quitWithoutConfirmationLabel == "Quit Without Confirmation")
         #expect(zh.groupingTitle(.project) == "按项目")
         #expect(en.groupingTitle(.project) == "By Project")
         #expect(zh.pathDisplayTitle(.folderName) == "当前文件夹")

@@ -83,6 +83,16 @@ struct SettingsStrings: Equatable, Sendable {
             "恢复 OMG 退出时仍然打开的窗口、标签页、分屏、工作目录以及仍在运行的 Agent。"
         )
     }
+    var quitSection: String { t("Quit", "退出") }
+    var quitWithoutConfirmationLabel: String {
+        t("Quit Without Confirmation", "退出时无需确认")
+    }
+    var quitWithoutConfirmationCaption: String {
+        t(
+            "Quit immediately and terminate running terminal processes without asking.",
+            "退出时直接终止仍在运行的终端进程，不再弹出确认。"
+        )
+    }
     var configurationSection: String { t("Configuration", "配置") }
     var settingsFileLabel: String { t("OMG Settings", "OMG 设置文件") }
     var precedenceLabel: String { t("Precedence", "优先级") }

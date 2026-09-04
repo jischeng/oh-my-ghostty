@@ -126,6 +126,13 @@
    ],
    "type": "string"
   },
+  "general.quitWithoutConfirmation": {
+   "category": "general",
+   "default": false,
+   "description": "Quit immediately without confirming running terminal processes. OMG Dev defaults to true.",
+   "type": "boolean",
+   "x-debug-default": true
+  },
   "keyboard.quickInput": {
    "category": "keyboard",
    "default": "shift+command+e",

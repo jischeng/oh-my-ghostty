@@ -507,6 +507,15 @@ class AppDelegate: NSObject,
             }
         }
 
+        // This app-level preference deliberately bypasses only Cmd-Q/app
+        // termination. Closing an individual tab or window keeps Ghostty's
+        // existing process confirmation policy.
+        if MainActor.assumeIsolated({
+            OhMyGhosttySettings.shared.quitWithoutConfirmation
+        }) {
+            return .terminateNow
+        }
+
         // If our app says we don't need to confirm, we can exit now.
         if !ghostty.needsConfirmQuit { return .terminateNow }
 

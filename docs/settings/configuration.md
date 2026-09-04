@@ -27,6 +27,7 @@ The file is a flat, sorted JSON object. Only values explicitly chosen by the use
   "appearance.backgroundOpacity": 0.75,
   "appearance.darkTheme": "Catppuccin Mocha",
   "appearance.lightTheme": "Catppuccin Latte",
+  "general.quitWithoutConfirmation": true,
   "keyboard.quickInput": "shift+command+e",
   "keyboard.quickInputHeight": 252,
   "notifications.taskComplete": false,
@@ -86,6 +87,7 @@ Window UI state is intentionally separate: `InspectorPresentationStore` owns las
 | `keyboard.quickInputHeight` | number | `252` | `140...480` | Settings > Keyboard / drag divider | Runtime |
 | `sessions.restoreOnLaunch` | boolean | `true` | `true`, `false` | Settings > General | Next launch |
 | `general.language` | enum | `system` | `system`, `en`, `zh-Hans` | Settings > General | Live (Settings UI) |
+| `general.quitWithoutConfirmation` | boolean | Release: `false`; Dev: `true` | `true`, `false` | Settings > General | Next app quit |
 
 Appearance controls resolve each value as `OMG override > Ghostty config > built-in default`. The UI reports the effective value and source, and **Reset to Ghostty** removes only OMG Appearance keys. The app writes a generated `appearance.ghostty` overlay beside `settings.json`; it never edits the user's Ghostty config. The overlay is loaded last and applied with Ghostty's existing live config update API, so current surfaces keep their PTY, shell, and scrollback.
 
@@ -98,6 +100,8 @@ Settings > Keyboard > Agent Quick Input records `keyboard.quickInput`; the defau
 Settings > Plugins > Agent Integration installs the versioned, removable JSON/plugin/TOML/script integration declared by each bundled Agent manifest. Detector-only Antigravity, Crush, and Hermes use an explicit Host-owned Install/Update/Remove marker instead of pretending a vendor hook exists; their process/screen fallback is disabled when the marker is removed. `agents.statusHooks` controls both normalized event ingress and the bounded local foreground-PID fallback used when an agent does not emit `SessionStart`. Vertical Tabs use the focused pane's bundled Agent glyph/title/ring and keep other panes' attention/error/done as trailing alerts; idle has no ring. Normal `done` and unexpected-interruption `error` remain visible even on the currently focused pane; Tab selection/focus does not clear them, and only mouse click or keyboard input in the owning focused terminal acknowledges the terminal state. Horizontal Tabs keep Ghostty's native presentation. **Export SSH Installer…** writes an auditable Python 3 script that the user can explicitly transfer and run in a remote account. Remote hooks work through SSH because they write the bounded event to that remote TTY; OMG does not log in or alter remote accounts automatically.
 
 Settings > General > Sessions controls `sessions.restoreOnLaunch`. When enabled, AppKit restores every open window, canonical tab order, split tree, cwd, and typed Agent resume descriptor. Only Agents still running at quit are resumed with an exact validated conversation ID; a tab whose Agent already exited restores as a shell. SSH restore reuses original OpenSSH argv and never stores credentials or an arbitrary remote command.
+
+Settings > General > Quit controls `general.quitWithoutConfirmation`. When enabled, an app-level quit terminates running terminal processes without showing the close confirmation; closing an individual tab or window still uses Ghostty's normal confirmation policy. The safe Release default is `false`; OMG Dev defaults to `true` so replacement installs do not block on an interactive dialog. An explicitly saved value overrides the channel default.
 
 Settings > General > Language controls `general.language`. `system` (the default) follows the macOS preferred language; `en` pins English and `zh-Hans` pins Simplified Chinese. The language applies live to the Settings window and the app-owned static macOS main-menu hierarchy. Dynamic window names, Services entries, terminal content, titles, and Agent events are not translated.
 

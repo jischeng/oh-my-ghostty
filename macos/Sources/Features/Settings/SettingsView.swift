@@ -180,6 +180,15 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                Section(strings.quitSection) {
+                    Toggle(
+                        strings.quitWithoutConfirmationLabel,
+                        isOn: $settings.quitWithoutConfirmation
+                    )
+                    Text(strings.quitWithoutConfirmationCaption)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Section(strings.configurationSection) {
                     LabeledContent(strings.settingsFileLabel, value: OhMyGhosttySettings.fileURL.path)
                     LabeledContent(strings.precedenceLabel, value: strings.precedenceValue)

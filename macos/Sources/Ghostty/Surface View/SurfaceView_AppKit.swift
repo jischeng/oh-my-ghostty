@@ -2151,8 +2151,11 @@ extension Ghostty.SurfaceView: NSTextInputClient {
     }
 
     func insertText(_ string: Any, replacementRange: NSRange) {
-        // We must have an associated event
-        guard NSApp.currentEvent != nil else { return }
+        // NSTextInputClient also receives eventless insertions from macOS
+        // Accessibility clients such as clipboard managers. Treat those as
+        // committed typed text instead of dropping them solely because there
+        // is no current NSEvent. Event-backed IME input still uses the
+        // accumulator below.
 
         // We want the string view of the any value
         var chars = ""

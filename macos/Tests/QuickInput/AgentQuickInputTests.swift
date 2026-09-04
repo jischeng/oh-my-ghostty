@@ -480,4 +480,12 @@ struct AgentQuickInputTests {
             next: .idle
         ))
     }
+
+    @Test func composerTextViewUsesIsolatedUndoManager() {
+        let editor = ComposerTextView()
+        let window = NSWindow()
+        window.contentView = editor
+        #expect(editor.undoManager != nil)
+        #expect(editor.undoManager !== window.undoManager)
+    }
 }

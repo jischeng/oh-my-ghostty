@@ -532,7 +532,7 @@ class BaseTerminalController: NSWindowController,
 
         // If the child process is not alive, then we exit immediately
         guard withConfirmation else {
-            removeSurfaceNode(node)
+            removeSurfaceNode(node, registerUndo: false)
             return
         }
 
@@ -546,7 +546,7 @@ class BaseTerminalController: NSWindowController,
             informativeText: "The terminal still has a running process. If you close the terminal the process will be killed."
         ) { [weak self] in
             if let self {
-                self.removeSurfaceNode(node)
+                self.removeSurfaceNode(node, registerUndo: false)
             }
         }
     }
@@ -574,8 +574,8 @@ class BaseTerminalController: NSWindowController,
     /// This does no confirmation and assumes confirmation is already done.
     func removeSurfaceNode(
         _ node: SplitTree<Ghostty.SurfaceView>.Node,
-        undoAction: String? = "Close Terminal",
-        registerUndo: Bool = true
+        undoAction: String? = nil,
+        registerUndo: Bool = false
     ) {
         // Move focus if the closed surface was focused and we have a next target
         let nextFocus: Ghostty.SurfaceView? = if node.contains(
@@ -1171,7 +1171,7 @@ class BaseTerminalController: NSWindowController,
         }
 
         // Remove the node from the source.
-        sourceController.removeSurfaceNode(sourceNode)
+        sourceController.removeSurfaceNode(sourceNode, registerUndo: false)
 
         // Add in the surface to our tree
         replaceSurfaceTree(

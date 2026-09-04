@@ -18,3 +18,15 @@ FOUNDATION_EXPORT BOOL GhosttyShowWindowSafely(
     id _Nullable sender,
     NSError * _Nullable * _Nullable error
 );
+
+/// NSUndoManager.undo wrapper
+FOUNDATION_EXPORT BOOL GhosttyUndoSafely(
+    id _Nonnull undoManager,
+    NSError * _Nullable * _Nullable error
+);
+
+/// NSUndoManager.redo wrapper
+FOUNDATION_EXPORT BOOL GhosttyRedoSafely(
+    id _Nonnull undoManager,
+    NSError * _Nullable * _Nullable error
+);

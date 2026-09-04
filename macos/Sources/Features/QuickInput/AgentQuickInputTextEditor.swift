@@ -62,6 +62,7 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
         editor.onCancel = onCancel
         if !editor.hasMarkedText(), editor.string != text {
             editor.string = text
+            editor.resetLocalUndoManager()
         }
         configureTypography(for: editor)
         if isPresented,
@@ -164,6 +165,13 @@ final class ComposerTextView: NSTextView {
     var onSend: (() -> Void)?
     var onQueue: (() -> Void)?
     var onCancel: (() -> Void)?
+
+    private let localUndoManager = UndoManager()
+    override var undoManager: UndoManager? { localUndoManager }
+
+    func resetLocalUndoManager() {
+        localUndoManager.removeAllActions()
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
@@ -290,8 +298,14 @@ final class ComposerTextView: NSTextView {
         case .copy: copy(nil)
         case .paste: paste(nil)
         case .cut: cut(nil)
-        case .undo: undoManager?.undo()
-        case .redo: undoManager?.redo()
+        case .undo:
+            if localUndoManager.canUndo {
+                localUndoManager.undoSafely()
+            }
+        case .redo:
+            if localUndoManager.canRedo {
+                localUndoManager.redoSafely()
+            }
         case nil: return false
         }
         return true

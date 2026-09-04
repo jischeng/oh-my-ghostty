@@ -54,3 +54,35 @@ BOOL GhosttyShowWindowSafely(
         return NO;
     }
 }
+
+BOOL GhosttyUndoSafely(
+    id undoManager,
+    NSError * _Nullable * _Nullable error
+) {
+    @try {
+        [((NSUndoManager *)undoManager) undo];
+        return YES;
+    } @catch (NSException *exception) {
+        if (error != NULL) {
+            *error = GhosttyErrorFromException(exception, 3);
+        }
+
+        return NO;
+    }
+}
+
+BOOL GhosttyRedoSafely(
+    id undoManager,
+    NSError * _Nullable * _Nullable error
+) {
+    @try {
+        [((NSUndoManager *)undoManager) redo];
+        return YES;
+    } @catch (NSException *exception) {
+        if (error != NULL) {
+            *error = GhosttyErrorFromException(exception, 4);
+        }
+
+        return NO;
+    }
+}

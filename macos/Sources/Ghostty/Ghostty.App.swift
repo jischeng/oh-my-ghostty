@@ -792,8 +792,7 @@ extension Ghostty {
             }
 
             guard let undoManager, undoManager.canUndo else { return false }
-            undoManager.undo()
-            return true
+            return undoManager.undoSafely()
         }
 
         private static func redo(_ app: ghostty_app_t, target: ghostty_target_s) -> Bool {
@@ -813,8 +812,7 @@ extension Ghostty {
             }
 
             guard let undoManager, undoManager.canRedo else { return false }
-            undoManager.redo()
-            return true
+            return undoManager.redoSafely()
         }
 
         private static func newWindow(_ app: ghostty_app_t, target: ghostty_target_s) {

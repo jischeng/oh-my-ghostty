@@ -1219,11 +1219,11 @@ class AppDelegate: NSObject,
     }
 
     @IBAction func undo(_ sender: Any?) {
-        undoManager.undo()
+        undoManager.undoSafely()
     }
 
     @IBAction func redo(_ sender: Any?) {
-        undoManager.redo()
+        undoManager.redoSafely()
     }
 
     private struct DerivedConfig {

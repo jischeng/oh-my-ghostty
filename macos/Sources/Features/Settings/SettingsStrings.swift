@@ -67,6 +67,13 @@ struct SettingsStrings: Equatable, Sendable {
     }
 
     var sessionsSection: String { t("Sessions", "会话") }
+    var agentHistoryLimitLabel: String { t("Historical Sessions Limit", "历史会话保留上限") }
+    var agentHistoryLimitCaption: String {
+        t(
+            "Maximum number of agent conversations discovered and displayed in Agent History. Default is 10,000.",
+            "Agent History 索引并展示的最大历史会话数量，默认值为 10,000 条。"
+        )
+    }
     var restoreSessionsLabel: String {
         t("Restore Windows and Agent Sessions", "恢复窗口与 Agent 会话")
     }
@@ -252,6 +259,15 @@ struct SettingsStrings: Equatable, Sendable {
         t(
             "Keeps terminal focus unchanged. Use Option-Command-arrow keys to move focus into or out of the composer.",
             "不会改变终端焦点。使用 Option-Command-方向键在终端与输入框之间切换焦点。"
+        )
+    }
+    var openQuickInputOnAgentCompleteLabel: String {
+        t("Open Composer When Agent Completes", "Agent 会话完成时自动打开输入框")
+    }
+    var openQuickInputOnAgentCompleteCaption: String {
+        t(
+            "Opens only for a newly completed Agent in the focused Pane and keeps terminal focus unchanged.",
+            "仅在当前 Pane 中的 Agent 会话刚完成时打开，并保持终端焦点不变。"
         )
     }
     var quickInputShortcutLabel: String { t("Open Composer", "打开输入框") }

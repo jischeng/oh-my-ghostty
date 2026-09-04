@@ -66,6 +66,14 @@ struct InspectorFileTree: Equatable, Sendable {
     let nodes: [InspectorFileNode]
 }
 
+struct InspectorAgentHistoryContent: Equatable, Sendable {
+    let sessions: [AgentHistorySession]
+    let selectedSessionID: String?
+    let transcript: AgentHistoryTranscript?
+    let isLoadingSessions: Bool
+    let isLoadingTranscript: Bool
+}
+
 enum InspectorPaneActionKind: Equatable, Sendable {
     case toggleNode(id: String, expanded: Bool)
     case refresh
@@ -76,6 +84,11 @@ enum InspectorPaneActionKind: Equatable, Sendable {
     case openPortForward(id: String)
     case copyPortForward(id: String)
     case removePortForward(id: String)
+    case refreshAgentHistory
+    case selectAgentHistorySession(id: String)
+    case clearAgentHistorySelection
+    case resumeAgentHistorySession(id: String)
+    case forkAgentHistorySession(id: String)
 }
 
 struct InspectorPaneAction: Equatable, Sendable {
@@ -89,6 +102,7 @@ enum InspectorPaneContent: Equatable, Sendable {
     case list([InspectorListItem])
     case fileTree(InspectorFileTree)
     case info(InspectorInfoContent)
+    case agentHistory(InspectorAgentHistoryContent)
 }
 
 struct InspectorPaneContext: Equatable, Sendable {

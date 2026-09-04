@@ -168,7 +168,9 @@ final class BuiltInFilesInspectorProvider {
             create(name: name, directory: true, context: context)
 
         case .createPortForward, .openPortForward, .copyPortForward,
-             .removePortForward:
+             .removePortForward, .refreshAgentHistory,
+             .selectAgentHistorySession, .clearAgentHistorySelection,
+             .resumeAgentHistorySession, .forkAgentHistorySession:
             break
         }
     }
@@ -551,6 +553,8 @@ final class BuiltInFilesInspectorProvider {
         case .list(let items): "list count=\(items.count)"
         case .info(let info):
             "info host=\(info.portForwards.hostAlias) forwards=\(info.portForwards.items.count)"
+        case .agentHistory(let history):
+            "agentHistory sessions=\(history.sessions.count)"
         }
     }
 

@@ -1,0 +1,611 @@
+import Foundation
+import Testing
+@testable import Ghostty
+
+@MainActor
+struct AgentHistoryInspectorTests {
+    @Test func discoversAndParsesAgentSpecificLocalHistories() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agent-history-\(UUID().uuidString)")
+        let piRoot = root.appendingPathComponent("pi")
+        let codexRoot = root.appendingPathComponent("codex")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let piID = try #require(AgentConversationID("pi-session-1"))
+        let piFile = piRoot
+            .appendingPathComponent("project")
+            .appendingPathComponent("2026-09-03_\(piID.rawValue).jsonl")
+        try writeJSONL([
+            [
+                "type": "session",
+                "version": 3,
+                "id": piID.rawValue,
+                "timestamp": "2026-09-03T01:00:00.000Z",
+                "cwd": "/Users/test/pi-project",
+            ],
+            [
+                "type": "message",
+                "timestamp": "2026-09-03T01:01:00.000Z",
+                "message": [
+                    "role": "user",
+                    "content": [["type": "text", "text": "Implement the parser"]],
+                ],
+            ],
+            [
+                "type": "message",
+                "timestamp": "2026-09-03T01:02:00.000Z",
+                "message": [
+                    "role": "assistant",
+                    "content": [["type": "text", "text": "Parser implemented"]],
+                ],
+            ],
+        ], to: piFile)
+
+        let codexID = try #require(AgentConversationID("codex-session-1"))
+        let codexFile = codexRoot
+            .appendingPathComponent("2026/09/03")
+            .appendingPathComponent("rollout-\(codexID.rawValue).jsonl")
+        try writeJSONL([
+            [
+                "type": "session_meta",
+                "timestamp": "2026-09-03T02:00:00.000Z",
+                "payload": [
+                    "id": codexID.rawValue,
+                    "cwd": "/Users/test/codex-project",
+                ],
+            ],
+            [
+                "type": "response_item",
+                "timestamp": "2026-09-03T02:01:00.000Z",
+                "payload": [
+                    "type": "message",
+                    "role": "user",
+                    "content": [["type": "input_text", "text": "Review the patch"]],
+                ],
+            ],
+        ], to: codexFile)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 200)],
+            ofItemAtPath: codexFile.path
+        )
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 100)],
+            ofItemAtPath: piFile.path
+        )
+
+        let sessions = await AgentHistoryStore.load(
+            agents: [.pi, .codex],
+            rootURLs: [.pi: piRoot, .codex: codexRoot],
+            maximumSessions: 10
+        )
+
+        #expect(sessions.map(\.id) == [
+            "codex:\(codexID.rawValue)",
+            "pi:\(piID.rawValue)",
+        ])
+        #expect(sessions[0].title == "Review the patch")
+        #expect(sessions[0].workingDirectory == "/Users/test/codex-project")
+        #expect(sessions[1].title == "Implement the parser")
+        #expect(sessions[1].workingDirectory == "/Users/test/pi-project")
+
+        let transcript = await AgentHistoryStore.transcript(for: sessions[1])
+        #expect(transcript.sessionID == sessions[1].id)
+        #expect(transcript.messages.map(\.role) == [.user, .assistant])
+        #expect(transcript.messages.map(\.text) == [
+            "Implement the parser",
+            "Parser implemented",
+        ])
+        #expect(!transcript.wasTruncated)
+    }
+
+    @Test func codexTitleAndFullBodySearchSkipInjectedPrompts() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agent-history-codex-search-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let id = try #require(AgentConversationID("codex-search-session"))
+        let file = root
+            .appendingPathComponent("2026/09/03")
+            .appendingPathComponent("rollout-\(id.rawValue).jsonl")
+        var objects: [[String: Any]] = [
+            [
+                "type": "session_meta",
+                "payload": [
+                    "id": id.rawValue,
+                    "cwd": "/Users/test/education",
+                ],
+            ],
+            [
+                "type": "response_item",
+                "payload": [
+                    "role": "developer",
+                    "content": [[
+                        "type": "input_text",
+                        "text": String(repeating: "system context ", count: 6_000),
+                    ]],
+                ],
+            ],
+            [
+                "type": "response_item",
+                "payload": [
+                    "role": "user",
+                    "content": [
+                        ["type": "input_text", "text": "<recommended_plugins>noise</recommended_plugins>"],
+                        ["type": "input_text", "text": "# AGENTS.md instructions\n<INSTRUCTIONS>noise</INSTRUCTIONS>"],
+                        ["type": "input_text", "text": "<environment_context>noise</environment_context>"],
+                    ],
+                ],
+            ],
+            [
+                "type": "response_item",
+                "payload": [
+                    "role": "user",
+                    "content": [[
+                        "type": "input_text",
+                        "text": "查找融合教育教师编制要求",
+                    ]],
+                ],
+            ],
+        ]
+        for index in 0..<80 {
+            objects.append([
+                "type": "event_msg",
+                "payload": ["message": String(repeating: "filler", count: 1_000)],
+            ])
+            if index == 79 {
+                objects.append([
+                    "type": "response_item",
+                    "payload": [
+                        "role": "assistant",
+                        "content": [[
+                            "type": "output_text",
+                            "text": "正文深处包含唯一关键字：编制资格核验",
+                        ]],
+                    ],
+                ])
+            }
+        }
+        try writeJSONL(objects, to: file)
+
+        let sessions = await AgentHistoryStore.load(
+            agents: [.codex],
+            rootURLs: [.codex: root],
+            maximumSessions: 10,
+            cacheURL: root.appendingPathComponent("cache.json")
+        )
+        let session = try #require(sessions.first)
+        #expect(session.title == "查找融合教育教师编制要求")
+        #expect(session.previewSnippet?.contains("融合教育") == true)
+
+        var titleUpdates = AgentHistoryStore.searchUpdates(
+            sessions: sessions,
+            query: "融合教育"
+        ).makeAsyncIterator()
+        let firstTitleBatch = await titleUpdates.next()
+        #expect(firstTitleBatch?[session.id]?.contains("融合教育") == true)
+
+        let matches = await AgentHistoryStore.search(
+            sessions: sessions,
+            query: "编制资格核验"
+        )
+        #expect(matches[session.id]?.contains("编制资格核验") == true)
+
+        let transcript = await AgentHistoryStore.transcript(for: session)
+        #expect(transcript.messages.contains {
+            $0.text.contains("查找融合教育教师编制要求")
+        })
+        #expect(transcript.messages.contains {
+            $0.text.contains("编制资格核验")
+        })
+        #expect(!transcript.messages.contains {
+            $0.text.contains("recommended_plugins")
+        })
+    }
+
+    @Test func rejectsFilenameAndMetadataConversationMismatch() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agent-history-mismatch-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("project/2026_filename-id.jsonl")
+        try writeJSONL([
+            [
+                "type": "session",
+                "id": "different-id",
+                "timestamp": "2026-09-03T01:00:00.000Z",
+                "cwd": "/tmp/project",
+            ],
+        ], to: file)
+
+        let sessions = await AgentHistoryStore.load(
+            agents: [.pi],
+            rootURLs: [.pi: root],
+            maximumSessions: 10
+        )
+        #expect(sessions.isEmpty)
+    }
+
+    @Test func discoversEveryManifestBackedJSONLStorePattern() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agent-history-patterns-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let claudeRoot = root.appendingPathComponent("claude")
+        let piRoot = root.appendingPathComponent("pi")
+        let qoderRoot = root.appendingPathComponent("qoder")
+        let ompRoot = root.appendingPathComponent("omp")
+        let qwenRoot = root.appendingPathComponent("qwen")
+        let roots: [SupportedAgent: URL] = [
+            .claude: claudeRoot,
+            .pi: piRoot,
+            .qoder: qoderRoot,
+            .omp: ompRoot,
+            .qwen: qwenRoot,
+        ]
+
+        try writeJSONL([
+            [
+                "type": "user",
+                "sessionId": "claude-history",
+                "cwd": "/tmp/claude",
+                "message": ["role": "user", "content": "Claude history"],
+            ],
+        ], to: claudeRoot
+            .appendingPathComponent("project/claude-history.jsonl"))
+        try writeJSONL([
+            [
+                "type": "session",
+                "id": "pi-history",
+                "cwd": "/tmp/pi",
+            ],
+        ], to: piRoot
+            .appendingPathComponent("project/date_pi-history.jsonl"))
+        try writeJSONL([
+            [
+                "type": "user",
+                "sessionId": "qoder-history",
+                "cwd": "/tmp/qoder",
+                "message": [
+                    "role": "user",
+                    "content": [["type": "text", "text": "Qoder history"]],
+                ],
+            ],
+        ], to: qoderRoot
+            .appendingPathComponent("project/qoder-history.jsonl"))
+        try writeJSONL([
+            ["type": "title", "title": "OMP history"],
+            [
+                "type": "session",
+                "id": "omp-history",
+                "cwd": "/tmp/omp",
+            ],
+        ], to: ompRoot
+            .appendingPathComponent("project/date_omp-history.jsonl"))
+        try writeJSONL([
+            [
+                "type": "session",
+                "id": "qwen-history",
+                "cwd": "/tmp/qwen",
+            ],
+        ], to: qwenRoot
+            .appendingPathComponent("bucket/chats/qwen-history.jsonl"))
+
+        let sessions = await AgentHistoryStore.load(
+            agents: [.claude, .pi, .qoder, .omp, .qwen],
+            rootURLs: roots,
+            maximumSessions: 20
+        )
+        #expect(Set(sessions.map(\.agent)) == [
+            .claude,
+            .pi,
+            .qoder,
+            .omp,
+            .qwen,
+        ])
+        #expect(sessions.first(where: { $0.agent == .omp })?.title == "OMP history")
+        #expect(sessions.first(where: { $0.agent == .qwen })?.conversationID.rawValue ==
+            "qwen-history")
+    }
+
+    @Test func contextReplacementKeepsTranscriptLoadAlive() async throws {
+        let session = AgentHistorySession(
+            agent: .pi,
+            conversationID: try #require(AgentConversationID("context-session")),
+            title: "Context session",
+            workingDirectory: "/tmp/project",
+            updatedAt: Date(),
+            sourcePath: "/tmp/context-session.jsonl",
+            isActive: false
+        )
+        let transcript = AgentHistoryTranscript(
+            sessionID: session.id,
+            messages: [
+                .init(
+                    id: "message",
+                    role: .assistant,
+                    text: "Still loading",
+                    timestamp: nil
+                ),
+            ],
+            wasTruncated: false
+        )
+        let gate = AgentHistoryTranscriptGate()
+        let registry = InspectorRegistry()
+        let provider = BuiltInAgentHistoryInspectorProvider(
+            registry: registry,
+            sessionLoader: { [session] },
+            transcriptLoader: { _ in
+                await gate.wait()
+                return transcript
+            },
+            sessionResumer: { _, _ in }
+        )
+        try provider.register()
+        let tabID = UUID()
+        let context = InspectorPaneContext(
+            tabID: tabID,
+            surfaceID: UUID(),
+            title: "Before",
+            workingDirectory: "/tmp/project"
+        )
+        registry.presentationDidChange(
+            to: BuiltInAgentHistoryInspectorProvider.paneID,
+            context: context
+        )
+        for _ in 0..<20 {
+            if case .agentHistory(let value) = registry.content(
+                for: BuiltInAgentHistoryInspectorProvider.paneID,
+                context: context
+            ), value.sessions.count == 1 { break }
+            await Task.yield()
+        }
+        registry.performAction(
+            paneID: BuiltInAgentHistoryInspectorProvider.paneID,
+            action: .init(
+                context: context,
+                kind: .selectAgentHistorySession(id: session.id)
+            )
+        )
+        for _ in 0..<20 {
+            if await gate.started { break }
+            await Task.yield()
+        }
+        #expect(await gate.started)
+
+        let updated = InspectorPaneContext(
+            tabID: tabID,
+            surfaceID: context.surfaceID,
+            title: "After",
+            workingDirectory: "/tmp/project"
+        )
+        registry.presentationDidChange(
+            to: BuiltInAgentHistoryInspectorProvider.paneID,
+            context: updated
+        )
+        await gate.resume()
+
+        var loaded: InspectorAgentHistoryContent?
+        for _ in 0..<20 {
+            if case .agentHistory(let value) = registry.content(
+                for: BuiltInAgentHistoryInspectorProvider.paneID,
+                context: updated
+            ), value.transcript == transcript {
+                loaded = value
+                break
+            }
+            await Task.yield()
+        }
+        #expect(loaded?.transcript == transcript)
+        #expect(loaded?.isLoadingTranscript == false)
+    }
+
+    @Test func providerLoadsTranscriptAndRoutesTypedResumeAndForkActions() async throws {
+        let session = AgentHistorySession(
+            agent: .pi,
+            conversationID: try #require(AgentConversationID("session-42")),
+            title: "Continue feature work",
+            workingDirectory: "/Users/test/project",
+            updatedAt: Date(timeIntervalSince1970: 42),
+            sourcePath: "/tmp/session-42.jsonl",
+            isActive: false
+        )
+        let transcript = AgentHistoryTranscript(
+            sessionID: session.id,
+            messages: [
+                .init(
+                    id: "message-1",
+                    role: .user,
+                    text: "Continue feature work",
+                    timestamp: nil
+                ),
+            ],
+            wasTruncated: false
+        )
+        var resumedIDs: [String] = []
+        var forkedIDs: [String] = []
+        let registry = InspectorRegistry()
+        let provider = BuiltInAgentHistoryInspectorProvider(
+            registry: registry,
+            sessionLoader: { [session] },
+            transcriptLoader: { _ in transcript },
+            sessionResumer: { session, _ in resumedIDs.append(session.id) },
+            sessionForker: { session, _ in forkedIDs.append(session.id) }
+        )
+        try provider.register()
+        let context = InspectorPaneContext(
+            tabID: UUID(),
+            surfaceID: UUID(),
+            title: "Project",
+            workingDirectory: "/Users/test/project"
+        )
+
+        registry.presentationDidChange(
+            to: BuiltInAgentHistoryInspectorProvider.paneID,
+            context: context
+        )
+        var content: InspectorAgentHistoryContent?
+        for _ in 0..<20 {
+            if case .agentHistory(let value) = registry.content(
+                for: BuiltInAgentHistoryInspectorProvider.paneID,
+                context: context
+            ), value.sessions.count == 1 {
+                content = value
+                break
+            }
+            await Task.yield()
+        }
+        #expect(content?.sessions.map(\.id) == [session.id])
+
+        registry.performAction(
+            paneID: BuiltInAgentHistoryInspectorProvider.paneID,
+            action: .init(
+                context: context,
+                kind: .selectAgentHistorySession(id: session.id)
+            )
+        )
+        for _ in 0..<20 {
+            if case .agentHistory(let value) = registry.content(
+                for: BuiltInAgentHistoryInspectorProvider.paneID,
+                context: context
+            ), value.transcript == transcript {
+                content = value
+                break
+            }
+            await Task.yield()
+        }
+        #expect(content?.selectedSessionID == session.id)
+        #expect(content?.transcript == transcript)
+
+        registry.performAction(
+            paneID: BuiltInAgentHistoryInspectorProvider.paneID,
+            action: .init(
+                context: context,
+                kind: .resumeAgentHistorySession(id: session.id)
+            )
+        )
+        #expect(resumedIDs == [session.id])
+
+        registry.performAction(
+            paneID: BuiltInAgentHistoryInspectorProvider.paneID,
+            action: .init(
+                context: context,
+                kind: .forkAgentHistorySession(id: session.id)
+            )
+        )
+        #expect(forkedIDs == [session.id])
+
+        registry.performAction(
+            paneID: BuiltInAgentHistoryInspectorProvider.paneID,
+            action: .init(context: context, kind: .clearAgentHistorySelection)
+        )
+        guard case .agentHistory(let cleared) = registry.content(
+            for: BuiltInAgentHistoryInspectorProvider.paneID,
+            context: context
+        ) else {
+            Issue.record("Expected Agent History content")
+            return
+        }
+        #expect(cleared.selectedSessionID == nil)
+        #expect(cleared.transcript == nil)
+    }
+
+    @Test func forkCommandsMatchSupportedAgentDialects() throws {
+        let claudeSession = AgentHistorySession(
+            agent: .claude,
+            conversationID: try #require(AgentConversationID("claude-123")),
+            title: "Claude session",
+            workingDirectory: "/tmp/claude",
+            updatedAt: Date(),
+            sourcePath: "/tmp/c.jsonl",
+            isActive: false
+        )
+        let piSession = AgentHistorySession(
+            agent: .pi,
+            conversationID: try #require(AgentConversationID("pi-123")),
+            title: "Pi session",
+            workingDirectory: "/tmp/pi",
+            updatedAt: Date(),
+            sourcePath: "/tmp/p.jsonl",
+            isActive: false
+        )
+        let codexSession = AgentHistorySession(
+            agent: .codex,
+            conversationID: try #require(AgentConversationID("codex-123")),
+            title: "Codex session",
+            workingDirectory: "/tmp/codex",
+            updatedAt: Date(),
+            sourcePath: "/tmp/cx.jsonl",
+            isActive: false
+        )
+
+        let claudeCmd = try #require(BuiltInAgentHistoryInspectorProvider.forkCommand(for: claudeSession))
+        #expect(claudeCmd.contains("--fork-session"))
+        #expect(claudeCmd.contains("claude-123"))
+
+        let piCmd = try #require(BuiltInAgentHistoryInspectorProvider.forkCommand(for: piSession))
+        #expect(piCmd.contains("--fork"))
+        #expect(piCmd.contains("pi-123"))
+
+        let codexCmd = try #require(BuiltInAgentHistoryInspectorProvider.forkCommand(for: codexSession))
+        #expect(codexCmd.contains("fork"))
+        #expect(codexCmd.contains("codex-123"))
+    }
+
+    @Test func filtersMeaninglessPasteAndTemporaryPathLines() {
+        let dirty = """
+        帮我看看这个报错
+        /var/folders/2z/zl8wrct518v_n3zcgjmc07200000gn/T/omg-paste/omg-paste-199BDD0B-A08E-485E-BCB2-F2669FEE9D7B.png
+        <recommended_plugins>
+        - Atlassian Rovo
+        </recommended_plugins>
+        # AGENTS.md instructions
+        <INSTRUCTIONS>
+        - Always reply in Chinese.
+        @/Users/chengjisheng/.codex/RTK.md
+        </INSTRUCTIONS>
+        <environment_context>
+        <cwd>/Users/test</cwd>
+        </environment_context>
+        这是第二行说明
+        """
+        let cleaned = AgentHistoryStore.cleanMeaningfulText(dirty)
+        #expect(!cleaned.contains("omg-paste"))
+        #expect(!cleaned.contains("recommended_plugins"))
+        #expect(!cleaned.contains("AGENTS.md instructions"))
+        #expect(!cleaned.contains("<environment_context>"))
+        #expect(cleaned.contains("帮我看看这个报错"))
+        #expect(cleaned.contains("这是第二行说明"))
+
+        let isolatedPath = "/var/folders/2z/zl8wrct518v_n3zcgjmc07200000gn/T/otty-paste/image-12345.png"
+        #expect(AgentHistoryStore.cleanMeaningfulText(isolatedPath) == "[Image/Attachment]")
+    }
+
+    private func writeJSONL(
+        _ objects: [[String: Any]],
+        to url: URL
+    ) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let data = try objects.map {
+            try JSONSerialization.data(withJSONObject: $0)
+        }.reduce(into: Data()) { result, object in
+            result.append(object)
+            result.append(0x0A)
+        }
+        try data.write(to: url, options: .atomic)
+    }
+}
+
+private actor AgentHistoryTranscriptGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var started = false
+
+    func wait() async {
+        started = true
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func resume() {
+        continuation?.resume()
+        continuation = nil
+    }
+}

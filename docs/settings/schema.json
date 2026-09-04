@@ -2,6 +2,20 @@
  "$schema": "https://json-schema.org/draft/2020-12/schema",
  "additionalProperties": true,
  "properties": {
+  "agents.historyLimit": {
+   "category": "general",
+   "default": 10000,
+   "description": "Maximum number of historical agent sessions to index and display.",
+   "maximum": 50000,
+   "minimum": 100,
+   "type": "number"
+  },
+  "agents.openQuickInputOnComplete": {
+   "category": "keyboard",
+   "default": false,
+   "description": "Open Quick Input when an agent completes without changing keyboard focus.",
+   "type": "boolean"
+  },
   "agents.openQuickInputOnStart": {
    "category": "keyboard",
    "default": false,

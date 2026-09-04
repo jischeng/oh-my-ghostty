@@ -386,6 +386,44 @@ struct AgentQuickInputTests {
         ))
     }
 
+    @Test func agentCompletionPresentationPolicyRequiresNewDoneAndFocusedTarget() {
+        #expect(AgentQuickInputPresentationPolicy.shouldPresentForAgentCompletion(
+            previous: .working,
+            next: .done,
+            enabled: true,
+            isAlreadyPresented: false,
+            isTargetFocused: true
+        ))
+        #expect(!AgentQuickInputPresentationPolicy.shouldPresentForAgentCompletion(
+            previous: .done,
+            next: .done,
+            enabled: true,
+            isAlreadyPresented: false,
+            isTargetFocused: true
+        ))
+        #expect(!AgentQuickInputPresentationPolicy.shouldPresentForAgentCompletion(
+            previous: .working,
+            next: .done,
+            enabled: false,
+            isAlreadyPresented: false,
+            isTargetFocused: true
+        ))
+        #expect(!AgentQuickInputPresentationPolicy.shouldPresentForAgentCompletion(
+            previous: .working,
+            next: .done,
+            enabled: true,
+            isAlreadyPresented: true,
+            isTargetFocused: true
+        ))
+        #expect(!AgentQuickInputPresentationPolicy.shouldPresentForAgentCompletion(
+            previous: .working,
+            next: .done,
+            enabled: true,
+            isAlreadyPresented: false,
+            isTargetFocused: false
+        ))
+    }
+
     @Test func dispatchPolicyOnlyAcceptsNewDoneTransition() {
         #expect(AgentQuickInputDispatchPolicy.shouldDispatch(
             previous: .working,

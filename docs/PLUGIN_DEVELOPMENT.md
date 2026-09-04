@@ -240,7 +240,7 @@ hooks into a separate bounded, presentation-only OSC path owned by Core.
 | `terminalControl` | built-in user-confirmed QuickInput writes work; no process-plugin wire messages | Planned, high risk |
 | `rawTerminalOutput` | capability name only | Planned, high risk, default deny |
 
-Quick Input presentation and focus remain Host-owned. The built-in composer participates in macOS `Option-Command` directional focus navigation, but this does not grant a plugin focus control. When the user enables `agents.openQuickInputOnStart`, the Host may expand Quick Input on the focused Pane's first Agent activity without changing first responder; plugin lifecycle messages cannot force focus or override that preference.
+Quick Input presentation and focus remain Host-owned. The built-in composer participates in macOS `Option-Command` directional focus navigation, but this does not grant a plugin focus control. When the user enables `agents.openQuickInputOnStart`, the Host may expand Quick Input on the focused Pane's first Agent activity without changing first responder. `agents.openQuickInputOnComplete` applies the same Host-owned presentation policy to a newly completed focused Agent session. Plugin lifecycle messages cannot force focus or override either preference.
 
 ### Session status API
 
@@ -621,6 +621,7 @@ Host-rendered `InspectorPaneContent` supports:
 - label/value fields;
 - lists with optional subtitle/system image;
 - recursive typed file trees;
+- bounded Agent session lists and readable user/assistant transcripts;
 - extensible Info snapshots with an optional status, typed fields, and SSH
   port-forward rows containing remote/local ports, remote process, and bounded
   status/failure detail.
@@ -643,8 +644,15 @@ disconnect, focused Pane change, or local cwd
 change produces a new context/lifecycle appearance for the selected provider;
 the previous appearance is discarded and its asynchronous work must not
 publish afterward. Supported action values are disclosure toggle, refresh,
-collapse all, create file/folder, and create/open/copy/remove SSH port
-forwarding; whether they make sense is provider-specific. Port creation accepts only a valid 1...65535 port or bounded `host:port` and is
+Agent-history selection/back/exact-resume/native-fork, collapse all, create
+file/folder, and create/open/copy/remove SSH port forwarding; whether they make
+sense is provider-specific. Agent-history resume accepts only a host-discovered,
+`AgentConversationID`-validated local session whose manifest declares
+allowlisted resume arguments; it focuses a matching live Surface or creates a
+new typed resume tab. Agent-history metadata uses a versioned mtime cache and
+bounded configurable count; full-body search and transcript parsing stream in
+background tasks, while the host renders transcript rows through a reusable
+AppKit table. Port creation accepts only a valid 1...65535 port or bounded `host:port` and is
 rejected outside an `sshReady` context. Info/port UI, hover help, empty states,
 connection messages, and normalized Host failures resolve live from
 `general.language` (English or Simplified Chinese).
@@ -774,8 +782,10 @@ Relevant sources:
 - `macos/Sources/Features/Plugins/PluginProtocol.swift`;
 - `macos/Sources/Features/Plugins/PluginHost.swift`;
 - `macos/Sources/Features/Plugins/AgentStatusPlugin.swift`;
+- `macos/Sources/Features/Plugins/AgentHistoryStore.swift`;
 - `macos/Sources/Features/Inspector/InspectorRegistry.swift`;
 - `macos/Sources/Features/Inspector/BuiltInFilesInspectorProvider.swift`;
+- `macos/Sources/Features/Inspector/BuiltInAgentHistoryInspectorProvider.swift`;
 - `macos/Sources/Features/Inspector/RightInspectorHost.swift`.
 
 Files-specific diagnostics are available in Debug builds:

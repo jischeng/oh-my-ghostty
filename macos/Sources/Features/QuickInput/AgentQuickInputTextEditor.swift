@@ -6,6 +6,7 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
     let placeholder: String
     let isPresented: Bool
     let focusRequestID: Int
+    let font: NSFont
     let onSend: () -> Void
     let onQueue: () -> Void
     let onCancel: () -> Void
@@ -33,10 +34,6 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
         editor.isHorizontallyResizable = false
         editor.isVerticallyResizable = true
         editor.autoresizingMask = [.width]
-        editor.font = .monospacedSystemFont(
-            ofSize: 13,
-            weight: .regular
-        )
         editor.placeholder = placeholder
         editor.textContainerInset = NSSize(width: 0, height: 5)
         editor.textContainer?.widthTracksTextView = true
@@ -45,6 +42,7 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
             height: CGFloat.greatestFiniteMagnitude
         )
         editor.string = text
+        configureTypography(for: editor)
         editor.onSend = onSend
         editor.onQueue = onQueue
         editor.onCancel = onCancel
@@ -62,6 +60,7 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
         if !editor.hasMarkedText(), editor.string != text {
             editor.string = text
         }
+        configureTypography(for: editor)
         if isPresented,
            focusRequestID != context.coordinator.handledFocusRequestID {
             context.coordinator.handledFocusRequestID = focusRequestID
@@ -69,6 +68,21 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
                 guard let editor, editor.window != nil else { return }
                 editor.window?.makeFirstResponder(editor)
             }
+        }
+    }
+
+    private func configureTypography(for editor: NSTextView) {
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineSpacing = AgentQuickInputMetrics.editorLineSpacing
+        editor.font = font
+        editor.defaultParagraphStyle = paragraphStyle
+        editor.typingAttributes[.font] = font
+        editor.typingAttributes[.paragraphStyle] = paragraphStyle
+        if let storage = editor.textStorage, storage.length > 0 {
+            storage.addAttributes(
+                [.font: font, .paragraphStyle: paragraphStyle],
+                range: NSRange(location: 0, length: storage.length)
+            )
         }
     }
 

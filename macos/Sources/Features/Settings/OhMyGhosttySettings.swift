@@ -339,6 +339,11 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Open Quick Input when an agent starts without changing keyboard focus.",
             requiresNewWindow: false, category: "keyboard"),
         .init(
+            id: "agents.openQuickInputOnComplete", type: .boolean, defaultValue: "false",
+            allowedValues: nil, minimum: nil, maximum: nil,
+            description: "Open Quick Input when an agent completes without changing keyboard focus.",
+            requiresNewWindow: false, category: "keyboard"),
+        .init(
             id: "keyboard.quickInput", type: .string,
             defaultValue: OMGKeyboardShortcut.defaultQuickInput.storageValue,
             allowedValues: nil, minimum: nil, maximum: nil,
@@ -360,6 +365,11 @@ final class OhMyGhosttySettings: ObservableObject {
             id: "general.language", type: .enumeration, defaultValue: "system",
             allowedValues: OhMyGhosttyLanguage.allCases.map(\.rawValue), minimum: nil, maximum: nil,
             description: "Settings display language. system follows the macOS preferred language.",
+            requiresNewWindow: false, category: "general"),
+        .init(
+            id: "agents.historyLimit", type: .number, defaultValue: "10000",
+            allowedValues: nil, minimum: 100, maximum: 50000,
+            description: "Maximum number of historical agent sessions to index and display.",
             requiresNewWindow: false, category: "general"),
         .init(
             id: "sessions.restoreOnLaunch", type: .boolean, defaultValue: "true",
@@ -473,6 +483,11 @@ final class OhMyGhosttySettings: ObservableObject {
             persist("agents.openQuickInputOnStart", openQuickInputOnAgentStart)
         }
     }
+    @Published var openQuickInputOnAgentComplete = false {
+        didSet {
+            persist("agents.openQuickInputOnComplete", openQuickInputOnAgentComplete)
+        }
+    }
     @Published var quickInputShortcut = OMGKeyboardShortcut.defaultQuickInput.storageValue {
         didSet {
             let normalized = OMGKeyboardShortcut(storageValue: quickInputShortcut)?.storageValue
@@ -496,6 +511,16 @@ final class OhMyGhosttySettings: ObservableObject {
     }
     @Published var terminalResizeRendering: TerminalResizeRenderingMode = .onRelease {
         didSet { persist("terminal.resizeRendering", terminalResizeRendering.rawValue) }
+    }
+    @Published var agentHistoryLimit: Double = 10_000 {
+        didSet {
+            let clamped = min(max(agentHistoryLimit, 100), 50_000)
+            if agentHistoryLimit != clamped {
+                agentHistoryLimit = clamped
+            } else {
+                persist("agents.historyLimit", clamped)
+            }
+        }
     }
     @Published var restoreSessionsOnLaunch = true {
         didSet { persist("sessions.restoreOnLaunch", restoreSessionsOnLaunch) }
@@ -712,6 +737,10 @@ final class OhMyGhosttySettings: ObservableObject {
                 "agents.openQuickInputOnStart",
                 fallback: false
             )
+            openQuickInputOnAgentComplete = boolValue(
+                "agents.openQuickInputOnComplete",
+                fallback: false
+            )
             quickInputShortcut = validatedShortcutValue(
                 "keyboard.quickInput",
                 fallback: OMGKeyboardShortcut.defaultQuickInput.storageValue
@@ -724,6 +753,11 @@ final class OhMyGhosttySettings: ObservableObject {
             terminalResizeRendering = enumValue(
                 "terminal.resizeRendering",
                 fallback: .onRelease
+            )
+            agentHistoryLimit = numberValue(
+                "agents.historyLimit",
+                fallback: 10_000,
+                range: 100...50_000
             )
             restoreSessionsOnLaunch = boolValue(
                 "sessions.restoreOnLaunch",

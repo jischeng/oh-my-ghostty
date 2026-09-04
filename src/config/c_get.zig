@@ -32,6 +32,12 @@ fn getValue(ptr_raw: *anyopaque, value: anytype) bool {
             ptr.* = if (value) |slice| @ptrCast(slice.ptr) else null;
         },
 
+        Config.RepeatableString => {
+            const first = value.list.items[0..@min(value.list.items.len, 1)];
+            const ptr: *?[*:0]const u8 = @ptrCast(@alignCast(ptr_raw));
+            ptr.* = if (first.len > 0) first[0].ptr else null;
+        },
+
         bool => {
             const ptr: *bool = @ptrCast(@alignCast(ptr_raw));
             ptr.* = value;
@@ -129,6 +135,19 @@ test "c_get: u8" {
     var cval: f32 = undefined;
     try testing.expect(get(&c, .@"font-size", &cval));
     try testing.expectEqual(@as(f32, 24), cval);
+}
+
+test "c_get: repeatable string returns first value" {
+    const testing = std.testing;
+    var c = try Config.default(testing.allocator);
+    defer c.deinit();
+    const alloc = c._arena.?.allocator();
+    try c.@"font-family".parseCLI(alloc, "JetBrains Mono");
+    try c.@"font-family".parseCLI(alloc, "Apple Symbols");
+
+    var cval: ?[*:0]const u8 = undefined;
+    try testing.expect(get(&c, .@"font-family", @ptrCast(&cval)));
+    try testing.expectEqualStrings("JetBrains Mono", std.mem.span(cval.?));
 }
 
 test "c_get: enum" {

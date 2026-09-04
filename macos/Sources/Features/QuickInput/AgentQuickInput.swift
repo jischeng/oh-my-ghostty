@@ -135,6 +135,17 @@ enum AgentQuickInputPresentationPolicy {
         enabled && previous == nil && next != nil &&
             !isAlreadyPresented && isTargetFocused
     }
+
+    static func shouldPresentForAgentCompletion(
+        previous: TabActivityState?,
+        next: TabActivityState?,
+        enabled: Bool,
+        isAlreadyPresented: Bool,
+        isTargetFocused: Bool
+    ) -> Bool {
+        enabled && previous != .done && next == .done &&
+            !isAlreadyPresented && isTargetFocused
+    }
 }
 
 enum AgentQuickInputFocusDirection: Equatable {
@@ -182,6 +193,7 @@ enum AgentQuickInputMetrics {
     static let queueMinimumWidth: CGFloat = 150
     static let queueMaximumWidth: CGFloat = 420
     static let queueHorizontalInset: CGFloat = 12
+    static let editorLineSpacing: CGFloat = 3
 
     static func queueCardWidth(
         previewCount: Int,
@@ -747,7 +759,7 @@ private struct AgentQuickInputQueueLane: View {
             }
             .frame(height: AgentQuickInputMetrics.queueLaneHeight)
         }
-        .background(backgroundColor.opacity(max(backgroundOpacity, 0.96)))
+        .background(backgroundColor.opacity(backgroundOpacity))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Queued Agent Messages")
     }
@@ -914,13 +926,14 @@ private struct AgentQuickInputComposer: View {
                     : "Type here…",
                 isPresented: model.isPresented,
                 focusRequestID: model.focusRequestID,
+                font: editorFont,
                 onSend: controller.sendQuickInputDraft,
                 onQueue: controller.queueQuickInputDraft,
                 onCancel: controller.dismissQuickInput
             )
             .background(.clear)
 
-            HStack(spacing: 7) {
+            HStack(spacing: 12) {
                 if model.isEditingQueuedItem {
                     Text("⌘↩ Save Edit")
                     Text("·")
@@ -948,13 +961,27 @@ private struct AgentQuickInputComposer: View {
                     .help("Queued messages")
                 }
             }
-            .font(.system(size: 12, design: .monospaced))
+            .font(.system(size: 13, design: .monospaced))
             .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(backgroundColor.opacity(max(backgroundOpacity, 0.96)))
+        .background(backgroundColor.opacity(backgroundOpacity))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Agent Quick Input")
+    }
+
+    private var editorFont: NSFont {
+        let size = CGFloat(controller.ghostty.config.fontSize)
+        if let family = controller.ghostty.config.fontFamily,
+           let font = NSFontManager.shared.font(
+               withFamily: family,
+               traits: [],
+               weight: 5,
+               size: size
+           ) ?? NSFont(name: family, size: size) {
+            return font
+        }
+        return .monospacedSystemFont(ofSize: size, weight: .regular)
     }
 }

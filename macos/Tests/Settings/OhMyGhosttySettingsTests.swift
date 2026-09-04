@@ -84,6 +84,7 @@ struct OhMyGhosttySettingsTests {
         settings.tabPathDisplay = .folderName
         settings.notifyTaskComplete = false
         settings.openQuickInputOnAgentStart = true
+        settings.openQuickInputOnAgentComplete = true
         settings.quickInputShortcut = "control+option+q"
         settings.quickInputHeight = 318
         settings.terminalResizeRendering = .onRelease
@@ -101,6 +102,7 @@ struct OhMyGhosttySettingsTests {
         #expect(object["tabs.pathDisplay"] as? String == "folderName")
         #expect(object["notifications.taskComplete"] as? Bool == false)
         #expect(object["agents.openQuickInputOnStart"] as? Bool == true)
+        #expect(object["agents.openQuickInputOnComplete"] as? Bool == true)
         #expect(object["keyboard.quickInput"] as? String == "control+option+q")
         #expect((object["keyboard.quickInputHeight"] as? NSNumber)?.doubleValue == 318)
         #expect(object["terminal.resizeRendering"] as? String == "onRelease")
@@ -115,6 +117,7 @@ struct OhMyGhosttySettingsTests {
         #expect(restored.tabPathDisplay == .folderName)
         #expect(!restored.notifyTaskComplete)
         #expect(restored.openQuickInputOnAgentStart)
+        #expect(restored.openQuickInputOnAgentComplete)
         #expect(restored.quickInputShortcut == "control+option+q")
         #expect(restored.quickInputHeight == 318)
         #expect(restored.terminalResizeRendering == .onRelease)
@@ -289,8 +292,10 @@ struct OhMyGhosttySettingsTests {
         #expect(descriptors.contains { $0.id == "tabs.ordering" })
         #expect(descriptors.contains { $0.id == "tabs.pathDisplay" })
         #expect(descriptors.contains { $0.id == "tabs.sidebarVisible" })
+        #expect(descriptors.contains { $0.id == "agents.historyLimit" })
         #expect(descriptors.contains { $0.id == "agents.statusHooks" })
         #expect(descriptors.contains { $0.id == "agents.openQuickInputOnStart" })
+        #expect(descriptors.contains { $0.id == "agents.openQuickInputOnComplete" })
         #expect(descriptors.contains { $0.id == "keyboard.quickInput" })
         #expect(descriptors.contains { $0.id == "keyboard.quickInputHeight" })
         #expect(descriptors.contains { $0.id == "terminal.resizeRendering" })
@@ -308,6 +313,16 @@ struct OhMyGhosttySettingsTests {
         #expect(!settings.openQuickInputOnAgentStart)
         let descriptor = OhMyGhosttySettings.descriptors.first {
             $0.id == "agents.openQuickInputOnStart"
+        }
+        #expect(descriptor?.defaultValue == "false")
+    }
+
+    @Test func quickInputOnAgentCompleteDefaultsOff() {
+        let (settings, url) = temporarySettings()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        #expect(!settings.openQuickInputOnAgentComplete)
+        let descriptor = OhMyGhosttySettings.descriptors.first {
+            $0.id == "agents.openQuickInputOnComplete"
         }
         #expect(descriptor?.defaultValue == "false")
     }

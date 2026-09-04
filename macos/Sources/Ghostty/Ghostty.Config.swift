@@ -494,6 +494,19 @@ extension Ghostty {
             return Double(value)
         }
 
+        var fontFamily: String? {
+            guard let config = self.config else { return nil }
+            var value: UnsafePointer<Int8>?
+            let key = "font-family"
+            guard ghostty_config_get(
+                config,
+                &value,
+                key,
+                UInt(key.lengthOfBytes(using: .utf8))
+            ), let value else { return nil }
+            return String(cString: value)
+        }
+
         var cursorStyle: String {
             guard let config = self.config else { return "block" }
             var value: UnsafePointer<Int8>?

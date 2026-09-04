@@ -118,6 +118,10 @@ class AppDelegate: NSObject,
     @MainActor private lazy var builtInFilesInspector =
         BuiltInFilesInspectorProvider(registry: inspectorRegistry)
 
+    /// Searchable local Agent session history and exact-resume actions.
+    @MainActor private lazy var builtInAgentHistoryInspector =
+        BuiltInAgentHistoryInspectorProvider(registry: inspectorRegistry)
+
     /// In-tree Info Inspector and app-owned SSH port-forward process lifecycle.
     @MainActor private lazy var builtInInfoInspector =
         BuiltInInfoInspectorProvider(registry: inspectorRegistry)
@@ -319,8 +323,9 @@ class AppDelegate: NSObject,
         ghosttyConfigDidChange(config: ghostty.config)
         do {
             try builtInFilesInspector.register()
+            try builtInAgentHistoryInspector.register()
         } catch {
-            Self.logger.error("failed to register built-in Files Inspector: \(error)")
+            Self.logger.error("failed to register built-in Inspector provider: \(error)")
         }
         observeSSHPluginState()
 

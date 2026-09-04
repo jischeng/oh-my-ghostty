@@ -328,6 +328,19 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         return agentResumeDescriptors[surface.id]
     }
 
+    /// Adopts a host-validated descriptor for a Surface created by an explicit
+    /// Agent History resume action, before the resumed Agent emits its hook.
+    func adoptAgentResumeDescriptor(
+        _ descriptor: AgentResumeDescriptor,
+        for surface: Ghostty.SurfaceView
+    ) {
+        guard descriptor.isValid, surfaceTree.contains(surface) else { return }
+        agentResumeDescriptors[surface.id] = descriptor
+        surface.agentResumeDescriptor = descriptor
+        enableRestorationForAgentSession()
+        invalidateRestorableState()
+    }
+
     func focusedAgentActivity() -> TabActivity? {
         agentActivity(for: focusedSurface ?? surfaceTree.first)
     }
@@ -1595,6 +1608,15 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             previous: previousActivity,
             next: next[surfaceID],
             enabled: OhMyGhosttySettings.shared.openQuickInputOnAgentStart,
+            isAlreadyPresented: quickInputModel.isPresented,
+            isTargetFocused: (focusedSurface ?? surfaceTree.first)?.id == surfaceID
+        ), let surface = surfaceTree.first(where: { $0.id == surfaceID }) {
+            presentQuickInput(for: surface, requestFocus: false)
+        }
+        if AgentQuickInputPresentationPolicy.shouldPresentForAgentCompletion(
+            previous: previousState,
+            next: next[surfaceID]?.state,
+            enabled: OhMyGhosttySettings.shared.openQuickInputOnAgentComplete,
             isAlreadyPresented: quickInputModel.isPresented,
             isTargetFocused: (focusedSurface ?? surfaceTree.first)?.id == surfaceID
         ), let surface = surfaceTree.first(where: { $0.id == surfaceID }) {

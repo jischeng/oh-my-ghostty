@@ -630,6 +630,10 @@ struct TerminalShellLayoutContainer<Content: View>: View {
                             currentWidth: { layoutState.inspectorWidth },
                             resize: controller.updateInspectorWidth
                         )
+                        // The 8pt resize hit target overlaps Inspector content.
+                        // Keep it above native scroll/table views so they cannot
+                        // steal the initial mouseDown at the divider boundary.
+                        .zIndex(10)
                         RightInspectorHost(
                             controller: controller,
                             layoutState: layoutState,
@@ -843,7 +847,782 @@ private struct InspectorPaneContentView: View {
                     )
                 }
             )
+        case .agentHistory(let history):
+            InspectorAgentHistoryView(
+                history: history,
+                perform: { kind in
+                    registry.performAction(
+                        paneID: paneID,
+                        action: .init(context: context, kind: kind)
+                    )
+                }
+            )
         }
+    }
+}
+
+enum AgentHistoryGroupingMode: String, CaseIterable, Sendable {
+    case none
+    case project
+    case agent
+    case date
+}
+
+enum AgentHistoryOrderingMode: String, CaseIterable, Sendable {
+    case recentlyUpdated
+    case title
+}
+
+private struct InspectorAgentHistoryView: View {
+    let history: InspectorAgentHistoryContent
+    let perform: (InspectorPaneActionKind) -> Void
+    @ObservedObject private var settings = OhMyGhosttySettings.shared
+    @State private var visibleSessionCount = 60
+    @State private var visibleMessageCount = 30
+    @State private var query = ""
+    @State private var committedQuery = ""
+    @State private var searchMatches: [String: String] = [:]
+    @State private var isSearching = false
+    @State private var searchTask: Task<Void, Never>?
+    @State private var selectedAgent: SupportedAgent?
+    @State private var groupingMode: AgentHistoryGroupingMode = .none
+    @State private var orderingMode: AgentHistoryOrderingMode = .recentlyUpdated
+    @State private var collapsedGroupIDs: Set<String> = []
+    @State private var transcriptSearch = ""
+    @State private var isTranscriptSearchVisible = false
+    @FocusState private var isTranscriptSearchFocused: Bool
+
+    private var strings: AgentHistoryStrings {
+        .init(language: settings.language)
+    }
+
+    private var availableAgents: [SupportedAgent] {
+        SupportedAgent.allCases.filter { agent in
+            history.sessions.contains { $0.agent == agent }
+        }
+    }
+
+    private var filteredAndOrderedSessions: [AgentHistorySession] {
+        let needle = committedQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let matching = history.sessions.filter { session in
+            guard selectedAgent == nil || session.agent == selectedAgent else {
+                return false
+            }
+            return needle.isEmpty || searchMatches[session.id] != nil
+        }
+        switch orderingMode {
+        case .recentlyUpdated:
+            return matching.sorted {
+                if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
+                return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
+            }
+        case .title:
+            return matching.sorted {
+                $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
+            }
+        }
+    }
+
+    private struct GroupedSection: Identifiable {
+        let id: String
+        let title: String
+        let icon: GhosttyTabIcon
+        let sessions: [AgentHistorySession]
+    }
+
+    private var groupedSections: [GroupedSection] {
+        let list = filteredAndOrderedSessions
+        switch groupingMode {
+        case .none:
+            return [.init(id: "all", title: "", icon: .systemSymbol("folder"), sessions: list)]
+        case .project:
+            var buckets: [String: (title: String, icon: GhosttyTabIcon, sessions: [AgentHistorySession])] = [:]
+            for session in list {
+                let key = session.workingDirectory ?? "Other"
+                let title = WorkspacePathPresentation.folderName(key)
+                if buckets[key] == nil {
+                    buckets[key] = (title: title.isEmpty ? key : title, icon: .systemSymbol("folder"), sessions: [])
+                }
+                buckets[key]?.sessions.append(session)
+            }
+            return buckets.map { key, value in
+                GroupedSection(id: key, title: value.title, icon: value.icon, sessions: value.sessions)
+            }.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+        case .agent:
+            var buckets: [SupportedAgent: [AgentHistorySession]] = [:]
+            for session in list {
+                buckets[session.agent, default: []].append(session)
+            }
+            return buckets.map { agent, sessions in
+                GroupedSection(
+                    id: agent.rawValue,
+                    title: agent.displayName,
+                    icon: .systemSymbol("terminal"),
+                    sessions: sessions
+                )
+            }.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+        case .date:
+            let calendar = Calendar.current
+            var buckets: [String: (title: String, sessions: [AgentHistorySession])] = [:]
+            let formatter = DateFormatter()
+            formatter.dateStyle = .medium
+            formatter.timeStyle = .none
+            for session in list {
+                let key: String
+                let title: String
+                if calendar.isDateInToday(session.updatedAt) {
+                    key = "1_today"
+                    title = strings.today
+                } else if calendar.isDateInYesterday(session.updatedAt) {
+                    key = "2_yesterday"
+                    title = strings.yesterday
+                } else {
+                    key = "3_" + formatter.string(from: session.updatedAt)
+                    title = formatter.string(from: session.updatedAt)
+                }
+                if buckets[key] == nil {
+                    buckets[key] = (title: title, sessions: [])
+                }
+                buckets[key]?.sessions.append(session)
+            }
+            return buckets.sorted { $0.key < $1.key }.map { key, value in
+                GroupedSection(id: key, title: value.title, icon: .systemSymbol("calendar"), sessions: value.sessions)
+            }
+        }
+    }
+
+    private var selectedSession: AgentHistorySession? {
+        guard let id = history.selectedSessionID else { return nil }
+        return history.sessions.first { $0.id == id }
+    }
+
+    var body: some View {
+        if let session = selectedSession {
+            transcriptView(session)
+        } else {
+            sessionList
+        }
+    }
+
+    private var sessionList: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .foregroundStyle(.secondary)
+                Text(strings.sessionCount(history.sessions.count))
+                    .font(.headline)
+                Spacer(minLength: 8)
+                Button {
+                    perform(.refreshAgentHistory)
+                } label: {
+                    if history.isLoadingSessions {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                }
+                .buttonStyle(.borderless)
+                .disabled(history.isLoadingSessions)
+                .help(strings.refresh)
+                .accessibilityLabel(strings.refresh)
+            }
+            .padding(.horizontal, InspectorContentMetrics.leadingInset)
+            .padding(.vertical, 10)
+
+            HStack(spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField(strings.searchPlaceholder, text: $query)
+                        .textFieldStyle(.plain)
+                    if isSearching {
+                        ProgressView().controlSize(.mini)
+                    }
+                }
+                .padding(.horizontal, 8)
+                .frame(height: 28)
+                .background(
+                    Color.primary.opacity(0.07),
+                    in: RoundedRectangle(cornerRadius: 6)
+                )
+
+                filterAndOrganizeMenu
+            }
+            .padding(.horizontal, InspectorContentMetrics.leadingInset)
+            .padding(.bottom, 8)
+
+            if history.isLoadingSessions && history.sessions.isEmpty {
+                AgentHistoryEmptyView(
+                    systemImage: "clock.arrow.circlepath",
+                    title: strings.loading,
+                    message: nil,
+                    showsProgress: true
+                )
+            } else if history.sessions.isEmpty {
+                AgentHistoryEmptyView(
+                    systemImage: "clock.badge.questionmark",
+                    title: strings.noSessions,
+                    message: strings.noSessionsMessage
+                )
+            } else if filteredAndOrderedSessions.isEmpty, isSearching {
+                AgentHistoryEmptyView(
+                    systemImage: "magnifyingglass",
+                    title: strings.searchingSessions,
+                    message: strings.searchingSessionsMessage,
+                    showsProgress: true
+                )
+            } else if filteredAndOrderedSessions.isEmpty {
+                AgentHistoryEmptyView(
+                    systemImage: "magnifyingglass",
+                    title: strings.noMatches,
+                    message: strings.noMatchesMessage
+                )
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        if groupingMode == .none {
+                            let total = filteredAndOrderedSessions.count
+                            let displayed = Array(filteredAndOrderedSessions.prefix(visibleSessionCount))
+                            ForEach(displayed) { session in
+                                sessionRow(
+                                    session,
+                                    matchSnippet: searchMatches[session.id]
+                                )
+                                Divider().padding(.leading, 44)
+                            }
+                            if visibleSessionCount < total {
+                                HStack {
+                                    Spacer()
+                                    Button {
+                                        visibleSessionCount += 60
+                                    } label: {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "arrow.down.circle")
+                                            Text(strings.loadMoreSessions(total - visibleSessionCount))
+                                        }
+                                        .font(.caption)
+                                        .padding(.vertical, 8)
+                                    }
+                                    .buttonStyle(.borderless)
+                                    Spacer()
+                                }
+                                .padding(.vertical, 6)
+                                .onAppear {
+                                    visibleSessionCount += 60
+                                }
+                            }
+                        } else {
+                            ForEach(groupedSections) { section in
+                                sectionHeader(section)
+                                if !collapsedGroupIDs.contains(section.id) {
+                                    ForEach(section.sessions) { session in
+                                        sessionRow(
+                                            session,
+                                            matchSnippet: searchMatches[session.id]
+                                        )
+                                        Divider().padding(.leading, 44)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .onAppear { scheduleSessionSearch(query, immediately: true) }
+        .onChange(of: query) { value in
+            visibleSessionCount = 60
+            scheduleSessionSearch(value)
+        }
+        .onChange(of: history.sessions.count) { _ in
+            scheduleSessionSearch(query, immediately: true)
+        }
+        .onDisappear { searchTask?.cancel() }
+    }
+
+    private var filterAndOrganizeMenu: some View {
+        Menu {
+            Section(strings.filterAgentSection) {
+                Button {
+                    selectedAgent = nil
+                } label: {
+                    menuRow(strings.allAgents, selected: selectedAgent == nil)
+                }
+                ForEach(availableAgents) { agent in
+                    Button {
+                        selectedAgent = agent
+                    } label: {
+                        menuRow(agent.displayName, selected: selectedAgent == agent)
+                    }
+                }
+            }
+
+            Section(strings.groupSection) {
+                Button {
+                    groupingMode = .none
+                } label: {
+                    menuRow(strings.groupNone, selected: groupingMode == .none)
+                }
+                Button {
+                    groupingMode = .project
+                } label: {
+                    menuRow(strings.groupProject, selected: groupingMode == .project)
+                }
+                Button {
+                    groupingMode = .agent
+                } label: {
+                    menuRow(strings.groupAgent, selected: groupingMode == .agent)
+                }
+                Button {
+                    groupingMode = .date
+                } label: {
+                    menuRow(strings.groupDate, selected: groupingMode == .date)
+                }
+            }
+
+            Section(strings.orderSection) {
+                Button {
+                    orderingMode = .recentlyUpdated
+                } label: {
+                    menuRow(strings.orderRecentlyUpdated, selected: orderingMode == .recentlyUpdated)
+                }
+                Button {
+                    orderingMode = .title
+                } label: {
+                    menuRow(strings.orderTitle, selected: orderingMode == .title)
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                if let selectedAgent {
+                    Image(selectedAgent.assetName)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 14, height: 14)
+                } else {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+            }
+            .frame(width: 28, height: 28)
+            .background(
+                Color.primary.opacity(0.07),
+                in: RoundedRectangle(cornerRadius: 6)
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(strings.organize)
+        .accessibilityLabel(strings.organize)
+    }
+
+    @ViewBuilder
+    private func menuRow(_ text: String, selected: Bool) -> some View {
+        if selected {
+            Label(text, systemImage: "checkmark")
+        } else {
+            Text(text)
+        }
+    }
+
+    private func sectionHeader(_ section: GroupedSection) -> some View {
+        let isCollapsed = collapsedGroupIDs.contains(section.id)
+        return Button {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                if isCollapsed {
+                    collapsedGroupIDs.remove(section.id)
+                } else {
+                    collapsedGroupIDs.insert(section.id)
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .frame(width: 10)
+                Text(section.title)
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Text(String(section.sessions.count))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, InspectorContentMetrics.leadingInset)
+            .frame(height: 26)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func sessionRow(
+        _ session: AgentHistorySession,
+        matchSnippet: String?
+    ) -> some View {
+        let needle = committedQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        return Button {
+            visibleMessageCount = 30
+            transcriptSearch = needle
+            isTranscriptSearchVisible = !needle.isEmpty
+            perform(.selectAgentHistorySession(id: session.id))
+        } label: {
+            HStack(alignment: .top, spacing: 9) {
+                Image(session.agent.assetName)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 20, height: 20)
+                    .padding(.top, 1)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(highlightedText(session.title, query: needle))
+                            .font(.system(size: 12.5, weight: .medium))
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                        Spacer(minLength: 4)
+                        if session.isActive {
+                            Text(strings.live)
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.green)
+                        }
+                    }
+                    HStack(spacing: 5) {
+                        Text(session.agent.displayName)
+                        Text("·")
+                        Text(strings.relativeTime(from: session.updatedAt))
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    if !needle.isEmpty,
+                       let matchSnippet,
+                       matchSnippet != session.title {
+                        Text(highlightedText(matchSnippet, query: needle))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                    } else if let workingDirectory = session.workingDirectory {
+                        Text(workingDirectory)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 5)
+            }
+            .padding(.horizontal, InspectorContentMetrics.leadingInset)
+            .padding(.vertical, 9)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button(session.isActive ? strings.openLive : strings.resume) {
+                perform(.resumeAgentHistorySession(id: session.id))
+            }
+            Button(strings.forkSession) {
+                perform(.forkAgentHistorySession(id: session.id))
+            }
+        }
+    }
+
+    private func scheduleSessionSearch(
+        _ value: String,
+        immediately: Bool = false
+    ) {
+        searchTask?.cancel()
+        let needle = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else {
+            committedQuery = ""
+            searchMatches = [:]
+            isSearching = false
+            return
+        }
+        let sessions = history.sessions
+        isSearching = true
+        searchTask = Task {
+            if !immediately {
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+            guard !Task.isCancelled else { return }
+            committedQuery = needle
+            searchMatches = [:]
+            for await matches in AgentHistoryStore.searchUpdates(
+                sessions: sessions,
+                query: needle
+            ) {
+                guard !Task.isCancelled else { return }
+                searchMatches = matches
+            }
+            guard !Task.isCancelled else { return }
+            isSearching = false
+            searchTask = nil
+        }
+    }
+
+    private func highlightedText(
+        _ text: String,
+        query: String
+    ) -> AttributedString {
+        var result = AttributedString(text)
+        guard !query.isEmpty else { return result }
+        var searchRange = result.startIndex..<result.endIndex
+        while let range = result[searchRange].range(
+            of: query,
+            options: .caseInsensitive
+        ) {
+            result[range].backgroundColor = Color.yellow.opacity(0.45)
+            result[range].font = .system(size: 12.5, weight: .semibold)
+            searchRange = range.upperBound..<result.endIndex
+        }
+        return result
+    }
+
+    private func transcriptMessages(
+        _ messages: [AgentHistoryMessage],
+        aroundMatchesFor query: String
+    ) -> [AgentHistoryMessage] {
+        guard !query.isEmpty else { return messages }
+        var indexes = Set<Int>()
+        for index in messages.indices where
+            messages[index].text.range(
+                of: query,
+                options: .caseInsensitive
+            ) != nil {
+            for nearby in max(messages.startIndex, index - 1)...min(
+                messages.index(before: messages.endIndex),
+                index + 1
+            ) {
+                indexes.insert(nearby)
+            }
+        }
+        return indexes.sorted().map { messages[$0] }
+    }
+
+    private func transcriptView(_ session: AgentHistorySession) -> some View {
+        let needle = transcriptSearch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let allMessages = history.transcript?.sessionID == session.id
+            ? (history.transcript?.messages ?? [])
+            : []
+        let matchCount = needle.isEmpty ? 0 : allMessages.count {
+            $0.text.range(of: needle, options: .caseInsensitive) != nil
+        }
+        let matchingMessages = transcriptMessages(
+            allMessages,
+            aroundMatchesFor: needle
+        )
+
+        return VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Button {
+                    transcriptSearch = ""
+                    isTranscriptSearchVisible = false
+                    perform(.clearAgentHistorySelection)
+                } label: {
+                    Image(systemName: "chevron.left")
+                }
+                .buttonStyle(.borderless)
+                .help(strings.back)
+                .accessibilityLabel(strings.back)
+
+                Image(session.agent.assetName)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 18, height: 18)
+                Text(session.agent.displayName)
+                    .font(.headline)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        isTranscriptSearchVisible.toggle()
+                        if isTranscriptSearchVisible {
+                            isTranscriptSearchFocused = true
+                        } else {
+                            transcriptSearch = ""
+                        }
+                    }
+                } label: {
+                    Image(systemName: isTranscriptSearchVisible ? "magnifyingglass.circle.fill" : "magnifyingglass")
+                        .font(.system(size: 13))
+                }
+                .buttonStyle(.borderless)
+                .help("⌘F")
+
+                Button(session.isActive ? strings.openLive : strings.resume) {
+                    perform(.resumeAgentHistorySession(id: session.id))
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+            .padding(.horizontal, InspectorContentMetrics.leadingInset)
+            .padding(.vertical, 9)
+
+            if isTranscriptSearchVisible {
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField(strings.searchTranscriptPlaceholder, text: $transcriptSearch)
+                        .textFieldStyle(.plain)
+                        .focused($isTranscriptSearchFocused)
+                    if !transcriptSearch.isEmpty {
+                        Text("\(matchCount) \(strings.matchesCount)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Button {
+                            transcriptSearch = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+                .padding(.horizontal, 8)
+                .frame(height: 28)
+                .background(
+                    Color.primary.opacity(0.07),
+                    in: RoundedRectangle(cornerRadius: 6)
+                )
+                .padding(.horizontal, InspectorContentMetrics.leadingInset)
+                .padding(.bottom, 6)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(session.title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .textSelection(.enabled)
+                if let workingDirectory = session.workingDirectory {
+                    Text(workingDirectory)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(workingDirectory)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, InspectorContentMetrics.leadingInset)
+            .padding(.bottom, 9)
+
+            Divider()
+
+            if history.isLoadingTranscript {
+                AgentHistoryEmptyView(
+                    systemImage: "text.bubble",
+                    title: strings.loadingTranscript,
+                    message: nil,
+                    showsProgress: true
+                )
+            } else if let transcript = history.transcript,
+                      transcript.sessionID == session.id,
+                      transcript.messages.isEmpty {
+                AgentHistoryEmptyView(
+                    systemImage: "text.bubble",
+                    title: strings.emptyTranscript,
+                    message: strings.emptyTranscriptMessage
+                )
+            } else if matchingMessages.isEmpty, !needle.isEmpty {
+                AgentHistoryEmptyView(
+                    systemImage: "magnifyingglass",
+                    title: strings.noMatches,
+                    message: strings.noMatchesMessage
+                )
+            } else if let transcript = history.transcript,
+                      transcript.sessionID == session.id {
+                let displayedMessages = needle.isEmpty
+                    ? Array(matchingMessages.prefix(visibleMessageCount))
+                    : matchingMessages
+
+                VStack(spacing: 0) {
+                    AgentHistoryTranscriptTable(
+                        messages: displayedMessages,
+                        agentName: session.agent.displayName,
+                        strings: strings,
+                        highlightText: needle,
+                        onFork: {
+                            perform(.forkAgentHistorySession(id: session.id))
+                        }
+                    )
+
+                    if needle.isEmpty && visibleMessageCount < matchingMessages.count {
+                        Divider()
+                        Button {
+                            visibleMessageCount += 50
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.down.circle")
+                                Text(strings.loadMoreMessages(
+                                    matchingMessages.count - visibleMessageCount
+                                ))
+                            }
+                            .font(.caption)
+                            .padding(.vertical, 7)
+                        }
+                        .buttonStyle(.borderless)
+                    }
+
+                    if transcript.wasTruncated && needle.isEmpty {
+                        Text(strings.truncated)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, InspectorContentMetrics.leadingInset)
+                            .padding(.vertical, 6)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(
+            Button("") {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    isTranscriptSearchVisible.toggle()
+                    if isTranscriptSearchVisible {
+                        isTranscriptSearchFocused = true
+                    } else {
+                        transcriptSearch = ""
+                    }
+                }
+            }
+            .keyboardShortcut("f", modifiers: .command)
+            .opacity(0)
+        )
+    }
+}
+
+private struct AgentHistoryEmptyView: View {
+    let systemImage: String
+    let title: String
+    let message: String?
+    var showsProgress = false
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if showsProgress {
+                ProgressView().controlSize(.small)
+            } else {
+                Image(systemName: systemImage)
+                    .font(.system(size: 25))
+                    .foregroundStyle(.secondary)
+            }
+            Text(title)
+                .font(.headline)
+            if let message {
+                Text(message)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

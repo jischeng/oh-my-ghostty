@@ -158,6 +158,20 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 Section(strings.sessionsSection) {
+                    HStack {
+                        Text(strings.agentHistoryLimitLabel)
+                        Slider(
+                            value: $settings.agentHistoryLimit,
+                            in: 500...30000,
+                            step: 500
+                        )
+                        Text("\(Int(settings.agentHistoryLimit))")
+                            .monospacedDigit()
+                            .frame(width: 58, alignment: .trailing)
+                    }
+                    Text(strings.agentHistoryLimitCaption)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     Toggle(
                         strings.restoreSessionsLabel,
                         isOn: $settings.restoreSessionsOnLaunch
@@ -256,6 +270,13 @@ struct SettingsView: View {
                         isOn: $settings.openQuickInputOnAgentStart
                     )
                     Text(strings.openQuickInputOnAgentStartCaption)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Toggle(
+                        strings.openQuickInputOnAgentCompleteLabel,
+                        isOn: $settings.openQuickInputOnAgentComplete
+                    )
+                    Text(strings.openQuickInputOnAgentCompleteCaption)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     LabeledContent(strings.quickInputShortcutLabel) {

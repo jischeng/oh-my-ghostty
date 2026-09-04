@@ -37,14 +37,34 @@ Run:
 .agents/skills/omg-release/scripts/install-dev.sh
 ```
 
-The script:
+Before invoking the script, require the exact code intended for testing to be committed. If the current task has uncommitted changes, the agent must:
 
-1. builds with `macos/build.nu --configuration Debug --action build`;
-2. requires bundle ID `com.jischeng.omg.debug` and a `.ReleaseFast` GhosttyKit core;
-3. quits only the debug bundle;
-4. replaces only `/Applications/OMG Dev.app` using `ditto`;
-5. verifies the signature and binary hash;
-6. launches the installed app.
+1. review the diff and exclude generated files, secrets, and unrelated user changes;
+2. run the checks appropriate to the changed code;
+3. use the `writing-commit-messages` skill and create a commit;
+4. confirm `HEAD` contains the test changes and the worktree is completely clean;
+5. only then run the installer.
+
+Do not bypass this rule by stashing, discarding, or silently including unrelated changes. If unrelated modifications prevent a clean tree and their ownership is unclear, stop and ask the user how to separate them. The installer never creates commits itself; it fails closed so the agent must perform and report the commit first.
+
+The script requires that clean committed worktree so the installed binary maps to one commit. It then:
+
+1. reads the release `MARKETING_VERSION` and derives the short version `<release>-dev.<8-char-commit>`;
+2. builds with `macos/build.nu --configuration Debug --action build --marketing-version <dev-version>`;
+3. requires bundle ID `com.jischeng.omg.debug`, the derived version, and a `.ReleaseFast` GhosttyKit core;
+4. quits only the debug bundle;
+5. replaces only `/Applications/OMG Dev.app` using `ditto`;
+6. verifies the signature and binary hash;
+7. creates or reuses the local annotated tag `dev-v<release>-<8-char-commit>`;
+8. launches the installed app.
+
+The `dev-` tag namespace is intentionally disjoint from release tags (`vX.Y.Z`) and does not invoke the OMG release workflow. Tags are local by default to avoid remote tag/CI noise. Push exactly the generated tag only when a remotely resolvable issue reference is needed:
+
+```bash
+.agents/skills/omg-release/scripts/install-dev.sh --push-tag
+```
+
+Never move or force-update a Dev tag. Never tag a dirty tree: a Git tag identifies a commit and cannot represent uncommitted source. The agent must create a reviewed commit for the intended test state before installation; the installer itself must not manufacture an automatic snapshot commit or silently tag `HEAD` for a dirty build.
 
 Use `--skip-build` only when `macos/build/Debug/OMG.app` is the exact already-tested artifact:
 
@@ -52,7 +72,7 @@ Use `--skip-build` only when `macos/build/Debug/OMG.app` is the exact already-te
 .agents/skills/omg-release/scripts/install-dev.sh --skip-build
 ```
 
-After installation, report the source and installed hashes, bundle ID, OMG version, Ghostty version, build mode, and launch status.
+After installation, report the source and installed hashes, bundle ID, OMG Dev version, Dev tag and scope, full commit, Ghostty version, build mode, and launch status. When preparing an issue, prefer the complete Dev version and tag over the base release version alone.
 
 ## Release OMG
 

@@ -61,12 +61,15 @@ must never infer or publish `1.0.0`; reaching 1.0 requires an explicit human
 product decision and release-plan update. "Automatic bump" means applying the
 rules above when preparing a requested release, not publishing without approval.
 
-The tag and `CFBundleShortVersionString` contain only this value:
+For a published release, the tag and `CFBundleShortVersionString` contain only
+this value:
 
 ```text
 v0.1.2
 ```
 
+Local OMG Dev builds are the sole exception and use the traceability suffix and
+separate `dev-` tag namespace documented in [Development build](#1-development-build).
 Do not append `-ghostty.x.y.z`; SemVer treats that as a prerelease. Do not use
 build metadata as the only Ghostty record; SemVer ignores it for precedence.
 
@@ -204,6 +207,30 @@ Output:
 ```text
 macos/build/Debug/OMG.app
 ```
+
+For a traceable `/Applications/OMG Dev.app` install, use the release skill's
+installer instead of the raw build command:
+
+```bash
+.agents/skills/omg-release/scripts/install-dev.sh
+```
+
+Before using it, the agent must review and validate the intended test changes,
+commit them, and confirm that `HEAD` contains those changes with a completely
+clean worktree. Generated files, secrets, and unrelated user changes must not be
+silently included. Do not stash or discard unrelated changes merely to satisfy
+the installer; ask the user how to separate unclear changes. The installer
+never creates the commit itself and fails closed when the tree is dirty.
+
+It then derives the local app version `<release>-dev.<8-char-commit>` and creates
+the annotated local Git tag
+`dev-v<release>-<8-char-commit>` only after the built app has been installed and
+verified. The `dev-` namespace does not match the OMG release tag form `vX.Y.Z`;
+therefore it is not an OMG release and must not receive a GitHub Release or
+Sparkle artifact. The tag stays local by default. Use `--push-tag` only when a
+remote issue needs a resolvable tag, and push only that explicit ref. Never tag
+a dirty tree or move/force-update an existing Dev tag because either action
+would make the installed version misleading.
 
 Success for a routine development or acceptance build means `xcodebuild` exits
 zero, this executable exists, and the GhosttyKit core reports ReleaseFast:

@@ -914,3 +914,21 @@ status CLI. Terminal control and raw output remain high-risk and default-deny.
 
 These notes are planning context only. They must not be used by plugins until
 implementation, tests, and a stability designation land.
+
+## Built-in Git diff detail window (Task #8)
+
+The built-in Git diff surface is host-owned Swift code. `GitDiffService` first
+lists paths for a `GitDiffTarget` (`commit`, `staged`, or `unstaged`) and only
+loads a selected file's unified diff. File lists use Git's NUL-delimited
+`--name-status -z` output, so spaces, Unicode, and other valid path characters
+remain intact. Renames and copies retain both old and new paths; untracked
+working-tree files are represented as additions.
+
+`GitDetailWindowController.open(repository:target:tabID:)` is the host entry
+point. It reuses one resizable native window per terminal tab and binds the
+window to the repository and target supplied at open time. Subsequent terminal
+working-directory updates do not retarget that window. The detail view offers
+a file list, on-demand diff loading, selectable/copyable line-numbered output,
+and explicit binary, error, and size-limit/truncation states. Commit diffs use
+the first parent as their base; a root commit uses the empty tree. This surface
+does not edit files or stage changes and does not add plugin wire capabilities.

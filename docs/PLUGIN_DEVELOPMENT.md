@@ -630,6 +630,14 @@ Host-rendered `InspectorPaneContent` supports:
 - native Git views presenting repository context, status, and
   history/changes/branches.
 
+The built-in Git history graph is computed from `--topo-order` commit rows and
+parent object IDs only. `GitGraphLayout` retains active parent lanes across
+incremental appends, so paged history loading can continue the graph without
+rewriting rows that were already emitted. Merge and octopus commits connect to
+existing parent lanes when present and add only missing parents; branch names or
+ref decorations do not influence topology. Host-rendered Git cells draw the
+resulting nodes and colored lane segments with native AppKit views.
+
 A provider supplies data only. It cannot inject a SwiftUI `View`, `NSView`,
 window, controller, material, or arbitrary icon path.
 

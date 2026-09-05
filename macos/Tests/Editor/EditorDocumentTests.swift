@@ -145,6 +145,101 @@ struct EditorDocumentTests {
         #expect(try String(contentsOf: file, encoding: .utf8) == "external")
     }
 
+    @Test @MainActor func reloadsExternalModificationAndCanSaveWithNewEncoding() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-editor-reload-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("file.txt")
+        try Data("original\n".utf8).write(to: file)
+        let document = try await EditorDocument.open(
+            path: file.path,
+            filesystem: LocalWorkspaceFilesystem(workingDirectory: directory.path)
+        )
+        try Data([0xEF, 0xBB, 0xBF] + Array("external\r\n".utf8)).write(to: file)
+
+        try await document.reload()
+
+        #expect(document.text == "external\n")
+        #expect(!document.isDirty)
+        #expect(document.contentGeneration == 1)
+        document.text += "saved\n"
+        try await document.save()
+        #expect(try Data(contentsOf: file) == Data(
+            [0xEF, 0xBB, 0xBF] + Array("external\r\nsaved\r\n".utf8)
+        ))
+    }
+
+    @Test @MainActor func failedReloadPreservesDirtyContent() async throws {
+        let filesystem = MutableEditorFilesystem(data: Data("original".utf8))
+        let document = try await EditorDocument.open(path: "/file", filesystem: filesystem)
+        document.text = "editor"
+        await filesystem.failReads()
+
+        await #expect(throws: TestEditorFilesystemError.readFailed) {
+            try await document.reload()
+        }
+
+        #expect(document.text == "editor")
+        #expect(document.isDirty)
+        #expect(!document.isReloading)
+        #expect(document.contentGeneration == 0)
+    }
+
+    @Test @MainActor func editDuringReloadIsNotOverwritten() async throws {
+        let filesystem = SuspendedReadEditorFilesystem(data: Data("original".utf8))
+        let document = try await EditorDocument.open(path: "/file", filesystem: filesystem)
+        await filesystem.replaceData(Data("external".utf8))
+        await filesystem.suspendNextRead()
+
+        let reload = Task { try await document.reload() }
+        await filesystem.waitUntilReadStarts()
+        #expect(document.isReloading)
+        document.text = "editor"
+        await filesystem.finishRead()
+        await #expect(throws: EditorDocumentError.editedDuringReload) {
+            try await reload.value
+        }
+
+        #expect(document.text == "editor")
+        #expect(document.isDirty)
+        #expect(!document.isReloading)
+        #expect(document.contentGeneration == 0)
+        await #expect(throws: WorkspaceFilesystemError.fileChanged("/file")) {
+            try await document.save()
+        }
+        #expect(await filesystem.currentData() == Data("external".utf8))
+    }
+
+    @Test @MainActor func saveAndReloadAreMutuallyExclusive() async throws {
+        let filesystem = SuspendedReadEditorFilesystem(data: Data("original".utf8))
+        let document = try await EditorDocument.open(path: "/file", filesystem: filesystem)
+        document.text = "editor"
+        await filesystem.suspendNextRead()
+
+        let reload = Task { try await document.reload() }
+        await filesystem.waitUntilReadStarts()
+        await #expect(throws: EditorDocumentError.reloadInProgress) {
+            try await document.reload()
+        }
+        await #expect(throws: EditorDocumentError.reloadInProgress) {
+            try await document.save()
+        }
+        await filesystem.finishRead()
+        try await reload.value
+
+        let suspendedWrite = SuspendedWriteEditorFilesystem(data: Data("original".utf8))
+        let savingDocument = try await EditorDocument.open(path: "/file", filesystem: suspendedWrite)
+        savingDocument.text = "editor"
+        let save = Task { try await savingDocument.save() }
+        await suspendedWrite.waitUntilWriteStarts()
+        await #expect(throws: EditorDocumentError.saveInProgress) {
+            try await savingDocument.reload()
+        }
+        await suspendedWrite.finishWrite()
+        try await save.value
+    }
+
     @Test @MainActor func localSavePreservesSymlinkAndExecutableMode() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("omg-editor-metadata-\(UUID().uuidString)", isDirectory: true)
@@ -207,6 +302,83 @@ private struct MemoryEditorFilesystem: WorkspaceFilesystem {
     func createDirectory(named name: String, in directory: String) async throws {}
     func readFile(at path: String) async throws -> Data { data }
     func writeFile(_ data: Data, at path: String, replacing expectedData: Data) async throws {}
+}
+
+private enum TestEditorFilesystemError: Error {
+    case readFailed
+}
+
+private actor MutableEditorFilesystem: WorkspaceFilesystem {
+    nonisolated let descriptor = WorkspaceDescriptor(
+        kind: .local,
+        id: "local",
+        displayName: "test",
+        workingDirectory: "/"
+    )
+    private var data: Data
+    private var shouldFailReads = false
+
+    init(data: Data) { self.data = data }
+
+    func listDirectory(at path: String) async throws -> [WorkspaceFileEntry] { [] }
+    func createFile(named name: String, in directory: String) async throws {}
+    func createDirectory(named name: String, in directory: String) async throws {}
+    func readFile(at path: String) async throws -> Data {
+        guard !shouldFailReads else { throw TestEditorFilesystemError.readFailed }
+        return data
+    }
+    func writeFile(_ data: Data, at path: String, replacing expectedData: Data) async throws {
+        guard self.data == expectedData else { throw WorkspaceFilesystemError.fileChanged(path) }
+        self.data = data
+    }
+    func replaceData(_ data: Data) { self.data = data }
+    func failReads() { shouldFailReads = true }
+    func currentData() -> Data { data }
+}
+
+private actor SuspendedReadEditorFilesystem: WorkspaceFilesystem {
+    nonisolated let descriptor = WorkspaceDescriptor(
+        kind: .local,
+        id: "local",
+        displayName: "test",
+        workingDirectory: "/"
+    )
+    private var data: Data
+    private var shouldSuspendRead = false
+    private var readStarted = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var readContinuation: CheckedContinuation<Void, Never>?
+
+    init(data: Data) { self.data = data }
+
+    func listDirectory(at path: String) async throws -> [WorkspaceFileEntry] { [] }
+    func createFile(named name: String, in directory: String) async throws {}
+    func createDirectory(named name: String, in directory: String) async throws {}
+    func readFile(at path: String) async throws -> Data {
+        if shouldSuspendRead {
+            shouldSuspendRead = false
+            readStarted = true
+            startWaiters.forEach { $0.resume() }
+            startWaiters.removeAll()
+            await withCheckedContinuation { readContinuation = $0 }
+        }
+        return data
+    }
+    func writeFile(_ data: Data, at path: String, replacing expectedData: Data) async throws {
+        guard self.data == expectedData else { throw WorkspaceFilesystemError.fileChanged(path) }
+        self.data = data
+    }
+    func replaceData(_ data: Data) { self.data = data }
+    func suspendNextRead() { shouldSuspendRead = true }
+    func waitUntilReadStarts() async {
+        guard !readStarted else { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+    func finishRead() {
+        readContinuation?.resume()
+        readContinuation = nil
+    }
+    func currentData() -> Data { data }
 }
 
 private actor SuspendedWriteEditorFilesystem: WorkspaceFilesystem {

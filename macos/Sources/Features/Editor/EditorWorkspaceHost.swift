@@ -38,18 +38,25 @@ struct EditorWorkspaceHost<Terminal: View>: View {
     private var editor: some View {
         VStack(spacing: 0) {
             HStack(spacing: 4) {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 2) {
-                        ForEach(workspace.documents, id: \.id) { document in
-                            EditorDocumentTab(
-                                document: document,
-                                isSelected: workspace.selectedID == document.id,
-                                select: { workspace.selectedID = document.id },
-                                close: { close(document) }
-                            )
+                ScrollViewReader { proxy in
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 2) {
+                            ForEach(workspace.documents, id: \.id) { document in
+                                EditorDocumentTab(
+                                    document: document,
+                                    isSelected: workspace.selectedID == document.id,
+                                    select: { workspace.selectedID = document.id },
+                                    close: { close(document) }
+                                )
+                                .id(document.id)
+                            }
                         }
                     }
+                    .onChange(of: workspace.selectedID) { selected in
+                        if let selected { proxy.scrollTo(selected) }
+                    }
                 }
+                documentMenu
                 Button(action: openFile) { Image(systemName: "folder.badge.plus") }
                     .help("Open File")
                 Button { workspace.isVisible = false } label: {
@@ -84,7 +91,10 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                             isActive: selected && workspace.isVisible,
                             save: { Task { await workspace.save(document) } },
                             close: { close(document) },
-                            open: openFile
+                            open: openFile,
+                            nextDocument: { workspace.selectAdjacentDocument(offset: 1) },
+                            previousDocument: { workspace.selectAdjacentDocument(offset: -1) },
+                            saveAll: { Task { await workspace.saveAll() } }
                         )
                         .opacity(selected ? 1 : 0)
                         .allowsHitTesting(selected)
@@ -108,6 +118,31 @@ struct EditorWorkspaceHost<Terminal: View>: View {
 
     private func close(_ document: EditorDocument) {
         Task { await workspace.close(document, window: controller.window) }
+    }
+
+    private var documentMenu: some View {
+        Menu {
+            ForEach(workspace.documents, id: \.id) { document in
+                Button(document.path) { workspace.selectedID = document.id }
+            }
+            Divider()
+            Button("Save All") { Task { await workspace.saveAll() } }
+                .disabled(workspace.documents.isEmpty)
+            Button("Reload File") {
+                if let document = workspace.selectedDocument {
+                    Task { await workspace.reload(document, window: controller.window) }
+                }
+            }
+            .disabled(workspace.selectedDocument == nil)
+            Button("Close All Files") { Task { await workspace.closeAll(window: controller.window) } }
+                .disabled(workspace.documents.isEmpty)
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("File Actions and Open Files")
     }
 
     private func openFile() {
@@ -145,6 +180,9 @@ private struct EditorDocumentView: View {
     let save: () -> Void
     let close: () -> Void
     let open: () -> Void
+    let nextDocument: () -> Void
+    let previousDocument: () -> Void
+    let saveAll: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -154,8 +192,12 @@ private struct EditorDocumentView: View {
                 isActive: isActive,
                 onSave: save,
                 onClose: close,
-                onOpen: open
+                onOpen: open,
+                onNextDocument: nextDocument,
+                onPreviousDocument: previousDocument,
+                onSaveAll: saveAll
             )
+            .id(document.contentGeneration)
             Divider()
             HStack {
                 Text(document.path).lineLimit(1).truncationMode(.middle)
@@ -165,7 +207,7 @@ private struct EditorDocumentView: View {
                     Label(document.filesystem.descriptor.displayName, systemImage: "network")
                 }
                 Button(document.isSaving ? "Saving…" : "Save", action: save)
-                    .disabled(!document.isDirty || document.isSaving)
+                    .disabled(!document.isDirty || document.isSaving || document.isReloading)
                     .help("Save (⌘S)")
             }
             .font(.caption)
@@ -179,20 +221,24 @@ private struct EditorDocumentView: View {
 /// editor region, so terminal shortcuts retain their normal behavior.
 struct EditorKeyCommands: NSViewRepresentable {
     let actions: [String: () -> Void]
+    var modifiedActions: [EditorShortcut: () -> Void] = [:]
 
     func makeNSView(context: Context) -> EditorCommandView {
         let view = EditorCommandView()
         view.actions = actions
+        view.modifiedActions = modifiedActions
         return view
     }
 
     func updateNSView(_ view: EditorCommandView, context: Context) {
         view.actions = actions
+        view.modifiedActions = modifiedActions
     }
 }
 
 final class EditorCommandView: NSView {
     var actions: [String: () -> Void] = [:]
+    var modifiedActions: [EditorShortcut: () -> Void] = [:]
     private var monitor: Any?
 
     override func viewDidMoveToWindow() {
@@ -206,9 +252,13 @@ final class EditorCommandView: NSView {
                   !isHiddenOrHasHiddenAncestor,
                   bounds.width > 0,
                   bounds.intersects(convert(responder.bounds, from: responder)),
-                  event.modifierFlags.intersection([.command, .control, .option, .shift]) == .command,
-                  let key = event.charactersIgnoringModifiers?.lowercased(),
-                  let action = actions[key] else { return event }
+                  let characters = event.charactersIgnoringModifiers else { return event }
+            let key = event.keyCode == 48 ? "\t" : characters.lowercased()
+            let shortcut = EditorShortcut(key: key, modifiers: event.modifierFlags)
+            let action = modifiedActions[shortcut] ?? (
+                shortcut.modifiers == NSEvent.ModifierFlags.command.rawValue ? actions[key] : nil
+            )
+            guard let action else { return event }
             action()
             return nil
         }
@@ -216,5 +266,15 @@ final class EditorCommandView: NSView {
 
     deinit {
         if let monitor { NSEvent.removeMonitor(monitor) }
+    }
+}
+
+struct EditorShortcut: Hashable {
+    let key: String
+    let modifiers: UInt
+
+    init(key: String, modifiers: NSEvent.ModifierFlags) {
+        self.key = key.lowercased()
+        self.modifiers = modifiers.intersection([.command, .control, .option, .shift]).rawValue
     }
 }

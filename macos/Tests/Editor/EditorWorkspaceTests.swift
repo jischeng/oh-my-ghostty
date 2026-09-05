@@ -1,8 +1,45 @@
+import AppKit
 import Foundation
 import Testing
 @testable import Ghostty
 
 struct EditorWorkspaceTests {
+    @Test @MainActor func tabNavigationWrapsAndSaveAllWritesEachDocument() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let filesystem = LocalWorkspaceFilesystem(workingDirectory: root.path)
+        let workspace = EditorWorkspace()
+        for name in ["first.txt", "second.txt"] {
+            let file = root.appendingPathComponent(name)
+            try Data("original".utf8).write(to: file)
+            workspace.open(path: file.path, filesystem: filesystem)
+            await waitUntil { !workspace.isLoading }
+        }
+        #expect(workspace.documents.count == 2)
+        let first = try #require(workspace.documents.first)
+        let second = try #require(workspace.documents.last)
+        workspace.selectAdjacentDocument(offset: 1)
+        #expect(workspace.selectedID == first.id)
+        workspace.selectAdjacentDocument(offset: -1)
+        #expect(workspace.selectedID == second.id)
+        first.text = "first edit"
+        second.text = "second edit"
+        #expect(await workspace.saveAll())
+        #expect(!first.isDirty && !second.isDirty)
+        #expect(try String(contentsOfFile: first.path, encoding: .utf8) == "first edit")
+        #expect(try String(contentsOfFile: second.path, encoding: .utf8) == "second edit")
+    }
+
+    @Test func shortcutModifiersIgnoreCapsLockButDistinguishShiftAndControl() {
+        #expect(EditorShortcut(key: "F", modifiers: [.command, .capsLock]) ==
+            EditorShortcut(key: "f", modifiers: .command))
+        #expect(EditorShortcut(key: "g", modifiers: [.command, .shift]) !=
+            EditorShortcut(key: "g", modifiers: .command))
+        #expect(EditorShortcut(key: "\t", modifiers: .control) !=
+            EditorShortcut(key: "\t", modifiers: [.control, .shift]))
+    }
+
     @Test @MainActor func staleConcurrentOpenCannotReplaceNewerSelection() async throws {
         let filesystem = ControlledEditorWorkspaceFilesystem()
         let workspace = EditorWorkspace()

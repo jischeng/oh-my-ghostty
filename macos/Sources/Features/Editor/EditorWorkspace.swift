@@ -15,6 +15,45 @@ final class EditorWorkspace: ObservableObject {
         documents.first { $0.id == selectedID }
     }
 
+    func selectAdjacentDocument(offset: Int) {
+        guard !documents.isEmpty else { return }
+        let current = documents.firstIndex { $0.id == selectedID } ?? 0
+        let index = ((current + offset) % documents.count + documents.count) % documents.count
+        selectedID = documents[index].id
+        isVisible = true
+    }
+
+    func saveAll() async -> Bool {
+        for document in documents where document.isDirty || document.isSaving {
+            guard await save(document) else { return false }
+        }
+        return true
+    }
+
+    func reload(_ document: EditorDocument, window: NSWindow?) async {
+        guard !document.isSaving, !document.isReloading else { return }
+        if document.isDirty {
+            let alert = NSAlert()
+            alert.messageText = "Reload \"\((document.path as NSString).lastPathComponent)\"?"
+            alert.informativeText = "Reloading replaces your unsaved changes with the current file contents."
+            alert.addButton(withTitle: "Reload")
+            alert.addButton(withTitle: "Cancel")
+            let response: NSApplication.ModalResponse
+            if let window {
+                response = await alert.beginSheetModal(for: window)
+            } else {
+                response = alert.runModal()
+            }
+            guard response == .alertFirstButtonReturn else { return }
+        }
+        do {
+            try await document.reload()
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     func open(path: String, filesystem: any WorkspaceFilesystem) {
         isVisible = true
         errorMessage = nil

@@ -6,6 +6,8 @@ enum EditorDocumentError: Error, Equatable, Sendable {
     case binaryFile
     case unsupportedEncoding
     case saveInProgress
+    case reloadInProgress
+    case editedDuringReload
 }
 
 extension EditorDocumentError: LocalizedError {
@@ -15,6 +17,8 @@ extension EditorDocumentError: LocalizedError {
         case .binaryFile: "The file contains binary data and cannot be edited as text."
         case .unsupportedEncoding: "The file is not valid UTF-8 text."
         case .saveInProgress: "This document is already being saved."
+        case .reloadInProgress: "This document is already being reloaded."
+        case .editedDuringReload: "The document was edited while it was being reloaded."
         }
     }
 }
@@ -76,8 +80,10 @@ final class EditorDocument: ObservableObject {
     }
     @Published private(set) var isDirty: Bool
     @Published private(set) var isSaving = false
+    @Published private(set) var isReloading = false
+    @Published private(set) var contentGeneration: UInt64 = 0
 
-    private let encoding: EditorDocumentEncoding
+    private var encoding: EditorDocumentEncoding
     private var persistedText: String
     private var persistedData: Data
     private var revision: UInt64 = 0
@@ -120,6 +126,7 @@ final class EditorDocument: ObservableObject {
 
     func save() async throws {
         guard !isSaving else { throw EditorDocumentError.saveInProgress }
+        guard !isReloading else { throw EditorDocumentError.reloadInProgress }
         guard isDirty else { return }
         let savedRevision = revision
         let savedText = text
@@ -138,6 +145,29 @@ final class EditorDocument: ObservableObject {
         } else {
             isDirty = text != persistedText
         }
+    }
+
+    func reload() async throws {
+        guard !isSaving else { throw EditorDocumentError.saveInProgress }
+        guard !isReloading else { throw EditorDocumentError.reloadInProgress }
+        let reloadRevision = revision
+        isReloading = true
+        defer { isReloading = false }
+
+        let data = try await filesystem.readFile(at: path)
+        let decoded = try await Task.detached(priority: .utility) {
+            try Self.decode(data)
+        }.value
+
+        guard revision == reloadRevision else {
+            throw EditorDocumentError.editedDuringReload
+        }
+        encoding = decoded.encoding
+        persistedText = decoded.text
+        persistedData = data
+        text = decoded.text
+        isDirty = false
+        contentGeneration &+= 1
     }
 
     nonisolated private static func decode(

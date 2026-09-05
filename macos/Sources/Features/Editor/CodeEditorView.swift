@@ -16,11 +16,17 @@ struct CodeEditorView: View {
     var onSave: () -> Void = {}
     var onClose: () -> Void = {}
     var onOpen: () -> Void = {}
+    var onNextDocument: () -> Void = {}
+    var onPreviousDocument: () -> Void = {}
+    var onSaveAll: () -> Void = {}
 
     @State private var cursorPositions: [CursorPosition] = []
     @State private var editorCoordinator = EditorCoordinator()
     @State private var isFindVisible = false
     @State private var findText = ""
+    @State private var replaceText = ""
+    @State private var caseSensitive = false
+    @State private var barMode: BarMode = .find
     @FocusState private var isFindFocused: Bool
 
     init(
@@ -30,7 +36,10 @@ struct CodeEditorView: View {
         isActive: Bool = true,
         onSave: @escaping () -> Void = {},
         onClose: @escaping () -> Void = {},
-        onOpen: @escaping () -> Void = {}
+        onOpen: @escaping () -> Void = {},
+        onNextDocument: @escaping () -> Void = {},
+        onPreviousDocument: @escaping () -> Void = {},
+        onSaveAll: @escaping () -> Void = {}
     ) {
         self._text = text
         self.fileURL = fileURL
@@ -39,6 +48,9 @@ struct CodeEditorView: View {
         self.onSave = onSave
         self.onClose = onClose
         self.onOpen = onOpen
+        self.onNextDocument = onNextDocument
+        self.onPreviousDocument = onPreviousDocument
+        self.onSaveAll = onSaveAll
     }
 
     var body: some View {
@@ -62,12 +74,18 @@ struct CodeEditorView: View {
                 findBar
                     .padding(8)
             } else if isActive {
-                Button(action: presentFind) {
+                Menu {
+                    Button("Find", action: presentFind)
+                    Button("Find and Replace", action: presentReplace)
+                    Button("Go to Line", action: presentGoToLine)
+                } label: {
                     Image(systemName: "magnifyingglass")
                 }
-                .buttonStyle(.borderless)
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
                 .padding(10)
-                .help("Find")
+                .help("Find and Navigate")
             }
         }
         .background(Color(nsColor: .textBackgroundColor))
@@ -79,6 +97,14 @@ struct CodeEditorView: View {
                     "s": onSave,
                     "w": onClose,
                     "o": onOpen,
+                ], modifiedActions: [
+                    EditorShortcut(key: "f", modifiers: [.command, .option]): presentReplace,
+                    EditorShortcut(key: "l", modifiers: .command): presentGoToLine,
+                    EditorShortcut(key: "g", modifiers: .command): findNext,
+                    EditorShortcut(key: "g", modifiers: [.command, .shift]): findPrevious,
+                    EditorShortcut(key: "s", modifiers: [.command, .shift]): onSaveAll,
+                    EditorShortcut(key: "\t", modifiers: .control): onNextDocument,
+                    EditorShortcut(key: "\t", modifiers: [.control, .shift]): onPreviousDocument,
                 ])
             }
         }
@@ -94,33 +120,46 @@ struct CodeEditorView: View {
     }
 
     private var findBar: some View {
-        HStack(spacing: 6) {
-            TextField("Find", text: $findText)
+        VStack(alignment: .trailing, spacing: 4) {
+            HStack(spacing: 4) {
+                TextField(barMode == .goToLine ? "Line:Column" : "Find", text: $findText)
                 .textFieldStyle(.roundedBorder)
-                .frame(width: 220)
+                .frame(minWidth: 90, idealWidth: 150, maxWidth: 180)
                 .focused($isFindFocused)
-                .onSubmit(findNext)
-                .onExitCommand {
-                    isFindVisible = false
-                    isFindFocused = false
+                .onSubmit(barMode == .goToLine ? goToLine : findNext)
+                .onExitCommand(perform: leaveFindBar)
+
+                if barMode != .goToLine {
+                    Text(matchSummary)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(minWidth: 28)
+                    Button(action: findPrevious) { Image(systemName: "chevron.up") }
+                        .help("Previous Match")
+                    Button(action: findNext) { Image(systemName: "chevron.down") }
+                        .help("Next Match")
+                    Toggle("Aa", isOn: $caseSensitive)
+                        .toggleStyle(.button)
+                        .help("Match Case")
                 }
 
-            Button(action: findPrevious) {
-                Image(systemName: "chevron.up")
+                Button(action: leaveFindBar) {
+                    Image(systemName: "xmark")
+                }
+                .help("Close")
             }
-            .help("Previous Match")
 
-            Button(action: findNext) {
-                Image(systemName: "chevron.down")
+            if barMode == .replace {
+                HStack(spacing: 4) {
+                    TextField("Replace", text: $replaceText)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(minWidth: 90, idealWidth: 150, maxWidth: 180)
+                        .onSubmit(replaceCurrent)
+                    Button("Replace", action: replaceCurrent)
+                    Button("All", action: replaceAll)
+                }
+                .controlSize(.small)
             }
-            .help("Next Match")
-
-            Button {
-                isFindVisible = false
-            } label: {
-                Image(systemName: "xmark")
-            }
-            .help("Close Find")
         }
         .buttonStyle(.borderless)
         .padding(6)
@@ -135,6 +174,19 @@ struct CodeEditorView: View {
            let range = Range(selection, in: text) {
             findText = String(text[range])
         }
+        barMode = .find
+        isFindVisible = true
+        isFindFocused = true
+    }
+
+    private func presentReplace() {
+        presentFind()
+        barMode = .replace
+    }
+
+    private func presentGoToLine() {
+        barMode = .goToLine
+        findText = ""
         isFindVisible = true
         isFindFocused = true
     }
@@ -148,37 +200,71 @@ struct CodeEditorView: View {
     }
 
     private func selectMatch(searchingForward: Bool) {
-        guard !findText.isEmpty else { return }
-
-        let source = text as NSString
         let current = cursorPositions.first?.range ?? NSRange(location: 0, length: 0)
-        let start = current.location == NSNotFound
-            ? 0
-            : searchingForward ? NSMaxRange(current) : current.location
-        let primaryRange = searchingForward
-            ? NSRange(location: min(start, source.length), length: max(0, source.length - min(start, source.length)))
-            : NSRange(location: 0, length: min(start, source.length))
-        let options: NSString.CompareOptions = searchingForward ? [] : [.backwards]
-
-        var match = source.range(of: findText, options: options, range: primaryRange)
-        if match.location == NSNotFound {
-            match = source.range(
-                of: findText,
-                options: options,
-                range: NSRange(location: 0, length: source.length)
-            )
-        }
-        guard match.location != NSNotFound else { return }
-        editorCoordinator.scrollNextSelectionToVisible()
-        cursorPositions = [CursorPosition(range: match)]
+        let matches = searchMatches
+        guard let index = EditorTextSearch.matchIndex(
+            in: matches, selection: current, searchingForward: searchingForward
+        ) else { return }
+        editorCoordinator.select(matches[index])
     }
+
+    private var searchMatches: [NSRange] {
+        EditorTextSearch.matches(in: text, query: findText, caseSensitive: caseSensitive)
+    }
+
+    private var matchSummary: String {
+        let matches = searchMatches
+        guard !matches.isEmpty else { return "0/0" }
+        let selected = cursorPositions.first?.range
+        let index = matches.firstIndex(of: selected ?? .notFound).map { $0 + 1 } ?? 0
+        return "\(index)/\(matches.count)"
+    }
+
+    private func replaceCurrent() {
+        let matches = searchMatches
+        guard !matches.isEmpty else { return }
+        let selection = cursorPositions.first?.range
+        let nextIndex = EditorTextSearch.matchIndex(in: matches, selection: selection, searchingForward: true) ?? 0
+        let range = matches.first(where: { $0 == selection }) ?? matches[nextIndex]
+        editorCoordinator.replace(
+            ranges: [range],
+            with: replaceText,
+            selectionAfterEdit: NSRange(location: range.location, length: (replaceText as NSString).length)
+        )
+    }
+
+    private func replaceAll() {
+        let matches = searchMatches
+        guard !matches.isEmpty else { return }
+        let first = matches[0]
+        editorCoordinator.replace(
+            ranges: matches,
+            with: replaceText,
+            selectionAfterEdit: NSRange(location: first.location, length: (replaceText as NSString).length)
+        )
+    }
+
+    private func goToLine() {
+        guard let target = EditorTextSearch.lineAndColumn(from: findText),
+              let range = EditorTextSearch.range(forLine: target.line, column: target.column, in: text) else { return }
+        editorCoordinator.select(range)
+        leaveFindBar()
+    }
+
+    private func leaveFindBar() {
+        isFindVisible = false
+        isFindFocused = false
+        editorCoordinator.focus()
+    }
+
+    private enum BarMode { case find, replace, goToLine }
 }
 
 @MainActor
 private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
     private weak var controller: TextViewController?
     private var cachedLanguage: CodeLanguage?
-    private var shouldScrollNextSelection = false
+    private var isActive = false
 
     func language(fileURL: URL?, text: String) -> CodeLanguage {
         if let cachedLanguage { return cachedLanguage }
@@ -195,27 +281,53 @@ private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
 
     func prepareCoordinator(controller: TextViewController) {
         self.controller = controller
+        focusIfActive(onNextRunLoop: true)
     }
 
     func setActive(_ isActive: Bool) {
-        guard !isActive,
-              let textView = controller?.textView,
-              textView.window?.firstResponder === textView else { return }
-        textView.window?.makeFirstResponder(nil)
+        let didActivate = isActive && !self.isActive
+        self.isActive = isActive
+        if didActivate {
+            focusIfActive(onNextRunLoop: true)
+        } else if !isActive,
+                  let textView = controller?.textView,
+                  textView.window?.firstResponder === textView {
+            textView.window?.makeFirstResponder(nil)
+        }
     }
 
-    func scrollNextSelectionToVisible() {
-        shouldScrollNextSelection = true
+    func focus() {
+        focusIfActive(onNextRunLoop: false)
     }
 
-    func textViewDidChangeSelection(controller: TextViewController, newPositions: [CursorPosition]) {
-        guard shouldScrollNextSelection else { return }
-        shouldScrollNextSelection = false
+    private func focusIfActive(onNextRunLoop: Bool) {
+        let applyFocus = { [weak self] in
+            guard let self, isActive, let textView = controller?.textView,
+                  let window = textView.window else { return }
+            window.makeFirstResponder(textView)
+        }
+        if onNextRunLoop {
+            DispatchQueue.main.async(execute: applyFocus)
+        } else {
+            applyFocus()
+        }
+    }
+
+    func select(_ range: NSRange) {
+        guard let controller else { return }
+        controller.setCursorPositions([CursorPosition(range: range)])
         controller.textView.scrollSelectionToVisible()
+    }
+
+    func replace(ranges: [NSRange], with replacement: String, selectionAfterEdit: NSRange) {
+        guard let controller else { return }
+        guard EditorTextEditing.replace(on: controller.textView, ranges: ranges, with: replacement) else { return }
+        select(selectionAfterEdit)
     }
 
     func destroy() {
         controller = nil
+        isActive = false
     }
 }
 

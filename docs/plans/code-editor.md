@@ -50,6 +50,15 @@
 - 工作目录：`../oh-my-ghostty-editor`，分支：`codex/code-editor`，基于 `codex/git-readonly`。
 - 构建：`macos/build.nu`；测试：`macos/build.nu --action test`。独立 worktree 复用原 checkout 的 GhosttyKit 与 zig-out/share 构建产物。
 
+## 第二轮功能完善
+
+- 查找支持匹配计数与大小写选项；替换当前项或全部匹配走编辑器原生修改接口，保留撤销。
+- 支持按 `行:列` 跳转。快捷键：⌘F 查找、⌥⌘F 替换、⌘L 跳转、⌘G / ⇧⌘G 查找下一项或上一项。
+- Control-Tab / Control-Shift-Tab 切换文件，⇧⌘S 保存全部文件；标签菜单列出完整路径，支持重新加载与关闭全部文件。
+- 重新加载使用原文件系统，因此本地和 SSH 共用逻辑；未保存文件先确认，读取失败或读取期间继续编辑都保留现有内容。
+- 外部重新加载后重建对应编辑器视图，更新文本及编码基线；普通文件切换继续保留每个编辑器的撤销记录。
+- 本轮按用户要求只推进功能、编译和自动化测试，人工界面验收暂缓。
+
 ## Worker 接续检查清单
 
 - 构建：确认 `BuiltInFilesInspectorProvider` 所有初始化点都已注入真实或测试 handler。

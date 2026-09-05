@@ -37,8 +37,6 @@ struct GitTerminalCommand: Equatable, Sendable {
         GitShellQuoting.commandLine(for: argv)
     }
 
-    /// Alias used by callers that treat the result as terminal input.
-    var text: String { shellCommand }
 }
 
 enum GitTerminalCommandFormatter {
@@ -47,17 +45,17 @@ enum GitTerminalCommandFormatter {
 
         switch intent {
         case .status:
-            return command(argv: [
+            return GitTerminalCommand(argv: [
                 "git", "-C", repository.worktreePath, "status", "--short", "--branch",
             ])
 
         case .log:
-            return command(argv: [
+            return GitTerminalCommand(argv: [
                 "git", "-C", repository.worktreePath, "log", "--oneline", "--decorate", "--graph",
             ])
 
         case .show(_, let commit):
-            return command(argv: ["git", "-C", repository.worktreePath, "show", commit.rawValue])
+            return GitTerminalCommand(argv: ["git", "-C", repository.worktreePath, "show", commit.rawValue])
 
         case .diff(_, let scope, let file):
             let scopeFlag: String?
@@ -67,22 +65,19 @@ enum GitTerminalCommandFormatter {
             case .unstaged:
                 scopeFlag = nil
             }
-            var argv = ["git", "-C", repository.worktreePath, "diff"]
+            var argv = ["git", "-C", repository.worktreePath, "--literal-pathspecs", "diff"]
             if let scopeFlag { argv.append(scopeFlag) }
             argv += ["--", file]
-            return command(argv: argv)
+            return GitTerminalCommand(argv: argv)
 
         case .switchBranch(_, let branch):
-            return command(argv: ["git", "-C", repository.worktreePath, "switch", "--", branch])
+            return GitTerminalCommand(argv: ["git", "-C", repository.worktreePath, "switch", "--", branch])
 
         case .commit(_, let message):
-            return command(argv: ["git", "-C", repository.worktreePath, "commit", "-m", message, "--"])
+            return GitTerminalCommand(argv: ["git", "-C", repository.worktreePath, "commit", "-m", message, "--"])
         }
     }
 
-    private static func command(argv: [String]) -> GitTerminalCommand {
-        GitTerminalCommand(argv: argv)
-    }
 }
 
 /// POSIX shell single-quote escaping shared by every Git terminal command.

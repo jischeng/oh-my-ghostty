@@ -18,9 +18,9 @@ struct GitTerminalCommandsTests {
         let command = GitTerminalCommandFormatter.format(intent)
 
         #expect(command.argv == [
-            "git", "-C", "/tmp/project with space", "diff", "--", "a file's name.txt",
+            "git", "-C", "/tmp/project with space", "--literal-pathspecs", "diff", "--", "a file's name.txt",
         ])
-        #expect(command.shellCommand == "git -C '/tmp/project with space' diff -- 'a file'\\''s name.txt'")
+        #expect(command.shellCommand == "git -C '/tmp/project with space' --literal-pathspecs diff -- 'a file'\\''s name.txt'")
     }
 
     @Test func preservesMultilineCommitMessageWithoutEnter() {
@@ -41,7 +41,7 @@ struct GitTerminalCommandsTests {
         #expect(
             GitTerminalCommandFormatter.format(
                 .show(repository: repository, commit: commit)
-            ).shellCommand == "git -C '/tmp/project with space' show 'abc1234'"
+            ).shellCommand == "git -C '/tmp/project with space' show abc1234"
         )
         #expect(
             GitTerminalCommandFormatter.format(

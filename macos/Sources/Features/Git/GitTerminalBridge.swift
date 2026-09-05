@@ -95,7 +95,7 @@ final class GitTerminalBridge {
     ) -> Bool {
         switch (target, session.state) {
         case (.local, .local):
-            true
+            return true
         case (.remote(let host, let user), .sshReady(let ssh, _)):
             let hostMatches = host == ssh.alias || host == ssh.transferTarget
             let userMatches: Bool
@@ -104,9 +104,9 @@ final class GitTerminalBridge {
             } else {
                 userMatches = true
             }
-            hostMatches && userMatches
+            return hostMatches && userMatches
         default:
-            false
+            return false
         }
     }
 

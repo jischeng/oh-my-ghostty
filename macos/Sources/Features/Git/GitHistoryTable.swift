@@ -5,8 +5,11 @@ struct GitHistoryTable: NSViewRepresentable {
     let commits: [GitHistoryCommit]
     let selectedCommitID: GitCommitID?
     let onSelect: (GitCommitID) -> Void
+    let onOpen: (GitCommitID) -> Void
 
-    func makeCoordinator() -> Coordinator { Coordinator(onSelect: onSelect) }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onSelect: onSelect, onOpen: onOpen)
+    }
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSScrollView()
@@ -26,34 +29,66 @@ struct GitHistoryTable: NSViewRepresentable {
         table.addTableColumn(column)
         table.dataSource = context.coordinator
         table.delegate = context.coordinator
+        table.target = context.coordinator
+        table.doubleAction = #selector(Coordinator.openSelectedCommit)
         scrollView.documentView = table
         context.coordinator.tableView = table
-        context.coordinator.update(commits: commits, selectedCommitID: selectedCommitID, onSelect: onSelect)
+        context.coordinator.update(
+            commits: commits,
+            selectedCommitID: selectedCommitID,
+            onSelect: onSelect,
+            onOpen: onOpen
+        )
         return scrollView
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        context.coordinator.update(commits: commits, selectedCommitID: selectedCommitID, onSelect: onSelect)
+        context.coordinator.update(
+            commits: commits,
+            selectedCommitID: selectedCommitID,
+            onSelect: onSelect,
+            onOpen: onOpen
+        )
     }
 
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         weak var tableView: NSTableView?
         private var commits: [GitHistoryCommit] = []
+        private var graphRows: [GitGraphRow] = []
         private var selectedCommitID: GitCommitID?
         private var onSelect: (GitCommitID) -> Void
+        private var onOpen: (GitCommitID) -> Void
         private let dateFormatter: ISO8601DateFormatter = {
             let formatter = ISO8601DateFormatter()
             formatter.formatOptions = [.withInternetDateTime, .withDashSeparatorInDate]
             return formatter
         }()
 
-        init(onSelect: @escaping (GitCommitID) -> Void) { self.onSelect = onSelect }
+        init(
+            onSelect: @escaping (GitCommitID) -> Void,
+            onOpen: @escaping (GitCommitID) -> Void
+        ) {
+            self.onSelect = onSelect
+            self.onOpen = onOpen
+        }
 
-        func update(commits: [GitHistoryCommit], selectedCommitID: GitCommitID?, onSelect: @escaping (GitCommitID) -> Void) {
+        func update(
+            commits: [GitHistoryCommit],
+            selectedCommitID: GitCommitID?,
+            onSelect: @escaping (GitCommitID) -> Void,
+            onOpen: @escaping (GitCommitID) -> Void
+        ) {
             let changed = self.commits != commits || self.selectedCommitID != selectedCommitID
             self.commits = commits
+            if changed {
+                var layout = GitGraphLayout()
+                graphRows = commits.map {
+                    layout.append(commitID: $0.id, parentIDs: $0.parentIDs)
+                }
+            }
             self.selectedCommitID = selectedCommitID
             self.onSelect = onSelect
+            self.onOpen = onOpen
             guard changed, let tableView else { return }
             tableView.reloadData()
             if let selectedCommitID, let row = commits.firstIndex(where: { $0.id == selectedCommitID }) {
@@ -70,13 +105,24 @@ struct GitHistoryTable: NSViewRepresentable {
             let identifier = GitHistoryCell.reuseIdentifier
             let cell = tableView.makeView(withIdentifier: identifier, owner: nil) as? GitHistoryCell ?? GitHistoryCell()
             cell.identifier = identifier
-            cell.configure(commit: commits[row], date: dateFormatter.string(from: commits[row].authoredAt))
+            cell.configure(
+                commit: commits[row],
+                graphRow: graphRows[row],
+                date: dateFormatter.string(from: commits[row].authoredAt)
+            )
             return cell
         }
 
         func tableViewSelectionDidChange(_ notification: Notification) {
             guard let tableView, tableView.selectedRow >= 0, commits.indices.contains(tableView.selectedRow) else { return }
             onSelect(commits[tableView.selectedRow].id)
+        }
+
+        @objc func openSelectedCommit() {
+            guard let tableView,
+                  tableView.clickedRow >= 0,
+                  commits.indices.contains(tableView.clickedRow) else { return }
+            onOpen(commits[tableView.clickedRow].id)
         }
     }
 }
@@ -87,6 +133,7 @@ private final class GitHistoryCell: NSTableCellView {
     private let detail = NSTextField(labelWithString: "")
     private let refs = NSStackView()
     private let stack = NSStackView()
+    private let graph = GitGraphCellView()
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -104,9 +151,15 @@ private final class GitHistoryCell: NSTableCellView {
         stack.addArrangedSubview(subject)
         stack.addArrangedSubview(detail)
         stack.addArrangedSubview(refs)
+        graph.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
+        addSubview(graph)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            graph.leadingAnchor.constraint(equalTo: leadingAnchor),
+            graph.topAnchor.constraint(equalTo: topAnchor),
+            graph.bottomAnchor.constraint(equalTo: bottomAnchor),
+            graph.widthAnchor.constraint(greaterThanOrEqualToConstant: 24),
+            stack.leadingAnchor.constraint(equalTo: graph.trailingAnchor, constant: 4),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             stack.topAnchor.constraint(equalTo: topAnchor, constant: 5),
             stack.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -5),
@@ -116,7 +169,8 @@ private final class GitHistoryCell: NSTableCellView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func configure(commit: GitHistoryCommit, date: String) {
+    func configure(commit: GitHistoryCommit, graphRow: GitGraphRow, date: String) {
+        graph.configure(row: graphRow)
         subject.stringValue = commit.subject.isEmpty ? "(no subject)" : commit.subject
         detail.stringValue = "\(commit.id.shortSHA)  \(commit.authorName)  \(date)"
         refs.arrangedSubviews.forEach { refs.removeArrangedSubview($0); $0.removeFromSuperview() }

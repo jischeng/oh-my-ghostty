@@ -188,7 +188,8 @@ struct InspectorGitView: View {
                 GitHistoryTable(
                     commits: content.history.commits,
                     selectedCommitID: content.history.selectedCommitID,
-                    onSelect: { perform(.gitAction(.selectCommit($0))) }
+                    onSelect: { perform(.gitAction(.selectCommit($0))) },
+                    onOpen: { perform(.gitAction(.openCommit($0))) }
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }

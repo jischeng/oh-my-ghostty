@@ -170,7 +170,8 @@ final class BuiltInFilesInspectorProvider {
         case .createPortForward, .openPortForward, .copyPortForward,
              .removePortForward, .refreshAgentHistory,
              .selectAgentHistorySession, .clearAgentHistorySelection,
-             .resumeAgentHistorySession, .forkAgentHistorySession:
+             .resumeAgentHistorySession, .forkAgentHistorySession,
+             .gitAction:
             break
         }
     }
@@ -555,6 +556,8 @@ final class BuiltInFilesInspectorProvider {
             "info host=\(info.portForwards.hostAlias) forwards=\(info.portForwards.items.count)"
         case .agentHistory(let history):
             "agentHistory sessions=\(history.sessions.count)"
+        case .git(let git):
+            "git repo=\(git.repository?.worktreePath ?? "<none>") tab=\(git.activeTab.rawValue)"
         }
     }
 

@@ -122,6 +122,10 @@ class AppDelegate: NSObject,
     @MainActor private lazy var builtInAgentHistoryInspector =
         BuiltInAgentHistoryInspectorProvider(registry: inspectorRegistry)
 
+    /// In-tree native Git Inspector provider.
+    @MainActor private lazy var builtInGitInspector =
+        BuiltInGitInspectorProvider(registry: inspectorRegistry)
+
     /// In-tree Info Inspector and app-owned SSH port-forward process lifecycle.
     @MainActor private lazy var builtInInfoInspector =
         BuiltInInfoInspectorProvider(registry: inspectorRegistry)
@@ -324,6 +328,7 @@ class AppDelegate: NSObject,
         do {
             try builtInFilesInspector.register()
             try builtInAgentHistoryInspector.register()
+            try builtInGitInspector.register()
         } catch {
             Self.logger.error("failed to register built-in Inspector provider: \(error)")
         }

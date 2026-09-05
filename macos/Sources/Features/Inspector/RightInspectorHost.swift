@@ -857,6 +857,16 @@ private struct InspectorPaneContentView: View {
                     )
                 }
             )
+        case .git(let gitContent):
+            InspectorGitView(
+                content: gitContent,
+                perform: { kind in
+                    registry.performAction(
+                        paneID: paneID,
+                        action: .init(context: context, kind: kind)
+                    )
+                }
+            )
         }
     }
 }

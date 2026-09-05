@@ -1,0 +1,208 @@
+import Foundation
+import Testing
+@testable import Ghostty
+
+@MainActor
+struct BuiltInGitInspectorProviderTests {
+    private func createTempDirectory() -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("git-provider-test-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    private func runCommand(_ args: [String], in directory: String) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = args
+        process.currentDirectoryURL = URL(fileURLWithPath: directory)
+        process.environment = [
+            "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            "GIT_AUTHOR_NAME": "Test",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+        ]
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw NSError(domain: "TestCommand", code: Int(process.terminationStatus))
+        }
+    }
+
+    @Test func registersGitInspectorPaneDescriptor() throws {
+        let registry = InspectorRegistry()
+        let provider = BuiltInGitInspectorProvider(registry: registry)
+        try provider.register()
+
+        let descriptor = try #require(registry.descriptor(id: BuiltInGitInspectorProvider.paneID))
+        #expect(descriptor.title == "Git")
+        #expect(descriptor.systemImage == "arrow.triangle.branch")
+        #expect(descriptor.preferredWidth == RightInspectorMetrics.defaultWidth)
+    }
+
+    @Test func loadsRepositoryOnAppeared() async throws {
+        let dir = createTempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try runCommand(["git", "init", "-b", "main"], in: dir.path)
+        try runCommand(["git", "commit", "--allow-empty", "-m", "first commit"], in: dir.path)
+
+        let registry = InspectorRegistry()
+        let provider = BuiltInGitInspectorProvider(registry: registry)
+        try provider.register()
+
+        let tabID = UUID()
+        let context = InspectorPaneContext(
+            tabID: tabID,
+            surfaceID: UUID(),
+            title: "Terminal",
+            workingDirectory: dir.path
+        )
+
+        registry.presentationDidChange(
+            to: BuiltInGitInspectorProvider.paneID,
+            context: context
+        )
+
+        // Allow async load to complete
+        for _ in 0..<30 {
+            if case .git(let content) = registry.content(
+                for: BuiltInGitInspectorProvider.paneID,
+                context: context
+            ), case .ready = content.status {
+                #expect(content.branch == "main")
+                #expect(content.repository?.worktreePath.hasSuffix(dir.lastPathComponent) == true)
+                return
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        Issue.record("Timed out waiting for repository status to become ready")
+    }
+
+    @Test func switchesTabAndPreservesAcrossSameWorktreeSubdirectories() async throws {
+        let dir = createTempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try runCommand(["git", "init", "-b", "main"], in: dir.path)
+        try runCommand(["git", "commit", "--allow-empty", "-m", "initial"], in: dir.path)
+
+        let subDir = dir.appendingPathComponent("subdir")
+        try FileManager.default.createDirectory(at: subDir, withIntermediateDirectories: true)
+
+        let registry = InspectorRegistry()
+        let provider = BuiltInGitInspectorProvider(registry: registry)
+        try provider.register()
+
+        let tabID = UUID()
+        let context1 = InspectorPaneContext(
+            tabID: tabID,
+            surfaceID: UUID(),
+            title: "Terminal",
+            workingDirectory: dir.path
+        )
+
+        registry.presentationDidChange(
+            to: BuiltInGitInspectorProvider.paneID,
+            context: context1
+        )
+
+        // Wait for ready
+        for _ in 0..<30 {
+            if case .git(let content) = registry.content(
+                for: BuiltInGitInspectorProvider.paneID,
+                context: context1
+            ), case .ready = content.status {
+                break
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        // Select Changes tab
+        registry.performAction(
+            paneID: BuiltInGitInspectorProvider.paneID,
+            action: .init(context: context1, kind: .gitAction(.selectTab(.changes)))
+        )
+
+        guard case .git(let changedTabContent) = registry.content(
+            for: BuiltInGitInspectorProvider.paneID,
+            context: context1
+        ) else {
+            Issue.record("Expected .git content")
+            return
+        }
+        #expect(changedTabContent.activeTab == InspectorGitContent.ActiveTab.changes)
+
+        // Switch to subdirectory of same worktree
+        let context2 = InspectorPaneContext(
+            tabID: tabID,
+            surfaceID: UUID(),
+            title: "Terminal",
+            workingDirectory: subDir.path
+        )
+
+        registry.presentationDidChange(
+            to: BuiltInGitInspectorProvider.paneID,
+            context: context2
+        )
+
+        for _ in 0..<30 {
+            if case .git(let content) = registry.content(
+                for: BuiltInGitInspectorProvider.paneID,
+                context: context2
+            ), case .ready = content.status {
+                #expect(content.activeTab == InspectorGitContent.ActiveTab.changes)
+                return
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        Issue.record("Timed out waiting for subdirectory context update")
+    }
+
+    @Test func handlesSSHContextImmediately() throws {
+        let registry = InspectorRegistry()
+        let provider = BuiltInGitInspectorProvider(registry: registry)
+        try provider.register()
+
+        var session = PaneSessionContext(workingDirectory: "/local", terminalTitle: "Terminal")
+        session.observeForegroundSSH(
+            alias: "remote-host",
+            transferTarget: "user@host",
+            processGroupID: 9999,
+            currentWorkingDirectory: "/local",
+            currentTerminalTitle: "Terminal",
+            remoteWorkingDirectory: "/remote/project"
+        )
+
+        let tabID = UUID()
+        let context = InspectorPaneContext(
+            tabID: tabID,
+            surfaceID: UUID(),
+            title: "Terminal",
+            workingDirectory: "/remote/project",
+            session: session
+        )
+
+        registry.presentationDidChange(
+            to: BuiltInGitInspectorProvider.paneID,
+            context: context
+        )
+
+        guard case .git(let content) = registry.content(
+            for: BuiltInGitInspectorProvider.paneID,
+            context: context
+        ) else {
+            Issue.record("Expected .git content")
+            return
+        }
+
+        guard case .ssh(let host, let dir) = content.status else {
+            Issue.record("Expected .ssh status, got \(String(describing: content.status))")
+            return
+        }
+        #expect(host == "remote-host")
+        #expect(dir == "/remote/project")
+    }
+}

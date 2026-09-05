@@ -129,14 +129,14 @@ out-of-process plugin and not proof of public plugin loading.
 
 `PluginManifest` is `Codable` and currently contains:
 
-| Field | Type | Purpose | Enforced today |
-| --- | --- | --- | --- |
-| `id` | `String` | identity matched against hello | only when policy is manually invoked |
-| `version` | `String` | plugin version matched against hello | yes in policy tests |
-| `executable` | `String` | intended executable path | no loader resolves it |
-| `capabilities` | `[PluginCapability]` | maximum capability allowlist | yes in policy tests |
-| `minimumHostVersion` | `String?` | intended OMG compatibility floor | not evaluated |
-| `settings` | `[PluginSettingDescriptor]?` | declarative setting metadata | not rendered/stored |
+| Field                | Type                         | Purpose                              | Enforced today                       |
+| -------------------- | ---------------------------- | ------------------------------------ | ------------------------------------ |
+| `id`                 | `String`                     | identity matched against hello       | only when policy is manually invoked |
+| `version`            | `String`                     | plugin version matched against hello | yes in policy tests                  |
+| `executable`         | `String`                     | intended executable path             | no loader resolves it                |
+| `capabilities`       | `[PluginCapability]`         | maximum capability allowlist         | yes in policy tests                  |
+| `minimumHostVersion` | `String?`                    | intended OMG compatibility floor     | not evaluated                        |
+| `settings`           | `[PluginSettingDescriptor]?` | declarative setting metadata         | not rendered/stored                  |
 
 The default Swift `Codable` keys are camelCase. This JSON demonstrates the data
 shape only; no filename or directory makes it installable:
@@ -203,13 +203,13 @@ UTF-8 JSON payload
 Maximum payload size is 1,048,576 bytes. Empty and oversized frames fail before
 JSON routing. The envelope fields are:
 
-| Field | Type |
-| --- | --- |
-| `version` | UInt16 |
-| `sequence` | UInt64 |
-| `correlation_id` | optional UInt64 |
-| `type` | message discriminator |
-| `payload` | typed payload |
+| Field            | Type                  |
+| ---------------- | --------------------- |
+| `version`        | UInt16                |
+| `sequence`       | UInt64                |
+| `correlation_id` | optional UInt64       |
+| `type`           | message discriminator |
+| `payload`        | typed payload         |
 
 Message bodies implemented by the codec:
 
@@ -226,19 +226,19 @@ hooks into a separate bounded, presentation-only OSC path owned by Core.
 
 ## Capabilities
 
-| Capability | Current behavior | Stability |
-| --- | --- | --- |
-| `sessionStatus` | router can set/clear validated status | Experimental component |
-| `tabIcon` | permits validated icon in a status command | Experimental component |
-| `terminalEvents` | event/subscription data types only | Stub |
-| `tabMetadata` | enum plus separate in-process provider model | Stub for process plugin |
-| `inspectorPane` | in-process typed registry works; no wire messages | Internal / process stub |
-| `settingsContribution` | manifest descriptors only | Stub |
-| `commands` | capability name only | Stub |
-| `sidebarModel` | capability name only | Stub |
-| `quickInput` | built-in host composer and per-Surface queue work; no process-plugin wire messages | Internal / process stub |
-| `terminalControl` | built-in user-confirmed QuickInput writes work; no process-plugin wire messages | Planned, high risk |
-| `rawTerminalOutput` | capability name only | Planned, high risk, default deny |
+| Capability             | Current behavior                                                                   | Stability                        |
+| ---------------------- | ---------------------------------------------------------------------------------- | -------------------------------- |
+| `sessionStatus`        | router can set/clear validated status                                              | Experimental component           |
+| `tabIcon`              | permits validated icon in a status command                                         | Experimental component           |
+| `terminalEvents`       | event/subscription data types only                                                 | Stub                             |
+| `tabMetadata`          | enum plus separate in-process provider model                                       | Stub for process plugin          |
+| `inspectorPane`        | in-process typed registry works; no wire messages                                  | Internal / process stub          |
+| `settingsContribution` | manifest descriptors only                                                          | Stub                             |
+| `commands`             | capability name only                                                               | Stub                             |
+| `sidebarModel`         | capability name only                                                               | Stub                             |
+| `quickInput`           | built-in host composer and per-Surface queue work; no process-plugin wire messages | Internal / process stub          |
+| `terminalControl`      | built-in user-confirmed QuickInput writes work; no process-plugin wire messages    | Planned, high risk               |
+| `rawTerminalOutput`    | capability name only                                                               | Planned, high risk, default deny |
 
 Quick Input presentation and focus remain Host-owned. The built-in composer participates in macOS `Option-Command` directional focus navigation, but this does not grant a plugin focus control. When the user enables `agents.openQuickInputOnStart`, the Host may expand Quick Input on the focused Pane's first Agent activity without changing first responder. `agents.openQuickInputOnComplete` applies the same Host-owned presentation policy to a newly completed focused Agent session. Plugin lifecycle messages cannot force focus or override either preference.
 
@@ -253,12 +253,12 @@ Quick Input presentation and focus remain Host-owned. The built-in composer part
 
 Wire states map to host activity:
 
-| Wire | Host activity |
-| --- | --- |
-| `running` | `working` |
-| `waiting` | `needsAttention` |
-| `completed` | `done` |
-| `failed` | `error` |
+| Wire        | Host activity    |
+| ----------- | ---------------- |
+| `running`   | `working`        |
+| `waiting`   | `needsAttention` |
+| `completed` | `done`           |
+| `failed`    | `error`          |
 
 The in-tree OSC adapter can additionally retain an `idle` `TabActivity` so the
 agent identity icon remains visible while its TUI is connected but not running a
@@ -624,7 +624,9 @@ Host-rendered `InspectorPaneContent` supports:
 - bounded Agent session lists and readable user/assistant transcripts;
 - extensible Info snapshots with an optional status, typed fields, and SSH
   port-forward rows containing remote/local ports, remote process, and bounded
-  status/failure detail.
+  status/failure detail;
+- native Git views presenting repository context, status, and
+  history/changes/branches.
 
 A provider supplies data only. It cannot inject a SwiftUI `View`, `NSView`,
 window, controller, material, or arbitrary icon path.
@@ -645,8 +647,8 @@ change produces a new context/lifecycle appearance for the selected provider;
 the previous appearance is discarded and its asynchronous work must not
 publish afterward. Supported action values are disclosure toggle, refresh,
 Agent-history selection/back/exact-resume/native-fork, collapse all, create
-file/folder, and create/open/copy/remove SSH port forwarding; whether they make
-sense is provider-specific. Agent-history resume accepts only a host-discovered,
+file/folder, create/open/copy/remove SSH port forwarding, and typed Git actions;
+whether they make sense is provider-specific. Agent-history resume accepts only a host-discovered,
 `AgentConversationID`-validated local session whose manifest declares
 allowlisted resume arguments; it focuses a matching live Surface or creates a
 new typed resume tab. Agent-history metadata uses a versioned mtime cache and
@@ -808,17 +810,17 @@ messages today.
 
 No public plugin sandbox exists because no external runtime exists.
 
-| Resource | Public plugin API today |
-| --- | --- |
-| filesystem | none |
-| terminal Surface / PTY / scrollback | none |
-| shell/process execution | none |
-| raw terminal output | none |
-| network | none |
-| clipboard | none |
-| OMG/Ghostty settings | none |
-| persistent plugin storage | none |
-| arbitrary AppKit/SwiftUI UI | prohibited by Inspector boundary |
+| Resource                            | Public plugin API today          |
+| ----------------------------------- | -------------------------------- |
+| filesystem                          | none                             |
+| terminal Surface / PTY / scrollback | none                             |
+| shell/process execution             | none                             |
+| raw terminal output                 | none                             |
+| network                             | none                             |
+| clipboard                           | none                             |
+| OMG/Ghostty settings                | none                             |
+| persistent plugin storage           | none                             |
+| arbitrary AppKit/SwiftUI UI         | prohibited by Inspector boundary |
 
 The manifest capability intersection restricts future host IPC only. It would
 not sandbox an ordinary child process from macOS filesystem or network access.

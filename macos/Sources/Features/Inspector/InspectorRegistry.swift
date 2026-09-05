@@ -91,6 +91,42 @@ struct InspectorAgentHistoryContent: Equatable, Sendable {
     }
 }
 
+enum InspectorGitAction: Equatable, Sendable {
+    case refresh
+    case selectTab(InspectorGitContent.ActiveTab)
+}
+
+struct InspectorGitContent: Equatable, Sendable {
+    enum ActiveTab: String, CaseIterable, Equatable, Sendable {
+        case history = "History"
+        case changes = "Changes"
+        case branches = "Branches"
+    }
+
+    let repository: GitRepositoryIdentity?
+    let branch: String?
+    let status: GitRepositoryStatusKind
+    let activeTab: ActiveTab
+    let isLoading: Bool
+    let statusMessage: String?
+
+    init(
+        repository: GitRepositoryIdentity? = nil,
+        branch: String? = nil,
+        status: GitRepositoryStatusKind,
+        activeTab: ActiveTab = .history,
+        isLoading: Bool = false,
+        statusMessage: String? = nil
+    ) {
+        self.repository = repository
+        self.branch = branch
+        self.status = status
+        self.activeTab = activeTab
+        self.isLoading = isLoading
+        self.statusMessage = statusMessage
+    }
+}
+
 enum InspectorPaneActionKind: Equatable, Sendable {
     case toggleNode(id: String, expanded: Bool)
     case refresh
@@ -106,6 +142,7 @@ enum InspectorPaneActionKind: Equatable, Sendable {
     case clearAgentHistorySelection
     case resumeAgentHistorySession(id: String)
     case forkAgentHistorySession(id: String)
+    case gitAction(InspectorGitAction)
 }
 
 struct InspectorPaneAction: Equatable, Sendable {
@@ -120,6 +157,7 @@ enum InspectorPaneContent: Equatable, Sendable {
     case fileTree(InspectorFileTree)
     case info(InspectorInfoContent)
     case agentHistory(InspectorAgentHistoryContent)
+    case git(InspectorGitContent)
 }
 
 struct InspectorPaneContext: Equatable, Sendable {

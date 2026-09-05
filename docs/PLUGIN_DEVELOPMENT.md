@@ -43,6 +43,8 @@ not a third-party SDK:
   typed content rendering;
 - owner validation and cleanup in `InspectorRegistry`;
 - built-in `builtin.files` provider using the plugin-shaped Inspector boundary;
+- built-in `builtin.git` provider with frozen-tip, paginated commit history,
+  branch scope switching, and native table rendering;
 - stable terminal tab identity via `OH_MY_GHOSTTY_SESSION`;
 - manifest-driven built-in Agent adapters using bounded OSC 3008 presentation
   events on the owning Surface.

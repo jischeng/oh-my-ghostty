@@ -1,0 +1,99 @@
+import Foundation
+
+enum GitHistoryScope: String, CaseIterable, Equatable, Sendable {
+    case currentBranch
+    case allBranches
+
+    var displayName: String {
+        switch self {
+        case .currentBranch: "Current branch"
+        case .allBranches: "All branches"
+        }
+    }
+}
+
+enum GitRefDecorationKind: String, Equatable, Sendable {
+    case currentBranch
+    case localBranch
+    case remoteBranch
+    case tag
+    case head
+}
+
+struct GitRefDecoration: Hashable, Equatable, Sendable {
+    let name: String
+    let kind: GitRefDecorationKind
+
+}
+
+struct GitHistoryCommit: Identifiable, Hashable, Equatable, Sendable {
+    let id: GitCommitID
+    let parentIDs: [GitCommitID]
+    let authorName: String
+    let authorEmail: String
+    let authoredAt: Date
+    let subject: String
+    let refDecorations: [GitRefDecoration]
+
+    init(
+        id: GitCommitID,
+        parentIDs: [GitCommitID],
+        authorName: String,
+        authorEmail: String,
+        authoredAt: Date,
+        subject: String,
+        refDecorations: [GitRefDecoration] = []
+    ) {
+        self.id = id
+        self.parentIDs = parentIDs
+        self.authorName = authorName
+        self.authorEmail = authorEmail
+        self.authoredAt = authoredAt
+        self.subject = subject
+        self.refDecorations = refDecorations
+    }
+}
+
+struct GitHistorySnapshot: Equatable, Sendable {
+    let scope: GitHistoryScope
+    let branchName: String?
+    let headCommitID: GitCommitID?
+    let tipCommitIDs: [GitCommitID]
+    let decorationsByCommitID: [GitCommitID: [GitRefDecoration]]
+
+    var isEmpty: Bool { tipCommitIDs.isEmpty }
+}
+
+struct GitHistoryPage: Equatable, Sendable {
+    let commits: [GitHistoryCommit]
+    let offset: Int
+    let hasMore: Bool
+}
+
+struct InspectorGitHistoryContent: Equatable, Sendable {
+    let scope: GitHistoryScope
+    let commits: [GitHistoryCommit]
+    let selectedCommitID: GitCommitID?
+    let hasMore: Bool
+    let isLoading: Bool
+    let statusMessage: String?
+    let snapshot: GitHistorySnapshot?
+
+    init(
+        scope: GitHistoryScope = .currentBranch,
+        commits: [GitHistoryCommit] = [],
+        selectedCommitID: GitCommitID? = nil,
+        hasMore: Bool = false,
+        isLoading: Bool = false,
+        statusMessage: String? = nil,
+        snapshot: GitHistorySnapshot? = nil
+    ) {
+        self.scope = scope
+        self.commits = commits
+        self.selectedCommitID = selectedCommitID
+        self.hasMore = hasMore
+        self.isLoading = isLoading
+        self.statusMessage = statusMessage
+        self.snapshot = snapshot
+    }
+}

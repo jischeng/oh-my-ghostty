@@ -24,13 +24,13 @@ struct InspectorGitView: View {
                     hint: "Run 'git init' in the terminal to initialize a repository."
                 )
 
-            case .unborn(_, let branch):
-                emptyStateView(
-                    systemImage: "sparkles",
-                    title: "No Commits Yet",
-                    subtitle: "Initialized Git repository on branch '\(branch)'.",
-                    hint: "Create your first commit in the terminal or Changes tab."
-                )
+            case .unborn:
+                VStack(spacing: 12) {
+                    tabPickerView
+                        .padding(.horizontal, 12)
+                        .padding(.top, 10)
+                    tabContentView(headCommitID: nil)
+                }
 
             case .detached(_, let commitID):
                 VStack(spacing: 12) {
@@ -137,19 +137,14 @@ struct InspectorGitView: View {
     private func tabContentView(headCommitID: String?) -> some View {
         switch content.activeTab {
         case .history:
-            placeholderCard(
-                systemImage: "clock.arrow.circlepath",
-                title: "Commit History",
-                subtitle: headCommitID != nil ? "HEAD: \(String(headCommitID!.prefix(7)))" : "No commits",
-                taskHint: "Task #7A (Commit History) & #7B (Commit Graph)"
-            )
+            historyView(headCommitID: headCommitID)
 
         case .changes:
             placeholderCard(
                 systemImage: "doc.badge.plus",
                 title: "Working Tree Changes",
                 subtitle: "Stage, unstage and inspect file diffs.",
-                taskHint: "Task #8 (Commit & Diff) & #9 (Stage/Unstage)"
+                taskHint: "Changes will appear here when supported."
             )
 
         case .branches:
@@ -157,8 +152,58 @@ struct InspectorGitView: View {
                 systemImage: "arrow.triangle.branch",
                 title: "Branches",
                 subtitle: content.branch ?? "Current branch",
-                taskHint: "Task #11 (Branches view & switch)"
+                taskHint: "Branch management will appear here when supported."
             )
+        }
+    }
+
+    private func historyView(headCommitID: String?) -> some View {
+        VStack(spacing: 8) {
+            Picker(
+                "History scope",
+                selection: Binding(
+                    get: { content.history.scope },
+                    set: { perform(.gitAction(.selectHistoryScope($0))) }
+                )
+            ) {
+                ForEach(GitHistoryScope.allCases, id: \.self) { scope in
+                    Text(scope.displayName).tag(scope)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 12)
+
+            if content.history.commits.isEmpty && !content.history.isLoading {
+                VStack(spacing: 8) {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.system(size: 25))
+                        .foregroundStyle(.secondary)
+                    Text(content.history.statusMessage ?? (headCommitID == nil ? "No commits yet" : "No history found"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                GitHistoryTable(
+                    commits: content.history.commits,
+                    selectedCommitID: content.history.selectedCommitID,
+                    onSelect: { perform(.gitAction(.selectCommit($0))) }
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
+            if content.history.isLoading {
+                ProgressView()
+                    .controlSize(.small)
+                    .padding(.vertical, 4)
+            } else if content.history.hasMore {
+                Button("Load more history") {
+                    perform(.gitAction(.loadMoreHistory))
+                }
+                .buttonStyle(.link)
+                .padding(.bottom, 5)
+            }
         }
     }
 

@@ -1,0 +1,88 @@
+import Foundation
+import Testing
+@testable import Ghostty
+
+struct GitHistoryServiceTests {
+    private func createTempDirectory() -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("git-history-test-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    private func runCommand(_ args: [String], in directory: String) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = args
+        process.currentDirectoryURL = URL(fileURLWithPath: directory)
+        process.environment = [
+            "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            "GIT_AUTHOR_NAME": "History Test",
+            "GIT_AUTHOR_EMAIL": "history@example.com",
+            "GIT_COMMITTER_NAME": "History Test",
+            "GIT_COMMITTER_EMAIL": "history@example.com",
+        ]
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw NSError(domain: "GitHistoryTest", code: Int(process.terminationStatus))
+        }
+    }
+
+    private func identity(for directory: URL) async throws -> GitRepositoryIdentity {
+        let status = await GitRepositoryService().resolveStatus(workingDirectory: directory.path)
+        guard let identity = status.repository else {
+            throw NSError(domain: "GitHistoryTest", code: 1)
+        }
+        return identity
+    }
+
+    @Test func readsParentsAndFrozenBranchDecorations() async throws {
+        let directory = createTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try runCommand(["git", "init", "-b", "main"], in: directory.path)
+        try runCommand(["git", "commit", "--allow-empty", "-m", "initial"], in: directory.path)
+        try runCommand(["git", "branch", "feature"], in: directory.path)
+        try runCommand(["git", "commit", "--allow-empty", "-m", "second"], in: directory.path)
+        try runCommand(["git", "checkout", "feature"], in: directory.path)
+        try runCommand(["git", "commit", "--allow-empty", "-m", "feature commit"], in: directory.path)
+        try runCommand(["git", "checkout", "main"], in: directory.path)
+        try runCommand(["git", "checkout", "--detach"], in: directory.path)
+        try runCommand(["git", "commit", "--allow-empty", "-m", "detached commit"], in: directory.path)
+
+        let repository = try await identity(for: directory)
+        let service = GitHistoryService()
+        let snapshot = try await service.captureSnapshot(for: repository, scope: .allBranches)
+        let page = try await service.loadPage(snapshot: snapshot, repository: repository, offset: 0)
+
+        #expect(page.commits.count == 4)
+        let featureCommit = try #require(page.commits.first(where: { $0.subject == "feature commit" }))
+        #expect(featureCommit.parentIDs.count == 1)
+        #expect(featureCommit.refDecorations.contains(where: { $0.name == "feature" }))
+        #expect(snapshot.branchName == nil)
+        #expect(snapshot.tipCommitIDs.count == 3)
+        let detachedCommit = try #require(page.commits.first(where: { $0.subject == "detached commit" }))
+        #expect(detachedCommit.refDecorations.contains(where: { $0.kind == .head }))
+    }
+
+    @Test func paginationUsesFrozenTipsWhenRefsMove() async throws {
+        let directory = createTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try runCommand(["git", "init", "-b", "main"], in: directory.path)
+        for index in 0..<205 {
+            try runCommand(["git", "commit", "--allow-empty", "-m", "commit-\(index)"], in: directory.path)
+        }
+
+        let repository = try await identity(for: directory)
+        let service = GitHistoryService()
+        let snapshot = try await service.captureSnapshot(for: repository, scope: .currentBranch)
+        let firstPage = try await service.loadPage(snapshot: snapshot, repository: repository, offset: 0)
+        try runCommand(["git", "commit", "--allow-empty", "-m", "new-after-snapshot"], in: directory.path)
+        let secondPage = try await service.loadPage(snapshot: snapshot, repository: repository, offset: 100)
+
+        #expect(firstPage.commits.count == 100)
+        #expect(firstPage.hasMore)
+        #expect(secondPage.commits.count == 100)
+        #expect(secondPage.commits.allSatisfy { !$0.subject.contains("new-after-snapshot") })
+        #expect(Set(firstPage.commits.map(\.id)).isDisjoint(with: secondPage.commits.map(\.id)))
+    }
+}

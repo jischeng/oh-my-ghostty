@@ -59,6 +59,7 @@ final class GitDetailWindowController: NSWindowController, NSWindowDelegate {
         window.center()
         super.init(window: window)
         window.delegate = self
+        viewModel.reload()
     }
 
     @available(*, unavailable)
@@ -77,7 +78,6 @@ final class GitDetailWindowController: NSWindowController, NSWindowDelegate {
         showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
-        viewModel.reload()
     }
 }
 
@@ -223,10 +223,10 @@ private struct GitDiffDetailView: View {
                 ProgressView("Loading files…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if viewModel.files.isEmpty {
-                ContentUnavailableView(
-                    "No Changes",
+                GitDiffEmptyState(
+                    title: "No Changes",
                     systemImage: "checkmark.circle",
-                    description: Text("The selected Git target has no changed files.")
+                    message: "The selected Git target has no changed files."
                 )
             } else {
                 List(viewModel.files, selection: Binding(
@@ -290,11 +290,19 @@ private struct GitDiffDetailView: View {
                 ProgressView("Loading selected file…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let message = viewModel.errorMessage {
-                ContentUnavailableView("Unable to load diff", systemImage: "exclamationmark.triangle", description: Text(message))
+                GitDiffEmptyState(
+                    title: "Unable to load diff",
+                    systemImage: "exclamationmark.triangle",
+                    message: message
+                )
             } else if let document = viewModel.document {
                 GitDiffTextView(text: document.text)
             } else {
-                ContentUnavailableView("Select a file", systemImage: "doc.text.magnifyingglass")
+                GitDiffEmptyState(
+                    title: "Select a file",
+                    systemImage: "doc.text.magnifyingglass",
+                    message: nil
+                )
             }
         }
     }
@@ -306,6 +314,31 @@ private struct GitDiffDetailView: View {
         case .renamed, .copied: .orange
         default: .secondary
         }
+    }
+}
+
+private struct GitDiffEmptyState: View {
+    let title: String
+    let systemImage: String
+    let message: String?
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: systemImage)
+                .font(.system(size: 28))
+                .foregroundStyle(.secondary)
+            Text(title)
+                .font(.headline)
+            if let message {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 20)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(20)
     }
 }
 
@@ -346,23 +379,35 @@ private struct GitDiffTextView: NSViewRepresentable {
     }
 }
 
-private enum GitDiffTextRenderer {
+enum GitDiffTextRenderer {
     static func render(_ text: String) -> NSAttributedString {
-        let result = NSMutableAttributedString()
+        let result = NSMutableAttributedString(string: "")
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         var oldLine = 0
         var newLine = 0
+        var inHunk = false
 
         for (index, line) in lines.enumerated() {
-            if line.hasPrefix("@@") { updateLineNumbers(from: line, old: &oldLine, new: &newLine) }
-            let isAdded = line.hasPrefix("+") && !line.hasPrefix("+++")
-            let isDeleted = line.hasPrefix("-") && !line.hasPrefix("---")
+            if line.hasPrefix("diff ") { inHunk = false }
             let isHunk = line.hasPrefix("@@")
-            let isHeader = line.hasPrefix("diff ") || line.hasPrefix("index ") || line.hasPrefix("---") || line.hasPrefix("+++")
+            if isHunk {
+                updateLineNumbers(from: line, old: &oldLine, new: &newLine)
+                inHunk = true
+            }
+            let isMetadata = !inHunk && (
+                line.hasPrefix("diff ") ||
+                line.hasPrefix("index ") ||
+                line.hasPrefix("---") ||
+                line.hasPrefix("+++") ||
+                line.hasPrefix("Binary files ")
+            )
+            let isAdded = inHunk && line.hasPrefix("+")
+            let isDeleted = inHunk && line.hasPrefix("-")
+            let hasLineNumber = inHunk && !isHunk && !isMetadata && !line.hasPrefix("\\")
 
-            let oldNumber = isAdded || isHunk ? nil : oldLine
-            let newNumber = isDeleted || isHunk ? nil : newLine
-            if isAdded { newLine += 1 } else if isDeleted { oldLine += 1 } else if !isHunk && !isHeader && !line.hasPrefix("\\") { oldLine += 1; newLine += 1 }
+            let oldNumber = hasLineNumber && !isAdded && !isHunk ? oldLine : nil
+            let newNumber = hasLineNumber && !isDeleted && !isHunk ? newLine : nil
+            if isAdded { newLine += 1 } else if isDeleted { oldLine += 1 } else if !isHunk && !isMetadata && !line.hasPrefix("\\") { oldLine += 1; newLine += 1 }
 
             let prefix = "\(number(oldNumber)) \(number(newNumber)) │ "
             let output = prefix + line + (index + 1 < lines.count ? "\n" : "")

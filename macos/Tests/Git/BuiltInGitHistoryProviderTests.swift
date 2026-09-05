@@ -49,6 +49,7 @@ struct BuiltInGitHistoryProviderTests {
         for _ in 0..<40 {
             if case .git(let content) = registry.content(for: BuiltInGitInspectorProvider.paneID, context: context),
                let commit = content.history.commits.first {
+                #expect(content.history.scope == .allBranches)
                 selectedID = commit.id
                 break
             }

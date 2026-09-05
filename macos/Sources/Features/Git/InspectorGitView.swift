@@ -46,7 +46,7 @@ struct InspectorGitView: View {
                     systemImage: "network",
                     title: "Remote Git (\(host))",
                     subtitle: directory.isEmpty ? host : directory,
-                    hint: "SSH remote Git inspection will be enabled in task #13."
+                    hint: "Remote Git inspection is not available yet."
                 )
 
             case .error(let title, let message):
@@ -159,18 +159,28 @@ struct InspectorGitView: View {
 
     private func historyView(headCommitID: String?) -> some View {
         VStack(spacing: 8) {
-            Picker(
-                "History scope",
-                selection: Binding(
-                    get: { content.history.scope },
-                    set: { perform(.gitAction(.selectHistoryScope($0))) }
-                )
-            ) {
-                ForEach(GitHistoryScope.allCases, id: \.self) { scope in
-                    Text(scope.displayName).tag(scope)
+            HStack(spacing: 8) {
+                Picker(
+                    "History scope",
+                    selection: Binding(
+                        get: { content.history.scope },
+                        set: { perform(.gitAction(.selectHistoryScope($0))) }
+                    )
+                ) {
+                    ForEach(GitHistoryScope.allCases, id: \.self) { scope in
+                        Text(scope.displayName).tag(scope)
+                    }
                 }
+                .pickerStyle(.segmented)
+
+                Button {
+                    perform(.gitAction(.sendHistoryToTerminal(nil)))
+                } label: {
+                    Image(systemName: "terminal")
+                }
+                .buttonStyle(.borderless)
+                .help("Enter Git history command in terminal")
             }
-            .pickerStyle(.segmented)
             .padding(.horizontal, 12)
 
             if content.history.commits.isEmpty && !content.history.isLoading {
@@ -189,7 +199,10 @@ struct InspectorGitView: View {
                     commits: content.history.commits,
                     selectedCommitID: content.history.selectedCommitID,
                     onSelect: { perform(.gitAction(.selectCommit($0))) },
-                    onOpen: { perform(.gitAction(.openCommit($0))) }
+                    onOpen: { perform(.gitAction(.openCommit($0))) },
+                    onShowInTerminal: {
+                        perform(.gitAction(.sendHistoryToTerminal($0)))
+                    }
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }

@@ -98,7 +98,9 @@ struct GitHistoryService: Sendable {
 
         if let headID {
             if let branchName {
-                decorations[headID]?.removeAll { $0.name == branchName }
+                decorations[headID]?.removeAll {
+                    $0.name == branchName && $0.kind == .localBranch
+                }
                 decorations[headID, default: []].append(
                     GitRefDecoration(name: branchName, kind: .currentBranch)
                 )
@@ -127,7 +129,12 @@ struct GitHistoryService: Sendable {
         var seen = Set<GitCommitID>()
         tipIDs = tipIDs.filter { seen.insert($0).inserted }
         for key in decorations.keys {
-            decorations[key]?.sort { $0.name < $1.name }
+            decorations[key]?.sort {
+                if $0.name == $1.name {
+                    return $0.kind.rawValue < $1.kind.rawValue
+                }
+                return $0.name < $1.name
+            }
         }
 
         return GitHistorySnapshot(

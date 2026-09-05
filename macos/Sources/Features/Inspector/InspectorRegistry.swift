@@ -98,6 +98,7 @@ enum InspectorGitAction: Equatable, Sendable {
     case loadMoreHistory
     case selectCommit(GitCommitID)
     case openCommit(GitCommitID)
+    case sendHistoryToTerminal(GitCommitID?)
 }
 
 struct InspectorGitContent: Equatable, Sendable {

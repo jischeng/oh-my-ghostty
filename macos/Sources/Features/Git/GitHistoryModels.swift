@@ -80,7 +80,7 @@ struct InspectorGitHistoryContent: Equatable, Sendable {
     let snapshot: GitHistorySnapshot?
 
     init(
-        scope: GitHistoryScope = .currentBranch,
+        scope: GitHistoryScope = .allBranches,
         commits: [GitHistoryCommit] = [],
         selectedCommitID: GitCommitID? = nil,
         hasMore: Bool = false,

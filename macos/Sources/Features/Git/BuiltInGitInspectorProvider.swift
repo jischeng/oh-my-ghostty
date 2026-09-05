@@ -16,13 +16,14 @@ final class BuiltInGitInspectorProvider {
         var activeTab: InspectorGitContent.ActiveTab = .history
         var commitDraft: String = ""
         var selectedCommitID: GitCommitID?
-        var historyScope: GitHistoryScope = .currentBranch
+        var historyScope: GitHistoryScope = .allBranches
         var history: InspectorGitHistoryContent = InspectorGitHistoryContent()
     }
 
     private let registry: InspectorRegistry
     private let repositoryService: GitRepositoryService
     private let historyService: GitHistoryService
+    private let terminalBridge: GitTerminalBridge
     private var presentedContexts: [UUID: InspectorPaneContext] = [:]
     private var loadTasks: [UUID: Task<Void, Never>] = [:]
     private var generations: [UUID: UInt64] = [:]
@@ -30,10 +31,16 @@ final class BuiltInGitInspectorProvider {
     private var lastPublishedContent: [UUID: InspectorGitContent] = [:]
     private var pollTimer: Timer?
 
-    init(registry: InspectorRegistry, repositoryService: GitRepositoryService = GitRepositoryService(), historyService: GitHistoryService? = nil) {
+    init(
+        registry: InspectorRegistry,
+        repositoryService: GitRepositoryService = GitRepositoryService(),
+        historyService: GitHistoryService? = nil,
+        terminalBridge: GitTerminalBridge? = nil
+    ) {
         self.registry = registry
         self.repositoryService = repositoryService
         self.historyService = historyService ?? GitHistoryService()
+        self.terminalBridge = terminalBridge ?? GitTerminalBridge()
     }
 
     func register() throws {
@@ -75,7 +82,31 @@ final class BuiltInGitInspectorProvider {
             state.history = InspectorGitHistoryContent(scope: state.history.scope, commits: state.history.commits, selectedCommitID: commitID, hasMore: state.history.hasMore, isLoading: state.history.isLoading, statusMessage: state.history.statusMessage, snapshot: state.history.snapshot)
             save(state, tabID: action.context.tabID, worktreeKey: key)
             if let current = lastPublishedContent[action.context.tabID] { publish(makeContent(from: current, history: state.history), tabID: action.context.tabID) }
-        case .openCommit(let commitID): handle(InspectorPaneAction(context: action.context, kind: .gitAction(.selectCommit(commitID))))
+        case .openCommit(let commitID):
+            guard let content = lastPublishedContent[action.context.tabID],
+                  let repository = content.repository,
+                  content.history.commits.contains(where: { $0.id == commitID }) else {
+                return
+            }
+            GitDetailWindowController.open(
+                repository: repository,
+                target: .commit(commitID),
+                tabID: action.context.tabID
+            )
+
+        case .sendHistoryToTerminal(let commitID):
+            guard let content = lastPublishedContent[action.context.tabID],
+                  let repository = content.repository else { return }
+            let intent: GitTerminalCommandIntent
+            if let commitID {
+                guard content.history.commits.contains(where: { $0.id == commitID }) else {
+                    return
+                }
+                intent = .show(repository: repository, commit: commitID)
+            } else {
+                intent = .log(repository: repository)
+            }
+            _ = terminalBridge.dispatch(intent, in: action.context)
         }
     }
 
@@ -100,7 +131,7 @@ final class BuiltInGitInspectorProvider {
             var state = self.state(for: context.tabID, worktreeKey: resolvedKey)
             var history = state.history
             if history.scope != state.historyScope { history = InspectorGitHistoryContent(scope: state.historyScope) }
-            if let repo, activeTab == .history || force {
+            if let repo, force || (activeTab == .history && history.snapshot == nil) {
                 do {
                     let snapshot = try await self.historyService.captureSnapshot(for: repo, scope: state.historyScope)
                     let page = try await self.historyService.loadPage(snapshot: snapshot, repository: repo, offset: 0)
@@ -109,8 +140,20 @@ final class BuiltInGitInspectorProvider {
                 } catch { history = InspectorGitHistoryContent(scope: state.historyScope, selectedCommitID: state.selectedCommitID, statusMessage: error.localizedDescription) }
             }
             guard !Task.isCancelled, self.generations[context.tabID] == generation else { return }
-            state.history = history; self.save(state, tabID: context.tabID, worktreeKey: resolvedKey); self.loadTasks.removeValue(forKey: context.tabID)
-            self.publish(InspectorGitContent(repository: repo, branch: status.headDescription, status: status, activeTab: state.activeTab, history: history), tabID: context.tabID)
+            var latestState = self.state(for: context.tabID, worktreeKey: resolvedKey)
+            history = InspectorGitHistoryContent(
+                scope: latestState.historyScope,
+                commits: history.commits,
+                selectedCommitID: latestState.selectedCommitID,
+                hasMore: history.hasMore,
+                isLoading: false,
+                statusMessage: history.statusMessage,
+                snapshot: history.snapshot
+            )
+            latestState.history = history
+            self.save(latestState, tabID: context.tabID, worktreeKey: resolvedKey)
+            self.loadTasks.removeValue(forKey: context.tabID)
+            self.publish(InspectorGitContent(repository: repo, branch: status.headDescription, status: status, activeTab: latestState.activeTab, history: history), tabID: context.tabID)
         }
     }
 
@@ -175,9 +218,7 @@ final class BuiltInGitInspectorProvider {
                     guard !Task.isCancelled, self.generations[tabID] == generation else {
                         return
                     }
-                    refsChanged = latest.tipCommitIDs != snapshot.tipCommitIDs ||
-                        latest.headCommitID != snapshot.headCommitID ||
-                        latest.branchName != snapshot.branchName
+                    refsChanged = latest != snapshot
                 }
                 self.loadTasks.removeValue(forKey: tabID)
                 if refsChanged {

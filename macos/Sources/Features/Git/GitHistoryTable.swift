@@ -6,9 +6,14 @@ struct GitHistoryTable: NSViewRepresentable {
     let selectedCommitID: GitCommitID?
     let onSelect: (GitCommitID) -> Void
     let onOpen: (GitCommitID) -> Void
+    let onShowInTerminal: (GitCommitID) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onSelect: onSelect, onOpen: onOpen)
+        Coordinator(
+            onSelect: onSelect,
+            onOpen: onOpen,
+            onShowInTerminal: onShowInTerminal
+        )
     }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -31,13 +36,15 @@ struct GitHistoryTable: NSViewRepresentable {
         table.delegate = context.coordinator
         table.target = context.coordinator
         table.doubleAction = #selector(Coordinator.openSelectedCommit)
+        table.menu = context.coordinator.makeContextMenu()
         scrollView.documentView = table
         context.coordinator.tableView = table
         context.coordinator.update(
             commits: commits,
             selectedCommitID: selectedCommitID,
             onSelect: onSelect,
-            onOpen: onOpen
+            onOpen: onOpen,
+            onShowInTerminal: onShowInTerminal
         )
         return scrollView
     }
@@ -47,7 +54,8 @@ struct GitHistoryTable: NSViewRepresentable {
             commits: commits,
             selectedCommitID: selectedCommitID,
             onSelect: onSelect,
-            onOpen: onOpen
+            onOpen: onOpen,
+            onShowInTerminal: onShowInTerminal
         )
     }
 
@@ -58,6 +66,7 @@ struct GitHistoryTable: NSViewRepresentable {
         private var selectedCommitID: GitCommitID?
         private var onSelect: (GitCommitID) -> Void
         private var onOpen: (GitCommitID) -> Void
+        private var onShowInTerminal: (GitCommitID) -> Void
         private let dateFormatter: ISO8601DateFormatter = {
             let formatter = ISO8601DateFormatter()
             formatter.formatOptions = [.withInternetDateTime, .withDashSeparatorInDate]
@@ -66,17 +75,20 @@ struct GitHistoryTable: NSViewRepresentable {
 
         init(
             onSelect: @escaping (GitCommitID) -> Void,
-            onOpen: @escaping (GitCommitID) -> Void
+            onOpen: @escaping (GitCommitID) -> Void,
+            onShowInTerminal: @escaping (GitCommitID) -> Void
         ) {
             self.onSelect = onSelect
             self.onOpen = onOpen
+            self.onShowInTerminal = onShowInTerminal
         }
 
         func update(
             commits: [GitHistoryCommit],
             selectedCommitID: GitCommitID?,
             onSelect: @escaping (GitCommitID) -> Void,
-            onOpen: @escaping (GitCommitID) -> Void
+            onOpen: @escaping (GitCommitID) -> Void,
+            onShowInTerminal: @escaping (GitCommitID) -> Void
         ) {
             let changed = self.commits != commits || self.selectedCommitID != selectedCommitID
             self.commits = commits
@@ -89,6 +101,7 @@ struct GitHistoryTable: NSViewRepresentable {
             self.selectedCommitID = selectedCommitID
             self.onSelect = onSelect
             self.onOpen = onOpen
+            self.onShowInTerminal = onShowInTerminal
             guard changed, let tableView else { return }
             tableView.reloadData()
             if let selectedCommitID, let row = commits.firstIndex(where: { $0.id == selectedCommitID }) {
@@ -119,10 +132,41 @@ struct GitHistoryTable: NSViewRepresentable {
         }
 
         @objc func openSelectedCommit() {
-            guard let tableView,
-                  tableView.clickedRow >= 0,
-                  commits.indices.contains(tableView.clickedRow) else { return }
-            onOpen(commits[tableView.clickedRow].id)
+            guard let commitID = clickedCommitID else { return }
+            onOpen(commitID)
+        }
+
+        @objc private func showSelectedCommitInTerminal() {
+            guard let commitID = clickedCommitID else { return }
+            onShowInTerminal(commitID)
+        }
+
+        func makeContextMenu() -> NSMenu {
+            let menu = NSMenu()
+            let open = NSMenuItem(
+                title: "Open Commit Details",
+                action: #selector(openSelectedCommit),
+                keyEquivalent: ""
+            )
+            open.target = self
+            menu.addItem(open)
+            let terminal = NSMenuItem(
+                title: "Show in Terminal",
+                action: #selector(showSelectedCommitInTerminal),
+                keyEquivalent: ""
+            )
+            terminal.target = self
+            menu.addItem(terminal)
+            return menu
+        }
+
+        private var clickedCommitID: GitCommitID? {
+            guard let tableView else { return nil }
+            let row = tableView.clickedRow >= 0
+                ? tableView.clickedRow
+                : tableView.selectedRow
+            guard commits.indices.contains(row) else { return nil }
+            return commits[row].id
         }
     }
 }

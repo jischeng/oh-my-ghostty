@@ -923,7 +923,7 @@ status CLI. Terminal control and raw output remain high-risk and default-deny.
 These notes are planning context only. They must not be used by plugins until
 implementation, tests, and a stability designation land.
 
-## Built-in Git diff detail window (Task #8)
+## Built-in Git diff detail window
 
 The built-in Git diff surface is host-owned Swift code. `GitDiffService` first
 lists paths for a `GitDiffTarget` (`commit`, `staged`, or `unstaged`) and only

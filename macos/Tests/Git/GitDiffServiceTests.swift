@@ -19,6 +19,16 @@ struct GitDiffServiceTests {
         )
         #expect(list.baseDescription == "empty tree")
         #expect(list.files.map(\.path) == [path])
+        let metadata = try await service.loadCommitMetadata(
+            for: GitCommitID(commit),
+            repository: repository
+        )
+        #expect(metadata.commitID.rawValue == commit)
+        #expect(metadata.authorName == "Git Diff Test")
+        #expect(metadata.authorDescription == "Git Diff Test <git-diff@example.com>")
+        #expect(metadata.authoredAt.contains("T"))
+        #expect(metadata.parents.isEmpty)
+        #expect(metadata.message == "root")
         let document = try await service.loadDiff(
             for: list.files[0],
             repository: repository,
@@ -90,6 +100,12 @@ struct GitDiffServiceTests {
             for: repository,
             target: .commit(GitCommitID(mergeCommit))
         )
+        let metadata = try await GitDiffService().loadCommitMetadata(
+            for: GitCommitID(mergeCommit),
+            repository: repository
+        )
+        #expect(metadata.parents.count == 2)
+        #expect(metadata.message == "merge")
         let rename = try #require(list.files.first(where: { $0.kind == .renamed }))
         #expect(rename.oldPath == "old name.txt")
         #expect(rename.path == "new name.txt")

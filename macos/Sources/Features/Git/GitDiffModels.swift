@@ -85,6 +85,24 @@ struct GitDiffFileList: Hashable, Sendable, Equatable {
     let baseDescription: String
 }
 
+struct GitCommitMetadata: Hashable, Sendable, Equatable {
+    let commitID: GitCommitID
+    let authorName: String
+    let authorEmail: String?
+    let authoredAt: String
+    let parents: [GitCommitID]
+    let message: String
+
+    var subject: String {
+        message.split(whereSeparator: { $0.isNewline }).first.map(String.init) ?? "(no commit message)"
+    }
+
+    var authorDescription: String {
+        guard let authorEmail, !authorEmail.isEmpty else { return authorName }
+        return "\(authorName) <\(authorEmail)>"
+    }
+}
+
 struct GitDiffDocument: Hashable, Sendable, Equatable {
     let file: GitDiffFile
     let text: String

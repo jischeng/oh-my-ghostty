@@ -92,6 +92,7 @@ private final class GitDiffDetailViewModel: ObservableObject {
     @Published private(set) var isLoadingDiff = false
     @Published private(set) var errorMessage: String?
     @Published private(set) var baseDescription = ""
+    @Published private(set) var commitMetadata: GitCommitMetadata?
 
     private let service: GitDiffService
     private var filesTask: Task<Void, Never>?
@@ -113,6 +114,7 @@ private final class GitDiffDetailViewModel: ObservableObject {
         files = []
         selectedFileID = nil
         document = nil
+        commitMetadata = nil
         reload()
     }
 
@@ -127,8 +129,16 @@ private final class GitDiffDetailViewModel: ObservableObject {
             do {
                 let list = try await service.listFiles(for: repository, target: target)
                 guard !Task.isCancelled else { return }
+                let metadata: GitCommitMetadata? = switch target {
+                case .commit(let commit):
+                    try await service.loadCommitMetadata(for: commit, repository: repository)
+                case .staged, .unstaged:
+                    nil
+                }
+                guard !Task.isCancelled else { return }
                 files = list.files
                 baseDescription = list.baseDescription
+                commitMetadata = metadata
                 isLoadingFiles = false
                 if let selectedFileID, let selected = files.first(where: { $0.id == selectedFileID }) {
                     select(selected)
@@ -187,13 +197,59 @@ private struct GitDiffDetailView: View {
     @ObservedObject var viewModel: GitDiffDetailViewModel
 
     var body: some View {
-        HSplitView {
-            fileList
-                .frame(minWidth: 220, idealWidth: 290, maxWidth: 420)
-            detail
-                .frame(minWidth: 420)
+        VStack(spacing: 0) {
+            commitMetadataView
+            HSplitView {
+                fileList
+                    .frame(minWidth: 220, idealWidth: 290, maxWidth: 420)
+                detail
+                    .frame(minWidth: 420)
+            }
         }
         .frame(minWidth: 680, minHeight: 360)
+    }
+
+    @ViewBuilder
+    private var commitMetadataView: some View {
+        if let metadata = viewModel.commitMetadata {
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(metadata.subject)
+                        .font(.system(size: 14, weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer(minLength: 8)
+                    Text(metadata.commitID.shortSHA)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                HStack(spacing: 10) {
+                    Label(metadata.authorDescription, systemImage: "person")
+                    Label(metadata.authoredAt, systemImage: "calendar")
+                    if !metadata.parents.isEmpty {
+                        Label(
+                            "Parents: \(metadata.parents.map(\.shortSHA).joined(separator: ", "))",
+                            systemImage: "arrow.turn.up.left"
+                        )
+                    } else {
+                        Label("Root commit", systemImage: "sparkles")
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                ScrollView(.vertical) {
+                    Text(metadata.message)
+                        .font(.system(size: 12, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 96)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            Divider()
+        }
     }
 
     private var fileList: some View {

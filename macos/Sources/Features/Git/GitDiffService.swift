@@ -72,6 +72,45 @@ struct GitDiffService: Sendable {
         }
     }
 
+    /// Loads commit metadata once for the detail window. File diffs do not call this method.
+    func loadCommitMetadata(
+        for commit: GitCommitID,
+        repository: GitRepositoryIdentity
+    ) async throws -> GitCommitMetadata {
+        let result = try await executor.execute(
+            arguments: [
+                "show", "--no-ext-diff", "--no-color", "--no-patch",
+                "--format=%H%x00%an%x00%ae%x00%aI%x00%P%x00%B%x00",
+                commit.rawValue,
+            ],
+            workingDirectory: repository.worktreePath,
+            stdin: nil,
+            maxOutputBytes: 128 * 1024
+        )
+        guard result.isSuccess else {
+            throw GitDiffServiceError.invalidCommit(commit)
+        }
+        let fields = result.stdout
+            .split(separator: 0, omittingEmptySubsequences: false)
+            .map { String(bytes: $0, encoding: .utf8) ?? "" }
+        guard fields.count >= 6,
+              !fields[0].isEmpty,
+              !fields[3].isEmpty else {
+            throw GitDiffServiceError.gitFailed("Git returned incomplete commit metadata.")
+        }
+        let parents = fields[4]
+            .split(whereSeparator: { $0.isWhitespace })
+            .map { GitCommitID(String($0)) }
+        return GitCommitMetadata(
+            commitID: GitCommitID(fields[0]),
+            authorName: fields[1],
+            authorEmail: fields[2].isEmpty ? nil : fields[2],
+            authoredAt: fields[3],
+            parents: parents,
+            message: fields[5].trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
     /// Reads one file only after the caller has selected it in the file list.
     func loadDiff(
         for file: GitDiffFile,

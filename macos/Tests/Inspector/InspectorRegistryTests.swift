@@ -268,7 +268,10 @@ struct InspectorRegistryTests {
         )
 
         let registry = InspectorRegistry()
-        let provider = BuiltInFilesInspectorProvider(registry: registry)
+        let provider = BuiltInFilesInspectorProvider(
+            registry: registry,
+            openFile: { _, _ in }
+        )
         try provider.register()
         let context = InspectorPaneContext(
             tabID: UUID(),
@@ -503,6 +506,75 @@ struct InspectorRegistryTests {
         #expect(registry.isEmpty)
     }
 
+    @Test func builtInFilesOpenFileActionCallsInjectedHandler() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sources = root.appendingPathComponent("Sources")
+        try FileManager.default.createDirectory(
+            at: sources,
+            withIntermediateDirectories: true
+        )
+        let readme = root.appendingPathComponent("README.md")
+        try "demo".write(to: readme, atomically: true, encoding: .utf8)
+
+        let registry = InspectorRegistry()
+        var openedPaths: [String] = []
+        var openedContexts: [InspectorPaneContext] = []
+        let provider = BuiltInFilesInspectorProvider(
+            registry: registry,
+            openFile: { path, context in
+                openedPaths.append(path)
+                openedContexts.append(context)
+            }
+        )
+        try provider.register()
+        let context = InspectorPaneContext(
+            tabID: UUID(),
+            surfaceID: UUID(),
+            title: "Files",
+            workingDirectory: root.path
+        )
+        registry.presentationDidChange(
+            to: BuiltInFilesInspectorProvider.paneID,
+            context: context
+        )
+
+        var content: InspectorPaneContent?
+        for _ in 0..<20 {
+            content = registry.content(
+                for: BuiltInFilesInspectorProvider.paneID,
+                context: context
+            )
+            if case .fileTree = content { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        guard case .fileTree(let tree) = content,
+              let directory = tree.nodes.first(where: { $0.name == "Sources" }),
+              let file = tree.nodes.first(where: { $0.name == "README.md" }) else {
+            Issue.record("Expected Files tree with directory and file nodes")
+            return
+        }
+
+        registry.performAction(
+            paneID: BuiltInFilesInspectorProvider.paneID,
+            action: .init(context: context, kind: .openFile(path: directory.id))
+        )
+        registry.performAction(
+            paneID: BuiltInFilesInspectorProvider.paneID,
+            action: .init(context: context, kind: .openFile(path: "\(root.path)/missing.md"))
+        )
+        #expect(openedPaths.isEmpty)
+
+        registry.performAction(
+            paneID: BuiltInFilesInspectorProvider.paneID,
+            action: .init(context: context, kind: .openFile(path: file.id))
+        )
+
+        #expect(openedPaths == [file.id])
+        #expect(openedContexts == [context])
+    }
+
     @Test func repeatedDeepExpansionRemainsBoundedAndResponsive() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
@@ -526,7 +598,10 @@ struct InspectorRegistryTests {
         }
 
         let registry = InspectorRegistry()
-        let provider = BuiltInFilesInspectorProvider(registry: registry)
+        let provider = BuiltInFilesInspectorProvider(
+            registry: registry,
+            openFile: { _, _ in }
+        )
         try provider.register()
         let context = InspectorPaneContext(
             tabID: UUID(),
@@ -611,7 +686,8 @@ struct InspectorRegistryTests {
                 return LocalWorkspaceFilesystem(
                     workingDirectory: context.workingDirectory ?? "/"
                 )
-            }
+            },
+            openFile: { _, _ in }
         )
         try provider.register()
         let tabID = UUID()
@@ -693,7 +769,8 @@ struct InspectorRegistryTests {
         let registry = InspectorRegistry()
         let provider = BuiltInFilesInspectorProvider(
             registry: registry,
-            filesystemFactory: { _ in filesystem }
+            filesystemFactory: { _ in filesystem },
+            openFile: { _, _ in }
         )
         try provider.register()
         let context = InspectorPaneContext(
@@ -742,7 +819,8 @@ struct InspectorRegistryTests {
         let registry = InspectorRegistry()
         let provider = BuiltInFilesInspectorProvider(
             registry: registry,
-            filesystemFactory: { _ in filesystem }
+            filesystemFactory: { _ in filesystem },
+            openFile: { _, _ in }
         )
         try provider.register()
         let tabID = UUID()

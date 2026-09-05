@@ -137,6 +137,7 @@ struct InspectorGitContent: Equatable, Sendable {
 
 enum InspectorPaneActionKind: Equatable, Sendable {
     case toggleNode(id: String, expanded: Bool)
+    case openFile(path: String)
     case refresh
     case collapseAll
     case createFile(name: String)

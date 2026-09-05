@@ -14,6 +14,7 @@
 		819324642F24FF2100A9ED8F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A5B30538299BEAAB0047F10C /* Assets.xcassets */; };
 		8F3A9B4C2FA6B88000A18D13 /* Ghostty.sdef in Resources */ = {isa = PBXBuildFile; fileRef = 8F3A9B4B2FA6B88000A18D13 /* Ghostty.sdef */; };
 		9351BE8E3D22937F003B3499 /* nvim in Resources */ = {isa = PBXBuildFile; fileRef = 9351BE8E2D22937F003B3499 /* nvim */; };
+		9A0ED1702F5B000100C0DE01 /* CodeEditSourceEditor in Frameworks */ = {isa = PBXBuildFile; productRef = 9A0ED1722F5B000100C0DE01 /* CodeEditSourceEditor */; };
 		A51BFC272B30F1B800E92F16 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = A51BFC262B30F1B800E92F16 /* Sparkle */; };
 		A546F1142D7B68D7003B11A0 /* locale in Resources */ = {isa = PBXBuildFile; fileRef = A546F1132D7B68D7003B11A0 /* locale */; };
 		A56B880B2A840447007A0E29 /* Carbon.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A56B880A2A840447007A0E29 /* Carbon.framework */; };
@@ -147,6 +148,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				9A0ED1702F5B000100C0DE01 /* CodeEditSourceEditor in Frameworks */,
 				A51BFC272B30F1B800E92F16 /* Sparkle in Frameworks */,
 				A56B880B2A840447007A0E29 /* Carbon.framework in Frameworks */,
 				A571AB1D2A206FCF00248498 /* GhosttyKit.xcframework in Frameworks */,
@@ -299,6 +301,7 @@
 			);
 			name = Ghostty;
 			packageProductDependencies = (
+				9A0ED1722F5B000100C0DE01 /* CodeEditSourceEditor */,
 				A51BFC262B30F1B800E92F16 /* Sparkle */,
 			);
 			productName = OMG;
@@ -342,6 +345,7 @@
 			);
 			mainGroup = A5B30528299BEAAA0047F10C;
 			packageReferences = (
+				9A0ED1712F5B000100C0DE01 /* XCRemoteSwiftPackageReference "CodeEditSourceEditor" */,
 				A51BFC252B30F1B700E92F16 /* XCRemoteSwiftPackageReference "Sparkle" */,
 			);
 			productRefGroup = A5B30532299BEAAA0047F10C /* Products */;
@@ -1094,6 +1098,14 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		9A0ED1712F5B000100C0DE01 /* XCRemoteSwiftPackageReference "CodeEditSourceEditor" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/CodeEditApp/CodeEditSourceEditor.git";
+			requirement = {
+				kind = exactVersion;
+				version = 0.9.1;
+			};
+		};
 		A51BFC252B30F1B700E92F16 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/sparkle-project/Sparkle";
@@ -1105,6 +1117,11 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		9A0ED1722F5B000100C0DE01 /* CodeEditSourceEditor */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 9A0ED1712F5B000100C0DE01 /* XCRemoteSwiftPackageReference "CodeEditSourceEditor" */;
+			productName = CodeEditSourceEditor;
+		};
 		A51BFC262B30F1B800E92F16 /* Sparkle */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = A51BFC252B30F1B700E92F16 /* XCRemoteSwiftPackageReference "Sparkle" */;

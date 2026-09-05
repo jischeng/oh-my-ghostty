@@ -127,6 +127,14 @@ in-tree provider
 owner checks and typed content. It is still trusted application code, not an
 out-of-process plugin and not proof of public plugin loading.
 
+Files actions stay data-only. Directory rows toggle disclosure through typed
+actions, while file rows only request an editor open on explicit double-click or
+the row context menu's `Open in Editor` command. The provider validates that the
+path belongs to the current published file tree and is not a directory, then
+calls the host-injected `OpenFileHandler` with the absolute path and the current
+`InspectorPaneContext`, preserving local versus SSH session context for the
+editor controller. Single-click selection does not open files.
+
 ## Manifest model (Experimental)
 
 `PluginManifest` is `Codable` and currently contains:
@@ -451,7 +459,16 @@ implementation used by the Files provider. `SSHPlugin` reads non-wildcard
 aliases from the user's `~/.ssh/config` without owning private keys, passwords,
 known_hosts, ProxyJump, or ssh-agent state. `SSHWorkspaceFilesystem` uses the
 system `/usr/bin/sftp` client and the user's OpenSSH configuration for bounded
-remote directory operations and file/folder creation.
+remote directory operations, file/folder creation, and editor file transfers.
+
+The internal `readFile(at:)` and `writeFile(_:at:replacing:)` operations power
+the same editor document model for local files and SSH files. Reads accept
+text files up to 10 MiB; SSH checks the downloaded temporary file before
+loading it into memory. Saves compare the last-read bytes before writing and
+report external changes instead of silently overwriting them. Local saves
+replace the resolved target atomically and preserve its POSIX permissions;
+SSH saves reuse SFTP get/put and require an already usable OpenSSH connection.
+These are internal host operations, not new extension wire capabilities.
 
 Tab presentation is a zero-I/O consumer of this boundary: remote folder names
 are derived with pure POSIX string handling, and `WorkspaceDescriptor` identity

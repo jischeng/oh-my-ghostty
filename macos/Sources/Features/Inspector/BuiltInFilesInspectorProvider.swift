@@ -9,6 +9,7 @@ final class BuiltInFilesInspectorProvider {
     )
     static let pluginID = "builtin.files"
     static let paneID = "builtin.files"
+    typealias OpenFileHandler = @MainActor (String, InspectorPaneContext) -> Void
 
     private static let rootTaskID = "__root__"
     private static let loadingTaskID = "__loading__"
@@ -30,16 +31,19 @@ final class BuiltInFilesInspectorProvider {
 
     private let registry: InspectorRegistry
     private let filesystemFactory: (InspectorPaneContext) -> any WorkspaceFilesystem
+    private let openFile: OpenFileHandler
     private var states: [UUID: BrowserState] = [:]
     private var loadTasks: [LoadKey: Task<Void, Never>] = [:]
 
     init(
         registry: InspectorRegistry,
         filesystemFactory: @escaping (InspectorPaneContext) -> any WorkspaceFilesystem =
-            WorkspaceFilesystemFactory.make
+            WorkspaceFilesystemFactory.make,
+        openFile: @escaping OpenFileHandler
     ) {
         self.registry = registry
         self.filesystemFactory = filesystemFactory
+        self.openFile = openFile
     }
 
     func register() throws {
@@ -143,6 +147,15 @@ final class BuiltInFilesInspectorProvider {
                 states[context.tabID] = state
                 publishTree(for: context.tabID)
             }
+
+        case .openFile(let path):
+            guard let tree = state.tree,
+                  let node = Self.findNode(id: path, in: tree.nodes),
+                  !node.isDirectory else {
+                Self.logger.error("Files open ignored missing file=\(path, privacy: .public)")
+                return
+            }
+            openFile(path, state.context)
 
         case .refresh:
             states[context.tabID] = state

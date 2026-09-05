@@ -613,7 +613,9 @@ struct TerminalShellLayoutContainer<Content: View>: View {
                     backgroundColor: backgroundColor,
                     backgroundOpacity: backgroundOpacity
                 ) {
-                    content
+                    EditorWorkspaceHost(controller: controller) {
+                        content
+                    }
                 }
 
                 TerminalSidebarTransitionContainer(
@@ -2096,6 +2098,19 @@ private struct InspectorFileTreeNodeView: View {
             }
             .buttonStyle(.plain)
             .onHover { hovered = $0 }
+            .onTapGesture(count: 2) {
+                guard !node.isDirectory else { return }
+                selectedNodeID = node.id
+                perform(.openFile(path: node.id))
+            }
+            .contextMenu {
+                if !node.isDirectory {
+                    Button("Open in Editor") {
+                        selectedNodeID = node.id
+                        perform(.openFile(path: node.id))
+                    }
+                }
+            }
 
             if node.isExpanded, let children = node.children {
                 VStack(spacing: 0) {

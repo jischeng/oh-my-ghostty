@@ -116,7 +116,9 @@ class AppDelegate: NSObject,
 
     /// Built-in data provider that dogfoods the plugin-owned Inspector contract.
     @MainActor private lazy var builtInFilesInspector =
-        BuiltInFilesInspectorProvider(registry: inspectorRegistry)
+        BuiltInFilesInspectorProvider(registry: inspectorRegistry) { path, context in
+            EditorWorkspaceStore.shared.open(path: path, context: context)
+        }
 
     /// Searchable local Agent session history and exact-resume actions.
     @MainActor private lazy var builtInAgentHistoryInspector =
@@ -427,6 +429,7 @@ class AppDelegate: NSObject,
 
         // Setup our menu
         setupMenuImages()
+        EditorMenuController.shared.install(in: menuNewWindow?.menu)
 
         // Setup signal handlers
         setupSignals()
@@ -485,6 +488,9 @@ class AppDelegate: NSObject,
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard MainActor.assumeIsolated({ EditorWorkspaceStore.shared.prepareToTerminate() }) else {
+            return .terminateCancel
+        }
         let windows = NSApplication.shared.windows
         if windows.isEmpty { return .terminateNow }
 

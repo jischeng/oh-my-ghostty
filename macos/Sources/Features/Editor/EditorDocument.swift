@@ -1,0 +1,184 @@
+import Combine
+import Foundation
+
+enum EditorDocumentError: Error, Equatable, Sendable {
+    case invalidPath
+    case binaryFile
+    case unsupportedEncoding
+    case saveInProgress
+}
+
+extension EditorDocumentError: LocalizedError {
+    var errorDescription: String? {
+        switch self {
+        case .invalidPath: "The file path is invalid."
+        case .binaryFile: "The file contains binary data and cannot be edited as text."
+        case .unsupportedEncoding: "The file is not valid UTF-8 text."
+        case .saveInProgress: "This document is already being saved."
+        }
+    }
+}
+
+struct EditorDocumentID: Hashable, Sendable {
+    enum Endpoint: Hashable, Sendable {
+        case local
+        case ssh(workspaceID: String)
+    }
+
+    let endpoint: Endpoint
+    let path: String
+
+    init(descriptor: WorkspaceDescriptor, path: String) throws {
+        guard path.hasPrefix("/"), !path.contains("\0"), !path.contains("\n") else {
+            throw EditorDocumentError.invalidPath
+        }
+        switch descriptor.kind {
+        case .local:
+            self.endpoint = .local
+        case .ssh:
+            self.endpoint = .ssh(workspaceID: descriptor.id)
+        }
+        var components: [Substring] = []
+        for component in path.split(separator: "/") {
+            if component == "." { continue }
+            if component == ".." {
+                if !components.isEmpty { components.removeLast() }
+            } else {
+                components.append(component)
+            }
+        }
+        self.path = "/" + components.joined(separator: "/")
+    }
+}
+
+struct EditorDocumentEncoding: Equatable, Sendable {
+    enum Newline: String, Sendable {
+        case lineFeed = "\n"
+        case carriageReturnLineFeed = "\r\n"
+        case carriageReturn = "\r"
+    }
+
+    let hasUTF8ByteOrderMark: Bool
+    let newline: Newline
+}
+
+@MainActor
+final class EditorDocument: ObservableObject {
+    let id: EditorDocumentID
+    let filesystem: any WorkspaceFilesystem
+
+    @Published var text: String {
+        didSet {
+            guard text != oldValue else { return }
+            revision &+= 1
+            isDirty = text != persistedText
+        }
+    }
+    @Published private(set) var isDirty: Bool
+    @Published private(set) var isSaving = false
+
+    private let encoding: EditorDocumentEncoding
+    private var persistedText: String
+    private var persistedData: Data
+    private var revision: UInt64 = 0
+
+    var path: String { id.path }
+
+    init(
+        id: EditorDocumentID,
+        text: String,
+        encoding: EditorDocumentEncoding,
+        originalData: Data,
+        filesystem: any WorkspaceFilesystem
+    ) {
+        self.id = id
+        self.text = text
+        self.encoding = encoding
+        self.persistedText = text
+        self.persistedData = originalData
+        self.filesystem = filesystem
+        self.isDirty = false
+    }
+
+    static func open(
+        path: String,
+        filesystem: any WorkspaceFilesystem
+    ) async throws -> EditorDocument {
+        let id = try EditorDocumentID(descriptor: filesystem.descriptor, path: path)
+        let data = try await filesystem.readFile(at: id.path)
+        let decoded = try await Task.detached(priority: .utility) {
+            try Self.decode(data)
+        }.value
+        return EditorDocument(
+            id: id,
+            text: decoded.text,
+            encoding: decoded.encoding,
+            originalData: data,
+            filesystem: filesystem
+        )
+    }
+
+    func save() async throws {
+        guard !isSaving else { throw EditorDocumentError.saveInProgress }
+        guard isDirty else { return }
+        let savedRevision = revision
+        let savedText = text
+        let expectedData = persistedData
+        isSaving = true
+        defer { isSaving = false }
+        let encoding = encoding
+        let data = await Task.detached(priority: .utility) {
+            Self.encode(savedText, encoding: encoding)
+        }.value
+        try await filesystem.writeFile(data, at: path, replacing: expectedData)
+        persistedText = savedText
+        persistedData = data
+        if revision == savedRevision {
+            isDirty = false
+        } else {
+            isDirty = text != persistedText
+        }
+    }
+
+    nonisolated private static func decode(
+        _ data: Data
+    ) throws -> (text: String, encoding: EditorDocumentEncoding) {
+        let bom = Data([0xEF, 0xBB, 0xBF])
+        let hasBOM = data.starts(with: bom)
+        let content = hasBOM ? data.dropFirst(bom.count) : data[...]
+        let containsBinaryControl = content.contains { byte in
+            byte == 0 || byte < 0x08 || (byte > 0x0D && byte < 0x20)
+        }
+        guard !containsBinaryControl else { throw EditorDocumentError.binaryFile }
+        guard let raw = String(data: content, encoding: .utf8) else {
+            throw EditorDocumentError.unsupportedEncoding
+        }
+        let newline: EditorDocumentEncoding.Newline
+        if raw.contains("\r\n") {
+            newline = .carriageReturnLineFeed
+        } else if raw.contains("\r") {
+            newline = .carriageReturn
+        } else {
+            newline = .lineFeed
+        }
+        let normalized = raw
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        return (normalized, .init(hasUTF8ByteOrderMark: hasBOM, newline: newline))
+    }
+
+    nonisolated private static func encode(
+        _ text: String,
+        encoding: EditorDocumentEncoding
+    ) -> Data {
+        let serialized = encoding.newline == .lineFeed
+            ? text
+            : text.replacingOccurrences(of: "\n", with: encoding.newline.rawValue)
+        var data = Data()
+        if encoding.hasUTF8ByteOrderMark {
+            data.append(contentsOf: [0xEF, 0xBB, 0xBF])
+        }
+        data.append(serialized.data(using: .utf8)!)
+        return data
+    }
+}

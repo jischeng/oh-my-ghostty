@@ -1,0 +1,253 @@
+import Foundation
+import Testing
+@testable import Ghostty
+
+struct EditorDocumentTests {
+    @Test @MainActor func savingUnchangedFilePreservesMixedNewlines() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-editor-unchanged-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("mixed.txt")
+        let original = Data("one\r\ntwo\nthree\r".utf8)
+        try original.write(to: file)
+        let document = try await EditorDocument.open(
+            path: file.path,
+            filesystem: LocalWorkspaceFilesystem(workingDirectory: directory.path)
+        )
+        try await document.save()
+        #expect(try Data(contentsOf: file) == original)
+    }
+
+    @Test @MainActor func localFileRoundTripPreservesBOMAndCRLF() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-editor-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("hello.txt")
+        try Data([0xEF, 0xBB, 0xBF] + Array("one\r\ntwo\r\n".utf8)).write(to: file)
+
+        let filesystem = LocalWorkspaceFilesystem(workingDirectory: directory.path)
+        let document = try await EditorDocument.open(path: file.path, filesystem: filesystem)
+        #expect(document.text == "one\ntwo\n")
+        #expect(!document.isDirty)
+
+        document.text += "three\n"
+        #expect(document.isDirty)
+        try await document.save()
+        #expect(!document.isDirty)
+        #expect(try Data(contentsOf: file) == Data(
+            [0xEF, 0xBB, 0xBF] + Array("one\r\ntwo\r\nthree\r\n".utf8)
+        ))
+    }
+
+    @Test @MainActor func rejectsBinaryAndInvalidUTF8Files() async throws {
+        let binary = MemoryEditorFilesystem(data: Data([0x61, 0x00, 0x62]))
+        await #expect(throws: EditorDocumentError.binaryFile) {
+            try await EditorDocument.open(path: "/binary", filesystem: binary)
+        }
+        let invalidUTF8 = MemoryEditorFilesystem(data: Data([0xC3, 0x28]))
+        await #expect(throws: EditorDocumentError.unsupportedEncoding) {
+            try await EditorDocument.open(path: "/invalid", filesystem: invalidUTF8)
+        }
+    }
+
+    @Test @MainActor func rejectsFilesLargerThanEditorLimitBeforeReading() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-editor-size-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("large.txt")
+        #expect(FileManager.default.createFile(atPath: file.path, contents: nil))
+        let handle = try FileHandle(forWritingTo: file)
+        try handle.truncate(atOffset: UInt64(10 * 1_024 * 1_024 + 1))
+        try handle.close()
+
+        await #expect(throws: WorkspaceFilesystemError.fileTooLarge(
+            file.path,
+            10 * 1_024 * 1_024
+        )) {
+            try await EditorDocument.open(
+                path: file.path,
+                filesystem: LocalWorkspaceFilesystem(workingDirectory: directory.path)
+            )
+        }
+    }
+
+    @Test @MainActor func failedSaveKeepsDocumentDirty() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-editor-failure-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let file = directory.appendingPathComponent("removed.txt")
+        try Data("before".utf8).write(to: file)
+        let filesystem = LocalWorkspaceFilesystem(workingDirectory: directory.path)
+        let document = try await EditorDocument.open(path: file.path, filesystem: filesystem)
+        document.text = "after"
+        try FileManager.default.removeItem(at: directory)
+
+        await #expect(throws: Error.self) {
+            try await document.save()
+        }
+        #expect(document.isDirty)
+        #expect(!document.isSaving)
+    }
+
+    @Test @MainActor func editDuringSaveIsNotMarkedCleanOrLost() async throws {
+        let filesystem = SuspendedWriteEditorFilesystem(data: Data("before".utf8))
+        let document = try await EditorDocument.open(path: "/file", filesystem: filesystem)
+        document.text = "first edit"
+
+        let save = Task { try await document.save() }
+        await filesystem.waitUntilWriteStarts()
+        #expect(document.isSaving)
+        await #expect(throws: EditorDocumentError.saveInProgress) {
+            try await document.save()
+        }
+        document.text = "second edit"
+        await filesystem.finishWrite()
+        try await save.value
+
+        #expect(document.text == "second edit")
+        #expect(document.isDirty)
+        #expect(await filesystem.writtenData() == Data("first edit".utf8))
+    }
+
+    @Test @MainActor func dirtyTracksDifferenceFromPersistedText() async throws {
+        let filesystem = MemoryEditorFilesystem(data: Data("original".utf8))
+        let document = try await EditorDocument.open(path: "/file", filesystem: filesystem)
+
+        document.text = "original"
+        #expect(!document.isDirty)
+        document.text = "changed"
+        #expect(document.isDirty)
+        document.text = "original"
+        #expect(!document.isDirty)
+    }
+
+    @Test @MainActor func externalModificationPreventsOverwrite() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-editor-conflict-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("file.txt")
+        try Data("original".utf8).write(to: file)
+        let document = try await EditorDocument.open(
+            path: file.path,
+            filesystem: LocalWorkspaceFilesystem(workingDirectory: directory.path)
+        )
+        document.text = "editor"
+        try Data("external".utf8).write(to: file)
+
+        await #expect(throws: WorkspaceFilesystemError.fileChanged(file.path)) {
+            try await document.save()
+        }
+        #expect(document.isDirty)
+        #expect(try String(contentsOf: file, encoding: .utf8) == "external")
+    }
+
+    @Test @MainActor func localSavePreservesSymlinkAndExecutableMode() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-editor-metadata-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let target = directory.appendingPathComponent("script.sh")
+        let link = directory.appendingPathComponent("script-link.sh")
+        try Data("#!/bin/sh\necho before\n".utf8).write(to: target)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: target.path)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+
+        let document = try await EditorDocument.open(
+            path: link.path,
+            filesystem: LocalWorkspaceFilesystem(workingDirectory: directory.path)
+        )
+        document.text = "#!/bin/sh\necho after\n"
+        try await document.save()
+
+        let linkValues = try link.resourceValues(forKeys: [.isSymbolicLinkKey])
+        let attributes = try FileManager.default.attributesOfItem(atPath: target.path)
+        #expect(linkValues.isSymbolicLink == true)
+        #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o755)
+        #expect(try String(contentsOf: target, encoding: .utf8).contains("echo after"))
+    }
+
+    @Test func identityUsesEndpointAndNormalizedAbsolutePath() throws {
+        let local = WorkspaceDescriptor(
+            kind: .local,
+            id: "local",
+            displayName: "project",
+            workingDirectory: "/tmp/project"
+        )
+        let remote = WorkspaceDescriptor(
+            kind: .ssh,
+            id: "ssh:cloud",
+            displayName: "cloud",
+            workingDirectory: "/tmp/project"
+        )
+        let localID = try EditorDocumentID(descriptor: local, path: "/tmp/./project/file")
+        let remoteID = try EditorDocumentID(descriptor: remote, path: "/tmp/project/file")
+        #expect(localID.path == "/tmp/project/file")
+        #expect(localID != remoteID)
+        #expect(throws: EditorDocumentError.invalidPath) {
+            try EditorDocumentID(descriptor: local, path: "relative/file")
+        }
+    }
+}
+
+private struct MemoryEditorFilesystem: WorkspaceFilesystem {
+    let descriptor = WorkspaceDescriptor(
+        kind: .local,
+        id: "local",
+        displayName: "test",
+        workingDirectory: "/"
+    )
+    let data: Data
+
+    func listDirectory(at path: String) async throws -> [WorkspaceFileEntry] { [] }
+    func createFile(named name: String, in directory: String) async throws {}
+    func createDirectory(named name: String, in directory: String) async throws {}
+    func readFile(at path: String) async throws -> Data { data }
+    func writeFile(_ data: Data, at path: String, replacing expectedData: Data) async throws {}
+}
+
+private actor SuspendedWriteEditorFilesystem: WorkspaceFilesystem {
+    nonisolated let descriptor = WorkspaceDescriptor(
+        kind: .local,
+        id: "local",
+        displayName: "test",
+        workingDirectory: "/"
+    )
+    private let data: Data
+    private var writeStarted = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var writeContinuation: CheckedContinuation<Void, Never>?
+    private var output: Data?
+
+    init(data: Data) {
+        self.data = data
+    }
+
+    func listDirectory(at path: String) async throws -> [WorkspaceFileEntry] { [] }
+    func createFile(named name: String, in directory: String) async throws {}
+    func createDirectory(named name: String, in directory: String) async throws {}
+    func readFile(at path: String) async throws -> Data { data }
+
+    func writeFile(_ data: Data, at path: String, replacing expectedData: Data) async throws {
+        output = data
+        writeStarted = true
+        startWaiters.forEach { $0.resume() }
+        startWaiters.removeAll()
+        await withCheckedContinuation { writeContinuation = $0 }
+    }
+
+    func waitUntilWriteStarts() async {
+        guard !writeStarted else { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    func finishWrite() {
+        writeContinuation?.resume()
+        writeContinuation = nil
+    }
+
+    func writtenData() -> Data? { output }
+}

@@ -1,5 +1,7 @@
 import Foundation
 
+private let editorMaximumFileSize = 10 * 1_024 * 1_024
+
 struct RemoteTabBreadcrumb: Equatable, Sendable {
     let host: String
     let directory: String
@@ -663,6 +665,25 @@ enum WorkspaceFilesystemError: Error, Equatable, Sendable {
     case commandFailed(Int32, String)
     case invalidResponse
     case invalidPath
+    case fileChanged(String)
+    case operationFailed(String)
+    case fileTooLarge(String, Int)
+}
+
+extension WorkspaceFilesystemError: LocalizedError {
+    var errorDescription: String? {
+        switch self {
+        case .unavailable: "The workspace filesystem is unavailable."
+        case .commandFailed(let status, let message):
+            message.isEmpty ? "The filesystem command failed with status \(status)." : message
+        case .invalidResponse: "The workspace returned an invalid response."
+        case .invalidPath: "The file path is invalid."
+        case .fileChanged(let path): "The file changed outside the editor: \(path)"
+        case .operationFailed(let reason): reason
+        case .fileTooLarge(let path, let maximumBytes):
+            "The file is too large to edit: \(path) (maximum \(maximumBytes) bytes)."
+        }
+    }
 }
 
 /// Data-only filesystem boundary consumed by Files UI/providers.
@@ -673,6 +694,18 @@ protocol WorkspaceFilesystem: Sendable {
     func listDirectory(at path: String) async throws -> [WorkspaceFileEntry]
     func createFile(named name: String, in directory: String) async throws
     func createDirectory(named name: String, in directory: String) async throws
+    func readFile(at path: String) async throws -> Data
+    func writeFile(_ data: Data, at path: String, replacing expectedData: Data) async throws
+}
+
+extension WorkspaceFilesystem {
+    func readFile(at path: String) async throws -> Data {
+        throw WorkspaceFilesystemError.unavailable
+    }
+
+    func writeFile(_ data: Data, at path: String, replacing expectedData: Data) async throws {
+        throw WorkspaceFilesystemError.unavailable
+    }
 }
 
 struct LocalWorkspaceFilesystem: WorkspaceFilesystem {
@@ -738,6 +771,53 @@ struct LocalWorkspaceFilesystem: WorkspaceFilesystem {
                 )
             } catch {
                 throw WorkspaceFilesystemError.unavailable
+            }
+        }.value
+    }
+
+    func readFile(at path: String) async throws -> Data {
+        try await Task.detached(priority: .utility) {
+            let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+            do {
+                let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+                let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+                guard size <= UInt64(editorMaximumFileSize) else {
+                    throw WorkspaceFilesystemError.fileTooLarge(path, editorMaximumFileSize)
+                }
+                return try Data(contentsOf: url)
+            } catch let error as WorkspaceFilesystemError {
+                throw error
+            } catch {
+                throw WorkspaceFilesystemError.operationFailed(
+                    "Could not read \(path): \(error.localizedDescription)"
+                )
+            }
+        }.value
+    }
+
+    func writeFile(_ data: Data, at path: String, replacing expectedData: Data) async throws {
+        try await Task.detached(priority: .utility) {
+            let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+            do {
+                let current = try Data(contentsOf: url)
+                guard current == expectedData else {
+                    throw WorkspaceFilesystemError.fileChanged(path)
+                }
+                let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+                let permissions = attributes[.posixPermissions]
+                try data.write(to: url, options: [.atomic])
+                if let permissions {
+                    try FileManager.default.setAttributes(
+                        [.posixPermissions: permissions],
+                        ofItemAtPath: url.path
+                    )
+                }
+            } catch let error as WorkspaceFilesystemError {
+                throw error
+            } catch {
+                throw WorkspaceFilesystemError.operationFailed(
+                    "Could not write \(path): \(error.localizedDescription)"
+                )
             }
         }.value
     }
@@ -1026,6 +1106,39 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
         _ = try await runSFTP(batch: "mkdir \(Self.quote(Self.join(directory, name)))")
     }
 
+    func readFile(at path: String) async throws -> Data {
+        let localURL = Self.temporaryTransferURL()
+        defer { try? FileManager.default.removeItem(at: localURL) }
+        _ = try await runSFTP(batch: "get \(Self.quote(path)) \(Self.quote(localURL.path))")
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: localURL.path)
+            let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+            guard size <= UInt64(editorMaximumFileSize) else {
+                throw WorkspaceFilesystemError.fileTooLarge(path, editorMaximumFileSize)
+            }
+            return try Data(contentsOf: localURL)
+        } catch let error as WorkspaceFilesystemError {
+            throw error
+        } catch {
+            throw WorkspaceFilesystemError.invalidResponse
+        }
+    }
+
+    func writeFile(_ data: Data, at path: String, replacing expectedData: Data) async throws {
+        let current = try await readFile(at: path)
+        guard current == expectedData else {
+            throw WorkspaceFilesystemError.fileChanged(path)
+        }
+        let localURL = Self.temporaryTransferURL()
+        defer { try? FileManager.default.removeItem(at: localURL) }
+        do {
+            try data.write(to: localURL, options: [.atomic])
+        } catch {
+            throw WorkspaceFilesystemError.unavailable
+        }
+        _ = try await runSFTP(batch: "put \(Self.quote(localURL.path)) \(Self.quote(path))")
+    }
+
     private func runSFTP(batch: String) async throws -> String {
         try await SSHSFTPClient.run(batch: batch, host: host.alias)
     }
@@ -1070,5 +1183,10 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
     private static func validChildName(_ name: String) -> Bool {
         !name.isEmpty && name != "." && name != ".." &&
             !name.contains("/") && !name.contains(":")
+    }
+
+    private static func temporaryTransferURL() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-editor-\(UUID().uuidString)")
     }
 }

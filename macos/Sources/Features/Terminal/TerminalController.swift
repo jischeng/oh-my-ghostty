@@ -3167,6 +3167,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     func closeTabImmediately(registerRedo: Bool = true) {
         guard let window = window else { return }
+        guard EditorWorkspaceStore.shared.prepareToClose(tabIDs: [tabSessionID], window: window, retry: { [weak self] in
+            self?.closeTabImmediately(registerRedo: registerRedo)
+        }) else { return }
         guard let tabGroup = window.tabGroup,
                 tabGroup.windows.count > 1 else {
             closeWindowImmediately()
@@ -3292,6 +3295,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// confirmation. This will setup proper undo state so the action can be undone.
     func closeWindowImmediately() {
         guard let window = window else { return }
+        let editorTabIDs = (window.tabGroup?.windows ?? [window]).compactMap {
+            ($0.windowController as? TerminalController)?.tabSessionID
+        }
+        guard EditorWorkspaceStore.shared.prepareToClose(tabIDs: editorTabIDs, window: window, retry: { [weak self] in
+            self?.closeWindowImmediately()
+        }) else { return }
 
         cancelPendingInitialPresentation()
 
@@ -3711,6 +3720,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     override func windowWillClose(_ notification: Notification) {
         super.windowWillClose(notification)
+        EditorWorkspaceStore.shared.remove(tabID: tabSessionID)
         (NSApp.delegate as? AppDelegate)?.tabActivities.removeSession(tabSessionID)
         cancelPendingInitialPresentation()
         self.relabelTabs()

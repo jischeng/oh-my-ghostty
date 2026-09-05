@@ -668,6 +668,15 @@ rejected outside an `sshReady` context. Info/port UI, hover help, empty states,
 connection messages, and normalized Host failures resolve live from
 `general.language` (English or Simplified Chinese).
 
+Git terminal actions carry a `GitRepositoryIdentity` and are formatted as
+`git -C <worktree> ...`, so they remain bound to the inspected worktree even
+when the host process has another current directory. The bridge resolves both
+`InspectorPaneContext.tabID` and `surfaceID` before writing the command to the
+live Surface. It focuses that Surface and calls `sendText` once; it does not
+send an Enter key event. Local intents are accepted only by local sessions,
+and remote intents only by a matching SSH host. Commit messages are shell
+quoted as one argument, preserving spaces, single quotes, and newlines.
+
 Actual in-process lifecycle:
 
 ```text

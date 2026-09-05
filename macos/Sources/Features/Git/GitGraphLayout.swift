@@ -2,9 +2,13 @@ import Foundation
 
 struct GitGraphLayout: Equatable, Sendable {
     private(set) var activeLanes: [GitCommitID]
+    private var activeLaneColorIndices: [Int]
+    private var nextColorIndex: Int
 
     init(activeLanes: [GitCommitID] = []) {
         self.activeLanes = activeLanes
+        self.activeLaneColorIndices = activeLanes.indices.map { $0 % GitGraphRow.paletteSize }
+        self.nextColorIndex = activeLanes.count % GitGraphRow.paletteSize
     }
 
     var activeCommitIDs: [GitCommitID] {
@@ -16,28 +20,41 @@ struct GitGraphLayout: Equatable, Sendable {
         parentIDs: [GitCommitID]
     ) -> GitGraphRow {
         let topLanes = activeLanes
+        let topLaneColorIndices = activeLaneColorIndices
         let uniqueParentIDs = Self.uniqueCommitIDs(parentIDs)
         let currentLane = topLanes.firstIndex(of: commitID) ?? topLanes.count
         let wasActive = currentLane < topLanes.count
+        let currentColorIndex = if wasActive {
+            topLaneColorIndices[currentLane]
+        } else {
+            allocateColorIndex()
+        }
 
         var bottomLanes = topLanes
+        var bottomLaneColorIndices = topLaneColorIndices
         if wasActive {
             bottomLanes.remove(at: currentLane)
+            bottomLaneColorIndices.remove(at: currentLane)
         }
 
         var parentLanes: [GitCommitID: Int] = [:]
+        var parentColorIndices: [GitCommitID: Int] = [:]
         var insertionIndex = min(currentLane, bottomLanes.count)
 
-        for parentID in uniqueParentIDs {
+        for (parentIndex, parentID) in uniqueParentIDs.enumerated() {
             if let lane = bottomLanes.firstIndex(of: parentID) {
                 parentLanes[parentID] = lane
+                parentColorIndices[parentID] = bottomLaneColorIndices[lane]
                 insertionIndex = max(insertionIndex, lane + 1)
                 continue
             }
 
             let lane = min(insertionIndex, bottomLanes.count)
+            let colorIndex = parentIndex == 0 ? currentColorIndex : allocateColorIndex()
             bottomLanes.insert(parentID, at: lane)
+            bottomLaneColorIndices.insert(colorIndex, at: lane)
             parentLanes[parentID] = lane
+            parentColorIndices[parentID] = colorIndex
             insertionIndex = lane + 1
         }
 
@@ -48,7 +65,7 @@ struct GitGraphLayout: Equatable, Sendable {
                     kind: .incoming,
                     from: .top(lane: currentLane),
                     to: .node(lane: currentLane),
-                    colorIndex: Self.colorIndex(for: commitID),
+                    colorIndex: currentColorIndex,
                     commitID: commitID,
                     parentID: nil
                 )
@@ -62,7 +79,7 @@ struct GitGraphLayout: Equatable, Sendable {
                     kind: .passthrough,
                     from: .top(lane: lane),
                     to: .bottom(lane: bottomLane),
-                    colorIndex: Self.colorIndex(for: laneCommitID),
+                    colorIndex: topLaneColorIndices[lane],
                     commitID: laneCommitID,
                     parentID: nil
                 )
@@ -70,13 +87,14 @@ struct GitGraphLayout: Equatable, Sendable {
         }
 
         for parentID in uniqueParentIDs {
-            guard let parentLane = parentLanes[parentID] else { continue }
+            guard let parentLane = parentLanes[parentID],
+                  let parentColorIndex = parentColorIndices[parentID] else { continue }
             segments.append(
                 GitGraphSegment(
                     kind: .parent,
                     from: .node(lane: currentLane),
                     to: .bottom(lane: parentLane),
-                    colorIndex: Self.colorIndex(for: parentID),
+                    colorIndex: parentColorIndex,
                     commitID: commitID,
                     parentID: parentID
                 )
@@ -84,6 +102,7 @@ struct GitGraphLayout: Equatable, Sendable {
         }
 
         activeLanes = bottomLanes
+        activeLaneColorIndices = bottomLaneColorIndices
 
         return GitGraphRow(
             commitID: commitID,
@@ -91,9 +110,16 @@ struct GitGraphLayout: Equatable, Sendable {
             topLanes: topLanes,
             bottomLanes: bottomLanes,
             nodeLane: currentLane,
-            nodeColorIndex: Self.colorIndex(for: commitID),
+            nodeColorIndex: currentColorIndex,
             segments: segments
         )
+    }
+
+    private mutating func allocateColorIndex() -> Int {
+        defer {
+            nextColorIndex = (nextColorIndex + 1) % GitGraphRow.paletteSize
+        }
+        return nextColorIndex
     }
 
     private static func uniqueCommitIDs(_ commitIDs: [GitCommitID]) -> [GitCommitID] {
@@ -106,12 +132,6 @@ struct GitGraphLayout: Equatable, Sendable {
         return result
     }
 
-    private static func colorIndex(for commitID: GitCommitID) -> Int {
-        let value = commitID.rawValue.utf8.reduce(UInt32(2_166_136_261)) { hash, byte in
-            (hash ^ UInt32(byte)) &* 16_777_619
-        }
-        return Int(value % UInt32(GitGraphRow.paletteSize))
-    }
 }
 
 struct GitGraphRow: Equatable, Sendable {

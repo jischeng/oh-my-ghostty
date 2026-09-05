@@ -23,6 +23,21 @@ struct GitGraphLayoutTests {
         #expect(layout.activeCommitIDs == [])
     }
 
+    @Test func linearFirstParentHistoryKeepsOneColor() {
+        var layout = GitGraphLayout()
+
+        let rowA = layout.append(commitID: id("a"), parentIDs: [id("b")])
+        let rowB = layout.append(commitID: id("b"), parentIDs: [id("c")])
+        let rowC = layout.append(commitID: id("c"), parentIDs: [])
+
+        #expect(rowA.nodeColorIndex == rowA.parentEdge(to: id("b"))?.colorIndex)
+        #expect(rowB.nodeColorIndex == rowA.nodeColorIndex)
+        #expect(rowB.nodeColorIndex == rowB.incomingSegment()?.colorIndex)
+        #expect(rowB.nodeColorIndex == rowB.parentEdge(to: id("c"))?.colorIndex)
+        #expect(rowC.nodeColorIndex == rowA.nodeColorIndex)
+        #expect(rowC.nodeColorIndex == rowC.incomingSegment()?.colorIndex)
+    }
+
     @Test func mergeReusesExistingParentLaneWithoutDuplicateActiveParents() {
         var layout = GitGraphLayout()
 
@@ -42,6 +57,8 @@ struct GitGraphLayoutTests {
         #expect(right.bottomLanes == [id("base")])
         #expect(right.containsPassthrough(commitID: id("base"), from: 0, to: 0))
         #expect(right.containsParentEdge(from: id("right"), to: id("base")))
+        #expect(right.parentEdge(to: id("base"))?.colorIndex == left.nodeColorIndex)
+        #expect(right.parentEdge(to: id("base"))?.colorIndex != right.nodeColorIndex)
         #expect(layout.activeCommitIDs == [id("base")])
     }
 
@@ -58,6 +75,9 @@ struct GitGraphLayoutTests {
         #expect(row.containsParentEdge(from: id("octopus"), to: id("p1")))
         #expect(row.containsParentEdge(from: id("octopus"), to: id("p2")))
         #expect(row.containsParentEdge(from: id("octopus"), to: id("p3")))
+        #expect(row.parentEdge(to: id("p1"))?.colorIndex == row.nodeColorIndex)
+        #expect(row.parentEdge(to: id("p2"))?.colorIndex != row.nodeColorIndex)
+        #expect(row.parentEdge(to: id("p3"))?.colorIndex != row.nodeColorIndex)
     }
 
     @Test func independentRootsDoNotLeaveActiveLanes() {
@@ -108,6 +128,27 @@ struct GitGraphLayoutTests {
         #expect(paged.activeCommitIDs == singlePass.activeCommitIDs)
     }
 
+    @Test func pagedAppendPreservesLaneColorsAcrossBoundary() {
+        let history: [(GitCommitID, [GitCommitID])] = [
+            (id("merge"), [id("left"), id("right")]),
+            (id("left"), [id("base")]),
+            (id("right"), [id("base")]),
+            (id("base"), [id("root")]),
+            (id("root"), []),
+        ]
+
+        var singlePass = GitGraphLayout()
+        let singleRows = history.map { singlePass.append(commitID: $0.0, parentIDs: $0.1) }
+
+        var paged = GitGraphLayout()
+        let pageOne = history.prefix(3).map { paged.append(commitID: $0.0, parentIDs: $0.1) }
+        let pageTwo = history.dropFirst(3).map { paged.append(commitID: $0.0, parentIDs: $0.1) }
+        let pagedRows = pageOne + pageTwo
+
+        #expect(pagedRows.map(\.nodeColorIndex) == singleRows.map(\.nodeColorIndex))
+        #expect(pagedRows.map(\.segments) == singleRows.map(\.segments))
+    }
+
     @Test func duplicateParentIDsProduceOneActiveLaneAndOneEdge() {
         var layout = GitGraphLayout()
 
@@ -146,6 +187,17 @@ private extension GitGraphRow {
         segments.contains {
             $0.kind == .parent
                 && $0.commitID == commitID
+                && $0.parentID == parentID
+        }
+    }
+
+    func incomingSegment() -> GitGraphSegment? {
+        segments.first { $0.kind == .incoming }
+    }
+
+    func parentEdge(to parentID: GitCommitID) -> GitGraphSegment? {
+        segments.first {
+            $0.kind == .parent
                 && $0.parentID == parentID
         }
     }

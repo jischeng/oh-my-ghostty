@@ -648,7 +648,10 @@ the previous appearance is discarded and its asynchronous work must not
 publish afterward. Supported action values are disclosure toggle, refresh,
 Agent-history selection/back/exact-resume/native-fork, collapse all, create
 file/folder, create/open/copy/remove SSH port forwarding, and typed Git actions;
-whether they make sense is provider-specific. Agent-history resume accepts only a host-discovered,
+whether they make sense is provider-specific. The built-in Git provider asks
+Git for absolute worktree, Git-directory, and common-directory paths, keeping
+repository identity consistent when the focused terminal enters a subdirectory.
+Agent-history resume accepts only a host-discovered,
 `AgentConversationID`-validated local session whose manifest declares
 allowlisted resume arguments; it focuses a matching live Surface or creates a
 new typed resume tab. Agent-history metadata uses a versioned mtime cache and

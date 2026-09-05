@@ -117,6 +117,8 @@ struct GitRepositoryServiceTests {
         }
         #expect(branch == "main")
         #expect(repo.worktreePath == dir.standardized.path || repo.worktreePath.hasSuffix(dir.lastPathComponent))
+        #expect(repo.gitDirPath == repo.worktreePath + "/.git")
+        #expect(repo.commonGitDirPath == repo.gitDirPath)
     }
 
     @Test func detectsWorktreeIdentityCorrectly() async throws {

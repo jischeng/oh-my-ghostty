@@ -42,6 +42,7 @@ struct GitRepositoryService: Sendable {
             let result = try await executor.execute(
                 arguments: [
                     "rev-parse",
+                    "--path-format=absolute",
                     "--is-inside-work-tree",
                     "--show-toplevel",
                     "--git-dir",
@@ -68,14 +69,11 @@ struct GitRepositoryService: Sendable {
             let gitDir = lines[2]
             let commonGitDir = lines[3]
 
-            let resolvedGitDir = resolvePath(gitDir, relativeTo: worktreePath)
-            let resolvedCommonGitDir = resolvePath(commonGitDir, relativeTo: worktreePath)
-
             let identity = GitRepositoryIdentity(
                 target: .local,
                 worktreePath: worktreePath,
-                gitDirPath: resolvedGitDir,
-                commonGitDirPath: resolvedCommonGitDir
+                gitDirPath: gitDir,
+                commonGitDirPath: commonGitDir
             )
 
             // 4. Resolve HEAD and branch state
@@ -139,12 +137,5 @@ struct GitRepositoryService: Sendable {
         } catch {
             return .error(title: "Head Resolution Error", message: error.localizedDescription)
         }
-    }
-
-    private func resolvePath(_ path: String, relativeTo base: String) -> String {
-        if (path as NSString).isAbsolutePath {
-            return URL(fileURLWithPath: path).standardized.path
-        }
-        return URL(fileURLWithPath: base).appendingPathComponent(path).standardized.path
     }
 }

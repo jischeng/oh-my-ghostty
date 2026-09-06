@@ -48,6 +48,9 @@ struct EditorKeyStroke: Hashable {
 struct EditorKeymap {
     enum Profile { case idea, vscode }
 
+    static let idea = EditorKeymap(profile: .idea)
+    static let vscode = EditorKeymap(profile: .vscode)
+
     let actions: [EditorKeyStroke: EditorAction]
 
     init(profile: Profile) {

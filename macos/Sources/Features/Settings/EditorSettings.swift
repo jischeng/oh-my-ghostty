@@ -33,6 +33,9 @@ struct EditorSettings: Equatable, Sendable {
     }
 
     var keymap: EditorKeymap {
-        EditorKeymap(profile: keymapProfile)
+        switch keymapProfile {
+        case .idea: .idea
+        case .vscode: .vscode
+        }
     }
 }

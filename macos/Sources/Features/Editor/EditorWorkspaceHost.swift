@@ -51,20 +51,28 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                     .opacity(workspace.isVisible ? 1 : 0)
                     .allowsHitTesting(workspace.isVisible)
                     .accessibilityHidden(!workspace.isVisible)
-                    .simultaneousGesture(TapGesture().onEnded { controller.focusedSurface = surfaceView })
+                    .simultaneousGesture(TapGesture().onEnded {
+                        if controller.focusedSurface !== surfaceView {
+                            controller.focusedSurface = surfaceView
+                        }
+                    })
             }
         }
         .overlay(alignment: .topTrailing) {
             if !workspace.isVisible, !workspace.documents.isEmpty {
                 Button("Editor") {
-                    controller.focusedSurface = surfaceView
+                    if controller.focusedSurface !== surfaceView {
+                        controller.focusedSurface = surfaceView
+                    }
                     workspace.isVisible = true
                 }.padding(8)
             }
         }
         .onChange(of: workspace.isVisible) { visible in
             if visible {
-                controller.focusedSurface = surfaceView
+                if controller.focusedSurface !== surfaceView {
+                    controller.focusedSurface = surfaceView
+                }
             } else if controller.focusedSurface === surfaceView {
                 controller.focusSurface(surfaceView)
             }
@@ -127,7 +135,11 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                             isActive: selected && workspace.isVisible,
                             terminalBackground: NSColor(controller.terminalBackgroundColor),
                             terminalBackgroundOpacity: controller.terminalBackgroundOpacity,
-                            onFocus: { controller.focusedSurface = surfaceView },
+                            onFocus: {
+                                if controller.focusedSurface !== surfaceView {
+                                    controller.focusedSurface = surfaceView
+                                }
+                            },
                             save: { Task { await workspace.save(document) } },
                             close: { close(document) },
                             open: openFile,

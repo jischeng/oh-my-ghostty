@@ -374,8 +374,10 @@ private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
         let applyFocus = { [weak self] in
             guard let self, isActive, let textView = controller?.textView,
                   let window = textView.window else { return }
-            if window.makeFirstResponder(textView) {
-                onFocus()
+            if window.firstResponder !== textView {
+                if window.makeFirstResponder(textView) {
+                    onFocus()
+                }
             }
         }
         if onNextRunLoop {
@@ -406,8 +408,8 @@ private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
     }
 
     func textViewDidChangeSelection(controller: TextViewController, newPositions: [CursorPosition]) {
-        guard isActive, controller.textView.window?.firstResponder === controller.textView else { return }
-        onFocus()
+        // Selection movement inside the text view must not trigger view-model focus changes,
+        // which would invalidate the SwiftUI graph during editing/layout.
     }
 
     func destroy() {

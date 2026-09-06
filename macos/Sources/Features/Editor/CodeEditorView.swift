@@ -27,6 +27,7 @@ struct CodeEditorView: View {
 
     @State private var cursorPositions: [CursorPosition] = []
     @State private var editorCoordinator = EditorCoordinator()
+    @StateObject private var completionState = CompletionState()
     @State private var isFindVisible = false
     @State private var findText = ""
     @State private var replaceText = ""
@@ -67,7 +68,7 @@ struct CodeEditorView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
+        ZStack(alignment: .topLeading) {
             CodeEditSourceEditor(
                 $text,
                 language: editorCoordinator.language(fileURL: fileURL, text: text),
@@ -94,6 +95,15 @@ struct CodeEditorView: View {
                 }
             }
 
+            if completionState.isPresented && !completionState.candidates.isEmpty {
+                EditorCompletionPopupView(state: completionState) { item in
+                    editorCoordinator.commit(completion: item)
+                }
+                .offset(x: completionState.presentationPoint.x, y: completionState.presentationPoint.y)
+                .transition(.opacity)
+            }
+        }
+        .overlay(alignment: .topTrailing) {
             if isActive, isFindVisible {
                 findBar
                     .padding(8)
@@ -114,6 +124,8 @@ struct CodeEditorView: View {
         }
         .background(Color.clear)
         .onAppear {
+            editorCoordinator.setCompletionState(completionState)
+            editorCoordinator.setFileURL(fileURL)
             configureCommands()
             editorCoordinator.setActive(isActive)
         }
@@ -122,6 +134,7 @@ struct CodeEditorView: View {
             editorCoordinator.setActive(isActive)
             if !isActive {
                 isFindVisible = false
+                completionState.dismiss()
             }
         }
         .onChange(of: settings.editorKeymapPreset) { _ in configureCommands() }
@@ -327,6 +340,9 @@ struct CodeEditorView: View {
         case .oneLight: baseTheme = .oneLight
         case .dracula: baseTheme = .dracula
         case .githubDark: baseTheme = .githubDark
+        case .nord: baseTheme = .nord
+        case .monokai: baseTheme = .monokai
+        case .catppuccinMocha: baseTheme = .catppuccinMocha
         case .followTerminal: baseTheme = .adaptive(background: .clear, foreground: editorForeground)
         }
         baseTheme.background = .clear
@@ -351,12 +367,23 @@ struct CodeEditorView: View {
 @MainActor
 private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
     private weak var controller: TextViewController?
+    private weak var completionState: CompletionState?
+    private var completionTask: Task<Void, Never>?
+    private var fileURL: URL?
     private var cachedLanguage: CodeLanguage?
     private var isActive = false
     private var keymap = EditorKeymap(profile: .idea)
     private var findFieldFocused: () -> Bool = { false }
     private var onFocus: () -> Void = {}
     private var actionHandler: (EditorAction) -> Bool = { _ in false }
+
+    func setCompletionState(_ state: CompletionState) {
+        self.completionState = state
+    }
+
+    func setFileURL(_ fileURL: URL?) {
+        self.fileURL = fileURL
+    }
 
     var selectedRange: NSRange? {
         controller?.textView.selectionManager.textSelections.first?.range
@@ -438,7 +465,7 @@ private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
             }
         }
         if onNextRunLoop {
-            DispatchQueue.main.async(execute: applyFocus)
+            DispatchQueue.main.async { applyFocus() }
         } else {
             applyFocus()
         }
@@ -464,12 +491,131 @@ private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
         select(selectionAfterEdit, focusEditor: focusEditor)
     }
 
+    func textViewDidChangeText(controller: TextViewController) {
+        updateCompletion(controller: controller)
+    }
+
     func textViewDidChangeSelection(controller: TextViewController, newPositions: [CursorPosition]) {
-        // Selection movement inside the text view must not trigger view-model focus changes,
-        // which would invalidate the SwiftUI graph during editing/layout.
+        guard let completionState, completionState.isPresented else { return }
+        guard let sel = controller.textView.selectionManager.textSelections.first?.range else {
+            completionState.dismiss()
+            return
+        }
+        if sel.location < completionState.prefixRange.location ||
+           sel.location > NSMaxRange(completionState.prefixRange) + 1 {
+            completionState.dismiss()
+        }
+    }
+
+    private func updateCompletion(controller: TextViewController) {
+        guard isActive else {
+            completionState?.dismiss()
+            return
+        }
+
+        guard let textSelection = controller.textView.selectionManager.textSelections.first,
+              textSelection.range.length == 0 else {
+            completionState?.dismiss()
+            return
+        }
+
+        let cursorLocation = textSelection.range.location
+        let string = controller.textView.string as NSString
+        guard cursorLocation <= string.length else {
+            completionState?.dismiss()
+            return
+        }
+
+        var wordStart = cursorLocation
+        while wordStart > 0 {
+            let char = string.character(at: wordStart - 1)
+            if let scalar = UnicodeScalar(char),
+               CharacterSet.alphanumerics.contains(scalar) || scalar == "_" {
+                wordStart -= 1
+            } else {
+                break
+            }
+        }
+
+        let prefixLength = cursorLocation - wordStart
+        guard prefixLength >= 2 else {
+            completionState?.dismiss()
+            return
+        }
+
+        let prefix = string.substring(with: NSRange(location: wordStart, length: prefixLength))
+        let prefixRange = NSRange(location: wordStart, length: prefixLength)
+
+        let cursorRect = controller.textView.layoutManager.rectForOffset(cursorLocation) ?? .zero
+        guard let scrollView = controller.textView.enclosingScrollView else { return }
+        let originInScroll = controller.textView.convert(cursorRect.origin, to: scrollView)
+
+        let popupX = max(12, min(originInScroll.x, scrollView.bounds.width - 260))
+        var popupY = originInScroll.y + cursorRect.height + 4
+        if popupY + 200 > scrollView.bounds.height, originInScroll.y > 210 {
+            popupY = originInScroll.y - 195
+        }
+        let anchorPoint = CGPoint(x: popupX, y: max(8, popupY))
+
+        let lineRange = string.lineRange(for: NSRange(location: cursorLocation, length: 0))
+        let lineText = string.substring(with: lineRange)
+        let lang = self.cachedLanguage?.tsName.lowercased()
+
+        let context = CompletionContext(
+            documentText: controller.textView.string,
+            cursorOffset: cursorLocation,
+            prefix: prefix,
+            lineText: lineText,
+            language: lang,
+            fileURL: self.fileURL
+        )
+
+        completionTask?.cancel()
+        completionTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 30_000_000)
+            guard !Task.isCancelled else { return }
+            let candidates = await EditorCompletionEngine.shared.completions(for: context)
+            guard !Task.isCancelled, let self, self.isActive else { return }
+
+            if let currentSel = controller.textView.selectionManager.textSelections.first,
+               currentSel.range.location == cursorLocation {
+                self.completionState?.update(
+                    candidates: candidates,
+                    prefix: prefix,
+                    prefixRange: prefixRange,
+                    at: anchorPoint
+                )
+            }
+        }
+    }
+
+    func commit(completion: CompletionItem) {
+        guard let controller,
+              let completionState,
+              completionState.isPresented else { return }
+
+        let range = completionState.prefixRange
+        let insertText = completion.insertText
+        completionState.dismiss()
+
+        guard range.location != NSNotFound,
+              NSMaxRange(range) <= controller.textView.textStorage.length else { return }
+
+        controller.textView.replaceCharacters(in: range, with: insertText)
+        let newCursorPos = range.location + (insertText as NSString).length
+        let newRange = NSRange(location: newCursorPos, length: 0)
+        controller.setCursorPositions([CursorPosition(range: newRange)])
+        controller.textView.selectionManager.setSelectedRange(newRange)
+        controller.textView.scrollSelectionToVisible()
+        controller.textView.updatedViewport(controller.textView.visibleRect)
+        controller.textView.needsDisplay = true
     }
 
     func destroy() {
+        completionTask?.cancel()
+        completionTask = nil
+        completionState?.dismiss()
+        completionState = nil
         EditorCommandRouter.shared.unregister(owner: self)
         controller = nil
         isActive = false
@@ -477,8 +623,41 @@ private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
 
     private func handle(_ event: NSEvent) -> Bool {
         guard isActive, let textView = controller?.textView,
-              event.window === textView.window,
-              let action = keymap.action(for: event) else { return false }
+              event.window === textView.window else { return false }
+
+        if let completionState, completionState.isPresented, !completionState.candidates.isEmpty {
+            switch event.keyCode {
+            case 125: // Down arrow
+                completionState.selectNext()
+                return true
+            case 126: // Up arrow
+                completionState.selectPrevious()
+                return true
+            case 48: // Tab
+                if let candidate = completionState.currentSelection {
+                    commit(completion: candidate)
+                    return true
+                }
+            case 36: // Enter / Return
+                if let candidate = completionState.currentSelection {
+                    commit(completion: candidate)
+                    return true
+                }
+            case 53: // Escape
+                completionState.dismiss()
+                return true
+            case 45 where event.modifierFlags.contains(.control): // Ctrl + N
+                completionState.selectNext()
+                return true
+            case 35 where event.modifierFlags.contains(.control): // Ctrl + P
+                completionState.selectPrevious()
+                return true
+            default:
+                break
+            }
+        }
+
+        guard let action = keymap.action(for: event) else { return false }
         let responder = textView.window?.firstResponder
         let isTextViewOrChild = responder === textView || (responder as? NSView)?.isDescendant(of: textView) == true
         let editingField = (responder as? NSTextView)?.isFieldEditor == true

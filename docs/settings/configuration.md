@@ -85,7 +85,7 @@ Window UI state is intentionally separate: `InspectorPresentationStore` owns las
 | `appearance.tabIconSize` | number | `16` | `12...20` | Settings > Appearance | Runtime |
 | `editor.keymapPreset` | enum | `idea` | `idea`, `vscode` | Settings > Editor | Runtime |
 | `editor.backgroundMode` | enum | `followTerminal` | `followTerminal`, `system` | Settings > Editor | Runtime |
-| `editor.syntaxTheme` | enum | `oneDark` | `oneDark`, `oneLight`, `dracula`, `githubDark`, `followTerminal` | Settings > Editor | Runtime |
+| `editor.syntaxTheme` | enum | `oneDark` | `oneDark`, `oneLight`, `dracula`, `githubDark`, `nord`, `monokai`, `catppuccinMocha`, `followTerminal` | Settings > Editor | Runtime |
 | `editor.fontFamily` | enum | `jetbrainsMono` | `jetbrainsMono`, `sfMono`, `menlo`, `firaCode`, `system` | Settings > Editor | Runtime |
 | `editor.fontSize` | number | `13` | `8...36` | Settings > Editor | Runtime |
 | `editor.tabWidth` | number | `4` | `1...12` | Settings > Editor | Runtime |

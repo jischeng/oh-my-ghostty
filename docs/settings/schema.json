@@ -165,6 +165,9 @@
     "oneLight",
     "dracula",
     "githubDark",
+    "nord",
+    "monokai",
+    "catppuccinMocha",
     "followTerminal"
    ],
    "type": "string"

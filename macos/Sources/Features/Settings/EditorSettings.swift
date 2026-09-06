@@ -26,6 +26,9 @@ enum EditorSyntaxTheme: String, CaseIterable, Identifiable, Sendable {
     case oneLight
     case dracula
     case githubDark
+    case nord
+    case monokai
+    case catppuccinMocha
     case followTerminal
 
     var id: String { rawValue }
@@ -36,6 +39,9 @@ enum EditorSyntaxTheme: String, CaseIterable, Identifiable, Sendable {
         case .oneLight: "Atom One Light"
         case .dracula: "Dracula"
         case .githubDark: "GitHub Dark"
+        case .nord: "Nord"
+        case .monokai: "Monokai"
+        case .catppuccinMocha: "Catppuccin Mocha"
         case .followTerminal: "Adaptive (Follow Terminal)"
         }
     }

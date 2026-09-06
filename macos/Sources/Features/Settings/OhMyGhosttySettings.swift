@@ -368,6 +368,35 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Choose whether terminal content reflows during a resize or once on release.",
             requiresNewWindow: false, category: "terminal"),
         .init(
+            id: "editor.keymapPreset", type: .enumeration,
+            defaultValue: EditorKeymapPreset.idea.rawValue,
+            allowedValues: EditorKeymapPreset.allCases.map(\.rawValue),
+            minimum: nil, maximum: nil,
+            description: "Keyboard shortcut preset used by the native editor.",
+            requiresNewWindow: false, category: "editor"),
+        .init(
+            id: "editor.backgroundMode", type: .enumeration,
+            defaultValue: EditorBackgroundMode.followTerminal.rawValue,
+            allowedValues: EditorBackgroundMode.allCases.map(\.rawValue),
+            minimum: nil, maximum: nil,
+            description: "Choose whether the editor follows the terminal background or uses the system editor background.",
+            requiresNewWindow: false, category: "editor"),
+        .init(
+            id: "editor.fontSize", type: .number, defaultValue: "13",
+            allowedValues: nil, minimum: 8, maximum: 36,
+            description: "Native editor font size in points.",
+            requiresNewWindow: false, category: "editor"),
+        .init(
+            id: "editor.tabWidth", type: .number, defaultValue: "4",
+            allowedValues: nil, minimum: 1, maximum: 12,
+            description: "Number of spaces represented by one editor tab stop.",
+            requiresNewWindow: false, category: "editor"),
+        .init(
+            id: "editor.wordWrap", type: .boolean, defaultValue: "true",
+            allowedValues: nil, minimum: nil, maximum: nil,
+            description: "Wrap long editor lines at the visible content width.",
+            requiresNewWindow: false, category: "editor"),
+        .init(
             id: "general.language", type: .enumeration, defaultValue: "system",
             allowedValues: OhMyGhosttyLanguage.allCases.map(\.rawValue), minimum: nil, maximum: nil,
             description: "Settings display language. system follows the macOS preferred language.",
@@ -525,6 +554,35 @@ final class OhMyGhosttySettings: ObservableObject {
     }
     @Published var terminalResizeRendering: TerminalResizeRenderingMode = .onRelease {
         didSet { persist("terminal.resizeRendering", terminalResizeRendering.rawValue) }
+    }
+    @Published var editorKeymapPreset: EditorKeymapPreset = .idea {
+        didSet { persist("editor.keymapPreset", editorKeymapPreset.rawValue) }
+    }
+    @Published var editorBackgroundMode: EditorBackgroundMode = .followTerminal {
+        didSet { persist("editor.backgroundMode", editorBackgroundMode.rawValue) }
+    }
+    @Published var editorFontSize: Double = 13 {
+        didSet {
+            let clamped = min(max(editorFontSize, 8), 36)
+            if editorFontSize != clamped {
+                editorFontSize = clamped
+            } else {
+                persist("editor.fontSize", clamped)
+            }
+        }
+    }
+    @Published var editorTabWidth: Double = 4 {
+        didSet {
+            let clamped = min(max(editorTabWidth.rounded(), 1), 12)
+            if editorTabWidth != clamped {
+                editorTabWidth = clamped
+            } else {
+                persist("editor.tabWidth", clamped)
+            }
+        }
+    }
+    @Published var editorWordWrap = true {
+        didSet { persist("editor.wordWrap", editorWordWrap) }
     }
     @Published var agentHistoryLimit: Double = 10_000 {
         didSet {
@@ -726,6 +784,16 @@ final class OhMyGhosttySettings: ObservableObject {
         return try encoder.encode(Self.descriptors)
     }
 
+    var editorSettings: EditorSettings {
+        EditorSettings(
+            keymapPreset: editorKeymapPreset,
+            backgroundMode: editorBackgroundMode,
+            fontSize: editorFontSize,
+            tabWidth: Int(editorTabWidth),
+            wordWrap: editorWordWrap
+        )
+    }
+
     private func applyChosenValues() {
         applyWithoutPersisting {
             tabLayout = enumValue("tabs.layout", fallback: ghosttyTabLayout)
@@ -774,6 +842,11 @@ final class OhMyGhosttySettings: ObservableObject {
                 "terminal.resizeRendering",
                 fallback: .onRelease
             )
+            editorKeymapPreset = enumValue("editor.keymapPreset", fallback: .idea)
+            editorBackgroundMode = enumValue("editor.backgroundMode", fallback: .followTerminal)
+            editorFontSize = numberValue("editor.fontSize", fallback: 13, range: 8...36)
+            editorTabWidth = numberValue("editor.tabWidth", fallback: 4, range: 1...12).rounded()
+            editorWordWrap = boolValue("editor.wordWrap", fallback: true)
             agentHistoryLimit = numberValue(
                 "agents.historyLimit",
                 fallback: 10_000,

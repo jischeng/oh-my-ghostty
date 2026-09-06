@@ -88,6 +88,11 @@ struct OhMyGhosttySettingsTests {
         settings.quickInputShortcut = "control+option+q"
         settings.quickInputHeight = 318
         settings.terminalResizeRendering = .onRelease
+        settings.editorKeymapPreset = .vscode
+        settings.editorBackgroundMode = .system
+        settings.editorFontSize = 15.5
+        settings.editorTabWidth = 2
+        settings.editorWordWrap = false
         settings.restoreSessionsOnLaunch = false
         settings.quitWithoutConfirmation = true
 
@@ -107,6 +112,11 @@ struct OhMyGhosttySettingsTests {
         #expect(object["keyboard.quickInput"] as? String == "control+option+q")
         #expect((object["keyboard.quickInputHeight"] as? NSNumber)?.doubleValue == 318)
         #expect(object["terminal.resizeRendering"] as? String == "onRelease")
+        #expect(object["editor.keymapPreset"] as? String == "vscode")
+        #expect(object["editor.backgroundMode"] as? String == "system")
+        #expect((object["editor.fontSize"] as? NSNumber)?.doubleValue == 15.5)
+        #expect((object["editor.tabWidth"] as? NSNumber)?.doubleValue == 2)
+        #expect(object["editor.wordWrap"] as? Bool == false)
         #expect(object["sessions.restoreOnLaunch"] as? Bool == false)
         #expect(object["general.quitWithoutConfirmation"] as? Bool == true)
 
@@ -123,6 +133,11 @@ struct OhMyGhosttySettingsTests {
         #expect(restored.quickInputShortcut == "control+option+q")
         #expect(restored.quickInputHeight == 318)
         #expect(restored.terminalResizeRendering == .onRelease)
+        #expect(restored.editorSettings.keymapPreset == .vscode)
+        #expect(restored.editorSettings.backgroundMode == .system)
+        #expect(restored.editorSettings.fontSize == 15.5)
+        #expect(restored.editorSettings.tabWidth == 2)
+        #expect(!restored.editorSettings.wordWrap)
         #expect(!restored.restoreSessionsOnLaunch)
         #expect(restored.quitWithoutConfirmation)
     }
@@ -302,6 +317,11 @@ struct OhMyGhosttySettingsTests {
         #expect(descriptors.contains { $0.id == "keyboard.quickInput" })
         #expect(descriptors.contains { $0.id == "keyboard.quickInputHeight" })
         #expect(descriptors.contains { $0.id == "terminal.resizeRendering" })
+        #expect(descriptors.contains { $0.id == "editor.keymapPreset" })
+        #expect(descriptors.contains { $0.id == "editor.backgroundMode" })
+        #expect(descriptors.contains { $0.id == "editor.fontSize" })
+        #expect(descriptors.contains { $0.id == "editor.tabWidth" })
+        #expect(descriptors.contains { $0.id == "editor.wordWrap" })
         #expect(descriptors.contains { $0.id == "sessions.restoreOnLaunch" })
         #expect(descriptors.contains { $0.id == "general.language" })
         #expect(descriptors.contains { $0.id == "general.quitWithoutConfirmation" })
@@ -346,6 +366,22 @@ struct OhMyGhosttySettingsTests {
             $0.id == "agents.openQuickInputOnComplete"
         }
         #expect(descriptor?.defaultValue == "false")
+    }
+
+    @Test func editorSettingsDefaultToIdeaAndFollowTerminal() {
+        let (settings, url) = temporarySettings()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        #expect(settings.editorSettings == EditorSettings(
+            keymapPreset: .idea,
+            backgroundMode: .followTerminal,
+            fontSize: 13,
+            tabWidth: 4,
+            wordWrap: true
+        ))
+        #expect(settings.editorSettings.keymapProfile == .idea)
+        #expect(settings.editorSettings.keymap.action(
+            for: EditorKeyStroke(key: "d", modifiers: .command)
+        ) == .duplicateLine)
     }
 
     @Test func languageSettingRoundTripsAndDefaultsToSystem() throws {

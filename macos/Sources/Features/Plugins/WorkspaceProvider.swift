@@ -1156,10 +1156,11 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
                 character == " " || character == "\t"
             })
             guard columns.count == 9 else { continue }
-            let name = String(columns[8])
+            let listedPath = listingPath(String(columns[8]), directory: directory)
+            let name = (listedPath as NSString).lastPathComponent
             guard name != ".", name != "..", name != ".DS_Store" else { continue }
             result.append(.init(
-                path: join(directory, name),
+                path: listedPath,
                 name: name,
                 isDirectory: isDirectory
             ))
@@ -1171,8 +1172,30 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
         }
     }
 
-    private static func quote(_ path: String) -> String {
-        "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    static func quote(_ path: String) -> String {
+        let escaped = path
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"\(escaped)\""
+    }
+
+    private static func listingPath(_ field: String, directory: String) -> String {
+        // Long listings render symlinks as "name -> target". The entry path is
+        // the link itself; resolving the target here would change navigation.
+        let value = field.components(separatedBy: " -> ").first ?? field
+        if value.hasPrefix("/") { return standardized(value) }
+
+        let normalizedDirectory = standardized(directory)
+        let directoryWithoutRoot = normalizedDirectory.drop(while: { $0 == "/" })
+        if !directoryWithoutRoot.isEmpty,
+           value == directoryWithoutRoot || value.hasPrefix(directoryWithoutRoot + "/") {
+            return standardized("/" + value)
+        }
+        return standardized(join(normalizedDirectory, value))
+    }
+
+    private static func standardized(_ path: String) -> String {
+        (path as NSString).standardizingPath
     }
 
     private static func join(_ directory: String, _ name: String) -> String {

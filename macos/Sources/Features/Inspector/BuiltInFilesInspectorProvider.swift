@@ -9,7 +9,7 @@ final class BuiltInFilesInspectorProvider {
     )
     static let pluginID = "builtin.files"
     static let paneID = "builtin.files"
-    typealias OpenFileHandler = @MainActor (String, InspectorPaneContext) -> Void
+    typealias OpenFileHandler = @MainActor (String, InspectorPaneContext, EditorOpenDestination) -> Void
 
     private static let rootTaskID = "__root__"
     private static let loadingTaskID = "__loading__"
@@ -148,14 +148,14 @@ final class BuiltInFilesInspectorProvider {
                 publishTree(for: context.tabID)
             }
 
-        case .openFile(let path):
+        case .openFile(let path, let destination):
             guard let tree = state.tree,
                   let node = Self.findNode(id: path, in: tree.nodes),
                   !node.isDirectory else {
                 Self.logger.error("Files open ignored missing file=\(path, privacy: .public)")
                 return
             }
-            openFile(path, state.context)
+            openFile(path, state.context, destination)
 
         case .refresh:
             states[context.tabID] = state

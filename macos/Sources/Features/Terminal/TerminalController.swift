@@ -3141,6 +3141,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         _ node: SplitTree<Ghostty.SurfaceView>.Node,
         withConfirmation: Bool = true
     ) {
+        guard EditorWorkspaceStore.shared.prepareToClose(surfaceIDs: node.leaves().map(\.id), window: window, retry: { [weak self] in
+            self?.closeSurface(node, withConfirmation: withConfirmation)
+        }) else { return }
         // If this isn't the root then we're dealing with a split closure.
         if surfaceTree.root != node {
             super.closeSurface(node, withConfirmation: withConfirmation)

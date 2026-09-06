@@ -613,9 +613,7 @@ struct TerminalShellLayoutContainer<Content: View>: View {
                     backgroundColor: backgroundColor,
                     backgroundOpacity: backgroundOpacity
                 ) {
-                    EditorWorkspaceHost(controller: controller) {
-                        content
-                    }
+                    content
                 }
 
                 TerminalSidebarTransitionContainer(
@@ -2107,7 +2105,15 @@ private struct InspectorFileTreeNodeView: View {
                 if !node.isDirectory {
                     Button("Open in Editor") {
                         selectedNodeID = node.id
-                        perform(.openFile(path: node.id))
+                        perform(.openFile(path: node.id, destination: .currentPane))
+                    }
+                    Menu("Open to the Side") {
+                        ForEach(EditorOpenDestination.allCases, id: \.rawValue) { destination in
+                            Button(destination.title) {
+                                selectedNodeID = node.id
+                                perform(.openFile(path: node.id, destination: destination))
+                            }
+                        }
                     }
                 }
             }

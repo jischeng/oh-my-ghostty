@@ -140,18 +140,41 @@ final class EditorWorkspace: ObservableObject {
 final class EditorWorkspaceStore {
     static let shared = EditorWorkspaceStore()
     private var workspaces: [UUID: EditorWorkspace] = [:]
+    private var owners: [UUID: UUID] = [:]
     private var closing = Set<UUID>()
     private var isResolvingTermination = false
 
-    func workspace(for tabID: UUID) -> EditorWorkspace {
-        if let existing = workspaces[tabID] { return existing }
+    func workspace(for tabID: UUID, surfaceID: UUID) -> EditorWorkspace {
+        owners[surfaceID] = tabID
+        if let existing = workspaces[surfaceID] { return existing }
         let workspace = EditorWorkspace()
-        workspaces[tabID] = workspace
+        workspaces[surfaceID] = workspace
         return workspace
     }
 
-    func open(path: String, context: InspectorPaneContext) {
-        workspace(for: context.tabID).open(
+    func open(path: String, context: InspectorPaneContext, destination: EditorOpenDestination = .currentPane) {
+        guard let controller = NSApp.windows.compactMap({ $0.windowController as? TerminalController })
+            .first(where: { $0.tabSessionID == context.tabID }),
+              let source = controller.surfaceTree.first(where: { $0.id == context.surfaceID })
+                ?? controller.focusedSurface ?? controller.surfaceTree.first else { return }
+        let targetController: TerminalController
+        let target: Ghostty.SurfaceView
+        switch destination {
+        case .currentPane:
+            targetController = controller
+            target = source
+        case .newTab:
+            guard let created = TerminalController.newTab(controller.ghostty, from: controller.window),
+                  let surface = created.surfaceTree.first else { return }
+            targetController = created
+            target = surface
+        case .splitRight, .splitDown, .splitLeft, .splitUp:
+            guard let surface = controller.newSplit(at: source, direction: destination.splitDirection) else { return }
+            targetController = controller
+            target = surface
+        }
+        targetController.focusedSurface = target
+        workspace(for: targetController.tabSessionID, surfaceID: target.id).open(
             path: path,
             filesystem: WorkspaceFilesystemFactory.make(for: context)
         )
@@ -159,7 +182,12 @@ final class EditorWorkspaceStore {
 
     /// Called at the terminal's final close boundary, including programmatic closes.
     func prepareToClose(tabIDs: [UUID], window: NSWindow?, retry: @escaping () -> Void) -> Bool {
-        let pending = tabIDs.filter { id in
+        let surfaceIDs = owners.compactMap { tabIDs.contains($0.value) ? $0.key : nil }
+        return prepareToClose(surfaceIDs: surfaceIDs, window: window, retry: retry)
+    }
+
+    func prepareToClose(surfaceIDs: [UUID], window: NSWindow?, retry: @escaping () -> Void) -> Bool {
+        let pending = surfaceIDs.filter { id in
             workspaces[id]?.documents.contains { $0.isDirty || $0.isSaving } == true
         }
         guard !pending.isEmpty else { return true }
@@ -176,7 +204,10 @@ final class EditorWorkspaceStore {
     }
 
     func remove(tabID: UUID) {
-        workspaces.removeValue(forKey: tabID)
+        for surfaceID in owners.compactMap({ $0.value == tabID ? $0.key : nil }) {
+            owners.removeValue(forKey: surfaceID)
+            workspaces.removeValue(forKey: surfaceID)
+        }
     }
 
     func prepareToTerminate() -> Bool {

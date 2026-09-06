@@ -270,7 +270,7 @@ struct InspectorRegistryTests {
         let registry = InspectorRegistry()
         let provider = BuiltInFilesInspectorProvider(
             registry: registry,
-            openFile: { _, _ in }
+            openFile: { _, _, _ in }
         )
         try provider.register()
         let context = InspectorPaneContext(
@@ -521,11 +521,13 @@ struct InspectorRegistryTests {
         let registry = InspectorRegistry()
         var openedPaths: [String] = []
         var openedContexts: [InspectorPaneContext] = []
+        var openedDestinations: [EditorOpenDestination] = []
         let provider = BuiltInFilesInspectorProvider(
             registry: registry,
-            openFile: { path, context in
+            openFile: { path, context, destination in
                 openedPaths.append(path)
                 openedContexts.append(context)
+                openedDestinations.append(destination)
             }
         )
         try provider.register()
@@ -573,6 +575,12 @@ struct InspectorRegistryTests {
 
         #expect(openedPaths == [file.id])
         #expect(openedContexts == [context])
+        #expect(openedDestinations == [.currentPane])
+        registry.performAction(
+            paneID: BuiltInFilesInspectorProvider.paneID,
+            action: .init(context: context, kind: .openFile(path: file.id, destination: .splitRight))
+        )
+        #expect(openedDestinations == [.currentPane, .splitRight])
     }
 
     @Test func repeatedDeepExpansionRemainsBoundedAndResponsive() async throws {
@@ -600,7 +608,7 @@ struct InspectorRegistryTests {
         let registry = InspectorRegistry()
         let provider = BuiltInFilesInspectorProvider(
             registry: registry,
-            openFile: { _, _ in }
+            openFile: { _, _, _ in }
         )
         try provider.register()
         let context = InspectorPaneContext(
@@ -687,7 +695,7 @@ struct InspectorRegistryTests {
                     workingDirectory: context.workingDirectory ?? "/"
                 )
             },
-            openFile: { _, _ in }
+            openFile: { _, _, _ in }
         )
         try provider.register()
         let tabID = UUID()
@@ -770,7 +778,7 @@ struct InspectorRegistryTests {
         let provider = BuiltInFilesInspectorProvider(
             registry: registry,
             filesystemFactory: { _ in filesystem },
-            openFile: { _, _ in }
+            openFile: { _, _, _ in }
         )
         try provider.register()
         let context = InspectorPaneContext(
@@ -820,7 +828,7 @@ struct InspectorRegistryTests {
         let provider = BuiltInFilesInspectorProvider(
             registry: registry,
             filesystemFactory: { _ in filesystem },
-            openFile: { _, _ in }
+            openFile: { _, _, _ in }
         )
         try provider.register()
         let tabID = UUID()

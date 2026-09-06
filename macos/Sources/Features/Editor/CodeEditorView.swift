@@ -9,10 +9,14 @@ import SwiftUI
 /// editor owns presentation state such as the current selection and find bar.
 struct CodeEditorView: View {
     @Binding var text: String
+    @ObservedObject private var settings = OhMyGhosttySettings.shared
 
     let fileURL: URL?
     var isEditable = true
     var isActive = true
+    var terminalBackground: NSColor = .textBackgroundColor
+    var terminalForeground: NSColor = .textColor
+    var onFocus: () -> Void = {}
     var onSave: () -> Void = {}
     var onClose: () -> Void = {}
     var onOpen: () -> Void = {}
@@ -34,6 +38,9 @@ struct CodeEditorView: View {
         fileURL: URL?,
         isEditable: Bool = true,
         isActive: Bool = true,
+        terminalBackground: NSColor = .textBackgroundColor,
+        terminalForeground: NSColor = .textColor,
+        onFocus: @escaping () -> Void = {},
         onSave: @escaping () -> Void = {},
         onClose: @escaping () -> Void = {},
         onOpen: @escaping () -> Void = {},
@@ -45,6 +52,9 @@ struct CodeEditorView: View {
         self.fileURL = fileURL
         self.isEditable = isEditable
         self.isActive = isActive
+        self.terminalBackground = terminalBackground
+        self.terminalForeground = terminalForeground
+        self.onFocus = onFocus
         self.onSave = onSave
         self.onClose = onClose
         self.onOpen = onOpen
@@ -58,11 +68,11 @@ struct CodeEditorView: View {
             CodeEditSourceEditor(
                 $text,
                 language: editorCoordinator.language(fileURL: fileURL, text: text),
-                theme: .omg,
-                font: .monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular),
-                tabWidth: 4,
+                theme: .omg(background: editorBackground, foreground: editorForeground),
+                font: .monospacedSystemFont(ofSize: editorSettings.fontSize, weight: .regular),
+                tabWidth: editorSettings.tabWidth,
                 lineHeight: 1.2,
-                wrapLines: false,
+                wrapLines: editorSettings.wordWrap,
                 cursorPositions: $cursorPositions,
                 isEditable: isEditable && isActive,
                 isSelectable: isActive,
@@ -88,34 +98,22 @@ struct CodeEditorView: View {
                 .help("Find and Navigate")
             }
         }
-        .background(Color(nsColor: .textBackgroundColor))
-        .background {
-            if isActive {
-                EditorKeyCommands(actions: [
-                    "x": { NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: nil) },
-                    "f": presentFind,
-                    "s": onSave,
-                    "w": onClose,
-                    "o": onOpen,
-                ], modifiedActions: [
-                    EditorShortcut(key: "f", modifiers: [.command, .option]): presentReplace,
-                    EditorShortcut(key: "l", modifiers: .command): presentGoToLine,
-                    EditorShortcut(key: "g", modifiers: .command): findNext,
-                    EditorShortcut(key: "g", modifiers: [.command, .shift]): findPrevious,
-                    EditorShortcut(key: "s", modifiers: [.command, .shift]): onSaveAll,
-                    EditorShortcut(key: "\t", modifiers: .control): onNextDocument,
-                    EditorShortcut(key: "\t", modifiers: [.control, .shift]): onPreviousDocument,
-                ])
-            }
-        }
+        .background(Color(nsColor: editorBackground))
         .onAppear {
+            configureCommands()
             editorCoordinator.setActive(isActive)
         }
         .onChange(of: isActive) { isActive in
+            configureCommands()
             editorCoordinator.setActive(isActive)
             if !isActive {
                 isFindVisible = false
             }
+        }
+        .onChange(of: settings.editorKeymapPreset) { _ in configureCommands() }
+        .onChange(of: findText) { query in
+            guard barMode != .goToLine, !query.isEmpty else { return }
+            selectMatch(searchingForward: true)
         }
     }
 
@@ -168,7 +166,7 @@ struct CodeEditorView: View {
     }
 
     private func presentFind() {
-        if let selection = cursorPositions.first?.range,
+        if let selection = editorCoordinator.selectedRange,
            selection.location != NSNotFound,
            selection.length > 0,
            let range = Range(selection, in: text) {
@@ -200,12 +198,12 @@ struct CodeEditorView: View {
     }
 
     private func selectMatch(searchingForward: Bool) {
-        let current = cursorPositions.first?.range ?? NSRange(location: 0, length: 0)
+        let current = editorCoordinator.selectedRange ?? NSRange(location: 0, length: 0)
         let matches = searchMatches
         guard let index = EditorTextSearch.matchIndex(
             in: matches, selection: current, searchingForward: searchingForward
         ) else { return }
-        editorCoordinator.select(matches[index])
+        editorCoordinator.select(matches[index], focusEditor: false)
     }
 
     private var searchMatches: [NSRange] {
@@ -215,7 +213,7 @@ struct CodeEditorView: View {
     private var matchSummary: String {
         let matches = searchMatches
         guard !matches.isEmpty else { return "0/0" }
-        let selected = cursorPositions.first?.range
+        let selected = editorCoordinator.selectedRange
         let index = matches.firstIndex(of: selected ?? .notFound).map { $0 + 1 } ?? 0
         return "\(index)/\(matches.count)"
     }
@@ -223,13 +221,14 @@ struct CodeEditorView: View {
     private func replaceCurrent() {
         let matches = searchMatches
         guard !matches.isEmpty else { return }
-        let selection = cursorPositions.first?.range
+        let selection = editorCoordinator.selectedRange
         let nextIndex = EditorTextSearch.matchIndex(in: matches, selection: selection, searchingForward: true) ?? 0
         let range = matches.first(where: { $0 == selection }) ?? matches[nextIndex]
         editorCoordinator.replace(
             ranges: [range],
             with: replaceText,
-            selectionAfterEdit: NSRange(location: range.location, length: (replaceText as NSString).length)
+            selectionAfterEdit: NSRange(location: range.location, length: (replaceText as NSString).length),
+            focusEditor: false
         )
     }
 
@@ -240,21 +239,56 @@ struct CodeEditorView: View {
         editorCoordinator.replace(
             ranges: matches,
             with: replaceText,
-            selectionAfterEdit: NSRange(location: first.location, length: (replaceText as NSString).length)
+            selectionAfterEdit: NSRange(location: first.location, length: (replaceText as NSString).length),
+            focusEditor: false
         )
     }
 
     private func goToLine() {
         guard let target = EditorTextSearch.lineAndColumn(from: findText),
               let range = EditorTextSearch.range(forLine: target.line, column: target.column, in: text) else { return }
-        editorCoordinator.select(range)
         leaveFindBar()
+        editorCoordinator.select(range, focusEditor: true)
     }
 
     private func leaveFindBar() {
         isFindVisible = false
         isFindFocused = false
         editorCoordinator.focus()
+    }
+
+    private func configureCommands() {
+        editorCoordinator.configure(
+            keymap: editorSettings.keymap,
+            findFieldFocused: { isFindFocused },
+            onFocus: onFocus,
+            actionHandler: { action in
+            switch action {
+            case .find: presentFind()
+            case .replace: presentReplace()
+            case .goToLine: presentGoToLine()
+            case .findNext: findNext()
+            case .findPrevious: findPrevious()
+            case .save: onSave()
+            case .saveAll: onSaveAll()
+            case .close: onClose()
+            case .open: onOpen()
+            case .nextDocument: onNextDocument()
+            case .previousDocument: onPreviousDocument()
+            default: return false
+            }
+            return true
+        })
+    }
+
+    private var editorSettings: EditorSettings { settings.editorSettings }
+
+    private var editorBackground: NSColor {
+        editorSettings.backgroundMode == .followTerminal ? terminalBackground : .textBackgroundColor
+    }
+
+    private var editorForeground: NSColor {
+        editorSettings.backgroundMode == .followTerminal ? terminalForeground : .textColor
     }
 
     private enum BarMode { case find, replace, goToLine }
@@ -265,6 +299,26 @@ private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
     private weak var controller: TextViewController?
     private var cachedLanguage: CodeLanguage?
     private var isActive = false
+    private var keymap = EditorKeymap(profile: .idea)
+    private var findFieldFocused: () -> Bool = { false }
+    private var onFocus: () -> Void = {}
+    private var actionHandler: (EditorAction) -> Bool = { _ in false }
+
+    var selectedRange: NSRange? {
+        controller?.textView.selectionManager.textSelections.first?.range
+    }
+
+    func configure(
+        keymap: EditorKeymap,
+        findFieldFocused: @escaping () -> Bool,
+        onFocus: @escaping () -> Void,
+        actionHandler: @escaping (EditorAction) -> Bool
+    ) {
+        self.keymap = keymap
+        self.findFieldFocused = findFieldFocused
+        self.onFocus = onFocus
+        self.actionHandler = actionHandler
+    }
 
     func language(fileURL: URL?, text: String) -> CodeLanguage {
         if let cachedLanguage { return cachedLanguage }
@@ -281,6 +335,8 @@ private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
 
     func prepareCoordinator(controller: TextViewController) {
         self.controller = controller
+        controller.textView.selectionManager.selectionBackgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.65)
+        if isActive { registerCommands() }
         focusIfActive(onNextRunLoop: true)
     }
 
@@ -288,11 +344,14 @@ private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
         let didActivate = isActive && !self.isActive
         self.isActive = isActive
         if didActivate {
+            registerCommands()
             focusIfActive(onNextRunLoop: true)
-        } else if !isActive,
-                  let textView = controller?.textView,
-                  textView.window?.firstResponder === textView {
-            textView.window?.makeFirstResponder(nil)
+        } else if !isActive {
+            EditorCommandRouter.shared.unregister(owner: self)
+            if let textView = controller?.textView,
+               textView.window?.firstResponder === textView {
+                textView.window?.makeFirstResponder(nil)
+            }
         }
     }
 
@@ -304,7 +363,9 @@ private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
         let applyFocus = { [weak self] in
             guard let self, isActive, let textView = controller?.textView,
                   let window = textView.window else { return }
-            window.makeFirstResponder(textView)
+            if window.makeFirstResponder(textView) {
+                onFocus()
+            }
         }
         if onNextRunLoop {
             DispatchQueue.main.async(execute: applyFocus)
@@ -313,38 +374,78 @@ private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
         }
     }
 
-    func select(_ range: NSRange) {
-        guard let controller else { return }
+    func select(_ range: NSRange, focusEditor: Bool = true) {
+        guard let controller, let textView = controller.textView else { return }
+        if focusEditor {
+            focus()
+        }
         controller.setCursorPositions([CursorPosition(range: range)])
-        controller.textView.scrollSelectionToVisible()
+        EditorNativeTextActions.select(range, on: textView)
     }
 
-    func replace(ranges: [NSRange], with replacement: String, selectionAfterEdit: NSRange) {
+    func replace(
+        ranges: [NSRange],
+        with replacement: String,
+        selectionAfterEdit: NSRange,
+        focusEditor: Bool
+    ) {
         guard let controller else { return }
         guard EditorTextEditing.replace(on: controller.textView, ranges: ranges, with: replacement) else { return }
-        select(selectionAfterEdit)
+        select(selectionAfterEdit, focusEditor: focusEditor)
+    }
+
+    func textViewDidChangeSelection(controller: TextViewController, newPositions: [CursorPosition]) {
+        guard isActive, controller.textView.window?.firstResponder === controller.textView else { return }
+        onFocus()
     }
 
     func destroy() {
+        EditorCommandRouter.shared.unregister(owner: self)
         controller = nil
         isActive = false
+    }
+
+    private func handle(_ event: NSEvent) -> Bool {
+        guard isActive, let textView = controller?.textView,
+              event.window === textView.window,
+              let action = keymap.action(for: event) else { return false }
+        let responder = textView.window?.firstResponder
+        let isTextViewOrChild = responder === textView || (responder as? NSView)?.isDescendant(of: textView) == true
+        let editingField = (responder as? NSTextView)?.isFieldEditor == true
+        guard isTextViewOrChild || editingField else { return false }
+        if editingField {
+            switch action {
+            case .cut, .copy, .paste, .selectAll, .selectLine, .undo, .redo,
+                 .duplicateLine, .deleteLine, .moveLineUp, .moveLineDown, .indent, .outdent, .toggleLineComment:
+                return false
+            default: return actionHandler(action)
+            }
+        }
+        guard let controller else { return false }
+        return EditorNativeTextActions.perform(action, on: controller) || actionHandler(action)
+    }
+
+    private func registerCommands() {
+        EditorCommandRouter.shared.register(owner: self) { [weak self] event in
+            self?.handle(event) ?? false
+        }
     }
 }
 
 private extension EditorTheme {
-    static var omg: EditorTheme {
+    static func omg(background: NSColor, foreground: NSColor) -> EditorTheme {
         EditorTheme(
-            text: .textColor,
-            insertionPoint: .textColor,
+            text: foreground,
+            insertionPoint: foreground,
             invisibles: .tertiaryLabelColor,
-            background: .textBackgroundColor,
+            background: background,
             lineHighlight: .controlAccentColor.withAlphaComponent(0.08),
             selection: .selectedTextBackgroundColor,
             keywords: .systemPurple,
             commands: .systemTeal,
             types: .systemBlue,
             attributes: .systemOrange,
-            variables: .textColor,
+            variables: foreground,
             values: .systemIndigo,
             numbers: .systemBlue,
             strings: .systemRed,

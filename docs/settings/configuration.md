@@ -27,6 +27,11 @@ The file is a flat, sorted JSON object. Only values explicitly chosen by the use
   "appearance.backgroundOpacity": 0.75,
   "appearance.darkTheme": "Catppuccin Mocha",
   "appearance.lightTheme": "Catppuccin Latte",
+  "editor.backgroundMode": "followTerminal",
+  "editor.fontSize": 13,
+  "editor.keymapPreset": "idea",
+  "editor.tabWidth": 4,
+  "editor.wordWrap": true,
   "general.quitWithoutConfirmation": true,
   "keyboard.quickInput": "shift+command+e",
   "keyboard.quickInputHeight": 252,
@@ -76,6 +81,11 @@ Window UI state is intentionally separate: `InspectorPresentationStore` owns las
 | `appearance.cursorStyle` | enum | Ghostty config | `block`, `bar`, `underline`, `block_hollow` | Settings > Appearance | Live |
 | `appearance.tabRowDensity` | enum | `compact` | `compact`, `comfortable` | Settings > Appearance | Runtime |
 | `appearance.tabIconSize` | number | `16` | `12...20` | Settings > Appearance | Runtime |
+| `editor.keymapPreset` | enum | `idea` | `idea`, `vscode` | Settings > Editor | Runtime |
+| `editor.backgroundMode` | enum | `followTerminal` | `followTerminal`, `system` | Settings > Editor | Runtime |
+| `editor.fontSize` | number | `13` | `8...36` | Settings > Editor | Runtime |
+| `editor.tabWidth` | number | `4` | `1...12` | Settings > Editor | Runtime |
+| `editor.wordWrap` | boolean | `true` | `true`, `false` | Settings > Editor | Runtime |
 | `notifications.taskComplete` | boolean | `true` | `true`, `false` | Settings > Plugins | Runtime policy |
 | `notifications.attention` | boolean | `true` | `true`, `false` | Settings > Plugins | Runtime policy |
 | `notifications.sound` | boolean | `false` | `true`, `false` | Settings > Plugins | Runtime policy |
@@ -92,6 +102,8 @@ Window UI state is intentionally separate: `InspectorPresentationStore` owns las
 Appearance controls resolve each value as `OMG override > Ghostty config > built-in default`. The UI reports the effective value and source, and **Reset to Ghostty** removes only OMG Appearance keys. The app writes a generated `appearance.ghostty` overlay beside `settings.json`; it never edits the user's Ghostty config. The overlay is loaded last and applied with Ghostty's existing live config update API, so current surfaces keep their PTY, shell, and scrollback.
 
 Vertical tabs and the Right Inspector use the active terminal background color and background opacity. There is no independent Sidebar or Inspector theme. Transparency is painted only on background layers; window alpha, terminal glyphs, cursors, and icons remain opaque.
+
+Settings > Editor owns the native code editor's local editing behavior. `editor.keymapPreset` defaults to `idea` and may be changed to `vscode`; the setting resolves to the native `EditorKeymap.Profile` consumed by the editor command router. `editor.backgroundMode` defaults to `followTerminal`, so the editor can use the terminal background color supplied by the hosting terminal view. The `system` option uses the platform editor background. `editor.fontSize`, `editor.tabWidth`, and `editor.wordWrap` are runtime settings consumed by the native editor view.
 
 `tabs.pathDisplay` applies to the path portion of every Vertical Tab label. Local and SSH panes use the same policy: `fullPath` preserves the current full-path presentation, while `folderName` displays only the final folder component. SSH keeps its alias prefix, for example `cloud /home/user/code` becomes `cloud code`.
 

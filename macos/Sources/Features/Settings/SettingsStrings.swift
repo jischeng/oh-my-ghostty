@@ -48,6 +48,7 @@ struct SettingsStrings: Equatable, Sendable {
         case .appearance: t("Appearance", "外观")
         case .tabs: t("Tabs", "标签页")
         case .terminal: t("Terminal", "终端")
+        case .editor: "Editor"
         case .keyboard: t("Keyboard", "键盘")
         case .plugins: t("Plugins", "插件")
         case .advanced: t("Advanced", "高级")
@@ -261,6 +262,41 @@ struct SettingsStrings: Equatable, Sendable {
         case .onRelease: t("On Release", "松开时重绘")
         }
     }
+
+    // MARK: Editor
+
+    var editorBehaviorSection: String { t("Behavior", "行为") }
+    var editorTypographySection: String { t("Typography", "排版") }
+    var editorKeymapPresetLabel: String { t("Keymap Preset", "键位预设") }
+
+    func editorKeymapPresetTitle(_ preset: EditorKeymapPreset) -> String {
+        switch preset {
+        case .idea: "IDEA"
+        case .vscode: "VS Code"
+        }
+    }
+
+    var editorKeymapPresetCaption: String {
+        t(
+            "IDEA is the default. The preset changes only native editor commands.",
+            "默认使用 IDEA。此预设只影响原生 Editor 命令。"
+        )
+    }
+
+    var editorBackgroundModeLabel: String { t("Background", "背景") }
+
+    func editorBackgroundModeTitle(_ mode: EditorBackgroundMode) -> String {
+        switch mode {
+        case .followTerminal: t("Follow Terminal", "跟随终端")
+        case .system: t("System Editor Background", "系统编辑器背景")
+        }
+    }
+
+    var editorWordWrapLabel: String { t("Word Wrap", "自动换行") }
+    var editorFontSizeLabel: String { t("Font Size", "字号") }
+    var editorTabWidthLabel: String { t("Tab Width", "Tab 宽度") }
+    var resetEditorButton: String { t("Reset Editor Settings", "重置 Editor 设置") }
+
     var quickInputSection: String { t("Agent Quick Input", "Agent 快速输入") }
     var openQuickInputOnAgentStartLabel: String {
         t("Open Composer When Agent Starts", "打开 Agent 时展开输入框")

@@ -4,6 +4,21 @@ import Testing
 @testable import Ghostty
 
 struct EditorWorkspaceTests {
+    @Test @MainActor func paneDocumentsFollowTheirSurfaceAndStayIndependent() {
+        let store = EditorWorkspaceStore()
+        let tab = UUID()
+        let movedTab = UUID()
+        let left = UUID()
+        let right = UUID()
+        let leftWorkspace = store.workspace(for: tab, surfaceID: left)
+        let rightWorkspace = store.workspace(for: tab, surfaceID: right)
+        #expect(leftWorkspace !== rightWorkspace)
+        #expect(store.workspace(for: movedTab, surfaceID: right) === rightWorkspace)
+        store.remove(tabID: tab)
+        #expect(store.workspace(for: movedTab, surfaceID: right) === rightWorkspace)
+        #expect(store.workspace(for: tab, surfaceID: left) !== leftWorkspace)
+    }
+
     @Test @MainActor func tabNavigationWrapsAndSaveAllWritesEachDocument() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -32,12 +47,12 @@ struct EditorWorkspaceTests {
     }
 
     @Test func shortcutModifiersIgnoreCapsLockButDistinguishShiftAndControl() {
-        #expect(EditorShortcut(key: "F", modifiers: [.command, .capsLock]) ==
-            EditorShortcut(key: "f", modifiers: .command))
-        #expect(EditorShortcut(key: "g", modifiers: [.command, .shift]) !=
-            EditorShortcut(key: "g", modifiers: .command))
-        #expect(EditorShortcut(key: "\t", modifiers: .control) !=
-            EditorShortcut(key: "\t", modifiers: [.control, .shift]))
+        #expect(EditorKeyStroke(key: "F", modifiers: [.command, .capsLock]) ==
+            EditorKeyStroke(key: "f", modifiers: .command))
+        #expect(EditorKeyStroke(key: "g", modifiers: [.command, .shift]) !=
+            EditorKeyStroke(key: "g", modifiers: .command))
+        #expect(EditorKeyStroke(key: "\t", modifiers: .control) !=
+            EditorKeyStroke(key: "\t", modifiers: [.control, .shift]))
     }
 
     @Test @MainActor func staleConcurrentOpenCannotReplaceNewerSelection() async throws {

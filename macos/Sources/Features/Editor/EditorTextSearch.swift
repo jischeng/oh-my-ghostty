@@ -29,6 +29,17 @@ enum EditorTextEditing {
 
 /// UTF-16 based search and navigation helpers for the native editor.
 enum EditorTextSearch {
+    static func lineRange(containing selection: NSRange, in text: String) -> NSRange? {
+        let source = text as NSString
+        guard selection.location != NSNotFound,
+              selection.location >= 0,
+              NSMaxRange(selection) <= source.length else { return nil }
+        if source.length == 0 { return .zero }
+        let location = min(selection.location, source.length - 1)
+        let effectiveLength = selection.length == 0 ? 0 : min(selection.length, source.length - location)
+        return source.lineRange(for: NSRange(location: location, length: effectiveLength))
+    }
+
     static func matches(in text: String, query: String, caseSensitive: Bool) -> [NSRange] {
         guard !query.isEmpty else { return [] }
         let source = text as NSString

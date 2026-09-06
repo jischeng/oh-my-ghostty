@@ -619,6 +619,28 @@ struct WorkspaceProviderTests {
         #expect(entries.allSatisfy { $0.path.hasPrefix("/remote/") })
     }
 
+    @Test func parsesSFTPListingPathsWithoutDuplicatingDirectory() throws {
+        let output = """
+        -rw-r--r-- 1 root root 1 Jan 1 00:00 /root/configure-maintenance.sh
+        -rw-r--r-- 1 root root 1 Jan 1 00:00 root/file with spaces.txt
+        -rw-r--r-- 1 root root 1 Jan 1 00:00 relative.txt
+        lrwxrwxrwx 1 root root 7 Jan 1 00:00 current -> release
+        """
+        let entries = try SSHWorkspaceFilesystem.parseLongListing(output, directory: "/root")
+        #expect(entries.map(\.path) == [
+            "/root/configure-maintenance.sh",
+            "/root/current",
+            "/root/file with spaces.txt",
+            "/root/relative.txt",
+        ])
+        #expect(entries.first { $0.name == "current" }?.isDirectory == false)
+    }
+
+    @Test func quotesSFTPBatchPaths() {
+        #expect(SSHWorkspaceFilesystem.quote("/root/file name") == "\"/root/file name\"")
+        #expect(SSHWorkspaceFilesystem.quote("/root/a\\b\"c") == "\"/root/a\\\\b\\\"c\"")
+    }
+
     @Test func createsSSHWorkspaceDescriptorFromAlias() throws {
         let previous = UserDefaults.standard.object(forKey: "OMG.Plugin.Enabled.builtin.ssh")
         UserDefaults.standard.set(true, forKey: "OMG.Plugin.Enabled.builtin.ssh")

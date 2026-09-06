@@ -115,6 +115,48 @@
    "fallback": "ghostty:window-theme",
    "type": "string"
   },
+  "editor.backgroundMode": {
+   "category": "editor",
+   "default": "followTerminal",
+   "description": "Choose whether the editor follows the terminal background or uses the system editor background.",
+   "enum": [
+    "followTerminal",
+    "system"
+   ],
+   "type": "string"
+  },
+  "editor.fontSize": {
+   "category": "editor",
+   "default": 13,
+   "description": "Native editor font size in points.",
+   "maximum": 36,
+   "minimum": 8,
+   "type": "number"
+  },
+  "editor.keymapPreset": {
+   "category": "editor",
+   "default": "idea",
+   "description": "Keyboard shortcut preset used by the native editor.",
+   "enum": [
+    "idea",
+    "vscode"
+   ],
+   "type": "string"
+  },
+  "editor.tabWidth": {
+   "category": "editor",
+   "default": 4,
+   "description": "Number of spaces represented by one editor tab stop.",
+   "maximum": 12,
+   "minimum": 1,
+   "type": "number"
+  },
+  "editor.wordWrap": {
+   "category": "editor",
+   "default": true,
+   "description": "Wrap long editor lines at the visible content width.",
+   "type": "boolean"
+  },
   "general.language": {
    "category": "general",
    "default": "system",

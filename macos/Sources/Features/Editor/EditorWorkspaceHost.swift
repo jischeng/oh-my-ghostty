@@ -1,36 +1,72 @@
 import AppKit
 import SwiftUI
 
-/// File browsing changes the selected document; terminal cwd changes do not.
+private struct EditorTerminalControllerKey: EnvironmentKey {
+    static let defaultValue: TerminalController? = nil
+}
+
+extension EnvironmentValues {
+    var editorTerminalController: TerminalController? {
+        get { self[EditorTerminalControllerKey.self] }
+        set { self[EditorTerminalControllerKey.self] = newValue }
+    }
+}
+
+struct EditorPaneContainer<Terminal: View>: View {
+    @Environment(\.editorTerminalController) private var controller
+    let surfaceView: Ghostty.SurfaceView
+    @ViewBuilder var terminal: () -> Terminal
+
+    var body: some View {
+        if let controller {
+            EditorWorkspaceHost(controller: controller, surfaceView: surfaceView, terminal: terminal)
+        } else {
+            terminal()
+        }
+    }
+}
+
+/// The editor occupies one existing split leaf; its terminal remains alive underneath.
 struct EditorWorkspaceHost<Terminal: View>: View {
     @ObservedObject var controller: TerminalController
     @ObservedObject private var workspace: EditorWorkspace
+    let surfaceView: Ghostty.SurfaceView
     private let terminal: Terminal
 
-    init(controller: TerminalController, @ViewBuilder terminal: () -> Terminal) {
+    init(controller: TerminalController, surfaceView: Ghostty.SurfaceView, @ViewBuilder terminal: () -> Terminal) {
         self.controller = controller
-        self.workspace = EditorWorkspaceStore.shared.workspace(for: controller.tabSessionID)
+        self.surfaceView = surfaceView
+        self.workspace = EditorWorkspaceStore.shared.workspace(for: controller.tabSessionID, surfaceID: surfaceView.id)
         self.terminal = terminal()
     }
 
     var body: some View {
-        HSplitView {
-            terminal.frame(minWidth: 240)
-                .overlay(alignment: .topTrailing) {
-                    if !workspace.isVisible, !workspace.documents.isEmpty {
-                        Button { workspace.isVisible = true } label: {
-                            Label("Editor", systemImage: "doc.text")
-                        }.padding(8)
-                    }
-                }
-            if workspace.isVisible || !workspace.documents.isEmpty {
+        ZStack {
+            terminal
+                .opacity(workspace.isVisible ? 0 : 1)
+                .allowsHitTesting(!workspace.isVisible)
+                .accessibilityHidden(workspace.isVisible)
+            if !workspace.documents.isEmpty || workspace.isVisible {
                 editor
-                    .frame(minWidth: workspace.isVisible ? 320 : 0, idealWidth: workspace.isVisible ? 600 : 0)
-                    .frame(maxWidth: workspace.isVisible ? .infinity : 0)
-                    .clipped()
                     .opacity(workspace.isVisible ? 1 : 0)
                     .allowsHitTesting(workspace.isVisible)
                     .accessibilityHidden(!workspace.isVisible)
+                    .simultaneousGesture(TapGesture().onEnded { controller.focusedSurface = surfaceView })
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            if !workspace.isVisible, !workspace.documents.isEmpty {
+                Button("Editor") {
+                    controller.focusedSurface = surfaceView
+                    workspace.isVisible = true
+                }.padding(8)
+            }
+        }
+        .onChange(of: workspace.isVisible) { visible in
+            if visible {
+                controller.focusedSurface = surfaceView
+            } else if controller.focusedSurface === surfaceView {
+                controller.focusSurface(surfaceView)
             }
         }
     }
@@ -62,7 +98,7 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                 Button { workspace.isVisible = false } label: {
                     Image(systemName: "sidebar.right")
                 }
-                .help("Hide Editor")
+                .help("Back to Terminal")
             }
             .buttonStyle(.borderless)
             .padding(6)
@@ -89,6 +125,8 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                         EditorDocumentView(
                             document: document,
                             isActive: selected && workspace.isVisible,
+                            terminalBackground: NSColor(controller.terminalBackgroundColor),
+                            onFocus: { controller.focusedSurface = surfaceView },
                             save: { Task { await workspace.save(document) } },
                             close: { close(document) },
                             open: openFile,
@@ -111,7 +149,7 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(controller.terminalBackgroundColor)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Code Editor")
     }
@@ -146,7 +184,7 @@ struct EditorWorkspaceHost<Terminal: View>: View {
     }
 
     private func openFile() {
-        EditorMenuController.shared.openFile(in: controller)
+        EditorMenuController.shared.openFile(in: controller, surface: surfaceView)
     }
 }
 
@@ -177,6 +215,8 @@ private struct EditorDocumentTab: View {
 private struct EditorDocumentView: View {
     @ObservedObject var document: EditorDocument
     let isActive: Bool
+    let terminalBackground: NSColor
+    let onFocus: () -> Void
     let save: () -> Void
     let close: () -> Void
     let open: () -> Void
@@ -190,6 +230,9 @@ private struct EditorDocumentView: View {
                 text: $document.text,
                 fileURL: URL(fileURLWithPath: document.path),
                 isActive: isActive,
+                terminalBackground: terminalBackground,
+                terminalForeground: contrastingForeground,
+                onFocus: onFocus,
                 onSave: save,
                 onClose: close,
                 onOpen: open,
@@ -215,66 +258,10 @@ private struct EditorDocumentView: View {
             .padding(8)
         }
     }
-}
 
-/// Intercept editor commands only while the first responder belongs to this
-/// editor region, so terminal shortcuts retain their normal behavior.
-struct EditorKeyCommands: NSViewRepresentable {
-    let actions: [String: () -> Void]
-    var modifiedActions: [EditorShortcut: () -> Void] = [:]
-
-    func makeNSView(context: Context) -> EditorCommandView {
-        let view = EditorCommandView()
-        view.actions = actions
-        view.modifiedActions = modifiedActions
-        return view
-    }
-
-    func updateNSView(_ view: EditorCommandView, context: Context) {
-        view.actions = actions
-        view.modifiedActions = modifiedActions
-    }
-}
-
-final class EditorCommandView: NSView {
-    var actions: [String: () -> Void] = [:]
-    var modifiedActions: [EditorShortcut: () -> Void] = [:]
-    private var monitor: Any?
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        if let monitor { NSEvent.removeMonitor(monitor) }
-        monitor = nil
-        guard window != nil else { return }
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self, let window, event.window === window,
-                  let responder = window.firstResponder as? NSView,
-                  !isHiddenOrHasHiddenAncestor,
-                  bounds.width > 0,
-                  bounds.intersects(convert(responder.bounds, from: responder)),
-                  let characters = event.charactersIgnoringModifiers else { return event }
-            let key = event.keyCode == 48 ? "\t" : characters.lowercased()
-            let shortcut = EditorShortcut(key: key, modifiers: event.modifierFlags)
-            let action = modifiedActions[shortcut] ?? (
-                shortcut.modifiers == NSEvent.ModifierFlags.command.rawValue ? actions[key] : nil
-            )
-            guard let action else { return event }
-            action()
-            return nil
-        }
-    }
-
-    deinit {
-        if let monitor { NSEvent.removeMonitor(monitor) }
-    }
-}
-
-struct EditorShortcut: Hashable {
-    let key: String
-    let modifiers: UInt
-
-    init(key: String, modifiers: NSEvent.ModifierFlags) {
-        self.key = key.lowercased()
-        self.modifiers = modifiers.intersection([.command, .control, .option, .shift]).rawValue
+    private var contrastingForeground: NSColor {
+        guard let color = terminalBackground.usingColorSpace(.deviceRGB) else { return .textColor }
+        let luminance = color.redComponent * 0.2126 + color.greenComponent * 0.7152 + color.blueComponent * 0.0722
+        return luminance < 0.5 ? NSColor(white: 0.9, alpha: 1) : NSColor(white: 0.1, alpha: 1)
     }
 }

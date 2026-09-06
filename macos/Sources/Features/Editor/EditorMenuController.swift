@@ -24,9 +24,11 @@ final class EditorMenuController: NSObject, NSMenuItemValidation {
         openFile(in: controller)
     }
 
-    func openFile(in controller: TerminalController) {
-        let workspace = EditorWorkspaceStore.shared.workspace(for: controller.tabSessionID)
-        let surface = controller.focusedSurface ?? controller.surfaceTree.first
+    func openFile(
+        in controller: TerminalController,
+        surface preferredSurface: Ghostty.SurfaceView? = nil
+    ) {
+        let surface = preferredSurface ?? controller.focusedSurface ?? controller.surfaceTree.first
         let session = controller.paneSessionContext(for: surface) ?? .init(
             workingDirectory: surface?.pwd,
             terminalTitle: surface?.title ?? "Terminal"
@@ -41,18 +43,9 @@ final class EditorMenuController: NSObject, NSMenuItemValidation {
         )
         let filesystem = WorkspaceFilesystemFactory.make(for: context)
         if filesystem.descriptor.kind == .ssh {
-            let alert = NSAlert()
-            alert.messageText = "Open Remote File"
-            alert.informativeText = filesystem.descriptor.displayName
-            let field = NSTextField(string: filesystem.descriptor.workingDirectory + "/")
-            field.frame = NSRect(x: 0, y: 0, width: 400, height: 24)
-            alert.accessoryView = field
-            alert.addButton(withTitle: "Open")
-            alert.addButton(withTitle: "Cancel")
             guard let window = controller.window else { return }
-            alert.beginSheetModal(for: window) { response in
-                guard response == .alertFirstButtonReturn else { return }
-                workspace.open(path: field.stringValue, filesystem: filesystem)
+            EditorFilePicker.present(filesystem: filesystem, for: window) { path in
+                EditorWorkspaceStore.shared.open(path: path, context: context)
             }
         } else {
             let panel = NSOpenPanel()
@@ -62,7 +55,7 @@ final class EditorMenuController: NSObject, NSMenuItemValidation {
             guard let window = controller.window else { return }
             panel.beginSheetModal(for: window) { response in
                 guard response == .OK, let url = panel.url else { return }
-                workspace.open(path: url.path, filesystem: filesystem)
+                EditorWorkspaceStore.shared.open(path: url.path, context: context)
             }
         }
     }

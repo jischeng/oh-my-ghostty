@@ -8,6 +8,7 @@ enum OhMyGhosttySettingsTab: String, CaseIterable, Identifiable {
     case appearance
     case tabs
     case terminal
+    case editor
     case keyboard
     case plugins
     case advanced
@@ -20,6 +21,7 @@ enum OhMyGhosttySettingsTab: String, CaseIterable, Identifiable {
         case .appearance: "paintbrush"
         case .tabs: "rectangle.split.3x1"
         case .terminal: "terminal"
+        case .editor: "curlybraces.square"
         case .keyboard: "keyboard"
         case .plugins: "puzzlepiece.extension"
         case .advanced: "slider.horizontal.3"
@@ -267,6 +269,56 @@ struct SettingsView: View {
                 Section(strings.ghosttySection) {
                     Button(strings.openGhosttyConfigButton) {
                         (NSApp.delegate as? AppDelegate)?.ghostty.openConfig()
+                    }
+                }
+            }
+
+        case .editor:
+            Form {
+                Section(strings.editorBehaviorSection) {
+                    Picker(strings.editorKeymapPresetLabel, selection: $settings.editorKeymapPreset) {
+                        ForEach(EditorKeymapPreset.allCases) { preset in
+                            Text(strings.editorKeymapPresetTitle(preset)).tag(preset)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    Text(strings.editorKeymapPresetCaption)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Picker(strings.editorBackgroundModeLabel, selection: $settings.editorBackgroundMode) {
+                        ForEach(EditorBackgroundMode.allCases) { mode in
+                            Text(strings.editorBackgroundModeTitle(mode)).tag(mode)
+                        }
+                    }
+                    Toggle(strings.editorWordWrapLabel, isOn: $settings.editorWordWrap)
+                }
+                Section(strings.editorTypographySection) {
+                    HStack {
+                        Text(strings.editorFontSizeLabel)
+                        Slider(value: $settings.editorFontSize, in: 8...36, step: 0.5)
+                        Text(String(format: "%.1f pt", settings.editorFontSize))
+                            .monospacedDigit()
+                            .frame(width: 68, alignment: .trailing)
+                    }
+                    Stepper(
+                        value: $settings.editorTabWidth,
+                        in: 1...12,
+                        step: 1
+                    ) {
+                        LabeledContent(strings.editorTabWidthLabel) {
+                            Text("\(Int(settings.editorTabWidth))")
+                                .monospacedDigit()
+                        }
+                    }
+                }
+                HStack {
+                    Spacer()
+                    Button(strings.resetEditorButton) {
+                        settings.editorKeymapPreset = .idea
+                        settings.editorBackgroundMode = .followTerminal
+                        settings.editorFontSize = 13
+                        settings.editorTabWidth = 4
+                        settings.editorWordWrap = true
                     }
                 }
             }

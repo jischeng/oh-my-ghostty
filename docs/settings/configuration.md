@@ -31,7 +31,7 @@ The file is a flat, sorted JSON object. Only values explicitly chosen by the use
   "editor.fontSize": 13,
   "editor.keymapPreset": "idea",
   "editor.tabWidth": 4,
-  "editor.wordWrap": true,
+  "editor.wordWrap": false,
   "general.quitWithoutConfirmation": true,
   "keyboard.quickInput": "shift+command+e",
   "keyboard.quickInputHeight": 252,
@@ -85,7 +85,7 @@ Window UI state is intentionally separate: `InspectorPresentationStore` owns las
 | `editor.backgroundMode` | enum | `followTerminal` | `followTerminal`, `system` | Settings > Editor | Runtime |
 | `editor.fontSize` | number | `13` | `8...36` | Settings > Editor | Runtime |
 | `editor.tabWidth` | number | `4` | `1...12` | Settings > Editor | Runtime |
-| `editor.wordWrap` | boolean | `true` | `true`, `false` | Settings > Editor | Runtime |
+| `editor.wordWrap` | boolean | `false` | `true`, `false` | Settings > Editor | Runtime |
 | `notifications.taskComplete` | boolean | `true` | `true`, `false` | Settings > Plugins | Runtime policy |
 | `notifications.attention` | boolean | `true` | `true`, `false` | Settings > Plugins | Runtime policy |
 | `notifications.sound` | boolean | `false` | `true`, `false` | Settings > Plugins | Runtime policy |

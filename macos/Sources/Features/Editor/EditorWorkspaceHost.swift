@@ -126,6 +126,7 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                             document: document,
                             isActive: selected && workspace.isVisible,
                             terminalBackground: NSColor(controller.terminalBackgroundColor),
+                            terminalBackgroundOpacity: controller.terminalBackgroundOpacity,
                             onFocus: { controller.focusedSurface = surfaceView },
                             save: { Task { await workspace.save(document) } },
                             close: { close(document) },
@@ -149,7 +150,7 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .background(controller.terminalBackgroundColor)
+        .background(controller.terminalBackgroundColor.opacity(controller.terminalBackgroundOpacity))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Code Editor")
     }
@@ -216,6 +217,7 @@ private struct EditorDocumentView: View {
     @ObservedObject var document: EditorDocument
     let isActive: Bool
     let terminalBackground: NSColor
+    let terminalBackgroundOpacity: Double
     let onFocus: () -> Void
     let save: () -> Void
     let close: () -> Void
@@ -231,6 +233,7 @@ private struct EditorDocumentView: View {
                 fileURL: URL(fileURLWithPath: document.path),
                 isActive: isActive,
                 terminalBackground: terminalBackground,
+                terminalBackgroundOpacity: terminalBackgroundOpacity,
                 terminalForeground: contrastingForeground,
                 onFocus: onFocus,
                 onSave: save,

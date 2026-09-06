@@ -376,7 +376,7 @@ struct OhMyGhosttySettingsTests {
             backgroundMode: .followTerminal,
             fontSize: 13,
             tabWidth: 4,
-            wordWrap: true
+            wordWrap: false
         ))
         #expect(settings.editorSettings.keymapProfile == .idea)
         #expect(settings.editorSettings.keymap.action(

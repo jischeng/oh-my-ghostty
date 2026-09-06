@@ -15,6 +15,7 @@ struct CodeEditorView: View {
     var isEditable = true
     var isActive = true
     var terminalBackground: NSColor = .textBackgroundColor
+    var terminalBackgroundOpacity: Double = 1.0
     var terminalForeground: NSColor = .textColor
     var onFocus: () -> Void = {}
     var onSave: () -> Void = {}
@@ -39,6 +40,7 @@ struct CodeEditorView: View {
         isEditable: Bool = true,
         isActive: Bool = true,
         terminalBackground: NSColor = .textBackgroundColor,
+        terminalBackgroundOpacity: Double = 1.0,
         terminalForeground: NSColor = .textColor,
         onFocus: @escaping () -> Void = {},
         onSave: @escaping () -> Void = {},
@@ -53,6 +55,7 @@ struct CodeEditorView: View {
         self.isEditable = isEditable
         self.isActive = isActive
         self.terminalBackground = terminalBackground
+        self.terminalBackgroundOpacity = terminalBackgroundOpacity
         self.terminalForeground = terminalForeground
         self.onFocus = onFocus
         self.onSave = onSave
@@ -98,7 +101,11 @@ struct CodeEditorView: View {
                 .help("Find and Navigate")
             }
         }
-        .background(Color(nsColor: editorBackground))
+        .background(
+            editorSettings.backgroundMode == .followTerminal
+                ? Color(nsColor: terminalBackground).opacity(terminalBackgroundOpacity)
+                : Color(nsColor: .textBackgroundColor)
+        )
         .onAppear {
             configureCommands()
             editorCoordinator.setActive(isActive)
@@ -284,7 +291,11 @@ struct CodeEditorView: View {
     private var editorSettings: EditorSettings { settings.editorSettings }
 
     private var editorBackground: NSColor {
-        editorSettings.backgroundMode == .followTerminal ? terminalBackground : .textBackgroundColor
+        if editorSettings.backgroundMode == .followTerminal {
+            return terminalBackground.withAlphaComponent(terminalBackgroundOpacity)
+        } else {
+            return .textBackgroundColor
+        }
     }
 
     private var editorForeground: NSColor {

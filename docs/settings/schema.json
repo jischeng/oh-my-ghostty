@@ -153,7 +153,7 @@
   },
   "editor.wordWrap": {
    "category": "editor",
-   "default": true,
+   "default": false,
    "description": "Wrap long editor lines at the visible content width.",
    "type": "boolean"
   },

@@ -185,7 +185,8 @@ class BaseTerminalController: NSWindowController,
         self.ghostty = ghostty
         self.derivedConfig = DerivedConfig(ghostty.config)
         self.tabLayoutState = tabLayoutState ?? VerticalTabWindowLayoutState(
-            isSidebarVisible: false
+            isSidebarVisible: false,
+            isInspectorVisible: false
         )
 
         super.init(window: nil)

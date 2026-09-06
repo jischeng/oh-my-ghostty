@@ -76,6 +76,7 @@ final class VerticalTabWindowLayoutState: ObservableObject {
     init(
         isSidebarVisible: Bool,
         sidebarWidth: CGFloat? = nil,
+        isInspectorVisible: Bool? = nil,
         settings: OhMyGhosttySettings? = nil,
         inspectorPresentation: InspectorPresentationStore? = nil
     ) {
@@ -89,7 +90,7 @@ final class VerticalTabWindowLayoutState: ObservableObject {
         self.committedSidebarWidth = initialWidth
         self.groupingMode = settings.groupingMode
         self.orderingMode = settings.orderingMode
-        self.isInspectorVisible = inspectorPresentation.snapshot.isVisible
+        self.isInspectorVisible = isInspectorVisible ?? inspectorPresentation.snapshot.isVisible
         let inspectorWidth = CGFloat(inspectorPresentation.snapshot.width)
         self.inspectorWidth = inspectorWidth
         self.committedInspectorWidth = inspectorWidth

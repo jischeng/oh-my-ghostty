@@ -392,7 +392,7 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Number of spaces represented by one editor tab stop.",
             requiresNewWindow: false, category: "editor"),
         .init(
-            id: "editor.wordWrap", type: .boolean, defaultValue: "true",
+            id: "editor.wordWrap", type: .boolean, defaultValue: "false",
             allowedValues: nil, minimum: nil, maximum: nil,
             description: "Wrap long editor lines at the visible content width.",
             requiresNewWindow: false, category: "editor"),
@@ -581,7 +581,7 @@ final class OhMyGhosttySettings: ObservableObject {
             }
         }
     }
-    @Published var editorWordWrap = true {
+    @Published var editorWordWrap = false {
         didSet { persist("editor.wordWrap", editorWordWrap) }
     }
     @Published var agentHistoryLimit: Double = 10_000 {
@@ -846,7 +846,7 @@ final class OhMyGhosttySettings: ObservableObject {
             editorBackgroundMode = enumValue("editor.backgroundMode", fallback: .followTerminal)
             editorFontSize = numberValue("editor.fontSize", fallback: 13, range: 8...36)
             editorTabWidth = numberValue("editor.tabWidth", fallback: 4, range: 1...12).rounded()
-            editorWordWrap = boolValue("editor.wordWrap", fallback: true)
+            editorWordWrap = boolValue("editor.wordWrap", fallback: false)
             agentHistoryLimit = numberValue(
                 "agents.historyLimit",
                 fallback: 10_000,

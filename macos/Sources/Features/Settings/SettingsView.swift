@@ -318,7 +318,7 @@ struct SettingsView: View {
                         settings.editorBackgroundMode = .followTerminal
                         settings.editorFontSize = 13
                         settings.editorTabWidth = 4
-                        settings.editorWordWrap = true
+                        settings.editorWordWrap = false
                     }
                 }
             }

@@ -688,7 +688,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             : base
         let initialLayoutState = VerticalTabWindowLayoutState(
             isSidebarVisible: self.tabLayout == .vertical &&
-                OhMyGhosttySettings.shared.sidebarVisible
+                OhMyGhosttySettings.shared.sidebarVisible,
+            isInspectorVisible: false
         )
 
         super.init(
@@ -4266,7 +4267,8 @@ extension NSWindowTabGroup {
             .first?
             .tabLayoutState ?? VerticalTabWindowLayoutState(
                 isSidebarVisible: OhMyGhosttySettings.shared.tabLayout == .vertical &&
-                    OhMyGhosttySettings.shared.sidebarVisible
+                    OhMyGhosttySettings.shared.sidebarVisible,
+                isInspectorVisible: false
             )
         setGhosttyTerminalShellLayoutState(state)
         return state

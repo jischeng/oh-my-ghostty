@@ -162,7 +162,11 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .background(controller.terminalBackgroundColor.opacity(controller.terminalBackgroundOpacity))
+        .background(
+            OhMyGhosttySettings.shared.editorBackgroundMode == .followTerminal
+                ? controller.terminalBackgroundColor.opacity(controller.terminalBackgroundOpacity)
+                : Color(nsColor: .textBackgroundColor).opacity(controller.terminalBackgroundOpacity)
+        )
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Code Editor")
     }

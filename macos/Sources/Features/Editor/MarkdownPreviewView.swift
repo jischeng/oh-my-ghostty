@@ -23,10 +23,7 @@ struct MarkdownPreviewView: View {
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(
-            Color(nsColor: terminalBackground)
-                .opacity(terminalBackgroundOpacity)
-        )
+        .background(Color.clear)
     }
 
     @ViewBuilder

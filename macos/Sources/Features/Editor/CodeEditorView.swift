@@ -112,11 +112,7 @@ struct CodeEditorView: View {
                 .help("Find and Navigate")
             }
         }
-        .background(
-            editorSettings.backgroundMode == .followTerminal
-                ? Color(nsColor: terminalBackground).opacity(terminalBackgroundOpacity)
-                : Color(nsColor: .textBackgroundColor)
-        )
+        .background(Color.clear)
         .onAppear {
             configureCommands()
             editorCoordinator.setActive(isActive)
@@ -331,11 +327,9 @@ struct CodeEditorView: View {
         case .oneLight: baseTheme = .oneLight
         case .dracula: baseTheme = .dracula
         case .githubDark: baseTheme = .githubDark
-        case .followTerminal: baseTheme = .adaptive(background: editorBackground, foreground: editorForeground)
+        case .followTerminal: baseTheme = .adaptive(background: .clear, foreground: editorForeground)
         }
-        if editorSettings.backgroundMode == .followTerminal {
-            baseTheme.background = editorBackground
-        }
+        baseTheme.background = .clear
         return baseTheme
     }
 
@@ -405,6 +399,10 @@ private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
         scrollView?.automaticallyAdjustsContentInsets = false
         scrollView?.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
         scrollView?.documentCursor = .iBeam
+        scrollView?.drawsBackground = false
+        scrollView?.backgroundColor = .clear
+        scrollView?.contentView.drawsBackground = false
+        scrollView?.contentView.backgroundColor = .clear
         controller.textView.selectionManager.selectionBackgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.65)
         if isActive { registerCommands() }
         focusIfActive(onNextRunLoop: true)

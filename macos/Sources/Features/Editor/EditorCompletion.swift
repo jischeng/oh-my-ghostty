@@ -114,7 +114,7 @@ public struct BufferWordCompletionProvider: CompletionProvider, Sendable {
 
     public func provideCompletions(context: CompletionContext) async -> [CompletionItem] {
         let prefix = context.prefix
-        guard prefix.count >= 2 else { return [] }
+        guard prefix.count >= 1 else { return [] }
 
         let text = context.documentText
         var frequencies: [String: Int] = [:]
@@ -224,7 +224,7 @@ public struct LanguageKeywordCompletionProvider: CompletionProvider, Sendable {
 
     public func provideCompletions(context: CompletionContext) async -> [CompletionItem] {
         let prefix = context.prefix
-        guard prefix.count >= 2 else { return [] }
+        guard prefix.count >= 1 else { return [] }
 
         let langKey = context.language?.lowercased() ?? ""
         var keywordList: [String] = []
@@ -280,7 +280,7 @@ public final class EditorCompletionEngine {
     }
 
     public func completions(for context: CompletionContext) async -> [CompletionItem] {
-        guard context.prefix.count >= 2 else { return [] }
+        guard context.prefix.count >= 1 else { return [] }
 
         var results: [CompletionItem] = []
         var seenLabels = Set<String>()

@@ -8,11 +8,16 @@ enum EditorAction: Hashable {
     case save, saveAll, close, open, nextDocument, previousDocument
     case duplicateLine, deleteLine, moveLineUp, moveLineDown, indent, outdent, toggleLineComment
     case insertLineBelow
+    case deleteWordBackward, deleteWordForward, deleteToBeginningOfLine, deleteToEndOfLine
+    case moveWordLeft, moveWordRight, selectWordLeft, selectWordRight
+    case moveToLineStart, moveToLineEnd, selectToLineStart, selectToLineEnd
+    case moveToDocumentStart, moveToDocumentEnd, selectToDocumentStart, selectToDocumentEnd
 }
 
 struct EditorKeyStroke: Hashable {
     static let tab = "\t"
     static let backspace = "\u{8}"
+    static let delete = "\u{f728}"
     static let upArrow = "\u{f700}"
     static let downArrow = "\u{f701}"
     static let leftArrow = "\u{f702}"
@@ -38,6 +43,7 @@ struct EditorKeyStroke: Hashable {
         case 36: "\r"
         case 48: tab
         case 51: backspace
+        case 117: delete
         case 123: leftArrow
         case 124: rightArrow
         case 125: downArrow
@@ -75,6 +81,24 @@ struct EditorKeymap {
             .init(key: "[", modifiers: .command): .outdent,
             .init(key: "s", modifiers: [.command, .shift]): .saveAll,
             .init(key: "\r", modifiers: .shift): .insertLineBelow,
+
+            // Option + Word operations (standard macOS text editing)
+            .init(key: EditorKeyStroke.backspace, modifiers: .option): .deleteWordBackward,
+            .init(key: EditorKeyStroke.delete, modifiers: .option): .deleteWordForward,
+            .init(key: EditorKeyStroke.leftArrow, modifiers: .option): .moveWordLeft,
+            .init(key: EditorKeyStroke.rightArrow, modifiers: .option): .moveWordRight,
+            .init(key: EditorKeyStroke.leftArrow, modifiers: [.option, .shift]): .selectWordLeft,
+            .init(key: EditorKeyStroke.rightArrow, modifiers: [.option, .shift]): .selectWordRight,
+
+            // Command + Line/Document operations
+            .init(key: EditorKeyStroke.leftArrow, modifiers: .command): .moveToLineStart,
+            .init(key: EditorKeyStroke.rightArrow, modifiers: .command): .moveToLineEnd,
+            .init(key: EditorKeyStroke.leftArrow, modifiers: [.command, .shift]): .selectToLineStart,
+            .init(key: EditorKeyStroke.rightArrow, modifiers: [.command, .shift]): .selectToLineEnd,
+            .init(key: EditorKeyStroke.upArrow, modifiers: .command): .moveToDocumentStart,
+            .init(key: EditorKeyStroke.downArrow, modifiers: .command): .moveToDocumentEnd,
+            .init(key: EditorKeyStroke.upArrow, modifiers: [.command, .shift]): .selectToDocumentStart,
+            .init(key: EditorKeyStroke.downArrow, modifiers: [.command, .shift]): .selectToDocumentEnd,
         ]
         switch profile {
         case .idea:
@@ -303,6 +327,38 @@ enum EditorNativeTextActions {
             let insertion = "\n" + indent
             textView.replaceCharacters(in: NSRange(location: insertPos, length: 0), with: insertion)
             select(NSRange(location: insertPos + 1 + (indent as NSString).length, length: 0), on: textView)
+        case .deleteWordBackward:
+            textView.deleteWordBackward(nil)
+        case .deleteWordForward:
+            textView.deleteWordForward(nil)
+        case .deleteToBeginningOfLine:
+            textView.deleteToBeginningOfLine(nil)
+        case .deleteToEndOfLine:
+            textView.deleteToEndOfLine(nil)
+        case .moveWordLeft:
+            textView.moveWordLeft(nil)
+        case .moveWordRight:
+            textView.moveWordRight(nil)
+        case .selectWordLeft:
+            textView.moveWordLeftAndModifySelection(nil)
+        case .selectWordRight:
+            textView.moveWordRightAndModifySelection(nil)
+        case .moveToLineStart:
+            textView.moveToLeftEndOfLine(nil)
+        case .moveToLineEnd:
+            textView.moveToRightEndOfLine(nil)
+        case .selectToLineStart:
+            textView.moveToLeftEndOfLineAndModifySelection(nil)
+        case .selectToLineEnd:
+            textView.moveToRightEndOfLineAndModifySelection(nil)
+        case .moveToDocumentStart:
+            textView.moveToBeginningOfDocument(nil)
+        case .moveToDocumentEnd:
+            textView.moveToEndOfDocument(nil)
+        case .selectToDocumentStart:
+            textView.moveToBeginningOfDocumentAndModifySelection(nil)
+        case .selectToDocumentEnd:
+            textView.moveToEndOfDocumentAndModifySelection(nil)
         default: return false
         }
         return true

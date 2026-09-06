@@ -1,6 +1,7 @@
 import AppKit
 import CodeEditLanguages
 import CodeEditSourceEditor
+import CodeEditTextView
 import SwiftUI
 
 /// A lightweight native source editor surface for editable OMG documents.
@@ -28,6 +29,7 @@ struct CodeEditorView: View {
     @State private var cursorPositions: [CursorPosition] = []
     @State private var editorCoordinator = EditorCoordinator()
     @StateObject private var completionState = CompletionState()
+    @State private var isCursorPushed = false
     @State private var isFindVisible = false
     @State private var findText = ""
     @State private var replaceText = ""
@@ -88,10 +90,12 @@ struct CodeEditorView: View {
             )
             .clipped()
             .onHover { inside in
-                if inside {
-                    NSCursor.iBeam.set()
-                } else {
-                    NSCursor.arrow.set()
+                if inside && !isCursorPushed {
+                    isCursorPushed = true
+                    NSCursor.iBeam.push()
+                } else if !inside && isCursorPushed {
+                    isCursorPushed = false
+                    NSCursor.pop()
                 }
             }
 
@@ -107,22 +111,15 @@ struct CodeEditorView: View {
             if isActive, isFindVisible {
                 findBar
                     .padding(8)
-            } else if isActive {
-                Menu {
-                    Button("Find", action: presentFind)
-                    Button("Find and Replace", action: presentReplace)
-                    Button("Go to Line", action: presentGoToLine)
-                } label: {
-                    Image(systemName: "magnifyingglass")
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .padding(10)
-                .help("Find and Navigate")
             }
         }
         .background(Color.clear)
+        .onDisappear {
+            if isCursorPushed {
+                isCursorPushed = false
+                NSCursor.pop()
+            }
+        }
         .onAppear {
             editorCoordinator.setCompletionState(completionState)
             editorCoordinator.setFileURL(fileURL)
@@ -369,6 +366,8 @@ private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
     private weak var controller: TextViewController?
     private weak var completionState: CompletionState?
     private var completionTask: Task<Void, Never>?
+    private var mouseMonitor: Any?
+    private var columnDragStart: CGPoint?
     private var fileURL: URL?
     private var cachedLanguage: CodeLanguage?
     private var isActive = false
@@ -431,8 +430,85 @@ private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
         scrollView?.contentView.drawsBackground = false
         scrollView?.contentView.backgroundColor = .clear
         controller.textView.selectionManager.selectionBackgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.65)
+        installMouseMonitor()
         if isActive { registerCommands() }
         focusIfActive(onNextRunLoop: true)
+    }
+
+    private func installMouseMonitor() {
+        guard mouseMonitor == nil else { return }
+        mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self] event in
+            guard let self, self.isActive, let textView = self.controller?.textView,
+                  event.window === textView.window else {
+                return event
+            }
+            let locInTextView = textView.convert(event.locationInWindow, from: nil)
+
+            switch event.type {
+            case .leftMouseDown:
+                if event.modifierFlags.contains(.option), textView.bounds.contains(locInTextView) {
+                    self.columnDragStart = locInTextView
+                    self.handleColumnSelection(at: locInTextView, start: locInTextView)
+                    return nil
+                }
+            case .leftMouseDragged:
+                if let start = self.columnDragStart {
+                    self.handleColumnSelection(at: locInTextView, start: start)
+                    return nil
+                }
+            case .leftMouseUp:
+                if self.columnDragStart != nil {
+                    self.columnDragStart = nil
+                    return nil
+                }
+            default:
+                break
+            }
+            return event
+        }
+    }
+
+    private func handleColumnSelection(at current: CGPoint, start: CGPoint) {
+        guard let controller, let layoutManager = controller.textView.layoutManager else { return }
+        let lineHeight = max(14, layoutManager.estimateLineHeight())
+        let minY = min(start.y, current.y)
+        let maxY = max(start.y, current.y)
+        let isBox = abs(current.x - start.x) >= 6
+
+        var ranges: [NSRange] = []
+        var seen = Set<Int>()
+
+        var y = minY + lineHeight / 2
+        while y <= maxY + lineHeight / 2 {
+            if isBox {
+                if let o1 = layoutManager.textOffsetAtPoint(CGPoint(x: start.x, y: y)),
+                   let o2 = layoutManager.textOffsetAtPoint(CGPoint(x: current.x, y: y)) {
+                    let loc = min(o1, o2)
+                    let len = abs(o2 - o1)
+                    if !seen.contains(loc) {
+                        seen.insert(loc)
+                        ranges.append(NSRange(location: loc, length: len))
+                    }
+                }
+            } else {
+                if let offset = layoutManager.textOffsetAtPoint(CGPoint(x: start.x, y: y)) {
+                    if !seen.contains(offset) {
+                        seen.insert(offset)
+                        ranges.append(NSRange(location: offset, length: 0))
+                    }
+                }
+            }
+            y += lineHeight
+        }
+
+        if !ranges.isEmpty {
+            controller.textView.selectionManager.setSelectedRanges(ranges)
+            controller.textView.setNeedsDisplay()
+            NotificationCenter.default.post(
+                name: TextSelectionManager.selectionChangedNotification,
+                object: controller.textView.selectionManager
+            )
+        }
     }
 
     func setActive(_ isActive: Bool) {
@@ -538,7 +614,7 @@ private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
         }
 
         let prefixLength = cursorLocation - wordStart
-        guard prefixLength >= 2 else {
+        guard prefixLength >= 1 else {
             completionState?.dismiss()
             return
         }
@@ -546,9 +622,18 @@ private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
         let prefix = string.substring(with: NSRange(location: wordStart, length: prefixLength))
         let prefixRange = NSRange(location: wordStart, length: prefixLength)
 
-        let cursorRect = controller.textView.layoutManager.rectForOffset(cursorLocation) ?? .zero
+        let lineIdx = controller.textView.layoutManager.textLineForOffset(cursorLocation)?.index ?? 0
+        let estHeight = max(14, controller.textView.layoutManager.estimateLineHeight())
+        let cursorRect: CGRect
+        if let rect = controller.textView.layoutManager.rectForOffset(cursorLocation), rect.height > 0 {
+            cursorRect = rect
+        } else {
+            cursorRect = CGRect(x: 40, y: CGFloat(lineIdx) * estHeight, width: 2, height: estHeight)
+        }
+
         guard let scrollView = controller.textView.enclosingScrollView else { return }
         let originInScroll = controller.textView.convert(cursorRect.origin, to: scrollView)
+        guard originInScroll.y >= 0 else { return }
 
         let popupX = max(12, min(originInScroll.x, scrollView.bounds.width - 260))
         var popupY = originInScroll.y + cursorRect.height + 4
@@ -612,6 +697,10 @@ private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
     }
 
     func destroy() {
+        if let mouseMonitor {
+            NSEvent.removeMonitor(mouseMonitor)
+            self.mouseMonitor = nil
+        }
         completionTask?.cancel()
         completionTask = nil
         completionState?.dismiss()

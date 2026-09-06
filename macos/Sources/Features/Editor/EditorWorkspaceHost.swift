@@ -133,8 +133,8 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                         EditorDocumentView(
                             document: document,
                             isActive: selected && workspace.isVisible,
-                            terminalBackground: NSColor(controller.terminalBackgroundColor),
-                            terminalBackgroundOpacity: controller.terminalBackgroundOpacity,
+                            terminalBackground: NSColor(terminalColor),
+                            terminalBackgroundOpacity: terminalOpacity,
                             onFocus: {
                                 if controller.focusedSurface !== surfaceView {
                                     controller.focusedSurface = surfaceView
@@ -164,8 +164,8 @@ struct EditorWorkspaceHost<Terminal: View>: View {
         }
         .background(
             OhMyGhosttySettings.shared.editorBackgroundMode == .followTerminal
-                ? controller.terminalBackgroundColor.opacity(controller.terminalBackgroundOpacity)
-                : Color(nsColor: .textBackgroundColor).opacity(controller.terminalBackgroundOpacity)
+                ? terminalColor.opacity(terminalOpacity)
+                : Color(nsColor: .textBackgroundColor).opacity(terminalOpacity)
         )
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Code Editor")
@@ -173,6 +173,14 @@ struct EditorWorkspaceHost<Terminal: View>: View {
 
     private func close(_ document: EditorDocument) {
         Task { await workspace.close(document, window: controller.window) }
+    }
+
+    private var terminalColor: Color {
+        surfaceView.backgroundColor ?? surfaceView.derivedConfig.backgroundColor
+    }
+
+    private var terminalOpacity: Double {
+        surfaceView.derivedConfig.backgroundOpacity
     }
 
     private var documentMenu: some View {

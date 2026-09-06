@@ -76,6 +76,7 @@ final class EditorDocument: ObservableObject {
             guard text != oldValue else { return }
             revision &+= 1
             isDirty = text != persistedText
+            if isDirty { scheduleAutoSave() }
         }
     }
     @Published private(set) var isDirty: Bool
@@ -87,8 +88,27 @@ final class EditorDocument: ObservableObject {
     private var persistedText: String
     private var persistedData: Data
     private var revision: UInt64 = 0
+    private var autoSaveTask: Task<Void, Never>?
 
     var path: String { id.path }
+
+    func flushAutoSave() {
+        autoSaveTask?.cancel()
+        autoSaveTask = nil
+        guard isDirty, !isSaving, !isReloading else { return }
+        Task { @MainActor [weak self] in
+            _ = try? await self?.save()
+        }
+    }
+
+    private func scheduleAutoSave() {
+        autoSaveTask?.cancel()
+        autoSaveTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard let self, !Task.isCancelled, self.isDirty, !self.isSaving, !self.isReloading else { return }
+            _ = try? await self.save()
+        }
+    }
 
     init(
         id: EditorDocumentID,

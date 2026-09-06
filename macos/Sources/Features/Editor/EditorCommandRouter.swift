@@ -7,6 +7,7 @@ enum EditorAction: Hashable {
     case find, replace, goToLine, findNext, findPrevious
     case save, saveAll, close, open, nextDocument, previousDocument
     case duplicateLine, deleteLine, moveLineUp, moveLineDown, indent, outdent, toggleLineComment
+    case insertLineBelow
 }
 
 struct EditorKeyStroke: Hashable {
@@ -34,6 +35,7 @@ struct EditorKeyStroke: Hashable {
 
     private static func key(for event: NSEvent) -> String {
         switch event.keyCode {
+        case 36: "\r"
         case 48: tab
         case 51: backspace
         case 123: leftArrow
@@ -72,6 +74,7 @@ struct EditorKeymap {
             .init(key: "]", modifiers: .command): .indent,
             .init(key: "[", modifiers: .command): .outdent,
             .init(key: "s", modifiers: [.command, .shift]): .saveAll,
+            .init(key: "\r", modifiers: .shift): .insertLineBelow,
         ]
         switch profile {
         case .idea:
@@ -152,14 +155,14 @@ enum EditorNativeTextActions {
         guard range.location != NSNotFound,
               range.location >= 0,
               NSMaxRange(range) <= textView.textStorage.length else { return false }
-        textView.layoutManager.ensureLayoutUntil(NSMaxRange(range))
         textView.selectionManager.setSelectedRange(range)
         NotificationCenter.default.post(
             name: TextSelectionManager.selectionChangedNotification,
             object: textView.selectionManager
         )
-        textView.needsDisplay = true
         textView.scrollSelectionToVisible()
+        textView.updatedViewport(textView.visibleRect)
+        textView.needsDisplay = true
         return true
     }
 
@@ -286,6 +289,20 @@ enum EditorNativeTextActions {
             let offsetInLine = selection.location - lineRange.location
             let newSelectionLoc = lineRange.location + (newNextText as NSString).length + offsetInLine
             select(NSRange(location: min(newSelectionLoc, textView.textStorage.length), length: selection.length), on: textView)
+        case .insertLineBelow:
+            guard textView.isEditable,
+                  let selection = textView.selectionManager.textSelections.first?.range,
+                  let lineRange = EditorTextSearch.lineRange(containing: selection, in: textView.string) else {
+                return false
+            }
+            let source = textView.string as NSString
+            let lineText = source.substring(with: lineRange)
+            let indent = String(lineText.prefix(while: { $0 == " " || $0 == "\t" }))
+            let hasNewline = lineText.hasSuffix("\n")
+            let insertPos = hasNewline ? NSMaxRange(lineRange) - 1 : NSMaxRange(lineRange)
+            let insertion = "\n" + indent
+            textView.replaceCharacters(in: NSRange(location: insertPos, length: 0), with: insertion)
+            select(NSRange(location: insertPos + 1 + (indent as NSString).length, length: 0), on: textView)
         default: return false
         }
         return true

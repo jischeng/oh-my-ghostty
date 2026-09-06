@@ -292,6 +292,12 @@ struct SettingsStrings: Equatable, Sendable {
         }
     }
 
+    var editorSyntaxThemeLabel: String { t("Syntax Theme", "代码风格主题") }
+    func editorSyntaxThemeTitle(_ theme: EditorSyntaxTheme) -> String { theme.title }
+
+    var editorFontFamilyLabel: String { t("Font Family", "字体") }
+    func editorFontFamilyTitle(_ family: EditorFontFamily) -> String { family.title }
+
     var editorWordWrapLabel: String { t("Word Wrap", "自动换行") }
     var editorFontSizeLabel: String { t("Font Size", "字号") }
     var editorTabWidthLabel: String { t("Tab Width", "Tab 宽度") }

@@ -290,9 +290,19 @@ struct SettingsView: View {
                             Text(strings.editorBackgroundModeTitle(mode)).tag(mode)
                         }
                     }
+                    Picker(strings.editorSyntaxThemeLabel, selection: $settings.editorSyntaxTheme) {
+                        ForEach(EditorSyntaxTheme.allCases) { theme in
+                            Text(strings.editorSyntaxThemeTitle(theme)).tag(theme)
+                        }
+                    }
                     Toggle(strings.editorWordWrapLabel, isOn: $settings.editorWordWrap)
                 }
                 Section(strings.editorTypographySection) {
+                    Picker(strings.editorFontFamilyLabel, selection: $settings.editorFontFamily) {
+                        ForEach(EditorFontFamily.allCases) { family in
+                            Text(strings.editorFontFamilyTitle(family)).tag(family)
+                        }
+                    }
                     HStack {
                         Text(strings.editorFontSizeLabel)
                         Slider(value: $settings.editorFontSize, in: 8...36, step: 0.5)
@@ -316,6 +326,8 @@ struct SettingsView: View {
                     Button(strings.resetEditorButton) {
                         settings.editorKeymapPreset = .idea
                         settings.editorBackgroundMode = .followTerminal
+                        settings.editorSyntaxTheme = .oneDark
+                        settings.editorFontFamily = .jetbrainsMono
                         settings.editorFontSize = 13
                         settings.editorTabWidth = 4
                         settings.editorWordWrap = false

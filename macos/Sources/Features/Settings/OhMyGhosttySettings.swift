@@ -382,6 +382,20 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Choose whether the editor follows the terminal background or uses the system editor background.",
             requiresNewWindow: false, category: "editor"),
         .init(
+            id: "editor.syntaxTheme", type: .enumeration,
+            defaultValue: EditorSyntaxTheme.oneDark.rawValue,
+            allowedValues: EditorSyntaxTheme.allCases.map(\.rawValue),
+            minimum: nil, maximum: nil,
+            description: "Syntax highlighting style theme for the native editor.",
+            requiresNewWindow: false, category: "editor"),
+        .init(
+            id: "editor.fontFamily", type: .enumeration,
+            defaultValue: EditorFontFamily.jetbrainsMono.rawValue,
+            allowedValues: EditorFontFamily.allCases.map(\.rawValue),
+            minimum: nil, maximum: nil,
+            description: "Font family used by the native editor.",
+            requiresNewWindow: false, category: "editor"),
+        .init(
             id: "editor.fontSize", type: .number, defaultValue: "13",
             allowedValues: nil, minimum: 8, maximum: 36,
             description: "Native editor font size in points.",
@@ -560,6 +574,12 @@ final class OhMyGhosttySettings: ObservableObject {
     }
     @Published var editorBackgroundMode: EditorBackgroundMode = .followTerminal {
         didSet { persist("editor.backgroundMode", editorBackgroundMode.rawValue) }
+    }
+    @Published var editorSyntaxTheme: EditorSyntaxTheme = .oneDark {
+        didSet { persist("editor.syntaxTheme", editorSyntaxTheme.rawValue) }
+    }
+    @Published var editorFontFamily: EditorFontFamily = .jetbrainsMono {
+        didSet { persist("editor.fontFamily", editorFontFamily.rawValue) }
     }
     @Published var editorFontSize: Double = 13 {
         didSet {
@@ -788,6 +808,8 @@ final class OhMyGhosttySettings: ObservableObject {
         EditorSettings(
             keymapPreset: editorKeymapPreset,
             backgroundMode: editorBackgroundMode,
+            syntaxTheme: editorSyntaxTheme,
+            fontFamily: editorFontFamily,
             fontSize: editorFontSize,
             tabWidth: Int(editorTabWidth),
             wordWrap: editorWordWrap
@@ -844,6 +866,8 @@ final class OhMyGhosttySettings: ObservableObject {
             )
             editorKeymapPreset = enumValue("editor.keymapPreset", fallback: .idea)
             editorBackgroundMode = enumValue("editor.backgroundMode", fallback: .followTerminal)
+            editorSyntaxTheme = enumValue("editor.syntaxTheme", fallback: .oneDark)
+            editorFontFamily = enumValue("editor.fontFamily", fallback: .jetbrainsMono)
             editorFontSize = numberValue("editor.fontSize", fallback: 13, range: 8...36)
             editorTabWidth = numberValue("editor.tabWidth", fallback: 4, range: 1...12).rounded()
             editorWordWrap = boolValue("editor.wordWrap", fallback: false)

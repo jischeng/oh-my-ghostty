@@ -90,6 +90,8 @@ struct OhMyGhosttySettingsTests {
         settings.terminalResizeRendering = .onRelease
         settings.editorKeymapPreset = .vscode
         settings.editorBackgroundMode = .system
+        settings.editorSyntaxTheme = .dracula
+        settings.editorFontFamily = .sfMono
         settings.editorFontSize = 15.5
         settings.editorTabWidth = 2
         settings.editorWordWrap = false
@@ -114,6 +116,8 @@ struct OhMyGhosttySettingsTests {
         #expect(object["terminal.resizeRendering"] as? String == "onRelease")
         #expect(object["editor.keymapPreset"] as? String == "vscode")
         #expect(object["editor.backgroundMode"] as? String == "system")
+        #expect(object["editor.syntaxTheme"] as? String == "dracula")
+        #expect(object["editor.fontFamily"] as? String == "sfMono")
         #expect((object["editor.fontSize"] as? NSNumber)?.doubleValue == 15.5)
         #expect((object["editor.tabWidth"] as? NSNumber)?.doubleValue == 2)
         #expect(object["editor.wordWrap"] as? Bool == false)
@@ -135,6 +139,8 @@ struct OhMyGhosttySettingsTests {
         #expect(restored.terminalResizeRendering == .onRelease)
         #expect(restored.editorSettings.keymapPreset == .vscode)
         #expect(restored.editorSettings.backgroundMode == .system)
+        #expect(restored.editorSettings.syntaxTheme == .dracula)
+        #expect(restored.editorSettings.fontFamily == .sfMono)
         #expect(restored.editorSettings.fontSize == 15.5)
         #expect(restored.editorSettings.tabWidth == 2)
         #expect(!restored.editorSettings.wordWrap)
@@ -374,6 +380,8 @@ struct OhMyGhosttySettingsTests {
         #expect(settings.editorSettings == EditorSettings(
             keymapPreset: .idea,
             backgroundMode: .followTerminal,
+            syntaxTheme: .oneDark,
+            fontFamily: .jetbrainsMono,
             fontSize: 13,
             tabWidth: 4,
             wordWrap: false

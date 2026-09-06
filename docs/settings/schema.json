@@ -125,6 +125,19 @@
    ],
    "type": "string"
   },
+  "editor.fontFamily": {
+   "category": "editor",
+   "default": "jetbrainsMono",
+   "description": "Font family used by the native editor.",
+   "enum": [
+    "jetbrainsMono",
+    "sfMono",
+    "menlo",
+    "firaCode",
+    "system"
+   ],
+   "type": "string"
+  },
   "editor.fontSize": {
    "category": "editor",
    "default": 13,
@@ -140,6 +153,19 @@
    "enum": [
     "idea",
     "vscode"
+   ],
+   "type": "string"
+  },
+  "editor.syntaxTheme": {
+   "category": "editor",
+   "default": "oneDark",
+   "description": "Syntax highlighting style theme for the native editor.",
+   "enum": [
+    "oneDark",
+    "oneLight",
+    "dracula",
+    "githubDark",
+    "followTerminal"
    ],
    "type": "string"
   },

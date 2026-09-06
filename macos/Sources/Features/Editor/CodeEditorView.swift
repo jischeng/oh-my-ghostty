@@ -71,8 +71,8 @@ struct CodeEditorView: View {
             CodeEditSourceEditor(
                 $text,
                 language: editorCoordinator.language(fileURL: fileURL, text: text),
-                theme: .omg(background: editorBackground, foreground: editorForeground),
-                font: .monospacedSystemFont(ofSize: editorSettings.fontSize, weight: .regular),
+                theme: resolvedTheme,
+                font: resolvedFont,
                 tabWidth: editorSettings.tabWidth,
                 lineHeight: 1.2,
                 wrapLines: editorSettings.wordWrap,
@@ -86,6 +86,13 @@ struct CodeEditorView: View {
                 coordinators: [editorCoordinator]
             )
             .clipped()
+            .onHover { inside in
+                if inside {
+                    NSCursor.iBeam.set()
+                } else {
+                    NSCursor.arrow.set()
+                }
+            }
 
             if isActive, isFindVisible {
                 findBar
@@ -294,6 +301,44 @@ struct CodeEditorView: View {
 
     private var editorSettings: EditorSettings { settings.editorSettings }
 
+    private var resolvedFont: NSFont {
+        let size = editorSettings.fontSize
+        switch editorSettings.fontFamily {
+        case .jetbrainsMono:
+            return NSFont(name: "JetBrainsMono-Regular", size: size)
+                ?? NSFont(name: "JetBrains Mono", size: size)
+                ?? .monospacedSystemFont(ofSize: size, weight: .regular)
+        case .sfMono:
+            return NSFont(name: "SFMono-Regular", size: size)
+                ?? .monospacedSystemFont(ofSize: size, weight: .regular)
+        case .menlo:
+            return NSFont(name: "Menlo-Regular", size: size)
+                ?? NSFont(name: "Menlo", size: size)
+                ?? .monospacedSystemFont(ofSize: size, weight: .regular)
+        case .firaCode:
+            return NSFont(name: "FiraCode-Regular", size: size)
+                ?? NSFont(name: "Fira Code", size: size)
+                ?? .monospacedSystemFont(ofSize: size, weight: .regular)
+        case .system:
+            return .monospacedSystemFont(ofSize: size, weight: .regular)
+        }
+    }
+
+    private var resolvedTheme: EditorTheme {
+        var baseTheme: EditorTheme
+        switch editorSettings.syntaxTheme {
+        case .oneDark: baseTheme = .oneDark
+        case .oneLight: baseTheme = .oneLight
+        case .dracula: baseTheme = .dracula
+        case .githubDark: baseTheme = .githubDark
+        case .followTerminal: baseTheme = .adaptive(background: editorBackground, foreground: editorForeground)
+        }
+        if editorSettings.backgroundMode == .followTerminal {
+            baseTheme.background = editorBackground
+        }
+        return baseTheme
+    }
+
     private var editorBackground: NSColor {
         if editorSettings.backgroundMode == .followTerminal {
             return terminalBackground.withAlphaComponent(terminalBackgroundOpacity)
@@ -337,6 +382,12 @@ private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
 
     func language(fileURL: URL?, text: String) -> CodeLanguage {
         if let cachedLanguage { return cachedLanguage }
+        if let path = fileURL?.path.lowercased() {
+            if path.hasSuffix(".ghostty") || path.hasSuffix(".conf") || path.hasSuffix(".ini") || path.hasSuffix(".cfg") {
+                cachedLanguage = .toml
+                return .toml
+            }
+        }
         let language: CodeLanguage = fileURL.map {
             .detectLanguageFrom(
                 url: $0,
@@ -450,28 +501,5 @@ private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
         EditorCommandRouter.shared.register(owner: self) { [weak self] event in
             self?.handle(event) ?? false
         }
-    }
-}
-
-private extension EditorTheme {
-    static func omg(background: NSColor, foreground: NSColor) -> EditorTheme {
-        EditorTheme(
-            text: foreground,
-            insertionPoint: foreground,
-            invisibles: .tertiaryLabelColor,
-            background: background,
-            lineHighlight: .controlAccentColor.withAlphaComponent(0.08),
-            selection: .selectedTextBackgroundColor,
-            keywords: .systemPurple,
-            commands: .systemBlue,
-            types: .systemMint,
-            attributes: .systemOrange,
-            variables: .systemTeal,
-            values: .systemIndigo,
-            numbers: .systemOrange,
-            strings: .systemGreen,
-            characters: .systemGreen,
-            comments: .secondaryLabelColor
-        )
     }
 }

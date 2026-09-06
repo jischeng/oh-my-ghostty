@@ -28,8 +28,10 @@ The file is a flat, sorted JSON object. Only values explicitly chosen by the use
   "appearance.darkTheme": "Catppuccin Mocha",
   "appearance.lightTheme": "Catppuccin Latte",
   "editor.backgroundMode": "followTerminal",
+  "editor.fontFamily": "jetbrainsMono",
   "editor.fontSize": 13,
   "editor.keymapPreset": "idea",
+  "editor.syntaxTheme": "oneDark",
   "editor.tabWidth": 4,
   "editor.wordWrap": false,
   "general.quitWithoutConfirmation": true,
@@ -83,6 +85,8 @@ Window UI state is intentionally separate: `InspectorPresentationStore` owns las
 | `appearance.tabIconSize` | number | `16` | `12...20` | Settings > Appearance | Runtime |
 | `editor.keymapPreset` | enum | `idea` | `idea`, `vscode` | Settings > Editor | Runtime |
 | `editor.backgroundMode` | enum | `followTerminal` | `followTerminal`, `system` | Settings > Editor | Runtime |
+| `editor.syntaxTheme` | enum | `oneDark` | `oneDark`, `oneLight`, `dracula`, `githubDark`, `followTerminal` | Settings > Editor | Runtime |
+| `editor.fontFamily` | enum | `jetbrainsMono` | `jetbrainsMono`, `sfMono`, `menlo`, `firaCode`, `system` | Settings > Editor | Runtime |
 | `editor.fontSize` | number | `13` | `8...36` | Settings > Editor | Runtime |
 | `editor.tabWidth` | number | `4` | `1...12` | Settings > Editor | Runtime |
 | `editor.wordWrap` | boolean | `false` | `true`, `false` | Settings > Editor | Runtime |

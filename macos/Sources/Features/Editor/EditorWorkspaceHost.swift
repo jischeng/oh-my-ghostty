@@ -238,39 +238,82 @@ private struct EditorDocumentView: View {
     let previousDocument: () -> Void
     let saveAll: () -> Void
 
+    @State private var isPreviewMode = false
+
+    private var isMarkdownDocument: Bool {
+        document.path.hasSuffix(".md") || document.path.hasSuffix(".markdown")
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            CodeEditorView(
-                text: $document.text,
-                fileURL: URL(fileURLWithPath: document.path),
-                isActive: isActive,
-                terminalBackground: terminalBackground,
-                terminalBackgroundOpacity: terminalBackgroundOpacity,
-                terminalForeground: contrastingForeground,
-                onFocus: onFocus,
-                onSave: save,
-                onClose: close,
-                onOpen: open,
-                onNextDocument: nextDocument,
-                onPreviousDocument: previousDocument,
-                onSaveAll: saveAll
-            )
-            .id(document.contentGeneration)
+            if isMarkdownDocument && isPreviewMode {
+                MarkdownPreviewView(
+                    text: document.text,
+                    fileURL: URL(fileURLWithPath: document.path),
+                    terminalBackground: terminalBackground,
+                    terminalBackgroundOpacity: terminalBackgroundOpacity,
+                    foregroundColor: contrastingForeground
+                )
+            } else {
+                CodeEditorView(
+                    text: $document.text,
+                    fileURL: URL(fileURLWithPath: document.path),
+                    isActive: isActive,
+                    terminalBackground: terminalBackground,
+                    terminalBackgroundOpacity: terminalBackgroundOpacity,
+                    terminalForeground: contrastingForeground,
+                    onFocus: onFocus,
+                    onSave: save,
+                    onClose: close,
+                    onOpen: open,
+                    onNextDocument: nextDocument,
+                    onPreviousDocument: previousDocument,
+                    onSaveAll: saveAll
+                )
+                .id(document.contentGeneration)
+            }
             Divider()
-            HStack {
+            HStack(spacing: 8) {
                 Text(document.path).lineLimit(1).truncationMode(.middle)
                     .help(document.path)
-                Spacer(minLength: 8)
                 if document.filesystem.descriptor.kind == .ssh {
                     Label(document.filesystem.descriptor.displayName, systemImage: "network")
                 }
-                Button(document.isSaving ? "Saving…" : "Save", action: save)
-                    .disabled(!document.isDirty || document.isSaving || document.isReloading)
-                    .help("Save (⌘S)")
+                Spacer(minLength: 8)
+
+                if isMarkdownDocument {
+                    Picker("", selection: $isPreviewMode) {
+                        Text("Edit").tag(false)
+                        Text("Preview").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .controlSize(.small)
+                    .frame(width: 120)
+                }
+
+                if document.isSaving {
+                    ProgressView().controlSize(.small)
+                    Text("Saving…")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                } else if document.isDirty {
+                    Text("Edited")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
             .font(.caption)
             .foregroundStyle(.secondary)
-            .padding(8)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+        }
+        .onChange(of: isActive) { active in
+            if !active {
+                document.flushAutoSave()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
+            document.flushAutoSave()
         }
     }
 

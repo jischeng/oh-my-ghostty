@@ -77,11 +77,15 @@ struct CodeEditorView: View {
                 lineHeight: 1.2,
                 wrapLines: editorSettings.wordWrap,
                 cursorPositions: $cursorPositions,
+                useThemeBackground: true,
+                highlightProviders: [TreeSitterClient(), MarkdownHighlightProvider()],
+                contentInsets: NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0),
                 isEditable: isEditable && isActive,
                 isSelectable: isActive,
                 bracketPairHighlight: .flash,
                 coordinators: [editorCoordinator]
             )
+            .clipped()
 
             if isActive, isFindVisible {
                 findBar
@@ -346,6 +350,10 @@ private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
 
     func prepareCoordinator(controller: TextViewController) {
         self.controller = controller
+        let scrollView = controller.textView.enclosingScrollView
+        scrollView?.automaticallyAdjustsContentInsets = false
+        scrollView?.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+        scrollView?.documentCursor = .iBeam
         controller.textView.selectionManager.selectionBackgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.65)
         if isActive { registerCommands() }
         focusIfActive(onNextRunLoop: true)
@@ -455,15 +463,15 @@ private extension EditorTheme {
             lineHighlight: .controlAccentColor.withAlphaComponent(0.08),
             selection: .selectedTextBackgroundColor,
             keywords: .systemPurple,
-            commands: .systemTeal,
-            types: .systemBlue,
+            commands: .systemBlue,
+            types: .systemMint,
             attributes: .systemOrange,
-            variables: foreground,
+            variables: .systemTeal,
             values: .systemIndigo,
-            numbers: .systemBlue,
-            strings: .systemRed,
-            characters: .systemRed,
-            comments: .systemGreen
+            numbers: .systemOrange,
+            strings: .systemGreen,
+            characters: .systemGreen,
+            comments: .secondaryLabelColor
         )
     }
 }

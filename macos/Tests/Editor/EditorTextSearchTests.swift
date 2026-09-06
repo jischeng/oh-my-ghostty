@@ -2,6 +2,8 @@ import AppKit
 import Foundation
 import Testing
 import CodeEditTextView
+import CodeEditSourceEditor
+import CodeEditLanguages
 @testable import Ghostty
 
 struct EditorTextSearchTests {
@@ -162,5 +164,23 @@ struct EditorTextSearchTests {
         #expect(!EditorTextEditing.replace(on: textView, ranges: ranges, with: "b"))
         #expect(textView.string == "a a")
         #expect(textView.undoManager?.canUndo == false)
+    }
+
+    @Test @MainActor func markdownHighlightProviderRecognizesHeadingsCodeAndLinks() async throws {
+        let text = "# Title\n\n> quote\n\n```swift\nlet x = 1\n```\n\n[link](https://example.com)"
+        let textView = TextView(string: text)
+        let provider = MarkdownHighlightProvider()
+        provider.setUp(textView: textView, codeLanguage: .markdown)
+
+        let highlights: [HighlightRange] = try await withCheckedThrowingContinuation { continuation in
+            provider.queryHighlightsFor(textView: textView, range: NSRange(location: 0, length: (text as NSString).length)) { result in
+                continuation.resume(with: result)
+            }
+        }
+
+        #expect(!highlights.isEmpty)
+        #expect(highlights.contains { $0.capture == .keyword })
+        #expect(highlights.contains { $0.capture == .comment })
+        #expect(highlights.contains { $0.capture == .string })
     }
 }

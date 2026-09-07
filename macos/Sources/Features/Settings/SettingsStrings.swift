@@ -300,6 +300,7 @@ struct SettingsStrings: Equatable, Sendable {
         t("Colors, opacity and effects follow OMG Appearance settings.", "颜色、透明度与毛玻璃跟随 OMG 外观设置。")
     }
     var editorThemeSection: String { t("Editor Theme", "编辑器主题") }
+    var followSystemThemeLabel: String { t("Switch with System Appearance", "跟随系统设置切换") }
     var themeVariantsLabel: String { t("Light and Dark Variants", "分别设置浅色与深色主题") }
     var unifiedThemeLabel: String { t("Theme Preset", "主题预设") }
 

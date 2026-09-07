@@ -36,6 +36,15 @@ struct EditorAppearanceTests {
         #expect(abs(keyword.blueComponent - 204.0 / 255) < 0.01)
     }
 
+    @Test func followingOMGReusesWindowBlurInsteadOfAddingSystemMaterial() {
+        let following = EditorBackdrop(color: .blue, opacity: 0.85, blur: .enabled, usesWindowBlur: true)
+        #expect(following.localEffect == .disabled)
+        let independent = EditorBackdrop(color: .blue, opacity: 0.85, blur: .enabled)
+        #expect(independent.localEffect == .enabled)
+        let glass = EditorBackdrop(color: .blue, opacity: 0.85, blur: .macosGlassRegular, usesWindowBlur: true)
+        #expect(glass.localEffect == .macosGlassRegular)
+    }
+
     @Test func nativeEditorRendersOneSharedBackdrop() async throws {
         let color = NSColor(red: 0.12, green: 0.24, blue: 0.36, alpha: 1)
         var theme = EditorTheme.adaptive(background: color, foreground: .white)

@@ -294,19 +294,19 @@ struct SettingsView: View {
                             Text(strings.editorSyntaxThemeTitle(theme)).tag(theme)
                         }
                     }
-                    HStack {
-                        Text(strings.backgroundOpacityLabel)
-                        Slider(value: editorOpacityBinding, in: 0.05...1, step: 0.05)
-                        Text("\(Int(editorOpacityBinding.wrappedValue * 100))%")
-                            .monospacedDigit().frame(width: 45)
-                    }
-                    .disabled(settings.editorSettings.followsOMG)
-                    Picker(strings.backgroundBlurLabel, selection: editorBlurBinding) {
-                        ForEach(OhMyGhosttyBackgroundBlur.allCases) { blur in
-                            Text(strings.blurTitle(blur)).tag(blur)
+                    if !settings.editorSettings.followsOMG {
+                        HStack {
+                            Text(strings.backgroundOpacityLabel)
+                            Slider(value: editorOpacityBinding, in: 0.05...1, step: 0.05)
+                            Text("\(Int(editorOpacityBinding.wrappedValue * 100))%")
+                                .monospacedDigit().frame(width: 45)
+                        }
+                        Picker(strings.backgroundBlurLabel, selection: editorBlurBinding) {
+                            ForEach(OhMyGhosttyBackgroundBlur.allCases) { blur in
+                                Text(strings.blurTitle(blur)).tag(blur)
+                            }
                         }
                     }
-                    .disabled(settings.editorSettings.followsOMG)
                     if settings.editorSettings.followsOMG {
                         Text(strings.editorThemeInheritedCaption).font(.caption).foregroundStyle(.secondary)
                     }
@@ -589,41 +589,44 @@ struct SettingsView: View {
         )
     }
 
+    private var followsSystemTheme: Binding<Bool> {
+        Binding(
+            get: {
+                if let mode = settings.windowThemeOverride { return mode == .system }
+                return !["light", "dark"].contains(inheritedGhosttyConfig.windowTheme ?? "auto")
+            },
+            set: { follows in
+                settings.windowThemeOverride = follows ? .system
+                    : (NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? .dark : .light)
+            }
+        )
+    }
+
     private var appearanceForm: some View {
         let appearance = settings.effectiveAppearance(using: inheritedGhosttyConfig)
         return Form {
-            Section(strings.windowSection) {
-                Picker(strings.appearancePickerLabel, selection: $settings.windowThemeOverride) {
-                    Text(strings.ghosttyConfigOption).tag(OhMyGhosttyWindowTheme?.none)
-                    ForEach(OhMyGhosttyWindowTheme.allCases) { theme in
-                        Text(strings.windowThemeTitle(theme)).tag(Optional(theme))
-                    }
-                }
-                resolutionRow(appearance.windowTheme)
-            }
-
             Section(strings.terminalThemeSection) {
-                GhosttyThemeField(
-                    strings: strings,
-                    title: strings.unifiedThemeLabel,
-                    value: Binding(
-                        get: { settings.lightThemeOverride == settings.darkThemeOverride ? settings.lightThemeOverride ?? "" : "" },
-                        set: { value in
-                            settings.lightThemeOverride = value.isEmpty ? nil : value
-                            settings.darkThemeOverride = value.isEmpty ? nil : value
-                        }
-                    )
-                )
-                DisclosureGroup(strings.themeVariantsLabel) {
+                Toggle(strings.followSystemThemeLabel, isOn: followsSystemTheme)
+                if followsSystemTheme.wrappedValue {
+                    GhosttyThemeField(strings: strings, title: strings.lightThemeLabel,
+                                      value: optionalStringBinding(\.lightThemeOverride))
+                    GhosttyThemeField(strings: strings, title: strings.darkThemeLabel,
+                                      value: optionalStringBinding(\.darkThemeOverride))
+                } else {
+                    Picker(strings.appearancePickerLabel, selection: $settings.windowThemeOverride) {
+                        Text(strings.windowThemeTitle(.light)).tag(Optional(OhMyGhosttyWindowTheme.light))
+                        Text(strings.windowThemeTitle(.dark)).tag(Optional(OhMyGhosttyWindowTheme.dark))
+                    }
                     GhosttyThemeField(
                         strings: strings,
-                        title: strings.lightThemeLabel,
-                        value: optionalStringBinding(\.lightThemeOverride)
-                    )
-                    GhosttyThemeField(
-                        strings: strings,
-                        title: strings.darkThemeLabel,
-                        value: optionalStringBinding(\.darkThemeOverride)
+                        title: strings.unifiedThemeLabel,
+                        value: Binding(
+                            get: { settings.windowThemeOverride == .light ? settings.lightThemeOverride ?? "" : settings.darkThemeOverride ?? "" },
+                            set: { value in
+                                settings.lightThemeOverride = value.isEmpty ? nil : value
+                                settings.darkThemeOverride = value.isEmpty ? nil : value
+                            }
+                        )
                     )
                 }
                 resolutionRow(appearance.theme)

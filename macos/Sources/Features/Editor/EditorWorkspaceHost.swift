@@ -105,7 +105,7 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                 Button(action: openFile) { Image(systemName: "folder.badge.plus") }
                     .help("Open File")
                 Button { workspace.isVisible = false } label: {
-                    Image(systemName: "minus")
+                    Image(systemName: "rectangle.compress.vertical")
                 }
                 .help("Hide Editor")
             }
@@ -167,7 +167,8 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .background(EditorBackdrop(color: appearanceTheme.background, opacity: appearanceOpacity, blur: appearanceBlur))
+        .background(EditorBackdrop(color: appearanceTheme.background, opacity: appearanceOpacity, blur: appearanceBlur,
+                                   usesWindowBlur: settings.editorSettings.followsOMG))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Code Editor")
     }
@@ -366,10 +367,18 @@ struct EditorBackdrop: NSViewRepresentable {
     let color: NSColor
     let opacity: Double
     let blur: OhMyGhosttyBackgroundBlur
+    var usesWindowBlur = false
+
+    var localEffect: OhMyGhosttyBackgroundBlur {
+        // Ordinary Ghostty blur is already applied behind the whole window.
+        // A second NSVisualEffectView would introduce its own gray material.
+        usesWindowBlur && blur == .enabled ? .disabled : blur
+    }
 
     func makeNSView(context: Context) -> BackdropView { BackdropView() }
 
     func updateNSView(_ view: BackdropView, context: Context) {
+        let blur = localEffect
         if context.coordinator.blur != blur {
             view.subviews.forEach { $0.removeFromSuperview() }
             context.coordinator.blur = blur

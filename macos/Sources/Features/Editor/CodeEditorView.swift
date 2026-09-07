@@ -378,7 +378,8 @@ struct CodeEditorView: View {
         case .catppuccinMocha: baseTheme = .catppuccinMocha
         case .followTerminal: baseTheme = .adaptive(background: .clear, foreground: editorForeground)
         }
-        baseTheme.background = .clear
+        baseTheme.background = editorSettings.backgroundMode == .followTerminal
+            ? terminalBackground : .textBackgroundColor
         return baseTheme
     }
 
@@ -433,8 +434,19 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator {
         self.actionHandler = actionHandler
     }
 
+    static func usesXMLHighlighting(_ url: URL) -> Bool {
+        ["xml", "xsd", "xsl", "xslt", "svg", "plist", "xib", "storyboard", "xcscheme", "entitlements"]
+            .contains(url.pathExtension.lowercased())
+    }
+
     func language(fileURL: URL?, text: String) -> CodeLanguage {
         if let cachedLanguage { return cachedLanguage }
+        if let fileURL, Self.usesXMLHighlighting(fileURL) {
+            // The bundled grammars have no XML parser. HTML provides tag,
+            // attribute, string and comment highlighting for XML-family files.
+            cachedLanguage = .html
+            return .html
+        }
         if let path = fileURL?.path.lowercased() {
             if path.hasSuffix(".ghostty") || path.hasSuffix(".conf") || path.hasSuffix(".ini") || path.hasSuffix(".cfg") {
                 cachedLanguage = .toml
@@ -458,13 +470,13 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator {
             scrollView.automaticallyAdjustsContentInsets = false
             scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
             scrollView.documentCursor = .iBeam
-            scrollView.drawsBackground = false
-            scrollView.backgroundColor = .clear
+            scrollView.drawsBackground = true
+            scrollView.backgroundColor = controller.theme.background
             scrollView.contentView.drawsBackground = false
             scrollView.contentView.backgroundColor = .clear
             for subview in scrollView.subviews {
                 for inner in subview.subviews where String(describing: type(of: inner)).contains("GutterView") {
-                    inner.setValue(NSColor.clear, forKey: "backgroundColor")
+                    inner.setValue(controller.theme.background, forKey: "backgroundColor")
                 }
             }
         }

@@ -31,11 +31,13 @@ public final class CompletionState: ObservableObject {
     }
 
     public func dismiss() {
-        isPresented = false
-        candidates = []
-        selectedIndex = 0
-        prefix = ""
-        prefixRange = NSRange(location: 0, length: 0)
+        // Selection updates also arrive during SwiftUI reconciliation. Publishing
+        // unchanged values here feeds another reconciliation and never settles.
+        if isPresented { isPresented = false }
+        if !candidates.isEmpty { candidates = [] }
+        if selectedIndex != 0 { selectedIndex = 0 }
+        if !prefix.isEmpty { prefix = "" }
+        if prefixRange != .zero { prefixRange = .zero }
     }
 
     public func update(

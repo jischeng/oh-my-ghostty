@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import CodeEditSourceEditor
 import CodeEditLanguages
 import CodeEditTextView
@@ -8,6 +9,45 @@ import Testing
 @testable import Ghostty
 
 struct EditorCompletionTests {
+    @Test @MainActor func dismissingInactiveCompletionDoesNotPublishUpdates() {
+        let state = CompletionState()
+        var updates = 0
+        let subscription = state.objectWillChange.sink { updates += 1 }
+        for _ in 0..<100 { state.dismiss() }
+        #expect(updates == 0)
+        state.update(candidates: [CompletionItem(label: "hello")], prefix: "he",
+                     prefixRange: NSRange(location: 0, length: 2), at: .zero)
+        state.dismiss()
+        let settledUpdates = updates
+        for _ in 0..<100 { state.dismiss() }
+        #expect(updates == settledUpdates)
+        withExtendedLifetime(subscription) {}
+    }
+
+    @Test @MainActor func xmlMarkupProducesNativeHighlights() async throws {
+        let text = "<?xml version=\"1.0\"?><root name=\"value\"><child>text</child><!-- note --></root>"
+        let textView = TextView(string: text)
+        let provider = TreeSitterClient()
+        provider.setUp(textView: textView, codeLanguage: .html)
+        let highlights: [HighlightRange] = try await withCheckedThrowingContinuation { continuation in
+            provider.queryHighlightsFor(textView: textView, range: NSRange(location: 0, length: text.utf16.count)) {
+                continuation.resume(with: $0)
+            }
+        }
+        #expect(!highlights.isEmpty)
+        #expect(highlights.contains { $0.capture == .string })
+        #expect(highlights.contains { $0.capture == .comment })
+    }
+
+    @Test @MainActor func xmlFamilyFilesUseMarkupGrammar() {
+        for name in ["pom.xml", "IMAGE.SVG", "Info.plist", "schema.xsd", "App.storyboard"] {
+            let coordinator = EditorCoordinator()
+            let language = coordinator.language(fileURL: URL(fileURLWithPath: "/tmp/" + name),
+                                                text: "<?xml version=\"1.0\"?><root key=\"value\"/>")
+            #expect(language.id == .html)
+        }
+    }
+
     @Test func bufferWordProviderExtractsMatchingPrefixes() async {
         let text = """
         function calculateTotal(items) {
@@ -194,6 +234,9 @@ struct EditorCompletionTests {
         }
         let controller = try #require(capture.controller)
         let textView = try #require(controller.textView)
+        let scrollView = try #require(textView.enclosingScrollView)
+        #expect(scrollView.drawsBackground)
+        #expect(scrollView.backgroundColor == controller.theme.background)
         coordinator.setActive(true)
         window.makeFirstResponder(textView)
         coordinator.select(NSRange(location: 2, length: 0))

@@ -474,7 +474,7 @@ pub const Action = union(Key) {
         // so we can change this but I want to be aware of it.
         assert(@sizeOf(CValue) == switch (@sizeOf(usize)) {
             4 => 24,
-            8 => 24,
+            8 => 40, // OMG OpenUrl includes the historical cwd slice.
             else => unreachable,
         });
     }
@@ -968,6 +968,10 @@ pub const OpenUrl = struct {
     /// The URL.
     url: []const u8,
 
+    /// OMG: cwd recorded at the clicked output, not the terminal's current cwd.
+    /// Null means not supplied; an empty value means historical cwd is unknown.
+    base_directory: ?[]const u8 = null,
+
     /// The type of the data at the URL to open. This is used as a hint to
     /// potentially open the URL in a different way.
     ///
@@ -1002,6 +1006,8 @@ pub const OpenUrl = struct {
         kind: Kind,
         url: [*]const u8,
         len: usize,
+        base_directory: ?[*]const u8 = null,
+        base_directory_len: usize = 0,
     };
 
     pub fn cval(self: OpenUrl) C {
@@ -1009,7 +1015,20 @@ pub const OpenUrl = struct {
             .kind = self.kind,
             .url = self.url.ptr,
             .len = self.url.len,
+            .base_directory = if (self.base_directory) |v| v.ptr else null,
+            .base_directory_len = if (self.base_directory) |v| v.len else 0,
         };
+    }
+
+    test "OMG OpenUrl distinguishes absent unknown and recorded cwd" {
+        const testing = std.testing;
+        const absent = (OpenUrl{ .kind = .unknown, .url = "README.md" }).cval();
+        try testing.expect(absent.base_directory == null);
+        const unknown = (OpenUrl{ .kind = .unknown, .url = "README.md", .base_directory = "" }).cval();
+        try testing.expect(unknown.base_directory != null);
+        try testing.expectEqual(@as(usize, 0), unknown.base_directory_len);
+        const recorded = (OpenUrl{ .kind = .unknown, .url = "README.md", .base_directory = "/parent" }).cval();
+        try testing.expectEqualStrings("/parent", recorded.base_directory.?[0..recorded.base_directory_len]);
     }
 };
 

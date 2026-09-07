@@ -104,9 +104,11 @@ private struct TerminalSplitLeaf: View {
 
     var body: some View {
         GeometryReader { geometry in
-            Ghostty.InspectableSurface(
-                surfaceView: surfaceView,
-                isSplit: isSplit)
+            EditorPaneContainer(surfaceView: surfaceView) {
+                Ghostty.InspectableSurface(
+                    surfaceView: surfaceView,
+                    isSplit: isSplit)
+            }
             .background {
                 // If we're dragging ourself, we hide the entire drop zone. This makes
                 // it so that a released drop animates back to its source properly

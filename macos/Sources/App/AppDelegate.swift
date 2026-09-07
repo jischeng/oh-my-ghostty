@@ -116,7 +116,9 @@ class AppDelegate: NSObject,
 
     /// Built-in data provider that dogfoods the plugin-owned Inspector contract.
     @MainActor private lazy var builtInFilesInspector =
-        BuiltInFilesInspectorProvider(registry: inspectorRegistry)
+        BuiltInFilesInspectorProvider(registry: inspectorRegistry) { path, context, destination in
+            EditorWorkspaceStore.shared.open(path: path, context: context, destination: destination)
+        }
 
     /// Searchable local Agent session history and exact-resume actions.
     @MainActor private lazy var builtInAgentHistoryInspector =
@@ -427,6 +429,7 @@ class AppDelegate: NSObject,
 
         // Setup our menu
         setupMenuImages()
+        EditorMenuController.shared.install(in: menuNewWindow?.menu)
 
         // Setup signal handlers
         setupSignals()
@@ -485,6 +488,9 @@ class AppDelegate: NSObject,
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard MainActor.assumeIsolated({ EditorWorkspaceStore.shared.prepareToTerminate() }) else {
+            return .terminateCancel
+        }
         let windows = NSApplication.shared.windows
         if windows.isEmpty { return .terminateNow }
 
@@ -703,6 +709,7 @@ class AppDelegate: NSObject,
     }
 
     private func localEventKeyDown(_ event: NSEvent) -> NSEvent? {
+        if MainActor.assumeIsolated({ EditorCommandRouter.shared.handle(event) }) { return nil }
         // If the tab overview is visible and escape is pressed, close it.
         // This can't POSSIBLY be right and is probably a FirstResponder problem
         // that we should handle elsewhere in our program. But this works and it

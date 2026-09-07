@@ -43,6 +43,8 @@ not a third-party SDK:
   typed content rendering;
 - owner validation and cleanup in `InspectorRegistry`;
 - built-in `builtin.files` provider using the plugin-shaped Inspector boundary;
+- built-in `builtin.git` provider with frozen-tip, paginated commit history,
+  branch scope switching, and native table rendering;
 - stable terminal tab identity via `OH_MY_GHOSTTY_SESSION`;
 - manifest-driven built-in Agent adapters using bounded OSC 3008 presentation
   events on the owning Surface.
@@ -124,6 +126,21 @@ in-tree provider
 `BuiltInFilesInspectorProvider` uses `.plugin("builtin.files")` to dogfood
 owner checks and typed content. It is still trusted application code, not an
 out-of-process plugin and not proof of public plugin loading.
+
+Files actions stay data-only. Directory rows toggle disclosure through typed
+actions, while file rows only request an editor open on explicit double-click or
+the row context menu's `Open in Editor` command. The provider validates that the
+path belongs to the current published file tree and is not a directory, then
+calls the host-injected `OpenFileHandler` with the absolute path and the current
+`InspectorPaneContext`, preserving local versus SSH session context for the
+editor controller. Single-click selection does not open files.
+
+The host renders file tree icons using bundled Material Icon Theme artwork and
+its filename, compound-extension, and folder associations, shared by local and
+SSH trees. Expanded folders and light appearance use the corresponding upstream
+variants. The existing `InspectorFileIcon` remains the fallback if an asset is
+unavailable; this does not add manifest fields or runtime network access. The
+upstream MIT license is included in the application asset catalog.
 
 ## Manifest model (Experimental)
 
@@ -449,7 +466,16 @@ implementation used by the Files provider. `SSHPlugin` reads non-wildcard
 aliases from the user's `~/.ssh/config` without owning private keys, passwords,
 known_hosts, ProxyJump, or ssh-agent state. `SSHWorkspaceFilesystem` uses the
 system `/usr/bin/sftp` client and the user's OpenSSH configuration for bounded
-remote directory operations and file/folder creation.
+remote directory operations, file/folder creation, and editor file transfers.
+
+The internal `readFile(at:)` and `writeFile(_:at:replacing:)` operations power
+the same editor document model for local files and SSH files. Reads accept
+text files up to 10 MiB; SSH checks the downloaded temporary file before
+loading it into memory. Saves compare the last-read bytes before writing and
+report external changes instead of silently overwriting them. Local saves
+replace the resolved target atomically and preserve its POSIX permissions;
+SSH saves reuse SFTP get/put and require an already usable OpenSSH connection.
+These are internal host operations, not new extension wire capabilities.
 
 Tab presentation is a zero-I/O consumer of this boundary: remote folder names
 are derived with pure POSIX string handling, and `WorkspaceDescriptor` identity
@@ -628,6 +654,14 @@ Host-rendered `InspectorPaneContent` supports:
 - native Git views presenting repository context, status, and
   history/changes/branches.
 
+The built-in Git history graph is computed from `--topo-order` commit rows and
+parent object IDs only. `GitGraphLayout` retains active parent lanes across
+incremental appends, so paged history loading can continue the graph without
+rewriting rows that were already emitted. Merge and octopus commits connect to
+existing parent lanes when present and add only missing parents; branch names or
+ref decorations do not influence topology. Host-rendered Git cells draw the
+resulting nodes and colored lane segments with native AppKit views.
+
 A provider supplies data only. It cannot inject a SwiftUI `View`, `NSView`,
 window, controller, material, or arbitrary icon path.
 
@@ -648,7 +682,10 @@ the previous appearance is discarded and its asynchronous work must not
 publish afterward. Supported action values are disclosure toggle, refresh,
 Agent-history selection/back/exact-resume/native-fork, collapse all, create
 file/folder, create/open/copy/remove SSH port forwarding, and typed Git actions;
-whether they make sense is provider-specific. Agent-history resume accepts only a host-discovered,
+whether they make sense is provider-specific. The built-in Git provider asks
+Git for absolute worktree, Git-directory, and common-directory paths, keeping
+repository identity consistent when the focused terminal enters a subdirectory.
+Agent-history resume accepts only a host-discovered,
 `AgentConversationID`-validated local session whose manifest declares
 allowlisted resume arguments; it focuses a matching live Surface or creates a
 new typed resume tab. Agent-history metadata uses a versioned mtime cache and
@@ -664,6 +701,15 @@ through a reusable AppKit table. Port creation accepts only a valid 1...65535 po
 rejected outside an `sshReady` context. Info/port UI, hover help, empty states,
 connection messages, and normalized Host failures resolve live from
 `general.language` (English or Simplified Chinese).
+
+Git terminal actions carry a `GitRepositoryIdentity` and are formatted as
+`git -C <worktree> ...`, so they remain bound to the inspected worktree even
+when the host process has another current directory. The bridge resolves both
+`InspectorPaneContext.tabID` and `surfaceID` before writing the command to the
+live Surface. It focuses that Surface and calls `sendText` once; it does not
+send an Enter key event. Local intents are accepted only by local sessions,
+and remote intents only by a matching SSH host. Commit messages are shell
+quoted as one argument, preserving spaces, single quotes, and newlines.
 
 Actual in-process lifecycle:
 
@@ -900,3 +946,69 @@ status CLI. Terminal control and raw output remain high-risk and default-deny.
 
 These notes are planning context only. They must not be used by plugins until
 implementation, tests, and a stability designation land.
+
+## Built-in Git diff detail window
+
+The built-in Git diff surface is host-owned Swift code. `GitDiffService` first
+lists paths for a `GitDiffTarget` (`commit`, `staged`, or `unstaged`) and only
+loads a selected file's unified diff. File lists use Git's NUL-delimited
+`--name-status -z` output, so spaces, Unicode, and other valid path characters
+remain intact. Renames and copies retain both old and new paths; untracked
+working-tree files are represented as additions.
+
+`GitDetailWindowController.open(repository:target:tabID:)` is the host entry
+point. It reuses one resizable native window per terminal tab and binds the
+window to the repository and target supplied at open time. Subsequent terminal
+working-directory updates do not retarget that window. The detail view offers
+a file list, on-demand diff loading, selectable/copyable line-numbered output,
+and explicit binary, error, and size-limit/truncation states. Commit diffs use
+the first parent as their base; a root commit uses the empty tree. This surface
+does not edit files or stage changes and does not add plugin wire capabilities.
+
+### Editor appearance settings
+
+The built-in editor follows the resolved OMG/Ghostty theme by default (`editor.syntaxTheme = followTerminal`). Independent editor themes may override `editor.opacity` and `editor.blur`; these values are ignored while following OMG. These settings do not add plugin capabilities or change the Files provider opening contract. See [settings configuration](settings/configuration.md#shared-omg-and-editor-appearance).
+
+### Built-in Files context actions
+
+The trusted `builtin.files` provider offers Copy Path, Copy Relative Path (relative
+to the displayed root), Rename, and Open in… for tree entries. Rename uses the
+workspace filesystem boundary for local and SSH files and folders, refuses an
+existing destination, and requires closing open editor documents below the item
+first. SSH rename uses Python 3 over SSH with Linux `renameat2(RENAME_NOREPLACE)`
+or macOS `renamex_np(RENAME_EXCL)`; unsupported hosts fail without a fallback that
+could overwrite a target. File transfers continue to use SFTP. Errors are presented by the host. Open in… uses the macOS application
+chooser; SSH files are downloaded as read-only temporary copies and edits in the
+external application are not uploaded. Remote folders cannot be opened locally.
+These host-owned actions do not grant external plugins filesystem capabilities.
+
+### Terminal file links and default destinations
+
+The macOS host routes OSC 8 `file:` links and detected paths to the built-in
+editor using the clicked surface's workspace/session. Relative candidates such
+as `README.md` and bare directory names are checked through `WorkspaceFilesystem`
+before opening; missing candidates do not launch external applications. Web
+links retain the existing URL-opening policy. Files and Command-clicked
+directories have independent default destinations (`editor.fileOpenDestination`
+and `editor.directoryOpenDestination`): current pane, new tab, or four split
+directions. An explicit Files menu destination overrides the file default.
+The directory default applies only to Command-click navigation, not Files tree
+expansion. Current-pane directory navigation changes the existing shell's cwd;
+new panes start in the requested directory, using the existing SSH replay path
+for remote sessions. These host-owned actions add no external plugin permission.
+
+Relative terminal links now carry the cwd recorded at their output position,
+using OSC 7 transitions anchored to tracked screen pins. Changing directories
+does not reinterpret older filenames against the new cwd. Each screen retains
+at most 1024 transitions with paths up to 4096 bytes; unknown/expired metadata
+does not fall back to guessing the current directory. Quoted names containing
+spaces are matched as one path. Absolute links are independent of this history.
+The additional native `open_url` cwd fields are not plugin wire capabilities.
+
+Known non-text formats (including DMG, PDF and images) use the system default
+application before creating an editor pane. Binary/unsupported-encoding and
+oversized text failures also fall back to the default application. Remote
+external files reuse the bounded read-only temporary download used by Open in…;
+external changes are not uploaded. Markdown Preview now supports local WYSIWYG
+editing, with version-checked text updates flowing through the same document
+save boundary, without granting web content direct filesystem write access.

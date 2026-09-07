@@ -115,6 +115,137 @@
    "fallback": "ghostty:window-theme",
    "type": "string"
   },
+  "editor.autoClosePairs": {
+   "category": "editor",
+   "default": true,
+   "description": "Insert matching quotes and brackets and position the caret inside.",
+   "type": "boolean"
+  },
+  "editor.backgroundMode": {
+   "category": "editor",
+   "default": "followTerminal",
+   "description": "Choose whether the editor follows the terminal background or uses the system editor background.",
+   "enum": [
+    "followTerminal",
+    "system"
+   ],
+   "type": "string"
+  },
+  "editor.blur": {
+   "category": "editor",
+   "default": "disabled",
+   "description": "Background effect when the editor uses an independent theme.",
+   "enum": [
+    "disabled",
+    "enabled",
+    "macosGlassRegular",
+    "macosGlassClear"
+   ],
+   "type": "string"
+  },
+  "editor.directoryOpenDestination": {
+   "category": "editor",
+   "default": "currentPane",
+   "description": "Default destination for directories opened with Command-click.",
+   "enum": [
+    "currentPane",
+    "newTab",
+    "splitRight",
+    "splitDown",
+    "splitLeft",
+    "splitUp"
+   ],
+   "type": "string"
+  },
+  "editor.fileOpenDestination": {
+   "category": "editor",
+   "default": "currentPane",
+   "description": "Default destination for opening files in the editor, including Command-click.",
+   "enum": [
+    "currentPane",
+    "newTab",
+    "splitRight",
+    "splitDown",
+    "splitLeft",
+    "splitUp"
+   ],
+   "type": "string"
+  },
+  "editor.fontFamily": {
+   "category": "editor",
+   "default": "jetbrainsMono",
+   "description": "Font family used by the native editor.",
+   "enum": [
+    "jetbrainsMono",
+    "sfMono",
+    "menlo",
+    "firaCode",
+    "system"
+   ],
+   "type": "string"
+  },
+  "editor.fontSize": {
+   "category": "editor",
+   "default": 13,
+   "description": "Native editor font size in points.",
+   "maximum": 36,
+   "minimum": 8,
+   "type": "number"
+  },
+  "editor.keymapPreset": {
+   "category": "editor",
+   "default": "idea",
+   "description": "Keyboard shortcut preset used by the native editor.",
+   "enum": [
+    "idea",
+    "vscode"
+   ],
+   "type": "string"
+  },
+  "editor.opacity": {
+   "category": "editor",
+   "default": 1,
+   "description": "Background opacity when the editor uses an independent theme.",
+   "maximum": 1,
+   "minimum": 0.05,
+   "type": "number"
+  },
+  "editor.syntaxTheme": {
+   "category": "editor",
+   "default": "followTerminal",
+   "description": "Syntax highlighting style theme for the native editor.",
+   "enum": [
+    "oneDark",
+    "oneLight",
+    "dracula",
+    "githubDark",
+    "nord",
+    "monokai",
+    "catppuccinMocha",
+    "followTerminal"
+   ],
+   "type": "string"
+  },
+  "editor.tabWidth": {
+   "category": "editor",
+   "default": 4,
+   "description": "Number of spaces represented by one editor tab stop.",
+   "maximum": 12,
+   "minimum": 1,
+   "type": "number"
+  },
+  "editor.themeName": {
+   "category": "editor",
+   "default": "",
+   "description": "Optional independent Ghostty catalog theme for editor colors.",
+   "type": "string"
+  },
+  "editor.wordWrap": {
+   "category": "editor",
+   "default": false,
+   "description": "Wrap long editor lines at the visible content width.",
+   "type": "boolean"
+  },
   "general.language": {
    "category": "general",
    "default": "system",

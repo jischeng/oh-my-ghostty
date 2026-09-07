@@ -96,7 +96,7 @@ extension BaseTerminalController {
 /// an inactive-window tint overlay.
 #if compiler(>=6.2)
 @available(macOS 26.0, *)
-private class TerminalGlassView: NSView {
+class TerminalGlassView: NSView {
     private let glassEffectView: NSGlassEffectView
     private var topConstraint: NSLayoutConstraint!
     private let tintOverlay: NSView

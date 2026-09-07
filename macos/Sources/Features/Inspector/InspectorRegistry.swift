@@ -94,6 +94,11 @@ struct InspectorAgentHistoryContent: Equatable, Sendable {
 enum InspectorGitAction: Equatable, Sendable {
     case refresh
     case selectTab(InspectorGitContent.ActiveTab)
+    case selectHistoryScope(GitHistoryScope)
+    case loadMoreHistory
+    case selectCommit(GitCommitID)
+    case openCommit(GitCommitID)
+    case sendHistoryToTerminal(GitCommitID?)
 }
 
 struct InspectorGitContent: Equatable, Sendable {
@@ -107,6 +112,7 @@ struct InspectorGitContent: Equatable, Sendable {
     let branch: String?
     let status: GitRepositoryStatusKind
     let activeTab: ActiveTab
+    let history: InspectorGitHistoryContent
     let isLoading: Bool
     let statusMessage: String?
 
@@ -115,6 +121,7 @@ struct InspectorGitContent: Equatable, Sendable {
         branch: String? = nil,
         status: GitRepositoryStatusKind,
         activeTab: ActiveTab = .history,
+        history: InspectorGitHistoryContent = InspectorGitHistoryContent(),
         isLoading: Bool = false,
         statusMessage: String? = nil
     ) {
@@ -122,13 +129,18 @@ struct InspectorGitContent: Equatable, Sendable {
         self.branch = branch
         self.status = status
         self.activeTab = activeTab
+        self.history = history
         self.isLoading = isLoading
         self.statusMessage = statusMessage
     }
 }
 
 enum InspectorPaneActionKind: Equatable, Sendable {
+    case copyFilePath(path: String, relative: Bool)
+    case renameFile(path: String)
+    case openFileExternally(path: String)
     case toggleNode(id: String, expanded: Bool)
+    case openFile(path: String, destination: EditorOpenDestination? = nil)
     case refresh
     case collapseAll
     case createFile(name: String)

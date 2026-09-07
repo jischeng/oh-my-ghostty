@@ -64,9 +64,13 @@ extension Ghostty.Action {
 
         let kind: Kind
         let url: String
+        let baseDirectory: String?
 
         init(c: ghostty_action_open_url_s) {
             self.kind = Kind(c.kind)
+            self.baseDirectory = c.base_directory.flatMap {
+                String(data: Data(bytes: $0, count: Int(c.base_directory_len)), encoding: .utf8)
+            }
 
             if let urlCString = c.url {
                 let data = Data(bytes: urlCString, count: Int(c.len))

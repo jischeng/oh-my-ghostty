@@ -1,0 +1,948 @@
+import AppKit
+import CodeEditLanguages
+import CodeEditSourceEditor
+import CodeEditTextView
+import SwiftUI
+
+/// A lightweight native source editor surface for editable OMG documents.
+///
+/// Document loading and persistence intentionally remain with the caller. The
+/// editor owns presentation state such as the current selection and find bar.
+struct CodeEditorView: View {
+    @Binding var text: String
+    @ObservedObject private var settings = OhMyGhosttySettings.shared
+
+    let fileURL: URL?
+    var isEditable = true
+    var isActive = true
+    var isPreview = false
+    var isSurfaceFocused: () -> Bool = { true }
+    var terminalBackground: NSColor = .textBackgroundColor
+    var terminalBackgroundOpacity: Double = 1.0
+    var terminalForeground: NSColor = .textColor
+    var terminalTheme: EditorTheme?
+    var onFocus: () -> Void = {}
+    var onSave: () -> Void = {}
+    var onClose: () -> Void = {}
+    var onOpen: () -> Void = {}
+    var onNextDocument: () -> Void = {}
+    var onPreviousDocument: () -> Void = {}
+    var onSaveAll: () -> Void = {}
+
+    @State private var cursorPositions: [CursorPosition] = []
+    @State private var editorCoordinator = EditorCoordinator()
+    @StateObject private var completionState = CompletionState()
+    @State private var isFindVisible = false
+    @State private var findText = ""
+    @State private var replaceText = ""
+    @State private var caseSensitive = false
+    @State private var barMode: BarMode = .find
+    @State private var cachedSearchMatches: [NSRange] = []
+    @FocusState private var isFindFocused: Bool
+
+    init(
+        text: Binding<String>,
+        fileURL: URL?,
+        isEditable: Bool = true,
+        isActive: Bool = true,
+        isPreview: Bool = false,
+        isSurfaceFocused: @escaping () -> Bool = { true },
+        terminalBackground: NSColor = .textBackgroundColor,
+        terminalBackgroundOpacity: Double = 1.0,
+        terminalForeground: NSColor = .textColor,
+        terminalTheme: EditorTheme? = nil,
+        onFocus: @escaping () -> Void = {},
+        onSave: @escaping () -> Void = {},
+        onClose: @escaping () -> Void = {},
+        onOpen: @escaping () -> Void = {},
+        onNextDocument: @escaping () -> Void = {},
+        onPreviousDocument: @escaping () -> Void = {},
+        onSaveAll: @escaping () -> Void = {}
+    ) {
+        self._text = text
+        self.fileURL = fileURL
+        self.isEditable = isEditable
+        self.isActive = isActive
+        self.isPreview = isPreview
+        self.isSurfaceFocused = isSurfaceFocused
+        self.terminalBackground = terminalBackground
+        self.terminalBackgroundOpacity = terminalBackgroundOpacity
+        self.terminalForeground = terminalForeground
+        self.terminalTheme = terminalTheme
+        self.onFocus = onFocus
+        self.onSave = onSave
+        self.onClose = onClose
+        self.onOpen = onOpen
+        self.onNextDocument = onNextDocument
+        self.onPreviousDocument = onPreviousDocument
+        self.onSaveAll = onSaveAll
+    }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            CodeEditSourceEditor(
+                $text,
+                language: editorCoordinator.language(fileURL: fileURL, text: text),
+                theme: resolvedTheme,
+                font: resolvedFont,
+                tabWidth: editorSettings.tabWidth,
+                indentOption: resolvedIndentOption,
+                lineHeight: 1.2,
+                wrapLines: editorSettings.wordWrap,
+                cursorPositions: $cursorPositions,
+                useThemeBackground: true,
+                highlightProviders: editorCoordinator.highlightProviders,
+                contentInsets: NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0),
+                isEditable: isEditable && isActive && !isPreview,
+                isSelectable: isActive && !isPreview,
+                bracketPairHighlight: .flash,
+                coordinators: [editorCoordinator]
+            )
+            .clipped()
+
+            if completionState.isPresented && !completionState.candidates.isEmpty {
+                EditorCompletionPopupView(state: completionState) { item in
+                    editorCoordinator.commit(completion: item)
+                }
+                .offset(x: completionState.presentationPoint.x, y: completionState.presentationPoint.y)
+                .transition(.opacity)
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            if isActive, isFindVisible {
+                findBar
+                    .padding(8)
+            }
+        }
+        .background(Color.clear)
+        .onAppear {
+            editorCoordinator.setCompletionState(completionState)
+            editorCoordinator.setFileURL(fileURL)
+            editorCoordinator.setIsPreview(isPreview)
+            configureCommands()
+            editorCoordinator.setActive(isActive)
+        }
+        .onChange(of: isActive) { isActive in
+            configureCommands()
+            editorCoordinator.setActive(isActive)
+            if !isActive {
+                isFindVisible = false
+                completionState.dismiss()
+            }
+        }
+        .onChange(of: isPreview) { isPreview in
+            editorCoordinator.setIsPreview(isPreview)
+        }
+        .onChange(of: settings.editorKeymapPreset) { _ in configureCommands() }
+        .onChange(of: resolvedTheme) { _ in editorCoordinator.refreshBackground() }
+        .onChange(of: editorSettings) { _ in editorCoordinator.refreshBackground() }
+        .onChange(of: findText) { _ in
+            refreshSearchMatches()
+            guard isFindVisible, barMode != .goToLine else { return }
+            if let first = cachedSearchMatches.first {
+                editorCoordinator.select(first, focusEditor: false)
+            }
+        }
+        .onChange(of: text) { _ in refreshSearchMatches() }
+        .onChange(of: caseSensitive) { _ in refreshSearchMatches() }
+        .onChange(of: isFindVisible) { _ in refreshSearchMatches() }
+        .onChange(of: barMode) { _ in refreshSearchMatches() }
+    }
+
+    private var findBar: some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            HStack(spacing: 4) {
+                TextField(barMode == .goToLine ? "Line:Column" : "Find", text: $findText)
+                .textFieldStyle(.roundedBorder)
+                .frame(minWidth: 90, idealWidth: 150, maxWidth: 180)
+                .focused($isFindFocused)
+                .onSubmit(barMode == .goToLine ? goToLine : findNext)
+                .onExitCommand(perform: leaveFindBar)
+
+                if barMode != .goToLine {
+                    Text(matchSummary)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(minWidth: 28)
+                    Button(action: findPrevious) { Image(systemName: "chevron.up") }
+                        .help("Previous Match")
+                    Button(action: findNext) { Image(systemName: "chevron.down") }
+                        .help("Next Match")
+                    Toggle("Aa", isOn: $caseSensitive)
+                        .toggleStyle(.button)
+                        .help("Match Case")
+                }
+
+                Button(action: leaveFindBar) {
+                    Image(systemName: "xmark")
+                }
+                .help("Close")
+            }
+
+            if barMode == .replace {
+                HStack(spacing: 4) {
+                    TextField("Replace", text: $replaceText)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(minWidth: 90, idealWidth: 150, maxWidth: 180)
+                        .onSubmit(replaceCurrent)
+                    Button("Replace", action: replaceCurrent)
+                    Button("All", action: replaceAll)
+                }
+                .controlSize(.small)
+            }
+        }
+        .buttonStyle(.borderless)
+        .padding(6)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7))
+        .shadow(radius: 3, y: 1)
+    }
+
+    private func presentFind() {
+        if let selection = editorCoordinator.selectedRange,
+           selection.location != NSNotFound,
+           selection.length > 0,
+           let range = Range(selection, in: text) {
+            findText = String(text[range])
+        }
+        barMode = .find
+        isFindVisible = true
+        isFindFocused = true
+    }
+
+    private func presentReplace() {
+        presentFind()
+        barMode = .replace
+    }
+
+    private func presentGoToLine() {
+        barMode = .goToLine
+        findText = ""
+        isFindVisible = true
+        isFindFocused = true
+    }
+
+    private func findNext() {
+        selectMatch(searchingForward: true)
+    }
+
+    private func findPrevious() {
+        selectMatch(searchingForward: false)
+    }
+
+    private func selectMatch(searchingForward: Bool) {
+        let current = editorCoordinator.selectedRange ?? NSRange(location: 0, length: 0)
+        let matches = searchMatches
+        guard let index = EditorTextSearch.matchIndex(
+            in: matches, selection: current, searchingForward: searchingForward
+        ) else { return }
+        editorCoordinator.select(matches[index], focusEditor: false)
+    }
+
+    private var searchMatches: [NSRange] {
+        if isFindVisible { return cachedSearchMatches }
+        // Find Next remains available after the bar is closed.
+        return EditorTextSearch.matches(in: text, query: findText, caseSensitive: caseSensitive)
+    }
+
+    private func refreshSearchMatches() {
+        cachedSearchMatches = isFindVisible && barMode != .goToLine
+            ? EditorTextSearch.matches(in: text, query: findText, caseSensitive: caseSensitive)
+            : []
+    }
+
+    private var matchSummary: String {
+        let matches = searchMatches
+        guard !matches.isEmpty else { return "0/0" }
+        let selected = editorCoordinator.selectedRange
+        let index = matches.firstIndex(of: selected ?? .notFound).map { $0 + 1 } ?? 0
+        return "\(index)/\(matches.count)"
+    }
+
+    private func replaceCurrent() {
+        let matches = searchMatches
+        guard !matches.isEmpty else { return }
+        let selection = editorCoordinator.selectedRange
+        let nextIndex = EditorTextSearch.matchIndex(in: matches, selection: selection, searchingForward: true) ?? 0
+        let range = matches.first(where: { $0 == selection }) ?? matches[nextIndex]
+        editorCoordinator.replace(
+            ranges: [range],
+            with: replaceText,
+            selectionAfterEdit: NSRange(location: range.location, length: (replaceText as NSString).length),
+            focusEditor: false
+        )
+    }
+
+    private func replaceAll() {
+        let matches = searchMatches
+        guard !matches.isEmpty else { return }
+        let first = matches[0]
+        editorCoordinator.replace(
+            ranges: matches,
+            with: replaceText,
+            selectionAfterEdit: NSRange(location: first.location, length: (replaceText as NSString).length),
+            focusEditor: false
+        )
+    }
+
+    private func goToLine() {
+        guard let target = EditorTextSearch.lineAndColumn(from: findText),
+              let range = EditorTextSearch.range(forLine: target.line, column: target.column, in: text) else { return }
+        leaveFindBar()
+        editorCoordinator.select(range, focusEditor: true)
+    }
+
+    private func leaveFindBar() {
+        isFindVisible = false
+        isFindFocused = false
+        editorCoordinator.focus()
+    }
+
+    private func configureCommands() {
+        editorCoordinator.configure(
+            keymap: editorSettings.keymap,
+            findFieldFocused: { isFindFocused },
+            onFocus: onFocus,
+            isSurfaceFocused: isSurfaceFocused,
+            actionHandler: { action in
+            switch action {
+            case .find: presentFind()
+            case .replace: presentReplace()
+            case .goToLine: presentGoToLine()
+            case .findNext: findNext()
+            case .findPrevious: findPrevious()
+            case .save: onSave()
+            case .saveAll: onSaveAll()
+            case .close: onClose()
+            case .open: onOpen()
+            case .nextDocument: onNextDocument()
+            case .previousDocument: onPreviousDocument()
+            default: return false
+            }
+            return true
+        })
+    }
+
+    private var editorSettings: EditorSettings { settings.editorSettings }
+
+    private var resolvedIndentOption: IndentOption {
+        if let name = fileURL?.lastPathComponent.lowercased(),
+           name == "makefile" || name.hasSuffix(".mk") {
+            return .tab
+        }
+        return .spaces(count: max(1, editorSettings.tabWidth))
+    }
+
+    private var resolvedFont: NSFont {
+        let size = editorSettings.fontSize
+        switch editorSettings.fontFamily {
+        case .jetbrainsMono:
+            return NSFont(name: "JetBrainsMono-Regular", size: size)
+                ?? NSFont(name: "JetBrains Mono", size: size)
+                ?? .monospacedSystemFont(ofSize: size, weight: .regular)
+        case .sfMono:
+            return NSFont(name: "SFMono-Regular", size: size)
+                ?? .monospacedSystemFont(ofSize: size, weight: .regular)
+        case .menlo:
+            return NSFont(name: "Menlo-Regular", size: size)
+                ?? NSFont(name: "Menlo", size: size)
+                ?? .monospacedSystemFont(ofSize: size, weight: .regular)
+        case .firaCode:
+            return NSFont(name: "FiraCode-Regular", size: size)
+                ?? NSFont(name: "Fira Code", size: size)
+                ?? .monospacedSystemFont(ofSize: size, weight: .regular)
+        case .system:
+            return .monospacedSystemFont(ofSize: size, weight: .regular)
+        }
+    }
+
+    private var resolvedTheme: EditorTheme {
+        var theme = terminalTheme ?? (editorSettings.followsOMG
+            ? .adaptive(background: terminalBackground, foreground: terminalForeground)
+            : editorSettings.syntaxTheme.preset)
+        // The workspace paints one backdrop for toolbar, gutter and text.
+        theme.background = .clear
+        return theme
+    }
+
+    private enum BarMode { case find, replace, goToLine }
+}
+
+@MainActor
+final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurrency TextViewDelegate {
+    let highlightProviders: [HighlightProviding] = [TreeSitterClient(), MarkdownHighlightProvider()]
+    private weak var controller: TextViewController?
+    private weak var completionState: CompletionState?
+    private var completionTask: Task<Void, Never>?
+    private var completionCursor: Int?
+    private var mouseMonitor: Any?
+    private var textChangeObserver: NSObjectProtocol?
+    private var textWillChangeObserver: NSObjectProtocol?
+    private var editDepth = 0
+    private var groupsMultipleCarets = false
+    private var startedUndoGroup = false
+    private var columnDragStart: CGPoint?
+    private var fileURL: URL?
+    private var cachedLanguage: CodeLanguage?
+    private var isActive = false
+    private var keymap = EditorKeymap(profile: .idea)
+    private var findFieldFocused: () -> Bool = { false }
+    private var onFocus: () -> Void = {}
+    private var isSurfaceFocused: () -> Bool = { true }
+    private var actionHandler: (EditorAction) -> Bool = { _ in false }
+
+    func setCompletionState(_ state: CompletionState) {
+        self.completionState = state
+    }
+
+    func setFileURL(_ fileURL: URL?) {
+        self.fileURL = fileURL
+    }
+
+    var selectedRange: NSRange? {
+        controller?.textView.selectionManager.textSelections.first?.range
+    }
+
+    func configure(
+        keymap: EditorKeymap,
+        findFieldFocused: @escaping () -> Bool,
+        onFocus: @escaping () -> Void,
+        isSurfaceFocused: @escaping () -> Bool = { true },
+        actionHandler: @escaping (EditorAction) -> Bool
+    ) {
+        self.keymap = keymap
+        self.findFieldFocused = findFieldFocused
+        self.onFocus = onFocus
+        self.isSurfaceFocused = isSurfaceFocused
+        self.actionHandler = actionHandler
+    }
+
+    static func usesXMLHighlighting(_ url: URL) -> Bool {
+        ["xml", "xsd", "xsl", "xslt", "svg", "plist", "xib", "storyboard", "xcscheme", "entitlements"]
+            .contains(url.pathExtension.lowercased())
+    }
+
+    func language(fileURL: URL?, text: String) -> CodeLanguage {
+        if let cachedLanguage { return cachedLanguage }
+        if let fileURL, Self.usesXMLHighlighting(fileURL) {
+            // The bundled grammars have no XML parser. HTML provides tag,
+            // attribute, string and comment highlighting for XML-family files.
+            cachedLanguage = .html
+            return .html
+        }
+        if let path = fileURL?.path.lowercased() {
+            if path.hasSuffix(".ghostty") || path.hasSuffix(".conf") || path.hasSuffix(".ini") || path.hasSuffix(".cfg") {
+                cachedLanguage = .toml
+                return .toml
+            }
+        }
+        let language: CodeLanguage = fileURL.map {
+            .detectLanguageFrom(
+                url: $0,
+                prefixBuffer: String(text.prefix(2_048)),
+                suffixBuffer: String(text.suffix(2_048))
+            )
+        } ?? .default
+        cachedLanguage = language
+        return language
+    }
+
+    func prepareCoordinator(controller: TextViewController) {
+        self.controller = controller
+        if let scrollView = controller.textView.enclosingScrollView {
+            scrollView.automaticallyAdjustsContentInsets = false
+            scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+            scrollView.documentCursor = .iBeam
+        }
+        refreshBackground()
+        installTextObservers(controller: controller)
+        installMouseMonitor()
+        if isActive { registerCommands() }
+        focusIfActive(onNextRunLoop: true)
+    }
+
+    func refreshBackground() {
+        // CodeEdit reloadUI runs after prepareCoordinator and reinstates AppKit
+        // scroll backgrounds. Clear them after that update, including the
+        // macOS scroll view backing layer, so the workspace backdrop is visible.
+        DispatchQueue.main.async { [weak self] in
+            guard let scroll = self?.controller?.textView.enclosingScrollView else { return }
+            scroll.drawsBackground = false
+            scroll.backgroundColor = .clear
+            scroll.layer?.backgroundColor = NSColor.clear.cgColor
+            scroll.contentView.drawsBackground = false
+            scroll.contentView.backgroundColor = .clear
+            scroll.contentView.layer?.backgroundColor = NSColor.clear.cgColor
+        }
+    }
+
+    private func installMouseMonitor() {
+        guard mouseMonitor == nil else { return }
+        mouseMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]
+        ) { [weak self] event in
+            guard let self, self.isActive, !self.isPreview, let textView = self.controller?.textView,
+                  event.window === textView.window else {
+                return event
+            }
+            let locInTextView = textView.convert(event.locationInWindow, from: nil)
+
+            switch event.type {
+            case .leftMouseDown:
+                if event.modifierFlags.contains(.option), textView.bounds.contains(locInTextView) {
+                    self.columnDragStart = locInTextView
+                    self.handleColumnSelection(at: locInTextView, start: locInTextView)
+                    return nil
+                }
+            case .leftMouseDragged:
+                if let start = self.columnDragStart {
+                    self.handleColumnSelection(at: locInTextView, start: start)
+                    return nil
+                }
+            case .leftMouseUp:
+                if self.columnDragStart != nil {
+                    self.columnDragStart = nil
+                    return nil
+                }
+            default:
+                break
+            }
+            return event
+        }
+    }
+
+    private func handleColumnSelection(at current: CGPoint, start: CGPoint) {
+        guard let controller, let layoutManager = controller.textView.layoutManager else { return }
+        let lineHeight = max(14, layoutManager.estimateLineHeight())
+        let minY = min(start.y, current.y)
+        let maxY = max(start.y, current.y)
+        let isBox = abs(current.x - start.x) >= 6
+
+        var ranges: [NSRange] = []
+        var seen = Set<Int>()
+
+        var y = minY + lineHeight / 2
+        while y <= maxY + lineHeight / 2 {
+            if isBox {
+                if let o1 = layoutManager.textOffsetAtPoint(CGPoint(x: start.x, y: y)),
+                   let o2 = layoutManager.textOffsetAtPoint(CGPoint(x: current.x, y: y)) {
+                    let loc = min(o1, o2)
+                    let len = abs(o2 - o1)
+                    if !seen.contains(loc) {
+                        seen.insert(loc)
+                        ranges.append(NSRange(location: loc, length: len))
+                    }
+                }
+            } else {
+                if let offset = layoutManager.textOffsetAtPoint(CGPoint(x: start.x, y: y)) {
+                    if !seen.contains(offset) {
+                        seen.insert(offset)
+                        ranges.append(NSRange(location: offset, length: 0))
+                    }
+                }
+            }
+            y += lineHeight
+        }
+
+        if !ranges.isEmpty {
+            controller.textView.selectionManager.setSelectedRanges(ranges)
+            controller.textView.setNeedsDisplay()
+            NotificationCenter.default.post(
+                name: TextSelectionManager.selectionChangedNotification,
+                object: controller.textView.selectionManager
+            )
+        }
+    }
+
+    func setActive(_ isActive: Bool) {
+        refreshBackground()
+        let didActivate = isActive && !self.isActive
+        self.isActive = isActive
+        if didActivate {
+            registerCommands()
+            if !isPreview {
+                focusIfActive(onNextRunLoop: true)
+            }
+        } else if !isActive {
+            dismissCompletion()
+            columnDragStart = nil
+            EditorCommandRouter.shared.unregister(owner: self)
+            if let textView = controller?.textView,
+               textView.window?.firstResponder === textView {
+                textView.window?.makeFirstResponder(nil)
+            }
+        }
+    }
+
+    private(set) var isPreview: Bool = false
+
+    func setIsPreview(_ isPreview: Bool) {
+        refreshBackground()
+        let changed = self.isPreview != isPreview
+        self.isPreview = isPreview
+        if changed {
+            if isPreview {
+                dismissCompletion()
+                if let textView = controller?.textView,
+                   textView.window?.firstResponder === textView {
+                    textView.window?.makeFirstResponder(nil)
+                }
+            } else if isActive {
+                focusIfActive(onNextRunLoop: true)
+            }
+        }
+    }
+
+    func focus() {
+        focusIfActive(onNextRunLoop: false)
+    }
+
+    private func focusIfActive(onNextRunLoop: Bool) {
+        let applyFocus = { [weak self] in
+            guard let self, isActive, let textView = controller?.textView,
+                  let window = textView.window else { return }
+            if window.firstResponder !== textView {
+                if window.makeFirstResponder(textView) {
+                    onFocus()
+                }
+            }
+        }
+        if onNextRunLoop {
+            DispatchQueue.main.async { applyFocus() }
+        } else {
+            applyFocus()
+        }
+    }
+
+    func select(_ range: NSRange, focusEditor: Bool = true) {
+        guard let controller, let textView = controller.textView else { return }
+        if focusEditor {
+            focus()
+        }
+        controller.setCursorPositions([CursorPosition(range: range)])
+        EditorNativeTextActions.select(range, on: textView)
+    }
+
+    func replace(
+        ranges: [NSRange],
+        with replacement: String,
+        selectionAfterEdit: NSRange,
+        focusEditor: Bool
+    ) {
+        guard let controller else { return }
+        guard EditorTextEditing.replace(on: controller.textView, ranges: ranges, with: replacement) else { return }
+        select(selectionAfterEdit, focusEditor: focusEditor)
+    }
+
+    private func installTextObservers(controller: TextViewController) {
+        let textView = controller.textView!
+        textWillChangeObserver = NotificationCenter.default.addObserver(
+            forName: TextView.textWillChangeNotification, object: textView, queue: .main
+        ) { [weak self, weak textView] _ in
+            MainActor.assumeIsolated {
+                guard let self, let textView else { return }
+                self.editDepth += 1
+                guard self.editDepth == 1 else { return }
+                self.groupsMultipleCarets = textView.selectionManager.textSelections.count > 1
+                    && !textView.hasMarkedText() && textView.undoManager?.isUndoing != true
+                    && textView.undoManager?.isRedoing != true
+            }
+        }
+        textChangeObserver = NotificationCenter.default.addObserver(
+            forName: TextView.textDidChangeNotification, object: textView, queue: .main
+        ) { [weak self, weak controller] _ in
+            MainActor.assumeIsolated {
+                guard let self, let controller else { return }
+                self.editDepth = max(0, self.editDepth - 1)
+                guard self.editDepth == 0 else { return }
+                if self.startedUndoGroup {
+                    controller.textView._undoManager?.endGrouping()
+                    self.startedUndoGroup = false
+                }
+                self.groupsMultipleCarets = false
+                self.updateCompletion(controller: controller)
+            }
+        }
+    }
+
+    func textView(_ textView: TextView, didReplaceContentsIn range: NSRange, with string: String) {
+        // Begin after the first mutation has entered its own undo group, so
+        // the other carets join it without absorbing the preceding user action.
+        if groupsMultipleCarets, !startedUndoGroup, textView._undoManager?.isGrouping == false {
+            textView._undoManager?.beginGrouping()
+            startedUndoGroup = true
+        }
+    }
+
+    func textViewDidChangeText(controller: TextViewController) {
+        // Explicit callers/tests may request completions; native edits use the
+        // transaction-complete notification after all selections are updated.
+        updateCompletion(controller: controller)
+    }
+
+    func textViewDidChangeSelection(controller: TextViewController, newPositions: [CursorPosition]) {
+        // TextView notifies selections before textDidChange. Keep the popup
+        // alive until that transaction updates its prefix and candidates.
+        guard editDepth == 0 else { return }
+        let selections = controller.textView.selectionManager.textSelections
+        guard selections.count == 1, let selection = selections.first?.range,
+              selection.length == 0, selection.location == completionCursor,
+              !controller.textView.hasMarkedText() else {
+            dismissCompletion()
+            return
+        }
+    }
+
+    private func dismissCompletion() {
+        completionTask?.cancel()
+        completionTask = nil
+        completionCursor = nil
+        completionState?.dismiss()
+    }
+
+    private func updateCompletion(controller: TextViewController) {
+        // Cancel before validating: whitespace, a selection or IME composition invalidates old work too.
+        completionTask?.cancel()
+        completionTask = nil
+        completionCursor = nil
+        guard isActive, controller.textView.isEditable, !controller.textView.hasMarkedText(),
+              controller.textView.selectionManager.textSelections.count == 1,
+              let textSelection = controller.textView.selectionManager.textSelections.first,
+              textSelection.range.length == 0 else {
+            dismissCompletion()
+            return
+        }
+
+        let cursorLocation = textSelection.range.location
+        let string = controller.textView.string as NSString
+        guard cursorLocation >= 0, cursorLocation <= string.length else {
+            dismissCompletion()
+            return
+        }
+
+        var wordStart = cursorLocation
+        while wordStart > 0 {
+            let char = string.character(at: wordStart - 1)
+            if let scalar = UnicodeScalar(char),
+               CharacterSet.alphanumerics.contains(scalar) || scalar == "_" {
+                wordStart -= 1
+            } else {
+                break
+            }
+        }
+
+        let prefixLength = cursorLocation - wordStart
+        guard prefixLength >= 1 else {
+            dismissCompletion()
+            return
+        }
+
+        let prefix = string.substring(with: NSRange(location: wordStart, length: prefixLength))
+        let prefixRange = NSRange(location: wordStart, length: prefixLength)
+
+        let lineIdx = controller.textView.layoutManager.textLineForOffset(cursorLocation)?.index ?? 0
+        let estHeight = max(14, controller.textView.layoutManager.estimateLineHeight())
+        let cursorRect: CGRect
+        if let rect = controller.textView.layoutManager.rectForOffset(cursorLocation), rect.height > 0 {
+            cursorRect = rect
+        } else {
+            cursorRect = CGRect(x: 40, y: CGFloat(lineIdx) * estHeight, width: 2, height: estHeight)
+        }
+
+        guard let scrollView = controller.textView.enclosingScrollView else {
+            dismissCompletion()
+            return
+        }
+        let originInScroll = controller.textView.convert(cursorRect.origin, to: scrollView)
+        guard originInScroll.y >= 0 else {
+            dismissCompletion()
+            return
+        }
+
+        let popupX = max(12, min(originInScroll.x, scrollView.bounds.width - 260))
+        var popupY = originInScroll.y + cursorRect.height + 4
+        if popupY + 200 > scrollView.bounds.height, originInScroll.y > 210 {
+            popupY = originInScroll.y - 195
+        }
+        let anchorPoint = CGPoint(x: popupX, y: max(8, popupY))
+
+        // Immediately update existing candidates and prefix synchronously!
+        if let completionState, completionState.isPresented {
+            completionState.filter(prefix: prefix, prefixRange: prefixRange, at: anchorPoint)
+        }
+
+        let lineRange = string.lineRange(for: NSRange(location: cursorLocation, length: 0))
+        let lineText = string.substring(with: lineRange)
+        let lang = self.cachedLanguage?.tsName.lowercased()
+
+        let context = CompletionContext(
+            documentText: controller.textView.string,
+            cursorOffset: cursorLocation,
+            prefix: prefix,
+            lineText: lineText,
+            language: lang,
+            fileURL: self.fileURL
+        )
+
+        completionCursor = cursorLocation
+        completionTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 15_000_000)
+            guard !Task.isCancelled else { return }
+            let candidates = await EditorCompletionEngine.shared.completions(for: context)
+            guard !Task.isCancelled, let self, self.isActive,
+                  let textView = self.controller?.textView,
+                  !textView.hasMarkedText(), textView.window?.firstResponder === textView,
+                  textView.selectionManager.textSelections.count == 1,
+                  self.selectedRange == NSRange(location: cursorLocation, length: 0) else { return }
+
+            let currentText = textView.string as NSString
+            guard NSMaxRange(prefixRange) <= currentText.length,
+                  currentText.substring(with: prefixRange) == prefix else { return }
+            self.completionState?.update(
+                candidates: candidates,
+                prefix: prefix,
+                prefixRange: prefixRange,
+                at: anchorPoint
+            )
+        }
+    }
+
+    func commit(completion: CompletionItem) {
+        guard let controller,
+              let completionState,
+              completionState.isPresented else { return }
+
+        let range = completionState.prefixRange
+        let insertText = completion.insertText
+        let prefix = completionState.prefix
+        dismissCompletion()
+
+        guard controller.textView.isEditable, !controller.textView.hasMarkedText(),
+              controller.textView.selectionManager.textSelections.count == 1,
+              selectedRange == NSRange(location: NSMaxRange(range), length: 0),
+              range.location != NSNotFound, range.location >= 0,
+              NSMaxRange(range) <= controller.textView.textStorage.length,
+              (controller.textView.string as NSString).substring(with: range) == prefix else { return }
+
+        controller.textView.replaceCharacters(in: range, with: insertText)
+        let newCursorPos = range.location + (insertText as NSString).length
+        let newRange = NSRange(location: newCursorPos, length: 0)
+        controller.setCursorPositions([CursorPosition(range: newRange)])
+        controller.textView.selectionManager.setSelectedRange(newRange)
+        controller.textView.scrollSelectionToVisible()
+        controller.textView.updatedViewport(controller.textView.visibleRect)
+        controller.textView.needsDisplay = true
+        dismissCompletion()
+    }
+
+    func destroy() {
+        if let textChangeObserver { NotificationCenter.default.removeObserver(textChangeObserver) }
+        if let textWillChangeObserver { NotificationCenter.default.removeObserver(textWillChangeObserver) }
+        textChangeObserver = nil
+        textWillChangeObserver = nil
+        if startedUndoGroup { controller?.textView._undoManager?.endGrouping() }
+        startedUndoGroup = false
+        if let mouseMonitor {
+            NSEvent.removeMonitor(mouseMonitor)
+            self.mouseMonitor = nil
+        }
+        dismissCompletion()
+        completionState = nil
+        EditorCommandRouter.shared.unregister(owner: self)
+        controller = nil
+        isActive = false
+    }
+
+    private func handle(_ event: NSEvent) -> Bool {
+        guard isActive, let textView = controller?.textView,
+              event.window === textView.window else { return false }
+
+        if isPreview {
+            guard isSurfaceFocused() else { return false }
+            guard let action = keymap.action(for: event) else { return false }
+            switch action {
+            case .close, .open, .nextDocument, .previousDocument:
+                return actionHandler(action)
+            default:
+                return false
+            }
+        }
+
+        let responder = textView.window?.firstResponder
+        let isTextViewOrChild = responder === textView || (responder as? NSView)?.isDescendant(of: textView) == true
+        let editingField = (responder as? NSTextView)?.isFieldEditor == true
+        guard isTextViewOrChild || editingField else {
+            dismissCompletion()
+            return false
+        }
+        if editingField {
+            dismissCompletion()
+            guard findFieldFocused() else { return false }
+        }
+        if isTextViewOrChild, textView.hasMarkedText() {
+            dismissCompletion()
+            return false
+        }
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            .subtracting([.capsLock, .numericPad, .function])
+        if isTextViewOrChild, modifiers.isEmpty || modifiers == .shift,
+           EditorPairedInput.apply(event.characters ?? "", backspace: event.keyCode == 51,
+                                   enabled: OhMyGhosttySettings.shared.editorAutoClosePairs, on: textView) {
+            dismissCompletion()
+            return true
+        }
+        // Escape must cancel pending results even before the popup becomes visible.
+        if isTextViewOrChild, event.keyCode == 53, modifiers.isEmpty {
+            let wasPresented = completionState?.isPresented == true
+            dismissCompletion()
+            return wasPresented
+        }
+
+        if let completionState, completionState.isPresented, !completionState.candidates.isEmpty {
+            switch event.keyCode {
+            case 125 where modifiers.isEmpty: // Down arrow
+                completionState.selectNext()
+                return true
+            case 126 where modifiers.isEmpty: // Up arrow
+                completionState.selectPrevious()
+                return true
+            case 48 where modifiers.isEmpty: // Tab
+                if let candidate = completionState.currentSelection {
+                    commit(completion: candidate)
+                    return true
+                }
+            case 36 where modifiers.isEmpty: // Enter / Return
+                if let candidate = completionState.currentSelection {
+                    commit(completion: candidate)
+                    return true
+                }
+            case 45 where modifiers == .control: // Ctrl + N
+                completionState.selectNext()
+                return true
+            case 35 where modifiers == .control: // Ctrl + P
+                completionState.selectPrevious()
+                return true
+            default:
+                break
+            }
+        }
+
+        guard let action = keymap.action(for: event) else { return false }
+        if action == .find || action == .replace || action == .goToLine { dismissCompletion() }
+        if editingField {
+            switch action {
+            case .cut, .copy, .paste, .selectAll, .selectLine, .undo, .redo,
+                 .duplicateLine, .deleteLine, .moveLineUp, .moveLineDown, .indent, .outdent, .toggleLineComment:
+                return false
+            default: return actionHandler(action)
+            }
+        }
+        guard let controller else { return false }
+        return EditorNativeTextActions.perform(action, on: controller) || actionHandler(action)
+    }
+
+    private func registerCommands() {
+        EditorCommandRouter.shared.register(owner: self) { [weak self] event in
+            self?.handle(event) ?? false
+        }
+    }
+}

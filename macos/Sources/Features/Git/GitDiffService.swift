@@ -1,0 +1,290 @@
+import Foundation
+
+struct GitDiffService: Sendable {
+    static let defaultDiffByteLimit = 512 * 1024
+
+    private let executor: any GitExecutor
+    let diffByteLimit: Int
+
+    private struct CommitBase: Sendable {
+        let id: String
+        let isRoot: Bool
+    }
+
+    init(
+        executor: any GitExecutor = LocalGitExecutor(),
+        diffByteLimit: Int = GitDiffService.defaultDiffByteLimit
+    ) {
+        self.executor = executor
+        self.diffByteLimit = max(1, diffByteLimit)
+    }
+
+    /// Lists changed paths without reading their contents. Git's `-z` output is
+    /// parsed as records so spaces, unicode, quotes and newlines in paths survive.
+    func listFiles(for repository: GitRepositoryIdentity, target: GitDiffTarget) async throws -> GitDiffFileList {
+        switch target {
+        case .commit(let commit):
+            let commitBase = try await commitBase(for: commit, repository: repository)
+            let result = try await run(
+                ["--literal-pathspecs", "diff", "--no-ext-diff", "--name-status", "-z", "--find-renames", commitBase.id, commit.rawValue, "--"],
+                repository: repository,
+                maxOutputBytes: 256 * 1024
+            )
+            return GitDiffFileList(
+                repository: repository,
+                target: target,
+                files: parseNameStatus(result.stdout),
+                baseDescription: commitBase.isRoot ? "empty tree" : "parent \(GitCommitID(commitBase.id).shortSHA)"
+            )
+
+        case .staged:
+            let result = try await run(
+                ["--literal-pathspecs", "diff", "--cached", "--no-ext-diff", "--name-status", "-z", "--find-renames", "--"],
+                repository: repository,
+                maxOutputBytes: 256 * 1024
+            )
+            return GitDiffFileList(
+                repository: repository,
+                target: target,
+                files: parseNameStatus(result.stdout),
+                baseDescription: "index vs HEAD"
+            )
+
+        case .unstaged:
+            let tracked = try await run(
+                ["--literal-pathspecs", "diff", "--no-ext-diff", "--name-status", "-z", "--find-renames", "--"],
+                repository: repository,
+                maxOutputBytes: 256 * 1024
+            )
+            let untracked = try await run(
+                ["--literal-pathspecs", "ls-files", "--others", "--exclude-standard", "-z", "--"],
+                repository: repository,
+                maxOutputBytes: 256 * 1024
+            )
+            var files = parseNameStatus(tracked.stdout)
+            files.append(contentsOf: parseUntracked(untracked.stdout))
+            return GitDiffFileList(
+                repository: repository,
+                target: target,
+                files: files.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending },
+                baseDescription: "working tree vs index"
+            )
+        }
+    }
+
+    /// Loads commit metadata once for the detail window. File diffs do not call this method.
+    func loadCommitMetadata(
+        for commit: GitCommitID,
+        repository: GitRepositoryIdentity
+    ) async throws -> GitCommitMetadata {
+        let result = try await executor.execute(
+            arguments: [
+                "show", "--no-ext-diff", "--no-color", "--no-patch",
+                "--format=%H%x00%an%x00%ae%x00%aI%x00%P%x00%B%x00",
+                commit.rawValue,
+            ],
+            workingDirectory: repository.worktreePath,
+            stdin: nil,
+            maxOutputBytes: 128 * 1024
+        )
+        guard result.isSuccess else {
+            throw GitDiffServiceError.invalidCommit(commit)
+        }
+        let fields = result.stdout
+            .split(separator: 0, omittingEmptySubsequences: false)
+            .map { String(bytes: $0, encoding: .utf8) ?? "" }
+        guard fields.count >= 6,
+              !fields[0].isEmpty,
+              !fields[3].isEmpty else {
+            throw GitDiffServiceError.gitFailed("Git returned incomplete commit metadata.")
+        }
+        let parents = fields[4]
+            .split(whereSeparator: { $0.isWhitespace })
+            .map { GitCommitID(String($0)) }
+        return GitCommitMetadata(
+            commitID: GitCommitID(fields[0]),
+            authorName: fields[1],
+            authorEmail: fields[2].isEmpty ? nil : fields[2],
+            authoredAt: fields[3],
+            parents: parents,
+            message: fields[5].trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
+    /// Reads one file only after the caller has selected it in the file list.
+    func loadDiff(
+        for file: GitDiffFile,
+        repository: GitRepositoryIdentity,
+        target: GitDiffTarget,
+        baseDescription: String? = nil
+    ) async throws -> GitDiffDocument {
+        guard !file.path.isEmpty, !file.path.hasPrefix("/") else {
+            throw GitDiffServiceError.invalidPath(file.path)
+        }
+
+        let arguments: [String]
+        let base: String
+        let allowsExitCodeOne: Bool
+        switch target {
+        case .commit(let commit):
+            let resolvedBase = try await commitBase(for: commit, repository: repository)
+            base = baseDescription ?? (resolvedBase.isRoot
+                ? "empty tree"
+                : "parent \(GitCommitID(resolvedBase.id).shortSHA)")
+            arguments = [
+                "--literal-pathspecs", "diff", "--no-ext-diff", "--no-color", "--unified=3", "--find-renames",
+                resolvedBase.id, commit.rawValue, "--", file.oldPath ?? file.path,
+            ] + (file.oldPath == nil ? [] : [file.path])
+            allowsExitCodeOne = false
+
+        case .staged:
+            base = baseDescription ?? "index vs HEAD"
+            arguments = [
+                "--literal-pathspecs", "diff", "--cached", "--no-ext-diff", "--no-color", "--unified=3", "--find-renames",
+                "--", file.oldPath ?? file.path,
+            ] + (file.oldPath == nil ? [] : [file.path])
+            allowsExitCodeOne = false
+
+        case .unstaged:
+            base = baseDescription ?? "working tree vs index"
+            if file.isUntracked {
+                let absolutePath = URL(fileURLWithPath: repository.worktreePath)
+                    .appendingPathComponent(file.path)
+                    .path
+                arguments = ["--literal-pathspecs", "diff", "--no-index", "--no-color", "--unified=3", "/dev/null", absolutePath]
+                allowsExitCodeOne = true
+            } else {
+                arguments = [
+                    "--literal-pathspecs", "diff", "--no-ext-diff", "--no-color", "--unified=3", "--find-renames",
+                    "--", file.oldPath ?? file.path,
+                ] + (file.oldPath == nil ? [] : [file.path])
+                allowsExitCodeOne = false
+            }
+        }
+
+        do {
+            let result = try await executor.execute(
+                arguments: arguments,
+                workingDirectory: repository.worktreePath,
+                stdin: nil,
+                maxOutputBytes: diffByteLimit
+            )
+            guard result.isSuccess || (allowsExitCodeOne && result.exitCode == 1) else {
+                throw GitDiffServiceError.gitFailed(gitErrorMessage(from: result))
+            }
+            let text = result.stdoutString
+            return GitDiffDocument(
+                file: file,
+                text: text,
+                isBinary: isBinaryDiff(text),
+                isTruncated: false,
+                byteLimit: diffByteLimit,
+                baseDescription: base
+            )
+        } catch GitExecutionError.outputLimitExceeded {
+            return GitDiffDocument(
+                file: file,
+                text: "Diff exceeds the \(formatBytes(diffByteLimit)) display limit and was truncated.\n",
+                isBinary: false,
+                isTruncated: true,
+                byteLimit: diffByteLimit,
+                baseDescription: base
+            )
+        }
+    }
+
+    private func commitBase(
+        for commit: GitCommitID,
+        repository: GitRepositoryIdentity
+    ) async throws -> CommitBase {
+        let result = try await executor.execute(
+            arguments: ["rev-list", "--parents", "-n", "1", commit.rawValue],
+            workingDirectory: repository.worktreePath,
+            stdin: nil,
+            maxOutputBytes: 4 * 1024
+        )
+        guard result.isSuccess else {
+            throw GitDiffServiceError.invalidCommit(commit)
+        }
+        let parts = result.stdoutString.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        guard parts.first == commit.rawValue || parts.first.map({ $0.hasPrefix(commit.rawValue) }) == true else {
+            throw GitDiffServiceError.invalidCommit(commit)
+        }
+        if let parent = parts.dropFirst().first {
+            return CommitBase(id: parent, isRoot: false)
+        }
+        let emptyTree = try await executor.execute(
+            arguments: ["hash-object", "-t", "tree", "--stdin"],
+            workingDirectory: repository.worktreePath,
+            stdin: Data(),
+            maxOutputBytes: 4 * 1024
+        )
+        guard emptyTree.isSuccess else {
+            throw GitDiffServiceError.gitFailed(gitErrorMessage(from: emptyTree))
+        }
+        return CommitBase(
+            id: emptyTree.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines),
+            isRoot: true
+        )
+    }
+
+    private func run(
+        _ arguments: [String],
+        repository: GitRepositoryIdentity,
+        maxOutputBytes: Int
+    ) async throws -> GitExecutionResult {
+        let result = try await executor.execute(
+            arguments: arguments,
+            workingDirectory: repository.worktreePath,
+            stdin: nil,
+            maxOutputBytes: maxOutputBytes
+        )
+        guard result.isSuccess else {
+            throw GitDiffServiceError.gitFailed(gitErrorMessage(from: result))
+        }
+        return result
+    }
+
+    private func parseNameStatus(_ data: Data) -> [GitDiffFile] {
+        let fields = data.split(separator: 0).map { String(bytes: $0, encoding: .utf8) ?? "" }
+        var files: [GitDiffFile] = []
+        var index = 0
+        while index < fields.count {
+            let status = fields[index]
+            index += 1
+            guard !status.isEmpty else { continue }
+            let isRenameOrCopy = status.first == "R" || status.first == "C"
+            let firstPath = index < fields.count ? fields[index] : ""
+            index += 1
+            guard !firstPath.isEmpty else { continue }
+            if isRenameOrCopy, index < fields.count {
+                let newPath = fields[index]
+                index += 1
+                files.append(GitDiffFile(path: newPath, oldPath: firstPath, status: status))
+            } else {
+                files.append(GitDiffFile(path: firstPath, status: status))
+            }
+        }
+        return files.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+    }
+
+    private func parseUntracked(_ data: Data) -> [GitDiffFile] {
+        data.split(separator: 0).map {
+            GitDiffFile(path: String(bytes: $0, encoding: .utf8) ?? "", status: "A", isUntracked: true)
+        }
+    }
+
+    private func isBinaryDiff(_ text: String) -> Bool {
+        text.contains("Binary files ") || text.contains("GIT binary patch")
+    }
+
+    private func gitErrorMessage(from result: GitExecutionResult) -> String {
+        let message = result.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
+        return message.isEmpty ? "Git command failed with exit code \(result.exitCode)." : message
+    }
+
+    private func formatBytes(_ bytes: Int) -> String {
+        if bytes >= 1024 * 1024 { return "\(bytes / (1024 * 1024)) MB" }
+        return "\(max(1, bytes / 1024)) KB"
+    }
+}

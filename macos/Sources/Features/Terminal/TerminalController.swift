@@ -688,7 +688,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             : base
         let initialLayoutState = VerticalTabWindowLayoutState(
             isSidebarVisible: self.tabLayout == .vertical &&
-                OhMyGhosttySettings.shared.sidebarVisible
+                OhMyGhosttySettings.shared.sidebarVisible,
+            isInspectorVisible: false
         )
 
         super.init(
@@ -3141,9 +3142,27 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         _ node: SplitTree<Ghostty.SurfaceView>.Node,
         withConfirmation: Bool = true
     ) {
+        let leafIDs = node.leaves().map(\.id)
+        guard EditorWorkspaceStore.shared.prepareToClose(surfaceIDs: leafIDs, window: window, retry: { [weak self] in
+            self?.closeSurface(node, withConfirmation: withConfirmation)
+        }) else { return }
+
         // If this isn't the root then we're dealing with a split closure.
         if surfaceTree.root != node {
-            super.closeSurface(node, withConfirmation: withConfirmation)
+            guard surfaceTree.contains(node) else { return }
+            if !withConfirmation {
+                EditorWorkspaceStore.shared.remove(surfaceIDs: leafIDs)
+                removeSurfaceNode(node, registerUndo: false)
+                return
+            }
+            confirmClose(
+                messageText: "Close Terminal?",
+                informativeText: "The terminal still has a running process. If you close the terminal the process will be killed."
+            ) { [weak self] in
+                guard let self else { return }
+                EditorWorkspaceStore.shared.remove(surfaceIDs: leafIDs)
+                self.removeSurfaceNode(node, registerUndo: false)
+            }
             return
         }
 
@@ -3167,6 +3186,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     func closeTabImmediately(registerRedo: Bool = true) {
         guard let window = window else { return }
+        guard EditorWorkspaceStore.shared.prepareToClose(tabIDs: [tabSessionID], window: window, retry: { [weak self] in
+            self?.closeTabImmediately(registerRedo: registerRedo)
+        }) else { return }
         guard let tabGroup = window.tabGroup,
                 tabGroup.windows.count > 1 else {
             closeWindowImmediately()
@@ -3292,6 +3314,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// confirmation. This will setup proper undo state so the action can be undone.
     func closeWindowImmediately() {
         guard let window = window else { return }
+        let editorTabIDs = (window.tabGroup?.windows ?? [window]).compactMap {
+            ($0.windowController as? TerminalController)?.tabSessionID
+        }
+        guard EditorWorkspaceStore.shared.prepareToClose(tabIDs: editorTabIDs, window: window, retry: { [weak self] in
+            self?.closeWindowImmediately()
+        }) else { return }
 
         cancelPendingInitialPresentation()
 
@@ -3711,6 +3739,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     override func windowWillClose(_ notification: Notification) {
         super.windowWillClose(notification)
+        EditorWorkspaceStore.shared.remove(tabID: tabSessionID)
         (NSApp.delegate as? AppDelegate)?.tabActivities.removeSession(tabSessionID)
         cancelPendingInitialPresentation()
         self.relabelTabs()
@@ -4253,7 +4282,8 @@ extension NSWindowTabGroup {
             .first?
             .tabLayoutState ?? VerticalTabWindowLayoutState(
                 isSidebarVisible: OhMyGhosttySettings.shared.tabLayout == .vertical &&
-                    OhMyGhosttySettings.shared.sidebarVisible
+                    OhMyGhosttySettings.shared.sidebarVisible,
+                isInspectorVisible: false
             )
         setGhosttyTerminalShellLayoutState(state)
         return state

@@ -4519,11 +4519,23 @@ fn processLinks(self: *Surface, pos: apprt.CursorPos) !bool {
             });
             defer self.alloc.free(str);
 
-            const resolved_path = try self.resolvePathForOpening(str);
+            // OMG resolves paths with the source pane's local/SSH filesystem.
+            // Resolving here would expand remote paths against the host's cwd.
+            const resolved_path: ?[]const u8 = if (comptime builtin.target.os.tag == .macos)
+                null
+            else
+                try self.resolvePathForOpening(str);
             defer if (resolved_path) |p| self.alloc.free(p);
 
             const url_to_open = resolved_path orelse str;
-            try self.openUrl(.{ .kind = .unknown, .url = url_to_open });
+            try self.openUrl(.{
+                .kind = .unknown,
+                .url = url_to_open,
+                .base_directory = if (comptime builtin.target.os.tag == .macos)
+                    self.io.terminal.screens.active.omg_cwd_history.cwdAt(link.selection.start()) orelse ""
+                else
+                    null,
+            });
         },
 
         ._open_osc8 => {
@@ -4531,7 +4543,14 @@ fn processLinks(self: *Surface, pos: apprt.CursorPos) !bool {
                 log.warn("failed to get URI for OSC8 hyperlink", .{});
                 return false;
             };
-            try self.openUrl(.{ .kind = .osc8, .url = uri });
+            try self.openUrl(.{
+                .kind = .osc8,
+                .url = uri,
+                .base_directory = if (comptime builtin.target.os.tag == .macos)
+                    self.io.terminal.screens.active.omg_cwd_history.cwdAt(link.selection.start()) orelse ""
+                else
+                    null,
+            });
         },
     }
 

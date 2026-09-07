@@ -1,5 +1,7 @@
+import AppKit
 import Foundation
 import OSLog
+import UniformTypeIdentifiers
 
 @MainActor
 final class BuiltInFilesInspectorProvider {
@@ -9,6 +11,7 @@ final class BuiltInFilesInspectorProvider {
     )
     static let pluginID = "builtin.files"
     static let paneID = "builtin.files"
+    typealias OpenFileHandler = @MainActor (String, InspectorPaneContext, EditorOpenDestination) -> Void
 
     private static let rootTaskID = "__root__"
     private static let loadingTaskID = "__loading__"
@@ -30,16 +33,19 @@ final class BuiltInFilesInspectorProvider {
 
     private let registry: InspectorRegistry
     private let filesystemFactory: (InspectorPaneContext) -> any WorkspaceFilesystem
+    private let openFile: OpenFileHandler
     private var states: [UUID: BrowserState] = [:]
     private var loadTasks: [LoadKey: Task<Void, Never>] = [:]
 
     init(
         registry: InspectorRegistry,
         filesystemFactory: @escaping (InspectorPaneContext) -> any WorkspaceFilesystem =
-            WorkspaceFilesystemFactory.make
+            WorkspaceFilesystemFactory.make,
+        openFile: @escaping OpenFileHandler
     ) {
         self.registry = registry
         self.filesystemFactory = filesystemFactory
+        self.openFile = openFile
     }
 
     func register() throws {
@@ -144,6 +150,29 @@ final class BuiltInFilesInspectorProvider {
                 publishTree(for: context.tabID)
             }
 
+        case .openFile(let path, let destination):
+            guard let tree = state.tree,
+                  let node = Self.findNode(id: path, in: tree.nodes),
+                  !node.isDirectory else {
+                Self.logger.error("Files open ignored missing file=\(path, privacy: .public)")
+                return
+            }
+            openFile(path, state.context, destination ?? OhMyGhosttySettings.shared.editorFileOpenDestination)
+
+        case .copyFilePath(let path, let relative):
+            guard let tree = state.tree, Self.findNode(id: path, in: tree.nodes) != nil else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(
+                relative ? WorkspaceFileActions.relativePath(path, root: state.rootPath) : path,
+                forType: .string
+            )
+
+        case .renameFile(let path):
+            rename(path: path, context: context)
+
+        case .openFileExternally(let path):
+            openExternally(path: path, context: context)
+
         case .refresh:
             states[context.tabID] = state
             reloadRoot(context: context, reason: "manual-refresh")
@@ -173,6 +202,93 @@ final class BuiltInFilesInspectorProvider {
              .resumeAgentHistorySession, .forkAgentHistorySession,
              .gitAction:
             break
+        }
+    }
+
+    private func showError(_ error: Error) {
+        let alert = NSAlert()
+        alert.messageText = "File operation failed"
+        alert.informativeText = error.localizedDescription
+        alert.alertStyle = .warning
+        alert.runModal()
+    }
+
+    private func rename(path: String, context: InspectorPaneContext) {
+        let state = state(for: context)
+        guard let tree = state.tree, let node = Self.findNode(id: path, in: tree.nodes) else { return }
+        guard !EditorWorkspaceStore.shared.containsOpenDocument(path: path, descriptor: state.filesystem.descriptor) else {
+            showError(WorkspaceFilesystemError.operationFailed(
+                "Close this file and any open files inside this folder before renaming it."
+            ))
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Rename \(node.name)"
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(string: node.name)
+        field.frame = NSRect(x: 0, y: 0, width: 300, height: 24)
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = field.stringValue
+        do { _ = try WorkspaceFileActions.renamedPath(path, name: name) } catch {
+            showError(error)
+            return
+        }
+        guard name != node.name else { return }
+        guard !EditorWorkspaceStore.shared.containsOpenDocument(path: path, descriptor: state.filesystem.descriptor) else {
+            showError(WorkspaceFilesystemError.operationFailed("Close this file and any open files inside this folder before renaming it."))
+            return
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await state.filesystem.renameItem(at: path, to: name)
+                guard let current = states[context.tabID],
+                      current.filesystem.descriptor == state.filesystem.descriptor,
+                      current.context.session.state == state.context.session.state else { return }
+                let newPath = try WorkspaceFileActions.renamedPath(path, name: name)
+                states[context.tabID]?.expanded = Set(current.expanded.map { expanded in
+                    if expanded == path { return newPath }
+                    return expanded.hasPrefix(path + "/") ? newPath + expanded.dropFirst(path.count) : expanded
+                })
+                reloadRoot(context: current.context, reason: "rename")
+            } catch {
+                showError(error)
+            }
+        }
+    }
+
+    private func openExternally(path: String, context: InspectorPaneContext) {
+        let state = state(for: context)
+        guard let tree = state.tree, let node = Self.findNode(id: path, in: tree.nodes) else { return }
+        let remote = state.filesystem.descriptor.kind == .ssh
+        guard !remote || !node.isDirectory else {
+            showError(WorkspaceFilesystemError.operationFailed("Open in… supports remote files, but not remote folders."))
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.title = remote ? "Open a read-only downloaded copy in…" : "Open in…"
+        panel.message = remote ? "Changes in the other app will not be uploaded to the server." : "Choose an application."
+        panel.prompt = "Open"
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        panel.allowedContentTypes = [.applicationBundle]
+        panel.canChooseDirectories = false
+        panel.treatsFilePackagesAsDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let application = panel.url else { return }
+        Task { [weak self] in
+            do {
+                let url = try await EditorFileOpening.externalURL(path: path, filesystem: state.filesystem)
+                let configuration = NSWorkspace.OpenConfiguration()
+                NSWorkspace.shared.open([url], withApplicationAt: application, configuration: configuration) { _, error in
+                    guard let error else { return }
+                    Task { @MainActor [weak self] in self?.showError(error) }
+                }
+            } catch {
+                self?.showError(error)
+            }
         }
     }
 

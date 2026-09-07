@@ -103,6 +103,7 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
             TerminalSplitTreeView(
                 tree: viewModel.surfaceTree,
                 action: { delegate?.performSplitAction($0) })
+                .environment(\.editorTerminalController, viewModel as? TerminalController)
                 .environmentObject(ghostty)
                 .ghosttyLastFocusedSurface(lastFocusedSurface)
                 .focused($focused)

@@ -8,6 +8,7 @@ enum OhMyGhosttySettingsTab: String, CaseIterable, Identifiable {
     case appearance
     case tabs
     case terminal
+    case editor
     case keyboard
     case plugins
     case advanced
@@ -20,6 +21,7 @@ enum OhMyGhosttySettingsTab: String, CaseIterable, Identifiable {
         case .appearance: "paintbrush"
         case .tabs: "rectangle.split.3x1"
         case .terminal: "terminal"
+        case .editor: "curlybraces.square"
         case .keyboard: "keyboard"
         case .plugins: "puzzlepiece.extension"
         case .advanced: "slider.horizontal.3"
@@ -37,7 +39,7 @@ final class OhMyGhosttySettingsWindowController: NSWindowController {
     ) {
         let root = SettingsView(settings: settings, initialSelection: initialSelection)
         let hostingController = NSHostingController(rootView: root)
-        let window = NSWindow(contentViewController: hostingController)
+        let window = SettingsWindow(contentViewController: hostingController)
         window.title = SettingsStrings(language: settings.language).windowTitle
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.toolbarStyle = .unified
@@ -84,10 +86,23 @@ final class OhMyGhosttySettingsWindowController: NSWindowController {
     }
 }
 
+final class SettingsWindow: NSWindow {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.type == .keyDown,
+           event.modifierFlags.intersection([.command, .control, .option, .shift]) == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "w" {
+            performClose(nil)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
 struct SettingsView: View {
     @ObservedObject var settings: OhMyGhosttySettings
     @StateObject private var pluginManager: PluginInstallationManager
     @State private var selection: OhMyGhosttySettingsTab
+    private let themeNames = GhosttyThemeCatalog.availableThemes()
     @State private var githubRepository = ""
     @State private var pluginOperation: String?
     @State private var pluginError: String?
@@ -267,6 +282,104 @@ struct SettingsView: View {
                 Section(strings.ghosttySection) {
                     Button(strings.openGhosttyConfigButton) {
                         (NSApp.delegate as? AppDelegate)?.ghostty.openConfig()
+                    }
+                }
+            }
+
+        case .editor:
+            Form {
+                Section(strings.editorOpeningSection) {
+                    Picker(strings.editorFileOpenDestinationLabel, selection: $settings.editorFileOpenDestination) {
+                        ForEach(EditorOpenDestination.allCases, id: \.self) { destination in
+                            Text(strings.editorOpenDestinationTitle(destination)).tag(destination)
+                        }
+                    }
+                    Picker(strings.editorDirectoryOpenDestinationLabel, selection: $settings.editorDirectoryOpenDestination) {
+                        ForEach(EditorOpenDestination.allCases, id: \.self) { destination in
+                            Text(strings.editorOpenDestinationTitle(destination)).tag(destination)
+                        }
+                    }
+                    Text(strings.editorOpeningCaption).font(.caption).foregroundStyle(.secondary)
+                }
+                Section(strings.editorBehaviorSection) {
+                    Picker(strings.editorKeymapPresetLabel, selection: $settings.editorKeymapPreset) {
+                        ForEach(EditorKeymapPreset.allCases) { preset in
+                            Text(strings.editorKeymapPresetTitle(preset)).tag(preset)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    Text(strings.editorKeymapPresetCaption)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Toggle(strings.editorWordWrapLabel, isOn: $settings.editorWordWrap)
+                    Toggle(strings.editorAutoClosePairsLabel, isOn: $settings.editorAutoClosePairs)
+                }
+                Section(strings.editorThemeSection) {
+                    Picker(strings.editorSyntaxThemeLabel, selection: editorThemeSelection) {
+                        Text(strings.editorSyntaxThemeTitle(.followTerminal)).tag("follow")
+                        ForEach(themeNames, id: \.self) { name in Text(name).tag("catalog:" + name) }
+                        ForEach(EditorSyntaxTheme.allCases.filter { $0 != .followTerminal }) { theme in
+                            Text(theme.title).tag("builtin:" + theme.rawValue)
+                        }
+                    }
+                    Text(strings.editorCatalogCaption).font(.caption).foregroundStyle(.secondary)
+                    if !settings.editorSettings.followsOMG {
+                        HStack {
+                            Text(strings.backgroundOpacityLabel)
+                            Slider(value: editorOpacityBinding, in: 0.05...1, step: 0.05)
+                            Text("\(Int(editorOpacityBinding.wrappedValue * 100))%")
+                                .monospacedDigit().frame(width: 45)
+                        }
+                        Picker(strings.backgroundBlurLabel, selection: editorBlurBinding) {
+                            ForEach(OhMyGhosttyBackgroundBlur.allCases) { blur in
+                                Text(strings.blurTitle(blur)).tag(blur)
+                            }
+                        }
+                    }
+                    if settings.editorSettings.followsOMG {
+                        Text(strings.editorThemeInheritedCaption).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Section(strings.editorTypographySection) {
+                    Picker(strings.editorFontFamilyLabel, selection: $settings.editorFontFamily) {
+                        ForEach(EditorFontFamily.allCases) { family in
+                            Text(strings.editorFontFamilyTitle(family)).tag(family)
+                        }
+                    }
+                    HStack {
+                        Text(strings.editorFontSizeLabel)
+                        Slider(value: $settings.editorFontSize, in: 8...36, step: 0.5)
+                        Text(String(format: "%.1f pt", settings.editorFontSize))
+                            .monospacedDigit()
+                            .frame(width: 68, alignment: .trailing)
+                    }
+                    Stepper(
+                        value: $settings.editorTabWidth,
+                        in: 1...12,
+                        step: 1
+                    ) {
+                        LabeledContent(strings.editorTabWidthLabel) {
+                            Text("\(Int(settings.editorTabWidth))")
+                                .monospacedDigit()
+                        }
+                    }
+                }
+                HStack {
+                    Spacer()
+                    Button(strings.resetEditorButton) {
+                        settings.editorFileOpenDestination = .currentPane
+                        settings.editorDirectoryOpenDestination = .currentPane
+                        settings.editorKeymapPreset = .idea
+                        settings.editorBackgroundMode = .followTerminal
+                        settings.editorSyntaxTheme = .followTerminal
+                        settings.editorThemeName = nil
+                        settings.editorAutoClosePairs = true
+                        settings.editorOpacity = 1
+                        settings.editorBlur = .disabled
+                        settings.editorFontFamily = .jetbrainsMono
+                        settings.editorFontSize = 13
+                        settings.editorTabWidth = 4
+                        settings.editorWordWrap = false
                     }
                 }
             }
@@ -487,30 +600,86 @@ struct SettingsView: View {
         }
     }
 
+    private var editorThemeSelection: Binding<String> {
+        Binding(
+            get: {
+                if let name = settings.editorThemeName { return "catalog:" + name }
+                return settings.editorSettings.followsOMG ? "follow" : "builtin:" + settings.editorSyntaxTheme.rawValue
+            },
+            set: { value in
+                if value.hasPrefix("catalog:") {
+                    settings.editorThemeName = String(value.dropFirst(8))
+                } else {
+                    settings.editorThemeName = nil
+                    settings.editorSyntaxTheme = value == "follow" ? .followTerminal
+                        : EditorSyntaxTheme(rawValue: String(value.dropFirst(8))) ?? .followTerminal
+                }
+            }
+        )
+    }
+
+    private var editorOpacityBinding: Binding<Double> {
+        Binding(
+            get: {
+                settings.editorSettings.followsOMG
+                    ? settings.effectiveAppearance(using: inheritedGhosttyConfig).backgroundOpacity.effectiveValue
+                    : settings.editorOpacity
+            },
+            set: { if !settings.editorSettings.followsOMG { settings.editorOpacity = $0 } }
+        )
+    }
+
+    private var editorBlurBinding: Binding<OhMyGhosttyBackgroundBlur> {
+        Binding(
+            get: {
+                settings.editorSettings.followsOMG
+                    ? settings.backgroundBlurOverride ?? inheritedGhosttyConfig.editorBackgroundBlur
+                    : settings.editorBlur
+            },
+            set: { if !settings.editorSettings.followsOMG { settings.editorBlur = $0 } }
+        )
+    }
+
+    private var followsSystemTheme: Binding<Bool> {
+        Binding(
+            get: {
+                if let mode = settings.windowThemeOverride { return mode == .system }
+                return !["light", "dark"].contains(inheritedGhosttyConfig.windowTheme ?? "auto")
+            },
+            set: { follows in
+                settings.windowThemeOverride = follows ? .system
+                    : (NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? .dark : .light)
+            }
+        )
+    }
+
     private var appearanceForm: some View {
         let appearance = settings.effectiveAppearance(using: inheritedGhosttyConfig)
         return Form {
-            Section(strings.windowSection) {
-                Picker(strings.appearancePickerLabel, selection: $settings.windowThemeOverride) {
-                    Text(strings.ghosttyConfigOption).tag(OhMyGhosttyWindowTheme?.none)
-                    ForEach(OhMyGhosttyWindowTheme.allCases) { theme in
-                        Text(strings.windowThemeTitle(theme)).tag(Optional(theme))
-                    }
-                }
-                resolutionRow(appearance.windowTheme)
-            }
-
             Section(strings.terminalThemeSection) {
-                GhosttyThemeField(
-                    strings: strings,
-                    title: strings.lightThemeLabel,
-                    value: optionalStringBinding(\.lightThemeOverride)
-                )
-                GhosttyThemeField(
-                    strings: strings,
-                    title: strings.darkThemeLabel,
-                    value: optionalStringBinding(\.darkThemeOverride)
-                )
+                Toggle(strings.followSystemThemeLabel, isOn: followsSystemTheme)
+                if followsSystemTheme.wrappedValue {
+                    GhosttyThemeField(strings: strings, title: strings.lightThemeLabel,
+                                      value: optionalStringBinding(\.lightThemeOverride))
+                    GhosttyThemeField(strings: strings, title: strings.darkThemeLabel,
+                                      value: optionalStringBinding(\.darkThemeOverride))
+                } else {
+                    Picker(strings.appearancePickerLabel, selection: $settings.windowThemeOverride) {
+                        Text(strings.windowThemeTitle(.light)).tag(Optional(OhMyGhosttyWindowTheme.light))
+                        Text(strings.windowThemeTitle(.dark)).tag(Optional(OhMyGhosttyWindowTheme.dark))
+                    }
+                    GhosttyThemeField(
+                        strings: strings,
+                        title: strings.unifiedThemeLabel,
+                        value: Binding(
+                            get: { settings.windowThemeOverride == .light ? settings.lightThemeOverride ?? "" : settings.darkThemeOverride ?? "" },
+                            set: { value in
+                                settings.lightThemeOverride = value.isEmpty ? nil : value
+                                settings.darkThemeOverride = value.isEmpty ? nil : value
+                            }
+                        )
+                    )
+                }
                 resolutionRow(appearance.theme)
                 HStack {
                     Text(strings.resolvedBackgroundLabel)
@@ -526,14 +695,11 @@ struct SettingsView: View {
             }
 
             Section(strings.fontSection) {
-                LabeledContent(strings.fontFamilyLabel) {
-                    TextField(
-                        strings.inheritGhosttyPlaceholder,
-                        text: optionalStringBinding(\.fontFamilyOverride)
-                    )
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 360)
-                    .multilineTextAlignment(.trailing)
+                Picker(strings.fontFamilyLabel, selection: optionalStringBinding(\.fontFamilyOverride)) {
+                    Text(strings.inheritGhosttyPlaceholder).tag("")
+                    ForEach(NSFontManager.shared.availableFontFamilies.sorted(), id: \.self) { family in
+                        Text(family).tag(family)
+                    }
                 }
                 optionalSlider(
                     strings.fontSizeLabel,
@@ -841,35 +1007,13 @@ private struct GhosttyThemeField: View {
     }
 
     var body: some View {
-        LabeledContent(title) {
-            HStack(spacing: 6) {
-                TextField(strings.inheritGhosttyPlaceholder, text: $value)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 360)
-                    .multilineTextAlignment(.trailing)
-                if !themes.isEmpty {
-                    Menu {
-                        ForEach(themes, id: \.self) { theme in
-                            Button(theme) { value = theme }
-                        }
-                    } label: {
-                        Image(systemName: "chevron.up.chevron.down")
-                    }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                }
-                if !value.isEmpty {
-                    Button {
-                        value = ""
-                    } label: {
-                        Image(systemName: "arrow.uturn.backward")
-                    }
-                    .buttonStyle(.borderless)
-                    .help(strings.resetThemeHelp)
-                }
-            }
+        Picker(title, selection: $value) {
+            Text(strings.inheritGhosttyPlaceholder).tag("")
+            if !value.isEmpty && !themes.contains(value) { Text(value).tag(value) }
+            ForEach(themes, id: \.self) { theme in Text(theme).tag(theme) }
         }
     }
+
 }
 
 struct SettingsView_Previews: PreviewProvider {

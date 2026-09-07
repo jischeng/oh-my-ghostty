@@ -839,6 +839,9 @@ typedef struct {
   ghostty_action_open_url_kind_e kind;
   const char* url;
   uintptr_t len;
+  // OMG: NULL means absent; a non-NULL empty value means unknown historical cwd.
+  const char* base_directory;
+  uintptr_t base_directory_len;
 } ghostty_action_open_url_s;
 
 // apprt.action.CloseTabMode

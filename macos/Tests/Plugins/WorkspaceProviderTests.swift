@@ -4,6 +4,43 @@ import Testing
 @testable import Ghostty
 
 struct WorkspaceProviderTests {
+    @Test func localRenamePreservesContentsAndRefusesConflicts() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let original = root.appendingPathComponent("old.md")
+        let renamed = root.appendingPathComponent("new.md")
+        let occupied = root.appendingPathComponent("occupied.md")
+        try Data("original".utf8).write(to: original)
+        try Data("keep".utf8).write(to: occupied)
+        let filesystem = LocalWorkspaceFilesystem(workingDirectory: root.path)
+        try await filesystem.renameItem(at: original.path, to: "new.md")
+        #expect(!FileManager.default.fileExists(atPath: original.path))
+        #expect(try Data(contentsOf: renamed) == Data("original".utf8))
+        await #expect(throws: (any Error).self) {
+            try await filesystem.renameItem(at: renamed.path, to: "occupied.md")
+        }
+        #expect(try Data(contentsOf: occupied) == Data("keep".utf8))
+        #expect(try Data(contentsOf: renamed) == Data("original".utf8))
+        let folder = root.appendingPathComponent("folder", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        try await filesystem.renameItem(at: folder.path, to: "renamed folder")
+        #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("renamed folder").path))
+    }
+
+    @Test func fileActionPathsRespectBoundariesAndRejectInvalidNames() throws {
+        #expect(WorkspaceFileActions.relativePath("/work/docs/readme.md", root: "/work") == "docs/readme.md")
+        #expect(WorkspaceFileActions.relativePath("/work/docs/readme.md", root: "/work/") == "docs/readme.md")
+        #expect(WorkspaceFileActions.relativePath("/worker/a", root: "/work") == "/worker/a")
+        #expect(WorkspaceFileActions.relativePath("/file", root: "/") == "file")
+        #expect(try WorkspaceFileActions.renamedPath("/work/old.md", name: "new name.md") == "/work/new name.md")
+        for name in ["", ".", "..", "../escape", "bad\nname", "bad\0name", "bad\rname"] {
+            #expect(throws: WorkspaceFilesystemError.invalidPath) {
+                try WorkspaceFileActions.renamedPath("/work/old.md", name: name)
+            }
+        }
+    }
+
     @Test @MainActor func imageOnlyClipboardWritesTempFileAndPastesPath() throws {
         let rep = try #require(NSBitmapImageRep(
             bitmapDataPlanes: nil,
@@ -619,6 +656,28 @@ struct WorkspaceProviderTests {
         #expect(entries.allSatisfy { $0.path.hasPrefix("/remote/") })
     }
 
+    @Test func parsesSFTPListingPathsWithoutDuplicatingDirectory() throws {
+        let output = """
+        -rw-r--r-- 1 root root 1 Jan 1 00:00 /root/configure-maintenance.sh
+        -rw-r--r-- 1 root root 1 Jan 1 00:00 root/file with spaces.txt
+        -rw-r--r-- 1 root root 1 Jan 1 00:00 relative.txt
+        lrwxrwxrwx 1 root root 7 Jan 1 00:00 current -> release
+        """
+        let entries = try SSHWorkspaceFilesystem.parseLongListing(output, directory: "/root")
+        #expect(entries.map(\.path) == [
+            "/root/configure-maintenance.sh",
+            "/root/current",
+            "/root/file with spaces.txt",
+            "/root/relative.txt",
+        ])
+        #expect(entries.first { $0.name == "current" }?.isDirectory == false)
+    }
+
+    @Test func quotesSFTPBatchPaths() {
+        #expect(SSHWorkspaceFilesystem.quote("/root/file name") == "\"/root/file name\"")
+        #expect(SSHWorkspaceFilesystem.quote("/root/a\\b\"c") == "\"/root/a\\\\b\\\"c\"")
+    }
+
     @Test func createsSSHWorkspaceDescriptorFromAlias() throws {
         let previous = UserDefaults.standard.object(forKey: "OMG.Plugin.Enabled.builtin.ssh")
         UserDefaults.standard.set(true, forKey: "OMG.Plugin.Enabled.builtin.ssh")
@@ -639,5 +698,60 @@ struct WorkspaceProviderTests {
         #expect(filesystem.descriptor.kind == .ssh)
         #expect(filesystem.descriptor.id == "ssh:cloud")
         #expect(filesystem.descriptor.displayName == "cloud")
+    }
+
+    @Test func parsesSFTPFileAttributesAndPermissions() {
+        let output = "-rwxr-xr-x 1 user group 12345678 Jan 1 00:00 /remote/script.sh"
+        let attrs = SSHWorkspaceFilesystem.parseFileAttributes(from: output)
+        #expect(attrs?.size == 12345678)
+        #expect(attrs?.isDirectory == false)
+        #expect(attrs?.permissions == 0o755)
+
+        let dirOutput = "drwxr-xr-x 2 user group 4096 Jan 1 00:00 /remote/dir"
+        let dirAttrs = SSHWorkspaceFilesystem.parseFileAttributes(from: dirOutput)
+        #expect(dirAttrs?.isDirectory == true)
+        #expect(dirAttrs?.permissions == 0o755)
+
+        let mode = SSHWorkspaceFilesystem.parsePosixPermissions("-rw-r--r--")
+        #expect(mode == 0o644)
+
+        // Special permission bits: SUID, SGID, Sticky bit and without execute (S/T)
+        #expect(SSHWorkspaceFilesystem.parsePosixPermissions("-rwSr--r--") == 0o4644)
+        #expect(SSHWorkspaceFilesystem.parsePosixPermissions("-rwsr-xr-x") == 0o4755)
+        #expect(SSHWorkspaceFilesystem.parsePosixPermissions("-rwxr-sr-x") == 0o2755)
+        #expect(SSHWorkspaceFilesystem.parsePosixPermissions("-rwxr-Sr-x") == 0o2745)
+        #expect(SSHWorkspaceFilesystem.parsePosixPermissions("drwxrwxrwt") == 0o1777)
+        #expect(SSHWorkspaceFilesystem.parsePosixPermissions("drwxrwx--T") == 0o1770)
+    }
+
+    @Test func parsesSFTPSymlinkTarget() {
+        let output = "lrwxrwxrwx 1 root root 7 Jan 1 00:00 /root/current -> /root/release"
+        #expect(SSHWorkspaceFilesystem.parseSymlinkTarget(from: output) == "/root/release")
+
+        let relOutput = "lrwxrwxrwx 1 root root 7 Jan 1 00:00 current -> release/v1"
+        #expect(SSHWorkspaceFilesystem.parseSymlinkTarget(from: relOutput) == "release/v1")
+
+        let nonLink = "-rw-r--r-- 1 root root 10 Jan 1 00:00 regular.txt"
+        #expect(SSHWorkspaceFilesystem.parseSymlinkTarget(from: nonLink) == nil)
+    }
+
+    @Test func parsesSymlinkStatusFromRealSFTPServerDirectoryListing() {
+        // Real OpenSSH sftp-server readdir output: no "-> target" arrow, only "l" prefix in mode
+        let listing = """
+        drwx------    ? chengjisheng staff         128 Sep  7 15:38 /remote/dir/.
+        drwx------    ? chengjisheng staff      227168 Sep  7 15:38 /remote/dir/..
+        lrwxr-xr-x    ? chengjisheng staff          71 Sep  7 15:38 /remote/dir/link.txt
+        -rw-r--r--    ? chengjisheng staff           5 Sep  7 15:38 /remote/dir/target.txt
+        """
+        #expect(SSHWorkspaceFilesystem.parseSymlinkStatus(name: "link.txt", fromDirectoryListing: listing) == .symlink)
+        #expect(SSHWorkspaceFilesystem.parseSymlinkStatus(name: "target.txt", fromDirectoryListing: listing) == .regularFile)
+        #expect(SSHWorkspaceFilesystem.parseSymlinkStatus(name: "nonexistent.txt", fromDirectoryListing: listing) == .indeterminate)
+    }
+
+    @Test func shellQuoteEscapesSpecialCharactersAndSingleQuotes() {
+        #expect(SSHWorkspaceFilesystem.shellQuote("simple.txt") == "'simple.txt'")
+        #expect(SSHWorkspaceFilesystem.shellQuote("foo'bar.txt") == "'foo'\\''bar.txt'")
+        #expect(SSHWorkspaceFilesystem.shellQuote("foo$(printf expanded).txt") == "'foo$(printf expanded).txt'")
+        #expect(SSHWorkspaceFilesystem.shellQuote("foo`whoami`$USER.txt") == "'foo`whoami`$USER.txt'")
     }
 }

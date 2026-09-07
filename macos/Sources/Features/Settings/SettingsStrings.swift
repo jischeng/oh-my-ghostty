@@ -48,6 +48,7 @@ struct SettingsStrings: Equatable, Sendable {
         case .appearance: t("Appearance", "外观")
         case .tabs: t("Tabs", "标签页")
         case .terminal: t("Terminal", "终端")
+        case .editor: t("Editor", "编辑器")
         case .keyboard: t("Keyboard", "键盘")
         case .plugins: t("Plugins", "插件")
         case .advanced: t("Advanced", "高级")
@@ -130,7 +131,7 @@ struct SettingsStrings: Equatable, Sendable {
         }
     }
 
-    var terminalThemeSection: String { t("Terminal Theme", "终端主题") }
+    var terminalThemeSection: String { t("OMG Theme", "OMG 主题") }
     var lightThemeLabel: String { t("Light Theme", "浅色主题") }
     var darkThemeLabel: String { t("Dark Theme", "深色主题") }
     var resolvedBackgroundLabel: String { t("Resolved Background", "实际背景色") }
@@ -261,6 +262,80 @@ struct SettingsStrings: Equatable, Sendable {
         case .onRelease: t("On Release", "松开时重绘")
         }
     }
+
+    // MARK: Editor
+
+    var editorBehaviorSection: String { t("Behavior", "行为") }
+    var editorOpeningSection: String { t("Opening Location", "打开位置") }
+    var editorFileOpenDestinationLabel: String { t("Open Files", "打开文件") }
+    var editorDirectoryOpenDestinationLabel: String { t("Command-click Folders", "⌘ 点击文件夹") }
+    var editorOpeningCaption: String {
+        t("Files use this location when opened in the editor or with Command-click. The folder setting applies only to Command-click.",
+          "在编辑器中打开文件或 ⌘ 点击文件时使用上述位置。文件夹设置仅适用于 ⌘ 点击。")
+    }
+    func editorOpenDestinationTitle(_ destination: EditorOpenDestination) -> String {
+        switch destination {
+        case .currentPane: t("Current Pane", "当前窗格")
+        case .newTab: t("New Tab", "新标签页")
+        case .splitRight: t("Split Right", "向右分屏")
+        case .splitDown: t("Split Down", "向下分屏")
+        case .splitLeft: t("Split Left", "向左分屏")
+        case .splitUp: t("Split Up", "向上分屏")
+        }
+    }
+    var editorTypographySection: String { t("Typography", "排版") }
+    var editorKeymapPresetLabel: String { t("Keymap Preset", "键位预设") }
+
+    func editorKeymapPresetTitle(_ preset: EditorKeymapPreset) -> String {
+        switch preset {
+        case .idea: "IDEA"
+        case .vscode: "VS Code"
+        }
+    }
+
+    var editorKeymapPresetCaption: String {
+        t(
+            "IDEA is the default. The preset changes only native editor commands.",
+            "默认使用 IDEA。此预设只影响原生编辑器命令。"
+        )
+    }
+
+    var editorBackgroundModeLabel: String { t("Background", "背景") }
+
+    func editorBackgroundModeTitle(_ mode: EditorBackgroundMode) -> String {
+        switch mode {
+        case .followTerminal: t("Follow Terminal", "跟随终端")
+        case .system: t("System Editor Background", "系统编辑器背景")
+        }
+    }
+
+    var editorSyntaxThemeLabel: String { t("Syntax Theme", "代码风格主题") }
+    func editorSyntaxThemeTitle(_ theme: EditorSyntaxTheme) -> String {
+        theme == .followTerminal ? t("Follow OMG", "跟随 OMG 的主题设置") : theme.title
+    }
+    var editorThemeInheritedCaption: String {
+        t("Colors, opacity and effects follow OMG Appearance settings.", "颜色、透明度与毛玻璃跟随 OMG 外观设置。")
+    }
+    var editorAutoClosePairsLabel: String { t("Auto-close Quotes and Brackets", "自动补全引号和括号") }
+    var editorCatalogCaption: String {
+        t("Themes set the background, syntax colors, selection and caret. They do not change code formatting.",
+          "主题包含背景、语法配色、选区和光标颜色，不改变代码格式。")
+    }
+    var editorThemeSection: String { t("Editor Theme", "编辑器主题") }
+    var followSystemThemeLabel: String { t("Switch with System Appearance", "跟随系统设置切换") }
+    var themeVariantsLabel: String { t("Light and Dark Variants", "分别设置浅色与深色主题") }
+    var unifiedThemeLabel: String { t("Theme Preset", "主题预设") }
+
+    var editorFontFamilyLabel: String { t("Font Family", "字体") }
+    func editorFontFamilyTitle(_ family: EditorFontFamily) -> String {
+        family == .system ? t("System Monospaced", "系统等宽字体") : family.title
+    }
+
+    var editorWordWrapLabel: String { t("Word Wrap", "自动换行") }
+    var editorFontSizeLabel: String { t("Font Size", "字号") }
+    var editorTabWidthLabel: String { t("Tab Width", "Tab 宽度") }
+    var resetEditorButton: String { t("Reset Editor Settings", "重置编辑器设置") }
+
     var quickInputSection: String { t("Agent Quick Input", "Agent 快速输入") }
     var openQuickInputOnAgentStartLabel: String {
         t("Open Composer When Agent Starts", "打开 Agent 时展开输入框")

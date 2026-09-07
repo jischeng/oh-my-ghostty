@@ -28,10 +28,14 @@ def main [
     (^env -i
         $"HOME=($env.HOME)"
         "PATH=/usr/bin:/bin:/usr/sbin:/sbin"
+        # The editor packages' lint plugins declare an absent Output directory
+        # under Xcode 26. Keep OMG's own Run SwiftLint phase as the lint gate.
+        "DISABLE_SWIFTLINT=1"
         xcodebuild
         -project $project
         -scheme $scheme
         -configuration $configuration
+        -skipPackagePluginValidation
         $"SYMROOT=($build_dir)"
         ...$version_override
         ...$skip_testing

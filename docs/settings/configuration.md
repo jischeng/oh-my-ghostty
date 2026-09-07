@@ -27,6 +27,15 @@ The file is a flat, sorted JSON object. Only values explicitly chosen by the use
   "appearance.backgroundOpacity": 0.75,
   "appearance.darkTheme": "Catppuccin Mocha",
   "appearance.lightTheme": "Catppuccin Latte",
+  "editor.backgroundMode": "followTerminal",
+  "editor.fontFamily": "jetbrainsMono",
+  "editor.fontSize": 13,
+  "editor.keymapPreset": "idea",
+  "editor.fileOpenDestination": "currentPane",
+  "editor.directoryOpenDestination": "currentPane",
+  "editor.syntaxTheme": "followTerminal",
+  "editor.tabWidth": 4,
+  "editor.wordWrap": false,
   "general.quitWithoutConfirmation": true,
   "keyboard.quickInput": "shift+command+e",
   "keyboard.quickInputHeight": 252,
@@ -76,6 +85,15 @@ Window UI state is intentionally separate: `InspectorPresentationStore` owns las
 | `appearance.cursorStyle` | enum | Ghostty config | `block`, `bar`, `underline`, `block_hollow` | Settings > Appearance | Live |
 | `appearance.tabRowDensity` | enum | `compact` | `compact`, `comfortable` | Settings > Appearance | Runtime |
 | `appearance.tabIconSize` | number | `16` | `12...20` | Settings > Appearance | Runtime |
+| `editor.keymapPreset` | enum | `idea` | `idea`, `vscode` | Settings > Editor | Runtime |
+| `editor.fileOpenDestination` | enum | `currentPane` | `currentPane`, `newTab`, `splitRight`, `splitDown`, `splitLeft`, `splitUp` | Settings > Editor | Runtime |
+| `editor.directoryOpenDestination` | enum | `currentPane` | `currentPane`, `newTab`, `splitRight`, `splitDown`, `splitLeft`, `splitUp` | Settings > Editor | Runtime |
+| `editor.backgroundMode` | enum | `followTerminal` | `followTerminal`, `system` | Legacy configuration | Retained, no visual effect |
+| `editor.syntaxTheme` | enum | `followTerminal` | `oneDark`, `oneLight`, `dracula`, `githubDark`, `nord`, `monokai`, `catppuccinMocha`, `followTerminal` | Settings > Editor | Runtime |
+| `editor.fontFamily` | enum | `jetbrainsMono` | `jetbrainsMono`, `sfMono`, `menlo`, `firaCode`, `system` | Settings > Editor | Runtime |
+| `editor.fontSize` | number | `13` | `8...36` | Settings > Editor | Runtime |
+| `editor.tabWidth` | number | `4` | `1...12` | Settings > Editor | Runtime |
+| `editor.wordWrap` | boolean | `false` | `true`, `false` | Settings > Editor | Runtime |
 | `notifications.taskComplete` | boolean | `true` | `true`, `false` | Settings > Plugins | Runtime policy |
 | `notifications.attention` | boolean | `true` | `true`, `false` | Settings > Plugins | Runtime policy |
 | `notifications.sound` | boolean | `false` | `true`, `false` | Settings > Plugins | Runtime policy |
@@ -92,6 +110,8 @@ Window UI state is intentionally separate: `InspectorPresentationStore` owns las
 Appearance controls resolve each value as `OMG override > Ghostty config > built-in default`. The UI reports the effective value and source, and **Reset to Ghostty** removes only OMG Appearance keys. The app writes a generated `appearance.ghostty` overlay beside `settings.json`; it never edits the user's Ghostty config. The overlay is loaded last and applied with Ghostty's existing live config update API, so current surfaces keep their PTY, shell, and scrollback.
 
 Vertical tabs and the Right Inspector use the active terminal background color and background opacity. There is no independent Sidebar or Inspector theme. Transparency is painted only on background layers; window alpha, terminal glyphs, cursors, and icons remain opaque.
+
+Settings > Editor owns the native code editor's local editing behavior. `editor.keymapPreset` defaults to `idea` and may be changed to `vscode`; the setting resolves to the native `EditorKeymap.Profile` consumed by the editor command router. `editor.syntaxTheme` defaults to `followTerminal`, inheriting the resolved OMG colors and background effects. Other presets use independent editor appearance controls. `editor.backgroundMode` is retained only for reading older configuration files. `editor.fontSize`, `editor.tabWidth`, and `editor.wordWrap` are runtime settings consumed by the native editor view.
 
 `tabs.pathDisplay` applies to the path portion of every Vertical Tab label. Local and SSH panes use the same policy: `fullPath` preserves the current full-path presentation, while `folderName` displays only the final folder component. SSH keeps its alias prefix, for example `cloud /home/user/code` becomes `cloud code`.
 
@@ -125,3 +145,19 @@ The configuration action is designed but not implemented in this iteration. It w
 - [`settings-appearance-light.png`](../images/settings-appearance-light.png): the same native Settings hierarchy under explicit Light Appearance.
 - [`appearance-transparency-vertical.png`](../images/appearance-transparency-vertical.png): Vertical Tabs and terminal content using the same 58% Ghostty background alpha.
 - [`appearance-transparency-horizontal.png`](../images/appearance-transparency-horizontal.png): native Horizontal presentation under the same Ghostty opacity/blur configuration.
+
+### Shared OMG and editor appearance
+
+Settings > Appearance uses the existing Ghostty theme catalog. Window appearance and theme selection share one section. Switch with System Appearance enables separate light/dark theme choices; otherwise a fixed light/dark appearance and one theme preset are shown. Background opacity and blur/glass continue to use Ghostty appearance overrides.
+
+The editor defaults to `editor.syntaxTheme = followTerminal` (Follow OMG), using the resolved Ghostty palette, background, opacity and effect. Editor opacity/effect controls are hidden while following OMG; adjust them in OMG Appearance instead. An explicit editor theme enables independent `editor.opacity` (0.05–1, default 1) and `editor.blur` (`disabled`, `enabled`, `macosGlassRegular`, `macosGlassClear`, default `disabled`); switching back preserves these independent values. Existing explicitly selected editor themes are retained. The older `editor.backgroundMode` key remains readable for configuration compatibility but no longer controls theme resolution.
+
+The editor toolbar uses a vertically collapsing rectangle button to hide the editor. Save All and Reload are no longer shown in its overflow menu; save and document keyboard actions remain available.
+
+### Editor completion and typing
+
+Completion stays open while a text transaction refines its prefix, preserves the selected candidate where possible, and uses current-buffer identifiers including short names and identifiers after the first 100,000 UTF-16 units. Buffer candidates are lexical suggestions, not LSP type-aware completion.
+
+`editor.autoClosePairs` defaults to `true`. Typing quotes or brackets inserts a matching partner and places carets inside, including multiple carets; a matching closing character advances past the existing partner. The setting can be disabled in Settings > Editor. Pasted text is not expanded into pairs.
+
+Appearance theme and font controls are selection lists. `editor.themeName` optionally selects an independent theme from the same Ghostty catalog; it overrides the older built-in `editor.syntaxTheme` preset. Theme colors include background, syntax categories, selection and caret, not source-code formatting. Follow OMG clears the independent theme name. Settings windows support Command-W.

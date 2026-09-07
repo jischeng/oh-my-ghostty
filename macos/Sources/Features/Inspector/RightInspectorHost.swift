@@ -2070,7 +2070,7 @@ private struct InspectorFileTreeNodeView: View {
                     }
                     .frame(width: 10, height: 14)
 
-                    InspectorFileIconView(icon: node.icon)
+                    InspectorFileIconView(node: node)
                     Text(node.name)
                         .font(.system(size: 12.5))
                         .lineLimit(1)
@@ -2096,6 +2096,32 @@ private struct InspectorFileTreeNodeView: View {
             }
             .buttonStyle(.plain)
             .onHover { hovered = $0 }
+            .onTapGesture(count: 2) {
+                guard !node.isDirectory else { return }
+                selectedNodeID = node.id
+                perform(.openFile(path: node.id))
+            }
+            .contextMenu {
+                Button("Copy Path") { perform(.copyFilePath(path: node.id, relative: false)) }
+                Button("Copy Relative Path") { perform(.copyFilePath(path: node.id, relative: true)) }
+                Button("Rename…") { perform(.renameFile(path: node.id)) }
+                Button("Open in…") { perform(.openFileExternally(path: node.id)) }
+                Divider()
+                if !node.isDirectory {
+                    Button("Open in Editor") {
+                        selectedNodeID = node.id
+                        perform(.openFile(path: node.id, destination: .currentPane))
+                    }
+                    Menu("Open to the Side") {
+                        ForEach(EditorOpenDestination.allCases, id: \.rawValue) { destination in
+                            Button(destination.title) {
+                                selectedNodeID = node.id
+                                perform(.openFile(path: node.id, destination: destination))
+                            }
+                        }
+                    }
+                }
+            }
 
             if node.isExpanded, let children = node.children {
                 VStack(spacing: 0) {
@@ -2122,16 +2148,30 @@ private struct InspectorFileTreeNodeView: View {
 }
 
 private struct InspectorFileIconView: View {
-    let icon: InspectorFileIcon
+    let node: InspectorFileNode
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        Image(systemName: icon.systemImage)
-            .foregroundStyle(color)
-            .frame(width: 16, height: 16)
+        Group {
+            if let name = MaterialFileIcons.assetName(
+                for: node.name,
+                isDirectory: node.isDirectory,
+                isExpanded: node.isExpanded,
+                isLight: colorScheme == .light
+            ), let image = NSImage(named: name) {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                Image(systemName: node.icon.systemImage)
+                    .foregroundStyle(color)
+            }
+        }
+        .frame(width: 16, height: 16)
     }
 
     private var color: Color {
-        switch icon.tint {
+        switch node.icon.tint {
         case .secondary: .secondary
         case .blue: .blue
         case .green: .green

@@ -13,6 +13,11 @@ struct EditorAppearanceTests {
         let file = directory.appendingPathComponent("settings.json")
         let settings = OhMyGhosttySettings(fileURL: file)
         #expect(settings.editorSettings.followsOMG)
+        #expect(settings.editorAutoClosePairs)
+        settings.editorAutoClosePairs = false
+        settings.editorThemeName = "Catppuccin Mocha"
+        #expect(!settings.editorSettings.followsOMG)
+        settings.editorThemeName = nil
         settings.editorSyntaxTheme = .dracula
         settings.editorOpacity = 0.6
         settings.editorBlur = .macosGlassClear
@@ -20,6 +25,7 @@ struct EditorAppearanceTests {
         settings.editorSyntaxTheme = .followTerminal
         let restored = OhMyGhosttySettings(fileURL: file)
         #expect(restored.editorSettings.followsOMG)
+        #expect(!restored.editorAutoClosePairs)
         #expect(restored.editorOpacity == 0.6)
         #expect(restored.editorBlur == .macosGlassClear)
     }
@@ -34,6 +40,27 @@ struct EditorAppearanceTests {
         let keyword = try #require(theme.keywords.usingColorSpace(.deviceRGB))
         #expect(abs(text.redComponent - 171.0 / 255) < 0.01)
         #expect(abs(keyword.blueComponent - 204.0 / 255) < 0.01)
+    }
+
+    @Test func namedCatalogThemeIncludesSyntaxAndBackground() throws {
+        let themes = GhosttyThemeCatalog.availableThemes()
+        #expect(themes.count > 50)
+        let theme = try #require(EditorCatalogThemes.shared.theme(named: "Catppuccin Mocha"))
+        #expect(theme.background.alphaComponent == 1)
+        #expect(theme.strings != theme.keywords)
+        #expect(theme.text != theme.background)
+    }
+
+    @Test func settingsWindowHandlesCommandW() throws {
+        let window = SettingsWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 400),
+                                    styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.orderFront(nil)
+        let event = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command,
+                                                timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                                characters: "w", charactersIgnoringModifiers: "w", isARepeat: false, keyCode: 13))
+        #expect(window.performKeyEquivalent(with: event))
+        #expect(!window.isVisible)
     }
 
     @Test func followingOMGReusesWindowBlurInsteadOfAddingSystemMaterial() {

@@ -356,9 +356,9 @@ struct CodeEditorView: View {
     }
 
     private var resolvedTheme: EditorTheme {
-        var theme = editorSettings.followsOMG
-            ? terminalTheme ?? .adaptive(background: terminalBackground, foreground: terminalForeground)
-            : editorSettings.syntaxTheme.preset
+        var theme = terminalTheme ?? (editorSettings.followsOMG
+            ? .adaptive(background: terminalBackground, foreground: terminalForeground)
+            : editorSettings.syntaxTheme.preset)
         // The workspace paints one backdrop for toolbar, gutter and text.
         theme.background = .clear
         return theme
@@ -680,6 +680,9 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
     }
 
     func textViewDidChangeSelection(controller: TextViewController, newPositions: [CursorPosition]) {
+        // TextView notifies selections before textDidChange. Keep the popup
+        // alive until that transaction updates its prefix and candidates.
+        guard editDepth == 0 else { return }
         let selections = controller.textView.selectionManager.textSelections
         guard selections.count == 1, let selection = selections.first?.range,
               selection.length == 0, selection.location == completionCursor,
@@ -881,6 +884,12 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
         }
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             .subtracting([.capsLock, .numericPad, .function])
+        if isTextViewOrChild, modifiers.isEmpty || modifiers == .shift,
+           EditorPairedInput.apply(event.characters ?? "", backspace: event.keyCode == 51,
+                                   enabled: OhMyGhosttySettings.shared.editorAutoClosePairs, on: textView) {
+            dismissCompletion()
+            return true
+        }
         // Escape must cancel pending results even before the popup becomes visible.
         if isTextViewOrChild, event.keyCode == 53, modifiers.isEmpty {
             let wasPresented = completionState?.isPresented == true

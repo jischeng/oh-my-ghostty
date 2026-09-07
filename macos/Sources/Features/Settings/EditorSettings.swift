@@ -78,7 +78,10 @@ struct EditorSettings: Equatable, Sendable {
     var opacity: Double = 1
     var blur: OhMyGhosttyBackgroundBlur = .disabled
 
-    var followsOMG: Bool { syntaxTheme == .followTerminal }
+    var themeName: String?
+    var autoClosePairs = true
+
+    var followsOMG: Bool { themeName == nil && syntaxTheme == .followTerminal }
 
     var keymapProfile: EditorKeymap.Profile {
         keymapPreset.profile

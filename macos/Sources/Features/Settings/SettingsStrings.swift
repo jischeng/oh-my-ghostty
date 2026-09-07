@@ -299,6 +299,11 @@ struct SettingsStrings: Equatable, Sendable {
     var editorThemeInheritedCaption: String {
         t("Colors, opacity and effects follow OMG Appearance settings.", "颜色、透明度与毛玻璃跟随 OMG 外观设置。")
     }
+    var editorAutoClosePairsLabel: String { t("Auto-close Quotes and Brackets", "自动补全引号和括号") }
+    var editorCatalogCaption: String {
+        t("Themes set the background, syntax colors, selection and caret. They do not change code formatting.",
+          "主题包含背景、语法配色、选区和光标颜色，不改变代码格式。")
+    }
     var editorThemeSection: String { t("Editor Theme", "编辑器主题") }
     var followSystemThemeLabel: String { t("Switch with System Appearance", "跟随系统设置切换") }
     var themeVariantsLabel: String { t("Light and Dark Variants", "分别设置浅色与深色主题") }

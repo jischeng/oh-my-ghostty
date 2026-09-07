@@ -47,11 +47,12 @@ public final class CompletionState: ObservableObject {
         at point: CGPoint
     ) {
         let candidates = candidates.filter { $0.label.lowercased().hasPrefix(prefix.lowercased()) }
+        let selected = currentSelection
         self.candidates = candidates
         self.prefix = prefix
         self.prefixRange = prefixRange
         self.presentationPoint = point
-        self.selectedIndex = 0
+        self.selectedIndex = selected.flatMap { candidates.firstIndex(of: $0) } ?? 0
         self.isPresented = !candidates.isEmpty
     }
 
@@ -79,7 +80,7 @@ struct EditorCompletionPopupView: View {
                 ScrollViewReader { proxy in
                     ScrollView(.vertical, showsIndicators: state.candidates.count > 6) {
                         LazyVStack(alignment: .leading, spacing: 1) {
-                            ForEach(Array(state.candidates.enumerated()), id: \.element.id) { index, item in
+                            ForEach(Array(state.candidates.enumerated()), id: \.element.label) { index, item in
                                 CompletionRowView(
                                     item: item,
                                     prefix: state.prefix,

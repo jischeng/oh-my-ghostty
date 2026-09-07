@@ -3,6 +3,8 @@ import CodeEditTextView
 
 private final class ProgrammaticReplaceDelegate: NSObject, TextViewDelegate {
     weak var upstream: TextViewDelegate?
+    var groupMutations = false
+    var ownsUndoGroup = false
 
     init(upstream: TextViewDelegate?) {
         self.upstream = upstream
@@ -17,41 +19,49 @@ private final class ProgrammaticReplaceDelegate: NSObject, TextViewDelegate {
     }
 
     func textView(_ textView: TextView, didReplaceContentsIn range: NSRange, with string: String) {
+        if groupMutations, !ownsUndoGroup, textView._undoManager?.isGrouping == false {
+            textView._undoManager?.beginGrouping()
+            ownsUndoGroup = true
+        }
         upstream?.textView(textView, didReplaceContentsIn: range, with: string)
     }
 }
 
 @MainActor
 enum EditorTextEditing {
-    /// Applies a replacement as one CodeEditTextView mutation, so one undo restores the full operation.
+    /// Literal replacements share one undo group without replacing untouched
+    /// lines between carets (which can invalidate the native line layout cache).
     @discardableResult
     static func replace(on textView: TextView, ranges: [NSRange], with replacement: String) -> Bool {
-        guard textView.isEditable, !ranges.isEmpty else { return false }
-        let ranges = EditorTextSearch.rangesForReplacement(ranges)
-        guard let first = ranges.last, let last = ranges.first else { return false }
-        let cover = NSRange(location: first.location, length: NSMaxRange(last) - first.location)
-        guard cover.location >= 0, NSMaxRange(cover) <= textView.textStorage.length else { return false }
+        apply(on: textView, edits: ranges.map { ($0, replacement) })
+    }
 
+    @discardableResult
+    static func apply(on textView: TextView, edits: [(range: NSRange, text: String)]) -> Bool {
+        guard textView.isEditable, !edits.isEmpty else { return false }
+        let edits = edits.sorted { $0.range.location < $1.range.location }
+        guard edits.allSatisfy({ $0.range.location != NSNotFound && $0.range.location >= 0
+            && NSMaxRange($0.range) <= textView.textStorage.length }) else { return false }
+        for (first, second) in zip(edits, edits.dropFirst()) where NSMaxRange(first.range) > second.range.location {
+            return false
+        }
         let originalDelegate = textView.delegate
-        let bypassDelegate = ProgrammaticReplaceDelegate(upstream: originalDelegate)
-        textView.delegate = bypassDelegate
+        let bypass = ProgrammaticReplaceDelegate(upstream: originalDelegate)
+        bypass.groupMutations = edits.count > 1
+        textView.delegate = bypass
         defer {
+            if bypass.ownsUndoGroup { textView._undoManager?.endGrouping() }
             textView.delegate = originalDelegate
         }
-
-        if ranges.count == 1 {
-            textView.replaceCharacters(in: first, with: replacement)
-            return true
+        for edit in edits.reversed() {
+            // Callers restore their final selections. Do not let intermediate
+            // replacements remap stale multi-caret positions outside the buffer.
+            textView.selectionManager.setSelectedRange(edit.range)
+            textView.replaceCharacters(in: edit.range, with: edit.text)
         }
-
-        let combined = NSMutableString(string: (textView.string as NSString).substring(with: cover))
-        for range in ranges {
-            let relative = NSRange(location: range.location - cover.location, length: range.length)
-            combined.replaceCharacters(in: relative, with: replacement)
-        }
-        textView.replaceCharacters(in: cover, with: combined as String)
         return true
     }
+
 }
 
 /// UTF-16 based search and navigation helpers for the native editor.

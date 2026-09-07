@@ -135,6 +135,13 @@ calls the host-injected `OpenFileHandler` with the absolute path and the current
 `InspectorPaneContext`, preserving local versus SSH session context for the
 editor controller. Single-click selection does not open files.
 
+The host renders file tree icons using bundled Material Icon Theme artwork and
+its filename, compound-extension, and folder associations, shared by local and
+SSH trees. Expanded folders and light appearance use the corresponding upstream
+variants. The existing `InspectorFileIcon` remains the fallback if an asset is
+unavailable; this does not add manifest fields or runtime network access. The
+upstream MIT license is included in the application asset catalog.
+
 ## Manifest model (Experimental)
 
 `PluginManifest` is `Codable` and currently contains:

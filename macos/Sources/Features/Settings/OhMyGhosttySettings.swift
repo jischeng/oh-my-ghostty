@@ -389,6 +389,16 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Syntax highlighting style theme for the native editor.",
             requiresNewWindow: false, category: "editor"),
         .init(
+            id: "editor.themeName", type: .string, defaultValue: "",
+            allowedValues: nil, minimum: nil, maximum: nil,
+            description: "Optional independent Ghostty catalog theme for editor colors.",
+            requiresNewWindow: false, category: "editor"),
+        .init(
+            id: "editor.autoClosePairs", type: .boolean, defaultValue: "true",
+            allowedValues: nil, minimum: nil, maximum: nil,
+            description: "Insert matching quotes and brackets and position the caret inside.",
+            requiresNewWindow: false, category: "editor"),
+        .init(
             id: "editor.opacity", type: .number, defaultValue: "1",
             allowedValues: nil, minimum: 0.05, maximum: 1,
             description: "Background opacity when the editor uses an independent theme.",
@@ -587,6 +597,12 @@ final class OhMyGhosttySettings: ObservableObject {
     }
     @Published var editorSyntaxTheme: EditorSyntaxTheme = .followTerminal {
         didSet { persist("editor.syntaxTheme", editorSyntaxTheme.rawValue) }
+    }
+    @Published var editorThemeName: String? {
+        didSet { persistOptional("editor.themeName", Self.normalized(editorThemeName)) }
+    }
+    @Published var editorAutoClosePairs = true {
+        didSet { persist("editor.autoClosePairs", editorAutoClosePairs) }
     }
     @Published var editorOpacity: Double = 1 {
         didSet { persist("editor.opacity", min(max(editorOpacity, 0.05), 1)) }
@@ -830,7 +846,9 @@ final class OhMyGhosttySettings: ObservableObject {
             tabWidth: Int(editorTabWidth),
             wordWrap: editorWordWrap,
             opacity: editorOpacity,
-            blur: editorBlur
+            blur: editorBlur,
+            themeName: editorThemeName,
+            autoClosePairs: editorAutoClosePairs
         )
     }
 
@@ -885,6 +903,8 @@ final class OhMyGhosttySettings: ObservableObject {
             editorKeymapPreset = enumValue("editor.keymapPreset", fallback: .idea)
             editorBackgroundMode = enumValue("editor.backgroundMode", fallback: .followTerminal)
             editorSyntaxTheme = enumValue("editor.syntaxTheme", fallback: .followTerminal)
+            editorThemeName = optionalStringValue("editor.themeName")
+            editorAutoClosePairs = boolValue("editor.autoClosePairs", fallback: true)
             editorOpacity = numberValue("editor.opacity", fallback: 1, range: 0.05...1)
             editorBlur = enumValue("editor.blur", fallback: .disabled)
             editorFontFamily = enumValue("editor.fontFamily", fallback: .jetbrainsMono)

@@ -39,7 +39,7 @@ final class OhMyGhosttySettingsWindowController: NSWindowController {
     ) {
         let root = SettingsView(settings: settings, initialSelection: initialSelection)
         let hostingController = NSHostingController(rootView: root)
-        let window = NSWindow(contentViewController: hostingController)
+        let window = SettingsWindow(contentViewController: hostingController)
         window.title = SettingsStrings(language: settings.language).windowTitle
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.toolbarStyle = .unified
@@ -86,10 +86,23 @@ final class OhMyGhosttySettingsWindowController: NSWindowController {
     }
 }
 
+final class SettingsWindow: NSWindow {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.type == .keyDown,
+           event.modifierFlags.intersection([.command, .control, .option, .shift]) == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "w" {
+            performClose(nil)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
 struct SettingsView: View {
     @ObservedObject var settings: OhMyGhosttySettings
     @StateObject private var pluginManager: PluginInstallationManager
     @State private var selection: OhMyGhosttySettingsTab
+    private let themeNames = GhosttyThemeCatalog.availableThemes()
     @State private var githubRepository = ""
     @State private var pluginOperation: String?
     @State private var pluginError: String?
@@ -286,14 +299,17 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Toggle(strings.editorWordWrapLabel, isOn: $settings.editorWordWrap)
+                    Toggle(strings.editorAutoClosePairsLabel, isOn: $settings.editorAutoClosePairs)
                 }
                 Section(strings.editorThemeSection) {
-                    Picker(strings.editorSyntaxThemeLabel, selection: $settings.editorSyntaxTheme) {
-                        Text(strings.editorSyntaxThemeTitle(.followTerminal)).tag(EditorSyntaxTheme.followTerminal)
+                    Picker(strings.editorSyntaxThemeLabel, selection: editorThemeSelection) {
+                        Text(strings.editorSyntaxThemeTitle(.followTerminal)).tag("follow")
+                        ForEach(themeNames, id: \.self) { name in Text(name).tag("catalog:" + name) }
                         ForEach(EditorSyntaxTheme.allCases.filter { $0 != .followTerminal }) { theme in
-                            Text(strings.editorSyntaxThemeTitle(theme)).tag(theme)
+                            Text(theme.title).tag("builtin:" + theme.rawValue)
                         }
                     }
+                    Text(strings.editorCatalogCaption).font(.caption).foregroundStyle(.secondary)
                     if !settings.editorSettings.followsOMG {
                         HStack {
                             Text(strings.backgroundOpacityLabel)
@@ -341,6 +357,8 @@ struct SettingsView: View {
                         settings.editorKeymapPreset = .idea
                         settings.editorBackgroundMode = .followTerminal
                         settings.editorSyntaxTheme = .followTerminal
+                        settings.editorThemeName = nil
+                        settings.editorAutoClosePairs = true
                         settings.editorOpacity = 1
                         settings.editorBlur = .disabled
                         settings.editorFontFamily = .jetbrainsMono
@@ -567,6 +585,24 @@ struct SettingsView: View {
         }
     }
 
+    private var editorThemeSelection: Binding<String> {
+        Binding(
+            get: {
+                if let name = settings.editorThemeName { return "catalog:" + name }
+                return settings.editorSettings.followsOMG ? "follow" : "builtin:" + settings.editorSyntaxTheme.rawValue
+            },
+            set: { value in
+                if value.hasPrefix("catalog:") {
+                    settings.editorThemeName = String(value.dropFirst(8))
+                } else {
+                    settings.editorThemeName = nil
+                    settings.editorSyntaxTheme = value == "follow" ? .followTerminal
+                        : EditorSyntaxTheme(rawValue: String(value.dropFirst(8))) ?? .followTerminal
+                }
+            }
+        )
+    }
+
     private var editorOpacityBinding: Binding<Double> {
         Binding(
             get: {
@@ -644,14 +680,11 @@ struct SettingsView: View {
             }
 
             Section(strings.fontSection) {
-                LabeledContent(strings.fontFamilyLabel) {
-                    TextField(
-                        strings.inheritGhosttyPlaceholder,
-                        text: optionalStringBinding(\.fontFamilyOverride)
-                    )
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 360)
-                    .multilineTextAlignment(.trailing)
+                Picker(strings.fontFamilyLabel, selection: optionalStringBinding(\.fontFamilyOverride)) {
+                    Text(strings.inheritGhosttyPlaceholder).tag("")
+                    ForEach(NSFontManager.shared.availableFontFamilies.sorted(), id: \.self) { family in
+                        Text(family).tag(family)
+                    }
                 }
                 optionalSlider(
                     strings.fontSizeLabel,
@@ -959,36 +992,13 @@ private struct GhosttyThemeField: View {
     }
 
     var body: some View {
-        LabeledContent(title) {
-            HStack(spacing: 6) {
-                TextField(strings.inheritGhosttyPlaceholder, text: $value)
-                    .labelsHidden()
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 360)
-                    .multilineTextAlignment(.trailing)
-                if !themes.isEmpty {
-                    Menu {
-                        ForEach(themes, id: \.self) { theme in
-                            Button(theme) { value = theme }
-                        }
-                    } label: {
-                        Image(systemName: "chevron.up.chevron.down")
-                    }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                }
-                if !value.isEmpty {
-                    Button {
-                        value = ""
-                    } label: {
-                        Image(systemName: "arrow.uturn.backward")
-                    }
-                    .buttonStyle(.borderless)
-                    .help(strings.resetThemeHelp)
-                }
-            }
+        Picker(title, selection: $value) {
+            Text(strings.inheritGhosttyPlaceholder).tag("")
+            if !value.isEmpty && !themes.contains(value) { Text(value).tag(value) }
+            ForEach(themes, id: \.self) { theme in Text(theme).tag(theme) }
         }
     }
+
 }
 
 struct SettingsView_Previews: PreviewProvider {

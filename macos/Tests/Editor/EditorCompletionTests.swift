@@ -74,6 +74,16 @@ struct EditorCompletionTests {
         #expect(labels.contains("calculationResult"))
     }
 
+    @Test func bufferWordsIncludeShortAndDistantIdentifiers() async {
+        let text = String(repeating: " ", count: 110_000) + "id = 1\nidx = id\ni"
+        let items = await BufferWordCompletionProvider().provideCompletions(context: CompletionContext(
+            documentText: text, cursorOffset: text.utf16.count, prefix: "i", lineText: "i", language: "python", fileURL: nil
+        ))
+        #expect(items.contains { $0.label == "id" })
+        #expect(items.contains { $0.label == "idx" })
+        #expect(!items.contains { $0.label == "i" })
+    }
+
     @Test func languageKeywordProviderSuppliesSwiftKeywords() async {
         let context = CompletionContext(
             documentText: "gu",
@@ -233,13 +243,19 @@ struct EditorCompletionTests {
         let textView = try #require(controller.textView)
         coordinator.setActive(true)
         coordinator.select(NSRange(location: 0, length: 0))
+        var presentations: [Bool] = []
+        let subscription = state.$isPresented.sink { presentations.append($0) }
         for character in "from" {
+            let alreadyVisible = state.isPresented
+            presentations.removeAll()
             textView.insertText(String(character))
             try await Task.sleep(for: .milliseconds(60))
+            if alreadyVisible { #expect(!presentations.contains(false)) }
             #expect(state.prefix == textView.string)
             #expect(state.candidates.contains { $0.label == "from" })
             #expect(state.candidates.allSatisfy { $0.label.lowercased().hasPrefix(textView.string.lowercased()) })
         }
+        withExtendedLifetime(subscription) {}
         textView.insertText(" ")
         try await Task.sleep(for: .milliseconds(60))
         #expect(!state.isPresented)

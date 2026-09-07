@@ -115,6 +115,12 @@
    "fallback": "ghostty:window-theme",
    "type": "string"
   },
+  "editor.autoClosePairs": {
+   "category": "editor",
+   "default": true,
+   "description": "Insert matching quotes and brackets and position the caret inside.",
+   "type": "boolean"
+  },
   "editor.backgroundMode": {
    "category": "editor",
    "default": "followTerminal",
@@ -199,6 +205,12 @@
    "maximum": 12,
    "minimum": 1,
    "type": "number"
+  },
+  "editor.themeName": {
+   "category": "editor",
+   "default": "",
+   "description": "Optional independent Ghostty catalog theme for editor colors.",
+   "type": "string"
   },
   "editor.wordWrap": {
    "category": "editor",

@@ -149,3 +149,11 @@ Settings > Appearance uses the existing Ghostty theme catalog. Window appearance
 The editor defaults to `editor.syntaxTheme = followTerminal` (Follow OMG), using the resolved Ghostty palette, background, opacity and effect. Editor opacity/effect controls are hidden while following OMG; adjust them in OMG Appearance instead. An explicit editor theme enables independent `editor.opacity` (0.05–1, default 1) and `editor.blur` (`disabled`, `enabled`, `macosGlassRegular`, `macosGlassClear`, default `disabled`); switching back preserves these independent values. Existing explicitly selected editor themes are retained. The older `editor.backgroundMode` key remains readable for configuration compatibility but no longer controls theme resolution.
 
 The editor toolbar uses a vertically collapsing rectangle button to hide the editor. Save All and Reload are no longer shown in its overflow menu; save and document keyboard actions remain available.
+
+### Editor completion and typing
+
+Completion stays open while a text transaction refines its prefix, preserves the selected candidate where possible, and uses current-buffer identifiers including short names and identifiers after the first 100,000 UTF-16 units. Buffer candidates are lexical suggestions, not LSP type-aware completion.
+
+`editor.autoClosePairs` defaults to `true`. Typing quotes or brackets inserts a matching partner and places carets inside, including multiple carets; a matching closing character advances past the existing partner. The setting can be disabled in Settings > Editor. Pasted text is not expanded into pairs.
+
+Appearance theme and font controls are selection lists. `editor.themeName` optionally selects an independent theme from the same Ghostty catalog; it overrides the older built-in `editor.syntaxTheme` preset. Theme colors include background, syntax categories, selection and caret, not source-code formatting. Follow OMG clears the independent theme name. Settings windows support Command-W.

@@ -112,7 +112,7 @@ public struct BufferWordCompletionProvider: CompletionProvider, Sendable {
 
     public init() {}
 
-    private static let wordPattern = try? NSRegularExpression(pattern: "\\b[a-zA-Z_][a-zA-Z0-9_]{2,}\\b")
+    private static let wordPattern = try? NSRegularExpression(pattern: #"[\p{L}_$][\p{L}\p{N}_$]*"#)
 
     public func provideCompletions(context: CompletionContext) async -> [CompletionItem] {
         let prefix = context.prefix
@@ -124,17 +124,19 @@ public struct BufferWordCompletionProvider: CompletionProvider, Sendable {
 
         let nsText = text as NSString
         let lowerPrefix = prefix.lowercased()
-        let matches = Self.wordPattern?.matches(
-            in: text, range: NSRange(location: 0, length: min(nsText.length, 100_000))
-        ) ?? []
-        for match in matches {
-            guard !Task.isCancelled else { return [] }
+        let cursorStart = max(0, context.cursorOffset - prefix.utf16.count)
+        Self.wordPattern?.enumerateMatches(in: text, range: NSRange(location: 0, length: nsText.length)) { match, _, stop in
+            if Task.isCancelled { stop.pointee = true; return }
+            guard let match else { return }
+            // Do not suggest the incomplete token being typed as its own source.
+            guard match.range != NSRange(location: cursorStart, length: prefix.utf16.count) else { return }
             let word = nsText.substring(with: match.range)
-            guard word.lowercased().hasPrefix(lowerPrefix) else { continue }
+            guard word.lowercased().hasPrefix(lowerPrefix) else { return }
             frequencies[word, default: 0] += 1
             let distance = abs(match.range.location - context.cursorOffset)
             minOffsets[word] = min(minOffsets[word] ?? Int.max, distance)
         }
+        guard !Task.isCancelled else { return [] }
 
         var results: [CompletionItem] = []
 

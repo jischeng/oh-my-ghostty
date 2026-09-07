@@ -178,9 +178,13 @@ struct EditorWorkspaceHost<Terminal: View>: View {
     }
 
     private var appearanceTheme: EditorTheme {
-        settings.editorSettings.followsOMG
-            ? controller.ghostty.config.editorTheme(background: NSColor(terminalColor))
-            : settings.editorSyntaxTheme.preset
+        if settings.editorSettings.followsOMG {
+            return controller.ghostty.config.editorTheme(background: NSColor(terminalColor))
+        }
+        if let name = settings.editorThemeName, let theme = EditorCatalogThemes.shared.theme(named: name) {
+            return theme
+        }
+        return settings.editorSyntaxTheme.preset
     }
 
     private var appearanceOpacity: Double {

@@ -326,3 +326,28 @@ extension EditorSyntaxTheme {
         return theme
     }
 }
+
+@MainActor
+final class EditorCatalogThemes {
+    static let shared = EditorCatalogThemes()
+    private var themes: [String: EditorTheme] = [:]
+
+    func theme(named name: String) -> EditorTheme? {
+        if let cached = themes[name] { return cached }
+        guard !name.isEmpty, !name.contains("/"), name != ".", name != ".." else { return nil }
+        let roots = [
+            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/ghostty/themes"),
+            Bundle.main.resourceURL?.appendingPathComponent("ghostty/themes")
+        ].compactMap { $0 }
+        guard let file = roots.map({ $0.appendingPathComponent(name) })
+            .first(where: { FileManager.default.fileExists(atPath: $0.path) }),
+              let raw = ghostty_config_new() else { return nil }
+        ghostty_config_load_file(raw, file.path)
+        ghostty_config_load_recursive_files(raw)
+        ghostty_config_finalize(raw)
+        let config = Ghostty.Config(config: raw)
+        let theme = config.editorTheme(background: NSColor(config.backgroundColor))
+        themes[name] = theme
+        return theme
+    }
+}

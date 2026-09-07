@@ -2070,7 +2070,7 @@ private struct InspectorFileTreeNodeView: View {
                     }
                     .frame(width: 10, height: 14)
 
-                    InspectorFileIconView(icon: node.icon)
+                    InspectorFileIconView(node: node)
                     Text(node.name)
                         .font(.system(size: 12.5))
                         .lineLimit(1)
@@ -2143,16 +2143,30 @@ private struct InspectorFileTreeNodeView: View {
 }
 
 private struct InspectorFileIconView: View {
-    let icon: InspectorFileIcon
+    let node: InspectorFileNode
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        Image(systemName: icon.systemImage)
-            .foregroundStyle(color)
-            .frame(width: 16, height: 16)
+        Group {
+            if let name = MaterialFileIcons.assetName(
+                for: node.name,
+                isDirectory: node.isDirectory,
+                isExpanded: node.isExpanded,
+                isLight: colorScheme == .light
+            ), let image = NSImage(named: name) {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                Image(systemName: node.icon.systemImage)
+                    .foregroundStyle(color)
+            }
+        }
+        .frame(width: 16, height: 16)
     }
 
     private var color: Color {
-        switch icon.tint {
+        switch node.icon.tint {
         case .secondary: .secondary
         case .blue: .blue
         case .green: .green

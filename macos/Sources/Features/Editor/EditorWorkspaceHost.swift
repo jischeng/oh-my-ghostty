@@ -30,7 +30,7 @@ struct EditorPaneContainer<Terminal: View>: View {
 struct EditorWorkspaceHost<Terminal: View>: View {
     @ObservedObject var controller: TerminalController
     @ObservedObject private var workspace: EditorWorkspace
-    let surfaceView: Ghostty.SurfaceView
+    @ObservedObject var surfaceView: Ghostty.SurfaceView
     private let terminal: Terminal
 
     init(controller: TerminalController, surfaceView: Ghostty.SurfaceView, @ViewBuilder terminal: () -> Terminal) {
@@ -176,11 +176,24 @@ struct EditorWorkspaceHost<Terminal: View>: View {
     }
 
     private var terminalColor: Color {
-        surfaceView.backgroundColor ?? surfaceView.derivedConfig.backgroundColor
+        if let bg = surfaceView.backgroundColor {
+            return bg
+        }
+        let configBg = surfaceView.derivedConfig.backgroundColor
+        if configBg != Color(NSColor.windowBackgroundColor) {
+            return configBg
+        }
+        if controller.terminalBackgroundColor != Color(NSColor.windowBackgroundColor) {
+            return controller.terminalBackgroundColor
+        }
+        return configBg
     }
 
     private var terminalOpacity: Double {
-        surfaceView.derivedConfig.backgroundOpacity
+        let opacity = surfaceView.derivedConfig.backgroundOpacity
+        if opacity < 1.0 { return opacity }
+        if controller.terminalBackgroundOpacity < 1.0 { return controller.terminalBackgroundOpacity }
+        return opacity
     }
 
     private var documentMenu: some View {

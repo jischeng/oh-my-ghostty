@@ -422,13 +422,20 @@ private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
     func prepareCoordinator(controller: TextViewController) {
         self.controller = controller
         let scrollView = controller.textView.enclosingScrollView
-        scrollView?.automaticallyAdjustsContentInsets = false
-        scrollView?.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
-        scrollView?.documentCursor = .iBeam
-        scrollView?.drawsBackground = false
-        scrollView?.backgroundColor = .clear
-        scrollView?.contentView.drawsBackground = false
-        scrollView?.contentView.backgroundColor = .clear
+        if let scrollView = controller.textView.enclosingScrollView {
+            scrollView.automaticallyAdjustsContentInsets = false
+            scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+            scrollView.documentCursor = .iBeam
+            scrollView.drawsBackground = false
+            scrollView.backgroundColor = .clear
+            scrollView.contentView.drawsBackground = false
+            scrollView.contentView.backgroundColor = .clear
+            for subview in scrollView.subviews {
+                for inner in subview.subviews where String(describing: type(of: inner)).contains("GutterView") {
+                    inner.setValue(NSColor.clear, forKey: "backgroundColor")
+                }
+            }
+        }
         controller.textView.selectionManager.selectionBackgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.65)
         installMouseMonitor()
         if isActive { registerCommands() }
@@ -437,10 +444,18 @@ private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
 
     private func installMouseMonitor() {
         guard mouseMonitor == nil else { return }
-        mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self] event in
+        mouseMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .mouseMoved]
+        ) { [weak self] event in
             guard let self, self.isActive, let textView = self.controller?.textView,
                   event.window === textView.window else {
                 return event
+            }
+            if let scrollView = textView.enclosingScrollView {
+                let locInScroll = scrollView.convert(event.locationInWindow, from: nil)
+                if scrollView.bounds.contains(locInScroll) {
+                    NSCursor.iBeam.set()
+                }
             }
             let locInTextView = textView.convert(event.locationInWindow, from: nil)
 
@@ -577,8 +592,7 @@ private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
             completionState.dismiss()
             return
         }
-        if sel.location < completionState.prefixRange.location ||
-           sel.location > NSMaxRange(completionState.prefixRange) + 1 {
+        if sel.location < completionState.prefixRange.location {
             completionState.dismiss()
         }
     }
@@ -642,6 +656,11 @@ private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
         }
         let anchorPoint = CGPoint(x: popupX, y: max(8, popupY))
 
+        // Immediately update existing candidates and prefix synchronously!
+        if let completionState, completionState.isPresented {
+            completionState.filter(prefix: prefix, prefixRange: prefixRange, at: anchorPoint)
+        }
+
         let lineRange = string.lineRange(for: NSRange(location: cursorLocation, length: 0))
         let lineText = string.substring(with: lineRange)
         let lang = self.cachedLanguage?.tsName.lowercased()
@@ -657,20 +676,17 @@ private final class EditorCoordinator: @preconcurrency TextViewCoordinator {
 
         completionTask?.cancel()
         completionTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 30_000_000)
+            try? await Task.sleep(nanoseconds: 15_000_000)
             guard !Task.isCancelled else { return }
             let candidates = await EditorCompletionEngine.shared.completions(for: context)
             guard !Task.isCancelled, let self, self.isActive else { return }
 
-            if let currentSel = controller.textView.selectionManager.textSelections.first,
-               currentSel.range.location == cursorLocation {
-                self.completionState?.update(
-                    candidates: candidates,
-                    prefix: prefix,
-                    prefixRange: prefixRange,
-                    at: anchorPoint
-                )
-            }
+            self.completionState?.update(
+                candidates: candidates,
+                prefix: prefix,
+                prefixRange: prefixRange,
+                at: anchorPoint
+            )
         }
     }
 

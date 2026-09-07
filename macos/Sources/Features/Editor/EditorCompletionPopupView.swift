@@ -51,6 +51,20 @@ public final class CompletionState: ObservableObject {
         self.selectedIndex = 0
         self.isPresented = !candidates.isEmpty
     }
+
+    public func filter(prefix: String, prefixRange: NSRange, at point: CGPoint) {
+        self.prefix = prefix
+        self.prefixRange = prefixRange
+        self.presentationPoint = point
+        let lower = prefix.lowercased()
+        let matching = candidates.filter { $0.label.lowercased().contains(lower) }
+        if !matching.isEmpty {
+            self.candidates = matching
+            if selectedIndex >= matching.count {
+                self.selectedIndex = 0
+            }
+        }
+    }
 }
 
 /// Floating autocomplete suggestions popup.
@@ -140,13 +154,18 @@ private struct CompletionRowView: View {
 
     @ViewBuilder
     private func highlightedLabel(_ label: String, prefix: String) -> some View {
-        if let range = label.range(of: prefix, options: .caseInsensitive),
-           range.lowerBound == label.startIndex {
+        if let range = label.range(of: prefix, options: .caseInsensitive) {
+            let before = String(label[..<range.lowerBound])
             let match = String(label[range])
-            let rest = String(label[range.upperBound...])
+            let after = String(label[range.upperBound...])
             HStack(spacing: 0) {
+                if !before.isEmpty {
+                    Text(before).foregroundStyle(Color.primary)
+                }
                 Text(match).fontWeight(.bold).foregroundStyle(Color.accentColor)
-                Text(rest).foregroundStyle(Color.primary)
+                if !after.isEmpty {
+                    Text(after).foregroundStyle(Color.primary)
+                }
             }
         } else {
             Text(label).foregroundStyle(Color.primary)

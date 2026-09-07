@@ -129,7 +129,6 @@ public struct BufferWordCompletionProvider: CompletionProvider, Sendable {
 
         for match in matches {
             let word = nsText.substring(with: match.range)
-            if word == prefix { continue }
             frequencies[word, default: 0] += 1
             if minOffsets[word] == nil {
                 minOffsets[word] = abs(match.range.location - context.cursorOffset)
@@ -241,7 +240,6 @@ public struct LanguageKeywordCompletionProvider: CompletionProvider, Sendable {
         var results: [CompletionItem] = []
 
         for kw in keywordList {
-            if kw == prefix { continue }
             let lowerKw = kw.lowercased()
             if lowerKw.hasPrefix(lowerPrefix) {
                 let exactPrefix = kw.hasPrefix(prefix)

@@ -101,7 +101,7 @@ final class EditorFilePickerModel: ObservableObject {
         load(directory)
     }
 
-    func navigate(to input: String, fileHandler: (String) -> Void) {
+    func navigate(to input: String, fileHandler: @escaping (String) -> Void) {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let target: String
@@ -114,7 +114,27 @@ final class EditorFilePickerModel: ObservableObject {
             fileHandler(file.path)
             return
         }
-        load(target)
+        if let dir = entries.first(where: { $0.path == target && $0.isDirectory }) {
+            load(dir.path)
+            return
+        }
+        directory = target
+        pathInput = target
+        loadTask?.cancel()
+        isLoading = true
+        errorMessage = nil
+        loadTask = Task { @MainActor in
+            if let type = try? await filesystem.itemType(at: target) {
+                guard !Task.isCancelled, directory == target else { return }
+                if type == .file {
+                    isLoading = false
+                    fileHandler(target)
+                    return
+                }
+            }
+            guard !Task.isCancelled, directory == target else { return }
+            load(target)
+        }
     }
 
     func openSelection(fileHandler: (String) -> Void) {

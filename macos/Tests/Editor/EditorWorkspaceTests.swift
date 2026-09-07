@@ -114,6 +114,119 @@ struct EditorWorkspaceTests {
         #expect(workspace.errorMessage == reason)
     }
 
+    @Test @MainActor func slowSaveDoesNotDropSubsequentSaveOrSaveAll() async throws {
+        let filesystem = ControlledEditorWorkspaceFilesystem(deferWrites: true)
+        let workspace = EditorWorkspace()
+        workspace.open(path: "/doc1", filesystem: filesystem)
+        await filesystem.waitUntilReadStarts(at: "/doc1")
+        await filesystem.finishRead(at: "/doc1", with: Data("doc1".utf8))
+        await waitUntil { workspace.documents.count == 1 }
+
+        workspace.open(path: "/doc2", filesystem: filesystem)
+        await filesystem.waitUntilReadStarts(at: "/doc2")
+        await filesystem.finishRead(at: "/doc2", with: Data("doc2".utf8))
+        await waitUntil { workspace.documents.count == 2 }
+
+        let doc1 = try #require(workspace.documents.first)
+        let doc2 = try #require(workspace.documents.last)
+        doc1.text = "edit1"
+        doc2.text = "edit2"
+
+        // Trigger save on doc1 in background
+        let doc1SaveTask = Task { await workspace.save(doc1) }
+        await filesystem.waitUntilWriteStarts(at: "/doc1")
+        #expect(doc1.isSaving)
+
+        // While doc1 is saving, call saveAll()
+        let saveAllTask = Task { await workspace.saveAll() }
+
+        // Finish doc1's initial write
+        await filesystem.finishWrite(at: "/doc1")
+        let doc1Saved = await doc1SaveTask.value
+        #expect(doc1Saved)
+
+        // Wait for doc2's write to start and finish
+        await filesystem.waitUntilWriteStarts(at: "/doc2")
+        await filesystem.finishWrite(at: "/doc2")
+
+        let allSaved = await saveAllTask.value
+        #expect(allSaved)
+        #expect(!doc1.isDirty && !doc2.isDirty)
+    }
+
+    @Test @MainActor func closingSurfaceCleansUpWorkspaceAndCancelsInFlightReads() async throws {
+        let store = EditorWorkspaceStore()
+        let tabID = UUID()
+        let surface1 = UUID()
+        let surface2 = UUID()
+
+        let ws1 = store.workspace(for: tabID, surfaceID: surface1)
+        let ws2 = store.workspace(for: tabID, surfaceID: surface2)
+
+        let filesystem = ControlledEditorWorkspaceFilesystem()
+        ws1.open(path: "/file1", filesystem: filesystem)
+        await filesystem.waitUntilReadStarts(at: "/file1")
+
+        // Now remove surface1 (as would happen when closing a split pane)
+        store.remove(surfaceIDs: [surface1])
+
+        #expect(!ws1.isLoading && ws1.documents.isEmpty)
+        // Ensure ws2 is untouched
+        #expect(store.workspace(for: tabID, surfaceID: surface2) === ws2)
+        // Ensure surface1 gets a fresh workspace if reopened
+        #expect(store.workspace(for: tabID, surfaceID: surface1) !== ws1)
+    }
+
+    @Test @MainActor func movingSurfaceTransfersWorkspaceOwnershipWithoutClearingDocuments() async throws {
+        let store = EditorWorkspaceStore()
+        let tab1 = UUID()
+        let tab2 = UUID()
+        let surface = UUID()
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let file = root.appendingPathComponent("move-test.txt")
+        try Data("content".utf8).write(to: file)
+        let filesystem = LocalWorkspaceFilesystem(workingDirectory: root.path)
+
+        let ws = store.workspace(for: tab1, surfaceID: surface)
+        ws.open(path: file.path, filesystem: filesystem)
+        await waitUntil { !ws.isLoading }
+        #expect(ws.documents.count == 1)
+
+        // Moving surface from tab1 to tab2 transfers ownership and preserves documents
+        let transferred = store.workspace(for: tab2, surfaceID: surface)
+        #expect(transferred === ws)
+        #expect(transferred.documents.count == 1)
+        #expect(transferred.documents.first?.text == "content")
+    }
+
+    @Test @MainActor func confirmAndSaveDirtyDocumentsPreservesDocumentList() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let file = root.appendingPathComponent("preserve-test.txt")
+        try Data("original".utf8).write(to: file)
+        let filesystem = LocalWorkspaceFilesystem(workingDirectory: root.path)
+
+        let workspace = EditorWorkspace()
+        workspace.open(path: file.path, filesystem: filesystem)
+        await waitUntil { !workspace.isLoading }
+        guard let doc = workspace.documents.first else {
+            Issue.record("Document failed to open")
+            return
+        }
+
+        // Clean document: confirmAndSaveDirtyDocuments returns true and documents list remains intact
+        let ok = await workspace.confirmAndSaveDirtyDocuments(window: nil)
+        #expect(ok)
+        #expect(workspace.documents.count == 1)
+        #expect(workspace.documents.first === doc)
+    }
+
     @MainActor
     private func waitUntil(
         _ condition: @escaping @MainActor () -> Bool
@@ -139,12 +252,16 @@ private actor ControlledEditorWorkspaceFilesystem: WorkspaceFilesystem {
     }
 
     private let writeFailure: String?
+    private let deferWrites: Bool
     private var pendingReads: [String: PendingRead] = [:]
     private var readWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+    private var pendingWrites: [String: CheckedContinuation<Void, Error>] = [:]
+    private var writeWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
     private var reads = 0
 
-    init(writeFailure: String? = nil) {
+    init(writeFailure: String? = nil, deferWrites: Bool = false) {
         self.writeFailure = writeFailure
+        self.deferWrites = deferWrites
     }
 
     func listDirectory(at path: String) async throws -> [WorkspaceFileEntry] { [] }
@@ -163,6 +280,23 @@ private actor ControlledEditorWorkspaceFilesystem: WorkspaceFilesystem {
         if let writeFailure {
             throw WorkspaceFilesystemError.operationFailed(writeFailure)
         }
+        if deferWrites {
+            try await withCheckedThrowingContinuation { continuation in
+                pendingWrites[path] = continuation
+                writeWaiters.removeValue(forKey: path)?.forEach { $0.resume() }
+            }
+        }
+    }
+
+    func waitUntilWriteStarts(at path: String) async {
+        if pendingWrites[path] != nil { return }
+        await withCheckedContinuation { continuation in
+            writeWaiters[path, default: []].append(continuation)
+        }
+    }
+
+    func finishWrite(at path: String) {
+        pendingWrites.removeValue(forKey: path)?.resume()
     }
 
     func waitUntilReadStarts(at path: String) async {

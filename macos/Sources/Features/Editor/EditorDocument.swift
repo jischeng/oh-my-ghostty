@@ -46,6 +46,26 @@ struct EditorDocumentID: Hashable, Sendable {
         for component in path.split(separator: "/") {
             if component == "." { continue }
             if component == ".." {
+                if descriptor.kind == .local {
+                    var currentString = "/" + components.joined(separator: "/")
+                    var depth = 0
+                    while depth < 32, let target = try? FileManager.default.destinationOfSymbolicLink(atPath: currentString) {
+                        let currentURL = URL(fileURLWithPath: currentString)
+                        let resolvedURL: URL
+                        if target.hasPrefix("/") {
+                            resolvedURL = URL(fileURLWithPath: target).standardizedFileURL
+                        } else {
+                            resolvedURL = URL(fileURLWithPath: target, relativeTo: currentURL.deletingLastPathComponent()).standardizedFileURL
+                        }
+                        currentString = resolvedURL.path
+                        depth += 1
+                    }
+                    if depth > 0 {
+                        let parentPath = URL(fileURLWithPath: currentString).deletingLastPathComponent().path
+                        components = parentPath.split(separator: "/").map { Substring($0) }
+                        continue
+                    }
+                }
                 if !components.isEmpty { components.removeLast() }
             } else {
                 components.append(component)
@@ -227,6 +247,13 @@ final class EditorDocument: ObservableObject {
         isDirty = false
         saveErrorMessage = nil
         contentGeneration &+= 1
+    }
+
+    func discardChanges() {
+        cancelAutoSave()
+        text = persistedText
+        isDirty = false
+        saveErrorMessage = nil
     }
 
     nonisolated private static func decode(

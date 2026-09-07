@@ -335,6 +335,66 @@ struct EditorDocumentTests {
             try EditorDocumentID(descriptor: local, path: "relative/file")
         }
     }
+
+    @Test func symlinkFollowedByParentResolvesToTargetParent() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-symlink-test-\(UUID().uuidString)")
+        let project = root.appendingPathComponent("project")
+        let targetDir = root.appendingPathComponent("target/sub")
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let link = project.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: targetDir)
+
+        let configFile = root.appendingPathComponent("target/config")
+        try Data("correct".utf8).write(to: configFile)
+
+        let wrongConfigFile = project.appendingPathComponent("config")
+        try Data("wrong".utf8).write(to: wrongConfigFile)
+
+        let localDescriptor = WorkspaceDescriptor(
+            kind: .local,
+            id: "local",
+            displayName: "project",
+            workingDirectory: project.path
+        )
+
+        let testPath = link.path + "/../config"
+        let docID = try EditorDocumentID(descriptor: localDescriptor, path: testPath)
+        #expect(docID.path == configFile.path)
+    }
+
+    @Test func multiLevelSymlinkFollowedByParentResolvesToTargetParent() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-multisymlink-test-\(UUID().uuidString)")
+        let project = root.appendingPathComponent("project")
+        let targetDir = root.appendingPathComponent("target/sub")
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let link2 = project.appendingPathComponent("link2")
+        try FileManager.default.createSymbolicLink(at: link2, withDestinationURL: targetDir)
+
+        let link1 = project.appendingPathComponent("link1")
+        try FileManager.default.createSymbolicLink(at: link1, withDestinationURL: link2)
+
+        let configFile = root.appendingPathComponent("target/config")
+        try Data("correct".utf8).write(to: configFile)
+
+        let localDescriptor = WorkspaceDescriptor(
+            kind: .local,
+            id: "local",
+            displayName: "project",
+            workingDirectory: project.path
+        )
+
+        let testPath = link1.path + "/../config"
+        let docID = try EditorDocumentID(descriptor: localDescriptor, path: testPath)
+        #expect(docID.path == configFile.path)
+    }
 }
 
 private struct MemoryEditorFilesystem: WorkspaceFilesystem {

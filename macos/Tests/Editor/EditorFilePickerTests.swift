@@ -58,6 +58,20 @@ struct EditorFilePickerTests {
         #expect(model.pathInput == "/other/folder")
     }
 
+    @Test @MainActor func navigateInputDirectlyOpensFilePathOutsideCurrentListing() async {
+        let filesystem = ControlledEditorFilePickerFilesystem()
+        let model = EditorFilePickerModel(filesystem: filesystem)
+        await filesystem.waitUntilListStarts(at: "/")
+        await filesystem.finishList(at: "/", with: [Self.directory("/project")])
+        await waitUntil { model.entries.count == 1 }
+
+        var openedPath: String?
+        // User types /tmp/a.swift directly while current dir is /
+        model.navigate(to: "/tmp/a.swift") { openedPath = $0 }
+        await waitUntil { openedPath != nil }
+        #expect(openedPath == "/tmp/a.swift")
+    }
+
     private static func directory(_ path: String) -> WorkspaceFileEntry {
         .init(path: path, name: (path as NSString).lastPathComponent, isDirectory: true)
     }
@@ -106,5 +120,15 @@ private actor ControlledEditorFilePickerFilesystem: WorkspaceFilesystem {
 
     func finishList(at path: String, with entries: [WorkspaceFileEntry]) {
         pending.removeValue(forKey: path)?.resume(returning: entries)
+    }
+
+    func itemType(at path: String) async throws -> WorkspaceItemType? {
+        if path.hasSuffix(".md") || path.hasSuffix(".swift") || path.hasSuffix(".txt") {
+            return .file
+        }
+        if path.contains("folder") || path.contains("project") || path == "/" {
+            return .directory
+        }
+        return nil
     }
 }

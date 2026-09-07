@@ -3142,12 +3142,27 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         _ node: SplitTree<Ghostty.SurfaceView>.Node,
         withConfirmation: Bool = true
     ) {
-        guard EditorWorkspaceStore.shared.prepareToClose(surfaceIDs: node.leaves().map(\.id), window: window, retry: { [weak self] in
+        let leafIDs = node.leaves().map(\.id)
+        guard EditorWorkspaceStore.shared.prepareToClose(surfaceIDs: leafIDs, window: window, retry: { [weak self] in
             self?.closeSurface(node, withConfirmation: withConfirmation)
         }) else { return }
+
         // If this isn't the root then we're dealing with a split closure.
         if surfaceTree.root != node {
-            super.closeSurface(node, withConfirmation: withConfirmation)
+            guard surfaceTree.contains(node) else { return }
+            if !withConfirmation {
+                EditorWorkspaceStore.shared.remove(surfaceIDs: leafIDs)
+                removeSurfaceNode(node, registerUndo: false)
+                return
+            }
+            confirmClose(
+                messageText: "Close Terminal?",
+                informativeText: "The terminal still has a running process. If you close the terminal the process will be killed."
+            ) { [weak self] in
+                guard let self else { return }
+                EditorWorkspaceStore.shared.remove(surfaceIDs: leafIDs)
+                self.removeSurfaceNode(node, registerUndo: false)
+            }
             return
         }
 

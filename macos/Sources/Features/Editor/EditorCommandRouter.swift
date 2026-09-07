@@ -174,12 +174,62 @@ final class EditorCommandRouter {
 
 @MainActor
 enum EditorNativeTextActions {
+    static func uniqueLineRanges(for ranges: [NSRange], in text: String) -> [NSRange] {
+        var rawRanges: [NSRange] = []
+        for range in ranges {
+            guard let lineRange = EditorTextSearch.lineRange(containing: range, in: text) else { continue }
+            rawRanges.append(lineRange)
+        }
+        guard !rawRanges.isEmpty else { return [] }
+        let sorted = rawRanges.sorted {
+            if $0.location != $1.location {
+                return $0.location < $1.location
+            }
+            return $0.length > $1.length
+        }
+        var merged: [NSRange] = []
+        for lr in sorted {
+            guard let last = merged.last else {
+                merged.append(lr)
+                continue
+            }
+            if lr.location == last.location && lr.length == last.length {
+                continue
+            }
+            if lr.location < NSMaxRange(last) {
+                let newEnd = max(NSMaxRange(last), NSMaxRange(lr))
+                merged[merged.count - 1] = NSRange(location: last.location, length: newEnd - last.location)
+            } else {
+                merged.append(lr)
+            }
+        }
+        return merged
+    }
+
+    private static func contiguousBlocks(from lineRanges: [NSRange]) -> [NSRange] {
+        var blocks: [NSRange] = []
+        for lr in lineRanges.sorted(by: { $0.location < $1.location }) {
+            if let last = blocks.last, NSMaxRange(last) == lr.location {
+                blocks[blocks.count - 1] = NSRange(location: last.location, length: last.length + lr.length)
+            } else {
+                blocks.append(lr)
+            }
+        }
+        return blocks
+    }
+
     @discardableResult
     static func select(_ range: NSRange, on textView: TextView) -> Bool {
-        guard range.location != NSNotFound,
-              range.location >= 0,
-              NSMaxRange(range) <= textView.textStorage.length else { return false }
-        textView.selectionManager.setSelectedRange(range)
+        select([range], on: textView)
+    }
+
+    @discardableResult
+    static func select(_ ranges: [NSRange], on textView: TextView) -> Bool {
+        let validRanges = ranges.filter {
+            $0.location != NSNotFound && $0.location >= 0 && NSMaxRange($0) <= textView.textStorage.length
+        }
+        guard !validRanges.isEmpty else { return false }
+        textView.selectionManager.setSelectedRanges(validRanges)
         NotificationCenter.default.post(
             name: TextSelectionManager.selectionChangedNotification,
             object: textView.selectionManager
@@ -193,28 +243,54 @@ enum EditorNativeTextActions {
     static func perform(_ action: EditorAction, on textView: TextView) -> Bool {
         switch action {
         case .cut:
-            guard textView.isEditable,
-                  let selection = textView.selectionManager.textSelections.first?.range else { return true }
-            if selection.length > 0 {
+            guard textView.isEditable else { return true }
+            let selections = textView.selectionManager.textSelections
+            guard !selections.isEmpty else { return true }
+            let hasNonEmptySelection = selections.contains { $0.range.length > 0 }
+            if hasNonEmptySelection {
                 textView.cut(textView)
-            } else if let lineRange = EditorTextSearch.lineRange(containing: selection, in: textView.string) {
+            } else {
+                let lineRanges = uniqueLineRanges(for: selections.map(\.range), in: textView.string)
+                guard let first = lineRanges.first, let last = lineRanges.last else { return true }
                 let source = textView.string as NSString
-                let lineText = source.substring(with: lineRange)
+                let combinedText = lineRanges.map { source.substring(with: $0) }.joined()
                 NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(lineText, forType: .string)
-                textView.replaceCharacters(in: lineRange, with: "")
-                select(NSRange(location: min(lineRange.location, textView.textStorage.length), length: 0), on: textView)
+                NSPasteboard.general.setString(combinedText, forType: .string)
+
+                var newCaretPositions: [Int] = []
+                var cumulativeDeleted = 0
+                for lr in lineRanges {
+                    newCaretPositions.append(lr.location - cumulativeDeleted)
+                    cumulativeDeleted += lr.length
+                }
+
+                let cover = NSRange(location: first.location, length: NSMaxRange(last) - first.location)
+                let combined = NSMutableString(string: source.substring(with: cover))
+                for lr in lineRanges.reversed() {
+                    let relative = NSRange(location: lr.location - cover.location, length: lr.length)
+                    combined.replaceCharacters(in: relative, with: "")
+                }
+                textView.replaceCharacters(in: cover, with: combined as String)
+
+                let newSelections = newCaretPositions.map {
+                    NSRange(location: min($0, textView.textStorage.length), length: 0)
+                }
+                select(newSelections, on: textView)
             }
             return true
         case .copy:
-            guard let selection = textView.selectionManager.textSelections.first?.range else { return true }
-            if selection.length > 0 {
+            let selections = textView.selectionManager.textSelections
+            guard !selections.isEmpty else { return true }
+            let hasNonEmptySelection = selections.contains { $0.range.length > 0 }
+            if hasNonEmptySelection {
                 textView.copy(textView)
-            } else if let lineRange = EditorTextSearch.lineRange(containing: selection, in: textView.string) {
+            } else {
+                let lineRanges = uniqueLineRanges(for: selections.map(\.range), in: textView.string)
+                guard !lineRanges.isEmpty else { return true }
                 let source = textView.string as NSString
-                let lineText = source.substring(with: lineRange)
+                let combinedText = lineRanges.map { source.substring(with: $0) }.joined()
                 NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(lineText, forType: .string)
+                NSPasteboard.general.setString(combinedText, forType: .string)
             }
             return true
         case .paste:
@@ -238,95 +314,240 @@ enum EditorNativeTextActions {
             }
             return true
         case .duplicateLine:
-            guard textView.isEditable,
-                  let selection = textView.selectionManager.textSelections.first?.range,
-                  let lineRange = EditorTextSearch.lineRange(containing: selection, in: textView.string) else {
-                return false
+            guard textView.isEditable else { return false }
+            let selections = textView.selectionManager.textSelections
+            guard !selections.isEmpty else { return false }
+            let lineRanges = uniqueLineRanges(for: selections.map(\.range), in: textView.string)
+            guard let first = lineRanges.first, let last = lineRanges.last else { return false }
+
+            var selectionInfos: [(lineIndex: Int, offsetInLine: Int, length: Int)] = []
+            for sel in selections {
+                if let lineIdx = lineRanges.firstIndex(where: {
+                    NSLocationInRange(sel.range.location, $0) || (sel.range.location == NSMaxRange($0) && $0.length > 0)
+                }) {
+                    selectionInfos.append((lineIdx, sel.range.location - lineRanges[lineIdx].location, sel.range.length))
+                } else if let firstIdx = lineRanges.indices.first {
+                    selectionInfos.append((firstIdx, 0, sel.range.length))
+                }
             }
+
             let source = textView.string as NSString
-            var duplicate = source.substring(with: lineRange)
-            var insertion = NSMaxRange(lineRange)
-            if !duplicate.hasSuffix("\n") {
-                duplicate = "\n" + duplicate
-                insertion = source.length
+            let cover = NSRange(location: first.location, length: NSMaxRange(last) - first.location)
+            let combined = NSMutableString(string: source.substring(with: cover))
+            var duplicateLengths: [Int: Int] = [:]
+
+            for (idx, lr) in lineRanges.enumerated().reversed() {
+                var duplicate = source.substring(with: lr)
+                let relativeEnd = NSMaxRange(lr) - cover.location
+                if !duplicate.hasSuffix("\n") {
+                    duplicate = "\n" + duplicate
+                }
+                combined.insert(duplicate, at: relativeEnd)
+                duplicateLengths[idx] = (duplicate as NSString).length
             }
-            textView.replaceCharacters(in: NSRange(location: insertion, length: 0), with: duplicate)
-            select(
-                NSRange(location: selection.location + duplicate.utf16.count, length: selection.length),
-                on: textView
-            )
+            textView.replaceCharacters(in: cover, with: combined as String)
+
+            var newSelections: [NSRange] = []
+            for info in selectionInfos {
+                let baseLine = lineRanges[info.lineIndex]
+                var shift = 0
+                for prevIdx in 0..<info.lineIndex {
+                    shift += duplicateLengths[prevIdx] ?? 0
+                }
+                let dupLen = duplicateLengths[info.lineIndex] ?? 0
+                let newLoc = baseLine.location + shift + dupLen + info.offsetInLine
+                newSelections.append(NSRange(location: min(newLoc, textView.textStorage.length), length: info.length))
+            }
+            select(newSelections, on: textView)
+            return true
         case .deleteLine:
-            guard textView.isEditable,
-                  let selection = textView.selectionManager.textSelections.first?.range,
-                  let lineRange = EditorTextSearch.lineRange(containing: selection, in: textView.string) else {
-                return false
+            guard textView.isEditable else { return false }
+            let selections = textView.selectionManager.textSelections
+            guard !selections.isEmpty else { return false }
+            let lineRanges = uniqueLineRanges(for: selections.map(\.range), in: textView.string)
+            guard let first = lineRanges.first, let last = lineRanges.last else { return false }
+
+            var newCaretPositions: [Int] = []
+            var cumulativeDeleted = 0
+            for lr in lineRanges {
+                newCaretPositions.append(lr.location - cumulativeDeleted)
+                cumulativeDeleted += lr.length
             }
-            textView.replaceCharacters(in: lineRange, with: "")
-            select(
-                NSRange(location: min(lineRange.location, textView.textStorage.length), length: 0),
-                on: textView
-            )
+
+            let source = textView.string as NSString
+            let cover = NSRange(location: first.location, length: NSMaxRange(last) - first.location)
+            let combined = NSMutableString(string: source.substring(with: cover))
+            for lr in lineRanges.reversed() {
+                let relative = NSRange(location: lr.location - cover.location, length: lr.length)
+                combined.replaceCharacters(in: relative, with: "")
+            }
+            textView.replaceCharacters(in: cover, with: combined as String)
+
+            let newSelections = newCaretPositions.map {
+                NSRange(location: min($0, textView.textStorage.length), length: 0)
+            }
+            select(newSelections, on: textView)
+            return true
         case .moveLineUp:
-            guard textView.isEditable,
-                  let selection = textView.selectionManager.textSelections.first?.range,
-                  let lineRange = EditorTextSearch.lineRange(containing: selection, in: textView.string) else {
-                return false
+            guard textView.isEditable else { return false }
+            let selections = textView.selectionManager.textSelections
+            guard !selections.isEmpty else { return false }
+            let lineRanges = uniqueLineRanges(for: selections.map(\.range), in: textView.string)
+            let blocks = contiguousBlocks(from: lineRanges)
+            guard !blocks.isEmpty else { return false }
+
+            var cursorOffsets: [(blockIdx: Int, offset: Int, length: Int)] = []
+            for sel in selections {
+                if let bIdx = blocks.firstIndex(where: {
+                    NSLocationInRange(sel.range.location, $0) || sel.range.location == NSMaxRange($0)
+                }) {
+                    cursorOffsets.append((bIdx, sel.range.location - blocks[bIdx].location, sel.range.length))
+                }
             }
-            guard lineRange.location > 0 else { return true }
-            let source = textView.string as NSString
-            let prevLineRange = source.lineRange(for: NSRange(location: lineRange.location - 1, length: 0))
-            let currentLineText = source.substring(with: lineRange)
-            let prevLineText = source.substring(with: prevLineRange)
-            var newCurrentText = currentLineText
-            var newPrevText = prevLineText
-            if !newCurrentText.hasSuffix("\n") && newPrevText.hasSuffix("\n") {
-                newCurrentText += "\n"
-                newPrevText = String(newPrevText.dropLast())
+
+            textView._undoManager?.beginGrouping()
+            defer { textView._undoManager?.endGrouping() }
+            textView.undoManager?.beginUndoGrouping()
+            defer { textView.undoManager?.endUndoGrouping() }
+
+            var newSelections: [NSRange] = []
+            for block in blocks {
+                guard block.location > 0 else {
+                    for co in cursorOffsets where blocks[co.blockIdx].location == block.location {
+                        newSelections.append(NSRange(location: block.location + co.offset, length: co.length))
+                    }
+                    continue
+                }
+                let source = textView.string as NSString
+                let prevLineRange = source.lineRange(for: NSRange(location: block.location - 1, length: 0))
+                let currentBlockText = source.substring(with: block)
+                let prevLineText = source.substring(with: prevLineRange)
+                var newBlockText = currentBlockText
+                var newPrevText = prevLineText
+                if !newBlockText.hasSuffix("\n") && newPrevText.hasSuffix("\n") {
+                    newBlockText += "\n"
+                    newPrevText = String(newPrevText.dropLast())
+                }
+                let combinedRange = NSRange(location: prevLineRange.location, length: prevLineRange.length + block.length)
+                let swappedText = newBlockText + newPrevText
+                textView.replaceCharacters(in: combinedRange, with: swappedText)
+
+                for co in cursorOffsets where blocks[co.blockIdx].location == block.location {
+                    let newLoc = prevLineRange.location + co.offset
+                    newSelections.append(NSRange(location: min(newLoc, textView.textStorage.length), length: co.length))
+                }
             }
-            let combinedRange = NSRange(location: prevLineRange.location, length: prevLineRange.length + lineRange.length)
-            let swappedText = newCurrentText + newPrevText
-            textView.replaceCharacters(in: combinedRange, with: swappedText)
-            let offsetInLine = selection.location - lineRange.location
-            let newSelectionLoc = prevLineRange.location + offsetInLine
-            select(NSRange(location: newSelectionLoc, length: selection.length), on: textView)
+            if !newSelections.isEmpty {
+                select(newSelections, on: textView)
+            }
+            return true
         case .moveLineDown:
-            guard textView.isEditable,
-                  let selection = textView.selectionManager.textSelections.first?.range,
-                  let lineRange = EditorTextSearch.lineRange(containing: selection, in: textView.string) else {
-                return false
+            guard textView.isEditable else { return false }
+            let selections = textView.selectionManager.textSelections
+            guard !selections.isEmpty else { return false }
+            let lineRanges = uniqueLineRanges(for: selections.map(\.range), in: textView.string)
+            let blocks = contiguousBlocks(from: lineRanges)
+            guard !blocks.isEmpty else { return false }
+
+            var cursorOffsets: [(blockIdx: Int, offset: Int, length: Int)] = []
+            for sel in selections {
+                if let bIdx = blocks.firstIndex(where: {
+                    NSLocationInRange(sel.range.location, $0) || sel.range.location == NSMaxRange($0)
+                }) {
+                    cursorOffsets.append((bIdx, sel.range.location - blocks[bIdx].location, sel.range.length))
+                }
             }
-            let source = textView.string as NSString
-            let endOfLine = NSMaxRange(lineRange)
-            guard endOfLine < source.length else { return true }
-            let nextLineRange = source.lineRange(for: NSRange(location: endOfLine, length: 0))
-            let currentLineText = source.substring(with: lineRange)
-            let nextLineText = source.substring(with: nextLineRange)
-            var newCurrentText = currentLineText
-            var newNextText = nextLineText
-            if !newNextText.hasSuffix("\n") && newCurrentText.hasSuffix("\n") {
-                newNextText += "\n"
-                newCurrentText = String(newCurrentText.dropLast())
+
+            textView._undoManager?.beginGrouping()
+            defer { textView._undoManager?.endGrouping() }
+            textView.undoManager?.beginUndoGrouping()
+            defer { textView.undoManager?.endUndoGrouping() }
+
+            var newSelections: [NSRange] = []
+            for block in blocks.reversed() {
+                let source = textView.string as NSString
+                let endOfBlock = NSMaxRange(block)
+                guard endOfBlock < source.length else {
+                    for co in cursorOffsets where blocks[co.blockIdx].location == block.location {
+                        newSelections.append(NSRange(location: block.location + co.offset, length: co.length))
+                    }
+                    continue
+                }
+                let nextLineRange = source.lineRange(for: NSRange(location: endOfBlock, length: 0))
+                let currentBlockText = source.substring(with: block)
+                let nextLineText = source.substring(with: nextLineRange)
+                var newBlockText = currentBlockText
+                var newNextText = nextLineText
+                if !newNextText.hasSuffix("\n") && newBlockText.hasSuffix("\n") {
+                    newNextText += "\n"
+                    newBlockText = String(newBlockText.dropLast())
+                }
+                let combinedRange = NSRange(location: block.location, length: block.length + nextLineRange.length)
+                let swappedText = newNextText + newBlockText
+                textView.replaceCharacters(in: combinedRange, with: swappedText)
+
+                for co in cursorOffsets where blocks[co.blockIdx].location == block.location {
+                    let newLoc = block.location + (newNextText as NSString).length + co.offset
+                    newSelections.append(NSRange(location: min(newLoc, textView.textStorage.length), length: co.length))
+                }
             }
-            let combinedRange = NSRange(location: lineRange.location, length: lineRange.length + nextLineRange.length)
-            let swappedText = newNextText + newCurrentText
-            textView.replaceCharacters(in: combinedRange, with: swappedText)
-            let offsetInLine = selection.location - lineRange.location
-            let newSelectionLoc = lineRange.location + (newNextText as NSString).length + offsetInLine
-            select(NSRange(location: min(newSelectionLoc, textView.textStorage.length), length: selection.length), on: textView)
+            if !newSelections.isEmpty {
+                select(newSelections.sorted(by: { $0.location < $1.location }), on: textView)
+            }
+            return true
         case .insertLineBelow:
-            guard textView.isEditable,
-                  let selection = textView.selectionManager.textSelections.first?.range,
-                  let lineRange = EditorTextSearch.lineRange(containing: selection, in: textView.string) else {
-                return false
-            }
+            guard textView.isEditable else { return false }
+            let selections = textView.selectionManager.textSelections
+            guard !selections.isEmpty else { return false }
+            let lineRanges = uniqueLineRanges(for: selections.map(\.range), in: textView.string)
+            guard let first = lineRanges.first, let last = lineRanges.last else { return false }
+
             let source = textView.string as NSString
-            let lineText = source.substring(with: lineRange)
-            let indent = String(lineText.prefix(while: { $0 == " " || $0 == "\t" }))
-            let hasNewline = lineText.hasSuffix("\n")
-            let insertPos = hasNewline ? NSMaxRange(lineRange) - 1 : NSMaxRange(lineRange)
-            let insertion = "\n" + indent
-            textView.replaceCharacters(in: NSRange(location: insertPos, length: 0), with: insertion)
-            select(NSRange(location: insertPos + 1 + (indent as NSString).length, length: 0), on: textView)
+            let cover = NSRange(location: first.location, length: NSMaxRange(last) - first.location)
+            let combined = NSMutableString(string: source.substring(with: cover))
+
+            struct InsertionPlan {
+                let relativePos: Int
+                let insertionText: String
+                let caretOffsetFromLineStart: Int
+            }
+
+            var plans: [InsertionPlan] = []
+            for lr in lineRanges {
+                let lineText = source.substring(with: lr)
+                let indent = String(lineText.prefix(while: { $0 == " " || $0 == "\t" }))
+                let hasNewline = lineText.hasSuffix("\n")
+                if hasNewline {
+                    let relativeInsertPos = NSMaxRange(lr) - cover.location
+                    let insertion = indent + "\n"
+                    let caretOffset = (lineText as NSString).length + (indent as NSString).length
+                    plans.append(InsertionPlan(relativePos: relativeInsertPos, insertionText: insertion, caretOffsetFromLineStart: caretOffset))
+                } else {
+                    let relativeInsertPos = NSMaxRange(lr) - cover.location
+                    let insertion = "\n" + indent
+                    let caretOffset = (lineText as NSString).length + 1 + (indent as NSString).length
+                    plans.append(InsertionPlan(relativePos: relativeInsertPos, insertionText: insertion, caretOffsetFromLineStart: caretOffset))
+                }
+            }
+
+            for plan in plans.reversed() {
+                combined.insert(plan.insertionText, at: plan.relativePos)
+            }
+
+            var newCarets: [Int] = []
+            var cumulativeShift = 0
+            for (idx, plan) in plans.enumerated() {
+                let lr = lineRanges[idx]
+                newCarets.append(lr.location + cumulativeShift + plan.caretOffsetFromLineStart)
+                cumulativeShift += (plan.insertionText as NSString).length
+            }
+
+            textView.replaceCharacters(in: cover, with: combined as String)
+            let newSelections = newCarets.sorted().map {
+                NSRange(location: min($0, textView.textStorage.length), length: 0)
+            }
+            select(newSelections, on: textView)
+            return true
         case .deleteWordBackward:
             textView.deleteWordBackward(nil)
         case .deleteWordForward:

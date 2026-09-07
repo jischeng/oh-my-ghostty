@@ -662,4 +662,59 @@ struct WorkspaceProviderTests {
         #expect(filesystem.descriptor.id == "ssh:cloud")
         #expect(filesystem.descriptor.displayName == "cloud")
     }
+
+    @Test func parsesSFTPFileAttributesAndPermissions() {
+        let output = "-rwxr-xr-x 1 user group 12345678 Jan 1 00:00 /remote/script.sh"
+        let attrs = SSHWorkspaceFilesystem.parseFileAttributes(from: output)
+        #expect(attrs?.size == 12345678)
+        #expect(attrs?.isDirectory == false)
+        #expect(attrs?.permissions == 0o755)
+
+        let dirOutput = "drwxr-xr-x 2 user group 4096 Jan 1 00:00 /remote/dir"
+        let dirAttrs = SSHWorkspaceFilesystem.parseFileAttributes(from: dirOutput)
+        #expect(dirAttrs?.isDirectory == true)
+        #expect(dirAttrs?.permissions == 0o755)
+
+        let mode = SSHWorkspaceFilesystem.parsePosixPermissions("-rw-r--r--")
+        #expect(mode == 0o644)
+
+        // Special permission bits: SUID, SGID, Sticky bit and without execute (S/T)
+        #expect(SSHWorkspaceFilesystem.parsePosixPermissions("-rwSr--r--") == 0o4644)
+        #expect(SSHWorkspaceFilesystem.parsePosixPermissions("-rwsr-xr-x") == 0o4755)
+        #expect(SSHWorkspaceFilesystem.parsePosixPermissions("-rwxr-sr-x") == 0o2755)
+        #expect(SSHWorkspaceFilesystem.parsePosixPermissions("-rwxr-Sr-x") == 0o2745)
+        #expect(SSHWorkspaceFilesystem.parsePosixPermissions("drwxrwxrwt") == 0o1777)
+        #expect(SSHWorkspaceFilesystem.parsePosixPermissions("drwxrwx--T") == 0o1770)
+    }
+
+    @Test func parsesSFTPSymlinkTarget() {
+        let output = "lrwxrwxrwx 1 root root 7 Jan 1 00:00 /root/current -> /root/release"
+        #expect(SSHWorkspaceFilesystem.parseSymlinkTarget(from: output) == "/root/release")
+
+        let relOutput = "lrwxrwxrwx 1 root root 7 Jan 1 00:00 current -> release/v1"
+        #expect(SSHWorkspaceFilesystem.parseSymlinkTarget(from: relOutput) == "release/v1")
+
+        let nonLink = "-rw-r--r-- 1 root root 10 Jan 1 00:00 regular.txt"
+        #expect(SSHWorkspaceFilesystem.parseSymlinkTarget(from: nonLink) == nil)
+    }
+
+    @Test func parsesSymlinkStatusFromRealSFTPServerDirectoryListing() {
+        // Real OpenSSH sftp-server readdir output: no "-> target" arrow, only "l" prefix in mode
+        let listing = """
+        drwx------    ? chengjisheng staff         128 Sep  7 15:38 /remote/dir/.
+        drwx------    ? chengjisheng staff      227168 Sep  7 15:38 /remote/dir/..
+        lrwxr-xr-x    ? chengjisheng staff          71 Sep  7 15:38 /remote/dir/link.txt
+        -rw-r--r--    ? chengjisheng staff           5 Sep  7 15:38 /remote/dir/target.txt
+        """
+        #expect(SSHWorkspaceFilesystem.parseSymlinkStatus(name: "link.txt", fromDirectoryListing: listing) == .symlink)
+        #expect(SSHWorkspaceFilesystem.parseSymlinkStatus(name: "target.txt", fromDirectoryListing: listing) == .regularFile)
+        #expect(SSHWorkspaceFilesystem.parseSymlinkStatus(name: "nonexistent.txt", fromDirectoryListing: listing) == .indeterminate)
+    }
+
+    @Test func shellQuoteEscapesSpecialCharactersAndSingleQuotes() {
+        #expect(SSHWorkspaceFilesystem.shellQuote("simple.txt") == "'simple.txt'")
+        #expect(SSHWorkspaceFilesystem.shellQuote("foo'bar.txt") == "'foo'\\''bar.txt'")
+        #expect(SSHWorkspaceFilesystem.shellQuote("foo$(printf expanded).txt") == "'foo$(printf expanded).txt'")
+        #expect(SSHWorkspaceFilesystem.shellQuote("foo`whoami`$USER.txt") == "'foo`whoami`$USER.txt'")
+    }
 }

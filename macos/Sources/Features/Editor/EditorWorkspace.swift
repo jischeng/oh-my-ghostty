@@ -11,6 +11,20 @@ final class EditorWorkspace: ObservableObject {
     @Published var errorMessage: String?
     private var openTask: Task<Void, Never>?
 
+    func cancelAndClear() {
+        openTask?.cancel()
+        openTask = nil
+        isLoading = false
+        closeDecisions.removeAll()
+        for document in documents {
+            document.suspendAutoSave()
+            document.cancelAutoSave()
+        }
+        documents.removeAll()
+        selectedID = nil
+        isVisible = false
+    }
+
     var selectedDocument: EditorDocument? {
         documents.first { $0.id == selectedID }
     }
@@ -24,14 +38,22 @@ final class EditorWorkspace: ObservableObject {
     }
 
     func saveAll() async -> Bool {
-        for document in documents where document.isDirty || document.isSaving {
-            guard await save(document) else { return false }
+        var allSucceeded = true
+        for document in documents {
+            guard document.isDirty || document.isSaving else { continue }
+            let saved = await save(document)
+            if !saved {
+                allSucceeded = false
+            }
         }
-        return true
+        return allSucceeded
     }
 
     func reload(_ document: EditorDocument, window: NSWindow?) async {
-        guard !document.isSaving, !document.isReloading else { return }
+        while document.isSaving {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        guard !document.isReloading else { return }
         document.suspendAutoSave()
         defer { document.resumeAutoSave() }
         if document.isDirty {
@@ -50,6 +72,7 @@ final class EditorWorkspace: ObservableObject {
         }
         do {
             try await document.reload()
+            MarkdownImageCache.shared.removeAllObjects()
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
@@ -83,7 +106,10 @@ final class EditorWorkspace: ObservableObject {
     }
 
     func save(_ document: EditorDocument) async -> Bool {
-        guard !document.isSaving else { return false }
+        while document.isSaving {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        guard document.isDirty else { return true }
         do {
             try await document.save()
             errorMessage = nil
@@ -109,8 +135,60 @@ final class EditorWorkspace: ObservableObject {
         return true
     }
 
+    enum CloseDecision {
+        case dontSave
+    }
+    private var closeDecisions: [EditorDocumentID: CloseDecision] = [:]
+
+    var hasPendingUnsavedChanges: Bool {
+        documents.contains { doc in
+            (doc.isDirty || doc.isSaving) && closeDecisions[doc.id] != .dontSave
+        }
+    }
+
+    func clearCloseDecisions() {
+        closeDecisions.removeAll()
+    }
+
+    /// Resolves unsaved changes before a host-level close operation without removing documents prematurely.
+    func confirmAndSaveDirtyDocuments(window: NSWindow?) async -> Bool {
+        for document in documents where (document.isDirty || document.isSaving) && closeDecisions[document.id] != .dontSave {
+            while document.isSaving {
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+            guard document.isDirty else { continue }
+            document.suspendAutoSave()
+            defer { document.resumeAutoSave() }
+            let alert = NSAlert()
+            alert.messageText = "Save changes to \"\((document.path as NSString).lastPathComponent)\"?"
+            alert.informativeText = "Your changes will be lost if you close without saving."
+            alert.addButton(withTitle: "Save")
+            alert.addButton(withTitle: "Cancel")
+            alert.addButton(withTitle: "Don't Save")
+            let response: NSApplication.ModalResponse
+            if let window {
+                response = await alert.beginSheetModal(for: window)
+            } else {
+                response = alert.runModal()
+            }
+            switch response {
+            case .alertFirstButtonReturn:
+                let saved = await save(document)
+                guard saved else { return false }
+            case .alertThirdButtonReturn:
+                closeDecisions[document.id] = .dontSave
+            default:
+                clearCloseDecisions()
+                return false
+            }
+        }
+        return true
+    }
+
     private func canClose(_ document: EditorDocument, window: NSWindow?) async -> Bool {
-        guard !document.isSaving else { return false }
+        while document.isSaving {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
         guard document.isDirty else { return true }
         document.suspendAutoSave()
         defer { document.resumeAutoSave() }
@@ -193,7 +271,7 @@ final class EditorWorkspaceStore {
 
     func prepareToClose(surfaceIDs: [UUID], window: NSWindow?, retry: @escaping () -> Void) -> Bool {
         let pending = surfaceIDs.filter { id in
-            workspaces[id]?.documents.contains { $0.isDirty || $0.isSaving } == true
+            workspaces[id]?.hasPendingUnsavedChanges == true
         }
         guard !pending.isEmpty else { return true }
         guard closing.isDisjoint(with: pending) else { return false }
@@ -201,23 +279,35 @@ final class EditorWorkspaceStore {
         Task {
             defer { closing.subtract(pending) }
             for id in pending {
-                guard await workspaces[id]?.closeAll(window: window) == true else { return }
+                guard await workspaces[id]?.confirmAndSaveDirtyDocuments(window: window) == true else {
+                    for cleanId in pending {
+                        workspaces[cleanId]?.clearCloseDecisions()
+                    }
+                    return
+                }
             }
             retry()
         }
         return false
     }
 
-    func remove(tabID: UUID) {
-        for surfaceID in owners.compactMap({ $0.value == tabID ? $0.key : nil }) {
+    func remove(surfaceIDs: [UUID]) {
+        for surfaceID in surfaceIDs {
+            if let ws = workspaces.removeValue(forKey: surfaceID) {
+                ws.cancelAndClear()
+            }
             owners.removeValue(forKey: surfaceID)
-            workspaces.removeValue(forKey: surfaceID)
         }
+    }
+
+    func remove(tabID: UUID) {
+        let surfaces = owners.compactMap { $0.value == tabID ? $0.key : nil }
+        remove(surfaceIDs: surfaces)
     }
 
     func prepareToTerminate() -> Bool {
         let pending = workspaces.values.filter { workspace in
-            workspace.documents.contains { $0.isDirty || $0.isSaving }
+            workspace.hasPendingUnsavedChanges
         }
         guard !pending.isEmpty else { return true }
         guard !isResolvingTermination else { return false }
@@ -225,7 +315,12 @@ final class EditorWorkspaceStore {
         Task {
             defer { isResolvingTermination = false }
             for workspace in pending {
-                guard await workspace.closeAll(window: NSApp.keyWindow) else { return }
+                guard await workspace.confirmAndSaveDirtyDocuments(window: NSApp.keyWindow) else {
+                    for ws in pending {
+                        ws.clearCloseDecisions()
+                    }
+                    return
+                }
             }
             // Re-enter the host's existing terminal-process quit handling.
             NSApp.terminate(nil)

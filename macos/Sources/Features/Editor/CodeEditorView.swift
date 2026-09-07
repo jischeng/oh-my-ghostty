@@ -15,6 +15,8 @@ struct CodeEditorView: View {
     let fileURL: URL?
     var isEditable = true
     var isActive = true
+    var isPreview = false
+    var isSurfaceFocused: () -> Bool = { true }
     var terminalBackground: NSColor = .textBackgroundColor
     var terminalBackgroundOpacity: Double = 1.0
     var terminalForeground: NSColor = .textColor
@@ -43,6 +45,8 @@ struct CodeEditorView: View {
         fileURL: URL?,
         isEditable: Bool = true,
         isActive: Bool = true,
+        isPreview: Bool = false,
+        isSurfaceFocused: @escaping () -> Bool = { true },
         terminalBackground: NSColor = .textBackgroundColor,
         terminalBackgroundOpacity: Double = 1.0,
         terminalForeground: NSColor = .textColor,
@@ -58,6 +62,8 @@ struct CodeEditorView: View {
         self.fileURL = fileURL
         self.isEditable = isEditable
         self.isActive = isActive
+        self.isPreview = isPreview
+        self.isSurfaceFocused = isSurfaceFocused
         self.terminalBackground = terminalBackground
         self.terminalBackgroundOpacity = terminalBackgroundOpacity
         self.terminalForeground = terminalForeground
@@ -78,14 +84,15 @@ struct CodeEditorView: View {
                 theme: resolvedTheme,
                 font: resolvedFont,
                 tabWidth: editorSettings.tabWidth,
+                indentOption: resolvedIndentOption,
                 lineHeight: 1.2,
                 wrapLines: editorSettings.wordWrap,
                 cursorPositions: $cursorPositions,
                 useThemeBackground: true,
                 highlightProviders: editorCoordinator.highlightProviders,
                 contentInsets: NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0),
-                isEditable: isEditable && isActive,
-                isSelectable: isActive,
+                isEditable: isEditable && isActive && !isPreview,
+                isSelectable: isActive && !isPreview,
                 bracketPairHighlight: .flash,
                 coordinators: [editorCoordinator]
             )
@@ -124,6 +131,7 @@ struct CodeEditorView: View {
         .onAppear {
             editorCoordinator.setCompletionState(completionState)
             editorCoordinator.setFileURL(fileURL)
+            editorCoordinator.setIsPreview(isPreview)
             configureCommands()
             editorCoordinator.setActive(isActive)
         }
@@ -134,6 +142,9 @@ struct CodeEditorView: View {
                 isFindVisible = false
                 completionState.dismiss()
             }
+        }
+        .onChange(of: isPreview) { isPreview in
+            editorCoordinator.setIsPreview(isPreview)
         }
         .onChange(of: settings.editorKeymapPreset) { _ in configureCommands() }
         .onChange(of: findText) { _ in
@@ -302,6 +313,7 @@ struct CodeEditorView: View {
             keymap: editorSettings.keymap,
             findFieldFocused: { isFindFocused },
             onFocus: onFocus,
+            isSurfaceFocused: isSurfaceFocused,
             actionHandler: { action in
             switch action {
             case .find: presentFind()
@@ -322,6 +334,14 @@ struct CodeEditorView: View {
     }
 
     private var editorSettings: EditorSettings { settings.editorSettings }
+
+    private var resolvedIndentOption: IndentOption {
+        if let name = fileURL?.lastPathComponent.lowercased(),
+           name == "makefile" || name.hasSuffix(".mk") {
+            return .tab
+        }
+        return .spaces(count: max(1, editorSettings.tabWidth))
+    }
 
     private var resolvedFont: NSFont {
         let size = editorSettings.fontSize
@@ -384,6 +404,7 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator {
     private var keymap = EditorKeymap(profile: .idea)
     private var findFieldFocused: () -> Bool = { false }
     private var onFocus: () -> Void = {}
+    private var isSurfaceFocused: () -> Bool = { true }
     private var actionHandler: (EditorAction) -> Bool = { _ in false }
 
     func setCompletionState(_ state: CompletionState) {
@@ -402,11 +423,13 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator {
         keymap: EditorKeymap,
         findFieldFocused: @escaping () -> Bool,
         onFocus: @escaping () -> Void,
+        isSurfaceFocused: @escaping () -> Bool = { true },
         actionHandler: @escaping (EditorAction) -> Bool
     ) {
         self.keymap = keymap
         self.findFieldFocused = findFieldFocused
         self.onFocus = onFocus
+        self.isSurfaceFocused = isSurfaceFocused
         self.actionHandler = actionHandler
     }
 
@@ -540,7 +563,9 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator {
         self.isActive = isActive
         if didActivate {
             registerCommands()
-            focusIfActive(onNextRunLoop: true)
+            if !isPreview {
+                focusIfActive(onNextRunLoop: true)
+            }
         } else if !isActive {
             dismissCompletion()
             columnDragStart = nil
@@ -548,6 +573,24 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator {
             if let textView = controller?.textView,
                textView.window?.firstResponder === textView {
                 textView.window?.makeFirstResponder(nil)
+            }
+        }
+    }
+
+    private(set) var isPreview: Bool = false
+
+    func setIsPreview(_ isPreview: Bool) {
+        let changed = self.isPreview != isPreview
+        self.isPreview = isPreview
+        if changed {
+            if isPreview {
+                dismissCompletion()
+                if let textView = controller?.textView,
+                   textView.window?.firstResponder === textView {
+                    textView.window?.makeFirstResponder(nil)
+                }
+            } else if isActive {
+                focusIfActive(onNextRunLoop: true)
             }
         }
     }
@@ -761,6 +804,17 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator {
     private func handle(_ event: NSEvent) -> Bool {
         guard isActive, let textView = controller?.textView,
               event.window === textView.window else { return false }
+
+        if isPreview {
+            guard isSurfaceFocused() else { return false }
+            guard let action = keymap.action(for: event) else { return false }
+            switch action {
+            case .save, .saveAll, .close, .open, .nextDocument, .previousDocument:
+                return actionHandler(action)
+            default:
+                return false
+            }
+        }
 
         let responder = textView.window?.firstResponder
         let isTextViewOrChild = responder === textView || (responder as? NSView)?.isDescendant(of: textView) == true

@@ -1,6 +1,26 @@
 import Foundation
 import CodeEditTextView
 
+private final class ProgrammaticReplaceDelegate: NSObject, TextViewDelegate {
+    weak var upstream: TextViewDelegate?
+
+    init(upstream: TextViewDelegate?) {
+        self.upstream = upstream
+    }
+
+    func textView(_ textView: TextView, shouldReplaceContentsIn range: NSRange, with string: String) -> Bool {
+        true
+    }
+
+    func textView(_ textView: TextView, willReplaceContentsIn range: NSRange, with string: String) {
+        upstream?.textView(textView, willReplaceContentsIn: range, with: string)
+    }
+
+    func textView(_ textView: TextView, didReplaceContentsIn range: NSRange, with string: String) {
+        upstream?.textView(textView, didReplaceContentsIn: range, with: string)
+    }
+}
+
 @MainActor
 enum EditorTextEditing {
     /// Applies a replacement as one CodeEditTextView mutation, so one undo restores the full operation.
@@ -11,6 +31,13 @@ enum EditorTextEditing {
         guard let first = ranges.last, let last = ranges.first else { return false }
         let cover = NSRange(location: first.location, length: NSMaxRange(last) - first.location)
         guard cover.location >= 0, NSMaxRange(cover) <= textView.textStorage.length else { return false }
+
+        let originalDelegate = textView.delegate
+        let bypassDelegate = ProgrammaticReplaceDelegate(upstream: originalDelegate)
+        textView.delegate = bypassDelegate
+        defer {
+            textView.delegate = originalDelegate
+        }
 
         if ranges.count == 1 {
             textView.replaceCharacters(in: first, with: replacement)

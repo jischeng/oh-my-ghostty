@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 private let editorMaximumFileSize = 10 * 1_024 * 1_024
@@ -686,6 +687,11 @@ extension WorkspaceFilesystemError: LocalizedError {
     }
 }
 
+enum WorkspaceItemType: Equatable, Sendable {
+    case file
+    case directory
+}
+
 /// Data-only filesystem boundary consumed by Files UI/providers.
 /// Implementations perform their own bounded asynchronous IO.
 protocol WorkspaceFilesystem: Sendable {
@@ -696,6 +702,7 @@ protocol WorkspaceFilesystem: Sendable {
     func createDirectory(named name: String, in directory: String) async throws
     func readFile(at path: String) async throws -> Data
     func writeFile(_ data: Data, at path: String, replacing expectedData: Data) async throws
+    func itemType(at path: String) async throws -> WorkspaceItemType?
 }
 
 extension WorkspaceFilesystem {
@@ -705,6 +712,10 @@ extension WorkspaceFilesystem {
 
     func writeFile(_ data: Data, at path: String, replacing expectedData: Data) async throws {
         throw WorkspaceFilesystemError.unavailable
+    }
+
+    func itemType(at path: String) async throws -> WorkspaceItemType? {
+        nil
     }
 }
 
@@ -775,6 +786,15 @@ struct LocalWorkspaceFilesystem: WorkspaceFilesystem {
         }.value
     }
 
+    func itemType(at path: String) async throws -> WorkspaceItemType? {
+        let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else {
+            return nil
+        }
+        return isDir.boolValue ? .directory : .file
+    }
+
     func readFile(at path: String) async throws -> Data {
         try await Task.detached(priority: .utility) {
             let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
@@ -795,10 +815,55 @@ struct LocalWorkspaceFilesystem: WorkspaceFilesystem {
         }.value
     }
 
+    private static let pathLocksLock = NSLock()
+    private static var pathLocks: [String: NSLock] = [:]
+
+    private static func pathLock(for path: String) -> NSLock {
+        pathLocksLock.lock()
+        defer { pathLocksLock.unlock() }
+        if let lock = pathLocks[path] {
+            return lock
+        }
+        let lock = NSLock()
+        pathLocks[path] = lock
+        return lock
+    }
+
+    private static func withPathLock<T>(for path: String, _ body: () throws -> T) throws -> T {
+        let lock = pathLock(for: path)
+        lock.lock()
+        defer { lock.unlock() }
+        return try body()
+    }
+
     func writeFile(_ data: Data, at path: String, replacing expectedData: Data) async throws {
         try await Task.detached(priority: .utility) {
             let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
-            do {
+            try Self.withPathLock(for: url.path) {
+                var fd: Int32 = -1
+                var attempts = 0
+                while attempts < 10 {
+                    attempts += 1
+                    let candidate = open(url.path, O_RDWR)
+                    if candidate < 0 { break }
+                    flock(candidate, LOCK_EX)
+                    var stFd = stat()
+                    var stPath = stat()
+                    if fstat(candidate, &stFd) == 0 && stat(url.path, &stPath) == 0 {
+                        if stFd.st_ino == stPath.st_ino && stFd.st_dev == stPath.st_dev {
+                            fd = candidate
+                            break
+                        }
+                    }
+                    flock(candidate, LOCK_UN)
+                    close(candidate)
+                }
+                defer {
+                    if fd >= 0 {
+                        flock(fd, LOCK_UN)
+                        close(fd)
+                    }
+                }
                 let current = try Data(contentsOf: url)
                 guard current == expectedData else {
                     throw WorkspaceFilesystemError.fileChanged(path)
@@ -812,12 +877,6 @@ struct LocalWorkspaceFilesystem: WorkspaceFilesystem {
                         ofItemAtPath: url.path
                     )
                 }
-            } catch let error as WorkspaceFilesystemError {
-                throw error
-            } catch {
-                throw WorkspaceFilesystemError.operationFailed(
-                    "Could not write \(path): \(error.localizedDescription)"
-                )
             }
         }.value
     }
@@ -1106,7 +1165,31 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
         _ = try await runSFTP(batch: "mkdir \(Self.quote(Self.join(directory, name)))")
     }
 
+    func statFile(at path: String) async throws -> (size: UInt64, permissions: Int?, isDirectory: Bool)? {
+        let output = try await runSFTP(batch: "ls -la \(Self.quote(path))")
+        return Self.parseFileAttributes(from: output)
+    }
+
+    func itemType(at path: String) async throws -> WorkspaceItemType? {
+        guard let output = try? await runSFTP(batch: "ls -la \(Self.quote(path))"),
+              let attrs = Self.parseFileAttributes(from: output) else {
+            return nil
+        }
+        return attrs.isDirectory ? .directory : .file
+    }
+
     func readFile(at path: String) async throws -> Data {
+        // Pre-check remote attributes before downloading (E11)
+        if let output = try? await runSFTP(batch: "ls -la \(Self.quote(path))"),
+           let attrs = Self.parseFileAttributes(from: output) {
+            guard !attrs.isDirectory else {
+                throw WorkspaceFilesystemError.invalidPath
+            }
+            guard attrs.size <= UInt64(editorMaximumFileSize) else {
+                throw WorkspaceFilesystemError.fileTooLarge(path, editorMaximumFileSize)
+            }
+        }
+
         let localURL = Self.temporaryTransferURL()
         defer { try? FileManager.default.removeItem(at: localURL) }
         _ = try await runSFTP(batch: "get \(Self.quote(path)) \(Self.quote(localURL.path))")
@@ -1124,8 +1207,122 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
         }
     }
 
+    static func shellQuote(_ path: String) -> String {
+        "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private func resolveSymlinkViaSSH(at path: String) async -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        process.arguments = [
+            "-q",
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=3",
+            host.alias,
+            "readlink -f \(Self.shellQuote(path)) 2>/dev/null || realpath \(Self.shellQuote(path)) 2>/dev/null"
+        ]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            let timeout = Task.detached {
+                try? await Task.sleep(for: .seconds(3))
+                if process.isRunning { process.terminate() }
+            }
+            process.waitUntilExit()
+            timeout.cancel()
+            guard process.terminationStatus == 0 else { return nil }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            guard let out = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  out.hasPrefix("/"), out != path else {
+                return nil
+            }
+            return out
+        } catch {
+            return nil
+        }
+    }
+
+    enum RemoteSymlinkCheckResult: Equatable {
+        case symlink
+        case regularFile
+        case indeterminate
+    }
+
+    static func parseSymlinkStatus(name: String, fromDirectoryListing output: String) -> RemoteSymlinkCheckResult {
+        for rawLine in output.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard line.count > 10, !line.hasPrefix("sftp>") else { continue }
+            let columns = line.split(maxSplits: 8, whereSeparator: { $0 == " " || $0 == "\t" })
+            guard columns.count >= 9 else { continue }
+            let entryPath = String(columns[8])
+            let entryName = (entryPath.components(separatedBy: " -> ").first ?? entryPath)
+            if (entryName as NSString).lastPathComponent == name {
+                return line.first == "l" ? .symlink : .regularFile
+            }
+        }
+        return .indeterminate
+    }
+
+    func checkRemoteSymlinkStatus(at path: String) async -> RemoteSymlinkCheckResult {
+        let parentDir = (path as NSString).deletingLastPathComponent
+        let targetName = (path as NSString).lastPathComponent
+        guard let output = try? await runSFTP(batch: "ls -la \(Self.quote(parentDir))") else {
+            return .indeterminate
+        }
+        return Self.parseSymlinkStatus(name: targetName, fromDirectoryListing: output)
+    }
+
+    func resolveSymlinkTarget(at path: String) async -> String {
+        var currentPath = path
+        var depth = 0
+        while depth < 32 {
+            guard let output = try? await runSFTP(batch: "ls -la \(Self.quote(currentPath))"),
+                  let target = Self.parseSymlinkTarget(from: output) else {
+                break
+            }
+            if target.hasPrefix("/") {
+                currentPath = Self.standardized(target)
+            } else {
+                let parentDir = (currentPath as NSString).deletingLastPathComponent
+                currentPath = Self.standardized(Self.join(parentDir, target))
+            }
+            depth += 1
+        }
+        return currentPath
+    }
+
     func writeFile(_ data: Data, at path: String, replacing expectedData: Data) async throws {
-        let current = try await readFile(at: path)
+        var targetPath = path
+        if let resolved = await resolveSymlinkViaSSH(at: path) {
+            targetPath = resolved
+        } else {
+            targetPath = await resolveSymlinkTarget(at: path)
+        }
+
+        if targetPath == path {
+            let status = await checkRemoteSymlinkStatus(at: path)
+            switch status {
+            case .symlink:
+                throw WorkspaceFilesystemError.operationFailed(
+                    "Cannot safely save symbolic link without resolving its remote target: \(path)"
+                )
+            case .indeterminate:
+                throw WorkspaceFilesystemError.operationFailed(
+                    "Cannot verify whether \(path) is a symbolic link; saving aborted to prevent overwriting."
+                )
+            case .regularFile:
+                break
+            }
+        }
+
+        var remotePermissions: Int?
+        if let attrs = try? await statFile(at: targetPath) {
+            remotePermissions = attrs.permissions
+        }
+
+        let current = try await readFile(at: targetPath)
         guard current == expectedData else {
             throw WorkspaceFilesystemError.fileChanged(path)
         }
@@ -1136,11 +1333,97 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
         } catch {
             throw WorkspaceFilesystemError.unavailable
         }
-        _ = try await runSFTP(batch: "put \(Self.quote(localURL.path)) \(Self.quote(path))")
+
+        // Upload to a remote temporary file in the target's directory and atomically rename
+        let directory = (targetPath as NSString).deletingLastPathComponent
+        let tempFileName = ".omg-tmp-\(UUID().uuidString)"
+        let remoteTempPath = Self.join(directory, tempFileName)
+
+        var batchCommands = [
+            "put \(Self.quote(localURL.path)) \(Self.quote(remoteTempPath))"
+        ]
+        if let permissions = remotePermissions {
+            let octal = String(permissions, radix: 8)
+            batchCommands.append("chmod \(octal) \(Self.quote(remoteTempPath))")
+        }
+        batchCommands.append("rename \(Self.quote(remoteTempPath)) \(Self.quote(targetPath))")
+        let batch = batchCommands.joined(separator: "\n")
+
+        do {
+            _ = try await runSFTP(batch: batch)
+        } catch {
+            _ = try? await runSFTP(batch: "rm \(Self.quote(remoteTempPath))")
+            throw error
+        }
     }
 
     private func runSFTP(batch: String) async throws -> String {
         try await SSHSFTPClient.run(batch: batch, host: host.alias)
+    }
+
+    static func parseFileAttributes(
+        from output: String
+    ) -> (size: UInt64, permissions: Int?, isDirectory: Bool)? {
+        for rawLine in output.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard line.count > 10, !line.hasPrefix("sftp>") else { continue }
+            let isDirectory = line.first == "d"
+            let columns = line.split(maxSplits: 8, whereSeparator: { character in
+                character == " " || character == "\t"
+            })
+            guard columns.count >= 5 else { continue }
+            guard let size = UInt64(columns[4]) else { continue }
+            let permissions = parsePosixPermissions(String(columns[0]))
+            return (size: size, permissions: permissions, isDirectory: isDirectory)
+        }
+        return nil
+    }
+
+    static func parseSymlinkTarget(from output: String) -> String? {
+        for rawLine in output.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard line.count > 10, !line.hasPrefix("sftp>") else { continue }
+            guard line.first == "l" else { return nil }
+            guard let arrowRange = line.range(of: " -> ") else { return nil }
+            return String(line[arrowRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+        }
+        return nil
+    }
+
+    static func parsePosixPermissions(_ modeString: String) -> Int? {
+        guard modeString.count >= 10 else { return nil }
+        let chars = Array(modeString)
+        var mode = 0
+        if chars[1] == "r" { mode |= 0o400 }
+        if chars[2] == "w" { mode |= 0o200 }
+        if chars[3] == "x" {
+            mode |= 0o100
+        } else if chars[3] == "s" {
+            mode |= 0o4000 | 0o100
+        } else if chars[3] == "S" {
+            mode |= 0o4000
+        }
+
+        if chars[4] == "r" { mode |= 0o040 }
+        if chars[5] == "w" { mode |= 0o020 }
+        if chars[6] == "x" {
+            mode |= 0o010
+        } else if chars[6] == "s" {
+            mode |= 0o2000 | 0o010
+        } else if chars[6] == "S" {
+            mode |= 0o2000
+        }
+
+        if chars[7] == "r" { mode |= 0o004 }
+        if chars[8] == "w" { mode |= 0o002 }
+        if chars[9] == "x" {
+            mode |= 0o001
+        } else if chars[9] == "t" {
+            mode |= 0o1000 | 0o001
+        } else if chars[9] == "T" {
+            mode |= 0o1000
+        }
+        return mode
     }
 
     static func parseLongListing(

@@ -123,6 +123,38 @@ struct EditorTextSearchTests {
         #expect(NSPasteboard.general.string(forType: .string) == "two\n")
     }
 
+    @Test @MainActor func multiCursorLineActionsOperateOncePerLineAndPreserveSelections() {
+        let textView = TextView(string: "line1\nline2\nline3\nline4\n")
+        let sel1 = NSRange(location: 2, length: 0)
+        let sel2 = NSRange(location: 14, length: 0)
+        textView.selectionManager.setSelectedRanges([sel1, sel2])
+        #expect(textView.selectionManager.textSelections.count == 2)
+
+        #expect(EditorNativeTextActions.perform(.copy, on: textView))
+        #expect(NSPasteboard.general.string(forType: .string) == "line1\nline3\n")
+
+        #expect(EditorNativeTextActions.perform(.duplicateLine, on: textView))
+        #expect(textView.string == "line1\nline1\nline2\nline3\nline3\nline4\n")
+        #expect(textView.selectionManager.textSelections.count == 2)
+
+        textView.undoManager?.undo()
+        #expect(textView.string == "line1\nline2\nline3\nline4\n")
+
+        textView.selectionManager.setSelectedRanges([NSRange(location: 2, length: 0), NSRange(location: 14, length: 0)])
+        #expect(EditorNativeTextActions.perform(.deleteLine, on: textView))
+        #expect(textView.string == "line2\nline4\n")
+        #expect(textView.selectionManager.textSelections.count == 2)
+
+        textView.undoManager?.undo()
+        #expect(textView.string == "line1\nline2\nline3\nline4\n")
+
+        let same1 = NSRange(location: 1, length: 0)
+        let same2 = NSRange(location: 3, length: 0)
+        textView.selectionManager.setSelectedRanges([same1, same2])
+        #expect(EditorNativeTextActions.perform(.deleteLine, on: textView))
+        #expect(textView.string == "line2\nline3\nline4\n")
+    }
+
     @Test @MainActor func commandRouterKeepsMultipleWeakOwnersIndependent() throws {
         final class Owner {}
         let first = Owner()
@@ -172,6 +204,62 @@ struct EditorTextSearchTests {
         #expect(textView.string == "long long!")
     }
 
+    @Test @MainActor func replaceDoesNotDeleteAdjacentUnmatchedBracketViaFilter() {
+        final class SimulatedDeleteCloseDelegate: NSObject, TextViewDelegate {
+            var shouldReplaceContentsInInvoked = false
+            var willReplaceInvoked = false
+            var didReplaceInvoked = false
+
+            func textView(_ textView: TextView, shouldReplaceContentsIn range: NSRange, with string: String) -> Bool {
+                shouldReplaceContentsInInvoked = true
+                if string.isEmpty && (textView.string as NSString).substring(with: range) == "(" {
+                    let closeRange = NSRange(location: range.location + 1, length: 1)
+                    if closeRange.location + closeRange.length <= textView.textStorage.length,
+                       (textView.string as NSString).substring(with: closeRange) == ")" {
+                        textView.textStorage.replaceCharacters(in: closeRange, with: "")
+                    }
+                }
+                return true
+            }
+
+            func textView(_ textView: TextView, willReplaceContentsIn range: NSRange, with string: String) {
+                willReplaceInvoked = true
+            }
+
+            func textView(_ textView: TextView, didReplaceContentsIn range: NSRange, with string: String) {
+                didReplaceInvoked = true
+            }
+        }
+
+        let textView = TextView(string: "foo()")
+        let delegate = SimulatedDeleteCloseDelegate()
+        textView.delegate = delegate
+
+        let openParenRanges = EditorTextSearch.matches(in: textView.string, query: "(", caseSensitive: true)
+        #expect(openParenRanges.count == 1)
+
+        #expect(EditorTextEditing.replace(on: textView, ranges: openParenRanges, with: ""))
+        // Closing parenthesis must not be deleted.
+        #expect(textView.string == "foo)")
+        #expect(!delegate.shouldReplaceContentsInInvoked)
+        #expect(delegate.willReplaceInvoked)
+        #expect(delegate.didReplaceInvoked)
+
+        textView.undoManager?.undo()
+        #expect(textView.string == "foo()")
+
+        // Replace all with multiple brackets
+        let multiTextView = TextView(string: "foo() bar() baz()")
+        multiTextView.delegate = delegate
+        let multiOpen = EditorTextSearch.matches(in: multiTextView.string, query: "(", caseSensitive: true)
+        #expect(multiOpen.count == 3)
+        #expect(EditorTextEditing.replace(on: multiTextView, ranges: multiOpen, with: ""))
+        #expect(multiTextView.string == "foo) bar) baz)")
+
+        multiTextView.undoManager?.undo()
+        #expect(multiTextView.string == "foo() bar() baz()")
+    }
+
     @Test @MainActor func replacementDoesNotEditReadOnlyTextView() {
         let textView = TextView(string: "a a", isEditable: false)
         let ranges = EditorTextSearch.matches(in: textView.string, query: "a", caseSensitive: true)
@@ -218,5 +306,143 @@ struct EditorTextSearchTests {
         #expect(highlights.contains { $0.capture == .keyword })
         #expect(highlights.contains { $0.capture == .comment })
         #expect(highlights.contains { $0.capture == .string })
+    }
+
+    @Test @MainActor func deleteLineWithOverlappingExpandedLineRangesDoesNotCrash() {
+        let textView = TextView(string: "aaa\nbbb\nccc\nddd\n")
+        // Selections (1, 4) ("aa\nb") and (6, 4) ("b\ncc") overlap when expanded to lines.
+        textView.selectionManager.setSelectedRanges([
+            NSRange(location: 1, length: 4),
+            NSRange(location: 6, length: 4),
+        ])
+
+        #expect(EditorNativeTextActions.perform(.deleteLine, on: textView))
+        #expect(textView.string == "ddd\n")
+        #expect(textView.selectionManager.textSelections.first?.range.location == 0)
+
+        #expect(EditorNativeTextActions.perform(.undo, on: textView))
+        #expect(textView.string == "aaa\nbbb\nccc\nddd\n")
+    }
+
+    @Test @MainActor func insertLineBelowPlacesCursorOnNewLineAndAccountsForCumulativeOffsets() {
+        // Single cursor on first line of "a\nb\n"
+        let textView = TextView(string: "a\nb\n")
+        textView.selectionManager.setSelectedRange(NSRange(location: 0, length: 0))
+
+        #expect(EditorNativeTextActions.perform(.insertLineBelow, on: textView))
+        #expect(textView.string == "a\n\nb\n")
+        // Cursor must be on the newly inserted blank line (index 2), not before 'b' (index 3).
+        #expect(textView.selectionManager.textSelections.first?.range.location == 2)
+
+        // Multi-cursor test
+        let multiTextView = TextView(string: "a\nb\n")
+        multiTextView.selectionManager.setSelectedRanges([
+            NSRange(location: 0, length: 0),
+            NSRange(location: 2, length: 0),
+        ])
+
+        #expect(EditorNativeTextActions.perform(.insertLineBelow, on: multiTextView))
+        #expect(multiTextView.string == "a\n\nb\n\n")
+        let caretLocations = multiTextView.selectionManager.textSelections.map(\.range.location).sorted()
+        #expect(caretLocations == [2, 5])
+    }
+
+    @Test @MainActor func moveLineMultipleNonContiguousBlocksSingleUndo() {
+        let textView = TextView(string: "a\nb\nc\nd\ne\n")
+        // Cursors in line 1 ("b\n" at loc 2) and line 3 ("d\n" at loc 6)
+        textView.selectionManager.setSelectedRanges([
+            NSRange(location: 2, length: 0),
+            NSRange(location: 6, length: 0),
+        ])
+
+        #expect(EditorNativeTextActions.perform(.moveLineUp, on: textView))
+        #expect(textView.string == "b\na\nd\nc\ne\n")
+
+        // Single undo step must revert all moved blocks
+        #expect(EditorNativeTextActions.perform(.undo, on: textView))
+        #expect(textView.string == "a\nb\nc\nd\ne\n")
+    }
+
+    @Test func markdownImageCacheKeyDifferentiatesDirectoriesAndHosts() {
+        let dirA = URL(fileURLWithPath: "/project/docs")
+        let dirB = URL(fileURLWithPath: "/project/other")
+
+        let keyLocalA = MarkdownImageCacheHelper.cacheKey(
+            path: "images/a.png",
+            isRemote: false,
+            baseDirectory: dirA,
+            filesystem: nil
+        )
+        let keyLocalB = MarkdownImageCacheHelper.cacheKey(
+            path: "images/a.png",
+            isRemote: false,
+            baseDirectory: dirB,
+            filesystem: nil
+        )
+        #expect(keyLocalA != keyLocalB)
+        #expect(keyLocalA == "local:/project/docs/images/a.png")
+        #expect(keyLocalB == "local:/project/other/images/a.png")
+
+        let descriptorHost1 = WorkspaceDescriptor(
+            kind: .ssh,
+            id: "ssh:host1",
+            displayName: "host1",
+            workingDirectory: "/home/user"
+        )
+        let descriptorHost2 = WorkspaceDescriptor(
+            kind: .ssh,
+            id: "ssh:host2",
+            displayName: "host2",
+            workingDirectory: "/home/user"
+        )
+        let fs1 = UnavailableWorkspaceFilesystem(descriptor: descriptorHost1)
+        let fs2 = UnavailableWorkspaceFilesystem(descriptor: descriptorHost2)
+
+        let keyRemote1 = MarkdownImageCacheHelper.cacheKey(
+            path: "images/a.png",
+            isRemote: true,
+            baseDirectory: URL(fileURLWithPath: "/home/user"),
+            filesystem: fs1
+        )
+        let keyRemote2 = MarkdownImageCacheHelper.cacheKey(
+            path: "images/a.png",
+            isRemote: true,
+            baseDirectory: URL(fileURLWithPath: "/home/user"),
+            filesystem: fs2
+        )
+        #expect(keyRemote1 != keyRemote2)
+        #expect(keyRemote1 == "ssh:host1:/home/user/images/a.png")
+        #expect(keyRemote2 == "ssh:host2:/home/user/images/a.png")
+    }
+
+    @Test func markdownImageCacheStoresAndInvalidatesEntries() {
+        let key = "local:/test/img.png"
+        let img1 = NSImage()
+        let img2 = NSImage()
+        let date1 = Date(timeIntervalSince1970: 1_000)
+        let date2 = Date(timeIntervalSince1970: 2_000)
+
+        MarkdownImageCache.shared.setObject(
+            MarkdownImageCache.Entry(image: img1, modificationDate: date1, fileSize: 100),
+            forKey: key
+        )
+
+        let cached1 = MarkdownImageCache.shared.object(forKey: key)
+        #expect(cached1?.image === img1)
+        #expect(cached1?.modificationDate == date1)
+        #expect(cached1?.fileSize == 100)
+
+        // Updated entry for modified image
+        MarkdownImageCache.shared.setObject(
+            MarkdownImageCache.Entry(image: img2, modificationDate: date2, fileSize: 200),
+            forKey: key
+        )
+        let cached2 = MarkdownImageCache.shared.object(forKey: key)
+        #expect(cached2?.image === img2)
+        #expect(cached2?.modificationDate == date2)
+        #expect(cached2?.fileSize == 200)
+
+        MarkdownImageCache.shared.removeAllObjects()
+        #expect(MarkdownImageCache.shared.object(forKey: key) == nil)
     }
 }

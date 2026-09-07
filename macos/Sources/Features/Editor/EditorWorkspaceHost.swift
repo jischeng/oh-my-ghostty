@@ -133,6 +133,9 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                         EditorDocumentView(
                             document: document,
                             isActive: selected && workspace.isVisible,
+                            isSurfaceFocused: {
+                                (controller.focusedSurface ?? controller.surfaceTree.first) === surfaceView
+                            },
                             terminalBackground: NSColor(terminalColor),
                             terminalBackgroundOpacity: terminalOpacity,
                             onFocus: {
@@ -253,6 +256,7 @@ private struct EditorDocumentTab: View {
 private struct EditorDocumentView: View {
     @ObservedObject var document: EditorDocument
     let isActive: Bool
+    var isSurfaceFocused: () -> Bool = { true }
     let terminalBackground: NSColor
     let terminalBackgroundOpacity: Double
     let onFocus: () -> Void
@@ -283,19 +287,14 @@ private struct EditorDocumentView: View {
                 .padding(10)
                 .background(Color.red.opacity(0.1))
             }
-            if isMarkdownDocument && isPreviewMode {
-                MarkdownPreviewView(
-                    text: document.text,
-                    fileURL: URL(fileURLWithPath: document.path),
-                    terminalBackground: terminalBackground,
-                    terminalBackgroundOpacity: terminalBackgroundOpacity,
-                    foregroundColor: contrastingForeground
-                )
-            } else {
+            ZStack(alignment: .topLeading) {
                 CodeEditorView(
                     text: $document.text,
                     fileURL: URL(fileURLWithPath: document.path),
+                    isEditable: true,
                     isActive: isActive,
+                    isPreview: isMarkdownDocument && isPreviewMode,
+                    isSurfaceFocused: isSurfaceFocused,
                     terminalBackground: terminalBackground,
                     terminalBackgroundOpacity: terminalBackgroundOpacity,
                     terminalForeground: contrastingForeground,
@@ -308,6 +307,20 @@ private struct EditorDocumentView: View {
                     onSaveAll: saveAll
                 )
                 .id(document.contentGeneration)
+                .opacity((isMarkdownDocument && isPreviewMode) ? 0 : 1)
+                .allowsHitTesting(!(isMarkdownDocument && isPreviewMode))
+
+                if isMarkdownDocument && isPreviewMode {
+                    MarkdownPreviewView(
+                        text: document.text,
+                        fileURL: URL(fileURLWithPath: document.path),
+                        isRemote: document.filesystem.descriptor.kind == .ssh,
+                        filesystem: document.filesystem,
+                        terminalBackground: terminalBackground,
+                        terminalBackgroundOpacity: terminalBackgroundOpacity,
+                        foregroundColor: contrastingForeground
+                    )
+                }
             }
             Divider()
             HStack(spacing: 8) {

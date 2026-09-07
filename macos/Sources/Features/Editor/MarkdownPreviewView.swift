@@ -22,6 +22,8 @@ struct MarkdownPreviewView: NSViewRepresentable {
         configuration.userContentController.add(context.coordinator, name: "markdownPreview")
         let view = WKWebView(frame: .zero, configuration: configuration)
         view.setValue(false, forKey: "drawsBackground")
+        view.wantsLayer = true
+        view.layer?.backgroundColor = terminalBackground.cgColor
         view.navigationDelegate = context.coordinator
         context.coordinator.webView = view
         context.coordinator.update(self)

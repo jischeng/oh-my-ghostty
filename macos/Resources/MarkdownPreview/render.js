@@ -68,6 +68,20 @@
     let generation = 0;
     let queue = Promise.resolve();
     const assetURL = document.baseURI;
+    let mermaidPromise;
+    function ensureMermaid() {
+        if (window.mermaid) return Promise.resolve(window.mermaid);
+        if (!mermaidPromise) {
+            mermaidPromise = new Promise((resolve, reject) => {
+                const script = document.createElement('script');
+                script.src = new URL('mermaid.min.js', assetURL).href;
+                script.onload = () => resolve(window.mermaid);
+                script.onerror = () => reject(new Error('Mermaid bundle could not be loaded'));
+                document.head.appendChild(script);
+            });
+        }
+        return mermaidPromise;
+    }
     const sanitizeOptions = {
         ADD_TAGS: ['semantics', 'annotation'], ADD_ATTR: ['encoding'],
         FORBID_TAGS: ['style', 'script', 'iframe', 'object', 'embed', 'form', 'base', 'link', 'meta'],
@@ -103,10 +117,15 @@
             try { link.href = new URL(href, options.baseURL || assetURL).href; } catch (_) { link.removeAttribute('href'); }
             link.rel = 'noreferrer noopener';
         });
+        const blocks = Array.from(content.querySelectorAll('pre > code.language-mermaid'));
+        if (blocks.length === 0) {
+            if (request === generation) notify({type: 'rendered'});
+            return;
+        }
+        const mermaid = await ensureMermaid();
         mermaid.initialize({startOnLoad: false, securityLevel: 'strict', theme: theme === 'dark' ? 'dark' : 'default',
             suppressErrorRendering: true, maxTextSize: 50000, htmlLabels: false, flowchart: {htmlLabels: false},
             secure: ['secure', 'securityLevel', 'startOnLoad', 'maxTextSize', 'suppressErrorRendering', 'htmlLabels']});
-        const blocks = Array.from(content.querySelectorAll('pre > code.language-mermaid'));
         for (let index = 0; index < blocks.length; index++) {
             if (request !== generation) return;
             const block = blocks[index];

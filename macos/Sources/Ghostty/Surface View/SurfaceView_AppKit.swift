@@ -1339,6 +1339,9 @@ extension Ghostty {
 
         /// Special case handling for some control keys
         override func performKeyEquivalent(with event: NSEvent) -> Bool {
+            // A visible Markdown editor owns its responder's shortcuts, even if
+            // this pane's terminal remains mounted underneath the preview.
+            if MarkdownPreviewWebView.ownsResponder(window?.firstResponder) { return false }
             // We only care about key down events. It might not even be possible
             // to receive any other event type here.
             guard event.type == .keyDown else { return false }

@@ -646,7 +646,7 @@ extension Ghostty {
                         // Leave the core callback before resolving paths or changing pane state.
                         Task { @MainActor [weak view] in
                             guard let view else { return }
-                            _ = TerminalPathOpener.open(link.url, from: view)
+                            _ = TerminalPathOpener.open(link.url, from: view, baseDirectory: link.baseDirectory)
                         }
                         return true
                     }

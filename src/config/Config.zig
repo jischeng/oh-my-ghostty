@@ -4011,6 +4011,15 @@ pub fn default(alloc_gpa: Allocator) Allocator.Error!Config {
     // Add our default command palette entries
     try result.@"command-palette-entry".init(alloc);
 
+    // Quoted paths must win over a partial URL/path match inside their quotes.
+    if (comptime builtin.target.os.tag == .macos) {
+        try result.link.links.append(alloc, .{
+            .regex = @import("omg_path.zig").quoted_regex,
+            .action = .{ .open = {} },
+            .highlight = .{ .hover_mods = inputpkg.ctrlOrSuper(.{}) },
+        });
+    }
+
     // Add our default link for URL detection
     try result.link.links.append(alloc, .{
         .regex = url.regex,
@@ -4869,7 +4878,7 @@ pub fn finalize(self: *Config) !void {
 
     // Disable both URL detection and OMG's macOS bare path fallback together.
     if (!self.@"link-url") {
-        const default_count: usize = if (builtin.target.os.tag == .macos) 2 else 1;
+        const default_count: usize = if (builtin.target.os.tag == .macos) 3 else 1;
         self.link.links.items = self.link.links.items[default_count..];
     }
 

@@ -75,7 +75,7 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                 if controller.focusedSurface !== surfaceView {
                     controller.focusedSurface = surfaceView
                 }
-            } else if controller.focusedSurface === surfaceView {
+            } else if controller.focusedSurface === surfaceView, controller.window?.isVisible == true {
                 controller.focusSurface(surfaceView)
             }
         }
@@ -308,12 +308,16 @@ private struct EditorDocumentView: View {
 
                 if isMarkdownDocument && isPreviewMode {
                     MarkdownPreviewView(
-                        text: document.text,
+                        text: $document.text,
                         fileURL: URL(fileURLWithPath: document.path),
                         isRemote: document.filesystem.descriptor.kind == .ssh,
                         filesystem: document.filesystem,
                         terminalBackground: terminalBackground,
-                        foregroundColor: terminalTheme.text
+                        foregroundColor: terminalTheme.text,
+                        isActive: isActive,
+                        onFocus: onFocus,
+                        onSave: save,
+                        onSaveAll: saveAll
                     )
                     .id(document.contentGeneration)
                 }

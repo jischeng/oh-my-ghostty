@@ -1,0 +1,16 @@
+.milkdown { --crepe-color-background: transparent; --crepe-color-on-background: var(--foreground); --crepe-color-surface: var(--subtle); --crepe-color-on-surface: var(--foreground); --crepe-color-outline: var(--border); --crepe-color-primary: var(--link); --crepe-color-inline-code: var(--foreground); --crepe-color-surface-low: var(--subtle); --crepe-color-surface-high: var(--subtle); --crepe-color-on-surface-variant: var(--muted); --crepe-color-on-primary: white; }
+.milkdown .ProseMirror { padding: 0; outline: none; min-height: calc(100vh - 90px); user-select: text; -webkit-user-select: text; }
+.milkdown .ProseMirror h1,.milkdown .ProseMirror h2,.milkdown .ProseMirror h3,.milkdown .ProseMirror h4,.milkdown .ProseMirror h5,.milkdown .ProseMirror h6 { font-family: inherit; }
+.milkdown .ProseMirror p,.milkdown .ProseMirror li { font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+.omg-preserved-markdown { user-select: text; -webkit-user-select: text; }
+.omg-preserved-source { display: block; width: 100%; min-height: 5em; resize: vertical; border: 1px solid var(--link); border-radius: 4px; padding: 8px; background: var(--subtle); color: var(--foreground); font: 13px/1.6 ui-monospace, SFMono-Regular, monospace; user-select: text; -webkit-user-select: text; }
+.omg-preserved-controls { display: flex; justify-content: flex-end; gap: 8px; padding: 6px 0; }
+.omg-preserved-controls button { border: 1px solid var(--border); border-radius: 4px; background: var(--subtle); color: var(--foreground); padding: 4px 12px; }
+.milkdown .ProseMirror .milkdown-code-block { margin: 0 0 16px; }
+.milkdown .ProseMirror .tableWrapper { overflow-x: auto; }
+.milkdown .ProseMirror table { width: 100%; }
+.milkdown .ProseMirror img { max-width: 100%; }
+.milkdown .ProseMirror .cm-editor { background: transparent; }
+[data-theme="dark"] .milkdown { --crepe-color-surface: #24282e; --crepe-color-surface-low: #292e35; --crepe-color-secondary: #343b44; --crepe-color-on-secondary: #e6edf3; --crepe-color-hover: #343b44; --crepe-color-selected: #3b5068; --crepe-color-inline-area: #343b44; }
+[data-theme="dark"] .milkdown .milkdown-code-block { background: #24282e; color: var(--foreground); }
+[data-theme="dark"] .milkdown .milkdown-code-block .cm-editor,[data-theme="dark"] .milkdown .milkdown-code-block .cm-gutters { background: #24282e; color: var(--foreground); }

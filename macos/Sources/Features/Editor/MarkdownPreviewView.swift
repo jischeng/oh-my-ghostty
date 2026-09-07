@@ -5,37 +5,45 @@ import WebKit
 
 /// The bundled renderer shares one filesystem boundary with the native editor.
 struct MarkdownPreviewView: NSViewRepresentable {
-    let text: String
+    @Binding var text: String
     let fileURL: URL?
     var isRemote: Bool = false
     var filesystem: (any WorkspaceFilesystem)?
     let terminalBackground: NSColor
     let foregroundColor: NSColor
+    var isActive = true
+    var onFocus: () -> Void = {}
+    var onSave: () -> Void = {}
+    var onSaveAll: () -> Void = {}
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    func makeNSView(context: Context) -> WKWebView {
+    func makeNSView(context: Context) -> MarkdownPreviewWebView {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         configuration.setURLSchemeHandler(context.coordinator.resources, forURLScheme: "omg-markdown")
         configuration.setURLSchemeHandler(context.coordinator.resources, forURLScheme: "omg-markdown-image")
         configuration.userContentController.add(context.coordinator, name: "markdownPreview")
-        let view = WKWebView(frame: .zero, configuration: configuration)
+        let view = MarkdownPreviewWebView(frame: .zero, configuration: configuration)
         view.setValue(false, forKey: "drawsBackground")
         view.wantsLayer = true
         view.layer?.backgroundColor = terminalBackground.cgColor
         view.navigationDelegate = context.coordinator
         context.coordinator.webView = view
+        EditorCommandRouter.shared.register(owner: context.coordinator) { [weak coordinator = context.coordinator] event in
+            coordinator?.handleKey(event) ?? false
+        }
         context.coordinator.update(self)
         view.load(URLRequest(url: URL(string: "omg-markdown://bundle/template.html")!))
         return view
     }
 
-    func updateNSView(_ view: WKWebView, context: Context) {
+    func updateNSView(_ view: MarkdownPreviewWebView, context: Context) {
         context.coordinator.update(self)
     }
 
-    static func dismantleNSView(_ view: WKWebView, coordinator: Coordinator) {
+    static func dismantleNSView(_ view: MarkdownPreviewWebView, coordinator: Coordinator) {
+        EditorCommandRouter.shared.unregister(owner: coordinator)
         coordinator.renderTask?.cancel()
         coordinator.resources.cancelAll()
         view.stopLoading()
@@ -50,8 +58,19 @@ struct MarkdownPreviewView: NSViewRepresentable {
         var renderTask: Task<Void, Never>?
         private var ready = false
         private var payload: String?
+        private var payloadText: String?
+        private var binding: Binding<String>?
+        private var isActive = false
+        private var onFocus: () -> Void = {}
+        private var onSave: () -> Void = {}
+        private var onSaveAll: () -> Void = {}
 
         func update(_ preview: MarkdownPreviewView) {
+            binding = preview.$text
+            isActive = preview.isActive
+            onFocus = preview.onFocus
+            onSave = preview.onSave
+            onSaveAll = preview.onSaveAll
             let directory = preview.fileURL?.deletingLastPathComponent()
                 ?? URL(fileURLWithPath: NSTemporaryDirectory())
             // Never fall back to the local host for a disconnected SSH document.
@@ -68,28 +87,86 @@ struct MarkdownPreviewView: NSViewRepresentable {
                     // The host already paints the shared terminal backdrop.
                     "background": "transparent",
                     "foreground": Self.cssColor(preview.foregroundColor),
+                    "editable": preview.isActive,
+                    "language": SettingsStrings(language: OhMyGhosttySettings.shared.language).languageCode,
                 ],
             ]
             guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]),
                   let nextPayload = String(data: data, encoding: .utf8), nextPayload != payload else { return }
             payload = nextPayload
+            payloadText = preview.text
             scheduleRender()
         }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             guard message.frameInfo.isMainFrame,
-                  let body = message.body as? [String: String], body["type"] == "ready" else { return }
-            ready = true
-            scheduleRender()
+                  let body = message.body as? [String: String] else { return }
+            switch body["type"] {
+            case "ready":
+                ready = true
+                scheduleRender()
+            case "focus":
+                if isActive { onFocus() }
+            case "edit":
+                guard isActive, let binding, let base = body["baseText"], let updated = body["text"],
+                      MarkdownPreviewEdit.canApply(current: binding.wrappedValue, base: base, updated: updated) else {
+                    scheduleRender()
+                    return
+                }
+                binding.wrappedValue = updated
+            default:
+                break
+            }
+        }
+
+        func handleKey(_ event: NSEvent) -> Bool {
+            guard isActive, let webView, event.window === webView.window,
+                  let responder = webView.window?.firstResponder as? NSView,
+                  responder === webView || responder.isDescendant(of: webView) else { return false }
+            let mods = event.modifierFlags.intersection([.command, .option, .control, .shift])
+            let key = event.charactersIgnoringModifiers?.lowercased()
+            if mods == .command, key == "c" {
+                webView.evaluateJavaScript("""
+                (() => { const e = document.activeElement;
+                    return e && (e.tagName === 'TEXTAREA' || e.tagName === 'INPUT')
+                        ? e.value.slice(e.selectionStart, e.selectionEnd) : window.getSelection().toString(); })()
+                """) { value, _ in
+                    guard let text = value as? String, !text.isEmpty else { return }
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                }
+                return true
+            }
+            if mods == .command, key == "a" {
+                webView.evaluateJavaScript("document.execCommand('selectAll')", completionHandler: nil)
+                return true
+            }
+            if key == "s", mods == .command || mods == [.command, .option] {
+                let saveAll = mods.contains(.option)
+                let base = binding?.wrappedValue
+                webView.callAsyncJavaScript("return window.getMarkdown ? await window.getMarkdown() : null;",
+                                            arguments: [:], in: nil, in: .page) { [weak self] result in
+                    guard let self, self.isActive else { return }
+                    if case .success(let text as String) = result, let binding = self.binding,
+                       let base, MarkdownPreviewEdit.canApply(current: binding.wrappedValue, base: base, updated: text) {
+                        binding.wrappedValue = text
+                    }
+                    if saveAll { self.onSaveAll() } else { self.onSave() }
+                }
+                return true
+            }
+            return false
         }
 
         private func scheduleRender() {
             renderTask?.cancel()
             guard ready, let payload else { return }
+            let text = payloadText
             renderTask = Task { [weak self] in
                 // Coalesce autosave/editor updates while typing.
                 try? await Task.sleep(nanoseconds: 120_000_000)
                 guard !Task.isCancelled, let self else { return }
+                guard self.binding?.wrappedValue == text else { return }
                 self.webView?.evaluateJavaScript(
                     "(() => { const p = \(payload); window.renderMarkdown(p.text, p.options); })();",
                     completionHandler: nil
@@ -116,6 +193,25 @@ struct MarkdownPreviewView: NSViewRepresentable {
             return "rgba(\(Int(rgb.redComponent * 255)),\(Int(rgb.greenComponent * 255)),"
                 + "\(Int(rgb.blueComponent * 255)),\(alpha ?? Double(rgb.alphaComponent)))"
         }
+    }
+}
+
+enum MarkdownPreviewEdit {
+    static func canApply(current: String, base: String, updated: String) -> Bool {
+        current == base && updated.utf8.count <= 10 * 1_024 * 1_024 && !updated.contains("\0")
+    }
+}
+
+final class MarkdownPreviewWebView: WKWebView {
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    static func ownsResponder(_ responder: NSResponder?) -> Bool {
+        var view = responder as? NSView
+        while let current = view {
+            if current is MarkdownPreviewWebView { return true }
+            view = current.superview
+        }
+        return false
     }
 }
 

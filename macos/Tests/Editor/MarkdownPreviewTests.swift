@@ -104,7 +104,7 @@ struct MarkdownPreviewTests {
             "options": ["baseURL": MarkdownPreviewResources.imageBaseURL(directory: directory).absoluteString],
         ])
         let json = try #require(String(data: payload, encoding: .utf8))
-        _ = try await webView.evaluateJavaScript("{ const p = \(json); window.renderMarkdown(p.text, p.options); } true;")
+        _ = try await webView.evaluateJavaScript("{ const p = \(json); window.renderMarkdownReadonly(p.text, p.options); } true;")
         try await messages.wait(for: "rendered")
         let result = try #require(try await webView.evaluateJavaScript("""
         (() => {

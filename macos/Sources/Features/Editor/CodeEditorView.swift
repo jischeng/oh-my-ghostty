@@ -860,7 +860,7 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
             guard isSurfaceFocused() else { return false }
             guard let action = keymap.action(for: event) else { return false }
             switch action {
-            case .save, .saveAll, .close, .open, .nextDocument, .previousDocument:
+            case .close, .open, .nextDocument, .previousDocument:
                 return actionHandler(action)
             default:
                 return false

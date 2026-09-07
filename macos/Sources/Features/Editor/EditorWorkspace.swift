@@ -78,7 +78,8 @@ final class EditorWorkspace: ObservableObject {
         }
     }
 
-    func open(path: String, filesystem: any WorkspaceFilesystem) {
+    func open(path: String, filesystem: any WorkspaceFilesystem, externalFallback: Bool = false) {
+        let wasVisible = isVisible
         isVisible = true
         errorMessage = nil
         openTask?.cancel()
@@ -99,6 +100,17 @@ final class EditorWorkspace: ObservableObject {
             } catch {
                 guard !Task.isCancelled, let self else { return }
                 isLoading = false
+                if externalFallback, EditorFileOpening.isUnsupported(error) {
+                    do {
+                        try await EditorFileOpening.openExternally(path: path, filesystem: filesystem)
+                        guard !Task.isCancelled else { return }
+                        isVisible = wasVisible
+                        return
+                    } catch {
+                        errorMessage = error.localizedDescription
+                        return
+                    }
+                }
                 errorMessage = error.localizedDescription
             }
         }
@@ -254,13 +266,27 @@ final class EditorWorkspaceStore {
             .first(where: { $0.tabSessionID == context.tabID }),
               let source = controller.surfaceTree.first(where: { $0.id == context.surfaceID })
                 ?? controller.focusedSurface ?? controller.surfaceTree.first else { return }
+        let filesystem = WorkspaceFilesystemFactory.make(for: context)
+        if EditorFileOpening.prefersDefaultApplication(path: path) {
+            Task {
+                do {
+                    try await EditorFileOpening.openExternally(path: path, filesystem: filesystem)
+                } catch {
+                    let workspace = workspace(for: controller.tabSessionID, surfaceID: source.id)
+                    workspace.errorMessage = error.localizedDescription
+                    workspace.isVisible = true
+                }
+            }
+            return
+        }
         guard let target = EditorPaneDestination.open(
             in: controller, source: source,
             destination: destination ?? OhMyGhosttySettings.shared.editorFileOpenDestination
         ) else { return }
         workspace(for: target.controller.tabSessionID, surfaceID: target.surface.id).open(
             path: path,
-            filesystem: WorkspaceFilesystemFactory.make(for: context)
+            filesystem: filesystem,
+            externalFallback: true
         )
     }
 

@@ -88,6 +88,9 @@
         FORBID_ATTR: ['srcset'], ALLOW_DATA_ATTR: false
     };
     function notify(message) { window.webkit?.messageHandlers?.markdownPreview?.postMessage(message); }
+    // Shared sanitized rendering for preserved rich blocks in the live editor.
+    window.omgMarkdownFragment = markdown => DOMPurify.sanitize(md.render(String(markdown)), sanitizeOptions);
+    window.omgEnsureMermaid = ensureMermaid;
     async function render(markdown, options, request) {
         if (request !== generation) return;
         const content = document.getElementById('content');
@@ -149,5 +152,6 @@
         queue = queue.catch(() => {}).then(() => render(markdown, options, request));
         return queue;
     };
-    notify({type: 'ready'});
+    window.renderMarkdownReadonly = window.renderMarkdown;
+    // live-editor.js sends ready after installing the editable render API.
 })();

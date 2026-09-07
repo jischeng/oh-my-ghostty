@@ -1,0 +1,8 @@
+{
+  "name": "omg-markdown-editor",
+  "private": true,
+  "type": "module",
+  "scripts": {"build": "node build.mjs"},
+  "dependencies": {"@milkdown/crepe": "7.22.1", "@milkdown/kit": "7.22.1"},
+  "devDependencies": {"esbuild": "0.25.12", "jsdom": "26.1.0"}
+}

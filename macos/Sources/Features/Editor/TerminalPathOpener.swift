@@ -10,6 +10,11 @@ enum TerminalPathTarget {
 
     static func path(_ value: String, directory: String, isRemote: Bool) -> String? {
         guard !value.isEmpty, value.utf8.count <= 16_384 else { return nil }
+        var value = value
+        if value.count >= 2, let first = value.first,
+           first == "'" || first == "\"", value.last == first {
+            value = String(value.dropFirst().dropLast())
+        }
         let path: String
         if value.lowercased().hasPrefix("file:") {
             guard let url = URL(string: value), url.isFileURL else { return nil }
@@ -34,7 +39,10 @@ enum TerminalPathTarget {
             guard !isRemote else { return nil }
             return (path as NSString).expandingTildeInPath
         }
-        return path.hasPrefix("/") ? path : (directory as NSString).appendingPathComponent(path)
+        if path.hasPrefix("/") { return path }
+        // An empty base explicitly means the clicked output's cwd is no longer known.
+        guard !directory.isEmpty else { return nil }
+        return (directory as NSString).appendingPathComponent(path)
     }
 
     static func directoryCommand(_ path: String) -> String {
@@ -45,7 +53,7 @@ enum TerminalPathTarget {
 @MainActor
 enum TerminalPathOpener {
     /// Return true for file candidates even when absent, so prose cannot reach Launch Services.
-    static func open(_ value: String, from source: Ghostty.SurfaceView) -> Bool {
+    static func open(_ value: String, from source: Ghostty.SurfaceView, baseDirectory: String? = nil) -> Bool {
         guard TerminalPathTarget.isCandidate(value) else { return false }
         guard let controller = source.window?.windowController as? TerminalController,
               let session = controller.paneSessionContext(for: source) else { return true }
@@ -55,7 +63,10 @@ enum TerminalPathOpener {
             workingDirectory: session.workingDirectory, workspace: session.workspace, session: session
         )
         let filesystem = WorkspaceFilesystemFactory.make(for: context)
-        guard let path = TerminalPathTarget.path(value, directory: filesystem.descriptor.workingDirectory,
+        let directory = baseDirectory.map { value in
+            value.hasPrefix("file:") ? (URL(string: value)?.path ?? "") : value
+        } ?? filesystem.descriptor.workingDirectory
+        guard let path = TerminalPathTarget.path(value, directory: directory,
                                                  isRemote: filesystem.descriptor.kind == .ssh) else { return true }
         Task { [weak controller, weak source] in
             do {

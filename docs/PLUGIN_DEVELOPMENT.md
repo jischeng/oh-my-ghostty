@@ -996,3 +996,19 @@ The directory default applies only to Command-click navigation, not Files tree
 expansion. Current-pane directory navigation changes the existing shell's cwd;
 new panes start in the requested directory, using the existing SSH replay path
 for remote sessions. These host-owned actions add no external plugin permission.
+
+Relative terminal links now carry the cwd recorded at their output position,
+using OSC 7 transitions anchored to tracked screen pins. Changing directories
+does not reinterpret older filenames against the new cwd. Each screen retains
+at most 1024 transitions with paths up to 4096 bytes; unknown/expired metadata
+does not fall back to guessing the current directory. Quoted names containing
+spaces are matched as one path. Absolute links are independent of this history.
+The additional native `open_url` cwd fields are not plugin wire capabilities.
+
+Known non-text formats (including DMG, PDF and images) use the system default
+application before creating an editor pane. Binary/unsupported-encoding and
+oversized text failures also fall back to the default application. Remote
+external files reuse the bounded read-only temporary download used by Open in…;
+external changes are not uploaded. Markdown Preview now supports local WYSIWYG
+editing, with version-checked text updates flowing through the same document
+save boundary, without granting web content direct filesystem write access.

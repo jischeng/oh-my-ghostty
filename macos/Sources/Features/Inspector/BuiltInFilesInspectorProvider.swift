@@ -280,19 +280,7 @@ final class BuiltInFilesInspectorProvider {
         guard panel.runModal() == .OK, let application = panel.url else { return }
         Task { [weak self] in
             do {
-                let url: URL
-                if remote {
-                    let data = try await state.filesystem.readFile(at: path)
-                    let directory = FileManager.default.temporaryDirectory
-                        .appendingPathComponent("omg-open-\(UUID().uuidString)", isDirectory: true)
-                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
-                                                           attributes: [.posixPermissions: 0o700])
-                    url = directory.appendingPathComponent(node.name)
-                    try data.write(to: url)
-                    try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: url.path)
-                } else {
-                    url = URL(fileURLWithPath: path)
-                }
+                let url = try await EditorFileOpening.externalURL(path: path, filesystem: state.filesystem)
                 let configuration = NSWorkspace.OpenConfiguration()
                 NSWorkspace.shared.open([url], withApplicationAt: application, configuration: configuration) { _, error in
                     guard let error else { return }

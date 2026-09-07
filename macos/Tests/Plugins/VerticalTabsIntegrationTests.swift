@@ -871,6 +871,7 @@ struct VerticalTabsIntegrationTests {
         #expect(controllers.allSatisfy { $0.sidebarWidth == 340 })
         try await Task.sleep(for: .milliseconds(1_200))
         let rapidToggleSurfaceSizes = controllers.map(surfaceSize)
+        let rapidToggleInspectorVisible = eighth.tabLayoutState.isInspectorVisible
 
         for _ in 0..<4 {
             eighth.setSidebarVisible(false)
@@ -884,7 +885,7 @@ struct VerticalTabsIntegrationTests {
         }
         try await Task.sleep(for: .milliseconds(300))
         #expect(eighth.sidebarIsShowing)
-        #expect(!eighth.tabLayoutState.isInspectorVisible)
+        #expect(eighth.tabLayoutState.isInspectorVisible == rapidToggleInspectorVisible)
         #expect(controllers.map(surfaceSize) == rapidToggleSurfaceSizes)
 
         try await applyConfig(

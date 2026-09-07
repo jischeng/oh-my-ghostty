@@ -4438,14 +4438,22 @@ test "Terminal: alternate resize replacement failure falls back to primary" {
 
 /// Set the pwd for the terminal.
 pub fn setPwd(self: *Terminal, pwd: []const u8) !void {
+    errdefer if (comptime @import("builtin").target.os.tag == .macos) {
+        const screen = self.screens.active;
+        screen.omg_cwd_history.deinit(screen.alloc, &screen.pages);
+    };
+    const capacity = std.math.add(usize, pwd.len, 1) catch
+        return error.OutOfMemory;
+    if (pwd.len > 0) try self.pwd.ensureTotalCapacity(self.gpa(), capacity);
+
+    if (comptime @import("builtin").target.os.tag == .macos) {
+        const screen = self.screens.active;
+        try screen.omg_cwd_history.record(screen.alloc, &screen.pages, screen.cursor.page_pin.*, pwd);
+    }
     if (pwd.len == 0) {
         self.pwd.clearRetainingCapacity();
         return;
     }
-
-    const capacity = std.math.add(usize, pwd.len, 1) catch
-        return error.OutOfMemory;
-    try self.pwd.ensureTotalCapacity(self.gpa(), capacity);
 
     self.pwd.items.len = capacity;
     std.mem.copyForwards(u8, self.pwd.items[0..pwd.len], pwd);

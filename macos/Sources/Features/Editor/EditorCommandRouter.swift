@@ -405,10 +405,9 @@ enum EditorNativeTextActions {
                 }
             }
 
-            textView._undoManager?.beginGrouping()
-            defer { textView._undoManager?.endGrouping() }
-            textView.undoManager?.beginUndoGrouping()
-            defer { textView.undoManager?.endUndoGrouping() }
+            let original = textView.string as NSString
+            let edited = NSMutableString(string: textView.string)
+            var affected: NSRange?
 
             var newSelections: [NSRange] = []
             for block in blocks {
@@ -418,7 +417,7 @@ enum EditorNativeTextActions {
                     }
                     continue
                 }
-                let source = textView.string as NSString
+                let source = edited as NSString
                 let prevLineRange = source.lineRange(for: NSRange(location: block.location - 1, length: 0))
                 let currentBlockText = source.substring(with: block)
                 let prevLineText = source.substring(with: prevLineRange)
@@ -430,12 +429,16 @@ enum EditorNativeTextActions {
                 }
                 let combinedRange = NSRange(location: prevLineRange.location, length: prevLineRange.length + block.length)
                 let swappedText = newBlockText + newPrevText
-                textView.replaceCharacters(in: combinedRange, with: swappedText)
+                edited.replaceCharacters(in: combinedRange, with: swappedText)
+                affected = affected.map { NSUnionRange($0, combinedRange) } ?? combinedRange
 
                 for co in cursorOffsets where blocks[co.blockIdx].location == block.location {
                     let newLoc = prevLineRange.location + co.offset
                     newSelections.append(NSRange(location: min(newLoc, textView.textStorage.length), length: co.length))
                 }
+            }
+            if let affected, original.substring(with: affected) != edited.substring(with: affected) {
+                EditorTextEditing.replace(on: textView, ranges: [affected], with: edited.substring(with: affected))
             }
             if !newSelections.isEmpty {
                 select(newSelections, on: textView)
@@ -458,14 +461,13 @@ enum EditorNativeTextActions {
                 }
             }
 
-            textView._undoManager?.beginGrouping()
-            defer { textView._undoManager?.endGrouping() }
-            textView.undoManager?.beginUndoGrouping()
-            defer { textView.undoManager?.endUndoGrouping() }
+            let original = textView.string as NSString
+            let edited = NSMutableString(string: textView.string)
+            var affected: NSRange?
 
             var newSelections: [NSRange] = []
             for block in blocks.reversed() {
-                let source = textView.string as NSString
+                let source = edited as NSString
                 let endOfBlock = NSMaxRange(block)
                 guard endOfBlock < source.length else {
                     for co in cursorOffsets where blocks[co.blockIdx].location == block.location {
@@ -484,12 +486,16 @@ enum EditorNativeTextActions {
                 }
                 let combinedRange = NSRange(location: block.location, length: block.length + nextLineRange.length)
                 let swappedText = newNextText + newBlockText
-                textView.replaceCharacters(in: combinedRange, with: swappedText)
+                edited.replaceCharacters(in: combinedRange, with: swappedText)
+                affected = affected.map { NSUnionRange($0, combinedRange) } ?? combinedRange
 
                 for co in cursorOffsets where blocks[co.blockIdx].location == block.location {
                     let newLoc = block.location + (newNextText as NSString).length + co.offset
                     newSelections.append(NSRange(location: min(newLoc, textView.textStorage.length), length: co.length))
                 }
+            }
+            if let affected, original.substring(with: affected) != edited.substring(with: affected) {
+                EditorTextEditing.replace(on: textView, ranges: [affected], with: edited.substring(with: affected))
             }
             if !newSelections.isEmpty {
                 select(newSelections.sorted(by: { $0.location < $1.location }), on: textView)

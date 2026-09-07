@@ -46,6 +46,7 @@ public final class CompletionState: ObservableObject {
         prefixRange: NSRange,
         at point: CGPoint
     ) {
+        let candidates = candidates.filter { $0.label.lowercased().hasPrefix(prefix.lowercased()) }
         self.candidates = candidates
         self.prefix = prefix
         self.prefixRange = prefixRange
@@ -60,7 +61,7 @@ public final class CompletionState: ObservableObject {
         self.prefixRange = prefixRange
         self.presentationPoint = point
         let lower = prefix.lowercased()
-        let matching = candidates.filter { $0.label.lowercased().contains(lower) }
+        let matching = candidates.filter { $0.label.lowercased().hasPrefix(lower) }
         self.candidates = matching
         self.selectedIndex = selected.flatMap { matching.firstIndex(of: $0) } ?? 0
         self.isPresented = !matching.isEmpty

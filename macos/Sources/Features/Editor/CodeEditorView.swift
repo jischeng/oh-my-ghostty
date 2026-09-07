@@ -20,6 +20,7 @@ struct CodeEditorView: View {
     var terminalBackground: NSColor = .textBackgroundColor
     var terminalBackgroundOpacity: Double = 1.0
     var terminalForeground: NSColor = .textColor
+    var terminalTheme: EditorTheme?
     var onFocus: () -> Void = {}
     var onSave: () -> Void = {}
     var onClose: () -> Void = {}
@@ -31,7 +32,6 @@ struct CodeEditorView: View {
     @State private var cursorPositions: [CursorPosition] = []
     @State private var editorCoordinator = EditorCoordinator()
     @StateObject private var completionState = CompletionState()
-    @State private var isCursorPushed = false
     @State private var isFindVisible = false
     @State private var findText = ""
     @State private var replaceText = ""
@@ -50,6 +50,7 @@ struct CodeEditorView: View {
         terminalBackground: NSColor = .textBackgroundColor,
         terminalBackgroundOpacity: Double = 1.0,
         terminalForeground: NSColor = .textColor,
+        terminalTheme: EditorTheme? = nil,
         onFocus: @escaping () -> Void = {},
         onSave: @escaping () -> Void = {},
         onClose: @escaping () -> Void = {},
@@ -67,6 +68,7 @@ struct CodeEditorView: View {
         self.terminalBackground = terminalBackground
         self.terminalBackgroundOpacity = terminalBackgroundOpacity
         self.terminalForeground = terminalForeground
+        self.terminalTheme = terminalTheme
         self.onFocus = onFocus
         self.onSave = onSave
         self.onClose = onClose
@@ -97,15 +99,6 @@ struct CodeEditorView: View {
                 coordinators: [editorCoordinator]
             )
             .clipped()
-            .onHover { inside in
-                if inside && !isCursorPushed {
-                    isCursorPushed = true
-                    NSCursor.iBeam.push()
-                } else if !inside && isCursorPushed {
-                    isCursorPushed = false
-                    NSCursor.pop()
-                }
-            }
 
             if completionState.isPresented && !completionState.candidates.isEmpty {
                 EditorCompletionPopupView(state: completionState) { item in
@@ -122,12 +115,6 @@ struct CodeEditorView: View {
             }
         }
         .background(Color.clear)
-        .onDisappear {
-            if isCursorPushed {
-                isCursorPushed = false
-                NSCursor.pop()
-            }
-        }
         .onAppear {
             editorCoordinator.setCompletionState(completionState)
             editorCoordinator.setFileURL(fileURL)
@@ -147,6 +134,8 @@ struct CodeEditorView: View {
             editorCoordinator.setIsPreview(isPreview)
         }
         .onChange(of: settings.editorKeymapPreset) { _ in configureCommands() }
+        .onChange(of: resolvedTheme) { _ in editorCoordinator.refreshBackground() }
+        .onChange(of: editorSettings) { _ in editorCoordinator.refreshBackground() }
         .onChange(of: findText) { _ in
             refreshSearchMatches()
             guard isFindVisible, barMode != .goToLine else { return }
@@ -367,37 +356,30 @@ struct CodeEditorView: View {
     }
 
     private var resolvedTheme: EditorTheme {
-        var baseTheme: EditorTheme
-        switch editorSettings.syntaxTheme {
-        case .oneDark: baseTheme = .oneDark
-        case .oneLight: baseTheme = .oneLight
-        case .dracula: baseTheme = .dracula
-        case .githubDark: baseTheme = .githubDark
-        case .nord: baseTheme = .nord
-        case .monokai: baseTheme = .monokai
-        case .catppuccinMocha: baseTheme = .catppuccinMocha
-        case .followTerminal: baseTheme = .adaptive(background: .clear, foreground: editorForeground)
-        }
-        baseTheme.background = editorSettings.backgroundMode == .followTerminal
-            ? terminalBackground : .textBackgroundColor
-        return baseTheme
-    }
-
-    private var editorForeground: NSColor {
-        editorSettings.backgroundMode == .followTerminal ? terminalForeground : .textColor
+        var theme = editorSettings.followsOMG
+            ? terminalTheme ?? .adaptive(background: terminalBackground, foreground: terminalForeground)
+            : editorSettings.syntaxTheme.preset
+        // The workspace paints one backdrop for toolbar, gutter and text.
+        theme.background = .clear
+        return theme
     }
 
     private enum BarMode { case find, replace, goToLine }
 }
 
 @MainActor
-final class EditorCoordinator: @preconcurrency TextViewCoordinator {
+final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurrency TextViewDelegate {
     let highlightProviders: [HighlightProviding] = [TreeSitterClient(), MarkdownHighlightProvider()]
     private weak var controller: TextViewController?
     private weak var completionState: CompletionState?
     private var completionTask: Task<Void, Never>?
     private var completionCursor: Int?
     private var mouseMonitor: Any?
+    private var textChangeObserver: NSObjectProtocol?
+    private var textWillChangeObserver: NSObjectProtocol?
+    private var editDepth = 0
+    private var groupsMultipleCarets = false
+    private var startedUndoGroup = false
     private var columnDragStart: CGPoint?
     private var fileURL: URL?
     private var cachedLanguage: CodeLanguage?
@@ -470,36 +452,37 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator {
             scrollView.automaticallyAdjustsContentInsets = false
             scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
             scrollView.documentCursor = .iBeam
-            scrollView.drawsBackground = true
-            scrollView.backgroundColor = controller.theme.background
-            scrollView.contentView.drawsBackground = false
-            scrollView.contentView.backgroundColor = .clear
-            for subview in scrollView.subviews {
-                for inner in subview.subviews where String(describing: type(of: inner)).contains("GutterView") {
-                    inner.setValue(controller.theme.background, forKey: "backgroundColor")
-                }
-            }
         }
-        controller.textView.selectionManager.selectionBackgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.65)
+        refreshBackground()
+        installTextObservers(controller: controller)
         installMouseMonitor()
         if isActive { registerCommands() }
         focusIfActive(onNextRunLoop: true)
     }
 
+    func refreshBackground() {
+        // CodeEdit reloadUI runs after prepareCoordinator and reinstates AppKit
+        // scroll backgrounds. Clear them after that update, including the
+        // macOS scroll view backing layer, so the workspace backdrop is visible.
+        DispatchQueue.main.async { [weak self] in
+            guard let scroll = self?.controller?.textView.enclosingScrollView else { return }
+            scroll.drawsBackground = false
+            scroll.backgroundColor = .clear
+            scroll.layer?.backgroundColor = NSColor.clear.cgColor
+            scroll.contentView.drawsBackground = false
+            scroll.contentView.backgroundColor = .clear
+            scroll.contentView.layer?.backgroundColor = NSColor.clear.cgColor
+        }
+    }
+
     private func installMouseMonitor() {
         guard mouseMonitor == nil else { return }
         mouseMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .mouseMoved]
+            matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]
         ) { [weak self] event in
-            guard let self, self.isActive, let textView = self.controller?.textView,
+            guard let self, self.isActive, !self.isPreview, let textView = self.controller?.textView,
                   event.window === textView.window else {
                 return event
-            }
-            if let scrollView = textView.enclosingScrollView {
-                let locInScroll = scrollView.convert(event.locationInWindow, from: nil)
-                if scrollView.bounds.contains(locInScroll) {
-                    NSCursor.iBeam.set()
-                }
             }
             let locInTextView = textView.convert(event.locationInWindow, from: nil)
 
@@ -571,6 +554,7 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator {
     }
 
     func setActive(_ isActive: Bool) {
+        refreshBackground()
         let didActivate = isActive && !self.isActive
         self.isActive = isActive
         if didActivate {
@@ -592,6 +576,7 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator {
     private(set) var isPreview: Bool = false
 
     func setIsPreview(_ isPreview: Bool) {
+        refreshBackground()
         let changed = self.isPreview != isPreview
         self.isPreview = isPreview
         if changed {
@@ -648,7 +633,49 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator {
         select(selectionAfterEdit, focusEditor: focusEditor)
     }
 
+    private func installTextObservers(controller: TextViewController) {
+        let textView = controller.textView!
+        textWillChangeObserver = NotificationCenter.default.addObserver(
+            forName: TextView.textWillChangeNotification, object: textView, queue: .main
+        ) { [weak self, weak textView] _ in
+            MainActor.assumeIsolated {
+                guard let self, let textView else { return }
+                self.editDepth += 1
+                guard self.editDepth == 1 else { return }
+                self.groupsMultipleCarets = textView.selectionManager.textSelections.count > 1
+                    && !textView.hasMarkedText() && textView.undoManager?.isUndoing != true
+                    && textView.undoManager?.isRedoing != true
+            }
+        }
+        textChangeObserver = NotificationCenter.default.addObserver(
+            forName: TextView.textDidChangeNotification, object: textView, queue: .main
+        ) { [weak self, weak controller] _ in
+            MainActor.assumeIsolated {
+                guard let self, let controller else { return }
+                self.editDepth = max(0, self.editDepth - 1)
+                guard self.editDepth == 0 else { return }
+                if self.startedUndoGroup {
+                    controller.textView._undoManager?.endGrouping()
+                    self.startedUndoGroup = false
+                }
+                self.groupsMultipleCarets = false
+                self.updateCompletion(controller: controller)
+            }
+        }
+    }
+
+    func textView(_ textView: TextView, didReplaceContentsIn range: NSRange, with string: String) {
+        // Begin after the first mutation has entered its own undo group, so
+        // the other carets join it without absorbing the preceding user action.
+        if groupsMultipleCarets, !startedUndoGroup, textView._undoManager?.isGrouping == false {
+            textView._undoManager?.beginGrouping()
+            startedUndoGroup = true
+        }
+    }
+
     func textViewDidChangeText(controller: TextViewController) {
+        // Explicit callers/tests may request completions; native edits use the
+        // transaction-complete notification after all selections are updated.
         updateCompletion(controller: controller)
     }
 
@@ -764,6 +791,9 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator {
                   textView.selectionManager.textSelections.count == 1,
                   self.selectedRange == NSRange(location: cursorLocation, length: 0) else { return }
 
+            let currentText = textView.string as NSString
+            guard NSMaxRange(prefixRange) <= currentText.length,
+                  currentText.substring(with: prefixRange) == prefix else { return }
             self.completionState?.update(
                 candidates: candidates,
                 prefix: prefix,
@@ -802,6 +832,12 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator {
     }
 
     func destroy() {
+        if let textChangeObserver { NotificationCenter.default.removeObserver(textChangeObserver) }
+        if let textWillChangeObserver { NotificationCenter.default.removeObserver(textWillChangeObserver) }
+        textChangeObserver = nil
+        textWillChangeObserver = nil
+        if startedUndoGroup { controller?.textView._undoManager?.endGrouping() }
+        startedUndoGroup = false
         if let mouseMonitor {
             NSEvent.removeMonitor(mouseMonitor)
             self.mouseMonitor = nil

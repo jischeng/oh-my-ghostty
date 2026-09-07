@@ -383,10 +383,20 @@ final class OhMyGhosttySettings: ObservableObject {
             requiresNewWindow: false, category: "editor"),
         .init(
             id: "editor.syntaxTheme", type: .enumeration,
-            defaultValue: EditorSyntaxTheme.oneDark.rawValue,
+            defaultValue: EditorSyntaxTheme.followTerminal.rawValue,
             allowedValues: EditorSyntaxTheme.allCases.map(\.rawValue),
             minimum: nil, maximum: nil,
             description: "Syntax highlighting style theme for the native editor.",
+            requiresNewWindow: false, category: "editor"),
+        .init(
+            id: "editor.opacity", type: .number, defaultValue: "1",
+            allowedValues: nil, minimum: 0.05, maximum: 1,
+            description: "Background opacity when the editor uses an independent theme.",
+            requiresNewWindow: false, category: "editor"),
+        .init(
+            id: "editor.blur", type: .enumeration, defaultValue: "disabled",
+            allowedValues: OhMyGhosttyBackgroundBlur.allCases.map(\.rawValue), minimum: nil, maximum: nil,
+            description: "Background effect when the editor uses an independent theme.",
             requiresNewWindow: false, category: "editor"),
         .init(
             id: "editor.fontFamily", type: .enumeration,
@@ -575,8 +585,14 @@ final class OhMyGhosttySettings: ObservableObject {
     @Published var editorBackgroundMode: EditorBackgroundMode = .followTerminal {
         didSet { persist("editor.backgroundMode", editorBackgroundMode.rawValue) }
     }
-    @Published var editorSyntaxTheme: EditorSyntaxTheme = .oneDark {
+    @Published var editorSyntaxTheme: EditorSyntaxTheme = .followTerminal {
         didSet { persist("editor.syntaxTheme", editorSyntaxTheme.rawValue) }
+    }
+    @Published var editorOpacity: Double = 1 {
+        didSet { persist("editor.opacity", min(max(editorOpacity, 0.05), 1)) }
+    }
+    @Published var editorBlur: OhMyGhosttyBackgroundBlur = .disabled {
+        didSet { persist("editor.blur", editorBlur.rawValue) }
     }
     @Published var editorFontFamily: EditorFontFamily = .jetbrainsMono {
         didSet { persist("editor.fontFamily", editorFontFamily.rawValue) }
@@ -812,7 +828,9 @@ final class OhMyGhosttySettings: ObservableObject {
             fontFamily: editorFontFamily,
             fontSize: editorFontSize,
             tabWidth: Int(editorTabWidth),
-            wordWrap: editorWordWrap
+            wordWrap: editorWordWrap,
+            opacity: editorOpacity,
+            blur: editorBlur
         )
     }
 
@@ -866,7 +884,9 @@ final class OhMyGhosttySettings: ObservableObject {
             )
             editorKeymapPreset = enumValue("editor.keymapPreset", fallback: .idea)
             editorBackgroundMode = enumValue("editor.backgroundMode", fallback: .followTerminal)
-            editorSyntaxTheme = enumValue("editor.syntaxTheme", fallback: .oneDark)
+            editorSyntaxTheme = enumValue("editor.syntaxTheme", fallback: .followTerminal)
+            editorOpacity = numberValue("editor.opacity", fallback: 1, range: 0.05...1)
+            editorBlur = enumValue("editor.blur", fallback: .disabled)
             editorFontFamily = enumValue("editor.fontFamily", fallback: .jetbrainsMono)
             editorFontSize = numberValue("editor.fontSize", fallback: 13, range: 8...36)
             editorTabWidth = numberValue("editor.tabWidth", fallback: 4, range: 1...12).rounded()

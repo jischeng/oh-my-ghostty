@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import CodeEditSourceEditor
 
 private struct EditorTerminalControllerKey: EnvironmentKey {
     static let defaultValue: TerminalController? = nil
@@ -28,6 +29,7 @@ struct EditorPaneContainer<Terminal: View>: View {
 
 /// The editor occupies one existing split leaf; its terminal remains alive underneath.
 struct EditorWorkspaceHost<Terminal: View>: View {
+    @ObservedObject private var settings = OhMyGhosttySettings.shared
     @ObservedObject var controller: TerminalController
     @ObservedObject private var workspace: EditorWorkspace
     @ObservedObject var surfaceView: Ghostty.SurfaceView
@@ -100,13 +102,12 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                         if let selected { proxy.scrollTo(selected) }
                     }
                 }
-                documentMenu
                 Button(action: openFile) { Image(systemName: "folder.badge.plus") }
                     .help("Open File")
                 Button { workspace.isVisible = false } label: {
-                    Image(systemName: "sidebar.right")
+                    Image(systemName: "minus")
                 }
-                .help("Back to Terminal")
+                .help("Hide Editor")
             }
             .buttonStyle(.borderless)
             .padding(6)
@@ -136,8 +137,9 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                             isSurfaceFocused: {
                                 (controller.focusedSurface ?? controller.surfaceTree.first) === surfaceView
                             },
-                            terminalBackground: NSColor(terminalColor),
-                            terminalBackgroundOpacity: terminalOpacity,
+                            terminalBackground: appearanceTheme.background,
+                            terminalBackgroundOpacity: appearanceOpacity,
+                            terminalTheme: appearanceTheme,
                             onFocus: {
                                 if controller.focusedSurface !== surfaceView {
                                     controller.focusedSurface = surfaceView
@@ -165,17 +167,28 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .background(
-            OhMyGhosttySettings.shared.editorBackgroundMode == .followTerminal
-                ? terminalColor.opacity(terminalOpacity)
-                : Color(nsColor: .textBackgroundColor).opacity(terminalOpacity)
-        )
+        .background(EditorBackdrop(color: appearanceTheme.background, opacity: appearanceOpacity, blur: appearanceBlur))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Code Editor")
     }
 
     private func close(_ document: EditorDocument) {
         Task { await workspace.close(document, window: controller.window) }
+    }
+
+    private var appearanceTheme: EditorTheme {
+        settings.editorSettings.followsOMG
+            ? controller.ghostty.config.editorTheme(background: NSColor(terminalColor))
+            : settings.editorSyntaxTheme.preset
+    }
+
+    private var appearanceOpacity: Double {
+        settings.editorSettings.followsOMG ? terminalOpacity : settings.editorOpacity
+    }
+
+    private var appearanceBlur: OhMyGhosttyBackgroundBlur {
+        guard settings.editorSettings.followsOMG else { return settings.editorBlur }
+        return controller.ghostty.config.editorBackgroundBlur
     }
 
     private var terminalColor: Color {
@@ -197,31 +210,6 @@ struct EditorWorkspaceHost<Terminal: View>: View {
         if opacity < 1.0 { return opacity }
         if controller.terminalBackgroundOpacity < 1.0 { return controller.terminalBackgroundOpacity }
         return opacity
-    }
-
-    private var documentMenu: some View {
-        Menu {
-            ForEach(workspace.documents, id: \.id) { document in
-                Button(document.path) { workspace.selectedID = document.id }
-            }
-            Divider()
-            Button("Save All") { Task { await workspace.saveAll() } }
-                .disabled(workspace.documents.isEmpty)
-            Button("Reload File") {
-                if let document = workspace.selectedDocument {
-                    Task { await workspace.reload(document, window: controller.window) }
-                }
-            }
-            .disabled(workspace.selectedDocument == nil)
-            Button("Close All Files") { Task { await workspace.closeAll(window: controller.window) } }
-                .disabled(workspace.documents.isEmpty)
-        } label: {
-            Image(systemName: "ellipsis.circle")
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help("File Actions and Open Files")
     }
 
     private func openFile() {
@@ -259,6 +247,7 @@ private struct EditorDocumentView: View {
     var isSurfaceFocused: () -> Bool = { true }
     let terminalBackground: NSColor
     let terminalBackgroundOpacity: Double
+    let terminalTheme: EditorTheme
     let onFocus: () -> Void
     let save: () -> Void
     let close: () -> Void
@@ -297,7 +286,8 @@ private struct EditorDocumentView: View {
                     isSurfaceFocused: isSurfaceFocused,
                     terminalBackground: terminalBackground,
                     terminalBackgroundOpacity: terminalBackgroundOpacity,
-                    terminalForeground: contrastingForeground,
+                    terminalForeground: terminalTheme.text,
+                    terminalTheme: terminalTheme,
                     onFocus: onFocus,
                     onSave: save,
                     onClose: close,
@@ -318,7 +308,7 @@ private struct EditorDocumentView: View {
                         filesystem: document.filesystem,
                         terminalBackground: terminalBackground,
                         terminalBackgroundOpacity: terminalBackgroundOpacity,
-                        foregroundColor: contrastingForeground
+                        foregroundColor: terminalTheme.text
                     )
                 }
             }
@@ -367,9 +357,72 @@ private struct EditorDocumentView: View {
         }
     }
 
-    private var contrastingForeground: NSColor {
-        guard let color = terminalBackground.usingColorSpace(.deviceRGB) else { return .textColor }
-        let luminance = color.redComponent * 0.2126 + color.greenComponent * 0.7152 + color.blueComponent * 0.0722
-        return luminance < 0.5 ? NSColor(white: 0.9, alpha: 1) : NSColor(white: 0.1, alpha: 1)
+}
+
+/// Uses the same glass implementation as the terminal. A single backdrop avoids
+/// multiplying opacity between the gutter, scroll view and surrounding controls.
+struct EditorBackdrop: NSViewRepresentable {
+    @Environment(\.controlActiveState) private var activeState
+    let color: NSColor
+    let opacity: Double
+    let blur: OhMyGhosttyBackgroundBlur
+
+    func makeNSView(context: Context) -> BackdropView { BackdropView() }
+
+    func updateNSView(_ view: BackdropView, context: Context) {
+        if context.coordinator.blur != blur {
+            view.subviews.forEach { $0.removeFromSuperview() }
+            context.coordinator.blur = blur
+            let effect: NSView?
+#if compiler(>=6.2)
+            if #available(macOS 26.0, *), blur == .macosGlassRegular || blur == .macosGlassClear {
+                effect = TerminalGlassView(topOffset: 0)
+            } else {
+                effect = blur == .disabled ? nil : NSVisualEffectView()
+            }
+#else
+            effect = blur == .disabled ? nil : NSVisualEffectView()
+#endif
+            if let effect {
+                effect.translatesAutoresizingMaskIntoConstraints = false
+                view.addSubview(effect)
+                NSLayoutConstraint.activate([
+                    effect.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                    effect.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+                    effect.topAnchor.constraint(equalTo: view.topAnchor),
+                    effect.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+                ])
+            }
+        }
+        view.fillColor = blur == .disabled ? color.withAlphaComponent(opacity) : .clear
+#if compiler(>=6.2)
+        if #available(macOS 26.0, *), let glass = view.subviews.first as? TerminalGlassView {
+            glass.configure(style: blur == .macosGlassClear ? .clear : .regular,
+                            backgroundColor: color, backgroundOpacity: opacity, cornerRadius: 0,
+                            isKeyWindow: activeState != .inactive)
+        }
+#endif
+        if let effect = view.subviews.first as? NSVisualEffectView {
+            effect.material = .underWindowBackground
+            effect.blendingMode = .behindWindow
+            effect.state = .followsWindowActiveState
+            effect.wantsLayer = true
+            effect.layer?.backgroundColor = color.withAlphaComponent(opacity).cgColor
+        }
+    }
+
+    final class BackdropView: NSView {
+        var fillColor: NSColor = .clear {
+            didSet { if fillColor != oldValue { needsDisplay = true } }
+        }
+        override func draw(_ dirtyRect: NSRect) {
+            fillColor.setFill()
+            dirtyRect.fill()
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    final class Coordinator {
+        var blur: OhMyGhosttyBackgroundBlur?
     }
 }

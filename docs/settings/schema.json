@@ -125,6 +125,18 @@
    ],
    "type": "string"
   },
+  "editor.blur": {
+   "category": "editor",
+   "default": "disabled",
+   "description": "Background effect when the editor uses an independent theme.",
+   "enum": [
+    "disabled",
+    "enabled",
+    "macosGlassRegular",
+    "macosGlassClear"
+   ],
+   "type": "string"
+  },
   "editor.fontFamily": {
    "category": "editor",
    "default": "jetbrainsMono",
@@ -156,9 +168,17 @@
    ],
    "type": "string"
   },
+  "editor.opacity": {
+   "category": "editor",
+   "default": 1,
+   "description": "Background opacity when the editor uses an independent theme.",
+   "maximum": 1,
+   "minimum": 0.05,
+   "type": "number"
+  },
   "editor.syntaxTheme": {
    "category": "editor",
-   "default": "oneDark",
+   "default": "followTerminal",
    "description": "Syntax highlighting style theme for the native editor.",
    "enum": [
     "oneDark",

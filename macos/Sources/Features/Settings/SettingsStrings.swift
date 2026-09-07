@@ -131,7 +131,7 @@ struct SettingsStrings: Equatable, Sendable {
         }
     }
 
-    var terminalThemeSection: String { t("Terminal Theme", "终端主题") }
+    var terminalThemeSection: String { t("OMG Theme", "OMG 主题") }
     var lightThemeLabel: String { t("Light Theme", "浅色主题") }
     var darkThemeLabel: String { t("Dark Theme", "深色主题") }
     var resolvedBackgroundLabel: String { t("Resolved Background", "实际背景色") }
@@ -293,7 +293,15 @@ struct SettingsStrings: Equatable, Sendable {
     }
 
     var editorSyntaxThemeLabel: String { t("Syntax Theme", "代码风格主题") }
-    func editorSyntaxThemeTitle(_ theme: EditorSyntaxTheme) -> String { theme.title }
+    func editorSyntaxThemeTitle(_ theme: EditorSyntaxTheme) -> String {
+        theme == .followTerminal ? t("Follow OMG", "跟随 OMG 的主题设置") : theme.title
+    }
+    var editorThemeInheritedCaption: String {
+        t("Colors, opacity and effects follow OMG Appearance settings.", "颜色、透明度与毛玻璃跟随 OMG 外观设置。")
+    }
+    var editorThemeSection: String { t("Editor Theme", "编辑器主题") }
+    var themeVariantsLabel: String { t("Light and Dark Variants", "分别设置浅色与深色主题") }
+    var unifiedThemeLabel: String { t("Theme Preset", "主题预设") }
 
     var editorFontFamilyLabel: String { t("Font Family", "字体") }
     func editorFontFamilyTitle(_ family: EditorFontFamily) -> String { family.title }

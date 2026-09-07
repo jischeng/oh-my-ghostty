@@ -184,7 +184,7 @@ struct EditorCompletionTests {
     @Test @MainActor func filteringRemovesStaleSuggestionsAndPreservesSelectedCandidate() {
         let state = CompletionState()
         state.update(candidates: [CompletionItem(label: "alpha"), CompletionItem(label: "beta")],
-                     prefix: "a", prefixRange: NSRange(location: 0, length: 1), at: .zero)
+                     prefix: "", prefixRange: NSRange(location: 0, length: 0), at: .zero)
         state.selectNext()
         state.filter(prefix: "bet", prefixRange: NSRange(location: 0, length: 3), at: .zero)
         #expect(state.currentSelection?.label == "beta")
@@ -208,6 +208,65 @@ struct EditorCompletionTests {
         engine.unregister(providerID: "builtin.keywords")
         engine.register(provider: Provider())
         #expect(await engine.completions(for: context("a")).map(\.label) == ["alpha", "zulu"])
+    }
+
+    @Test @MainActor func nativeTypingKeepsCompletionPrefixAndMultiCaretUndoTogether() async throws {
+        let coordinator = EditorCoordinator()
+        let capture = CompletionTestCapture()
+        let state = CompletionState()
+        coordinator.setCompletionState(state)
+        _ = coordinator.language(fileURL: URL(fileURLWithPath: "/test.py"), text: "")
+        let view = CodeEditSourceEditor(
+            .constant(""), language: .python, theme: .oneDark,
+            font: .monospacedSystemFont(ofSize: 13, weight: .regular), tabWidth: 4,
+            lineHeight: 1.2, wrapLines: false, cursorPositions: .constant([]),
+            highlightProviders: [], coordinators: [coordinator, capture]
+        )
+        let host = NSHostingController(rootView: view)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentViewController = host
+        host.view.layoutSubtreeIfNeeded()
+        defer { coordinator.destroy(); window.close() }
+        let controller = try #require(capture.controller)
+        let textView = try #require(controller.textView)
+        coordinator.setActive(true)
+        coordinator.select(NSRange(location: 0, length: 0))
+        for character in "from" {
+            textView.insertText(String(character))
+            try await Task.sleep(for: .milliseconds(60))
+            #expect(state.prefix == textView.string)
+            #expect(state.candidates.contains { $0.label == "from" })
+            #expect(state.candidates.allSatisfy { $0.label.lowercased().hasPrefix(textView.string.lowercased()) })
+        }
+        textView.insertText(" ")
+        try await Task.sleep(for: .milliseconds(60))
+        #expect(!state.isPresented)
+
+        textView.setText("a\nb")
+        textView._undoManager?.clearStack()
+        textView.selectionManager.setSelectedRanges([NSRange(location: 1, length: 0), NSRange(location: 3, length: 0)])
+        textView.insertText("x")
+        #expect(textView.string == "ax\nbx")
+        textView.insertText("y")
+        #expect(textView.string == "axy\nbxy")
+        textView.undoManager?.undo()
+        #expect(textView.string == "ax\nbx")
+        textView.undoManager?.undo()
+        #expect(textView.string == "a\nb")
+        textView.undoManager?.redo()
+        #expect(textView.string == "ax\nbx")
+        #expect(textView.selectionManager.textSelections.count == 2)
+        textView.setText("a\nb")
+        textView._undoManager?.clearStack()
+        textView.selectionManager.setSelectedRanges([NSRange(location: 1, length: 0), NSRange(location: 3, length: 0)])
+        textView.insertText("(")
+        #expect(textView.string == "a(\nb(")
+        textView.undoManager?.undo()
+        #expect(textView.string == "a\nb")
+        textView.undoManager?.redo()
+        #expect(textView.string == "a(\nb(")
     }
 
     @Test @MainActor func nativeCompletionCancelsStaleWorkAndRespectsFocus() async throws {
@@ -235,8 +294,7 @@ struct EditorCompletionTests {
         let controller = try #require(capture.controller)
         let textView = try #require(controller.textView)
         let scrollView = try #require(textView.enclosingScrollView)
-        #expect(scrollView.drawsBackground)
-        #expect(scrollView.backgroundColor == controller.theme.background)
+        #expect(scrollView.backgroundColor == .clear)
         coordinator.setActive(true)
         window.makeFirstResponder(textView)
         coordinator.select(NSRange(location: 2, length: 0))

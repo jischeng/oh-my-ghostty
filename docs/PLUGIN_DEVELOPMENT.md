@@ -957,3 +957,7 @@ a file list, on-demand diff loading, selectable/copyable line-numbered output,
 and explicit binary, error, and size-limit/truncation states. Commit diffs use
 the first parent as their base; a root commit uses the empty tree. This surface
 does not edit files or stage changes and does not add plugin wire capabilities.
+
+### Editor appearance settings
+
+The built-in editor follows the resolved OMG/Ghostty theme by default (`editor.syntaxTheme = followTerminal`). Independent editor themes may override `editor.opacity` and `editor.blur`; these values are ignored while following OMG. These settings do not add plugin capabilities or change the Files provider opening contract. See [settings configuration](settings/configuration.md#shared-omg-and-editor-appearance).

@@ -380,7 +380,7 @@ struct OhMyGhosttySettingsTests {
         #expect(settings.editorSettings == EditorSettings(
             keymapPreset: .idea,
             backgroundMode: .followTerminal,
-            syntaxTheme: .oneDark,
+            syntaxTheme: .followTerminal,
             fontFamily: .jetbrainsMono,
             fontSize: 13,
             tabWidth: 4,

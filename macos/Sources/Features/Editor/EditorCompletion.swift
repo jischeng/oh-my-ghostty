@@ -130,7 +130,7 @@ public struct BufferWordCompletionProvider: CompletionProvider, Sendable {
         for match in matches {
             guard !Task.isCancelled else { return [] }
             let word = nsText.substring(with: match.range)
-            guard word.lowercased().contains(lowerPrefix) else { continue }
+            guard word.lowercased().hasPrefix(lowerPrefix) else { continue }
             frequencies[word, default: 0] += 1
             let distance = abs(match.range.location - context.cursorOffset)
             minOffsets[word] = min(minOffsets[word] ?? Int.max, distance)
@@ -147,8 +147,6 @@ public struct BufferWordCompletionProvider: CompletionProvider, Sendable {
                 let freqScore = min(Double(count) * 0.1, 1.0)
                 let score = (exactPrefix ? 100.0 : 80.0) + distanceScore * 10.0 + freqScore * 5.0
                 results.append(CompletionItem(label: word, kind: .text, detail: "buffer", score: score))
-            } else if lowerWord.contains(lowerPrefix) {
-                results.append(CompletionItem(label: word, kind: .text, detail: "buffer", score: 40.0))
             }
         }
 

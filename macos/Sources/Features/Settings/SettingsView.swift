@@ -285,17 +285,31 @@ struct SettingsView: View {
                     Text(strings.editorKeymapPresetCaption)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Picker(strings.editorBackgroundModeLabel, selection: $settings.editorBackgroundMode) {
-                        ForEach(EditorBackgroundMode.allCases) { mode in
-                            Text(strings.editorBackgroundModeTitle(mode)).tag(mode)
-                        }
-                    }
+                    Toggle(strings.editorWordWrapLabel, isOn: $settings.editorWordWrap)
+                }
+                Section(strings.editorThemeSection) {
                     Picker(strings.editorSyntaxThemeLabel, selection: $settings.editorSyntaxTheme) {
-                        ForEach(EditorSyntaxTheme.allCases) { theme in
+                        Text(strings.editorSyntaxThemeTitle(.followTerminal)).tag(EditorSyntaxTheme.followTerminal)
+                        ForEach(EditorSyntaxTheme.allCases.filter { $0 != .followTerminal }) { theme in
                             Text(strings.editorSyntaxThemeTitle(theme)).tag(theme)
                         }
                     }
-                    Toggle(strings.editorWordWrapLabel, isOn: $settings.editorWordWrap)
+                    HStack {
+                        Text(strings.backgroundOpacityLabel)
+                        Slider(value: editorOpacityBinding, in: 0.05...1, step: 0.05)
+                        Text("\(Int(editorOpacityBinding.wrappedValue * 100))%")
+                            .monospacedDigit().frame(width: 45)
+                    }
+                    .disabled(settings.editorSettings.followsOMG)
+                    Picker(strings.backgroundBlurLabel, selection: editorBlurBinding) {
+                        ForEach(OhMyGhosttyBackgroundBlur.allCases) { blur in
+                            Text(strings.blurTitle(blur)).tag(blur)
+                        }
+                    }
+                    .disabled(settings.editorSettings.followsOMG)
+                    if settings.editorSettings.followsOMG {
+                        Text(strings.editorThemeInheritedCaption).font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 Section(strings.editorTypographySection) {
                     Picker(strings.editorFontFamilyLabel, selection: $settings.editorFontFamily) {
@@ -326,7 +340,9 @@ struct SettingsView: View {
                     Button(strings.resetEditorButton) {
                         settings.editorKeymapPreset = .idea
                         settings.editorBackgroundMode = .followTerminal
-                        settings.editorSyntaxTheme = .oneDark
+                        settings.editorSyntaxTheme = .followTerminal
+                        settings.editorOpacity = 1
+                        settings.editorBlur = .disabled
                         settings.editorFontFamily = .jetbrainsMono
                         settings.editorFontSize = 13
                         settings.editorTabWidth = 4
@@ -551,6 +567,28 @@ struct SettingsView: View {
         }
     }
 
+    private var editorOpacityBinding: Binding<Double> {
+        Binding(
+            get: {
+                settings.editorSettings.followsOMG
+                    ? settings.effectiveAppearance(using: inheritedGhosttyConfig).backgroundOpacity.effectiveValue
+                    : settings.editorOpacity
+            },
+            set: { if !settings.editorSettings.followsOMG { settings.editorOpacity = $0 } }
+        )
+    }
+
+    private var editorBlurBinding: Binding<OhMyGhosttyBackgroundBlur> {
+        Binding(
+            get: {
+                settings.editorSettings.followsOMG
+                    ? settings.backgroundBlurOverride ?? inheritedGhosttyConfig.editorBackgroundBlur
+                    : settings.editorBlur
+            },
+            set: { if !settings.editorSettings.followsOMG { settings.editorBlur = $0 } }
+        )
+    }
+
     private var appearanceForm: some View {
         let appearance = settings.effectiveAppearance(using: inheritedGhosttyConfig)
         return Form {
@@ -567,14 +605,27 @@ struct SettingsView: View {
             Section(strings.terminalThemeSection) {
                 GhosttyThemeField(
                     strings: strings,
-                    title: strings.lightThemeLabel,
-                    value: optionalStringBinding(\.lightThemeOverride)
+                    title: strings.unifiedThemeLabel,
+                    value: Binding(
+                        get: { settings.lightThemeOverride == settings.darkThemeOverride ? settings.lightThemeOverride ?? "" : "" },
+                        set: { value in
+                            settings.lightThemeOverride = value.isEmpty ? nil : value
+                            settings.darkThemeOverride = value.isEmpty ? nil : value
+                        }
+                    )
                 )
-                GhosttyThemeField(
-                    strings: strings,
-                    title: strings.darkThemeLabel,
-                    value: optionalStringBinding(\.darkThemeOverride)
-                )
+                DisclosureGroup(strings.themeVariantsLabel) {
+                    GhosttyThemeField(
+                        strings: strings,
+                        title: strings.lightThemeLabel,
+                        value: optionalStringBinding(\.lightThemeOverride)
+                    )
+                    GhosttyThemeField(
+                        strings: strings,
+                        title: strings.darkThemeLabel,
+                        value: optionalStringBinding(\.darkThemeOverride)
+                    )
+                }
                 resolutionRow(appearance.theme)
                 HStack {
                     Text(strings.resolvedBackgroundLabel)
@@ -908,6 +959,7 @@ private struct GhosttyThemeField: View {
         LabeledContent(title) {
             HStack(spacing: 6) {
                 TextField(strings.inheritGhosttyPlaceholder, text: $value)
+                    .labelsHidden()
                     .textFieldStyle(.roundedBorder)
                     .frame(maxWidth: 360)
                     .multilineTextAlignment(.trailing)

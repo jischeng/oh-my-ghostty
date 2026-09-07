@@ -1,5 +1,6 @@
 import AppKit
 import CodeEditSourceEditor
+import GhosttyKit
 
 extension EditorTheme {
     private static func color(_ hex: String, fallback: NSColor) -> NSColor {
@@ -261,5 +262,67 @@ public final class EditorThemeManager: ObservableObject {
             }
         }
         self.customThemes = loaded
+    }
+}
+
+// Reuse Ghostty's resolved config (including light/dark variants and overrides)
+// rather than parsing theme files in a second theme loader.
+extension Ghostty.Config {
+    var editorBackgroundBlur: OhMyGhosttyBackgroundBlur {
+        switch backgroundBlur {
+        case .macosGlassRegular: .macosGlassRegular
+        case .macosGlassClear: .macosGlassClear
+        case .disabled: .disabled
+        default: .enabled
+        }
+    }
+
+    func editorTheme(background: NSColor) -> EditorTheme {
+        func color(_ key: String, fallback: NSColor) -> NSColor {
+            var value = ghostty_config_color_s()
+            guard ghostty_config_get(config, &value, key, UInt(key.utf8.count)) else { return fallback }
+            return NSColor(ghostty: value)
+        }
+        let foreground = color("foreground", fallback: .textColor)
+        var theme = EditorTheme.adaptive(background: background, foreground: foreground)
+        var palette = ghostty_config_palette_s()
+        if ghostty_config_get(config, &palette, "palette", 7) {
+            let colors = withUnsafeBytes(of: &palette.colors) {
+                Array($0.bindMemory(to: ghostty_config_color_s.self)).map { NSColor(ghostty: $0) }
+            }
+            theme.keywords = colors[5]
+            theme.commands = colors[4]
+            theme.types = colors[3]
+            theme.attributes = colors[6]
+            theme.variables = colors[1]
+            theme.values = colors[3]
+            theme.numbers = colors[3]
+            theme.strings = colors[2]
+            theme.characters = colors[2]
+            theme.comments = colors[8]
+        }
+        theme.insertionPoint = color("cursor-color", fallback: foreground)
+        theme.selection = color("selection-background", fallback: foreground.withAlphaComponent(0.2))
+        return theme
+    }
+}
+
+extension EditorSyntaxTheme {
+    var preset: EditorTheme {
+        var theme: EditorTheme
+        let background: String
+        switch self {
+        case .oneDark: theme = .oneDark; background = "#282c34"
+        case .oneLight: theme = .oneLight; background = "#fafafa"
+        case .dracula: theme = .dracula; background = "#282a36"
+        case .githubDark: theme = .githubDark; background = "#0d1117"
+        case .nord: theme = .nord; background = "#2e3440"
+        case .monokai: theme = .monokai; background = "#272822"
+        case .catppuccinMocha: theme = .catppuccinMocha; background = "#1e1e2e"
+        case .followTerminal:
+            return .adaptive(background: .textBackgroundColor, foreground: .textColor)
+        }
+        theme.background = NSColor(hex: background) ?? .textBackgroundColor
+        return theme
     }
 }

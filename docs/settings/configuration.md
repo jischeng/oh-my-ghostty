@@ -31,7 +31,7 @@ The file is a flat, sorted JSON object. Only values explicitly chosen by the use
   "editor.fontFamily": "jetbrainsMono",
   "editor.fontSize": 13,
   "editor.keymapPreset": "idea",
-  "editor.syntaxTheme": "oneDark",
+  "editor.syntaxTheme": "followTerminal",
   "editor.tabWidth": 4,
   "editor.wordWrap": false,
   "general.quitWithoutConfirmation": true,
@@ -84,8 +84,8 @@ Window UI state is intentionally separate: `InspectorPresentationStore` owns las
 | `appearance.tabRowDensity` | enum | `compact` | `compact`, `comfortable` | Settings > Appearance | Runtime |
 | `appearance.tabIconSize` | number | `16` | `12...20` | Settings > Appearance | Runtime |
 | `editor.keymapPreset` | enum | `idea` | `idea`, `vscode` | Settings > Editor | Runtime |
-| `editor.backgroundMode` | enum | `followTerminal` | `followTerminal`, `system` | Settings > Editor | Runtime |
-| `editor.syntaxTheme` | enum | `oneDark` | `oneDark`, `oneLight`, `dracula`, `githubDark`, `nord`, `monokai`, `catppuccinMocha`, `followTerminal` | Settings > Editor | Runtime |
+| `editor.backgroundMode` | enum | `followTerminal` | `followTerminal`, `system` | Legacy configuration | Retained, no visual effect |
+| `editor.syntaxTheme` | enum | `followTerminal` | `oneDark`, `oneLight`, `dracula`, `githubDark`, `nord`, `monokai`, `catppuccinMocha`, `followTerminal` | Settings > Editor | Runtime |
 | `editor.fontFamily` | enum | `jetbrainsMono` | `jetbrainsMono`, `sfMono`, `menlo`, `firaCode`, `system` | Settings > Editor | Runtime |
 | `editor.fontSize` | number | `13` | `8...36` | Settings > Editor | Runtime |
 | `editor.tabWidth` | number | `4` | `1...12` | Settings > Editor | Runtime |
@@ -107,7 +107,7 @@ Appearance controls resolve each value as `OMG override > Ghostty config > built
 
 Vertical tabs and the Right Inspector use the active terminal background color and background opacity. There is no independent Sidebar or Inspector theme. Transparency is painted only on background layers; window alpha, terminal glyphs, cursors, and icons remain opaque.
 
-Settings > Editor owns the native code editor's local editing behavior. `editor.keymapPreset` defaults to `idea` and may be changed to `vscode`; the setting resolves to the native `EditorKeymap.Profile` consumed by the editor command router. `editor.backgroundMode` defaults to `followTerminal`, so the editor can use the terminal background color supplied by the hosting terminal view. The `system` option uses the platform editor background. `editor.fontSize`, `editor.tabWidth`, and `editor.wordWrap` are runtime settings consumed by the native editor view.
+Settings > Editor owns the native code editor's local editing behavior. `editor.keymapPreset` defaults to `idea` and may be changed to `vscode`; the setting resolves to the native `EditorKeymap.Profile` consumed by the editor command router. `editor.syntaxTheme` defaults to `followTerminal`, inheriting the resolved OMG colors and background effects. Other presets use independent editor appearance controls. `editor.backgroundMode` is retained only for reading older configuration files. `editor.fontSize`, `editor.tabWidth`, and `editor.wordWrap` are runtime settings consumed by the native editor view.
 
 `tabs.pathDisplay` applies to the path portion of every Vertical Tab label. Local and SSH panes use the same policy: `fullPath` preserves the current full-path presentation, while `folderName` displays only the final folder component. SSH keeps its alias prefix, for example `cloud /home/user/code` becomes `cloud code`.
 
@@ -141,3 +141,11 @@ The configuration action is designed but not implemented in this iteration. It w
 - [`settings-appearance-light.png`](../images/settings-appearance-light.png): the same native Settings hierarchy under explicit Light Appearance.
 - [`appearance-transparency-vertical.png`](../images/appearance-transparency-vertical.png): Vertical Tabs and terminal content using the same 58% Ghostty background alpha.
 - [`appearance-transparency-horizontal.png`](../images/appearance-transparency-horizontal.png): native Horizontal presentation under the same Ghostty opacity/blur configuration.
+
+### Shared OMG and editor appearance
+
+Settings > Appearance uses the existing Ghostty theme catalog. Theme Preset applies a theme to both light and dark appearances; the separate light/dark fields remain available. Background opacity and blur/glass continue to use Ghostty appearance overrides.
+
+The editor defaults to `editor.syntaxTheme = followTerminal` (Follow OMG), using the resolved Ghostty palette, background, opacity and effect. Editor opacity/effect controls are read-only while following OMG. An explicit editor theme enables independent `editor.opacity` (0.05–1, default 1) and `editor.blur` (`disabled`, `enabled`, `macosGlassRegular`, `macosGlassClear`, default `disabled`); switching back preserves these independent values. Existing explicitly selected editor themes are retained. The older `editor.backgroundMode` key remains readable for configuration compatibility but no longer controls theme resolution.
+
+The editor toolbar uses a minus button to hide the editor. Save All and Reload are no longer shown in its overflow menu; save and document keyboard actions remain available.

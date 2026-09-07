@@ -42,7 +42,7 @@ enum EditorSyntaxTheme: String, CaseIterable, Identifiable, Sendable {
         case .nord: "Nord"
         case .monokai: "Monokai"
         case .catppuccinMocha: "Catppuccin Mocha"
-        case .followTerminal: "Adaptive (Follow Terminal)"
+        case .followTerminal: "Follow OMG"
         }
     }
 }
@@ -75,6 +75,10 @@ struct EditorSettings: Equatable, Sendable {
     let fontSize: Double
     let tabWidth: Int
     let wordWrap: Bool
+    var opacity: Double = 1
+    var blur: OhMyGhosttyBackgroundBlur = .disabled
+
+    var followsOMG: Bool { syntaxTheme == .followTerminal }
 
     var keymapProfile: EditorKeymap.Profile {
         keymapPreset.profile

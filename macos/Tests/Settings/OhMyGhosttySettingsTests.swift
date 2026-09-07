@@ -374,6 +374,25 @@ struct OhMyGhosttySettingsTests {
         #expect(descriptor?.defaultValue == "false")
     }
 
+    @Test func editorOpenDestinationsPersistIndependently() throws {
+        let (settings, url) = temporarySettings()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        #expect(settings.editorFileOpenDestination == .currentPane)
+        #expect(settings.editorDirectoryOpenDestination == .currentPane)
+        for destination in EditorOpenDestination.allCases {
+            settings.editorFileOpenDestination = destination
+            settings.editorDirectoryOpenDestination = .splitLeft
+            let restored = OhMyGhosttySettings(fileURL: url)
+            #expect(restored.editorSettings.fileOpenDestination == destination)
+            #expect(restored.editorSettings.directoryOpenDestination == .splitLeft)
+        }
+        try #"{"editor.fileOpenDestination":"invalid","editor.directoryOpenDestination":"invalid"}"#
+            .write(to: url, atomically: true, encoding: .utf8)
+        let restored = OhMyGhosttySettings(fileURL: url)
+        #expect(restored.editorFileOpenDestination == .currentPane)
+        #expect(restored.editorDirectoryOpenDestination == .currentPane)
+    }
+
     @Test func editorSettingsDefaultToIdeaAndFollowTerminal() {
         let (settings, url) = temporarySettings()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
@@ -439,6 +458,11 @@ struct OhMyGhosttySettingsTests {
         #expect(en.windowTitle == "Settings")
         #expect(zh.tabTitle(.general) == "通用")
         #expect(zh.tabTitle(.plugins) == "插件")
+        #expect(zh.tabTitle(.editor) == "编辑器")
+        #expect(en.tabTitle(.editor) == "Editor")
+        #expect(zh.resetEditorButton == "重置编辑器设置")
+        #expect(zh.editorOpenDestinationTitle(.currentPane) == "当前窗格")
+        #expect(en.editorOpenDestinationTitle(.newTab) == "New Tab")
         #expect(zh.languageSystem == "跟随系统")
         #expect(zh.quitWithoutConfirmationLabel == "退出时无需确认")
         #expect(en.quitWithoutConfirmationLabel == "Quit Without Confirmation")

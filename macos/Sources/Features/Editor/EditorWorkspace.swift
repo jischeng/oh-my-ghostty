@@ -249,29 +249,16 @@ final class EditorWorkspaceStore {
         return workspace
     }
 
-    func open(path: String, context: InspectorPaneContext, destination: EditorOpenDestination = .currentPane) {
+    func open(path: String, context: InspectorPaneContext, destination: EditorOpenDestination? = nil) {
         guard let controller = NSApp.windows.compactMap({ $0.windowController as? TerminalController })
             .first(where: { $0.tabSessionID == context.tabID }),
               let source = controller.surfaceTree.first(where: { $0.id == context.surfaceID })
                 ?? controller.focusedSurface ?? controller.surfaceTree.first else { return }
-        let targetController: TerminalController
-        let target: Ghostty.SurfaceView
-        switch destination {
-        case .currentPane:
-            targetController = controller
-            target = source
-        case .newTab:
-            guard let created = TerminalController.newTab(controller.ghostty, from: controller.window),
-                  let surface = created.surfaceTree.first else { return }
-            targetController = created
-            target = surface
-        case .splitRight, .splitDown, .splitLeft, .splitUp:
-            guard let surface = controller.newSplit(at: source, direction: destination.splitDirection) else { return }
-            targetController = controller
-            target = surface
-        }
-        targetController.focusedSurface = target
-        workspace(for: targetController.tabSessionID, surfaceID: target.id).open(
+        guard let target = EditorPaneDestination.open(
+            in: controller, source: source,
+            destination: destination ?? OhMyGhosttySettings.shared.editorFileOpenDestination
+        ) else { return }
+        workspace(for: target.controller.tabSessionID, surfaceID: target.surface.id).open(
             path: path,
             filesystem: WorkspaceFilesystemFactory.make(for: context)
         )

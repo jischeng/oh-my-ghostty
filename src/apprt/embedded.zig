@@ -996,6 +996,8 @@ pub const Surface = struct {
         errdefer env.deinit();
 
         if (comptime builtin.target.os.tag.isDarwin()) {
+            @import("omg_environment.zig").filterInheritedTerminalEnvironment(&env);
+
             if (env.get("__XCODE_BUILT_PRODUCTS_DIR_PATHS") != null) {
                 _ = env.orderedRemove("__XCODE_BUILT_PRODUCTS_DIR_PATHS");
                 _ = env.orderedRemove("__XPC_DYLD_LIBRARY_PATH");

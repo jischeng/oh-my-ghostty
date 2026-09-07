@@ -981,3 +981,18 @@ could overwrite a target. File transfers continue to use SFTP. Errors are presen
 chooser; SSH files are downloaded as read-only temporary copies and edits in the
 external application are not uploaded. Remote folders cannot be opened locally.
 These host-owned actions do not grant external plugins filesystem capabilities.
+
+### Terminal file links and default destinations
+
+The macOS host routes OSC 8 `file:` links and detected paths to the built-in
+editor using the clicked surface's workspace/session. Relative candidates such
+as `README.md` and bare directory names are checked through `WorkspaceFilesystem`
+before opening; missing candidates do not launch external applications. Web
+links retain the existing URL-opening policy. Files and Command-clicked
+directories have independent default destinations (`editor.fileOpenDestination`
+and `editor.directoryOpenDestination`): current pane, new tab, or four split
+directions. An explicit Files menu destination overrides the file default.
+The directory default applies only to Command-click navigation, not Files tree
+expansion. Current-pane directory navigation changes the existing shell's cwd;
+new panes start in the requested directory, using the existing SSH replay path
+for remote sessions. These host-owned actions add no external plugin permission.

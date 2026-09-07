@@ -638,6 +638,19 @@ extension Ghostty {
                 checkForUpdates(app)
 
             case GHOSTTY_ACTION_OPEN_URL:
+                if target.tag == GHOSTTY_TARGET_SURFACE,
+                   let surface = target.target.surface,
+                   let view = surfaceView(from: surface) {
+                    let link = Ghostty.Action.OpenURL(c: action.action.open_url)
+                    if link.kind == .unknown || link.kind == .osc8, TerminalPathTarget.isCandidate(link.url) {
+                        // Leave the core callback before resolving paths or changing pane state.
+                        Task { @MainActor [weak view] in
+                            guard let view else { return }
+                            _ = TerminalPathOpener.open(link.url, from: view)
+                        }
+                        return true
+                    }
+                }
                 return openURL(action.action.open_url)
 
             case GHOSTTY_ACTION_UNDO:

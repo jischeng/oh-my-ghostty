@@ -288,6 +288,19 @@ struct SettingsView: View {
 
         case .editor:
             Form {
+                Section(strings.editorOpeningSection) {
+                    Picker(strings.editorFileOpenDestinationLabel, selection: $settings.editorFileOpenDestination) {
+                        ForEach(EditorOpenDestination.allCases, id: \.self) { destination in
+                            Text(strings.editorOpenDestinationTitle(destination)).tag(destination)
+                        }
+                    }
+                    Picker(strings.editorDirectoryOpenDestinationLabel, selection: $settings.editorDirectoryOpenDestination) {
+                        ForEach(EditorOpenDestination.allCases, id: \.self) { destination in
+                            Text(strings.editorOpenDestinationTitle(destination)).tag(destination)
+                        }
+                    }
+                    Text(strings.editorOpeningCaption).font(.caption).foregroundStyle(.secondary)
+                }
                 Section(strings.editorBehaviorSection) {
                     Picker(strings.editorKeymapPresetLabel, selection: $settings.editorKeymapPreset) {
                         ForEach(EditorKeymapPreset.allCases) { preset in
@@ -354,6 +367,8 @@ struct SettingsView: View {
                 HStack {
                     Spacer()
                     Button(strings.resetEditorButton) {
+                        settings.editorFileOpenDestination = .currentPane
+                        settings.editorDirectoryOpenDestination = .currentPane
                         settings.editorKeymapPreset = .idea
                         settings.editorBackgroundMode = .followTerminal
                         settings.editorSyntaxTheme = .followTerminal

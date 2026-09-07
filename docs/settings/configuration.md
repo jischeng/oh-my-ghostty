@@ -31,6 +31,8 @@ The file is a flat, sorted JSON object. Only values explicitly chosen by the use
   "editor.fontFamily": "jetbrainsMono",
   "editor.fontSize": 13,
   "editor.keymapPreset": "idea",
+  "editor.fileOpenDestination": "currentPane",
+  "editor.directoryOpenDestination": "currentPane",
   "editor.syntaxTheme": "followTerminal",
   "editor.tabWidth": 4,
   "editor.wordWrap": false,
@@ -84,6 +86,8 @@ Window UI state is intentionally separate: `InspectorPresentationStore` owns las
 | `appearance.tabRowDensity` | enum | `compact` | `compact`, `comfortable` | Settings > Appearance | Runtime |
 | `appearance.tabIconSize` | number | `16` | `12...20` | Settings > Appearance | Runtime |
 | `editor.keymapPreset` | enum | `idea` | `idea`, `vscode` | Settings > Editor | Runtime |
+| `editor.fileOpenDestination` | enum | `currentPane` | `currentPane`, `newTab`, `splitRight`, `splitDown`, `splitLeft`, `splitUp` | Settings > Editor | Runtime |
+| `editor.directoryOpenDestination` | enum | `currentPane` | `currentPane`, `newTab`, `splitRight`, `splitDown`, `splitLeft`, `splitUp` | Settings > Editor | Runtime |
 | `editor.backgroundMode` | enum | `followTerminal` | `followTerminal`, `system` | Legacy configuration | Retained, no visual effect |
 | `editor.syntaxTheme` | enum | `followTerminal` | `oneDark`, `oneLight`, `dracula`, `githubDark`, `nord`, `monokai`, `catppuccinMocha`, `followTerminal` | Settings > Editor | Runtime |
 | `editor.fontFamily` | enum | `jetbrainsMono` | `jetbrainsMono`, `sfMono`, `menlo`, `firaCode`, `system` | Settings > Editor | Runtime |

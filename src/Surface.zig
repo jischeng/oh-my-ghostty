@@ -4519,7 +4519,12 @@ fn processLinks(self: *Surface, pos: apprt.CursorPos) !bool {
             });
             defer self.alloc.free(str);
 
-            const resolved_path = try self.resolvePathForOpening(str);
+            // OMG resolves paths with the source pane's local/SSH filesystem.
+            // Resolving here would expand remote paths against the host's cwd.
+            const resolved_path: ?[]const u8 = if (comptime builtin.target.os.tag == .macos)
+                null
+            else
+                try self.resolvePathForOpening(str);
             defer if (resolved_path) |p| self.alloc.free(p);
 
             const url_to_open = resolved_path orelse str;

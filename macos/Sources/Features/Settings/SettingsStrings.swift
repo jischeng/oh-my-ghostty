@@ -48,7 +48,7 @@ struct SettingsStrings: Equatable, Sendable {
         case .appearance: t("Appearance", "外观")
         case .tabs: t("Tabs", "标签页")
         case .terminal: t("Terminal", "终端")
-        case .editor: "Editor"
+        case .editor: t("Editor", "编辑器")
         case .keyboard: t("Keyboard", "键盘")
         case .plugins: t("Plugins", "插件")
         case .advanced: t("Advanced", "高级")
@@ -266,6 +266,23 @@ struct SettingsStrings: Equatable, Sendable {
     // MARK: Editor
 
     var editorBehaviorSection: String { t("Behavior", "行为") }
+    var editorOpeningSection: String { t("Opening Location", "打开位置") }
+    var editorFileOpenDestinationLabel: String { t("Open Files", "打开文件") }
+    var editorDirectoryOpenDestinationLabel: String { t("Command-click Folders", "⌘ 点击文件夹") }
+    var editorOpeningCaption: String {
+        t("Files use this location when opened in the editor or with Command-click. The folder setting applies only to Command-click.",
+          "在编辑器中打开文件或 ⌘ 点击文件时使用上述位置。文件夹设置仅适用于 ⌘ 点击。")
+    }
+    func editorOpenDestinationTitle(_ destination: EditorOpenDestination) -> String {
+        switch destination {
+        case .currentPane: t("Current Pane", "当前窗格")
+        case .newTab: t("New Tab", "新标签页")
+        case .splitRight: t("Split Right", "向右分屏")
+        case .splitDown: t("Split Down", "向下分屏")
+        case .splitLeft: t("Split Left", "向左分屏")
+        case .splitUp: t("Split Up", "向上分屏")
+        }
+    }
     var editorTypographySection: String { t("Typography", "排版") }
     var editorKeymapPresetLabel: String { t("Keymap Preset", "键位预设") }
 
@@ -279,7 +296,7 @@ struct SettingsStrings: Equatable, Sendable {
     var editorKeymapPresetCaption: String {
         t(
             "IDEA is the default. The preset changes only native editor commands.",
-            "默认使用 IDEA。此预设只影响原生 Editor 命令。"
+            "默认使用 IDEA。此预设只影响原生编辑器命令。"
         )
     }
 
@@ -310,12 +327,14 @@ struct SettingsStrings: Equatable, Sendable {
     var unifiedThemeLabel: String { t("Theme Preset", "主题预设") }
 
     var editorFontFamilyLabel: String { t("Font Family", "字体") }
-    func editorFontFamilyTitle(_ family: EditorFontFamily) -> String { family.title }
+    func editorFontFamilyTitle(_ family: EditorFontFamily) -> String {
+        family == .system ? t("System Monospaced", "系统等宽字体") : family.title
+    }
 
     var editorWordWrapLabel: String { t("Word Wrap", "自动换行") }
     var editorFontSizeLabel: String { t("Font Size", "字号") }
     var editorTabWidthLabel: String { t("Tab Width", "Tab 宽度") }
-    var resetEditorButton: String { t("Reset Editor Settings", "重置 Editor 设置") }
+    var resetEditorButton: String { t("Reset Editor Settings", "重置编辑器设置") }
 
     var quickInputSection: String { t("Agent Quick Input", "Agent 快速输入") }
     var openQuickInputOnAgentStartLabel: String {

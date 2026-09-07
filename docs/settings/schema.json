@@ -143,6 +143,34 @@
    ],
    "type": "string"
   },
+  "editor.directoryOpenDestination": {
+   "category": "editor",
+   "default": "currentPane",
+   "description": "Default destination for directories opened with Command-click.",
+   "enum": [
+    "currentPane",
+    "newTab",
+    "splitRight",
+    "splitDown",
+    "splitLeft",
+    "splitUp"
+   ],
+   "type": "string"
+  },
+  "editor.fileOpenDestination": {
+   "category": "editor",
+   "default": "currentPane",
+   "description": "Default destination for opening files in the editor, including Command-click.",
+   "enum": [
+    "currentPane",
+    "newTab",
+    "splitRight",
+    "splitDown",
+    "splitLeft",
+    "splitUp"
+   ],
+   "type": "string"
+  },
   "editor.fontFamily": {
    "category": "editor",
    "default": "jetbrainsMono",

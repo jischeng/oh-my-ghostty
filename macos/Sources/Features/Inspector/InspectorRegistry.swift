@@ -140,7 +140,7 @@ enum InspectorPaneActionKind: Equatable, Sendable {
     case renameFile(path: String)
     case openFileExternally(path: String)
     case toggleNode(id: String, expanded: Bool)
-    case openFile(path: String, destination: EditorOpenDestination = .currentPane)
+    case openFile(path: String, destination: EditorOpenDestination? = nil)
     case refresh
     case collapseAll
     case createFile(name: String)

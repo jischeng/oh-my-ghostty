@@ -4017,6 +4017,15 @@ pub fn default(alloc_gpa: Allocator) Allocator.Error!Config {
         .action = .{ .open = {} },
         .highlight = .{ .hover_mods = inputpkg.ctrlOrSuper(.{}) },
     });
+    if (comptime builtin.target.os.tag == .macos) {
+        // OMG validates bare path candidates against the source pane's filesystem.
+        // Keep this after URL detection so URLs always retain their full match.
+        try result.link.links.append(alloc, .{
+            .regex = @import("omg_path.zig").regex,
+            .action = .{ .open = {} },
+            .highlight = .{ .hover_mods = inputpkg.ctrlOrSuper(.{}) },
+        });
+    }
 
     return result;
 }
@@ -4858,9 +4867,11 @@ pub fn finalize(self: *Config) !void {
     if (self.@"window-width" > 0) self.@"window-width" = @max(10, self.@"window-width");
     if (self.@"window-height" > 0) self.@"window-height" = @max(4, self.@"window-height");
 
-    // If URLs are disabled, cut off the first link. The first link is
-    // always the URL matcher.
-    if (!self.@"link-url") self.link.links.items = self.link.links.items[1..];
+    // Disable both URL detection and OMG's macOS bare path fallback together.
+    if (!self.@"link-url") {
+        const default_count: usize = if (builtin.target.os.tag == .macos) 2 else 1;
+        self.link.links.items = self.link.links.items[default_count..];
+    }
 
     // We warn when the quit-after-last-window-closed-delay is set to a very
     // short value because it can cause Ghostty to quit before the first

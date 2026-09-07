@@ -368,6 +368,20 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Choose whether terminal content reflows during a resize or once on release.",
             requiresNewWindow: false, category: "terminal"),
         .init(
+            id: "editor.fileOpenDestination", type: .enumeration,
+            defaultValue: EditorOpenDestination.currentPane.rawValue,
+            allowedValues: EditorOpenDestination.allCases.map(\.rawValue),
+            minimum: nil, maximum: nil,
+            description: "Default destination for opening files in the editor, including Command-click.",
+            requiresNewWindow: false, category: "editor"),
+        .init(
+            id: "editor.directoryOpenDestination", type: .enumeration,
+            defaultValue: EditorOpenDestination.currentPane.rawValue,
+            allowedValues: EditorOpenDestination.allCases.map(\.rawValue),
+            minimum: nil, maximum: nil,
+            description: "Default destination for directories opened with Command-click.",
+            requiresNewWindow: false, category: "editor"),
+        .init(
             id: "editor.keymapPreset", type: .enumeration,
             defaultValue: EditorKeymapPreset.idea.rawValue,
             allowedValues: EditorKeymapPreset.allCases.map(\.rawValue),
@@ -588,6 +602,12 @@ final class OhMyGhosttySettings: ObservableObject {
     }
     @Published var terminalResizeRendering: TerminalResizeRenderingMode = .onRelease {
         didSet { persist("terminal.resizeRendering", terminalResizeRendering.rawValue) }
+    }
+    @Published var editorFileOpenDestination: EditorOpenDestination = .currentPane {
+        didSet { persist("editor.fileOpenDestination", editorFileOpenDestination.rawValue) }
+    }
+    @Published var editorDirectoryOpenDestination: EditorOpenDestination = .currentPane {
+        didSet { persist("editor.directoryOpenDestination", editorDirectoryOpenDestination.rawValue) }
     }
     @Published var editorKeymapPreset: EditorKeymapPreset = .idea {
         didSet { persist("editor.keymapPreset", editorKeymapPreset.rawValue) }
@@ -848,7 +868,9 @@ final class OhMyGhosttySettings: ObservableObject {
             opacity: editorOpacity,
             blur: editorBlur,
             themeName: editorThemeName,
-            autoClosePairs: editorAutoClosePairs
+            autoClosePairs: editorAutoClosePairs,
+            fileOpenDestination: editorFileOpenDestination,
+            directoryOpenDestination: editorDirectoryOpenDestination
         )
     }
 
@@ -900,6 +922,8 @@ final class OhMyGhosttySettings: ObservableObject {
                 "terminal.resizeRendering",
                 fallback: .onRelease
             )
+            editorFileOpenDestination = enumValue("editor.fileOpenDestination", fallback: .currentPane)
+            editorDirectoryOpenDestination = enumValue("editor.directoryOpenDestination", fallback: .currentPane)
             editorKeymapPreset = enumValue("editor.keymapPreset", fallback: .idea)
             editorBackgroundMode = enumValue("editor.backgroundMode", fallback: .followTerminal)
             editorSyntaxTheme = enumValue("editor.syntaxTheme", fallback: .followTerminal)

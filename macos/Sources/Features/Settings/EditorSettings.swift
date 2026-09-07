@@ -80,6 +80,8 @@ struct EditorSettings: Equatable, Sendable {
 
     var themeName: String?
     var autoClosePairs = true
+    var fileOpenDestination: EditorOpenDestination = .currentPane
+    var directoryOpenDestination: EditorOpenDestination = .currentPane
 
     var followsOMG: Bool { themeName == nil && syntaxTheme == .followTerminal }
 

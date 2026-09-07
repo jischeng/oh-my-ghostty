@@ -157,7 +157,7 @@ final class BuiltInFilesInspectorProvider {
                 Self.logger.error("Files open ignored missing file=\(path, privacy: .public)")
                 return
             }
-            openFile(path, state.context, destination)
+            openFile(path, state.context, destination ?? OhMyGhosttySettings.shared.editorFileOpenDestination)
 
         case .copyFilePath(let path, let relative):
             guard let tree = state.tree, Self.findNode(id: path, in: tree.nodes) != nil else { return }

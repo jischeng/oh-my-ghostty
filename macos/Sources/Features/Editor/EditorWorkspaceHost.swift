@@ -271,6 +271,18 @@ private struct EditorDocumentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if let error = document.saveErrorMessage {
+                HStack(alignment: .top) {
+                    Label("Couldn’t save: " + error, systemImage: "exclamationmark.triangle")
+                        .textSelection(.enabled)
+                    Spacer()
+                    Button("Retry Save", action: save)
+                        .disabled(document.isSaving || document.isReloading)
+                }
+                .font(.callout)
+                .padding(10)
+                .background(Color.red.opacity(0.1))
+            }
             if isMarkdownDocument && isPreviewMode {
                 MarkdownPreviewView(
                     text: document.text,

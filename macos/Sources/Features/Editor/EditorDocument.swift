@@ -82,6 +82,7 @@ final class EditorDocument: ObservableObject {
     @Published private(set) var isDirty: Bool
     @Published private(set) var isSaving = false
     @Published private(set) var isReloading = false
+    @Published private(set) var saveErrorMessage: String?
     @Published private(set) var contentGeneration: UInt64 = 0
 
     private var encoding: EditorDocumentEncoding
@@ -92,21 +93,44 @@ final class EditorDocument: ObservableObject {
 
     var path: String { id.path }
 
-    func flushAutoSave() {
-        autoSaveTask?.cancel()
-        autoSaveTask = nil
-        guard isDirty, !isSaving, !isReloading else { return }
-        Task { @MainActor [weak self] in
-            _ = try? await self?.save()
-        }
+    private var autoSaveSuspensionCount = 0
+
+    func suspendAutoSave() {
+        autoSaveSuspensionCount += 1
+        cancelAutoSave()
     }
 
-    private func scheduleAutoSave() {
+    func resumeAutoSave() {
+        autoSaveSuspensionCount = max(0, autoSaveSuspensionCount - 1)
+        if isDirty { scheduleAutoSave() }
+    }
+
+    func cancelAutoSave() {
         autoSaveTask?.cancel()
+        autoSaveTask = nil
+    }
+
+    func flushAutoSave() {
+        scheduleAutoSave(delay: .zero)
+    }
+
+    private func scheduleAutoSave(delay: Duration = .seconds(1)) {
+        cancelAutoSave()
+        guard autoSaveSuspensionCount == 0, isDirty, !isSaving, !isReloading else { return }
         autoSaveTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(1))
-            guard let self, !Task.isCancelled, self.isDirty, !self.isSaving, !self.isReloading else { return }
-            _ = try? await self.save()
+            do {
+                try await Task.sleep(for: delay)
+            } catch {
+                return
+            }
+            guard let self, !Task.isCancelled else { return }
+            // The timer has fired. A subsequent edit must not cancel an in-flight write.
+            self.autoSaveTask = nil
+            do {
+                try await self.save()
+            } catch {
+                // save() retains the error on the document for the editor to display.
+            }
         }
     }
 
@@ -148,6 +172,7 @@ final class EditorDocument: ObservableObject {
         guard !isSaving else { throw EditorDocumentError.saveInProgress }
         guard !isReloading else { throw EditorDocumentError.reloadInProgress }
         guard isDirty else { return }
+        cancelAutoSave()
         let savedRevision = revision
         let savedText = text
         let expectedData = persistedData
@@ -157,7 +182,13 @@ final class EditorDocument: ObservableObject {
         let data = await Task.detached(priority: .utility) {
             Self.encode(savedText, encoding: encoding)
         }.value
-        try await filesystem.writeFile(data, at: path, replacing: expectedData)
+        do {
+            try await filesystem.writeFile(data, at: path, replacing: expectedData)
+        } catch {
+            saveErrorMessage = error.localizedDescription
+            throw error
+        }
+        saveErrorMessage = nil
         persistedText = savedText
         persistedData = data
         if revision == savedRevision {
@@ -165,14 +196,21 @@ final class EditorDocument: ObservableObject {
         } else {
             isDirty = text != persistedText
         }
+        // A slow local/SSH write may outlive the debounce for edits made during it.
+        isSaving = false
+        if isDirty { scheduleAutoSave() }
     }
 
     func reload() async throws {
         guard !isSaving else { throw EditorDocumentError.saveInProgress }
         guard !isReloading else { throw EditorDocumentError.reloadInProgress }
+        cancelAutoSave()
         let reloadRevision = revision
         isReloading = true
-        defer { isReloading = false }
+        defer {
+            isReloading = false
+            if isDirty { scheduleAutoSave() }
+        }
 
         let data = try await filesystem.readFile(at: path)
         let decoded = try await Task.detached(priority: .utility) {
@@ -187,6 +225,7 @@ final class EditorDocument: ObservableObject {
         persistedData = data
         text = decoded.text
         isDirty = false
+        saveErrorMessage = nil
         contentGeneration &+= 1
     }
 

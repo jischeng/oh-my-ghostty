@@ -53,17 +53,15 @@ public final class CompletionState: ObservableObject {
     }
 
     public func filter(prefix: String, prefixRange: NSRange, at point: CGPoint) {
+        let selected = currentSelection
         self.prefix = prefix
         self.prefixRange = prefixRange
         self.presentationPoint = point
         let lower = prefix.lowercased()
         let matching = candidates.filter { $0.label.lowercased().contains(lower) }
-        if !matching.isEmpty {
-            self.candidates = matching
-            if selectedIndex >= matching.count {
-                self.selectedIndex = 0
-            }
-        }
+        self.candidates = matching
+        self.selectedIndex = selected.flatMap { matching.firstIndex(of: $0) } ?? 0
+        self.isPresented = !matching.isEmpty
     }
 }
 

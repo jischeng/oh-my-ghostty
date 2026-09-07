@@ -1,5 +1,8 @@
 import AppKit
 import CodeEditSourceEditor
+import CodeEditLanguages
+import CodeEditTextView
+import SwiftUI
 import Foundation
 import Testing
 @testable import Ghostty
@@ -64,7 +67,7 @@ struct EditorCompletionTests {
     }
 
     @Test @MainActor func completionEngineMergesAndRanksProviders() async {
-        let engine = EditorCompletionEngine.shared
+        let engine = EditorCompletionEngine()
         let text = """
         guard let customGuard = guardValue else { return }
         """
@@ -95,7 +98,7 @@ struct EditorCompletionTests {
             }
         }
 
-        let engine = EditorCompletionEngine.shared
+        let engine = EditorCompletionEngine()
         engine.register(provider: MockProvider())
 
         let context = CompletionContext(
@@ -112,6 +115,163 @@ struct EditorCompletionTests {
         engine.unregister(providerID: "test.mock")
         let afterItems = await engine.completions(for: context)
         #expect(!afterItems.contains(where: { $0.label == "mockSpecialCandidate" }))
+    }
+
+    @Test func keywordLookupDoesNotConfuseCWithOtherLanguages() async {
+        let provider = LanguageKeywordCompletionProvider()
+        for (language, prefix, expected) in [
+            ("javascript", "fun", "function"), ("cpp", "cla", "class"),
+            ("tsx", "rea", "readonly"), ("c", "uns", "unsigned")
+        ] {
+            let items = await provider.provideCompletions(context: context(prefix, language: language))
+            #expect(items.contains { $0.label == expected })
+        }
+        for language in ["markdown", "yaml", "unknown"] {
+            #expect(await provider.provideCompletions(context: context("gu", language: language)).isEmpty)
+        }
+    }
+
+    @Test func bufferRankingUsesNearestOccurrence() async throws {
+        let text = "calculate " + String(repeating: " ", count: 1000) + "calculate cal"
+        let items = await BufferWordCompletionProvider().provideCompletions(context: CompletionContext(
+            documentText: text, cursorOffset: text.utf16.count, prefix: "cal", lineText: text,
+            language: nil, fileURL: nil
+        ))
+        let item = try #require(items.first { $0.label == "calculate" })
+        #expect(item.score > 110)
+    }
+
+    @Test @MainActor func filteringRemovesStaleSuggestionsAndPreservesSelectedCandidate() {
+        let state = CompletionState()
+        state.update(candidates: [CompletionItem(label: "alpha"), CompletionItem(label: "beta")],
+                     prefix: "a", prefixRange: NSRange(location: 0, length: 1), at: .zero)
+        state.selectNext()
+        state.filter(prefix: "bet", prefixRange: NSRange(location: 0, length: 3), at: .zero)
+        #expect(state.currentSelection?.label == "beta")
+        state.filter(prefix: "zzz", prefixRange: NSRange(location: 0, length: 3), at: .zero)
+        #expect(state.candidates.isEmpty)
+        #expect(!state.isPresented)
+        #expect(state.currentSelection == nil)
+    }
+
+    @Test @MainActor func equalScoreCompletionsHaveStableOrder() async {
+        struct Provider: CompletionProvider {
+            let id = "test.ties"
+            let name = "Ties"
+            let priority = 1000
+            func provideCompletions(context: CompletionContext) async -> [CompletionItem] {
+                [CompletionItem(label: "zulu"), CompletionItem(label: "alpha")]
+            }
+        }
+        let engine = EditorCompletionEngine()
+        engine.unregister(providerID: "builtin.buffer")
+        engine.unregister(providerID: "builtin.keywords")
+        engine.register(provider: Provider())
+        #expect(await engine.completions(for: context("a")).map(\.label) == ["alpha", "zulu"])
+    }
+
+    @Test @MainActor func nativeCompletionCancelsStaleWorkAndRespectsFocus() async throws {
+        let coordinator = EditorCoordinator()
+        let capture = CompletionTestCapture()
+        let state = CompletionState()
+        coordinator.setCompletionState(state)
+        _ = coordinator.language(fileURL: URL(fileURLWithPath: "/test.swift"), text: "gu")
+        let view = CodeEditSourceEditor(
+            .constant("gu"), language: .swift, theme: .oneDark,
+            font: .monospacedSystemFont(ofSize: 13, weight: .regular), tabWidth: 4,
+            lineHeight: 1.2, wrapLines: false, cursorPositions: .constant([]),
+            highlightProviders: [], coordinators: [coordinator, capture]
+        )
+        let host = NSHostingController(rootView: view)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentViewController = host
+        host.view.layoutSubtreeIfNeeded()
+        defer {
+            coordinator.destroy()
+            window.close()
+        }
+        let controller = try #require(capture.controller)
+        let textView = try #require(controller.textView)
+        coordinator.setActive(true)
+        window.makeFirstResponder(textView)
+        coordinator.select(NSRange(location: 2, length: 0))
+        coordinator.textViewDidChangeText(controller: controller)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(state.candidates.contains { $0.label == "guard" })
+
+        // Starting work and then inserting whitespace must not resurrect the old popup.
+        coordinator.textViewDidChangeText(controller: controller)
+        textView.replaceCharacters(in: NSRange(location: 2, length: 0), with: " ")
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(!state.isPresented)
+
+        textView.replaceCharacters(in: NSRange(location: 2, length: 1), with: "")
+        coordinator.select(NSRange(location: 2, length: 0))
+        coordinator.textViewDidChangeText(controller: controller)
+        coordinator.select(NSRange(location: 0, length: 0))
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(!state.isPresented)
+
+        coordinator.select(NSRange(location: 2, length: 0))
+        coordinator.textViewDidChangeText(controller: controller)
+        _ = EditorCommandRouter.shared.handle(try keyEvent(53, window: window))
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(!state.isPresented)
+
+        state.update(candidates: [CompletionItem(label: "guard")], prefix: "gu",
+                     prefixRange: NSRange(location: 0, length: 2), at: .zero)
+        let fieldEditor = NSTextView()
+        fieldEditor.isFieldEditor = true
+        host.view.addSubview(fieldEditor)
+        window.makeFirstResponder(fieldEditor)
+        #expect(!EditorCommandRouter.shared.handle(try keyEvent(36, window: window)))
+        #expect(textView.string == "gu")
+        #expect(!state.isPresented)
+
+        window.makeFirstResponder(textView)
+        state.update(candidates: [CompletionItem(label: "guard")], prefix: "gu",
+                     prefixRange: NSRange(location: 0, length: 2), at: .zero)
+        #expect(!EditorCommandRouter.shared.handle(try keyEvent(36, window: window, modifiers: .command)))
+        #expect(textView.string == "gu")
+        coordinator.commit(completion: CompletionItem(label: "guard"))
+        #expect(textView.string == "guard")
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(!state.isPresented)
+        textView.undoManager?.undo()
+        #expect(textView.string == "gu")
+
+        state.update(candidates: [CompletionItem(label: "guard")], prefix: "stale",
+                     prefixRange: NSRange(location: 0, length: 2), at: .zero)
+        coordinator.commit(completion: CompletionItem(label: "guard"))
+        #expect(textView.string == "gu")
+
+        textView.setMarkedText("拼", selectedRange: NSRange(location: 1, length: 0),
+                               replacementRange: NSRange(location: NSNotFound, length: 0))
+        #expect(textView.hasMarkedText())
+        let markedText = textView.string
+        state.update(candidates: [CompletionItem(label: "guard")], prefix: "gu",
+                     prefixRange: NSRange(location: 0, length: 2), at: .zero)
+        #expect(!EditorCommandRouter.shared.handle(try keyEvent(36, window: window)))
+        #expect(textView.string == markedText)
+        #expect(textView.hasMarkedText())
+        #expect(!state.isPresented)
+        textView.unmarkText()
+        coordinator.setActive(false)
+    }
+
+    private func context(_ prefix: String, language: String? = nil) -> CompletionContext {
+        CompletionContext(documentText: prefix, cursorOffset: prefix.utf16.count,
+                          prefix: prefix, lineText: prefix, language: language, fileURL: nil)
+    }
+
+    @MainActor private func keyEvent(
+        _ code: UInt16, window: NSWindow, modifiers: NSEvent.ModifierFlags = []
+    ) throws -> NSEvent {
+        try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers,
+                                     timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                     characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: code))
     }
 
     @Test func themeDefinitionDecodesJSONAndProducesTheme() throws {
@@ -132,4 +292,10 @@ struct EditorCompletionTests {
         let theme = def.toEditorTheme()
         #expect(theme.background == .clear)
     }
+}
+
+@MainActor
+private final class CompletionTestCapture: @preconcurrency TextViewCoordinator {
+    weak var controller: TextViewController?
+    func prepareCoordinator(controller: TextViewController) { self.controller = controller }
 }

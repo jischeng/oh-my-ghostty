@@ -32,6 +32,8 @@ final class EditorWorkspace: ObservableObject {
 
     func reload(_ document: EditorDocument, window: NSWindow?) async {
         guard !document.isSaving, !document.isReloading else { return }
+        document.suspendAutoSave()
+        defer { document.resumeAutoSave() }
         if document.isDirty {
             let alert = NSAlert()
             alert.messageText = "Reload \"\((document.path as NSString).lastPathComponent)\"?"
@@ -110,6 +112,8 @@ final class EditorWorkspace: ObservableObject {
     private func canClose(_ document: EditorDocument, window: NSWindow?) async -> Bool {
         guard !document.isSaving else { return false }
         guard document.isDirty else { return true }
+        document.suspendAutoSave()
+        defer { document.resumeAutoSave() }
         let alert = NSAlert()
         alert.messageText = "Save changes to \"\((document.path as NSString).lastPathComponent)\"?"
         alert.informativeText = "Your changes will be lost if you close without saving."
@@ -130,6 +134,7 @@ final class EditorWorkspace: ObservableObject {
     }
 
     private func remove(_ document: EditorDocument) {
+        document.suspendAutoSave()
         documents.removeAll { $0.id == document.id }
         if selectedID == document.id { selectedID = documents.last?.id }
         if documents.isEmpty { isVisible = false }

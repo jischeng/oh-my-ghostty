@@ -112,31 +112,31 @@ public struct BufferWordCompletionProvider: CompletionProvider, Sendable {
 
     public init() {}
 
+    private static let wordPattern = try? NSRegularExpression(pattern: "\\b[a-zA-Z_][a-zA-Z0-9_]{2,}\\b")
+
     public func provideCompletions(context: CompletionContext) async -> [CompletionItem] {
         let prefix = context.prefix
-        guard prefix.count >= 1 else { return [] }
+        guard !prefix.isEmpty, !Task.isCancelled else { return [] }
 
         let text = context.documentText
         var frequencies: [String: Int] = [:]
         var minOffsets: [String: Int] = [:]
 
-        // Fast regex to extract word identifiers
-        let pattern = "\\b[a-zA-Z_][a-zA-Z0-9_]{2,}\\b"
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
-
         let nsText = text as NSString
-        let matches = regex.matches(in: text, range: NSRange(location: 0, length: min(nsText.length, 100_000)))
-
+        let lowerPrefix = prefix.lowercased()
+        let matches = Self.wordPattern?.matches(
+            in: text, range: NSRange(location: 0, length: min(nsText.length, 100_000))
+        ) ?? []
         for match in matches {
+            guard !Task.isCancelled else { return [] }
             let word = nsText.substring(with: match.range)
+            guard word.lowercased().contains(lowerPrefix) else { continue }
             frequencies[word, default: 0] += 1
-            if minOffsets[word] == nil {
-                minOffsets[word] = abs(match.range.location - context.cursorOffset)
-            }
+            let distance = abs(match.range.location - context.cursorOffset)
+            minOffsets[word] = min(minOffsets[word] ?? Int.max, distance)
         }
 
         var results: [CompletionItem] = []
-        let lowerPrefix = prefix.lowercased()
 
         for (word, count) in frequencies {
             let lowerWord = word.lowercased()
@@ -225,16 +225,11 @@ public struct LanguageKeywordCompletionProvider: CompletionProvider, Sendable {
         let prefix = context.prefix
         guard prefix.count >= 1 else { return [] }
 
-        let langKey = context.language?.lowercased() ?? ""
-        var keywordList: [String] = []
-
-        for (k, v) in Self.keywordsByLanguage where langKey.contains(k) {
-            keywordList = v
-            break
-        }
-        if keywordList.isEmpty {
-            keywordList = Self.keywordsByLanguage["swift"] ?? []
-        }
+        let language = context.language?.lowercased() ?? ""
+        let aliases = ["c++": "cpp", "cxx": "cpp", "js": "javascript", "jsx": "javascript",
+                       "ts": "typescript", "tsx": "typescript", "sh": "bash", "shell": "bash"]
+        let langKey = aliases[language] ?? language
+        guard let keywordList = Self.keywordsByLanguage[langKey] else { return [] }
 
         let lowerPrefix = prefix.lowercased()
         var results: [CompletionItem] = []
@@ -284,14 +279,18 @@ public final class EditorCompletionEngine {
         var seenLabels = Set<String>()
 
         for provider in providers {
+            guard !Task.isCancelled else { return [] }
             let items = await provider.provideCompletions(context: context)
+            guard !Task.isCancelled else { return [] }
             for item in items where !seenLabels.contains(item.label) {
                 seenLabels.insert(item.label)
                 results.append(item)
             }
         }
 
-        results.sort { $0.score > $1.score }
+        results.sort {
+            $0.score == $1.score ? $0.label < $1.label : $0.score > $1.score
+        }
         return Array(results.prefix(15))
     }
 }

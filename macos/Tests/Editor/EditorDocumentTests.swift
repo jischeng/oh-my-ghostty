@@ -112,6 +112,55 @@ struct EditorDocumentTests {
         #expect(await filesystem.writtenData() == Data("first edit".utf8))
     }
 
+    @Test @MainActor func slowSaveSchedulesRemainingEdits() async throws {
+        let filesystem = SuspendedWriteEditorFilesystem(data: Data("before".utf8))
+        let document = try await EditorDocument.open(path: "/file", filesystem: filesystem)
+        document.text = "first edit"
+        let save = Task { try await document.save() }
+        await filesystem.waitUntilWriteStarts()
+        document.text = "second edit"
+        // Let the old debounce deadline pass while the first write is blocked.
+        try await Task.sleep(for: .milliseconds(1200))
+        await filesystem.finishWrite()
+        try await save.value
+        try await Task.sleep(for: .milliseconds(1200))
+        #expect(await filesystem.writtenData() == Data("second edit".utf8))
+        await filesystem.finishWrite()
+        document.suspendAutoSave()
+    }
+
+    @Test @MainActor func suspendedAutoSaveCannotFlushAndResumesAfterCancel() async throws {
+        let filesystem = MutableEditorFilesystem(data: Data("original".utf8))
+        let document = try await EditorDocument.open(path: "/file", filesystem: filesystem)
+        document.text = "edited"
+        document.suspendAutoSave()
+        document.flushAutoSave()
+        try await Task.sleep(for: .milliseconds(1200))
+        #expect(await filesystem.currentData() == Data("original".utf8))
+        #expect(document.isDirty)
+        document.resumeAutoSave()
+        try await Task.sleep(for: .milliseconds(1200))
+        #expect(await filesystem.currentData() == Data("edited".utf8))
+        #expect(!document.isDirty)
+    }
+
+    @Test @MainActor func autoSaveFailureIsVisibleAndSuccessfulRetryClearsIt() async throws {
+        let filesystem = MutableEditorFilesystem(data: Data("original".utf8))
+        let document = try await EditorDocument.open(path: "/file", filesystem: filesystem)
+        await filesystem.replaceData(Data("external".utf8))
+        document.text = "edited"
+        document.flushAutoSave()
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(document.saveErrorMessage != nil)
+        #expect(document.isDirty)
+        #expect(await filesystem.currentData() == Data("external".utf8))
+        await filesystem.replaceData(Data("original".utf8))
+        try await document.save()
+        #expect(document.saveErrorMessage == nil)
+        #expect(!document.isDirty)
+        #expect(await filesystem.currentData() == Data("edited".utf8))
+    }
+
     @Test @MainActor func dirtyTracksDifferenceFromPersistedText() async throws {
         let filesystem = MemoryEditorFilesystem(data: Data("original".utf8))
         let document = try await EditorDocument.open(path: "/file", filesystem: filesystem)

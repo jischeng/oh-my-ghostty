@@ -7,11 +7,12 @@ import Foundation
 /// A lightweight syntax highlight provider for Markdown files in the native editor.
 @MainActor
 final class MarkdownHighlightProvider: HighlightProviding {
-    private weak var textView: TextView?
     private var isMarkdown = false
+    private static let inlineCode = try? NSRegularExpression(pattern: "`([^`]+)`")
+    private static let link = try? NSRegularExpression(pattern: #"\[([^\]]+)\]\(([^\)]+)\)"#)
+    private static let bold = try? NSRegularExpression(pattern: #"\*\*([^\*]+)\*\*"#)
 
     func setUp(textView: TextView, codeLanguage: CodeLanguage) {
-        self.textView = textView
         self.isMarkdown = codeLanguage.id == .markdown || codeLanguage.id == .markdownInline
     }
 
@@ -25,8 +26,22 @@ final class MarkdownHighlightProvider: HighlightProviding {
             completion(.success(IndexSet()))
             return
         }
-        let fullLength = textView.textStorage.length
-        completion(.success(IndexSet(integersIn: 0..<fullLength)))
+        let string = textView.string as NSString
+        guard range.location != NSNotFound, range.location >= 0, range.location <= string.length else {
+            completion(.success(IndexSet()))
+            return
+        }
+        let newRange = NSRange(
+            location: range.location,
+            length: min(max(0, range.length + delta), string.length - range.location)
+        )
+        // This supplemental provider recognizes line-local syntax only.
+        // Tree-sitter separately invalidates multi-line constructs such as fenced code.
+        let affectedLines = string.lineRange(for: newRange)
+        // The dependency's HighlightProviderState does not shift its valid index set after edits.
+        // A length change must also invalidate the suffix so previously unseen text is not marked valid.
+        let invalidEnd = delta == 0 ? NSMaxRange(affectedLines) : string.length
+        completion(.success(IndexSet(integersIn: affectedLines.location..<invalidEnd)))
     }
 
     func queryHighlightsFor(
@@ -42,14 +57,14 @@ final class MarkdownHighlightProvider: HighlightProviding {
         }
         let string = textView.string as NSString
         let lineRange = string.lineRange(for: range)
-        let slice = string.substring(with: lineRange)
+        let slice = string.substring(with: lineRange) as NSString
         var results: [HighlightRange] = []
 
         let baseOffset = lineRange.location
         var lineStart = 0
-        while lineStart < slice.utf16.count {
-            let currentLineRange = (slice as NSString).lineRange(for: NSRange(location: lineStart, length: 0))
-            let lineText = (slice as NSString).substring(with: currentLineRange)
+        while lineStart < slice.length {
+            let currentLineRange = slice.lineRange(for: NSRange(location: lineStart, length: 0))
+            let lineText = slice.substring(with: currentLineRange)
             let trimmed = lineText.trimmingCharacters(in: .newlines)
             let lineGlobalOffset = baseOffset + currentLineRange.location
 
@@ -92,8 +107,7 @@ final class MarkdownHighlightProvider: HighlightProviding {
             }
 
             if lineText.contains("`") {
-                let pattern = try? NSRegularExpression(pattern: "`([^`]+)`")
-                let matches = pattern?.matches(
+                let matches = Self.inlineCode?.matches(
                     in: lineText,
                     range: NSRange(location: 0, length: (lineText as NSString).length)
                 ) ?? []
@@ -106,8 +120,7 @@ final class MarkdownHighlightProvider: HighlightProviding {
             }
 
             if lineText.contains("[") && lineText.contains("](") {
-                let pattern = try? NSRegularExpression(pattern: "\\[([^\\]]+)\\]\\(([^\\)]+)\\)")
-                let matches = pattern?.matches(
+                let matches = Self.link?.matches(
                     in: lineText,
                     range: NSRange(location: 0, length: (lineText as NSString).length)
                 ) ?? []
@@ -126,8 +139,7 @@ final class MarkdownHighlightProvider: HighlightProviding {
             }
 
             if lineText.contains("**") {
-                let pattern = try? NSRegularExpression(pattern: "\\*\\*([^\\*]+)\\*\\*")
-                let matches = pattern?.matches(
+                let matches = Self.bold?.matches(
                     in: lineText,
                     range: NSRange(location: 0, length: (lineText as NSString).length)
                 ) ?? []

@@ -62,6 +62,21 @@ struct EditorTextSearchTests {
         ) == NSRange(location: 4, length: 9))
     }
 
+    @Test @MainActor func lineActionsAtTrailingEmptyLineDoNotModifyPreviousLine() {
+        #expect(EditorTextSearch.lineRange(
+            containing: NSRange(location: 4, length: 0), in: "one\n"
+        ) == NSRange(location: 4, length: 0))
+        let textView = TextView(string: "one\n")
+        textView.selectionManager.setSelectedRange(NSRange(location: 4, length: 0))
+        #expect(EditorNativeTextActions.perform(.deleteLine, on: textView))
+        #expect(textView.string == "one\n")
+        #expect(EditorNativeTextActions.perform(.duplicateLine, on: textView))
+        #expect(textView.string == "one\n\n")
+        #expect(textView.selectionManager.textSelections.first?.range.location == 5)
+        #expect(EditorNativeTextActions.perform(.undo, on: textView))
+        #expect(textView.string == "one\n")
+    }
+
     @Test @MainActor func nativeSelectionCopyCutPasteAndUndoUseTheEditorTextView() {
         let textView = TextView(string: "alpha beta")
         #expect(EditorNativeTextActions.select(NSRange(location: 0, length: 5), on: textView))
@@ -164,6 +179,27 @@ struct EditorTextSearchTests {
         #expect(!EditorTextEditing.replace(on: textView, ranges: ranges, with: "b"))
         #expect(textView.string == "a a")
         #expect(textView.undoManager?.canUndo == false)
+    }
+
+    @Test @MainActor func markdownEditInvalidationAccountsForShiftedOffsets() {
+        let textView = TextView(string: "# First\nchanged\n# Last\n")
+        let provider = MarkdownHighlightProvider()
+        provider.setUp(textView: textView, codeLanguage: .markdown)
+        var invalidated = IndexSet()
+        provider.applyEdit(textView: textView, range: NSRange(location: 8, length: 7), delta: 0) {
+            invalidated = (try? $0.get()) ?? IndexSet()
+        }
+        #expect(invalidated == IndexSet(integersIn: 8..<16))
+        provider.applyEdit(textView: textView, range: NSRange(location: 8, length: 3), delta: 4) {
+            invalidated = (try? $0.get()) ?? IndexSet()
+        }
+        #expect(invalidated == IndexSet(integersIn: 8..<23))
+        // Deleting the newline joins two lines and must invalidate the resulting whole line.
+        let joined = TextView(string: "# Firstchanged\n# Last\n")
+        provider.applyEdit(textView: joined, range: NSRange(location: 7, length: 1), delta: -1) {
+            invalidated = (try? $0.get()) ?? IndexSet()
+        }
+        #expect(invalidated == IndexSet(integersIn: 0..<22))
     }
 
     @Test @MainActor func markdownHighlightProviderRecognizesHeadingsCodeAndLinks() async throws {

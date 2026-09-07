@@ -34,10 +34,8 @@ enum EditorTextSearch {
         guard selection.location != NSNotFound,
               selection.location >= 0,
               NSMaxRange(selection) <= source.length else { return nil }
-        if source.length == 0 { return .zero }
-        let location = min(selection.location, source.length - 1)
-        let effectiveLength = selection.length == 0 ? 0 : min(selection.length, source.length - location)
-        return source.lineRange(for: NSRange(location: location, length: effectiveLength))
+        // EOF after a newline is an empty line, not the preceding line.
+        return source.lineRange(for: selection)
     }
 
     static func matches(in text: String, query: String, caseSensitive: Bool) -> [NSRange] {

@@ -261,10 +261,11 @@ private struct EditorDocumentView: View {
     let previousDocument: () -> Void
     let saveAll: () -> Void
 
-    @State private var isPreviewMode = false
+    // Each document has its own view identity in the workspace, preserving its chosen mode.
+    @State private var isPreviewMode = true
 
     private var isMarkdownDocument: Bool {
-        document.path.hasSuffix(".md") || document.path.hasSuffix(".markdown")
+        ["md", "markdown"].contains((document.path as NSString).pathExtension.lowercased())
     }
 
     var body: some View {
@@ -312,9 +313,9 @@ private struct EditorDocumentView: View {
                         isRemote: document.filesystem.descriptor.kind == .ssh,
                         filesystem: document.filesystem,
                         terminalBackground: terminalBackground,
-                        terminalBackgroundOpacity: terminalBackgroundOpacity,
                         foregroundColor: terminalTheme.text
                     )
+                    .id(document.contentGeneration)
                 }
             }
             Divider()

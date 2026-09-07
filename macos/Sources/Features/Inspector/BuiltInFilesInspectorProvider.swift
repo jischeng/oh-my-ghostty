@@ -1,5 +1,7 @@
+import AppKit
 import Foundation
 import OSLog
+import UniformTypeIdentifiers
 
 @MainActor
 final class BuiltInFilesInspectorProvider {
@@ -157,6 +159,20 @@ final class BuiltInFilesInspectorProvider {
             }
             openFile(path, state.context, destination)
 
+        case .copyFilePath(let path, let relative):
+            guard let tree = state.tree, Self.findNode(id: path, in: tree.nodes) != nil else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(
+                relative ? WorkspaceFileActions.relativePath(path, root: state.rootPath) : path,
+                forType: .string
+            )
+
+        case .renameFile(let path):
+            rename(path: path, context: context)
+
+        case .openFileExternally(let path):
+            openExternally(path: path, context: context)
+
         case .refresh:
             states[context.tabID] = state
             reloadRoot(context: context, reason: "manual-refresh")
@@ -186,6 +202,105 @@ final class BuiltInFilesInspectorProvider {
              .resumeAgentHistorySession, .forkAgentHistorySession,
              .gitAction:
             break
+        }
+    }
+
+    private func showError(_ error: Error) {
+        let alert = NSAlert()
+        alert.messageText = "File operation failed"
+        alert.informativeText = error.localizedDescription
+        alert.alertStyle = .warning
+        alert.runModal()
+    }
+
+    private func rename(path: String, context: InspectorPaneContext) {
+        let state = state(for: context)
+        guard let tree = state.tree, let node = Self.findNode(id: path, in: tree.nodes) else { return }
+        guard !EditorWorkspaceStore.shared.containsOpenDocument(path: path, descriptor: state.filesystem.descriptor) else {
+            showError(WorkspaceFilesystemError.operationFailed(
+                "Close this file and any open files inside this folder before renaming it."
+            ))
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Rename \(node.name)"
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(string: node.name)
+        field.frame = NSRect(x: 0, y: 0, width: 300, height: 24)
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = field.stringValue
+        do { _ = try WorkspaceFileActions.renamedPath(path, name: name) } catch {
+            showError(error)
+            return
+        }
+        guard name != node.name else { return }
+        guard !EditorWorkspaceStore.shared.containsOpenDocument(path: path, descriptor: state.filesystem.descriptor) else {
+            showError(WorkspaceFilesystemError.operationFailed("Close this file and any open files inside this folder before renaming it."))
+            return
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await state.filesystem.renameItem(at: path, to: name)
+                guard let current = states[context.tabID],
+                      current.filesystem.descriptor == state.filesystem.descriptor,
+                      current.context.session.state == state.context.session.state else { return }
+                let newPath = try WorkspaceFileActions.renamedPath(path, name: name)
+                states[context.tabID]?.expanded = Set(current.expanded.map { expanded in
+                    if expanded == path { return newPath }
+                    return expanded.hasPrefix(path + "/") ? newPath + expanded.dropFirst(path.count) : expanded
+                })
+                reloadRoot(context: current.context, reason: "rename")
+            } catch {
+                showError(error)
+            }
+        }
+    }
+
+    private func openExternally(path: String, context: InspectorPaneContext) {
+        let state = state(for: context)
+        guard let tree = state.tree, let node = Self.findNode(id: path, in: tree.nodes) else { return }
+        let remote = state.filesystem.descriptor.kind == .ssh
+        guard !remote || !node.isDirectory else {
+            showError(WorkspaceFilesystemError.operationFailed("Open in… supports remote files, but not remote folders."))
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.title = remote ? "Open a read-only downloaded copy in…" : "Open in…"
+        panel.message = remote ? "Changes in the other app will not be uploaded to the server." : "Choose an application."
+        panel.prompt = "Open"
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        panel.allowedContentTypes = [.applicationBundle]
+        panel.canChooseDirectories = false
+        panel.treatsFilePackagesAsDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let application = panel.url else { return }
+        Task { [weak self] in
+            do {
+                let url: URL
+                if remote {
+                    let data = try await state.filesystem.readFile(at: path)
+                    let directory = FileManager.default.temporaryDirectory
+                        .appendingPathComponent("omg-open-\(UUID().uuidString)", isDirectory: true)
+                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                                           attributes: [.posixPermissions: 0o700])
+                    url = directory.appendingPathComponent(node.name)
+                    try data.write(to: url)
+                    try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: url.path)
+                } else {
+                    url = URL(fileURLWithPath: path)
+                }
+                let configuration = NSWorkspace.OpenConfiguration()
+                NSWorkspace.shared.open([url], withApplicationAt: application, configuration: configuration) { _, error in
+                    guard let error else { return }
+                    Task { @MainActor [weak self] in self?.showError(error) }
+                }
+            } catch {
+                self?.showError(error)
+            }
         }
     }
 

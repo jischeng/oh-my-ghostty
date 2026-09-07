@@ -4,6 +4,43 @@ import Testing
 @testable import Ghostty
 
 struct WorkspaceProviderTests {
+    @Test func localRenamePreservesContentsAndRefusesConflicts() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let original = root.appendingPathComponent("old.md")
+        let renamed = root.appendingPathComponent("new.md")
+        let occupied = root.appendingPathComponent("occupied.md")
+        try Data("original".utf8).write(to: original)
+        try Data("keep".utf8).write(to: occupied)
+        let filesystem = LocalWorkspaceFilesystem(workingDirectory: root.path)
+        try await filesystem.renameItem(at: original.path, to: "new.md")
+        #expect(!FileManager.default.fileExists(atPath: original.path))
+        #expect(try Data(contentsOf: renamed) == Data("original".utf8))
+        await #expect(throws: (any Error).self) {
+            try await filesystem.renameItem(at: renamed.path, to: "occupied.md")
+        }
+        #expect(try Data(contentsOf: occupied) == Data("keep".utf8))
+        #expect(try Data(contentsOf: renamed) == Data("original".utf8))
+        let folder = root.appendingPathComponent("folder", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        try await filesystem.renameItem(at: folder.path, to: "renamed folder")
+        #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("renamed folder").path))
+    }
+
+    @Test func fileActionPathsRespectBoundariesAndRejectInvalidNames() throws {
+        #expect(WorkspaceFileActions.relativePath("/work/docs/readme.md", root: "/work") == "docs/readme.md")
+        #expect(WorkspaceFileActions.relativePath("/work/docs/readme.md", root: "/work/") == "docs/readme.md")
+        #expect(WorkspaceFileActions.relativePath("/worker/a", root: "/work") == "/worker/a")
+        #expect(WorkspaceFileActions.relativePath("/file", root: "/") == "file")
+        #expect(try WorkspaceFileActions.renamedPath("/work/old.md", name: "new name.md") == "/work/new name.md")
+        for name in ["", ".", "..", "../escape", "bad\nname", "bad\0name", "bad\rname"] {
+            #expect(throws: WorkspaceFilesystemError.invalidPath) {
+                try WorkspaceFileActions.renamedPath("/work/old.md", name: name)
+            }
+        }
+    }
+
     @Test @MainActor func imageOnlyClipboardWritesTempFileAndPastesPath() throws {
         let rep = try #require(NSBitmapImageRep(
             bitmapDataPlanes: nil,

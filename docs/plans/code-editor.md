@@ -90,7 +90,8 @@
 
 ### 本轮检查后仍待推进
 
-- `MarkdownPreviewView` 在 SwiftUI body 内解析全部块并同步加载本地图片；SSH 文档的相对图片路径也尚未通过 WorkspaceFilesystem 解析。应单独改造为异步加载及缓存。
+- Markdown 文件（`.md` / `.markdown`，不区分大小写）默认预览，每个文档保留独立的 Edit/Preview 选择。预览复用离线打包的 markdown-it、highlight.js、Mermaid、KaTeX 与 DOMPurify，支持 GFM 表格、任务列表、嵌套列表、彩色 GitHub alerts（包括 Notes/Tips 别名）、admonitions、SVG 图片、公式与图表。任务复选框仅展示，不修改源文件。
+- `MarkdownPreviewView` 使用透明 WKWebView 继承终端背景，渲染更新合并处理；本地和 SSH 图片通过同一个 `WorkspaceFilesystem` 异步读取，资源桥只返回图片类型。重载文档重建预览并重新请求图片。脚本、字体和样式随应用打包，远程 URL 图片仍需要网络；HTML 经 DOMPurify 过滤，Mermaid 使用 strict 模式，外部链接仅在用户点击后交给系统浏览器。
 - buffer 补全仍只扫描文件开头 100,000 个 UTF-16 单元，大文件尾部的局部标识符可能缺失；后续应采用光标周边窗口或增量索引。
 - `EditorWorkspace.save/canClose` 在已有保存进行时直接返回 false，慢速 SSH 下缺少等待完成后继续用户操作的机制。
 - 每个打开的文档都保留原生编辑器以保存撤销历史；大量标签的内存及恢复策略需要实际测量，不能直接通过销毁隐藏编辑器优化。

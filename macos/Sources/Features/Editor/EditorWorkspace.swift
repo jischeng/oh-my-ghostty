@@ -72,7 +72,6 @@ final class EditorWorkspace: ObservableObject {
         }
         do {
             try await document.reload()
-            MarkdownImageCache.shared.removeAllObjects()
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
@@ -226,6 +225,21 @@ final class EditorWorkspaceStore {
     private var owners: [UUID: UUID] = [:]
     private var closing = Set<UUID>()
     private var isResolvingTermination = false
+
+    func containsOpenDocument(path: String, descriptor: WorkspaceDescriptor) -> Bool {
+        guard let target = try? EditorDocumentID(descriptor: descriptor, path: path) else { return true }
+        let resolvedTarget = descriptor.kind == .local
+            ? URL(fileURLWithPath: target.path).resolvingSymlinksInPath().path : target.path
+        return workspaces.values.contains { workspace in
+            workspace.documents.contains { document in
+                guard document.id.endpoint == target.endpoint else { return false }
+                if document.path == target.path || document.path.hasPrefix(target.path + "/") { return true }
+                guard descriptor.kind == .local else { return false }
+                let resolvedDocument = URL(fileURLWithPath: document.path).resolvingSymlinksInPath().path
+                return resolvedDocument == resolvedTarget || resolvedDocument.hasPrefix(resolvedTarget + "/")
+            }
+        }
+    }
 
     func workspace(for tabID: UUID, surfaceID: UUID) -> EditorWorkspace {
         owners[surfaceID] = tabID

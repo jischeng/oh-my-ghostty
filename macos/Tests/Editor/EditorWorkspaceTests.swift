@@ -4,6 +4,30 @@ import Testing
 @testable import Ghostty
 
 struct EditorWorkspaceTests {
+    @Test @MainActor func renameGuardFindsOpenDocumentsThroughLocalSymlinks() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let real = root.appendingPathComponent("real", isDirectory: true)
+        let alias = root.appendingPathComponent("alias", isDirectory: true)
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: real)
+        let file = real.appendingPathComponent("file.md")
+        try Data("text".utf8).write(to: file)
+        let filesystem = LocalWorkspaceFilesystem(workingDirectory: root.path)
+        let store = EditorWorkspaceStore()
+        let surfaceID = UUID()
+        let workspace = store.workspace(for: UUID(), surfaceID: surfaceID)
+        defer { store.remove(surfaceIDs: [surfaceID]) }
+        workspace.open(path: alias.appendingPathComponent("file.md").path, filesystem: filesystem)
+        await waitUntil { !workspace.isLoading }
+        #expect(workspace.documents.count == 1)
+        #expect(store.containsOpenDocument(path: file.path, descriptor: filesystem.descriptor))
+        #expect(store.containsOpenDocument(path: real.path, descriptor: filesystem.descriptor))
+        #expect(store.containsOpenDocument(path: alias.path, descriptor: filesystem.descriptor))
+        #expect(!store.containsOpenDocument(path: real.appendingPathComponent("other.md").path,
+                                           descriptor: filesystem.descriptor))
+    }
+
     @Test @MainActor func paneDocumentsFollowTheirSurfaceAndStayIndependent() {
         let store = EditorWorkspaceStore()
         let tab = UUID()

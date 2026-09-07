@@ -700,12 +700,36 @@ protocol WorkspaceFilesystem: Sendable {
     func listDirectory(at path: String) async throws -> [WorkspaceFileEntry]
     func createFile(named name: String, in directory: String) async throws
     func createDirectory(named name: String, in directory: String) async throws
+    func renameItem(at path: String, to name: String) async throws
     func readFile(at path: String) async throws -> Data
     func writeFile(_ data: Data, at path: String, replacing expectedData: Data) async throws
     func itemType(at path: String) async throws -> WorkspaceItemType?
 }
 
+enum WorkspaceFileActions {
+    static func renamedPath(_ path: String, name: String) throws -> String {
+        guard path.hasPrefix("/"), !path.contains("\0"), !path.contains("\n"),
+              !name.isEmpty, name != ".", name != "..",
+              !name.contains("/"), !name.contains(":"),
+              !name.contains("\0"), !name.contains("\n"), !name.contains("\r") else {
+            throw WorkspaceFilesystemError.invalidPath
+        }
+        return ((path as NSString).deletingLastPathComponent as NSString).appendingPathComponent(name)
+    }
+
+    static func relativePath(_ path: String, root: String) -> String {
+        let prefix = root == "/" ? "/" : root.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let absolutePrefix = prefix.hasPrefix("/") ? prefix : "/" + prefix
+        let boundary = absolutePrefix == "/" ? "/" : absolutePrefix + "/"
+        return path.hasPrefix(boundary) ? String(path.dropFirst(boundary.count)) : path
+    }
+}
+
 extension WorkspaceFilesystem {
+    func renameItem(at path: String, to name: String) async throws {
+        throw WorkspaceFilesystemError.unavailable
+    }
+
     func readFile(at path: String) async throws -> Data {
         throw WorkspaceFilesystemError.unavailable
     }
@@ -783,6 +807,15 @@ struct LocalWorkspaceFilesystem: WorkspaceFilesystem {
             } catch {
                 throw WorkspaceFilesystemError.unavailable
             }
+        }.value
+    }
+
+    func renameItem(at path: String, to name: String) async throws {
+        let destination = try WorkspaceFileActions.renamedPath(path, name: name)
+        guard destination != path else { return }
+        try await Task.detached(priority: .utility) {
+            // FileManager refuses to replace an existing destination, including symlinks.
+            try FileManager.default.moveItem(atPath: path, toPath: destination)
         }.value
     }
 
@@ -1080,7 +1113,18 @@ enum SSHSFTPClient {
         process.executableURL = URL(fileURLWithPath: "/usr/bin/sftp")
         process.arguments = ["-q", "-b", "-", host]
         process.standardInput = dataPipe(batch + "\n")
+        return try await run(process)
+    }
 
+    static func runCommand(_ command: String, host: String) async throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        process.arguments = ["-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, command]
+        process.standardInput = FileHandle.nullDevice
+        return try await run(process)
+    }
+
+    private static func run(_ process: Process) async throws -> String {
         return try await withTaskCancellationHandler {
             try await Task.detached(priority: .utility) {
                 let temporaryDirectory = FileManager.default.temporaryDirectory
@@ -1164,6 +1208,33 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
         guard Self.validChildName(name) else { throw WorkspaceFilesystemError.invalidPath }
         _ = try await runSFTP(batch: "mkdir \(Self.quote(Self.join(directory, name)))")
     }
+
+    func renameItem(at path: String, to name: String) async throws {
+        let destination = try WorkspaceFileActions.renamedPath(path, name: name)
+        guard destination != path else { return }
+        let command = "python3 -c " + Self.shellQuote(Self.exclusiveRenameScript) + " " +
+            Self.shellQuote(path) + " " + Self.shellQuote(destination)
+        _ = try await SSHSFTPClient.runCommand(command, host: host.alias)
+    }
+
+    // No check-then-rename fallback: it could overwrite a concurrently created target.
+    static let exclusiveRenameScript = """
+    import ctypes, os, sys
+    libc = ctypes.CDLL(None, use_errno=True)
+    source, target = map(os.fsencode, sys.argv[1:3])
+    if sys.platform.startswith('linux') and hasattr(libc, 'renameat2'):
+        rename = libc.renameat2
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        result = rename(-100, source, -100, target, 1)
+    elif sys.platform == 'darwin' and hasattr(libc, 'renamex_np'):
+        rename = libc.renamex_np
+        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        result = rename(source, target, 4)
+    else:
+        sys.exit('Safe rename requires Linux renameat2 or macOS renamex_np and Python 3.')
+    if result != 0:
+        sys.exit(os.strerror(ctypes.get_errno()))
+    """
 
     func statFile(at path: String) async throws -> (size: UInt64, permissions: Int?, isDirectory: Bool)? {
         let output = try await runSFTP(batch: "ls -la \(Self.quote(path))")

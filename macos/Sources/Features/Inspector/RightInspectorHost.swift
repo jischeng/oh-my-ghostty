@@ -2102,6 +2102,11 @@ private struct InspectorFileTreeNodeView: View {
                 perform(.openFile(path: node.id))
             }
             .contextMenu {
+                Button("Copy Path") { perform(.copyFilePath(path: node.id, relative: false)) }
+                Button("Copy Relative Path") { perform(.copyFilePath(path: node.id, relative: true)) }
+                Button("Rename…") { perform(.renameFile(path: node.id)) }
+                Button("Open in…") { perform(.openFileExternally(path: node.id)) }
+                Divider()
                 if !node.isDirectory {
                     Button("Open in Editor") {
                         selectedNodeID = node.id

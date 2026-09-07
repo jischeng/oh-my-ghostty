@@ -968,3 +968,16 @@ does not edit files or stage changes and does not add plugin wire capabilities.
 ### Editor appearance settings
 
 The built-in editor follows the resolved OMG/Ghostty theme by default (`editor.syntaxTheme = followTerminal`). Independent editor themes may override `editor.opacity` and `editor.blur`; these values are ignored while following OMG. These settings do not add plugin capabilities or change the Files provider opening contract. See [settings configuration](settings/configuration.md#shared-omg-and-editor-appearance).
+
+### Built-in Files context actions
+
+The trusted `builtin.files` provider offers Copy Path, Copy Relative Path (relative
+to the displayed root), Rename, and Open in… for tree entries. Rename uses the
+workspace filesystem boundary for local and SSH files and folders, refuses an
+existing destination, and requires closing open editor documents below the item
+first. SSH rename uses Python 3 over SSH with Linux `renameat2(RENAME_NOREPLACE)`
+or macOS `renamex_np(RENAME_EXCL)`; unsupported hosts fail without a fallback that
+could overwrite a target. File transfers continue to use SFTP. Errors are presented by the host. Open in… uses the macOS application
+chooser; SSH files are downloaded as read-only temporary copies and edits in the
+external application are not uploaded. Remote folders cannot be opened locally.
+These host-owned actions do not grant external plugins filesystem capabilities.

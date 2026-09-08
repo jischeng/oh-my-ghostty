@@ -1411,6 +1411,14 @@ class BaseTerminalController: NSWindowController,
     }
 
     func windowDidResignKey(_ notification: Notification) {
+        // Clear surface modifiers when the window loses focus so underlines don't linger
+        for view in surfaceTree {
+            view.surfaceModel?.sendMousePos(.init(
+                x: -1,
+                y: -1,
+                mods: .none
+            ))
+        }
         // Becoming/losing key means we have to notify our surface(s) that we have focus
         // so things like cursors blink, pty events are sent, etc.
         self.syncFocusToSurfaceTree()

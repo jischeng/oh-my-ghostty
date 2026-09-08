@@ -8821,8 +8821,8 @@ pub const ShellIntegrationFeatures = packed struct {
     cursor: bool = true,
     sudo: bool = false,
     title: bool = true,
-    @"ssh-env": bool = false,
-    @"ssh-terminfo": bool = false,
+    @"ssh-env": bool = true,
+    @"ssh-terminfo": bool = true,
     path: bool = true,
 };
 

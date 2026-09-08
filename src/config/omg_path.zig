@@ -8,7 +8,7 @@ pub const quoted_regex =
 ;
 
 pub const regex =
-    \\(?<![\w./~:@$+-])(?!(?:\.{3,}|[\w.\-/]*\.{3,}))(?:(?:~|/|\.{1,2}/|[\w.\-]+/)[\w./-]*|\.[A-Za-z0-9_][\w.\-]*|[^\s/:*?"'<>|()]+\.[A-Za-z0-9_]{1,8}|(?:Makefile|Dockerfile|Containerfile|Vagrantfile|Gemfile|Rakefile|LICENSE|LICENCE|README)|\.{1,2}|(?<=[📁📂]\s)[\w.\-]+)(?::[0-9]+(?::[0-9]+)?)?(?![/\w.~@$+-])
+    \\(?<![\w./~:@$+-])(?!(?:\.{3,}|[\w.\-/]*\.{3,}))(?![0-9]+(?:[A-Za-z]+)?\.[0-9]+)(?:(?:~|/|\.{1,2}/|[\w.\-]+/)[\w./-]*|\.[A-Za-z0-9_][\w.\-]*|(?![0-9]+\.[0-9]+)[^\s/:*?"'<>|()]+\.(?:7z|[A-Za-z][A-Za-z0-9_]{0,7})|(?:Makefile|Dockerfile|Containerfile|Vagrantfile|Gemfile|Rakefile|LICENSE|LICENCE|README)|\.{1,2}|(?<=[📁📂]\s)[\w.\-]+)(?::[0-9]+(?::[0-9]+)?)?(?![/\w.~@$+-])
 ;
 
 test "OMG bare path candidates" {
@@ -35,6 +35,8 @@ test "OMG bare path candidates" {
         .{ .input = "/tmp/file", .expected = "/tmp/file" },
         .{ .input = "./run.sh", .expected = "./run.sh" },
         .{ .input = "../parent/file.zig", .expected = "../parent/file.zig" },
+        .{ .input = "1.txt", .expected = "1.txt" },
+        .{ .input = "archive.7z", .expected = "archive.7z" },
     };
     for (cases) |case| {
         var match = try re.search(case.input, .{});
@@ -54,6 +56,12 @@ test "OMG bare path candidates" {
         "chegnjisheng",
         "main",
         "20:35",
+        "1.4M",
+        "5.6k",
+        "10.2MB",
+        "3.14",
+        "0.5s",
+        "1.2.3",
         ".../Marked",
         "git",
         "status",

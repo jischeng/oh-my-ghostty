@@ -1044,11 +1044,13 @@ extension Ghostty {
                 return
             }
 
-            // Negative values indicate cursor has left the viewport
+            // Negative values indicate cursor has left the viewport.
+            // Clear modifiers when leaving the surface so that link underlines
+            // and hover states do not linger while the mouse is outside the terminal.
             let mouseEvent = Ghostty.Input.MousePosEvent(
                 x: -1,
                 y: -1,
-                mods: .init(nsFlags: event.modifierFlags)
+                mods: .none
             )
             surfaceModel.sendMousePos(mouseEvent)
         }
@@ -1509,6 +1511,15 @@ extension Ghostty {
             }
 
             _ = keyAction(action, event: event)
+
+            if let surfaceModel {
+                let pos = mouseLocationInSurface ?? NSPoint(x: -1, y: -1)
+                surfaceModel.sendMousePos(.init(
+                    x: pos.x,
+                    y: pos.y >= 0 ? (frame.height - pos.y) : -1,
+                    mods: .init(nsFlags: event.modifierFlags)
+                ))
+            }
         }
 
         private func keyAction(

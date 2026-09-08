@@ -47,6 +47,7 @@ core_archs=$(lipo -archs \
 }
 
 for arch in arm64 x86_64; do
+  DISABLE_SWIFTLINT=1 \
   xcodebuild \
     -project macos/Ghostty.xcodeproj \
     -target Ghostty \
@@ -59,6 +60,7 @@ for arch in arm64 x86_64; do
     build
 done
 
+DISABLE_SWIFTLINT=1 \
 xcodebuild \
   -project macos/Ghostty.xcodeproj \
   -target Ghostty \

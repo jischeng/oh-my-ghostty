@@ -18,8 +18,9 @@ working directory associated with historical output.
   fallback to the system default application for binary file types.
 - **Editor settings:** Localizes the Editor settings in Chinese when selected
   and adds separate opening-location controls for files and Command-click folders.
-- **Terminal environment:** Removes only inherited empty `NO_COLOR`, preserving
-  explicit nonempty values so color-capable tools such as `eza` keep their output.
+- **Terminal environment:** Removes inherited `NO_COLOR` from the OMG host
+  environment so color-capable tools such as `eza` keep their output. A terminal
+  configuration can still set an explicit `NO_COLOR` override when needed.
 
 ## Verification
 

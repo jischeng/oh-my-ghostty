@@ -2,15 +2,15 @@
 const std = @import("std");
 
 pub fn filterInheritedTerminalEnvironment(env: *std.process.Environ.Map) void {
-    // Some launchers export an empty NO_COLOR. Presence alone disables colors
-    // in tools such as eza. Preserve an explicit nonempty opt-out; surface and
-    // config environment overrides are applied after this inherited-env filter.
-    if (env.get("NO_COLOR")) |value| {
-        if (value.len == 0) _ = env.orderedRemove("NO_COLOR");
-    }
+    // OMG is a color-capable terminal host. Launchers and agent runners often
+    // inherit NO_COLOR even though the user did not opt out of terminal colors;
+    // remove the inherited marker so tools such as eza keep their color output.
+    // Surface and config environment overrides are applied after this filter,
+    // so an explicit per-terminal opt-out remains available.
+    _ = env.orderedRemove("NO_COLOR");
 }
 
-test "OMG inherited NO_COLOR preserves absence and nonempty opt-out" {
+test "OMG inherited NO_COLOR is removed while other environment survives" {
     var env = std.process.Environ.Map.init(std.testing.allocator);
     defer env.deinit();
 
@@ -23,9 +23,9 @@ test "OMG inherited NO_COLOR preserves absence and nonempty opt-out" {
     try std.testing.expect(env.get("NO_COLOR") == null);
     try std.testing.expectEqualStrings("truecolor", env.get("COLORTERM").?);
 
-    for ([_][]const u8{ "1", "0", "true" }) |value| {
+    for ([_][]const u8{ "", "1", "0", "true" }) |value| {
         try env.put("NO_COLOR", value);
         filterInheritedTerminalEnvironment(&env);
-        try std.testing.expectEqualStrings(value, env.get("NO_COLOR").?);
+        try std.testing.expect(env.get("NO_COLOR") == null);
     }
 }

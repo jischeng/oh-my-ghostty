@@ -136,7 +136,8 @@ struct MarkdownPreviewView: NSViewRepresentable {
                 webView.evaluateJavaScript("""
                 (() => { const e = document.activeElement;
                     return e && (e.tagName === 'TEXTAREA' || e.tagName === 'INPUT')
-                        ? e.value.slice(e.selectionStart, e.selectionEnd) : window.getSelection().toString(); })()
+                        ? e.value.slice(e.selectionStart, e.selectionEnd)
+                        : (window.getSelectedMarkdownText ? window.getSelectedMarkdownText() : window.getSelection().toString()); })()
                 """) { value, _ in
                     guard let text = value as? String, !text.isEmpty else { return }
                     NSPasteboard.general.clearContents()
@@ -145,7 +146,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
                 return true
             }
             if mods == .command, key == "a" {
-                webView.evaluateJavaScript("document.execCommand('selectAll')", completionHandler: nil)
+                webView.evaluateJavaScript("window.selectAllMarkdown ? window.selectAllMarkdown() : document.execCommand('selectAll')", completionHandler: nil)
                 return true
             }
             if key == "s", mods == .command || mods == [.command, .option] {

@@ -1,0 +1,12 @@
+/* Content retains the original MarkdownPreview style.css (including GFM alerts,
+   tables, KaTeX and highlight.js). Only editing affordances belong here. */
+.omg-block-widget { position: relative; white-space: normal; padding-top: 1px; padding-bottom: 1px; }
+.omg-block-widget > :last-child:not(button) { margin-bottom: 16px; }
+.omg-block-widget pre { white-space: pre; }
+.omg-block-widget .omg-block-source-button { position: absolute; right: 4px; top: 4px; opacity: 0; padding: 2px 7px; color: var(--muted); background: var(--background); border: 1px solid var(--border); border-radius: 4px; font: inherit; font-size: 11px; cursor: pointer; }
+.omg-block-widget:hover > .omg-block-source-button,
+.omg-block-widget:focus-within > .omg-block-source-button { opacity: 1; }
+.omg-block-widget .omg-editable-cell { cursor: text; min-width: 2em; }
+.omg-block-widget .omg-editable-cell:focus-visible { outline: 1px solid var(--link); outline-offset: -1px; }
+.omg-block-widget .omg-editable-cell[contenteditable="true"] { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; outline: 2px solid var(--link); outline-offset: -2px; }
+.omg-block-widget .mermaid { margin: 0 0 16px; }

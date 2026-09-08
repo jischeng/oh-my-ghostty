@@ -1,14 +1,12 @@
-// Install test-only dependencies outside the checkout:
-//   npm install --prefix /tmp/omg-markdown-test --no-audit --no-fund jsdom
-// Run from the checkout:
-//   NODE_PATH=/tmp/omg-markdown-test/node_modules node dist/tests/markdown_preview.cjs [sample.md]
+// npm ci --prefix dist/markdown-editor
+// node dist/tests/markdown_preview.cjs [sample.md]
 // DOM integration test; native WKWebView tests cover actual Mermaid SVG and CSP.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const resources = path.resolve(__dirname, '../../macos/Resources/MarkdownPreview');
 const vm = require('node:vm');
-const {JSDOM} = require('jsdom');
+const {JSDOM} = require('../markdown-editor/node_modules/jsdom');
 const dom = new JSDOM('<!doctype html><link id="highlight-theme"><main id="content"></main>', {
     url: 'https://preview.invalid/template.html', runScripts: 'outside-only'
 });

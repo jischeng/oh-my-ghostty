@@ -1009,6 +1009,19 @@ Known non-text formats (including DMG, PDF and images) use the system default
 application before creating an editor pane. Binary/unsupported-encoding and
 oversized text failures also fall back to the default application. Remote
 external files reuse the bounded read-only temporary download used by Open in…;
-external changes are not uploaded. Markdown Preview now supports local WYSIWYG
-editing, with version-checked text updates flowing through the same document
-save boundary, without granting web content direct filesystem write access.
+external changes are not uploaded. Markdown Live Preview uses offline CodeMirror 6
+with Markdown source as the sole document state. Ordinary lines use live
+decorations; complex blocks reuse the existing sanitized markdown-it renderer as
+widgets mapped to source ranges. Reference link/image definitions remain source
+and contribute to the rendering context even when they produce no visible block.
+Widgets do not own a second rich-text document or serialize the whole file.
+
+CodeMirror transactions update the same native editor document through the
+version-checked `{type: "edit", text, baseText}` bridge. Matching native text
+acknowledgements preserve selection and undo history; opening or rendering alone
+does not rewrite source. Save continues through the existing native document
+boundary, without granting web content direct filesystem write access. Complex
+blocks are edited through their source ranges; this is a source-based live
+preview, not a claim of complete Typora-style rich-text editing. The internal
+`window.omgLiveEditorView()` test hook returns a CodeMirror `EditorView`; it is
+not a plugin API or a ProseMirror view.

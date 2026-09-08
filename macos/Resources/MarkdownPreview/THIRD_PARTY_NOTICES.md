@@ -20,3 +20,8 @@ DOMPurify was refreshed from the pinned npm distribution rather than reusing
 Markd's older copy. Mermaid's bundled dependency notices are retained at the end
 of mermaid.min.js. Runtime code never downloads scripts, styles, or fonts.
 Remote images load only when the Markdown document references them.
+
+The live editor bundles CodeMirror 6 and its language parsers from the versions
+pinned in `dist/markdown-editor/package-lock.json`. Their dependency licenses are
+collected in `licenses/codemirror-editor.txt` by the editor build. Milkdown and
+ProseMirror are no longer included.

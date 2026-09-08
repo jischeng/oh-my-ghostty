@@ -153,5 +153,5 @@
         return queue;
     };
     window.renderMarkdownReadonly = window.renderMarkdown;
-    // live-editor.js sends ready after installing the editable render API.
+    notify({type: 'ready'});
 })();

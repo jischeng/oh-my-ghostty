@@ -150,7 +150,8 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                             open: openFile,
                             nextDocument: { workspace.selectAdjacentDocument(offset: 1) },
                             previousDocument: { workspace.selectAdjacentDocument(offset: -1) },
-                            saveAll: { Task { await workspace.saveAll() } }
+                            saveAll: { Task { await workspace.saveAll() } },
+                            onHide: { workspace.isVisible = false }
                         )
                         .opacity(selected ? 1 : 0)
                         .allowsHitTesting(selected)
@@ -260,6 +261,7 @@ private struct EditorDocumentView: View {
     let nextDocument: () -> Void
     let previousDocument: () -> Void
     let saveAll: () -> Void
+    let onHide: () -> Void
 
     // Each document has its own view identity in the workspace, preserving its chosen mode.
     @State private var isPreviewMode = true
@@ -300,7 +302,8 @@ private struct EditorDocumentView: View {
                     onOpen: open,
                     onNextDocument: nextDocument,
                     onPreviousDocument: previousDocument,
-                    onSaveAll: saveAll
+                    onSaveAll: saveAll,
+                    onHide: onHide
                 )
                 .id(document.contentGeneration)
                 .opacity((isMarkdownDocument && isPreviewMode) ? 0 : 1)
@@ -317,7 +320,8 @@ private struct EditorDocumentView: View {
                         isActive: isActive,
                         onFocus: onFocus,
                         onSave: save,
-                        onSaveAll: saveAll
+                        onSaveAll: saveAll,
+                        onHide: onHide
                     )
                     .id(document.contentGeneration)
                 }

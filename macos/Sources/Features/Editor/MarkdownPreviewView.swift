@@ -15,6 +15,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
     var onFocus: () -> Void = {}
     var onSave: () -> Void = {}
     var onSaveAll: () -> Void = {}
+    var onHide: () -> Void = {}
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -64,6 +65,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
         private var onFocus: () -> Void = {}
         private var onSave: () -> Void = {}
         private var onSaveAll: () -> Void = {}
+        private var onHide: () -> Void = {}
 
         func update(_ preview: MarkdownPreviewView) {
             binding = preview.$text
@@ -71,6 +73,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
             onFocus = preview.onFocus
             onSave = preview.onSave
             onSaveAll = preview.onSaveAll
+            onHide = preview.onHide
             let directory = preview.fileURL?.deletingLastPathComponent()
                 ?? URL(fileURLWithPath: NSTemporaryDirectory())
             // Never fall back to the local host for a disconnected SSH document.
@@ -124,6 +127,10 @@ struct MarkdownPreviewView: NSViewRepresentable {
                   let responder = webView.window?.firstResponder as? NSView,
                   responder === webView || responder.isDescendant(of: webView) else { return false }
             let mods = event.modifierFlags.intersection([.command, .option, .control, .shift])
+            if event.keyCode == 53, mods == .shift {
+                onHide()
+                return true
+            }
             let key = event.charactersIgnoringModifiers?.lowercased()
             if mods == .command, key == "c" {
                 webView.evaluateJavaScript("""

@@ -28,6 +28,7 @@ struct CodeEditorView: View {
     var onNextDocument: () -> Void = {}
     var onPreviousDocument: () -> Void = {}
     var onSaveAll: () -> Void = {}
+    var onHide: () -> Void = {}
 
     @State private var cursorPositions: [CursorPosition] = []
     @State private var editorCoordinator = EditorCoordinator()
@@ -57,7 +58,8 @@ struct CodeEditorView: View {
         onOpen: @escaping () -> Void = {},
         onNextDocument: @escaping () -> Void = {},
         onPreviousDocument: @escaping () -> Void = {},
-        onSaveAll: @escaping () -> Void = {}
+        onSaveAll: @escaping () -> Void = {},
+        onHide: @escaping () -> Void = {}
     ) {
         self._text = text
         self.fileURL = fileURL
@@ -76,6 +78,7 @@ struct CodeEditorView: View {
         self.onNextDocument = onNextDocument
         self.onPreviousDocument = onPreviousDocument
         self.onSaveAll = onSaveAll
+        self.onHide = onHide
     }
 
     var body: some View {
@@ -316,6 +319,9 @@ struct CodeEditorView: View {
             case .open: onOpen()
             case .nextDocument: onNextDocument()
             case .previousDocument: onPreviousDocument()
+            case .hide:
+                leaveFindBar()
+                onHide()
             default: return false
             }
             return true
@@ -860,7 +866,7 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
             guard isSurfaceFocused() else { return false }
             guard let action = keymap.action(for: event) else { return false }
             switch action {
-            case .close, .open, .nextDocument, .previousDocument:
+            case .close, .open, .nextDocument, .previousDocument, .hide:
                 return actionHandler(action)
             default:
                 return false
@@ -884,6 +890,12 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
         }
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             .subtracting([.capsLock, .numericPad, .function])
+
+        // Shift + Escape: Hide Editor
+        if event.keyCode == 53, modifiers == .shift {
+            dismissCompletion()
+            return actionHandler(.hide)
+        }
         if isTextViewOrChild, modifiers.isEmpty || modifiers == .shift,
            EditorPairedInput.apply(event.characters ?? "", backspace: event.keyCode == 51,
                                    enabled: OhMyGhosttySettings.shared.editorAutoClosePairs, on: textView) {

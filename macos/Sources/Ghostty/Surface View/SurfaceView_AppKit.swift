@@ -581,6 +581,15 @@ extension Ghostty {
                 // We ignore unknown shapes.
                 return
             }
+
+            if mouseOverSurface {
+                pointerStyle.cursor.set()
+            }
+            window?.invalidateCursorRects(for: self)
+        }
+
+        override func resetCursorRects() {
+            addCursorRect(bounds, cursor: pointerStyle.cursor)
         }
 
         func setCursorVisibility(_ visible: Bool) {

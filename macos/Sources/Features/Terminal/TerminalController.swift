@@ -4178,6 +4178,21 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         Self.refreshTabs(in: tabGroup)
     }
 
+    @discardableResult
+    static func selectTab(digit: Int, in window: NSWindow?) -> Bool {
+        guard let tabGroup = window?.tabGroup else { return false }
+        let tabbedWindows = tabGroup.windows
+        guard tabbedWindows.count > 1 else { return false }
+        let targetIndex = digit == 9 ? (tabbedWindows.count - 1) : (digit - 1)
+        guard targetIndex >= 0, targetIndex < tabbedWindows.count else { return false }
+        let targetWindow = tabbedWindows[targetIndex]
+        tabGroup.selectedWindow = targetWindow
+        (targetWindow.windowController as? TerminalController)?.markTabActivated()
+        targetWindow.makeKeyAndOrderFront(nil)
+        Self.refreshTabs(in: tabGroup)
+        return true
+    }
+
     @objc private func onCloseTab(notification: SwiftUI.Notification) {
         guard let target = notification.object as? Ghostty.SurfaceView else { return }
         guard surfaceTree.contains(target) else { return }

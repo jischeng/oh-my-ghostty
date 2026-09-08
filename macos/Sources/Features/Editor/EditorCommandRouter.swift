@@ -6,6 +6,7 @@ enum EditorAction: Hashable {
     case cut, copy, paste, selectAll, selectLine, undo, redo
     case find, replace, goToLine, findNext, findPrevious
     case save, saveAll, close, open, nextDocument, previousDocument
+    case hide
     case duplicateLine, deleteLine, moveLineUp, moveLineDown, indent, outdent, toggleLineComment
     case insertLineBelow
     case deleteWordBackward, deleteWordForward, deleteToBeginningOfLine, deleteToEndOfLine
@@ -17,6 +18,7 @@ enum EditorAction: Hashable {
 struct EditorKeyStroke: Hashable {
     static let tab = "\t"
     static let backspace = "\u{8}"
+    static let escape = "\u{1b}"
     static let delete = "\u{f728}"
     static let upArrow = "\u{f700}"
     static let downArrow = "\u{f701}"
@@ -43,6 +45,7 @@ struct EditorKeyStroke: Hashable {
         case 36: "\r"
         case 48: tab
         case 51: backspace
+        case 53: escape
         case 117: delete
         case 123: leftArrow
         case 124: rightArrow
@@ -81,6 +84,7 @@ struct EditorKeymap {
             .init(key: "[", modifiers: .command): .outdent,
             .init(key: "s", modifiers: [.command, .shift]): .saveAll,
             .init(key: "\r", modifiers: .shift): .insertLineBelow,
+            .init(key: EditorKeyStroke.escape, modifiers: .shift): .hide,
 
             // Option + Word operations (standard macOS text editing)
             .init(key: EditorKeyStroke.backspace, modifiers: .option): .deleteWordBackward,
@@ -160,6 +164,18 @@ final class EditorCommandRouter {
     }
 
     func handle(_ event: NSEvent) -> Bool {
+        if event.type == .keyDown,
+           event.modifierFlags.contains(.command),
+           !event.modifierFlags.contains(.control),
+           !event.modifierFlags.contains(.option),
+           let char = event.charactersIgnoringModifiers?.first,
+           let digit = char.wholeNumberValue,
+           (1...9).contains(digit) {
+            if TerminalController.selectTab(digit: digit, in: event.window) {
+                return true
+            }
+        }
+
         let deadIdentifiers = registrationOrder.filter { entries[$0]?.owner == nil }
         for identifier in deadIdentifiers {
             entries.removeValue(forKey: identifier)

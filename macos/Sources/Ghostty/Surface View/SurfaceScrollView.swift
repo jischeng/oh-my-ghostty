@@ -283,6 +283,9 @@ class SurfaceScrollView: NSView {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] newStyle in
                 self?.scrollView.documentCursor = newStyle.cursor
+                if self?.surfaceView.mouseOverSurface == true {
+                    newStyle.cursor.set()
+                }
             }
             .store(in: &cancellables)
     }

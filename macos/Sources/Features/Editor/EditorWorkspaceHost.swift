@@ -78,6 +78,9 @@ struct EditorWorkspaceHost<Terminal: View>: View {
             } else if controller.focusedSurface === surfaceView, controller.window?.isVisible == true {
                 controller.focusSurface(surfaceView)
             }
+            // SwiftUI/AppKit rebuilds the window's backdrop regions when the
+            // terminal is hidden. Reapply the host-owned blur after that pass.
+            DispatchQueue.main.async { controller.syncAppearance() }
         }
     }
 
@@ -170,6 +173,9 @@ struct EditorWorkspaceHost<Terminal: View>: View {
         }
         .background(EditorBackdrop(color: appearanceTheme.background, opacity: appearanceOpacity, blur: appearanceBlur,
                                    usesWindowBlur: settings.editorSettings.followsOMG))
+        .onAppear {
+            DispatchQueue.main.async { controller.syncAppearance() }
+        }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Code Editor")
     }

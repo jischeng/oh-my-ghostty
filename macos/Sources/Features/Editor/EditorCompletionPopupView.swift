@@ -69,6 +69,19 @@ public final class CompletionState: ObservableObject {
     }
 }
 
+/// Observe placement here without refreshing the native editor's cursor binding.
+struct EditorCompletionOverlay: View {
+    @ObservedObject var state: CompletionState
+    let onCommit: (CompletionItem) -> Void
+
+    var body: some View {
+        if state.isPresented && !state.candidates.isEmpty {
+            EditorCompletionPopupView(state: state, onCommit: onCommit)
+                .offset(x: state.presentationPoint.x, y: state.presentationPoint.y)
+        }
+    }
+}
+
 /// Floating autocomplete suggestions popup.
 struct EditorCompletionPopupView: View {
     @ObservedObject var state: CompletionState
@@ -79,14 +92,14 @@ struct EditorCompletionPopupView: View {
             VStack(alignment: .leading, spacing: 0) {
                 ScrollViewReader { proxy in
                     ScrollView(.vertical, showsIndicators: state.candidates.count > 6) {
-                        LazyVStack(alignment: .leading, spacing: 1) {
+                        VStack(alignment: .leading, spacing: 1) {
                             ForEach(Array(state.candidates.enumerated()), id: \.element.label) { index, item in
                                 CompletionRowView(
                                     item: item,
                                     prefix: state.prefix,
                                     isSelected: index == state.selectedIndex
                                 )
-                                .id(index)
+                                .id(item.label)
                                 .contentShape(Rectangle())
                                 .onTapGesture {
                                     onCommit(item)
@@ -97,14 +110,16 @@ struct EditorCompletionPopupView: View {
                     }
                     .onChange(of: state.selectedIndex) { newIndex in
                         withAnimation(.easeInOut(duration: 0.08)) {
-                            proxy.scrollTo(newIndex, anchor: .center)
+                            if state.candidates.indices.contains(newIndex) {
+                                proxy.scrollTo(state.candidates[newIndex].label, anchor: .center)
+                            }
                         }
                     }
                 }
             }
             .frame(width: 250)
             .frame(maxHeight: min(CGFloat(state.candidates.count) * 26 + 12, 190))
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 7))
+            .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
             .overlay(
                 RoundedRectangle(cornerRadius: 7)
                     .stroke(Color.primary.opacity(0.12), lineWidth: 1)

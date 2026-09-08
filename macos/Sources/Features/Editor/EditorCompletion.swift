@@ -75,6 +75,19 @@ public struct CompletionContext: Sendable {
     public let language: String?
     public let fileURL: URL?
 
+    var memberReceiver: String? {
+        Self.memberReceiver(in: documentText as NSString, prefixStart: cursorOffset - prefix.utf16.count)
+    }
+
+    static func memberReceiver(in text: NSString, prefixStart: Int) -> String? {
+        guard prefixStart > 1, prefixStart <= text.length,
+              text.character(at: prefixStart - 1) == 46 else { return nil }
+        let beforeDot = text.substring(to: prefixStart - 1)
+        guard let range = beforeDot.range(of: #"[\p{L}_$][\p{L}\p{N}_$]*(?:\.[\p{L}_$][\p{L}\p{N}_$]*)*$"#,
+                                         options: .regularExpression) else { return nil }
+        return String(beforeDot[range])
+    }
+
     public init(
         documentText: String,
         cursorOffset: Int,
@@ -116,6 +129,9 @@ public struct BufferWordCompletionProvider: CompletionProvider, Sendable {
 
     public func provideCompletions(context: CompletionContext) async -> [CompletionItem] {
         let prefix = context.prefix
+        if let receiver = context.memberReceiver {
+            return memberCompletions(context: context, receiver: receiver)
+        }
         guard !prefix.isEmpty, !Task.isCancelled else { return [] }
 
         let text = context.documentText
@@ -153,6 +169,26 @@ public struct BufferWordCompletionProvider: CompletionProvider, Sendable {
         }
 
         return results
+    }
+
+    private func memberCompletions(context: CompletionContext, receiver: String) -> [CompletionItem] {
+        // A lexical fallback: only members seen on this receiver in this file.
+        // It deliberately does not claim type inference or cross-file knowledge.
+        let escaped = NSRegularExpression.escapedPattern(for: receiver)
+        guard let regex = try? NSRegularExpression(
+            pattern: #"(?<![\p{L}\p{N}_$.])"# + escaped + #"\.([\p{L}_$][\p{L}\p{N}_$]*)"#
+        ) else { return [] }
+        let text = context.documentText as NSString
+        let typedRange = NSRange(location: context.cursorOffset - context.prefix.utf16.count,
+                                 length: context.prefix.utf16.count)
+        var names = Set<String>()
+        regex.enumerateMatches(in: context.documentText, range: NSRange(location: 0, length: text.length)) { match, _, stop in
+            if Task.isCancelled { stop.pointee = true; return }
+            guard let match, match.range(at: 1) != typedRange else { return }
+            let name = text.substring(with: match.range(at: 1))
+            if name.lowercased().hasPrefix(context.prefix.lowercased()) { names.insert(name) }
+        }
+        return names.sorted().map { CompletionItem(label: $0, kind: .property, detail: "buffer", score: 100) }
     }
 }
 
@@ -223,7 +259,7 @@ public struct LanguageKeywordCompletionProvider: CompletionProvider, Sendable {
 
     public func provideCompletions(context: CompletionContext) async -> [CompletionItem] {
         let prefix = context.prefix
-        guard prefix.count >= 1 else { return [] }
+        guard prefix.count >= 1, context.memberReceiver == nil else { return [] }
 
         let language = context.language?.lowercased() ?? ""
         let aliases = ["c++": "cpp", "cxx": "cpp", "js": "javascript", "jsx": "javascript",
@@ -273,7 +309,7 @@ public final class EditorCompletionEngine {
     }
 
     public func completions(for context: CompletionContext) async -> [CompletionItem] {
-        guard context.prefix.count >= 1 else { return [] }
+        guard !context.prefix.isEmpty || context.memberReceiver != nil else { return [] }
 
         var results: [CompletionItem] = []
         var seenLabels = Set<String>()

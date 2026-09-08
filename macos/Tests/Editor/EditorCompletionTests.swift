@@ -9,6 +9,69 @@ import Testing
 @testable import Ghostty
 
 struct EditorCompletionTests {
+    @Test func dotCompletionUsesOnlyMembersOfTheReceiver() async {
+        let source = "self.key\nself.value\nother.unrelated\nself."
+        let dot = CompletionContext(documentText: source, cursorOffset: source.utf16.count,
+                                    prefix: "", lineText: "self.", language: "python", fileURL: nil)
+        let provider = BufferWordCompletionProvider()
+        #expect(await provider.provideCompletions(context: dot).map(\.label) == ["key", "value"])
+        let typed = source + "va"
+        let member = CompletionContext(documentText: typed, cursorOffset: typed.utf16.count,
+                                       prefix: "va", lineText: "self.va", language: "python", fileURL: nil)
+        #expect(await provider.provideCompletions(context: member).map(\.label) == ["value"])
+        #expect(await LanguageKeywordCompletionProvider().provideCompletions(context: member).isEmpty)
+        #expect(CompletionContext.memberReceiver(in: "3." as NSString, prefixStart: 2) == nil)
+    }
+
+    @Test @MainActor func maskTypingAndArrowSelectionStayInSync() async throws {
+        let source = "mx mask mlx mask_length\nself.key\nself.value\n"
+        let coordinator = EditorCoordinator()
+        let capture = CompletionTestCapture()
+        let state = CompletionState()
+        coordinator.setCompletionState(state)
+        _ = coordinator.language(fileURL: URL(fileURLWithPath: "/test.py"), text: source)
+        let view = CodeEditSourceEditor(
+            .constant(source), language: .python, theme: .oneDark,
+            font: .monospacedSystemFont(ofSize: 13, weight: .regular), tabWidth: 4,
+            lineHeight: 1.2, wrapLines: false, cursorPositions: .constant([]),
+            highlightProviders: [], coordinators: [coordinator, capture]
+        ).overlay(alignment: .topLeading) {
+            EditorCompletionOverlay(state: state, onCommit: coordinator.commit)
+        }
+        let host = NSHostingController(rootView: view)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentViewController = host
+        host.view.layoutSubtreeIfNeeded()
+        defer { coordinator.destroy(); window.close() }
+        let textView = try #require(capture.controller?.textView)
+        coordinator.setActive(true)
+        coordinator.select(NSRange(location: source.utf16.count, length: 0))
+        window.makeFirstResponder(textView)
+        var prefix = ""
+        for character in "mask" {
+            textView.insertText(String(character))
+            prefix.append(character)
+            try await Task.sleep(for: .milliseconds(60))
+            #expect(state.prefix == prefix)
+            #expect(state.candidates.allSatisfy { $0.label.hasPrefix(prefix) })
+            #expect(state.candidates.count >= 2)
+            let previous = state.selectedIndex
+            #expect(EditorCommandRouter.shared.handle(try keyEvent(125, window: window)))
+            #expect(state.selectedIndex == (previous + 1) % state.candidates.count)
+            #expect(EditorCommandRouter.shared.handle(try keyEvent(126, window: window)))
+            #expect(state.selectedIndex == previous)
+        }
+        let selected = try #require(state.currentSelection)
+        #expect(EditorCommandRouter.shared.handle(try keyEvent(36, window: window)))
+        #expect(textView.string == source + selected.insertText)
+        textView.insertText("\nself.")
+        try await Task.sleep(for: .milliseconds(60))
+        #expect(state.prefix.isEmpty)
+        #expect(state.candidates.map(\.label).sorted() == ["key", "value"])
+    }
+
     @Test @MainActor func dismissingInactiveCompletionDoesNotPublishUpdates() {
         let state = CompletionState()
         var updates = 0

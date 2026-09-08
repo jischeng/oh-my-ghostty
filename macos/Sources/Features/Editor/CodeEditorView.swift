@@ -32,7 +32,9 @@ struct CodeEditorView: View {
 
     @State private var cursorPositions: [CursorPosition] = []
     @State private var editorCoordinator = EditorCoordinator()
-    @StateObject private var completionState = CompletionState()
+    // Only the popup observes completion changes. Rebuilding the native editor
+    // for every candidate/selection update feeds cursor bindings back into it.
+    @State private var completionState = CompletionState()
     @State private var isFindVisible = false
     @State private var findText = ""
     @State private var replaceText = ""
@@ -103,12 +105,8 @@ struct CodeEditorView: View {
             )
             .clipped()
 
-            if completionState.isPresented && !completionState.candidates.isEmpty {
-                EditorCompletionPopupView(state: completionState) { item in
-                    editorCoordinator.commit(completion: item)
-                }
-                .offset(x: completionState.presentationPoint.x, y: completionState.presentationPoint.y)
-                .transition(.opacity)
+            EditorCompletionOverlay(state: completionState) { item in
+                editorCoordinator.commit(completion: item)
             }
         }
         .overlay(alignment: .topTrailing) {
@@ -196,7 +194,7 @@ struct CodeEditorView: View {
         }
         .buttonStyle(.borderless)
         .padding(6)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7))
+        .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
         .shadow(radius: 3, y: 1)
     }
 
@@ -367,7 +365,7 @@ struct CodeEditorView: View {
             : editorSettings.syntaxTheme.preset)
         // The workspace paints one backdrop for toolbar, gutter and text.
         theme.background = .clear
-        return theme
+        return EditorSyntaxHighlightProvider.renderTheme(theme)
     }
 
     private enum BarMode { case find, replace, goToLine }
@@ -375,7 +373,7 @@ struct CodeEditorView: View {
 
 @MainActor
 final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurrency TextViewDelegate {
-    let highlightProviders: [HighlightProviding] = [TreeSitterClient(), MarkdownHighlightProvider()]
+    let highlightProviders: [HighlightProviding] = [EditorSyntaxHighlightProvider(), MarkdownHighlightProvider()]
     private weak var controller: TextViewController?
     private weak var completionState: CompletionState?
     private var completionTask: Task<Void, Never>?
@@ -737,7 +735,8 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
         }
 
         let prefixLength = cursorLocation - wordStart
-        guard prefixLength >= 1 else {
+        let memberReceiver = CompletionContext.memberReceiver(in: string, prefixStart: wordStart)
+        guard prefixLength >= 1 || memberReceiver != nil else {
             dismissCompletion()
             return
         }
@@ -773,7 +772,13 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
 
         // Immediately update existing candidates and prefix synchronously!
         if let completionState, completionState.isPresented {
-            completionState.filter(prefix: prefix, prefixRange: prefixRange, at: anchorPoint)
+            if completionState.prefixRange.location == prefixRange.location {
+                completionState.filter(prefix: prefix, prefixRange: prefixRange, at: anchorPoint)
+            } else {
+                // A new token (notably the empty prefix after a dot) must never
+                // temporarily reuse the previous receiver's candidates.
+                completionState.dismiss()
+            }
         }
 
         let lineRange = string.lineRange(for: NSRange(location: cursorLocation, length: 0))

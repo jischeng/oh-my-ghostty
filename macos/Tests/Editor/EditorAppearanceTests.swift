@@ -1,12 +1,36 @@
 import AppKit
 import CodeEditSourceEditor
 import CodeEditLanguages
+import CodeEditTextView
 import SwiftUI
 import Testing
 @testable import Ghostty
 
 @MainActor
 struct EditorAppearanceTests {
+    @Test func pythonHighlightSeparatesFunctionsTypesAndVariables() async throws {
+        let source = "class TinyCache:\n    def update(self, value: int):\n        self.key = value\n"
+        let textView = TextView(string: source)
+        let provider = EditorSyntaxHighlightProvider()
+        provider.setUp(textView: textView, codeLanguage: .python)
+        let highlights: [HighlightRange] = try await withCheckedThrowingContinuation { continuation in
+            provider.queryHighlightsFor(textView: textView, range: NSRange(location: 0, length: source.utf16.count)) {
+                continuation.resume(with: $0)
+            }
+        }
+        func captures(_ word: String) -> [CaptureName?] {
+            let range = (source as NSString).range(of: word)
+            return highlights.filter { NSIntersectionRange($0.range, range).length > 0 }.map(\.capture)
+        }
+        #expect(captures("update").contains(.typeAlternate))
+        #expect(captures("TinyCache").contains(.type))
+        let theme = EditorSyntaxHighlightProvider.renderTheme(.oneDark)
+        #expect(theme.attributes == EditorTheme.oneDark.commands)
+        #expect(theme.variables == theme.text)
+        #expect(theme.attributes != theme.variables)
+        #expect(theme.types != theme.attributes)
+    }
+
     @Test func appearanceSettingsPersistIndependentValuesWithoutChangingOMG() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

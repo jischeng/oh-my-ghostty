@@ -51,6 +51,7 @@ for arch in arm64 x86_64; do
     -project macos/Ghostty.xcodeproj \
     -target Ghostty \
     -configuration Release \
+    -skipPackagePluginValidation \
     ARCHS="$arch" \
     ONLY_ACTIVE_ARCH=YES \
     SYMROOT="$build_root/$arch" \
@@ -62,6 +63,7 @@ xcodebuild \
   -project macos/Ghostty.xcodeproj \
   -target Ghostty \
   -configuration Release \
+  -skipPackagePluginValidation \
   ARCHS="arm64 x86_64" \
   ONLY_ACTIVE_ARCH=NO \
   SYMROOT="$build_root/universal" \

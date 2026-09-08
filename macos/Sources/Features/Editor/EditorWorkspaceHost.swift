@@ -434,12 +434,21 @@ struct EditorBackdrop: NSViewRepresentable {
     }
 
     final class BackdropView: NSView {
-        var fillColor: NSColor = .clear {
-            didSet { if fillColor != oldValue { needsDisplay = true } }
+        // AppKit can invalidate beyond an un-clipped view's bounds. Painting
+        // dirtyRect into a shared backing store tinted neighbouring terminal
+        // panes after split resizing/reordering. Own and clip the background.
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            wantsLayer = true
+            clipsToBounds = true
+            layer?.masksToBounds = true
         }
-        override func draw(_ dirtyRect: NSRect) {
-            fillColor.setFill()
-            dirtyRect.fill()
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        var fillColor: NSColor = .clear {
+            didSet { layer?.backgroundColor = fillColor.cgColor }
         }
     }
 

@@ -8,6 +8,42 @@ import Testing
 
 @MainActor
 struct EditorAppearanceTests {
+    @Test func translucentBackdropCannotPaintAcrossPaneBoundariesAfterMoving() throws {
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        container.wantsLayer = true
+        container.layer?.backgroundColor = NSColor.white.cgColor
+        let terminal = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        terminal.wantsLayer = true
+        terminal.layer?.backgroundColor = NSColor.white.cgColor
+        container.addSubview(terminal)
+        let backdrop = EditorBackdrop.BackdropView(frame: NSRect(x: 0, y: 0, width: 200, height: 200))
+        backdrop.fillColor = NSColor.black.withAlphaComponent(0.5)
+        container.addSubview(backdrop)
+        let window = NSWindow(contentRect: container.bounds, styleMask: [.borderless],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = container
+        defer { window.close() }
+
+        // Repeated swaps and resizes must not accumulate alpha or tint the
+        // neighbouring terminal, even when damage extends outside this pane.
+        for origin in [0.0, 200.0, 0.0, 200.0] {
+            backdrop.frame = NSRect(x: origin, y: 0, width: 200, height: 200)
+            backdrop.setNeedsDisplay(NSRect(x: -400, y: -200, width: 1200, height: 600))
+            container.layoutSubtreeIfNeeded()
+            let bitmap = try #require(container.bitmapImageRepForCachingDisplay(in: container.bounds))
+            container.cacheDisplay(in: container.bounds, to: bitmap)
+            let scale = CGFloat(bitmap.pixelsWide) / container.bounds.width
+            let neighbourX = origin == 0 ? 300.0 : 100.0
+            let neighbour = try #require(bitmap.colorAt(x: Int(neighbourX * scale), y: bitmap.pixelsHigh / 2)?
+                .usingColorSpace(.deviceRGB))
+            let editor = try #require(bitmap.colorAt(x: Int((origin + 100) * scale), y: bitmap.pixelsHigh / 2)?
+                .usingColorSpace(.deviceRGB))
+            #expect(neighbour.redComponent > 0.95)
+            #expect(editor.redComponent > 0.4 && editor.redComponent < 0.8)
+        }
+    }
+
     @Test func nativePythonEditorPaintsFunctionAndTypeColors() async throws {
         let source = "from .quantize import QuantizedWeights\n\ndef grouped_expert_linear(x: QuantizedWeights, enabled: bool = False):\n    return str(x)\n# bool\nlabel = \"False\"\n"
         let host = NSHostingController(rootView: CodeEditorView(

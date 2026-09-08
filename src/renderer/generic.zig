@@ -1311,12 +1311,26 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Get our OSC8 links we're hovering if we have a mouse.
                 // This requires terminal state because of URLs.
                 const links: terminal.RenderState.CellSet = osc8: {
-                    // If our mouse isn't hovering, we have no links.
-                    const vp = state.mouse.point orelse break :osc8 .empty;
-
                     // If the right mods aren't pressed, then we can't match.
                     if (!state.mouse.mods.equal(inputpkg.ctrlOrSuper(.{})))
                         break :osc8 .empty;
+
+                    if (comptime builtin.os.tag == .macos) {
+                        var set: terminal.RenderState.CellSet = .empty;
+                        const row_slice = self.terminal_state.row_data.slice();
+                        for (0.., row_slice.items(.raw), row_slice.items(.cells)) |y, row, cells| {
+                            if (!row.hyperlink) continue;
+                            for (0.., cells.items(.raw)) |x, cell| {
+                                if (cell.hyperlink) {
+                                    set.put(arena_alloc, .{ .x = @intCast(x), .y = @intCast(y) }, {}) catch {};
+                                }
+                            }
+                        }
+                        break :osc8 set;
+                    }
+
+                    // If our mouse isn't hovering, we have no links.
+                    const vp = state.mouse.point orelse break :osc8 .empty;
 
                     break :osc8 self.terminal_state.linkCells(
                         arena_alloc,

@@ -58,6 +58,8 @@ pub fn init(
         const env_map = try b.allocator.create(std.process.Environ.Map);
         env_map.* = .init(b.allocator);
         if (env.get("PATH")) |v| try env_map.put("PATH", v);
+        if (env.get("HOME")) |v| try env_map.put("HOME", v);
+        try env_map.put("DISABLE_SWIFTLINT", "1");
 
         const step = RunStep.create(b, "xcodebuild");
         step.has_side_effects = true;
@@ -65,10 +67,11 @@ pub fn init(
         step.environ_map = env_map;
         step.addArgs(&.{
             "xcodebuild",
-            "-target",
+            "-scheme",
             "Ghostty",
             "-configuration",
             xc_config,
+            "-skipPackagePluginValidation",
         });
 
         // If we have a specific architecture, we need to pass it
@@ -94,6 +97,8 @@ pub fn init(
         const env_map = try b.allocator.create(std.process.Environ.Map);
         env_map.* = .init(b.allocator);
         if (env.get("PATH")) |v| try env_map.put("PATH", v);
+        if (env.get("HOME")) |v| try env_map.put("HOME", v);
+        try env_map.put("DISABLE_SWIFTLINT", "1");
 
         const step = RunStep.create(b, "xcodebuild test");
         step.has_side_effects = true;
@@ -106,6 +111,7 @@ pub fn init(
             "Ghostty",
             "-skip-testing",
             "GhosttyUITests",
+            "-skipPackagePluginValidation",
         });
         if (xc_arch) |arch| step.addArgs(&.{ "-arch", arch });
 

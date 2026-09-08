@@ -2097,9 +2097,14 @@ private struct InspectorFileTreeNodeView: View {
             .buttonStyle(.plain)
             .onHover { hovered = $0 }
             .onTapGesture(count: 2) {
-                guard !node.isDirectory else { return }
                 selectedNodeID = node.id
-                perform(.openFile(path: node.id))
+                if node.isDirectory {
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        perform(.toggleNode(id: node.id, expanded: !node.isExpanded))
+                    }
+                } else {
+                    perform(.openFile(path: node.id))
+                }
             }
             .contextMenu {
                 Button("Copy Path") { perform(.copyFilePath(path: node.id, relative: false)) }

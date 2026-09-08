@@ -4448,6 +4448,9 @@ fn linkAtPin(
 ) !?Link {
     if (self.config.links.len == 0) return null;
 
+    // Reject links inside a semantic prompt
+    if (mouse_pin.rowAndCell().cell.semantic_content == .prompt) return null;
+
     const screen: *terminal.Screen = self.renderer_state.terminal.screens.active;
     const line = screen.selectLine(.{
         .pin = mouse_pin,

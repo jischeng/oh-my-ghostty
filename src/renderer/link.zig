@@ -135,6 +135,25 @@ pub const Set = struct {
                     } else continue,
                 }
 
+                // If any cell in this match is inside a semantic prompt, do not highlight it.
+                const is_prompt = prompt: {
+                    const row_slice = render_state.row_data.slice();
+                    const row_cells = row_slice.items(.cells);
+                    for (map.items[start..end]) |pt| {
+                        if (pt.y < row_slice.len) {
+                            const cells_slice = row_cells[pt.y].slice();
+                            const raw_cells = cells_slice.items(.raw);
+                            if (pt.x < raw_cells.len) {
+                                if (raw_cells[pt.x].semantic_content == .prompt) {
+                                    break :prompt true;
+                                }
+                            }
+                        }
+                    }
+                    break :prompt false;
+                };
+                if (is_prompt) continue;
+
                 // Record the match
                 for (map.items[start..end]) |pt| {
                     try result.put(alloc, pt, {});
@@ -388,4 +407,61 @@ test "renderCellMap mods no match" {
     try testing.expect(!result.contains(.{ .x = 3, .y = 0 }));
     try testing.expect(!result.contains(.{ .x = 1, .y = 1 }));
     try testing.expect(!result.contains(.{ .x = 1, .y = 2 }));
+}
+
+test "renderCellMap excludes prompt cells" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t: terminal.Terminal = try .init(testing.io, alloc, .{
+        .cols = 10,
+        .rows = 3,
+    });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    // Emit OSC 133 prompt for ABCD, then output EFGH
+    const str = "\x1b]133;A\x1b\\ABCD\x1b]133;C\x1b\\EFGH";
+    s.nextSlice(str);
+
+    var state: terminal.RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    var set = try Set.fromConfig(alloc, &.{
+        .{
+            .regex = "ABCD",
+            .action = .{ .open = {} },
+            .highlight = .{ .always = {} },
+        },
+        .{
+            .regex = "EFGH",
+            .action = .{ .open = {} },
+            .highlight = .{ .always = {} },
+        },
+    });
+    defer set.deinit(alloc);
+
+    var result: terminal.RenderState.CellSet = .empty;
+    defer result.deinit(alloc);
+    try set.renderCellMap(
+        alloc,
+        &result,
+        &state,
+        null,
+        .{},
+    );
+
+    // Prompt content ABCD should NOT be highlighted
+    try testing.expect(!result.contains(.{ .x = 0, .y = 0 }));
+    try testing.expect(!result.contains(.{ .x = 1, .y = 0 }));
+    try testing.expect(!result.contains(.{ .x = 2, .y = 0 }));
+    try testing.expect(!result.contains(.{ .x = 3, .y = 0 }));
+
+    // Output content EFGH SHOULD be highlighted
+    try testing.expect(result.contains(.{ .x = 4, .y = 0 }));
+    try testing.expect(result.contains(.{ .x = 5, .y = 0 }));
+    try testing.expect(result.contains(.{ .x = 6, .y = 0 }));
+    try testing.expect(result.contains(.{ .x = 7, .y = 0 }));
 }

@@ -9,6 +9,26 @@ import Testing
 @testable import Ghostty
 
 struct EditorCompletionTests {
+    @Test @MainActor func smallPopupStaysAdjacentToCaretNearBottom() {
+        let caret = CGRect(x: 80, y: 370, width: 1, height: 20)
+        let origin = CompletionState.popupOrigin(caret: caret, viewport: CGSize(width: 600, height: 400), candidateCount: 1)
+        #expect(origin.y + CompletionState.popupHeight(candidateCount: 1) == caret.minY - 4)
+        let below = CompletionState.popupOrigin(caret: CGRect(x: 80, y: 100, width: 1, height: 20),
+                                               viewport: CGSize(width: 600, height: 400), candidateCount: 1)
+        #expect(below.y == 124)
+    }
+
+    @Test func incompleteSelfMemberFallsBackToFileWords() async {
+        let source = "def __init__(self, w_router: QuantizedWeights, w_gate: QuantizedWeights):\n    self.w_r"
+        let context = CompletionContext(documentText: source, cursorOffset: source.utf16.count,
+                                        prefix: "w_r", lineText: "    self.w_r", language: "python", fileURL: nil)
+        #expect(await BufferWordCompletionProvider().provideCompletions(context: context).map(\.label) == ["w_router"])
+        let dotSource = String(source.dropLast(3))
+        let dot = CompletionContext(documentText: dotSource, cursorOffset: dotSource.utf16.count,
+                                    prefix: "", lineText: "    self.", language: "python", fileURL: nil)
+        #expect(await BufferWordCompletionProvider().provideCompletions(context: dot).contains { $0.label == "w_router" })
+    }
+
     @Test func dotCompletionUsesOnlyMembersOfTheReceiver() async {
         let source = "self.key\nself.value\nother.unrelated\nself."
         let dot = CompletionContext(documentText: source, cursorOffset: source.utf16.count,
@@ -70,6 +90,13 @@ struct EditorCompletionTests {
         try await Task.sleep(for: .milliseconds(60))
         #expect(state.prefix.isEmpty)
         #expect(state.candidates.map(\.label).sorted() == ["key", "value"])
+        // Rebuilding an old leaf while a new pane is focused must not grab focus.
+        coordinator.setActive(false)
+        coordinator.configure(keymap: .idea, findFieldFocused: { false }, onFocus: {},
+                              isSurfaceFocused: { false }, actionHandler: { _ in false })
+        coordinator.setActive(true)
+        try await Task.sleep(for: .milliseconds(60))
+        #expect(window.firstResponder !== textView)
     }
 
     @Test @MainActor func dismissingInactiveCompletionDoesNotPublishUpdates() {

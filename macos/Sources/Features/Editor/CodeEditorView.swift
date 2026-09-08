@@ -381,6 +381,7 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
     private var mouseMonitor: Any?
     private var textChangeObserver: NSObjectProtocol?
     private var textWillChangeObserver: NSObjectProtocol?
+    private var viewportObserver: NSObjectProtocol?
     private var editDepth = 0
     private var groupsMultipleCarets = false
     private var startedUndoGroup = false
@@ -459,6 +460,14 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
         }
         refreshBackground()
         installTextObservers(controller: controller)
+        if let clip = controller.textView.enclosingScrollView?.contentView {
+            clip.postsBoundsChangedNotifications = true
+            viewportObserver = NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification, object: clip, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.repositionCompletion() }
+            }
+        }
         installMouseMonitor()
         if isActive { registerCommands() }
         focusIfActive(onNextRunLoop: true)
@@ -604,6 +613,9 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
         let applyFocus = { [weak self] in
             guard let self, isActive, let textView = controller?.textView,
                   let window = textView.window else { return }
+            // Splitting rebuilds the existing leaf's view. Its deferred onAppear
+            // focus must not steal focus from the newly created terminal pane.
+            if onNextRunLoop && !isSurfaceFocused() { return }
             if window.firstResponder !== textView {
                 if window.makeFirstResponder(textView) {
                     onFocus()
@@ -763,17 +775,16 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
             return
         }
 
-        let popupX = max(12, min(originInScroll.x, scrollView.bounds.width - 260))
-        var popupY = originInScroll.y + cursorRect.height + 4
-        if popupY + 200 > scrollView.bounds.height, originInScroll.y > 210 {
-            popupY = originInScroll.y - 195
-        }
-        let anchorPoint = CGPoint(x: popupX, y: max(8, popupY))
+        let anchorPoint = CompletionState.popupOrigin(
+            caret: CGRect(origin: originInScroll, size: cursorRect.size),
+            viewport: scrollView.bounds.size, candidateCount: completionState?.candidates.count ?? 0
+        )
 
         // Immediately update existing candidates and prefix synchronously!
         if let completionState, completionState.isPresented {
             if completionState.prefixRange.location == prefixRange.location {
                 completionState.filter(prefix: prefix, prefixRange: prefixRange, at: anchorPoint)
+                repositionCompletion()
             } else {
                 // A new token (notably the empty prefix after a dot) must never
                 // temporarily reuse the previous receiver's candidates.
@@ -814,7 +825,24 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
                 prefixRange: prefixRange,
                 at: anchorPoint
             )
+            self.repositionCompletion()
         }
+    }
+
+    private func repositionCompletion() {
+        guard let state = completionState, state.isPresented,
+              let textView = controller?.textView, let scroll = textView.enclosingScrollView,
+              scroll.bounds.width > 0, scroll.bounds.height > 0,
+              let offset = selectedRange?.location,
+              let rect = textView.layoutManager.rectForOffset(offset) else { return }
+        let caret = textView.convert(rect, to: scroll)
+        guard caret.maxY >= 0, caret.minY < scroll.bounds.height else {
+            dismissCompletion()
+            return
+        }
+        let origin = CompletionState.popupOrigin(caret: caret, viewport: scroll.bounds.size,
+                                                candidateCount: state.candidates.count)
+        if state.presentationPoint != origin { state.presentationPoint = origin }
     }
 
     func commit(completion: CompletionItem) {
@@ -846,6 +874,8 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
     }
 
     func destroy() {
+        if let viewportObserver { NotificationCenter.default.removeObserver(viewportObserver) }
+        viewportObserver = nil
         if let textChangeObserver { NotificationCenter.default.removeObserver(textChangeObserver) }
         if let textWillChangeObserver { NotificationCenter.default.removeObserver(textWillChangeObserver) }
         textChangeObserver = nil

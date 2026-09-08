@@ -130,9 +130,10 @@ public struct BufferWordCompletionProvider: CompletionProvider, Sendable {
     public func provideCompletions(context: CompletionContext) async -> [CompletionItem] {
         let prefix = context.prefix
         if let receiver = context.memberReceiver {
-            return memberCompletions(context: context, receiver: receiver)
+            let members = memberCompletions(context: context, receiver: receiver)
+            if !members.isEmpty { return members }
         }
-        guard !prefix.isEmpty, !Task.isCancelled else { return [] }
+        guard !prefix.isEmpty || context.memberReceiver != nil, !Task.isCancelled else { return [] }
 
         let text = context.documentText
         var frequencies: [String: Int] = [:]

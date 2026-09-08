@@ -4,6 +4,17 @@ import SwiftUI
 /// Observable state managing active completion suggestions and popup presentation.
 @MainActor
 public final class CompletionState: ObservableObject {
+    static func popupHeight(candidateCount: Int) -> CGFloat {
+        min(CGFloat(candidateCount) * 23 + 5, 190)
+    }
+
+    static func popupOrigin(caret: CGRect, viewport: CGSize, candidateCount: Int) -> CGPoint {
+        let height = popupHeight(candidateCount: candidateCount)
+        let below = caret.maxY + 4
+        let y = below + height <= viewport.height ? below : caret.minY - height - 4
+        return CGPoint(x: max(0, min(caret.minX, viewport.width - 250)),
+                       y: max(0, min(y, viewport.height - height)))
+    }
     @Published public var isPresented: Bool = false
     @Published public var candidates: [CompletionItem] = []
     @Published public var selectedIndex: Int = 0
@@ -118,7 +129,7 @@ struct EditorCompletionPopupView: View {
                 }
             }
             .frame(width: 250)
-            .frame(maxHeight: min(CGFloat(state.candidates.count) * 26 + 12, 190))
+            .frame(height: CompletionState.popupHeight(candidateCount: state.candidates.count))
             .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
             .overlay(
                 RoundedRectangle(cornerRadius: 7)
@@ -160,7 +171,7 @@ private struct CompletionRowView: View {
             }
         }
         .padding(.horizontal, 6)
-        .padding(.vertical, 3.5)
+        .frame(height: 22)
         .background(
             isSelected
                 ? Color.accentColor.opacity(0.25)

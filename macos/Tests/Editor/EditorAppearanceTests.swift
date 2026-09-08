@@ -8,6 +8,41 @@ import Testing
 
 @MainActor
 struct EditorAppearanceTests {
+    @Test func nativePythonEditorPaintsFunctionAndTypeColors() async throws {
+        let source = "from .quantize import QuantizedWeights\n\ndef grouped_expert_linear(x: QuantizedWeights, enabled: bool = False):\n    return str(x)\n# bool\nlabel = \"False\"\n"
+        let host = NSHostingController(rootView: CodeEditorView(
+            text: .constant(source), fileURL: URL(fileURLWithPath: "/moe.py"), terminalTheme: .oneDark
+        ).frame(width: 700, height: 400))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 400),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentViewController = host
+        host.view.layoutSubtreeIfNeeded()
+        defer { window.close() }
+        func findTextView(_ view: NSView) -> TextView? {
+            if let text = view as? TextView { return text }
+            return view.subviews.lazy.compactMap { findTextView($0) }.first
+        }
+        let textView = try #require(findTextView(host.view))
+        try await Task.sleep(for: .milliseconds(300))
+        func color(_ word: String) -> NSColor? {
+            textView.textStorage.attribute(.foregroundColor, at: (source as NSString).range(of: word).location,
+                                           effectiveRange: nil) as? NSColor
+        }
+        #expect(color("grouped_expert_linear") == EditorTheme.oneDark.commands)
+        #expect(color("QuantizedWeights") == EditorTheme.oneDark.types)
+        #expect(color("bool") == EditorTheme.oneDark.commands)
+        #expect(color("False") == EditorTheme.oneDark.numbers)
+        let quoted = (source as NSString).range(of: "\"False\"")
+        #expect(textView.textStorage.attribute(.foregroundColor, at: quoted.location + 1,
+                                               effectiveRange: nil) as? NSColor == EditorTheme.oneDark.strings)
+        let bitmap = try #require(host.view.bitmapImageRepForCachingDisplay(in: host.view.bounds))
+        host.view.cacheDisplay(in: host.view.bounds, to: bitmap)
+        try bitmap.representation(using: .png, properties: [:])?.write(
+            to: URL(fileURLWithPath: "/tmp/omg-python-highlight-acceptance.png")
+        )
+    }
+
     @Test func pythonHighlightSeparatesFunctionsTypesAndVariables() async throws {
         let source = "class TinyCache:\n    def update(self, value: int):\n        self.key = value\n"
         let textView = TextView(string: source)

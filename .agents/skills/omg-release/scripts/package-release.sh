@@ -124,7 +124,15 @@ for arch in arm64 x86_64 universal; do
   fi
   mode=$(awk '/build mode/{print $NF}' <<<"$output")
   [[ "$mode" == ".ReleaseFast" ]] || { echo "$arch DMG build mode is $mode" >&2; exit 1; }
-  hdiutil detach "$mount_base/mnt" >/dev/null
+  detached=false
+  for _ in {1..10}; do
+    if hdiutil detach "$mount_base/mnt" -force >/dev/null 2>&1; then
+      detached=true
+      break
+    fi
+    sleep 0.5
+  done
+  [[ "$detached" == true ]] || { echo "could not unmount $mount_base/mnt" >&2; exit 1; }
   printf '[%s] dmg_mount=valid launch=ok mode=%s\n' "$arch" "$mode"
 done
 

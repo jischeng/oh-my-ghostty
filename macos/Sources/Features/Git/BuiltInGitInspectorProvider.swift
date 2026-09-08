@@ -16,6 +16,7 @@ final class BuiltInGitInspectorProvider {
         var activeTab: InspectorGitContent.ActiveTab = .history
         var browsedBranch: String?
         var commitDraft: String = ""
+        var operationError: String?
         var selectedCommitID: GitCommitID?
         var historyScope: GitHistoryScope = .allBranches
         var history: InspectorGitHistoryContent = InspectorGitHistoryContent()
@@ -31,6 +32,9 @@ final class BuiltInGitInspectorProvider {
     private var tabWorktreeStates: [UUID: [String: WorktreeUIState]] = [:]
     private var lastPublishedContent: [UUID: InspectorGitContent] = [:]
     private var pollTimer: Timer?
+    private var mutationTasks: [String: Task<Void, Never>] = [:]
+    private var operationTitles: [String: String] = [:]
+    private var resolvedDirectories: [UUID: String] = [:]
 
     init(
         registry: InspectorRegistry,
@@ -112,6 +116,41 @@ final class BuiltInGitInspectorProvider {
             state.history = InspectorGitHistoryContent(scope: state.historyScope)
             save(state, tabID: action.context.tabID, worktreeKey: key)
             load(context: action.context, force: true)
+        case .branchOperation(let operation, let ref):
+            guard let content = lastPublishedContent[action.context.tabID], let repository = content.repository,
+                  let branch = content.workingTree.branches.first(where: { $0.id == ref }),
+                  mutationTasks[repository.worktreePath] == nil,
+                  !branch.isRemote || operation == .checkout || operation == .create else { return }
+            let window = NSApp.windows.first { ($0.windowController as? TerminalController)?.tabSessionID == action.context.tabID }
+            Task {
+                do {
+                    if let mutation = try await GitBranchDialogs.mutation(for: operation, branch: branch,
+                        branches: content.workingTree.branches, repository: repository, window: window) {
+                        self.mutate(mutation, repository: repository, context: action.context)
+                    }
+                } catch { self.publishOperationError(error.localizedDescription, repository: repository, context: action.context) }
+            }
+        case .setFileStaged(let file, let staged):
+            guard let content = lastPublishedContent[action.context.tabID], let repository = content.repository,
+                  (staged ? content.workingTree.unstaged : content.workingTree.staged).contains(file) else { return }
+            let paths = Array(Set([file.path] + (file.oldPath.map { [$0] } ?? []))).sorted()
+            mutate(staged ? .stage(paths) : .unstage(paths), repository: repository, context: action.context)
+        case .updateCommitDraft(let draft):
+            let key = currentWorktreeKey(for: action.context)
+            var state = state(for: action.context.tabID, worktreeKey: key)
+            state.commitDraft = draft
+            save(state, tabID: action.context.tabID, worktreeKey: key)
+            if let current = lastPublishedContent[action.context.tabID] { publish(current, tabID: action.context.tabID) }
+        case .clearOperationError:
+            let key = currentWorktreeKey(for: action.context)
+            var state = state(for: action.context.tabID, worktreeKey: key)
+            state.operationError = nil
+            save(state, tabID: action.context.tabID, worktreeKey: key)
+            if let content = lastPublishedContent[action.context.tabID] { publish(content, tabID: action.context.tabID) }
+        case .commitStaged:
+            guard let content = lastPublishedContent[action.context.tabID], let repository = content.repository,
+                  !content.workingTree.staged.isEmpty else { return }
+            mutate(.commit(content.commitDraft), repository: repository, context: action.context)
         case .sendHistoryToTerminal(let commitID):
             guard let content = lastPublishedContent[action.context.tabID],
                   let repository = content.repository else { return }
@@ -129,6 +168,9 @@ final class BuiltInGitInspectorProvider {
     }
 
     private func load(context: InspectorPaneContext, force: Bool = false) {
+        if let repository = lastPublishedContent[context.tabID]?.repository,
+           mutationTasks[repository.worktreePath] != nil,
+           context.workingDirectory == resolvedDirectories[context.tabID] { return }
         cancelTask(tabID: context.tabID)
         let generation = nextGeneration(for: context.tabID)
         let key = currentWorktreeKey(for: context)
@@ -145,6 +187,7 @@ final class BuiltInGitInspectorProvider {
             guard let self else { return }
             let status = await self.repositoryService.resolveStatus(workingDirectory: directory, session: context.session)
             guard !Task.isCancelled, self.generations[context.tabID] == generation else { return }
+            self.resolvedDirectories[context.tabID] = directory
             var workingTree = GitWorkingTreeContent()
             if let repository = status.repository {
                 do {
@@ -260,7 +303,73 @@ final class BuiltInGitInspectorProvider {
 
     private func state(for tabID: UUID, worktreeKey: String) -> WorktreeUIState { tabWorktreeStates[tabID]?[worktreeKey] ?? WorktreeUIState() }
     private func save(_ state: WorktreeUIState, tabID: UUID, worktreeKey: String) { var states = tabWorktreeStates[tabID] ?? [:]; states[worktreeKey] = state; tabWorktreeStates[tabID] = states }
-    private func publish(_ content: InspectorGitContent, tabID: UUID) { lastPublishedContent[tabID] = content; do { try registry.updatePluginContent(paneID: Self.paneID, pluginID: Self.pluginID, tabID: tabID, content: .git(content)) } catch { Self.logger.error("Git state publish failed tab=\(tabID.uuidString, privacy: .public) error=\(error.localizedDescription, privacy: .public)") } }
+    private func publish(_ value: InspectorGitContent, tabID: UUID) {
+        var content = value
+        if let key = content.repository?.worktreePath {
+            let state = state(for: tabID, worktreeKey: key)
+            content.commitDraft = state.commitDraft
+            content.operationError = state.operationError
+            content.operation = operationTitles[key]
+        }
+        lastPublishedContent[tabID] = content
+        do {
+            try registry.updatePluginContent(paneID: Self.paneID, pluginID: Self.pluginID,
+                                             tabID: tabID, content: .git(content))
+        } catch { Self.logger.error("Git state publish failed: \(error.localizedDescription, privacy: .public)") }
+    }
+
+    private func mutate(_ mutation: GitMutation, repository: GitRepositoryIdentity, context: InspectorPaneContext) {
+        let key = repository.worktreePath
+        guard lastPublishedContent[context.tabID]?.repository == repository else { return }
+        guard mutationTasks[key] == nil else {
+            publishOperationError("Another Git operation is running in this worktree.", repository: repository, context: context)
+            return
+        }
+        switch mutation {
+        case .checkout, .create:
+            guard !EditorWorkspaceStore.shared.hasUnsavedDocuments(in: key) else {
+                publishOperationError("Save or discard unsaved editor changes before switching branches.",
+                                      repository: repository, context: context)
+                return
+            }
+        default: break
+        }
+        operationTitles[key] = mutation.title
+        var state = state(for: context.tabID, worktreeKey: key)
+        state.operationError = nil
+        save(state, tabID: context.tabID, worktreeKey: key)
+        for (tabID, content) in lastPublishedContent where content.repository == repository {
+            cancelTask(tabID: tabID)
+            _ = nextGeneration(for: tabID)
+            publish(content, tabID: tabID)
+        }
+        mutationTasks[key] = Task {
+            do {
+                try await GitMutationService().perform(mutation, in: repository)
+                if case .commit(let submitted) = mutation {
+                    var state = self.state(for: context.tabID, worktreeKey: key)
+                    if state.commitDraft == submitted { state.commitDraft = "" }
+                    self.save(state, tabID: context.tabID, worktreeKey: key)
+                }
+            } catch { self.publishOperationError(error.localizedDescription, repository: repository, context: context) }
+            self.mutationTasks.removeValue(forKey: key)
+            self.operationTitles.removeValue(forKey: key)
+            for (tabID, content) in self.lastPublishedContent where content.repository == repository {
+                self.publish(content, tabID: tabID)
+                if let current = self.presentedContexts[tabID] { self.load(context: current, force: true) }
+            }
+        }
+    }
+
+    private func publishOperationError(_ message: String, repository: GitRepositoryIdentity, context: InspectorPaneContext) {
+        var state = state(for: context.tabID, worktreeKey: repository.worktreePath)
+        state.operationError = message
+        save(state, tabID: context.tabID, worktreeKey: repository.worktreePath)
+        if let content = lastPublishedContent[context.tabID], content.repository == repository {
+            publish(content, tabID: context.tabID)
+        }
+    }
+
     private func cancelTask(tabID: UUID) { loadTasks.removeValue(forKey: tabID)?.cancel() }
     private func nextGeneration(for tabID: UUID) -> UInt64 { let next = (generations[tabID] ?? 0) &+ 1; generations[tabID] = next; return next }
     private func currentWorktreeKey(for context: InspectorPaneContext) -> String { lastPublishedContent[context.tabID]?.repository?.worktreePath ?? context.workingDirectory ?? "" }

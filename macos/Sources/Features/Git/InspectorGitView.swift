@@ -12,6 +12,17 @@ struct InspectorGitView: View {
                 .padding(.bottom, 8)
 
             Divider()
+            if let error = content.operationError {
+                HStack(alignment: .top) {
+                    ScrollView { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
+                        .frame(maxHeight: 90)
+                    Button { perform(.gitAction(.clearOperationError)) } label: { Image(systemName: "xmark") }
+                        .buttonStyle(.plain).help("Dismiss Git error")
+                }.padding(8)
+            }
+            if let operation = content.operation {
+                HStack { ProgressView().controlSize(.small); Text(operation).font(.caption) }.padding(6)
+            }
 
             switch content.status {
             case .notRepository(let directory):
@@ -161,33 +172,30 @@ struct InspectorGitView: View {
                     } else {
                         changeSection("Staged", files: content.workingTree.staged, target: .staged)
                         changeSection("Unstaged / Untracked", files: content.workingTree.unstaged, target: .unstaged)
+                        Divider()
+                        Text("Checked files are staged for commit.").font(.caption2).foregroundStyle(.secondary)
+                        Text("Commit message").font(.caption).foregroundStyle(.secondary)
+                        TextEditor(text: Binding(get: { content.commitDraft }, set: {
+                            perform(.gitAction(.updateCommitDraft($0)))
+                        }))
+                        .font(.system(size: 12))
+                        .frame(height: 72)
+                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.2)))
+                        .accessibilityLabel("Commit message")
+                        Button("Commit Staged (\(content.workingTree.staged.count))") {
+                            perform(.gitAction(.commitStaged))
+                        }
+                        .disabled(content.operation != nil || content.workingTree.staged.isEmpty ||
+                                  content.commitDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
                 }.padding(.horizontal, 12)
             }
         case .branches:
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    if let error = content.workingTree.error { Text(error).foregroundStyle(.red) }
-                    ForEach(content.workingTree.branches) { branch in
-                        Button {
-                            perform(.gitAction(.browseBranch(branch.id)))
-                        } label: {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Label(branch.name, systemImage: branch.isCurrent ? "checkmark.circle.fill" :
-                                        (branch.isRemote ? "network" : "arrow.triangle.branch"))
-                                    .foregroundStyle(branch.isCurrent ? Color.accentColor : Color.primary)
-                                    .lineLimit(1).truncationMode(.middle)
-                                if !branch.upstream.isEmpty {
-                                    Text("\(branch.upstream) \(branch.tracking.isEmpty ? "· up to date" : branch.tracking)")
-                                        .font(.caption2).foregroundStyle(.secondary)
-                                }
-                            }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-                        }.buttonStyle(.plain).help("Browse history · \(branch.name)")
-                    }
-                    if content.workingTree.branches.isEmpty {
-                        Text("No branches yet").foregroundStyle(.secondary)
-                    }
-                }.padding(.horizontal, 12)
+            if let error = content.workingTree.error {
+                Text(error).font(.caption).foregroundStyle(.red).padding(8)
+            }
+            GitBranchTree(branches: content.workingTree.branches, isBusy: content.operation != nil) {
+                perform(.gitAction($0))
             }
         }
     }
@@ -196,6 +204,12 @@ struct InspectorGitView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("\(title) (\(files.count))").font(.caption).foregroundStyle(.secondary)
             ForEach(files) { file in
+                HStack(alignment: .top, spacing: 5) {
+                    Toggle("Stage \(file.path)", isOn: Binding(get: { target == .staged }, set: {
+                        perform(.gitAction(.setFileStaged(file, $0)))
+                    }))
+                    .toggleStyle(.checkbox).labelsHidden()
+                    .disabled(content.operation != nil)
                 Button { perform(.gitAction(.openDiff(file, target))) } label: {
                     HStack(spacing: 6) {
                         Text(file.isUntracked ? "?" : file.status).font(.caption.monospaced())
@@ -204,6 +218,7 @@ struct InspectorGitView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }.contentShape(Rectangle())
                 }.buttonStyle(.plain).help(file.displayPath)
+                }
             }
             if files.isEmpty { Text("No changes").font(.caption).foregroundStyle(.secondary) }
         }
@@ -211,29 +226,20 @@ struct InspectorGitView: View {
 
     private func historyView(headCommitID: String?) -> some View {
         VStack(spacing: 8) {
-            if let branch = content.history.snapshot?.browsedBranch {
-                HStack {
-                    Text("History: \(branch)").font(.caption).lineLimit(1).truncationMode(.middle)
-                    Spacer(minLength: 0)
-                    Button("Reset") { perform(.gitAction(.selectHistoryScope(content.history.scope))) }
-                        .buttonStyle(.link)
-                }.padding(.horizontal, 12)
-            }
-            HStack(spacing: 8) {
-                Picker(
-                    "History scope",
-                    selection: Binding(
-                        get: { content.history.scope },
-                        set: { perform(.gitAction(.selectHistoryScope($0))) }
-                    )
-                ) {
-                    ForEach(GitHistoryScope.allCases, id: \.self) { scope in
-                        Text(scope.displayName).tag(scope)
+            Menu {
+                ForEach(GitHistoryScope.allCases, id: \.self) { scope in
+                    Button(scope.displayName) { perform(.gitAction(.selectHistoryScope(scope))) }
+                }
+                Divider()
+                ForEach(content.workingTree.branches) { branch in
+                    Button { perform(.gitAction(.browseBranch(branch.id))) } label: {
+                        Label(branch.name, systemImage: branch.isRemote ? "network" : "arrow.triangle.branch")
                     }
                 }
-                .pickerStyle(.menu)
-                .labelsHidden()
-
+            } label: {
+                Label(content.history.snapshot?.browsedBranch ?? content.history.scope.displayName,
+                      systemImage: "line.3.horizontal.decrease")
+                    .lineLimit(1).truncationMode(.middle).frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(.horizontal, 12)
 

@@ -29,6 +29,60 @@ struct BuiltInGitHistoryProviderTests {
         }
     }
 
+    @Test func checkboxCommitClearsDraftOnlyOnSuccessAndRetainsItOnHookFailure() async throws {
+        let directory = createTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try runCommand(["git", "init", "-b", "main"], in: directory.path)
+        try runCommand(["git", "config", "user.name", "Provider Test"], in: directory.path)
+        try runCommand(["git", "config", "user.email", "provider@example.com"], in: directory.path)
+        try runCommand(["git", "config", "commit.gpgSign", "false"], in: directory.path)
+        try runCommand(["git", "config", "core.hooksPath", directory.path + "/.git/hooks"], in: directory.path)
+        let file = directory.appendingPathComponent("file.txt")
+        try Data("first".utf8).write(to: file)
+        let registry = InspectorRegistry()
+        let provider = BuiltInGitInspectorProvider(registry: registry)
+        try provider.register()
+        let context = InspectorPaneContext(tabID: UUID(), surfaceID: UUID(), title: "Terminal",
+                                           workingDirectory: directory.path)
+        registry.presentationDidChange(to: BuiltInGitInspectorProvider.paneID, context: context)
+        defer { registry.presentationDidChange(to: nil, context: context) }
+        func send(_ action: InspectorGitAction) {
+            registry.performAction(paneID: BuiltInGitInspectorProvider.paneID,
+                                   action: .init(context: context, kind: .gitAction(action)))
+        }
+        func waitFor(_ predicate: (InspectorGitContent) -> Bool) async throws -> InspectorGitContent {
+            for _ in 0..<100 {
+                if case .git(let content) = registry.content(for: BuiltInGitInspectorProvider.paneID, context: context),
+                   !content.isLoading, content.operation == nil, predicate(content) { return content }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            throw NSError(domain: "GitProviderTimeout", code: 1)
+        }
+        let initial = try await waitFor { !$0.workingTree.unstaged.isEmpty }
+        send(.updateCommitDraft("first"))
+        send(.setFileStaged(initial.workingTree.unstaged[0], true))
+        _ = try await waitFor { $0.workingTree.staged.count == 1 }
+        send(.commitStaged)
+        let committed = try await waitFor { $0.history.commits.count == 1 && $0.workingTree.staged.isEmpty }
+        #expect(committed.commitDraft.isEmpty)
+        try Data("second".utf8).write(to: file)
+        send(.refresh)
+        let changed = try await waitFor { !$0.workingTree.unstaged.isEmpty }
+        send(.setFileStaged(changed.workingTree.unstaged[0], true))
+        _ = try await waitFor { $0.workingTree.staged.count == 1 }
+        let hook = directory.appendingPathComponent(".git/hooks/pre-commit")
+        try Data("#!/bin/sh\necho rejected-by-test-hook >&2\nexit 1\n".utf8).write(to: hook)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)
+        send(.updateCommitDraft("keep this draft"))
+        send(.commitStaged)
+        let rejected = try await waitFor { $0.operationError != nil }
+        #expect(rejected.commitDraft == "keep this draft")
+        #expect(rejected.workingTree.staged.count == 1)
+        #expect(rejected.history.commits.count == 1)
+        send(.clearOperationError)
+        _ = try await waitFor { $0.operationError == nil }
+    }
+
     @Test func changesAndBranchHistoryUseRealRepositoryData() async throws {
         let directory = createTempDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

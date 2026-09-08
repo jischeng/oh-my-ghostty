@@ -22,7 +22,11 @@ struct GitEditorDiffView: View {
     @State private var error: String?
     @State private var sourceError: String?
     @State private var loading = true
-    @State private var mode = "Source"
+    @State private var mode = "Side by Side"
+    @State private var presentation = GitDiffPresentation(before: "", after: "", patch: "")
+    @State private var scroll = GitDiffScrollLink()
+    @State private var linkedScrolling = true
+    @State private var reloadVersion = 0
     private let service = GitDiffService()
 
     var body: some View {
@@ -31,17 +35,28 @@ struct GitEditorDiffView: View {
                 Text(request.target.description).font(.caption).lineLimit(1)
                 Spacer()
                 Picker("View", selection: $mode) {
-                    Text("Diff").tag("Diff")
-                    Text("Source comparison").tag("Source")
-                }.pickerStyle(.menu).fixedSize()
+                    Text("Side by Side").tag("Side by Side")
+                    Text("Inline").tag("Inline")
+                }.pickerStyle(.menu).labelsHidden().fixedSize()
+                if mode == "Side by Side" {
+                    Button { linkedScrolling.toggle() } label: {
+                        Image(systemName: linkedScrolling ? "link" : "link.slash")
+                    }.help(linkedScrolling ? "Disable linked scrolling" : "Enable linked scrolling")
+                }
+                Button { reloadVersion += 1 } label: { Image(systemName: "arrow.clockwise") }
+                    .help("Refresh diff").disabled(loading)
                 Button(action: close) { Image(systemName: "xmark") }.buttonStyle(.borderless)
             }.padding(8)
             if !files.isEmpty {
-                Picker("File", selection: $selected) {
+                Menu {
                     ForEach(files) { file in
-                        Text(file.displayPath).tag(Optional(file))
+                        Button(file.displayPath) { selected = file }
                     }
+                } label: {
+                    Text(selected?.displayPath ?? "Select file")
+                        .lineLimit(1).truncationMode(.middle).frame(maxWidth: .infinity, alignment: .leading)
                 }.padding(.horizontal, 8)
+
             }
             Divider()
             if loading { ProgressView().padding() }
@@ -49,17 +64,20 @@ struct GitEditorDiffView: View {
             if let document, !loading {
                 if document.isBinary || document.isTruncated {
                     Text(document.summary ?? document.text).padding()
-                } else if mode == "Source" {
-                    if let sourceError {
-                        Text(sourceError).foregroundStyle(.secondary).padding()
-                    } else {
-                        HSplitView {
-                            sourcePane("Before", text: before, path: document.file.oldPath ?? document.file.path)
-                            sourcePane("After", text: after, path: document.file.path)
-                        }
+                } else if let sourceError {
+                    Text(sourceError).foregroundStyle(.secondary).padding()
+                    GitDiffTextView(text: document.text)
+                } else if mode == "Side by Side" {
+                    HSplitView {
+                        sourcePane("Before", text: before, path: document.file.oldPath ?? document.file.path, side: 0)
+                        sourcePane("After", text: after, path: document.file.path, side: 1)
                     }
                 } else {
-                    GitDiffTextView(text: document.text)
+                    CodeEditorView(text: .constant(presentation.text),
+                                   fileURL: URL(fileURLWithPath: document.file.path),
+                                   diffLines: presentation.highlights,
+                                   isEditable: false, isActive: isActive, terminalTheme: theme, onClose: close)
+                        .id("inline-\(selected?.id ?? "")")
                 }
             } else if !loading && error == nil {
                 Text("No changed files").foregroundStyle(.secondary).padding()
@@ -76,7 +94,8 @@ struct GitEditorDiffView: View {
             } catch is CancellationError {
             } catch { self.error = error.localizedDescription; loading = false }
         }
-        .task(id: selected) {
+        .onChange(of: linkedScrolling) { scroll.enabled = $0 }
+        .task(id: "\(selected?.id ?? "")-\(reloadVersion)") {
             guard let selected else { return }
             document = nil
             error = nil
@@ -94,6 +113,11 @@ struct GitEditorDiffView: View {
                         try Task.checkCancellation()
                         before = versions.before
                         after = versions.after
+                        presentation = GitDiffPresentation(before: before, after: after, patch: diff.text)
+                        scroll.presentation = presentation
+                        if !presentation.isConsistent {
+                            sourceError = "Source snapshots do not match this patch. Refresh to retry; the patch is shown below."
+                        }
                     } catch is CancellationError { return
                     } catch { sourceError = error.localizedDescription }
                 }
@@ -103,14 +127,14 @@ struct GitEditorDiffView: View {
         }
     }
 
-    private func sourcePane(_ title: String, text: String, path: String) -> some View {
+    private func sourcePane(_ title: String, text: String, path: String, side: Int) -> some View {
         VStack(spacing: 0) {
             Text(title).font(.caption).padding(6)
                 .frame(maxWidth: .infinity)
                 .background(title == "Before" ? Color.red.opacity(0.12) : Color.green.opacity(0.12))
-            CodeEditorView(text: .constant(text), fileURL: URL(fileURLWithPath: path),
-                           diffLines: title == "Before" ? lineMap.before : lineMap.after,
-                           isEditable: false, isActive: isActive, terminalTheme: theme, onClose: close)
+            GitDiffLinkedEditor(text: text, path: path,
+                                highlights: title == "Before" ? lineMap.before : lineMap.after,
+                                isActive: isActive, theme: theme, link: scroll, side: side, close: close)
                 .id("\(selected?.id ?? "")-\(title)")
         }.frame(minWidth: 120)
     }

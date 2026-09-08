@@ -252,6 +252,17 @@ final class EditorWorkspaceStore {
     private var closing = Set<UUID>()
     private var isResolvingTermination = false
 
+    func hasUnsavedDocuments(in worktreePath: String) -> Bool {
+        let root = URL(fileURLWithPath: worktreePath).resolvingSymlinksInPath().path
+        return workspaces.values.contains { workspace in
+            workspace.documents.contains { document in
+                guard document.id.endpoint == .local, document.isDirty || document.isSaving else { return false }
+                let path = URL(fileURLWithPath: document.path).resolvingSymlinksInPath().path
+                return path == root || path.hasPrefix(root + "/")
+            }
+        }
+    }
+
     func containsOpenDocument(path: String, descriptor: WorkspaceDescriptor) -> Bool {
         guard let target = try? EditorDocumentID(descriptor: descriptor, path: path) else { return true }
         let resolvedTarget = descriptor.kind == .local

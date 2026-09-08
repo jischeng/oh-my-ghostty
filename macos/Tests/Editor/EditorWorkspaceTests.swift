@@ -4,6 +4,28 @@ import Testing
 @testable import Ghostty
 
 struct EditorWorkspaceTests {
+    @Test @MainActor func branchSwitchGuardOnlyDetectsDirtyDocumentsInThatWorktree() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("file.swift")
+        try Data("original".utf8).write(to: file)
+        let store = EditorWorkspaceStore()
+        let surface = UUID()
+        defer { store.remove(surfaceIDs: [surface]) }
+        let workspace = store.workspace(for: UUID(), surfaceID: surface)
+        workspace.open(path: file.path, filesystem: LocalWorkspaceFilesystem(workingDirectory: root.path))
+        await waitUntil { !workspace.isLoading }
+        let document = try #require(workspace.selectedDocument)
+        document.suspendAutoSave()
+        #expect(!store.hasUnsavedDocuments(in: root.path))
+        document.text = "dirty"
+        #expect(store.hasUnsavedDocuments(in: root.path))
+        #expect(!store.hasUnsavedDocuments(in: root.path + "/other"))
+        document.text = "original"
+        #expect(!store.hasUnsavedDocuments(in: root.path))
+    }
+
     @Test @MainActor func gitPreviewPreservesDirtyDocumentAndCannotBeSavedOverIt() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

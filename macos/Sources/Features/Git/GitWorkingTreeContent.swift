@@ -21,14 +21,14 @@ extension GitRepositoryService {
     func branches(for repository: GitRepositoryIdentity) async throws -> [GitBranchInfo] {
         let result = try await executor.execute(
             arguments: ["for-each-ref",
-                        "--format=%(refname)%00%(objectname)%00%(HEAD)%00%(upstream:short)%00%(upstream:track)",
+                        "--format=%(refname)%00%(objectname)%00%(HEAD)%00%(upstream:short)%00%(upstream:track)%00%(symref)",
                         "refs/heads", "refs/remotes"],
             workingDirectory: repository.worktreePath, stdin: nil, maxOutputBytes: 512 * 1024
         )
         guard result.isSuccess else { throw GitDiffServiceError.gitFailed(result.stderrString) }
         return result.stdoutString.split(separator: "\n").compactMap { line in
             let fields = line.split(separator: "\0", omittingEmptySubsequences: false).map(String.init)
-            guard fields.count == 5 else { return nil }
+            guard fields.count == 6, fields[5].isEmpty else { return nil }
             let remote = fields[0].hasPrefix("refs/remotes/")
             let prefix = remote ? "refs/remotes/" : "refs/heads/"
             return GitBranchInfo(name: String(fields[0].dropFirst(prefix.count)),

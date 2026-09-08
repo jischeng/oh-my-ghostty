@@ -225,15 +225,23 @@ private final class GitHistoryCell: NSTableCellView {
         let badges = NSMutableAttributedString()
         for decoration in commit.refDecorations {
             let color: NSColor
-            let prefix: String
+            let symbol: String
             switch decoration.kind {
-            case .currentBranch: color = .systemBlue; prefix = "● "
-            case .localBranch: color = .systemGreen; prefix = "⑂ "
-            case .remoteBranch: color = .systemPurple; prefix = "↗ "
-            case .tag: color = .systemOrange; prefix = "Tag: "
-            case .head: color = .systemBlue; prefix = "◎ "
+            case .currentBranch: color = .systemBlue; symbol = "checkmark.circle.fill"
+            case .localBranch: color = .systemGreen; symbol = "arrow.triangle.branch"
+            case .remoteBranch: color = .systemPurple; symbol = "network"
+            case .tag: color = .systemOrange; symbol = "tag.fill"
+            case .head: color = .systemBlue; symbol = "scope"
             }
-            badges.append(NSAttributedString(string: prefix + decoration.name + "  ", attributes: [
+            if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: decoration.kind.rawValue)?
+                .withSymbolConfiguration(.init(pointSize: 10, weight: .medium))?
+                .withSymbolConfiguration(.init(paletteColors: [color])) {
+                let attachment = NSTextAttachment()
+                attachment.image = image
+                attachment.bounds = NSRect(x: 0, y: -2, width: 11, height: 11)
+                badges.append(NSAttributedString(attachment: attachment))
+            }
+            badges.append(NSAttributedString(string: " " + decoration.name + "  ", attributes: [
                 .foregroundColor: color, .font: NSFont.systemFont(ofSize: 10, weight: .medium),
             ]))
         }

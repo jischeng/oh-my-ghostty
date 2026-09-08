@@ -101,6 +101,11 @@ enum InspectorGitAction: Equatable, Sendable {
     case sendHistoryToTerminal(GitCommitID?)
     case openDiff(GitDiffFile, GitDiffTarget)
     case browseBranch(String)
+    case branchOperation(GitBranchOperation, String)
+    case setFileStaged(GitDiffFile, Bool)
+    case updateCommitDraft(String)
+    case commitStaged
+    case clearOperationError
 }
 
 struct InspectorGitContent: Equatable, Sendable {
@@ -116,6 +121,9 @@ struct InspectorGitContent: Equatable, Sendable {
     let activeTab: ActiveTab
     let history: InspectorGitHistoryContent
     var workingTree = GitWorkingTreeContent()
+    var commitDraft = ""
+    var operation: String?
+    var operationError: String?
     let isLoading: Bool
     let statusMessage: String?
 

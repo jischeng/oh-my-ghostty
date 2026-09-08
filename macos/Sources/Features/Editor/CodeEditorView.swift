@@ -14,6 +14,7 @@ struct CodeEditorView: View {
 
     let fileURL: URL?
     var diffLines: [Int: Bool] = [:]
+    var additionalCoordinators: [TextViewCoordinator] = []
     var isEditable = true
     var isActive = true
     var isPreview = false
@@ -48,6 +49,7 @@ struct CodeEditorView: View {
         text: Binding<String>,
         fileURL: URL?,
         diffLines: [Int: Bool] = [:],
+        additionalCoordinators: [TextViewCoordinator] = [],
         isEditable: Bool = true,
         isActive: Bool = true,
         isPreview: Bool = false,
@@ -68,6 +70,7 @@ struct CodeEditorView: View {
         self._text = text
         self.fileURL = fileURL
         self.diffLines = diffLines
+        self.additionalCoordinators = additionalCoordinators
         self.isEditable = isEditable
         self.isActive = isActive
         self.isPreview = isPreview
@@ -104,7 +107,7 @@ struct CodeEditorView: View {
                 isEditable: isEditable && isActive && !isPreview,
                 isSelectable: isActive && !isPreview,
                 bracketPairHighlight: .flash,
-                coordinators: [editorCoordinator]
+                coordinators: [editorCoordinator] + additionalCoordinators
             )
             .clipped()
 

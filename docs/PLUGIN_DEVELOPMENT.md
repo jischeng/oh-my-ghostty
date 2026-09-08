@@ -961,23 +961,43 @@ The built-in inspector routes commit and changed-file actions through
 editor pane destination setting. The editor binds each preview to its original
 repository and target and keeps regular documents (including unsaved buffers)
 separate. Source comparison uses bounded, read-only before/after snapshots with
-the editor's syntax highlighting and added/deleted line tints. A unified patch
-view preserves hunk line numbers and explicit binary, error and size-limit
-states. Commit diffs compare against the first parent, or the empty tree for a
+the editor's syntax highlighting and added/deleted line tints. Side by Side and
+Inline modes share the same snapshots. Inline interleaves removed/added source
+lines, retaining unchanged source context. Linked scrolling is on by default
+in Side by Side mode and maps source line positions through Git's hunks in both
+directions, including insertion/deletion offsets; it can be disabled.
+Binary and size-limit states remain explicit, and a raw patch is the fallback
+when complete source snapshots are unavailable or changed during loading. Commit diffs compare against the first parent, or the empty tree for a
 root commit; staged diffs compare HEAD/index, unstaged diffs index/worktree.
 The legacy native detail window remains available internally.
 
-Changes lists staged and unstaged/untracked paths separately. Branches lists
-local and remote references, marks the current branch, and opens the selected
-branch's history without checking it out. Reset or selecting a history scope
-returns to normal current/all-branch history. The header shows the configured
-upstream's Git tracking status (ahead/behind, up to date, or gone); these are
-locally cached refs, and refresh never fetches. No upstream and detached HEAD
-are distinct states. Visible panes poll repository, refs and working-tree data;
-tab/worktree state and generation checks prevent stale results being published.
-Tags, local branches, remote branches and HEAD use distinct graph decorations.
-These host-owned read actions add no external plugin wire capabilities and do
-not stage, commit, checkout or otherwise mutate the repository.
+Changes lists staged and unstaged/untracked paths separately. Checkboxes reflect
+the real index: checking an unstaged row stages that whole file; unchecking a
+staged row unstages it without deleting the working file (including unborn
+repositories). Commit Staged submits the index via stdin commit message, never
+implicitly stages other files, and preserves the draft on failure. A file with
+both index and working-tree edits can appear in both sections.
+
+History's scope menu includes current/all branches and every available local
+and remote branch. Branches uses an expandable Local/Remotes folder tree with
+stable ref IDs. Single click selects; double click opens history. Leaf context
+menus offer switching, creating and switching a branch from that ref, pushing
+a selected local branch, and setting its upstream. Remote refs can create local
+tracking branches. Push explicitly selects a configured remote/destination
+and uses a normal non-force refspec for the selected branch, even if it is not
+checked out. These host-owned actions add no external plugin wire capabilities.
+
+Mutations are serialized per worktree and are separate from cancellable polling
+tasks. Git's refusal to overwrite dirty files, non-fast-forward rejection,
+hooks, signing and authentication errors are shown in a dismissible pane banner;
+no forced checkout/push, stash, reset, hook bypass or terminal injection is performed.
+Unstaging before the first commit removes only the selected index entries with
+`git rm --cached --force`, preserving working files even if edited after staging.
+Switch/create also refuses unsaved editor buffers in that worktree.
+Success refreshes status, changes, refs and history; failed commits retain the
+draft and index. The header reports configured upstream tracking against local
+cached refs, and routine refresh never fetches. Current branch, tag and remote
+decorations use distinct native SF Symbols, colors and accessible descriptions.
 
 ### Editor appearance settings
 

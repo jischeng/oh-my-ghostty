@@ -49,7 +49,20 @@ function makeBlockState(state, blocks, active, focused) {
             }
             continue;
         }
-        if (['paragraph', 'heading', 'list'].includes(block.kind)) continue;
+        if (block.kind === 'list') {
+            for (const nested of block.codeBlocks || []) {
+                const explicit = active && active.from <= nested.from && active.to >= nested.to;
+                if (explicit || selected(state, nested.from, nested.to, focused)) continue;
+                let end = nested.to;
+                while (end > nested.from && /[\r\n]/.test(source[end - 1])) end--;
+                if (end <= nested.from) continue;
+                decorations.push(Decoration.replace({block: true, widget: createBlockWidget(nested,
+                    {...options, referenceKey, activate})}).range(nested.from, end));
+                hidden.push({from: nested.from, to: end});
+            }
+            continue;
+        }
+        if (['paragraph', 'heading'].includes(block.kind)) continue;
         const explicit = active && active.from <= block.from && active.to >= block.to;
         // A table's cell editor modifies source ranges without expanding the whole table.
         if (explicit || (block.kind !== 'table' && selected(state, block.from, block.to, focused))) continue;
@@ -148,7 +161,10 @@ function inlineDecorations(editor) {
             const line = state.doc.lineAt(position);
             if (!seen.has(line.number) && !hidden(line.from, line.to)) {
                 seen.add(line.number);
-                const fenced = block.blocks.some(b => b.kind === 'code' && b.from <= line.from && b.to > line.from);
+                const fenced = block.blocks.some(b =>
+                    (b.kind === 'code' || (b.codeBlocks || []).some(code => code.kind === 'code')) &&
+                    (b.kind === 'code' ? b.from <= line.from && b.to > line.from
+                        : b.codeBlocks.some(code => code.from <= line.from && code.to > line.from)));
                 if (fenced) {
                     result.push(Decoration.line({class: 'cm-md-code-line'}).range(line.from));
                 } else {

@@ -71,6 +71,13 @@ const delay = () => new Promise(resolve => setTimeout(resolve, 30));
     assert.ok(checkbox); checkbox.click();
     assert.ok(w.getMarkdown().includes('- [x] task'));
 
+    const nestedShell = '- explanation\n\n  ```sh\n  zig build -Demit-lib-vt -Dtarget=wasm32-freestanding \\\n    -Doptimize=ReleaseSmall -Dvt-features=-all,+render-state\n  ```\n';
+    await w.renderMarkdown(nestedShell);
+    const nestedBlocks = w.omgMarkdownModel.parseBlocks(nestedShell);
+    assert.equal(nestedBlocks.find(block => block.kind === 'list').codeBlocks[0].language, 'sh');
+    assert.ok(w.document.querySelector('.omg-block-code pre code'),
+        'fenced code nested inside a list uses the code widget');
+
     const sample = fs.readFileSync(path.join(__dirname, 'fixtures/markdown-preview.md'), 'utf8');
     view.dispatch({selection: {anchor: 0, head: view.state.doc.length}});
     await w.renderMarkdown(sample + '\n> [!TIP]\n> Preserved alert\n');

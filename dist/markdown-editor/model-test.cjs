@@ -36,5 +36,10 @@ assert.match(renderFragment('![svg](image.svg)', {baseURL: 'omg-markdown-image:/
 assert.ok(blocks.some(block => block.sourceOnly && block.source.includes('[target]:')));
 const all = parseBlocks('- one\n  - nested\n\n> quote\n\n<div>HTML</div>\n');
 assert.deepEqual(Array.from(all, block => block.kind), ['list', 'quote', 'html']);
+const nestedCode = parseBlocks('- explanation\n\n  ```sh\n  zig build -Demit-lib-vt -Dtarget=wasm32-freestanding \\\n    -Doptimize=ReleaseSmall -Dvt-features=-all,+render-state\n  ```\n');
+const listWithCode = nestedCode.find(block => block.kind === 'list');
+assert.equal(listWithCode.codeBlocks.length, 1, 'nested fenced code is exposed as a source range');
+assert.equal(listWithCode.codeBlocks[0].language, 'sh');
+assert.match(renderFragment(listWithCode.codeBlocks[0].source), /<pre class="hljs"><code>/);
 console.log('PASS: exact UTF-16/CRLF block and table-cell ranges, escaped pipes/code spans, reference environment, all block kinds, sanitization');
 dom.window.close();

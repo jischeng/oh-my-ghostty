@@ -162,6 +162,15 @@
             }
             }
         };
+        const nestedCodeBlocks = (group) => group.filter(item => item.type === 'fence' || item.type === 'code_block')
+            .filter(item => item.map && item.map[1] > item.map[0])
+            .map(item => {
+                const from = position(item.map[0]), to = position(item.map[1]);
+                return {
+                    from, to, kind: 'code', source: text.slice(from, to),
+                    language: item.info.trim().split(/\s+/)[0] || '', content: item.content,
+                };
+            });
         for (let index = 0; index < tokens.length;) {
             const token = tokens[index], start = index;
             let depth = token.nesting;
@@ -172,6 +181,7 @@
             const block = {from, to, kind: kindOf(token, tokens.slice(start, index)), source: text.slice(from, to)};
             if (block.kind === 'heading') block.level = Number(token.tag.slice(1));
             if (block.kind === 'code') { block.language = token.info.trim().split(/\s+/)[0] || ''; block.content = token.content; }
+            if (block.kind === 'list') block.codeBlocks = nestedCodeBlocks(tokens.slice(start, index));
             if (block.kind === 'table') {
                 block.rows = [];
                 block.cells = [];

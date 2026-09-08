@@ -1,7 +1,7 @@
 import Foundation
 
 struct GitRepositoryService: Sendable {
-    private let executor: any GitExecutor
+    let executor: any GitExecutor
 
     init(executor: any GitExecutor = LocalGitExecutor()) {
         self.executor = executor

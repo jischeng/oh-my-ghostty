@@ -5,7 +5,8 @@ import Foundation
 @MainActor
 final class EditorWorkspace: ObservableObject {
     @Published private(set) var documents: [EditorDocument] = []
-    @Published var selectedID: EditorDocumentID?
+    @Published var selectedID: EditorDocumentID? { didSet { if selectedID != nil { gitDiff = nil } } }
+    @Published var gitDiff: GitEditorDiffRequest?
     @Published var isVisible = false
     @Published var isLoading = false
     @Published var errorMessage: String?
@@ -20,6 +21,7 @@ final class EditorWorkspace: ObservableObject {
             document.suspendAutoSave()
             document.cancelAutoSave()
         }
+        gitDiff = nil
         documents.removeAll()
         selectedID = nil
         isVisible = false
@@ -79,6 +81,7 @@ final class EditorWorkspace: ObservableObject {
     }
 
     func open(path: String, filesystem: any WorkspaceFilesystem, externalFallback: Bool = false) {
+        gitDiff = nil
         let wasVisible = isVisible
         isVisible = true
         errorMessage = nil
@@ -116,6 +119,15 @@ final class EditorWorkspace: ObservableObject {
         }
     }
 
+    func openGitDiff(_ request: GitEditorDiffRequest) {
+        openTask?.cancel()
+        isLoading = false
+        errorMessage = nil
+        selectedID = nil
+        gitDiff = request
+        isVisible = true
+    }
+
     func save(_ document: EditorDocument) async -> Bool {
         while document.isSaving {
             try? await Task.sleep(nanoseconds: 20_000_000)
@@ -142,6 +154,8 @@ final class EditorWorkspace: ObservableObject {
             remove(document)
         }
         openTask?.cancel()
+        gitDiff = nil
+        isVisible = false
         isLoading = false
         return true
     }
@@ -226,7 +240,7 @@ final class EditorWorkspace: ObservableObject {
         document.suspendAutoSave()
         documents.removeAll { $0.id == document.id }
         if selectedID == document.id { selectedID = documents.last?.id }
-        if documents.isEmpty { isVisible = false }
+        if documents.isEmpty && gitDiff == nil { isVisible = false }
     }
 }
 
@@ -288,6 +302,18 @@ final class EditorWorkspaceStore {
             filesystem: filesystem,
             externalFallback: true
         )
+    }
+
+    func openGitDiff(repository: GitRepositoryIdentity, target: GitDiffTarget, file: GitDiffFile? = nil,
+                     context: InspectorPaneContext) {
+        guard let controller = NSApp.windows.compactMap({ $0.windowController as? TerminalController })
+            .first(where: { $0.tabSessionID == context.tabID }),
+              let source = controller.surfaceTree.first(where: { $0.id == context.surfaceID })
+                ?? controller.focusedSurface ?? controller.surfaceTree.first,
+              let destination = EditorPaneDestination.open(in: controller, source: source,
+                  destination: OhMyGhosttySettings.shared.editorFileOpenDestination) else { return }
+        workspace(for: destination.controller.tabSessionID, surfaceID: destination.surface.id)
+            .openGitDiff(GitEditorDiffRequest(repository: repository, target: target, file: file))
     }
 
     /// Called at the terminal's final close boundary, including programmatic closes.

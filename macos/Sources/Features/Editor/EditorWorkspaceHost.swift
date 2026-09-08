@@ -61,7 +61,7 @@ struct EditorWorkspaceHost<Terminal: View>: View {
             }
         }
         .overlay(alignment: .topTrailing) {
-            if !workspace.isVisible, !workspace.documents.isEmpty {
+            if !workspace.isVisible, !workspace.documents.isEmpty || workspace.gitDiff != nil {
                 Button("Editor") {
                     if controller.focusedSurface !== surfaceView {
                         controller.focusedSurface = surfaceView
@@ -127,7 +127,13 @@ struct EditorWorkspaceHost<Terminal: View>: View {
             if workspace.isLoading {
                 ProgressView("Opening file…").padding(8)
             }
-            if !workspace.documents.isEmpty {
+            if let request = workspace.gitDiff {
+                GitEditorDiffView(request: request, theme: appearanceTheme, isActive: workspace.isVisible) {
+                    workspace.gitDiff = nil
+                    workspace.selectedID = workspace.documents.last?.id
+                    if workspace.documents.isEmpty { workspace.isVisible = false }
+                }.id(request.id)
+            } else if !workspace.documents.isEmpty {
                 ZStack {
                     ForEach(workspace.documents, id: \.id) { document in
                         let selected = workspace.selectedID == document.id

@@ -104,7 +104,9 @@ struct InspectorGitView: View {
 
             if let branch = content.branch, !branch.isEmpty {
                 HStack(spacing: 4) {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.tint)
                     Text(branch)
+                        .lineLimit(1).truncationMode(.middle)
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 6)
@@ -115,22 +117,34 @@ struct InspectorGitView: View {
                         )
                 }
             }
+            if let current = content.workingTree.branches.first(where: { $0.isCurrent }) {
+                Text(current.upstream.isEmpty ? "No upstream configured" :
+                        "\(current.upstream) \(current.tracking.isEmpty ? "· up to date" : current.tracking)")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .help("Compared with the locally cached upstream ref; refresh does not fetch.")
+            }
         }
     }
 
     private var tabPickerView: some View {
-        Picker(
-            "",
-            selection: Binding(
-                get: { content.activeTab },
-                set: { perform(.gitAction(.selectTab($0))) }
-            )
-        ) {
+        HStack(spacing: 2) {
             ForEach(InspectorGitContent.ActiveTab.allCases, id: \.self) { tab in
-                Text(tab.rawValue).tag(tab)
+                Button { perform(.gitAction(.selectTab(tab))) } label: {
+                    Text(tab.rawValue)
+                        .font(.system(size: 11, weight: content.activeTab == tab ? .semibold : .regular))
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 5)
+                        .background(content.activeTab == tab ? Color.accentColor.opacity(0.16) : Color.clear,
+                                    in: RoundedRectangle(cornerRadius: 4))
+                }
+                .buttonStyle(.plain)
+                .accessibilityValue(content.activeTab == tab ? "Selected" : "")
             }
         }
-        .pickerStyle(.segmented)
+        .padding(2)
+        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
     }
 
     @ViewBuilder
@@ -140,25 +154,71 @@ struct InspectorGitView: View {
             historyView(headCommitID: headCommitID)
 
         case .changes:
-            placeholderCard(
-                systemImage: "doc.badge.plus",
-                title: "Working Tree Changes",
-                subtitle: "Stage, unstage and inspect file diffs.",
-                taskHint: "Changes will appear here when supported."
-            )
-
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if let error = content.workingTree.error {
+                        Text(error).foregroundStyle(.red)
+                    } else {
+                        changeSection("Staged", files: content.workingTree.staged, target: .staged)
+                        changeSection("Unstaged / Untracked", files: content.workingTree.unstaged, target: .unstaged)
+                    }
+                }.padding(.horizontal, 12)
+            }
         case .branches:
-            placeholderCard(
-                systemImage: "arrow.triangle.branch",
-                title: "Branches",
-                subtitle: content.branch ?? "Current branch",
-                taskHint: "Branch management will appear here when supported."
-            )
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    if let error = content.workingTree.error { Text(error).foregroundStyle(.red) }
+                    ForEach(content.workingTree.branches) { branch in
+                        Button {
+                            perform(.gitAction(.browseBranch(branch.id)))
+                        } label: {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Label(branch.name, systemImage: branch.isCurrent ? "checkmark.circle.fill" :
+                                        (branch.isRemote ? "network" : "arrow.triangle.branch"))
+                                    .foregroundStyle(branch.isCurrent ? Color.accentColor : Color.primary)
+                                    .lineLimit(1).truncationMode(.middle)
+                                if !branch.upstream.isEmpty {
+                                    Text("\(branch.upstream) \(branch.tracking.isEmpty ? "· up to date" : branch.tracking)")
+                                        .font(.caption2).foregroundStyle(.secondary)
+                                }
+                            }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                        }.buttonStyle(.plain).help("Browse history · \(branch.name)")
+                    }
+                    if content.workingTree.branches.isEmpty {
+                        Text("No branches yet").foregroundStyle(.secondary)
+                    }
+                }.padding(.horizontal, 12)
+            }
+        }
+    }
+
+    private func changeSection(_ title: String, files: [GitDiffFile], target: GitDiffTarget) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("\(title) (\(files.count))").font(.caption).foregroundStyle(.secondary)
+            ForEach(files) { file in
+                Button { perform(.gitAction(.openDiff(file, target))) } label: {
+                    HStack(spacing: 6) {
+                        Text(file.isUntracked ? "?" : file.status).font(.caption.monospaced())
+                            .foregroundStyle(file.kind == .deleted ? Color.red : Color.green)
+                        Text(file.displayPath).lineLimit(2).truncationMode(.middle)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }.contentShape(Rectangle())
+                }.buttonStyle(.plain).help(file.displayPath)
+            }
+            if files.isEmpty { Text("No changes").font(.caption).foregroundStyle(.secondary) }
         }
     }
 
     private func historyView(headCommitID: String?) -> some View {
         VStack(spacing: 8) {
+            if let branch = content.history.snapshot?.browsedBranch {
+                HStack {
+                    Text("History: \(branch)").font(.caption).lineLimit(1).truncationMode(.middle)
+                    Spacer(minLength: 0)
+                    Button("Reset") { perform(.gitAction(.selectHistoryScope(content.history.scope))) }
+                        .buttonStyle(.link)
+                }.padding(.horizontal, 12)
+            }
             HStack(spacing: 8) {
                 Picker(
                     "History scope",
@@ -171,15 +231,9 @@ struct InspectorGitView: View {
                         Text(scope.displayName).tag(scope)
                     }
                 }
-                .pickerStyle(.segmented)
+                .pickerStyle(.menu)
+                .labelsHidden()
 
-                Button {
-                    perform(.gitAction(.sendHistoryToTerminal(nil)))
-                } label: {
-                    Image(systemName: "terminal")
-                }
-                .buttonStyle(.borderless)
-                .help("Enter Git history command in terminal")
             }
             .padding(.horizontal, 12)
 
@@ -219,43 +273,6 @@ struct InspectorGitView: View {
                 .padding(.bottom, 5)
             }
         }
-    }
-
-    private func placeholderCard(
-        systemImage: String,
-        title: String,
-        subtitle: String,
-        taskHint: String
-    ) -> some View {
-        VStack(spacing: 12) {
-            Image(systemName: systemImage)
-                .font(.system(size: 28))
-                .foregroundStyle(.secondary.opacity(0.7))
-
-            VStack(spacing: 4) {
-                Text(title)
-                    .font(.headline)
-                    .foregroundStyle(.primary)
-
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-            }
-
-            Text(taskHint)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.secondary.opacity(0.7))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(
-                    Capsule()
-                        .fill(Color.secondary.opacity(0.08))
-                )
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 32)
-        .padding(.horizontal, 16)
     }
 
     private func emptyStateView(

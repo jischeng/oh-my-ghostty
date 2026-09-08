@@ -13,6 +13,7 @@ struct CodeEditorView: View {
     @ObservedObject private var settings = OhMyGhosttySettings.shared
 
     let fileURL: URL?
+    var diffLines: [Int: Bool] = [:]
     var isEditable = true
     var isActive = true
     var isPreview = false
@@ -46,6 +47,7 @@ struct CodeEditorView: View {
     init(
         text: Binding<String>,
         fileURL: URL?,
+        diffLines: [Int: Bool] = [:],
         isEditable: Bool = true,
         isActive: Bool = true,
         isPreview: Bool = false,
@@ -65,6 +67,7 @@ struct CodeEditorView: View {
     ) {
         self._text = text
         self.fileURL = fileURL
+        self.diffLines = diffLines
         self.isEditable = isEditable
         self.isActive = isActive
         self.isPreview = isPreview
@@ -117,12 +120,14 @@ struct CodeEditorView: View {
         }
         .background(Color.clear)
         .onAppear {
+            editorCoordinator.setDiffLines(diffLines)
             editorCoordinator.setCompletionState(completionState)
             editorCoordinator.setFileURL(fileURL)
             editorCoordinator.setIsPreview(isPreview)
             configureCommands()
             editorCoordinator.setActive(isActive)
         }
+.onChange(of: diffLines) { editorCoordinator.setDiffLines($0) }
         .onChange(of: isActive) { isActive in
             configureCommands()
             editorCoordinator.setActive(isActive)
@@ -375,6 +380,8 @@ struct CodeEditorView: View {
 final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurrency TextViewDelegate {
     let highlightProviders: [HighlightProviding] = [EditorSyntaxHighlightProvider(), MarkdownHighlightProvider()]
     private weak var controller: TextViewController?
+    private var diffOverlay: EditorDiffLineOverlay?
+    private var diffLines: [Int: Bool] = [:]
     private weak var completionState: CompletionState?
     private var completionTask: Task<Void, Never>?
     private var completionCursor: Int?
@@ -451,8 +458,23 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
         return language
     }
 
+    func setDiffLines(_ lines: [Int: Bool]) {
+        diffLines = lines
+        guard let textView = controller?.textView else { return }
+        if lines.isEmpty {
+            diffOverlay?.layer.removeFromSuperlayer()
+            diffOverlay = nil
+        } else {
+            let overlay = diffOverlay ?? EditorDiffLineOverlay(textView: textView)
+            overlay.lines = lines
+            diffOverlay = overlay
+            overlay.refresh()
+        }
+    }
+
     func prepareCoordinator(controller: TextViewController) {
         self.controller = controller
+        setDiffLines(diffLines)
         if let scrollView = controller.textView.enclosingScrollView {
             scrollView.automaticallyAdjustsContentInsets = false
             scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
@@ -460,12 +482,18 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
         }
         refreshBackground()
         installTextObservers(controller: controller)
+        // A read-only snapshot never gets an edit to initialize the provider's
+        // visible range. Notify it once after the native viewport is laid out.
+        DispatchQueue.main.async { [weak controller] in
+            guard let scroll = controller?.textView.enclosingScrollView else { return }
+            NotificationCenter.default.post(name: NSView.boundsDidChangeNotification, object: scroll.contentView)
+        }
         if let clip = controller.textView.enclosingScrollView?.contentView {
             clip.postsBoundsChangedNotifications = true
             viewportObserver = NotificationCenter.default.addObserver(
                 forName: NSView.boundsDidChangeNotification, object: clip, queue: .main
             ) { [weak self] _ in
-                MainActor.assumeIsolated { self?.repositionCompletion() }
+                MainActor.assumeIsolated { self?.repositionCompletion(); self?.diffOverlay?.refresh() }
             }
         }
         installMouseMonitor()
@@ -485,6 +513,7 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
             scroll.contentView.drawsBackground = false
             scroll.contentView.backgroundColor = .clear
             scroll.contentView.layer?.backgroundColor = NSColor.clear.cgColor
+            self?.diffOverlay?.refresh()
         }
     }
 
@@ -991,5 +1020,41 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
         EditorCommandRouter.shared.register(owner: self) { [weak self] event in
             self?.handle(event) ?? false
         }
+    }
+}
+
+/// Layers tint source lines without contributing to AppKit's intrinsic layout.
+@MainActor
+private final class EditorDiffLineOverlay {
+    let layer = CALayer()
+    private weak var textView: TextView?
+    var lines: [Int: Bool] = [:]
+
+    init(textView: TextView) {
+        self.textView = textView
+        textView.wantsLayer = true
+        textView.layer?.addSublayer(layer)
+    }
+
+    func refresh() {
+        guard let textView else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.frame = textView.bounds
+        layer.sublayers = []
+        let added = CGMutablePath()
+        let removed = CGMutablePath()
+        for line in textView.layoutManager.visibleLines() {
+            guard let isAdded = lines[line.index] else { continue }
+            let path = isAdded ? added : removed
+            path.addRect(CGRect(x: 0, y: line.yPos, width: textView.bounds.width, height: line.height))
+        }
+        for (path, color) in [(added, NSColor.systemGreen), (removed, NSColor.systemRed)] {
+            let tint = CAShapeLayer()
+            tint.path = path
+            tint.fillColor = color.withAlphaComponent(0.14).cgColor
+            layer.addSublayer(tint)
+        }
+        CATransaction.commit()
     }
 }

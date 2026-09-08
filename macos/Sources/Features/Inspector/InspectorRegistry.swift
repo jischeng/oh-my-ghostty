@@ -99,6 +99,8 @@ enum InspectorGitAction: Equatable, Sendable {
     case selectCommit(GitCommitID)
     case openCommit(GitCommitID)
     case sendHistoryToTerminal(GitCommitID?)
+    case openDiff(GitDiffFile, GitDiffTarget)
+    case browseBranch(String)
 }
 
 struct InspectorGitContent: Equatable, Sendable {
@@ -113,6 +115,7 @@ struct InspectorGitContent: Equatable, Sendable {
     let status: GitRepositoryStatusKind
     let activeTab: ActiveTab
     let history: InspectorGitHistoryContent
+    var workingTree = GitWorkingTreeContent()
     let isLoading: Bool
     let statusMessage: String?
 

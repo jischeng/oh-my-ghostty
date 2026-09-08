@@ -89,8 +89,9 @@ final class GitGraphCellView: NSView {
     }
 
     private func point(for graphPoint: GitGraphPoint) -> NSPoint {
-        let x = Self.horizontalInset + Self.nodeDiameter / 2
-            + CGFloat(graphPoint.lane) * Self.laneSpacing
+        let lanes = max(1, (row?.requiredLaneCount ?? 1) - 1)
+        let spacing = min(Self.laneSpacing, max(1, bounds.width - Self.horizontalInset * 2 - Self.nodeDiameter) / CGFloat(lanes))
+        let x = Self.horizontalInset + Self.nodeDiameter / 2 + CGFloat(graphPoint.lane) * spacing
         let y: CGFloat
         switch graphPoint {
         case .top:

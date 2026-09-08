@@ -132,3 +132,29 @@ enum GitDiffServiceError: Error, Sendable, Equatable, LocalizedError {
         }
     }
 }
+
+/// Zero-based source line numbers from unified hunks; metadata is never source.
+struct GitDiffLineMap: Equatable {
+    var before: [Int: Bool] = [:]
+    var after: [Int: Bool] = [:]
+
+    init(_ patch: String) {
+        var old = 0
+        var new = 0
+        var inHunk = false
+        for line in patch.split(separator: "\n", omittingEmptySubsequences: false) {
+            if line.hasPrefix("diff ") { inHunk = false }
+            if line.hasPrefix("@@ ") {
+                let fields = line.split(separator: " ")
+                guard fields.count >= 3,
+                      let oldStart = Int(fields[1].dropFirst().split(separator: ",")[0]),
+                      let newStart = Int(fields[2].dropFirst().split(separator: ",")[0]) else { continue }
+                old = oldStart - 1
+                new = newStart - 1
+                inHunk = true
+            } else if inHunk {
+                if line.hasPrefix("-") { before[old] = false; old += 1 } else if line.hasPrefix("+") { after[new] = true; new += 1 } else if line.hasPrefix(" ") { old += 1; new += 1 }
+            }
+        }
+    }
+}

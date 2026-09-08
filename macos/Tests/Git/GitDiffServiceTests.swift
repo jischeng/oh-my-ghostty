@@ -3,6 +3,77 @@ import Testing
 @testable import Ghostty
 
 struct GitDiffServiceTests {
+    @Test func editorSnapshotsSeparateHeadIndexAndWorkingTree() async throws {
+        let dir = try makeRepository()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("example.swift")
+        try write("let value = 1\n", to: url)
+        try run(["git", "add", "."], in: dir.path)
+        let root = try commit(in: dir, message: "root")
+        let repository = try await repositoryIdentity(for: dir)
+        let service = GitDiffService()
+        let rootFiles = try await service.listFiles(for: repository, target: .commit(GitCommitID(root)))
+        let rootSource = try await service.sourceVersions(for: rootFiles.files[0], repository: repository,
+                                                          target: .commit(GitCommitID(root)))
+        #expect(rootSource.before.isEmpty)
+        #expect(rootSource.after == "let value = 1\n")
+        try write("let value = 2\n", to: url)
+        try run(["git", "add", "."], in: dir.path)
+        try write("let value = 3\n", to: url)
+        let staged = try await service.listFiles(for: repository, target: .staged)
+        let unstaged = try await service.listFiles(for: repository, target: .unstaged)
+        let indexSource = try await service.sourceVersions(for: staged.files[0], repository: repository, target: .staged)
+        let worktreeSource = try await service.sourceVersions(for: unstaged.files[0], repository: repository, target: .unstaged)
+        #expect(indexSource.before == "let value = 1\n")
+        #expect(indexSource.after == "let value = 2\n")
+        #expect(worktreeSource.before == "let value = 2\n")
+        #expect(worktreeSource.after == "let value = 3\n")
+    }
+
+    @Test func branchesReportCurrentAndUpstreamDivergence() async throws {
+        let dir = try makeRepository()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try write("base\n", to: dir.appendingPathComponent("file"))
+        try run(["git", "add", "."], in: dir.path)
+        _ = try commit(in: dir, message: "base")
+        try run(["git", "remote", "add", "origin", dir.path], in: dir.path)
+        try run(["git", "update-ref", "refs/remotes/origin/main", "HEAD"], in: dir.path)
+        try run(["git", "branch", "--set-upstream-to=origin/main"], in: dir.path)
+        try write("ahead\n", to: dir.appendingPathComponent("file"))
+        try run(["git", "add", "."], in: dir.path)
+        _ = try commit(in: dir, message: "ahead")
+        let repository = try await repositoryIdentity(for: dir)
+        let branches = try await GitRepositoryService().branches(for: repository)
+        let current = try #require(branches.first(where: { $0.isCurrent }))
+        #expect(current.name == "main")
+        #expect(current.upstream == "origin/main")
+        #expect(current.tracking == "[ahead 1]")
+        #expect(branches.contains { $0.name == "origin/main" && $0.isRemote && !$0.isCurrent })
+        try run(["git", "checkout", "--detach"], in: dir.path)
+        let detached = try await GitRepositoryService().branches(for: repository)
+        #expect(!detached.contains(where: { $0.isCurrent }))
+    }
+
+    @Test func diffLineMapIgnoresHeadersAndNoNewlineMarkers() {
+        let patch = """
+        diff --git a/file b/file
+        --- a/file
+        +++ b/file
+        @@ -2,2 +2,3 @@
+         same
+        -old
+        +new
+        +extra
+        \\ No newline at end of file
+        @@ -10 +11 @@
+        -last
+        +changed
+        """
+        let lines = GitDiffLineMap(patch)
+        #expect(lines.before == [2: false, 9: false])
+        #expect(lines.after == [2: true, 3: true, 10: true])
+    }
+
     @Test func listsRootCommitAndPreservesUnicodeSpacePath() async throws {
         let dir = try makeRepository()
         defer { try? FileManager.default.removeItem(at: dir) }

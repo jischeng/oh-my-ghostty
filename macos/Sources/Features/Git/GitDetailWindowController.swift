@@ -398,7 +398,7 @@ private struct GitDiffEmptyState: View {
     }
 }
 
-private struct GitDiffTextView: NSViewRepresentable {
+struct GitDiffTextView: NSViewRepresentable {
     let text: String
 
     func makeNSView(context: Context) -> NSScrollView {

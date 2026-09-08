@@ -947,7 +947,7 @@ status CLI. Terminal control and raw output remain high-risk and default-deny.
 These notes are planning context only. They must not be used by plugins until
 implementation, tests, and a stability designation land.
 
-## Built-in Git diff detail window
+## Built-in Git editor diff
 
 The built-in Git diff surface is host-owned Swift code. `GitDiffService` first
 lists paths for a `GitDiffTarget` (`commit`, `staged`, or `unstaged`) and only
@@ -956,14 +956,28 @@ loads a selected file's unified diff. File lists use Git's NUL-delimited
 remain intact. Renames and copies retain both old and new paths; untracked
 working-tree files are represented as additions.
 
-`GitDetailWindowController.open(repository:target:tabID:)` is the host entry
-point. It reuses one resizable native window per terminal tab and binds the
-window to the repository and target supplied at open time. Subsequent terminal
-working-directory updates do not retarget that window. The detail view offers
-a file list, on-demand diff loading, selectable/copyable line-numbered output,
-and explicit binary, error, and size-limit/truncation states. Commit diffs use
-the first parent as their base; a root commit uses the empty tree. This surface
-does not edit files or stage changes and does not add plugin wire capabilities.
+The built-in inspector routes commit and changed-file actions through
+`EditorWorkspaceStore.openGitDiff(repository:target:file:context:)`, honoring the
+editor pane destination setting. The editor binds each preview to its original
+repository and target and keeps regular documents (including unsaved buffers)
+separate. Source comparison uses bounded, read-only before/after snapshots with
+the editor's syntax highlighting and added/deleted line tints. A unified patch
+view preserves hunk line numbers and explicit binary, error and size-limit
+states. Commit diffs compare against the first parent, or the empty tree for a
+root commit; staged diffs compare HEAD/index, unstaged diffs index/worktree.
+The legacy native detail window remains available internally.
+
+Changes lists staged and unstaged/untracked paths separately. Branches lists
+local and remote references, marks the current branch, and opens the selected
+branch's history without checking it out. Reset or selecting a history scope
+returns to normal current/all-branch history. The header shows the configured
+upstream's Git tracking status (ahead/behind, up to date, or gone); these are
+locally cached refs, and refresh never fetches. No upstream and detached HEAD
+are distinct states. Visible panes poll repository, refs and working-tree data;
+tab/worktree state and generation checks prevent stale results being published.
+Tags, local branches, remote branches and HEAD use distinct graph decorations.
+These host-owned read actions add no external plugin wire capabilities and do
+not stage, commit, checkout or otherwise mutate the repository.
 
 ### Editor appearance settings
 

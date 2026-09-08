@@ -193,6 +193,51 @@ struct GitDiffService: Sendable {
         }
     }
 
+    /// Full source snapshots use the same bounded Git reader as patches.
+    func sourceVersions(for file: GitDiffFile, repository: GitRepositoryIdentity,
+                        target: GitDiffTarget) async throws -> (before: String, after: String) {
+        func blob(_ revision: String, _ path: String) async throws -> String {
+            let result = try await run(["show", "\(revision):\(path)"], repository: repository,
+                                       maxOutputBytes: diffByteLimit)
+            guard !result.stdout.contains(0), let text = String(data: result.stdout, encoding: .utf8) else {
+                throw EditorDocumentError.binaryFile
+            }
+            return text
+        }
+        let before: String
+        let after: String
+        switch target {
+        case .commit(let commit):
+            let base = try await commitBase(for: commit, repository: repository)
+            before = base.isRoot || file.kind == .added ? "" :
+                try await blob(base.id, file.oldPath ?? file.path)
+            after = file.kind == .deleted ? "" : try await blob(commit.rawValue, file.path)
+        case .staged:
+            before = file.kind == .added ? "" : try await blob("HEAD", file.oldPath ?? file.path)
+            after = file.kind == .deleted ? "" : try await blob("", file.path)
+        case .unstaged:
+            before = file.isUntracked || file.kind == .added ? "" : try await blob("", file.oldPath ?? file.path)
+            if file.kind == .deleted {
+                after = ""
+            } else {
+                let url = URL(fileURLWithPath: repository.worktreePath).appendingPathComponent(file.path)
+                let root = URL(fileURLWithPath: repository.worktreePath).resolvingSymlinksInPath().path
+                guard url.resolvingSymlinksInPath().path.hasPrefix(root + "/") else {
+                    throw GitDiffServiceError.invalidPath(file.path)
+                }
+                let handle = try FileHandle(forReadingFrom: url)
+                defer { try? handle.close() }
+                let data = try handle.read(upToCount: diffByteLimit + 1) ?? Data()
+                guard data.count <= diffByteLimit else { throw GitExecutionError.outputLimitExceeded(maxBytes: diffByteLimit) }
+                guard !data.contains(0), let text = String(data: data, encoding: .utf8) else {
+                    throw EditorDocumentError.binaryFile
+                }
+                after = text
+            }
+        }
+        return (before, after)
+    }
+
     private func commitBase(
         for commit: GitCommitID,
         repository: GitRepositoryIdentity

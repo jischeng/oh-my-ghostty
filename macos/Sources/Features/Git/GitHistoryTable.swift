@@ -8,6 +8,10 @@ struct GitHistoryTable: NSViewRepresentable {
     let onOpen: (GitCommitID) -> Void
     let onShowInTerminal: (GitCommitID) -> Void
 
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
+    }
+
     func makeCoordinator() -> Coordinator {
         Coordinator(
             onSelect: onSelect,
@@ -26,10 +30,12 @@ struct GitHistoryTable: NSViewRepresentable {
         table.headerView = nil
         table.backgroundColor = .clear
         table.intercellSpacing = NSSize(width: 0, height: 1)
-        table.rowHeight = 56
+        table.rowHeight = 62
+        table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         table.usesAlternatingRowBackgroundColors = false
         table.allowsEmptySelection = true
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("git-history"))
+        column.minWidth = 0
         column.resizingMask = .autoresizingMask
         table.addTableColumn(column)
         table.dataSource = context.coordinator
@@ -144,19 +150,12 @@ struct GitHistoryTable: NSViewRepresentable {
         func makeContextMenu() -> NSMenu {
             let menu = NSMenu()
             let open = NSMenuItem(
-                title: "Open Commit Details",
+                title: "Open Commit in Editor",
                 action: #selector(openSelectedCommit),
                 keyEquivalent: ""
             )
             open.target = self
             menu.addItem(open)
-            let terminal = NSMenuItem(
-                title: "Show in Terminal",
-                action: #selector(showSelectedCommitInTerminal),
-                keyEquivalent: ""
-            )
-            terminal.target = self
-            menu.addItem(terminal)
             return menu
         }
 
@@ -175,7 +174,7 @@ private final class GitHistoryCell: NSTableCellView {
     static let reuseIdentifier = NSUserInterfaceItemIdentifier("git-history-cell")
     private let subject = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
-    private let refs = NSStackView()
+    private let refs = NSTextField(labelWithString: "")
     private let stack = NSStackView()
     private let graph = GitGraphCellView()
 
@@ -186,8 +185,11 @@ private final class GitHistoryCell: NSTableCellView {
         detail.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
         detail.textColor = .secondaryLabelColor
         detail.lineBreakMode = .byTruncatingTail
-        refs.orientation = .horizontal
-        refs.spacing = 4
+        refs.lineBreakMode = .byTruncatingTail
+        for label in [subject, detail, refs] {
+            label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            label.maximumNumberOfLines = 1
+        }
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 2
@@ -202,7 +204,10 @@ private final class GitHistoryCell: NSTableCellView {
             graph.leadingAnchor.constraint(equalTo: leadingAnchor),
             graph.topAnchor.constraint(equalTo: topAnchor),
             graph.bottomAnchor.constraint(equalTo: bottomAnchor),
-            graph.widthAnchor.constraint(greaterThanOrEqualToConstant: 24),
+            graph.widthAnchor.constraint(equalToConstant: 48),
+            subject.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            detail.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            refs.widthAnchor.constraint(equalTo: stack.widthAnchor),
             stack.leadingAnchor.constraint(equalTo: graph.trailingAnchor, constant: 4),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             stack.topAnchor.constraint(equalTo: topAnchor, constant: 5),
@@ -217,17 +222,23 @@ private final class GitHistoryCell: NSTableCellView {
         graph.configure(row: graphRow)
         subject.stringValue = commit.subject.isEmpty ? "(no subject)" : commit.subject
         detail.stringValue = "\(commit.id.shortSHA)  \(commit.authorName)  \(date)"
-        refs.arrangedSubviews.forEach { refs.removeArrangedSubview($0); $0.removeFromSuperview() }
+        let badges = NSMutableAttributedString()
         for decoration in commit.refDecorations {
-            let label = NSTextField(labelWithString: decoration.name)
-            label.font = .systemFont(ofSize: 9, weight: .medium)
-            label.textColor = .systemGreen
-            label.drawsBackground = true
-            label.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.12)
-            label.wantsLayer = true
-            label.layer?.cornerRadius = 3
-            label.alignment = .center
-            refs.addArrangedSubview(label)
+            let color: NSColor
+            let prefix: String
+            switch decoration.kind {
+            case .currentBranch: color = .systemBlue; prefix = "● "
+            case .localBranch: color = .systemGreen; prefix = "⑂ "
+            case .remoteBranch: color = .systemPurple; prefix = "↗ "
+            case .tag: color = .systemOrange; prefix = "Tag: "
+            case .head: color = .systemBlue; prefix = "◎ "
+            }
+            badges.append(NSAttributedString(string: prefix + decoration.name + "  ", attributes: [
+                .foregroundColor: color, .font: NSFont.systemFont(ofSize: 10, weight: .medium),
+            ]))
         }
+        refs.attributedStringValue = badges
+        refs.toolTip = commit.refDecorations.map { "\($0.kind.rawValue): \($0.name)" }.joined(separator: "\n")
+        toolTip = "\(commit.subject)\n\(detail.stringValue)\n\(refs.toolTip ?? "")"
     }
 }

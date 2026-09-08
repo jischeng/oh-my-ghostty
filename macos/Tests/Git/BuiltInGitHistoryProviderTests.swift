@@ -29,6 +29,50 @@ struct BuiltInGitHistoryProviderTests {
         }
     }
 
+    @Test func changesAndBranchHistoryUseRealRepositoryData() async throws {
+        let directory = createTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try runCommand(["git", "init", "-b", "main"], in: directory.path)
+        try runCommand(["git", "commit", "--allow-empty", "-m", "base"], in: directory.path)
+        try runCommand(["git", "branch", "feature"], in: directory.path)
+        try runCommand(["git", "commit", "--allow-empty", "-m", "main only"], in: directory.path)
+        try Data("untracked".utf8).write(to: directory.appendingPathComponent("new.swift"))
+        let registry = InspectorRegistry()
+        let provider = BuiltInGitInspectorProvider(registry: registry)
+        try provider.register()
+        let context = InspectorPaneContext(tabID: UUID(), surfaceID: UUID(), title: "Terminal",
+                                           workingDirectory: directory.path)
+        registry.presentationDidChange(to: BuiltInGitInspectorProvider.paneID, context: context)
+        defer { registry.presentationDidChange(to: nil, context: context) }
+        var initial: InspectorGitContent?
+        for _ in 0..<80 {
+            if case .git(let content) = registry.content(for: BuiltInGitInspectorProvider.paneID, context: context),
+               content.history.commits.count == 2, !content.isLoading {
+                initial = content
+                break
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        let loaded = try #require(initial)
+        #expect(loaded.workingTree.unstaged.contains { $0.path == "new.swift" && $0.isUntracked })
+        #expect(loaded.workingTree.branches.contains { $0.name == "main" && $0.isCurrent })
+        registry.performAction(paneID: BuiltInGitInspectorProvider.paneID,
+                               action: .init(context: context, kind: .gitAction(.browseBranch("refs/heads/feature"))))
+        for _ in 0..<80 {
+            if case .git(let content) = registry.content(for: BuiltInGitInspectorProvider.paneID, context: context),
+               content.history.snapshot?.browsedBranch == "feature", !content.isLoading {
+                #expect(content.branch == "main")
+                #expect(content.activeTab == .history)
+                #expect(content.history.commits.map(\.subject) == ["base"])
+                registry.performAction(paneID: BuiltInGitInspectorProvider.paneID,
+                    action: .init(context: context, kind: .gitAction(.selectHistoryScope(.allBranches))))
+                return
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        Issue.record("Selected branch history was not loaded")
+    }
+
     @Test func cachesHistoryAndSelectionPerWorktree() async throws {
         let directory = createTempDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

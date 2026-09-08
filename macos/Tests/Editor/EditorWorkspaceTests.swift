@@ -4,6 +4,31 @@ import Testing
 @testable import Ghostty
 
 struct EditorWorkspaceTests {
+    @Test @MainActor func gitPreviewPreservesDirtyDocumentAndCannotBeSavedOverIt() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("file.swift")
+        try Data("original".utf8).write(to: file)
+        let workspace = EditorWorkspace()
+        defer { workspace.cancelAndClear() }
+        workspace.open(path: file.path, filesystem: LocalWorkspaceFilesystem(workingDirectory: root.path))
+        await waitUntil { !workspace.isLoading }
+        let document = try #require(workspace.selectedDocument)
+        document.suspendAutoSave()
+        document.text = "unsaved"
+        workspace.openGitDiff(GitEditorDiffRequest(repository: .init(worktreePath: root.path,
+                              gitDirPath: root.path + "/.git", commonGitDirPath: root.path + "/.git"),
+                              target: .staged, file: nil))
+        #expect(workspace.selectedDocument == nil)
+        #expect(workspace.documents.count == 1)
+        #expect(document.isDirty && document.text == "unsaved")
+        #expect(try String(contentsOf: file, encoding: .utf8) == "original")
+        workspace.selectedID = document.id
+        #expect(workspace.gitDiff == nil)
+        #expect(workspace.selectedDocument === document)
+    }
+
     @Test @MainActor func renameGuardFindsOpenDocumentsThroughLocalSymlinks() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let real = root.appendingPathComponent("real", isDirectory: true)

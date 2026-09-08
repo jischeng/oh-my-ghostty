@@ -54,6 +54,103 @@ extension NSPasteboard {
         return strings.joined(separator: " ")
     }
 
+    /// Checks if a file URL points to an image file.
+    static func isImageFileURL(_ url: URL) -> Bool {
+        guard url.isFileURL else { return false }
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
+            return false
+        }
+        let ext = url.pathExtension.lowercased()
+        if !ext.isEmpty {
+            if let utType = UTType(filenameExtension: ext), utType.conforms(to: .image) {
+                return true
+            }
+            let commonExtensions: Set<String> = [
+                "png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif",
+                "heic", "heif", "avif", "ico", "svg",
+            ]
+            if commonExtensions.contains(ext) {
+                return true
+            }
+        }
+        if let values = try? url.resourceValues(forKeys: [.contentTypeKey]),
+           let contentType = values.contentType,
+           contentType.conforms(to: .image) {
+            return true
+        }
+        return false
+    }
+
+    /// Returns the local file URL if the pasteboard contains a single existing image file.
+    func existingImageFileURL() -> URL? {
+        if let items = pasteboardItems, items.count == 1,
+           let item = items.first {
+            var resolvedURL: URL?
+            if let plist = item.propertyList(forType: .fileURL),
+               let url = NSURL(pasteboardPropertyList: plist, ofType: .fileURL) as URL? {
+                resolvedURL = url
+            } else if let str = item.string(forType: .fileURL),
+                      let url = URL(string: str) {
+                resolvedURL = url
+            }
+            if let resolvedURL,
+               resolvedURL.isFileURL,
+               Self.isImageFileURL(resolvedURL),
+               FileManager.default.fileExists(atPath: resolvedURL.path) {
+                return resolvedURL
+            }
+        }
+        if let urls = readObjects(forClasses: [NSURL.self], options: [
+            .urlReadingFileURLsOnly: true,
+        ]) as? [URL], urls.count == 1,
+           let fileURL = urls.first,
+           fileURL.isFileURL,
+           Self.isImageFileURL(fileURL),
+           FileManager.default.fileExists(atPath: fileURL.path) {
+            return fileURL
+        }
+        return nil
+    }
+
+    /// Checks whether the pasteboard carries any file URLs.
+    func hasFileURLs() -> Bool {
+        if let items = pasteboardItems {
+            for item in items {
+                if item.types.contains(.fileURL) ||
+                   item.propertyList(forType: .fileURL) != nil ||
+                   item.string(forType: .fileURL) != nil {
+                    return true
+                }
+            }
+        }
+        if let urls = readObjects(forClasses: [NSURL.self], options: [
+            .urlReadingFileURLsOnly: true,
+        ]) as? [URL], !urls.isEmpty {
+            return true
+        }
+        return false
+    }
+
+    /// If the pasteboard holds an image (either as an existing image file URL,
+    /// or as image data on the clipboard), returns a file URL pointing to the image.
+    /// For an existing image file on disk (such as copied from Lark/Feishu or Finder),
+    /// its URL is returned directly. For raw clipboard image data, the image is
+    /// written as PNG to a temporary directory. Returns nil if the pasteboard does not
+    /// contain an image or if it contains non-image file URLs.
+    func imagePasteURL(
+        directory: URL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-paste", isDirectory: true)
+    ) -> URL? {
+        if let existing = existingImageFileURL() {
+            return existing
+        }
+        if hasFileURLs() {
+            return nil
+        }
+        return imagePasteFile(directory: directory)
+    }
+
     /// If the pasteboard holds an image but no text/file content, write the
     /// image as PNG into a dedicated temporary directory and return its URL.
     /// Returns nil when there is no usable image. Stored files are pruned after
@@ -118,7 +215,7 @@ extension NSPasteboard {
         directory: URL = FileManager.default.temporaryDirectory
             .appendingPathComponent("omg-paste", isDirectory: true)
     ) -> String? {
-        imagePasteFile(directory: directory).map { Ghostty.Shell.escape($0.path) }
+        imagePasteURL(directory: directory).map { Ghostty.Shell.escape($0.path) }
     }
 
     /// Removes image paste files older than the retention window.

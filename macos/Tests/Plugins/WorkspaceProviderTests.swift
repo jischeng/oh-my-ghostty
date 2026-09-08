@@ -104,6 +104,70 @@ struct WorkspaceProviderTests {
         #expect(pasteboard.getOpinionatedStringContents() == "hello")
     }
 
+    @Test func existingImageFileOnPasteboardUsesDirectURL() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-img-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let jpegFile = tempDir.appendingPathComponent("img_v3_test.jpg")
+        try Data([0xFF, 0xD8, 0xFF, 0xE0]).write(to: jpegFile)
+
+        let pasteboard = NSPasteboard(
+            name: NSPasteboard.Name("omg-img-paste-test-\(UUID().uuidString)")
+        )
+        pasteboard.clearContents()
+        let item = NSPasteboardItem()
+        item.setString(jpegFile.absoluteString, forType: .fileURL)
+        pasteboard.writeObjects([item])
+
+        // When a single existing image file is on the pasteboard (like Lark/Feishu copy image),
+        // imagePasteURL should return the original file URL directly.
+        let resolvedURL = try #require(pasteboard.imagePasteURL())
+        #expect(resolvedURL.path == jpegFile.path)
+        #expect(pasteboard.imagePastePath() == Ghostty.Shell.escape(jpegFile.path))
+
+        // Non-image file on pasteboard should NOT be treated as an image paste
+        let textFile = tempDir.appendingPathComponent("document.txt")
+        try "hello".write(to: textFile, atomically: true, encoding: .utf8)
+        let textPB = NSPasteboard(
+            name: NSPasteboard.Name("omg-txt-paste-test-\(UUID().uuidString)")
+        )
+        textPB.clearContents()
+        let textItem = NSPasteboardItem()
+        textItem.setString(textFile.absoluteString, forType: .fileURL)
+        textPB.writeObjects([textItem])
+        #expect(textPB.imagePasteURL() == nil)
+        #expect(textPB.imagePastePath() == nil)
+        #expect(textPB.getOpinionatedStringContents() == Ghostty.Shell.escape(textFile.path))
+
+        // Multiple image files on pasteboard should fall back to opinionated string contents
+        let secondJpeg = tempDir.appendingPathComponent("img_v3_second.jpg")
+        try Data([0xFF, 0xD8, 0xFF, 0xE0]).write(to: secondJpeg)
+        let multiPB = NSPasteboard(
+            name: NSPasteboard.Name("omg-multi-paste-test-\(UUID().uuidString)")
+        )
+        multiPB.clearContents()
+        let item1 = NSPasteboardItem()
+        item1.setString(jpegFile.absoluteString, forType: .fileURL)
+        let item2 = NSPasteboardItem()
+        item2.setString(secondJpeg.absoluteString, forType: .fileURL)
+        multiPB.writeObjects([item1, item2])
+        #expect(multiPB.imagePasteURL() == nil)
+
+        // Directory with image extension should NOT be treated as an image
+        let dirWithImgExt = tempDir.appendingPathComponent("fake_image.png")
+        try FileManager.default.createDirectory(at: dirWithImgExt, withIntermediateDirectories: true)
+        let dirPB = NSPasteboard(
+            name: NSPasteboard.Name("omg-dir-paste-test-\(UUID().uuidString)")
+        )
+        dirPB.clearContents()
+        let dirItem = NSPasteboardItem()
+        dirItem.setString(dirWithImgExt.absoluteString, forType: .fileURL)
+        dirPB.writeObjects([dirItem])
+        #expect(dirPB.imagePasteURL() == nil)
+    }
+
     @Test func parsesSSHConfigAliasesWithoutSecrets() throws {
         let previous = UserDefaults.standard.object(forKey: "OMG.Plugin.Enabled.builtin.ssh")
         UserDefaults.standard.set(true, forKey: "OMG.Plugin.Enabled.builtin.ssh")
@@ -144,6 +208,25 @@ struct WorkspaceProviderTests {
         put '/tmp/local image'\\''s.png' '/tmp/omg-paste-123.png'
         chmod 600 '/tmp/omg-paste-123.png'
         """)
+    }
+
+    @Test func imageTransferPreservesKnownFileExtensions() {
+        let jpgURL = URL(fileURLWithPath: "/tmp/img_v3_test.jpg")
+        let jpgRemote = SSHImagePasteTransfer.remotePath(for: jpgURL)
+        #expect(jpgRemote.hasPrefix("/tmp/omg-paste-"))
+        #expect(jpgRemote.hasSuffix(".jpg"))
+
+        let pngURL = URL(fileURLWithPath: "/tmp/screenshot.PNG")
+        let pngRemote = SSHImagePasteTransfer.remotePath(for: pngURL)
+        #expect(pngRemote.hasSuffix(".png"))
+
+        let webpURL = URL(fileURLWithPath: "/tmp/photo.webp")
+        let webpRemote = SSHImagePasteTransfer.remotePath(for: webpURL)
+        #expect(webpRemote.hasSuffix(".webp"))
+
+        let noExtURL = URL(fileURLWithPath: "/tmp/raw_image")
+        let noExtRemote = SSHImagePasteTransfer.remotePath(for: noExtURL)
+        #expect(noExtRemote.hasSuffix(".png"))
     }
 
     @Test func createsGenericLocalWorkspaceDescriptor() {

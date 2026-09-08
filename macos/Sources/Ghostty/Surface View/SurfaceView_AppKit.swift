@@ -2405,6 +2405,23 @@ extension Ghostty.SurfaceView {
     override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
         let pb = sender.draggingPasteboard
 
+        if let file = pb.imagePasteURL(),
+           let controller = window?.windowController as? TerminalController {
+            controller.resolveImagePastePath(
+                for: file,
+                surfaceID: id
+            ) { [weak self] path in
+                guard let self else { return }
+                DispatchQueue.main.async {
+                    self.insertText(
+                        path,
+                        replacementRange: NSRange(location: 0, length: 0)
+                    )
+                }
+            }
+            return true
+        }
+
         let content = pb.getOpinionatedStringContents()
 
         if let content {

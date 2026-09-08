@@ -257,8 +257,7 @@ final class ComposerTextView: NSTextView {
     }
 
     override func paste(_ sender: Any?) {
-        if pasteboard.getOpinionatedStringContents() == nil,
-           let file = pasteboard.imagePasteFile() {
+        if let file = pasteboard.imagePasteURL() {
             let insertPath: (String) -> Void = { [weak self] path in
                 guard let self else { return }
                 self.insertText(path, replacementRange: self.selectedRange())

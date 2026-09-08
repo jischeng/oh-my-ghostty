@@ -1089,10 +1089,18 @@ struct SSHImagePasteTransfer {
               attributes[.type] as? FileAttributeType == .typeRegular else {
             throw WorkspaceFilesystemError.invalidPath
         }
-        let remotePath = "/tmp/omg-paste-\(UUID().uuidString).png"
+        let remotePath = remotePath(for: localFile)
         let batch = batch(localPath: localFile.path, remotePath: remotePath)
         _ = try await SSHSFTPClient.run(batch: batch, host: ssh.transferTarget)
         return Ghostty.Shell.escape(remotePath)
+    }
+
+    static func remotePath(for localFile: URL) -> String {
+        let rawExt = localFile.pathExtension.lowercased()
+        let ext = (rawExt.count <= 8 && rawExt.allSatisfy({ $0.isLetter || $0.isNumber }) && !rawExt.isEmpty)
+            ? rawExt
+            : "png"
+        return "/tmp/omg-paste-\(UUID().uuidString).\(ext)"
     }
 
     static func batch(localPath: String, remotePath: String) -> String {

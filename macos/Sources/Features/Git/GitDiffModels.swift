@@ -111,11 +111,20 @@ struct GitCommitMetadata: Hashable, Sendable, Equatable {
         message.split(whereSeparator: { $0.isNewline }).first.map(String.init) ?? "(no commit message)"
     }
 
-    /// Git's subject is the first paragraph; only later paragraphs are body.
-    var body: String {
+    let body: String
+
+    init(commitID: GitCommitID, authorName: String, authorEmail: String?, authoredAt: String,
+         parents: [GitCommitID], message: String) {
+        self.commitID = commitID
+        self.authorName = authorName
+        self.authorEmail = authorEmail
+        self.authoredAt = authoredAt
+        self.parents = parents
+        self.message = message
         let lines = message.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
-        guard let separator = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces).isEmpty }) else { return "" }
-        return lines.dropFirst(separator + 1).joined(separator: "\n").trimmingCharacters(in: .newlines)
+        if let separator = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces).isEmpty }) {
+            body = lines.dropFirst(separator + 1).joined(separator: "\n").trimmingCharacters(in: .newlines)
+        } else { body = "" }
     }
 
     var authorDescription: String {

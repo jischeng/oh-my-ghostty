@@ -16,10 +16,10 @@ struct GitDiffService: Sendable {
 
     /// Lists changed paths without reading their contents. Git's `-z` output is
     /// parsed as records so spaces, unicode, quotes and newlines in paths survive.
-    func listFiles(for repository: GitRepositoryIdentity, target: GitDiffTarget) async throws -> GitDiffFileList {
+    func listFiles(for repository: GitRepositoryIdentity, target: GitDiffTarget, parentIDs: [GitCommitID]? = nil) async throws -> GitDiffFileList {
         switch target {
         case .commit(let commit):
-            let commitBase = try await commitBase(for: commit, repository: repository)
+            let commitBase = try await commitBase(for: commit, repository: repository, parentIDs: parentIDs)
             let result = try await run(
                 ["--literal-pathspecs", "diff", "--no-ext-diff", "--raw", "--numstat", "-z", "--find-renames", commitBase.id, commit.rawValue, "--"],
                 repository: repository,
@@ -233,25 +233,28 @@ struct GitDiffService: Sendable {
     private func commitBase(
         for commit: GitCommitID,
         repository: GitRepositoryIdentity,
-        knownBase: GitDiffCommitBase? = nil
+        knownBase: GitDiffCommitBase? = nil,
+        parentIDs: [GitCommitID]? = nil
     ) async throws -> GitDiffCommitBase {
         if let knownBase, knownBase.commit == commit { return knownBase }
-        let result = try await (executor ?? repository.executor).execute(
-            arguments: ["rev-list", "--parents", "-n", "1", commit.rawValue],
-            workingDirectory: repository.worktreePath,
-            stdin: nil,
-            maxOutputBytes: 4 * 1024
-        )
-        guard result.isSuccess else {
-            throw GitDiffServiceError.invalidCommit(commit)
+        let parents: [String]
+        if let parentIDs { parents = parentIDs.map(\.rawValue) } else {
+            let result = try await (executor ?? repository.executor).execute(
+                arguments: ["rev-list", "--parents", "-n", "1", commit.rawValue],
+                workingDirectory: repository.worktreePath,
+                stdin: nil,
+                maxOutputBytes: 4 * 1024
+            )
+            guard result.isSuccess else {
+                throw GitDiffServiceError.invalidCommit(commit)
+            }
+            let parts = result.stdoutString.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+            guard parts.first == commit.rawValue || parts.first.map({ $0.hasPrefix(commit.rawValue) }) == true else {
+                throw GitDiffServiceError.invalidCommit(commit)
+            }
+            parents = Array(parts.dropFirst())
         }
-        let parts = result.stdoutString.split(whereSeparator: { $0.isWhitespace }).map(String.init)
-        guard parts.first == commit.rawValue || parts.first.map({ $0.hasPrefix(commit.rawValue) }) == true else {
-            throw GitDiffServiceError.invalidCommit(commit)
-        }
-        if let parent = parts.dropFirst().first {
-            return GitDiffCommitBase(commit: commit, id: parent, isRoot: false)
-        }
+        if let parent = parents.first { return GitDiffCommitBase(commit: commit, id: parent, isRoot: false) }
         let emptyTree = try await (executor ?? repository.executor).execute(
             arguments: ["hash-object", "-t", "tree", "--stdin"],
             workingDirectory: repository.worktreePath,

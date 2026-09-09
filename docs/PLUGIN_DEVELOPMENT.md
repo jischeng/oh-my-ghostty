@@ -959,26 +959,37 @@ intact. Binary files contribute to a separate count, not invented line totals;
 untracked working-tree files are represented as additions.
 
 History keeps the subject first, followed by two secondary metadata lines:
-Author · Email, then Time · Short SHA. These are independent text-only click
-copy targets, with subtle hover feedback and a temporary Copied state; hash
-clicks copy the full SHA. The subject and message body use native text selection,
-word selection and Cmd+C instead of copy icons. Only the trailing, low-contrast
-7-point chevron toggles a commit; the graph gutter contains topology alone.
+Author and Email, then Time and Short SHA, separated by whitespace rather
+than dot labels. These are independent click-copy targets; feedback keeps the
+original text and uses a temporary accent/underline instead of replacing it.
+Hash clicks copy the full SHA. Double-clicking a summary, including metadata
+and blank space, toggles the commit. Metadata mouse clicks wait for the system
+double-click interval so a double-click can cancel copying and expand instead.
+The trailing 7-point chevron remains available; the graph gutter is topology only.
+Subjects and bodies use row selection/whole-value copying without word selection.
 
 HEAD/branch/remote/tag badges remain compact even while a commit is expanded.
 They occupy one 17-point row, cap each name at 104 points, and aggregate local
 branches, remote branches and tags separately when needed. Clicking a badge
-opens References, never copies it. That popover separates HEAD, Branches, Remote
-Branches and Tags; branches use visual slash-delimited folders while leaves
-retain exact ref names. Selecting a leaf reveals its full name for native
-selection/copy; keyboard/context-menu copying is also available. No permanent
+opens References. That popover separates HEAD, Branches, Remote Branches and
+Tags; branches use slash-delimited folders while leaves retain exact ref names.
+Clicking a ref leaf copies its full name with light feedback. Folder clicks do
+not copy; folder double-clicks toggle expansion. Keyboard/context-menu copying
+and the selectable full-name footer remain available. No permanent
 copy-icon column or expanded inline ref list is added to the timeline.
 
 Expanding a commit adds changed-file count and line statistics, clickable file
 rows, then the optional message body without repeating metadata or the subject.
 Short bodies default to expanded and long bodies to collapsed. Their disclosure
-header stays above the text with a line count; clicking or selecting the text
-never toggles the section. Changed Files stays before the body.
+header stays above the text with a line count; clicking the text selects it
+for whole-body copy and never toggles the section. Changed Files stays before the body.
+Presentation folds update only affected rows and heights without implicit
+animations. Unchanged graph layouts and unrelated native cells stay intact.
+Body extraction and text measurements are reused, and collapsed long bodies do
+not need full text layout to decide their default state. Successful commit
+details have a bounded 32-entry per-worktree cache; collapse/reopen does not
+repeat Git reads, and explicit refresh invalidates that cache. Initial expansion
+reuses already-loaded parent IDs, avoiding a redundant parent query.
 Presentation folds do not refetch Git data. The commit rail spans child rows,
 including root commits; forks and lane compaction occur at the block end.
 Lane changes finish near nodes/boundaries, with adequate parallel spacing.
@@ -990,7 +1001,7 @@ scope picker displays compact titles but dispatches original ref IDs. Repository
 headers show selectable worktree/origin addresses and HEAD tags. Origin is read
 on initial/forced refresh rather than each poll; HTTP credentials are omitted.
 
-Using the trailing commit disclosure loads metadata/files on demand,
+Commit disclosure or double-click loads metadata/files on demand,
 independently of history pagination; collapsing cancels that pending request.
 Only clicking a changed file routes to
 `EditorWorkspaceStore.openGitDiff(repository:target:file:context:)`, honoring the

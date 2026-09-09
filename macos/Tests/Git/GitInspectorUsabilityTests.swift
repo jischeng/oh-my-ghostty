@@ -106,23 +106,24 @@ struct GitInspectorUsabilityTests {
         let disclosure = try #require(cell.subviews.compactMap { $0 as? NSButton }.first)
         #expect(graph.frame.maxX < subject.frame.minX)
         #expect(disclosure.frame.minX > subject.frame.maxX)
-        #expect(subject.isSelectable)
+        #expect(!subject.isSelectable)
         let buttons = find(InspectorClickCopyText.self, in: cell)
         let board = NSPasteboard.withUniqueName()
         for value in [commit.authorName, commit.authorEmail, commit.authoredAt.description, commit.id.rawValue] {
             let button = try #require(buttons.first { $0.value == value })
             button.pasteboard = board
             let frame = button.frame
-            button.performClick(nil)
+            let title = button.attributedTitle.string
+            button.activate(clickCount: 1)
             #expect(board.string(forType: .string) == value)
-            #expect(button.isCopied && button.attributedTitle.string == "Copied")
+            #expect(button.isCopied && button.attributedTitle.string == title)
             #expect(button.frame == frame && button.image == nil)
         }
         try await Task.sleep(for: .milliseconds(1100))
-        #expect(buttons.allSatisfy { !$0.isCopied })
+        #expect(buttons.allSatisfy { !$0.isCopied && $0.toolTip != "Copied" })
     }
 
-    @Test func referencesHaveTypedFolderTreesWithoutClickToCopy() async throws {
+    @Test func referencesHaveTypedFolderTreesAndClickToCopy() async throws {
         let refs: [GitRefDecoration] = [
             .init(name: "HEAD", kind: .head), .init(name: "main", kind: .currentBranch),
             .init(name: "feature/git/history", kind: .localBranch), .init(name: "feature/git/diff", kind: .localBranch),
@@ -159,6 +160,8 @@ struct GitInspectorUsabilityTests {
         #expect(board.string(forType: .string) == "unchanged")
         #expect(find(InspectorClickCopyText.self, in: list).isEmpty)
         #expect(find(NSButton.self, in: list).allSatisfy { $0.toolTip?.hasPrefix("Copy") != true })
+        list.tree.sendAction(list.tree.action, to: list.tree.target)
+        #expect(board.string(forType: .string) == "feature/git/history")
         host.makeFirstResponder(list.tree)
         #expect(EditorCommandRouter.shared.handle(try key("c", in: host)))
         #expect(board.string(forType: .string) == "feature/git/history")
@@ -170,7 +173,7 @@ struct GitInspectorUsabilityTests {
         }
     }
 
-    @Test func messageBodyUsesNativeWordSelectionWithoutTogglingDisclosure() async throws {
+    @Test func messageBodyCopiesAsAWholeWithoutTogglingDisclosure() async throws {
         let commit = GitHistoryCommit(id: .init("1234567"), parentIDs: [], authorName: "Author", authorEmail: "a@example.com",
             authoredAt: Date(), subject: "Subject")
         let body = "alpha beta gamma\nsecond explanatory line"
@@ -189,12 +192,13 @@ struct GitInspectorUsabilityTests {
         let field = try #require(find(InspectorCopyableTextField.self, in: cell).first)
         let board = NSPasteboard.withUniqueName()
         field.pasteboard = board
-        field.selectText(nil)
-        let editor = try #require(field.currentEditor() as? NSTextView)
-        let word = editor.selectionRange(forProposedRange: NSRange(location: 7, length: 0), granularity: .selectByWord)
-        editor.setSelectedRange(word)
+        #expect(!field.isSelectable)
+        let copyTable = try #require(table as? InspectorCopyTableView)
+        copyTable.pasteboard = board
+        table.selectRowIndexes(IndexSet(integer: 2), byExtendingSelection: false)
+        host.makeFirstResponder(table)
         #expect(EditorCommandRouter.shared.handle(try key("c", in: host)))
-        #expect(board.string(forType: .string) == "beta")
+        #expect(board.string(forType: .string) == body)
         let before = table.rect(ofRow: 2).height
         let coordinator = try #require(table.target as? GitHistoryTable.Coordinator)
         coordinator.activateRow(2, doubleClick: false)

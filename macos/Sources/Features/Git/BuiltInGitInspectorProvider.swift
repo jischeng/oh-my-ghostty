@@ -17,6 +17,8 @@ final class BuiltInGitInspectorProvider {
         var browsedBranch: String?
         var commitDraft: String = ""
         var operationError: String?
+        var detailCache: [GitCommitID: GitCommitExpansion] = [:]
+        var detailCacheOrder: [GitCommitID] = []
         var expandedCommits: [GitCommitID: GitCommitExpansion] = [:]
         var selectedCommitID: GitCommitID?
         var historyScope: GitHistoryScope = .allBranches
@@ -79,7 +81,12 @@ final class BuiltInGitInspectorProvider {
     private func handle(_ action: InspectorPaneAction) {
         guard case .gitAction(let gitAction) = action.kind else { return }
         switch gitAction {
-        case .refresh: load(context: action.context, force: true)
+        case .refresh:
+            let key = currentWorktreeKey(for: action.context)
+            var value = state(for: action.context.tabID, worktreeKey: key)
+            value.detailCache.removeAll(); value.detailCacheOrder.removeAll()
+            save(value, tabID: action.context.tabID, worktreeKey: key)
+            load(context: action.context, force: true)
         case .selectTab(let tab):
             let key = currentWorktreeKey(for: action.context)
             var state = state(for: action.context.tabID, worktreeKey: key); state.activeTab = tab; save(state, tabID: action.context.tabID, worktreeKey: key)
@@ -323,6 +330,13 @@ final class BuiltInGitInspectorProvider {
             publish(content, tabID: context.tabID)
             return
         }
+        if let cached = state.detailCache[commit] {
+            state.expandedCommits[commit] = cached
+            save(state, tabID: context.tabID, worktreeKey: worktree)
+            publish(content, tabID: context.tabID)
+            return
+        }
+        let parents = content.history.commits.first(where: { $0.id == commit })?.parentIDs
         state.expandedCommits[commit] = GitCommitExpansion(isLoading: true)
         save(state, tabID: context.tabID, worktreeKey: worktree)
         publish(content, tabID: context.tabID)
@@ -331,13 +345,21 @@ final class BuiltInGitInspectorProvider {
             do {
                 let service = self.diffService
                 async let metadata = service.loadCommitMetadata(for: commit, repository: repository)
-                async let list = service.listFiles(for: repository, target: .commit(commit))
+                async let list = service.listFiles(for: repository, target: .commit(commit), parentIDs: parents)
                 detail = try await GitCommitExpansion(metadata: metadata, files: list.files, statistics: list.statistics)
             } catch { detail = GitCommitExpansion(error: error.localizedDescription) }
             guard !Task.isCancelled else { return }
             var current = self.state(for: context.tabID, worktreeKey: worktree)
             guard current.expandedCommits[commit] != nil else { return }
             current.expandedCommits[commit] = detail
+            if detail.error == nil {
+                current.detailCache[commit] = detail
+                current.detailCacheOrder.removeAll { $0 == commit }
+                current.detailCacheOrder.append(commit)
+                if current.detailCacheOrder.count > 32 {
+                    current.detailCache.removeValue(forKey: current.detailCacheOrder.removeFirst())
+                }
+            }
             self.save(current, tabID: context.tabID, worktreeKey: worktree)
             self.detailTasks.removeValue(forKey: key)
             if let latest = self.lastPublishedContent[context.tabID], latest.repository == repository,

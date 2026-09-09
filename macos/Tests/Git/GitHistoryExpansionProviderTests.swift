@@ -69,6 +69,40 @@ struct GitHistoryExpansionProviderTests {
         throw NSError(domain: "GitExpansionTimeout", code: 1)
     }
 
+    @Test func repeatedCommitExpansionUsesCachedDetailsAndKnownParents() async throws {
+        let directory = try await repository(commits: 2)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let recorder = ExpansionQueryRecorder()
+        let registry = InspectorRegistry()
+        let provider = BuiltInGitInspectorProvider(registry: registry, executor: recorder)
+        try provider.register()
+        let context = InspectorPaneContext(tabID: UUID(), surfaceID: UUID(), title: "Terminal", workingDirectory: directory.path)
+        registry.presentationDidChange(to: BuiltInGitInspectorProvider.paneID, context: context)
+        defer { registry.presentationDidChange(to: nil, context: context) }
+        let initial = try await waitFor(registry, context: context) { $0.history.commits.count == 2 }
+        let id = try #require(initial.history.commits.first?.id)
+        func toggle() {
+            registry.performAction(paneID: BuiltInGitInspectorProvider.paneID,
+                action: .init(context: context, kind: .gitAction(.openCommit(id))))
+        }
+        toggle()
+        _ = try await waitFor(registry, context: context) { $0.expandedCommits[id]?.metadata != nil }
+        let reads = await recorder.detailReads
+        #expect(reads == 2)
+        #expect(await recorder.parentReads == 0)
+        toggle()
+        toggle()
+        _ = try await waitFor(registry, context: context) { $0.expandedCommits[id]?.metadata != nil }
+        #expect(await recorder.detailReads == reads)
+        toggle()
+        registry.performAction(paneID: BuiltInGitInspectorProvider.paneID,
+            action: .init(context: context, kind: .gitAction(.refresh)))
+        _ = try await waitFor(registry, context: context) { $0.expandedCommits.isEmpty }
+        toggle()
+        _ = try await waitFor(registry, context: context) { $0.expandedCommits[id]?.metadata != nil }
+        #expect(await recorder.detailReads == reads + 2)
+    }
+
     @Test func doubleClickLoadsCommitMetadataAndFilesThenCollapses() async throws {
         let directory = try await repository(commits: 1)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -214,5 +248,16 @@ struct GitHistoryExpansionProviderTests {
             $0.workingTree.stagedError == nil && $0.workingTree.unstagedError == nil && $0.workingTree.branchesError == nil
         }
         #expect(recovered.workingTree.staged.count == (failed == .unstaged ? 0 : 2))
+    }
+}
+
+private actor ExpansionQueryRecorder: GitExecutor {
+    var detailReads = 0
+    var parentReads = 0
+    func execute(arguments: [String], workingDirectory: String, stdin: Data?, maxOutputBytes: Int?) async throws -> GitExecutionResult {
+        if arguments.contains("--raw") || arguments.contains("--no-patch") { detailReads += 1 }
+        if arguments.first == "rev-list" { parentReads += 1 }
+        return try await LocalGitExecutor().execute(arguments: arguments, workingDirectory: workingDirectory,
+            stdin: stdin, maxOutputBytes: maxOutputBytes)
     }
 }

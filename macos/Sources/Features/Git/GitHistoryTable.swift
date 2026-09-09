@@ -50,7 +50,7 @@ struct GitHistoryTable: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) { context.coordinator.update(self) }
 
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
-        private enum Row {
+        private enum Row: Hashable {
             case commit(Int)
             case files(Int)
             case message(Int)
@@ -71,6 +71,7 @@ struct GitHistoryTable: NSViewRepresentable {
                 }
             }
         }
+        enum LocalChange { case files(GitCommitID), message(GitCommitID) }
         weak var tableView: NSTableView?
         private var content: GitHistoryTable?
         private var rows: [Row] = []
@@ -103,10 +104,11 @@ struct GitHistoryTable: NSViewRepresentable {
             }
         }
 
-        func update(_ new: GitHistoryTable, refreshRows: Bool = false) {
-            let changed = content?.commits != new.commits || content?.expandedCommits != new.expandedCommits ||
-                content?.headCommitID != new.headCommitID || refreshRows
-            if content?.commits != new.commits { requestedCount = nil }
+        func update(_ new: GitHistoryTable, change: LocalChange? = nil) {
+            let commitsChanged = content?.commits != new.commits
+            let changed = commitsChanged || content?.expandedCommits != new.expandedCommits ||
+                content?.headCommitID != new.headCommitID || change != nil
+            if commitsChanged { requestedCount = nil }
             let previous = content
             collapsedFiles.formIntersection(new.expandedCommits.keys)
             messageExpansion = messageExpansion.filter { new.expandedCommits[$0.key] != nil }
@@ -122,10 +124,14 @@ struct GitHistoryTable: NSViewRepresentable {
                 let anchor = rows.indices.contains(top) ? rows[top] : nil
                 let anchorID = anchor.flatMap { row in previous?.commits[safe: row.commitIndex]?.id }
                 let offset = top >= 0 ? table.visibleRect.minY - table.rect(ofRow: top).minY : 0
-                var layout = GitGraphLayout()
-                graphRows = new.commits.map { layout.append(commitID: $0.id, parentIDs: $0.parentIDs) }
-                graphColumns = graphRows.indices.map { index in
-                    GitGraphColumnLayout(row: graphRows[index], previous: graphRows[safe: index - 1], next: graphRows[safe: index + 1])
+                let oldRows = rows
+                let oldHeights = heights
+                if commitsChanged {
+                    var layout = GitGraphLayout()
+                    graphRows = new.commits.map { layout.append(commitID: $0.id, parentIDs: $0.parentIDs) }
+                    graphColumns = graphRows.indices.map { index in
+                        GitGraphColumnLayout(row: graphRows[index], previous: graphRows[safe: index - 1], next: graphRows[safe: index + 1])
+                    }
                 }
                 rows = []
                 for (index, commit) in new.commits.enumerated() {
@@ -143,7 +149,11 @@ struct GitHistoryTable: NSViewRepresentable {
                     }
                 }
                 measureRows()
-                table.reloadData()
+                if commitsChanged {
+                    table.reloadData()
+                } else {
+                    updateVisibleRows(previous: previous, oldRows: oldRows, oldHeights: oldHeights, change: change)
+                }
                 if let anchorID, let index = rows.firstIndex(where: {
                     new.commits[$0.commitIndex].id == anchorID && $0.suffix == anchor?.suffix
                 }), let clip = table.enclosingScrollView?.contentView {
@@ -160,6 +170,53 @@ struct GitHistoryTable: NSViewRepresentable {
                     return false
                 }) { table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false) }
             } else { table.deselectAll(nil) }
+        }
+
+        /// Preserve unrelated native cells and update only the changed block.
+        private func updateVisibleRows(previous: GitHistoryTable?, oldRows: [Row], oldHeights: [CGFloat], change: LocalChange?) {
+            guard let table = tableView, let content else { return }
+            var prefix = 0
+            while prefix < min(oldRows.count, rows.count), oldRows[prefix] == rows[prefix] { prefix += 1 }
+            var suffix = 0
+            while suffix < min(oldRows.count, rows.count) - prefix,
+                  oldRows[oldRows.count - suffix - 1] == rows[rows.count - suffix - 1] { suffix += 1 }
+            let inserted = prefix..<(rows.count - suffix)
+            var oldIndices: [Row: Int] = [:]
+            for (index, row) in oldRows.enumerated() { oldIndices[row] = index }
+            let changedCommits = Set(content.commits.filter {
+                previous?.expandedCommits[$0.id] != content.expandedCommits[$0.id]
+            }.map(\.id))
+            var refresh = IndexSet()
+            var resized = IndexSet()
+            for (index, row) in rows.enumerated() where !inserted.contains(index) {
+                guard let old = oldIndices[row] else { continue }
+                if heights[index] != oldHeights[old] { resized.insert(index) }
+                let id = content.commits[row.commitIndex].id
+                switch row {
+                case .commit:
+                    if previous?.headCommitID != content.headCommitID ||
+                        (previous?.expandedCommits[id] != nil) != (content.expandedCommits[id] != nil) { refresh.insert(index) }
+                default:
+                    if changedCommits.contains(id) { refresh.insert(index) }
+                    switch (change, row) {
+                    case (.files(let target), .files), (.message(let target), .message):
+                        if target == id { refresh.insert(index) }
+                    default: break
+                    }
+                }
+            }
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0
+                context.allowsImplicitAnimation = false
+                if oldRows.count - suffix > prefix || !inserted.isEmpty {
+                    table.beginUpdates()
+                    table.removeRows(at: IndexSet(integersIn: prefix..<(oldRows.count - suffix)), withAnimation: [])
+                    table.insertRows(at: IndexSet(integersIn: inserted), withAnimation: [])
+                    table.endUpdates()
+                }
+                if !resized.isEmpty { table.noteHeightOfRows(withIndexesChanged: resized) }
+                if !refresh.isEmpty { table.reloadData(forRowIndexes: refresh, columnIndexes: IndexSet(integer: 0)) }
+            }
         }
 
         private func measureRows() {
@@ -268,7 +325,8 @@ struct GitHistoryTable: NSViewRepresentable {
                 return
             default: return
             }
-            update(content, refreshRows: true)
+            let change: LocalChange = if case .files = row { .files(id) } else { .message(id) }
+            update(content, change: change)
         }
 
         func tableViewSelectionDidChange(_ notification: Notification) {
@@ -278,6 +336,9 @@ struct GitHistoryTable: NSViewRepresentable {
         func activateRow(_ index: Int, doubleClick: Bool) {
             guard let content, rows.indices.contains(index) else { return }
             switch rows[index] {
+            case .commit(let commit) where doubleClick:
+                (tableView?.view(atColumn: 0, row: index, makeIfNecessary: false) as? GitHistoryCell)?.cancelPendingCopy()
+                content.onOpen(content.commits[commit].id)
             case .file(let commit, let file) where !doubleClick: content.onOpenFile(content.commits[commit].id, file)
             case .files where !doubleClick: activateChild(rows[index])
             default: break

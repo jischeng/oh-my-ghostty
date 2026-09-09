@@ -21,7 +21,7 @@ final class GitHistoryCell: NSTableCellView {
         subject.font = .systemFont(ofSize: 12, weight: .medium)
         subject.lineBreakMode = .byTruncatingTail
         subject.maximumNumberOfLines = 1
-        subject.isSelectable = true
+        subject.isSelectable = false
         disclosure.isBordered = false
         disclosure.imagePosition = .imageOnly
         disclosure.imageScaling = .scaleNone
@@ -45,10 +45,11 @@ final class GitHistoryCell: NSTableCellView {
         self.graph.configure(row: graph, isHead: state.head, layout: graphLayout,
                              section: state.expanded ? .expandedCommit : .commit)
         subject.stringValue = commit.subject.isEmpty ? "(no subject)" : commit.subject
+        let doubleClick = { [weak self] in self?.cancelPendingCopy(); toggle() }
         authorAndEmail.configure(.init(text: commit.authorName, value: commit.authorName, label: "Author"),
-            second: commit.authorEmail.isEmpty ? nil : .init(text: commit.authorEmail, value: commit.authorEmail, label: "Email"))
+            second: commit.authorEmail.isEmpty ? nil : .init(text: commit.authorEmail, value: commit.authorEmail, label: "Email"), onDoubleClick: doubleClick)
         timeAndHash.configure(.init(text: summary.date, value: commit.authoredAt.description, label: "Time"),
-            second: .init(text: commit.id.shortSHA, value: commit.id.rawValue, label: "Commit SHA"))
+            second: .init(text: commit.id.shortSHA, value: commit.id.rawValue, label: "Commit SHA"), onDoubleClick: doubleClick)
         subject.copyItems = [("Copy subject", commit.subject)]
         badges.configure(summary.refs)
         disclosure.image = NSImage(systemSymbolName: state.expanded ? "chevron.down" : "chevron.right",
@@ -57,6 +58,7 @@ final class GitHistoryCell: NSTableCellView {
         toolTip = "\(commit.subject)\n\(commit.authorName) <\(commit.authorEmail)>\n\(commit.authoredAt)\n\(commit.id.rawValue)"
         needsLayout = true
     }
+    func cancelPendingCopy() { authorAndEmail.cancelPendingCopy(); timeAndHash.cancelPendingCopy() }
     override func layout() {
         super.layout()
         graph.frame = NSRect(x: 0, y: 0, width: graphWidth, height: bounds.height)
@@ -89,14 +91,21 @@ final class GitHistoryDetailCell: NSTableCellView {
     private var content = Content.notice("", false)
     private var action: () -> Void = {}
 
+    private struct Measurement: Hashable { let text: String; let width: CGFloat }
+    private static var measurements: [Measurement: CGFloat] = [:]
     private static func textHeight(_ text: String, width: CGFloat) -> CGFloat {
+        let key = Measurement(text: text, width: width)
+        if let height = measurements[key] { return height }
         let cell = NSTextFieldCell(textCell: text)
         cell.font = .systemFont(ofSize: 11)
         cell.wraps = true
         cell.isScrollable = false
         cell.usesSingleLineMode = false
-        return ceil(cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: max(1, width),
+        let height = ceil(cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: max(1, width),
                                                    height: .greatestFiniteMagnitude)).height)
+        if measurements.count >= 32 { measurements.removeAll(keepingCapacity: true) }
+        measurements[key] = height
+        return height
     }
     static func height(for content: Content, width: CGFloat) -> CGFloat {
         switch content {
@@ -109,7 +118,9 @@ final class GitHistoryDetailCell: NSTableCellView {
         }
     }
     static func messageIsExpanded(_ text: String, preference: Bool?, width: CGFloat) -> Bool {
-        preference ?? (textHeight(text, width: width - 12) <= 56)
+        if let preference { return preference }
+        guard text.utf16.count <= max(320, Int(width) * 2) else { return false }
+        return textHeight(text, width: width - 12) <= 56
     }
 
     override init(frame: NSRect) {
@@ -163,7 +174,7 @@ final class GitHistoryDetailCell: NSTableCellView {
         let width = max(1, bounds.width - x - 8)
         label.frame = NSRect(x: x, y: 6, width: width, height: max(1, bounds.height - 12))
         label.isHidden = false
-        label.isSelectable = true
+        label.isSelectable = false
         label.maximumNumberOfLines = 0
         label.lineBreakMode = .byWordWrapping
         label.font = .systemFont(ofSize: 11)
@@ -194,6 +205,7 @@ final class GitHistoryDetailCell: NSTableCellView {
             openIcon.isHidden = false
             openIcon.frame = NSRect(x: x + width - 10, y: 7, width: 8, height: 8)
         case .notice(let text, let isError):
+            label.isSelectable = true
             if label.stringValue != text { label.stringValue = text }
             label.textColor = isError ? .systemRed : .secondaryLabelColor
         case .message(let text, let preference):

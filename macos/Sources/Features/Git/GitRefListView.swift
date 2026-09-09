@@ -6,13 +6,14 @@ import SwiftUI
 final class GitRefListView: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate {
     private(set) var refs: [GitRefDecoration] = []
     private(set) var roots: [GitReferenceNode] = []
-    private(set) var tree = NSOutlineView()
+    private(set) var tree = GitReferenceOutlineView()
     private let title = NSTextField(labelWithString: "References")
     private let scroll = NSScrollView()
     private let detailScroll = NSScrollView()
     private let detail = InspectorCopyableTextView()
     private let divider = NSBox()
     private var pendingScroll: Int?
+    private var feedbackTask: Task<Void, Never>?
     var pasteboard = NSPasteboard.general { didSet { detail.pasteboard = pasteboard } }
     override var isFlipped: Bool { true }
 
@@ -38,6 +39,9 @@ final class GitRefListView: NSView, NSOutlineViewDataSource, NSOutlineViewDelega
         tree.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         tree.dataSource = self
         tree.delegate = self
+        tree.target = self
+        tree.action = #selector(copyClickedRef)
+        tree.doubleAction = #selector(doubleClickedRef)
         let menu = InspectorCopyMenu()
         menu.delegate = self
         tree.menu = menu
@@ -109,7 +113,7 @@ final class GitRefListView: NSView, NSOutlineViewDataSource, NSOutlineViewDelega
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         EditorCommandRouter.shared.unregister(owner: self)
-        guard window != nil else { return }
+        guard window != nil else { feedbackTask?.cancel(); return }
         EditorCommandRouter.shared.register(owner: self) { [weak self] event in
             guard let self, event.window === self.window, self.window?.firstResponder === self.tree,
                   event.modifierFlags.intersection([.command, .control, .option, .shift]) == .command,
@@ -147,13 +151,35 @@ final class GitRefListView: NSView, NSOutlineViewDataSource, NSOutlineViewDelega
             label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -5),
             label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
         ])
-        cell.toolTip = node.ref?.name ?? node.title
+        cell.toolTip = node.ref.map { "Click to copy · " + $0.name } ?? node.title
         return cell
     }
     func outlineViewSelectionDidChange(_ notification: Notification) {
+        feedbackTask?.cancel()
+        detail.textColor = .secondaryLabelColor
+        detail.toolTip = nil
         detail.string = (tree.item(atRow: tree.selectedRow) as? GitReferenceNode)?.ref?.name ?? "Select a reference to view its full name."
         detail.setSelectedRange(NSRange(location: 0, length: 0))
         needsLayout = true
+    }
+    @objc func copyClickedRef() {
+        let row = tree.clickedRow >= 0 ? tree.clickedRow : tree.selectedRow
+        guard let ref = (tree.item(atRow: row) as? GitReferenceNode)?.ref else { return }
+        InspectorCopyMenu.copy(ref.name, to: pasteboard)
+        feedbackTask?.cancel()
+        detail.textColor = .controlAccentColor
+        detail.toolTip = "Copied"
+        feedbackTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            self?.detail.textColor = .secondaryLabelColor
+            self?.detail.toolTip = nil
+        }
+    }
+    @objc private func doubleClickedRef() {
+        let row = tree.clickedRow >= 0 ? tree.clickedRow : tree.selectedRow
+        guard let node = tree.item(atRow: row) as? GitReferenceNode, node.ref == nil else { return }
+        if tree.isItemExpanded(node) { tree.collapseItem(node) } else { tree.expandItem(node) }
     }
     func menuNeedsUpdate(_ menu: NSMenu) {
         guard let menu = menu as? InspectorCopyMenu else { return }
@@ -191,5 +217,16 @@ struct InspectorCopyText: NSViewRepresentable {
     }
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: InspectorCopyableTextField, context: Context) -> CGSize? {
         CGSize(width: proposal.width ?? 0, height: 14)
+    }
+}
+
+final class GitReferenceOutlineView: NSOutlineView {
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        let range = rows(in: visibleRect)
+        guard range.location != NSNotFound else { return }
+        for index in range.location..<NSMaxRange(range) where (item(atRow: index) as? GitReferenceNode)?.ref != nil {
+            addCursorRect(rect(ofRow: index), cursor: .pointingHand)
+        }
     }
 }

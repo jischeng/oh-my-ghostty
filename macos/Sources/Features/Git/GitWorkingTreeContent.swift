@@ -17,9 +17,27 @@ struct GitWorkingTreeContent: Equatable, Sendable {
     var stagedError: String?
     var unstagedError: String?
     var branchesError: String?
+    var remoteURL: String?
 }
 
 extension GitRepositoryService {
+    func remoteAddress(for repository: GitRepositoryIdentity) async throws -> String? {
+        let result = try await (executor ?? repository.executor).execute(arguments: ["config", "--get", "remote.origin.url"],
+            workingDirectory: repository.worktreePath, stdin: nil, maxOutputBytes: 16 * 1024)
+        if result.exitCode == 1 { return nil }
+        guard result.isSuccess else { throw GitDiffServiceError.gitFailed(result.stderrString) }
+        let value = result.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+        if var url = URLComponents(string: value), let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme) {
+            url.user = nil
+            url.password = nil
+            url.query = nil
+            url.fragment = nil
+            return url.string
+        }
+        return value
+    }
+
     func branches(for repository: GitRepositoryIdentity) async throws -> [GitBranchInfo] {
         let result = try await (executor ?? repository.executor).execute(
             arguments: ["for-each-ref",

@@ -228,6 +228,9 @@ final class BuiltInGitInspectorProvider {
                 Self.update(await staged, values: &workingTree.staged, error: &workingTree.stagedError)
                 Self.update(await unstaged, values: &workingTree.unstaged, error: &workingTree.unstagedError)
                 Self.update(await branches, values: &workingTree.branches, error: &workingTree.branchesError)
+                if force || oldContent?.repository != repository {
+                    workingTree.remoteURL = try? await self.repositoryService.remoteAddress(for: repository)
+                }
             }
             guard !Task.isCancelled, self.generations[context.tabID] == generation else { return }
             let repo = status.repository; let resolvedKey = repo?.stateKey ?? self.currentWorktreeKey(for: context)

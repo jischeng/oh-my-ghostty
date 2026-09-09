@@ -24,7 +24,8 @@ struct GitHistoryTable: NSViewRepresentable {
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
-        let table = NSTableView()
+        let table = InspectorCopyTableView()
+        table.copyValue = { [weak coordinator = context.coordinator] in coordinator?.selectedCopyValue() }
         table.headerView = nil
         table.style = .plain
         table.backgroundColor = .clear
@@ -48,16 +49,17 @@ struct GitHistoryTable: NSViewRepresentable {
     }
     func updateNSView(_ scroll: NSScrollView, context: Context) { context.coordinator.update(self) }
 
-    final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+    final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
         private enum Row {
             case commit(Int)
             case files(Int)
             case message(Int)
+            case refs(Int)
             case notice(Int)
             case file(Int, GitDiffFile)
             var commitIndex: Int {
                 switch self {
-                case .commit(let index), .files(let index), .message(let index), .notice(let index), .file(let index, _): index
+                case .commit(let index), .files(let index), .message(let index), .refs(let index), .notice(let index), .file(let index, _): index
                 }
             }
             var suffix: String {
@@ -65,6 +67,7 @@ struct GitHistoryTable: NSViewRepresentable {
                 case .commit: "commit"
                 case .files: "files"
                 case .message: "message"
+                case .refs: "refs"
                 case .notice: "notice"
                 case .file(_, let file): file.id
                 }
@@ -137,6 +140,7 @@ struct GitHistoryTable: NSViewRepresentable {
                             if !collapsedFiles.contains(commit.id) {
                                 rows.append(contentsOf: details.files.map { .file(index, $0) })
                             }
+                            if !decorations(for: commit).isEmpty { rows.append(.refs(index)) }
                             if details.metadata?.body.isEmpty == false { rows.append(.message(index)) }
                         }
                     }
@@ -169,7 +173,7 @@ struct GitHistoryTable: NSViewRepresentable {
                 let commit = content.commits[row.commitIndex]
                 switch row {
                 case .commit:
-                    return GitHistoryCell.height(commit: commit, refs: decorations(for: commit), width: width)
+                    return GitHistoryCell.height(commit: commit, refs: content.expandedCommits[commit.id] == nil ? decorations(for: commit) : [], width: width)
                 default:
                     return GitHistoryDetailCell.height(for: childContent(for: row), width: width)
                 }
@@ -245,6 +249,7 @@ struct GitHistoryTable: NSViewRepresentable {
             case .files:
                 return .files(details?.files.count ?? 0, details?.statistics, collapsedFiles.contains(commit.id))
             case .file(_, let file): return .file(file)
+            case .refs: return .refs(decorations(for: commit))
             case .message: return .message(details?.metadata?.body ?? "", messageExpansion[commit.id])
             default: return .notice(details?.error ?? "Loading changed files…", details?.error != nil)
             }
@@ -291,12 +296,47 @@ struct GitHistoryTable: NSViewRepresentable {
             guard let table = tableView else { return }
             activateRow(table.clickedRow >= 0 ? table.clickedRow : table.selectedRow, doubleClick: true)
         }
+        func selectedCopyValue() -> String? {
+            guard let table = tableView, rows.indices.contains(table.selectedRow), let content else { return nil }
+            let row = rows[table.selectedRow]
+            let commit = content.commits[row.commitIndex]
+            switch row {
+            case .file(_, let file): return file.path
+            case .message: return content.expandedCommits[commit.id]?.metadata?.body
+            case .refs: return decorations(for: commit).map(\.name).joined(separator: "\n")
+            default: return commit.subject
+            }
+        }
         func makeContextMenu() -> NSMenu {
-            let menu = NSMenu()
-            let item = NSMenuItem(title: "Expand / Collapse Commit", action: #selector(openSelectedCommit), keyEquivalent: "")
-            item.target = self
-            menu.addItem(item)
+            let menu = InspectorCopyMenu()
+            menu.delegate = self
             return menu
+        }
+        func menuNeedsUpdate(_ menu: NSMenu) {
+            guard let menu = menu as? InspectorCopyMenu else { return }
+            menu.removeAllItems()
+            guard let table = tableView, let content else { return }
+            let index = table.clickedRow >= 0 ? table.clickedRow : table.selectedRow
+            guard rows.indices.contains(index) else { return }
+            let commit = content.commits[rows[index].commitIndex]
+            let toggle = NSMenuItem(title: "Expand / Collapse Commit", action: #selector(toggleContextCommit), keyEquivalent: "")
+            toggle.target = self
+            menu.addItem(toggle)
+            menu.addItem(.separator())
+            var values = [("Copy subject", commit.subject), ("Copy author", commit.authorName),
+                          ("Copy email", commit.authorEmail), ("Copy commit SHA", commit.id.rawValue),
+                          ("Copy refs", decorations(for: commit).map(\.name).joined(separator: "\n"))]
+            if let message = content.expandedCommits[commit.id]?.metadata?.message {
+                values.append(("Copy full commit message", message))
+            }
+            if case .file(_, let file) = rows[index] { values.append(("Copy file path", file.path)) }
+            menu.addCopyItems(values.filter { !$0.1.isEmpty })
+        }
+        @objc private func toggleContextCommit() {
+            guard let table = tableView, let content else { return }
+            let index = table.clickedRow >= 0 ? table.clickedRow : table.selectedRow
+            guard rows.indices.contains(index) else { return }
+            content.onOpen(content.commits[rows[index].commitIndex].id)
         }
     }
 }

@@ -72,7 +72,7 @@ final class GitGraphCellView: NSView {
             let top = point(for: segment.from)
             let middleX = column?.middleX(lane: segment.from.lane, row: row) ?? top.x
             var points = [top]
-            if section == .expandedCommit { points.append(NSPoint(x: middleX, y: min(14, bounds.midY))) }
+            if section == .expandedCommit { points.append(NSPoint(x: middleX, y: min(GitGraphColumnLayout.contentAxisY, bounds.midY))) }
             points.append(NSPoint(x: middleX, y: bendY))
             if ending { points.append(point(for: segment.to)) }
             stroke(points, colorIndex: segment.colorIndex)
@@ -114,11 +114,22 @@ final class GitGraphCellView: NSView {
     }
 
     private func draw(_ segment: GitGraphSegment) {
-        var points = [point(for: segment.from)]
-        if segment.kind == .passthrough, let row, let column {
-            points.append(NSPoint(x: column.middleX(lane: segment.from.lane, row: row), y: min(14, bounds.midY)))
+        guard let row, let column else { return }
+        let start = point(for: segment.from)
+        let end = point(for: segment.to)
+        var points = [start]
+        switch segment.kind {
+        case .incoming:
+            points.append(NSPoint(x: start.x, y: max(start.y, end.y - 12)))
+        case .parent:
+            // Complete the lane change near the node, then continue vertically.
+            points.append(NSPoint(x: end.x, y: min(end.y, start.y + 16)))
+        case .passthrough:
+            let x = column.middleX(lane: segment.from.lane, row: row)
+            points.append(NSPoint(x: x, y: min(GitGraphColumnLayout.contentAxisY, bounds.midY)))
+            points.append(NSPoint(x: x, y: max(bounds.midY, bounds.height - 12)))
         }
-        points.append(point(for: segment.to))
+        points.append(end)
         stroke(points, colorIndex: segment.colorIndex)
     }
 
@@ -165,7 +176,7 @@ final class GitGraphCellView: NSView {
         case .top:
             y = bounds.minY
         case .node:
-            y = min(14, bounds.midY)
+            y = min(GitGraphColumnLayout.contentAxisY, bounds.midY)
         case .bottom:
             y = bounds.maxY
         }

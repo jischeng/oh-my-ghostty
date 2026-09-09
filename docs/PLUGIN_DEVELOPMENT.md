@@ -960,11 +960,13 @@ untracked working-tree files are represented as additions.
 
 History keeps the subject first, followed by two secondary metadata lines:
 Author · Email, then Time · Short SHA. HEAD/branch/remote/tag badges occupy a
-single fixed 17-point row. Each badge is capped at 104 points; overflow groups
-show counts of the represented branches or tags, retaining a primary branch
-name when it fits. Clicking any named or count badge opens the complete,
-selectable ref list in a bounded scrolling popover. Ref names and counts never
-increase summary height or the sidebar's width. Expanding a commit preserves
+single fixed 17-point row. Each badge is capped at 104 points. Folded summaries preserve one named tag
+and combine remaining tags into a count; branch names shrink or aggregate first
+when space is tight. Clicking a badge opens a bounded scrolling list with the
+same ref colors/symbols, selectable full names and per-row/Copy All buttons.
+Expanded commits replace compact badges with the full ref list after Changed
+Files and before the body, keeping file actions reachable even with many refs.
+Ref names and counts never widen the sidebar; folded summaries stay bounded. Expanding a commit preserves
 these summary fields and their positions. It adds the changed-file count and
 additions/deletions, then clickable A/M/D/R file rows, and only then the optional
 message body. It never repeats metadata labels or the subject. Short bodies
@@ -974,9 +976,21 @@ Long-body disclosure headers stay at the same top position when expanded,
 show their source line count, and collapse the body on a second click. There
 is no bottom-only “Show less” control. The changed-file group can fold
 independently and remains before the body.
-Presentation-only folds do not refetch Git data. A continuous current-commit
+Presentation-only folds do not refetch Git data.
+Inspector text selection routes Copy/Select All before terminal shortcuts.
+Commit rows also support keyboard Copy and field-specific context-menu copies;
+ref rows offer explicit copy buttons. These controls copy full values even
+when the displayed label is truncated. The branch scope picker bounds displayed
+menu titles by measured width but dispatches the original ref ID. Its tooltip
+retains the full name. The repository header shows the worktree path, configured
+origin address and tags on the actual HEAD (not a browsed branch). Origin is read
+on initial/forced repository refresh, not every poll; HTTP user info and query
+credentials are omitted from its display address. A continuous current-commit
 rail spans its child rows, including root commits; parent forks and passing
-lane compaction occur at the end of the expanded block. Graph drawing and text
+lane compaction occur at the end of the expanded block. Lane changes finish
+near nodes/boundaries rather than bending across a whole row; parallel lanes
+have extra spacing without moving mainline text. Node/disclosure centers share
+the subject's optical center. Graph drawing and text
 placement use per-commit geometry: lane-zero subjects keep a fixed 36-point
 origin, while only a node on a branch gets a bounded local offset. The maximum
 lane count of other commits cannot move this origin. Shared row-boundary

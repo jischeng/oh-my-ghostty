@@ -9,6 +9,7 @@ final class GitRefBadgesView: NSView {
         let decoration: GitRefDecoration
         let refs: [GitRefDecoration]
         let isCount: Bool
+        var widthLimit: CGFloat = GitRefBadgesView.maximumBadgeWidth
     }
     private var refs: [GitRefDecoration] = []
     private var rendered: [Badge] = []
@@ -18,14 +19,7 @@ final class GitRefBadgesView: NSView {
 
     static func attributed(_ decoration: GitRefDecoration) -> NSAttributedString {
         let color = tint(for: decoration.kind)
-        let symbol: String?
-        switch decoration.kind {
-        case .currentBranch: symbol = "arrow.triangle.branch"
-        case .localBranch: symbol = "arrow.triangle.branch"
-        case .remoteBranch: symbol = "network"
-        case .tag: symbol = "tag.fill"
-        case .head: symbol = nil
-        }
+        let symbol = symbol(for: decoration.kind)
         let text = NSMutableAttributedString(string: " ")
         if let symbol, let image = NSImage(systemSymbolName: symbol, accessibilityDescription: decoration.kind.rawValue)?
             .withSymbolConfiguration(.init(pointSize: 10, weight: .medium))?
@@ -41,7 +35,16 @@ final class GitRefBadgesView: NSView {
         return text
     }
 
-    private static func tint(for kind: GitRefDecorationKind) -> NSColor {
+    static func symbol(for kind: GitRefDecorationKind) -> String? {
+        switch kind {
+        case .currentBranch, .localBranch: "arrow.triangle.branch"
+        case .remoteBranch: "network"
+        case .tag: "tag.fill"
+        case .head: "circle.inset.filled"
+        }
+    }
+
+    static func tint(for kind: GitRefDecorationKind) -> NSColor {
         switch kind {
         case .head, .currentBranch: .systemBlue
         case .localBranch: .systemGreen
@@ -56,30 +59,43 @@ final class GitRefBadgesView: NSView {
         func count(_ refs: [GitRefDecoration], kind: GitRefDecorationKind) -> [Badge] {
             refs.isEmpty ? [] : [Badge(decoration: .init(name: String(refs.count), kind: kind), refs: refs, isCount: true)]
         }
-        func fits(_ values: [Badge]) -> Bool {
-            var used: CGFloat = 0
-            for (index, value) in values.enumerated() {
-                used += badgeWidth(value) + (index == 0 ? 0 : 4)
-                if used > width { return false }
+        func fit(_ values: [Badge]) -> [Badge]? {
+            var widths = values.map(badgeWidth)
+            let minimums = zip(values, widths).map { badge, width in
+                badge.isCount || badge.decoration.kind == .head ? width : min(48, width)
             }
-            return true
+            let gaps = CGFloat(max(0, values.count - 1)) * 4
+            guard minimums.reduce(0, +) + gaps <= width else { return nil }
+            var excess = max(0, widths.reduce(0, +) + gaps - width)
+            // Keep a readable tag before sacrificing its name to an aggregate.
+            let indices = values.indices.sorted { (values[$0].decoration.kind == .tag ? 1 : 0) < (values[$1].decoration.kind == .tag ? 1 : 0) }
+            for index in indices {
+                let removed = min(excess, widths[index] - minimums[index])
+                widths[index] -= removed
+                excess -= removed
+            }
+            return values.enumerated().map { index, badge in
+                var badge = badge
+                badge.widthLimit = widths[index]
+                return badge
+            }
         }
-        let all = ordered.map(named)
-        if fits(all) { return all }
         let head = ordered.filter { $0.kind == .head }.map(named)
         let branches = ordered.filter { $0.kind != .head && $0.kind != .tag }
         let tags = ordered.filter { $0.kind == .tag }
-        let primary = head + branches.prefix(1).map(named) +
-            count(Array(branches.dropFirst()), kind: .localBranch) + count(tags, kind: .tag)
-        if fits(primary) { return primary }
-        let grouped = head + count(branches, kind: .localBranch) + count(tags, kind: .tag)
-        if fits(grouped) { return grouped }
-        return ordered.isEmpty ? [] : [Badge(decoration: .init(name: "\(ordered.count) refs", kind: .head),
-                                              refs: ordered, isCount: true)]
+        let tagBadges = tags.prefix(1).map(named) + count(Array(tags.dropFirst()), kind: .tag)
+        if let all = fit(head + branches.map(named) + tagBadges) { return all }
+        let primary = head + branches.prefix(1).map(named) + count(Array(branches.dropFirst()), kind: .localBranch) + tagBadges
+        if let result = fit(primary) { return result }
+        if let result = fit(head + count(branches, kind: .localBranch) + tagBadges) { return result }
+        let others = ordered.filter { $0.kind != .tag }
+        let otherBadge = others.isEmpty ? [] : [Badge(decoration: .init(name: "\(others.count) refs", kind: .head), refs: others, isCount: true)]
+        if let result = fit(otherBadge + tagBadges) { return result }
+        return ordered.isEmpty ? [] : [Badge(decoration: .init(name: "\(ordered.count) refs", kind: .head), refs: ordered, isCount: true)]
     }
 
     private static func badgeWidth(_ badge: Badge) -> CGFloat {
-        min(maximumBadgeWidth, ceil(attributed(badge.decoration).size().width) + 4)
+        min(badge.widthLimit, ceil(attributed(badge.decoration).size().width) + 4)
     }
 
     static func height(for refs: [GitRefDecoration], width: CGFloat) -> CGFloat {
@@ -132,25 +148,12 @@ final class GitRefBadgesView: NSView {
 
     @objc private func showRefs(_ sender: NSButton) {
         popover?.close()
-        let view = NSTextView(frame: NSRect(x: 0, y: 0, width: 360, height: 100))
-        view.isEditable = false
-        view.isSelectable = true
-        view.drawsBackground = false
-        view.font = .systemFont(ofSize: 11)
-        view.textColor = .labelColor
-        view.textContainerInset = NSSize(width: 10, height: 10)
-        view.isHorizontallyResizable = false
-        view.isVerticallyResizable = true
-        view.autoresizingMask = [.width]
-        view.textContainer?.widthTracksTextView = true
-        view.textContainer?.containerSize = NSSize(width: 340, height: CGFloat.greatestFiniteMagnitude)
-        view.string = Self.fullText(for: refs)
-        if let container = view.textContainer, let layout = view.layoutManager {
-            layout.ensureLayout(for: container)
-            view.setFrameSize(NSSize(width: 360, height: layout.usedRect(for: container).height + 20))
-        }
+        let view = GitRefListView()
+        view.configure(refs)
+        view.frame = NSRect(x: 0, y: 0, width: 360, height: GitRefListView.height(for: refs, width: 360))
         let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 360, height: min(320, max(60, view.frame.height))))
-        scroll.drawsBackground = false
+        scroll.drawsBackground = true
+        scroll.backgroundColor = .windowBackgroundColor
         scroll.hasVerticalScroller = true
         scroll.documentView = view
         let controller = NSViewController()

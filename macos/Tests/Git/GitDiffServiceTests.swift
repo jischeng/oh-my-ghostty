@@ -35,6 +35,17 @@ struct GitDiffServiceTests {
         #expect(metadata.body == "Details")
     }
 
+    @Test func repositoryRemoteAddressOmitsEmbeddedHTTPAuthentication() async throws {
+        let dir = try makeRepository()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let repository = try await repositoryIdentity(for: dir)
+        #expect(try await GitRepositoryService().remoteAddress(for: repository) == nil)
+        try run(["git", "config", "remote.origin.url", "https://test-user:test-password@example.com/team/repo.git?token=test"], in: dir.path)
+        #expect(try await GitRepositoryService().remoteAddress(for: repository) == "https://example.com/team/repo.git")
+        try run(["git", "config", "remote.origin.url", "git@example.com:team/repo.git"], in: dir.path)
+        #expect(try await GitRepositoryService().remoteAddress(for: repository) == "git@example.com:team/repo.git")
+    }
+
     @Test func editorSnapshotsSeparateHeadIndexAndWorkingTree() async throws {
         let dir = try makeRepository()
         defer { try? FileManager.default.removeItem(at: dir) }

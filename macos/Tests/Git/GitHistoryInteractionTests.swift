@@ -114,44 +114,40 @@ struct GitHistoryInteractionTests {
             let table = try #require(find(NSTableView.self, in: window.contentView))
             let coordinator = try #require(table.target as? GitHistoryTable.Coordinator)
             let originalHeight = table.rect(ofRow: 0).height
-            func labels(in view: NSView) -> [NSTextField] {
-                if let label = view as? NSTextField { return [label] }
-                return view.subviews.flatMap { labels(in: $0) }
-            }
             func summary() throws -> [String] {
                 let cell = try #require(table.view(atColumn: 0, row: 0, makeIfNecessary: true))
                 cell.layoutSubtreeIfNeeded()
-                return labels(in: cell).map { $0.stringValue + NSStringFromRect($0.frame) }
+                return cell.subviews.compactMap { $0 as? NSTextField }.map { $0.stringValue + NSStringFromRect($0.frame) }
             }
             let originalSummary = try summary()
             root.expandedCommits = [first.id: details]
             coordinator.update(root)
             window.contentView?.layoutSubtreeIfNeeded()
-            #expect(table.numberOfRows == 11)
-            #expect(table.rect(ofRow: 0).height == originalHeight)
+            #expect(table.numberOfRows == 12)
+            #expect(table.rect(ofRow: 0).height <= originalHeight)
             #expect(try summary() == originalSummary)
             let header = try #require(table.view(atColumn: 0, row: 1, makeIfNecessary: true))
             header.layoutSubtreeIfNeeded()
             #expect(find(NSButton.self, in: header)?.attributedTitle.string == "6 files changed · +642 −87")
             let filesTop = table.rect(ofRow: 2).minY
-            let message = try #require(table.view(atColumn: 0, row: 8, makeIfNecessary: true))
+            let message = try #require(table.view(atColumn: 0, row: 9, makeIfNecessary: true))
             message.layoutSubtreeIfNeeded()
-            #expect(table.rect(ofRow: 8).height == 28)
+            #expect(table.rect(ofRow: 9).height == 28)
             let toggle = try #require(find(NSButton.self, in: message))
             #expect(toggle.title == "Commit message · 100 lines")
             let toggleFrame = toggle.frame
             toggle.performClick(nil)
-            #expect(table.rect(ofRow: 8).height > 500)
+            #expect(table.rect(ofRow: 9).height > 500)
             #expect(table.rect(ofRow: 2).minY == filesTop)
-            let expanded = try #require(table.view(atColumn: 0, row: 8, makeIfNecessary: true))
+            let expanded = try #require(table.view(atColumn: 0, row: 9, makeIfNecessary: true))
             expanded.layoutSubtreeIfNeeded()
             #expect(find(NSTextField.self, in: expanded)?.stringValue.contains("Explanation line 99") == true)
             let less = try #require(find(NSButton.self, in: expanded))
             #expect(less.title == "Commit message · 100 lines")
             #expect(less.frame == toggleFrame)
             less.performClick(nil)
-            #expect(table.rect(ofRow: 8).height == 28)
-            #expect(NSLocationInRange(9, table.rows(in: table.visibleRect)))
+            #expect(table.rect(ofRow: 9).height == 28)
+            #expect(NSLocationInRange(10, table.rows(in: table.visibleRect)))
             #expect(table.rect(ofRow: 2).minY == filesTop)
             if FileManager.default.fileExists(atPath: "/tmp/omg-git-render"), let view = window.contentView {
                 view.layoutSubtreeIfNeeded()
@@ -161,9 +157,9 @@ struct GitHistoryInteractionTests {
                 try data.write(to: URL(fileURLWithPath: "/tmp/omg-git-timeline-\(Int(width)).png"))
             }
             coordinator.activateRow(1, doubleClick: false)
-            #expect(table.numberOfRows == 5)
+            #expect(table.numberOfRows == 6)
             coordinator.activateRow(1, doubleClick: false)
-            #expect(table.numberOfRows == 11)
+            #expect(table.numberOfRows == 12)
         }
     }
 

@@ -56,8 +56,8 @@ struct GitHistoryNavigatorTests {
                 files: [.init(path: "foo.swift", status: "M"), .init(path: "bar.swift", status: "A"),
                         .init(path: "new.swift", oldPath: "old.swift", status: "R100")],
                 statistics: .init(additions: 642, deletions: 87, binaryFiles: 0))
-            let root = GitHistoryTable(commits: commits, selectedCommitID: nil, headCommitID: first.id,
-                expandedCommits: [first.id: detail], onSelect: { _ in }, onOpen: { _ in }, onShowInTerminal: { _ in })
+            var root = GitHistoryTable(commits: commits, selectedCommitID: nil, headCommitID: first.id,
+                expandedCommits: [:], onSelect: { _ in }, onOpen: { _ in }, onShowInTerminal: { _ in })
             let host = NSHostingView(rootView: root.background(Color(NSColor.windowBackgroundColor)))
             host.sizingOptions = []
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 730),
@@ -74,14 +74,28 @@ struct GitHistoryNavigatorTests {
                 value.layoutSubtreeIfNeeded()
                 return value
             }
+            let foldedMain = try cell(0)
+            let foldedHeight = table.rect(ofRow: 0).height
+            let foldedBadges = try #require(find(GitRefBadgesView.self, in: foldedMain))
+            let badge = try #require(foldedBadges.subviews.compactMap { $0 as? NSButton }.last)
+            badge.performClick(nil)
+            let popover = try #require(foldedBadges.popover)
+            #expect(popover.isShown)
+            let fullList = try #require(find(GitRefListView.self, in: popover.contentViewController?.view))
+            #expect(first.refDecorations.allSatisfy { fullList.refs.contains($0) })
+            try await capture(popover.contentViewController!.view, path: "/tmp/omg-git-refs-popover-\(Int(width)).png")
+            popover.close()
+            root.expandedCommits = [first.id: detail]
+            let coordinator = try #require(table.target as? GitHistoryTable.Coordinator)
+            coordinator.update(root)
             let main = try cell(0)
-            let nextMain = try cell(6)
-            let branch = try cell(7)
+            let nextMain = try cell(7)
+            let branch = try cell(8)
             let subject = try #require(find(NSTextField.self, in: main))
             #expect(subject.frame.minX == find(NSTextField.self, in: nextMain)?.frame.minX)
             #expect(subject.frame.minX < (find(NSTextField.self, in: branch)?.frame.minX ?? 0))
             #expect(subject.bounds.width > width * 0.70)
-            #expect(table.rect(ofRow: 0).height == table.rect(ofRow: 6).height)
+            #expect(foldedHeight == table.rect(ofRow: 7).height)
             let meta = main.subviews.compactMap { $0 as? NSTextField }
             #expect(meta[1].stringValue == "renjiejiang02 · renjiejiang02@deeproute.ai")
             #expect(meta[2].stringValue.hasSuffix(" · main001"))
@@ -92,30 +106,23 @@ struct GitHistoryNavigatorTests {
                 #expect(group.bounds.height == 17)
             }
             let badges = try #require(find(GitRefBadgesView.self, in: main))
-            #expect(badges.bounds.height == 17)
-            let buttons = badges.subviews.compactMap { $0 as? NSButton }
-            #expect(buttons.allSatisfy { $0.frame.maxX <= badges.bounds.width && $0.frame.width <= 104 })
-            let message = try cell(5)
+            #expect(badges.bounds.height == 0)
+            let references = try #require(find(GitRefListView.self, in: try cell(5)))
+            #expect(first.refDecorations.allSatisfy { references.refs.contains($0) })
+            #expect(table.rect(ofRow: 2).minY < table.rect(ofRow: 5).minY)
+            let message = try cell(6)
             let control = try #require(find(NSButton.self, in: message))
             let controlFrame = control.frame
             let filePosition = table.rect(ofRow: 2)
             control.performClick(nil)
-            let openControl = try #require(find(NSButton.self, in: try cell(5)))
+            let openControl = try #require(find(NSButton.self, in: try cell(6)))
             #expect(openControl.title == "Commit message · 18 lines")
             #expect(openControl.frame == controlFrame)
             #expect(table.rect(ofRow: 2) == filePosition)
             try await capture(host, path: "/tmp/omg-git-navigator-message-open-\(Int(width)).png")
             openControl.performClick(nil)
             try await capture(host, path: "/tmp/omg-git-navigator-\(Int(width)).png")
-            let currentBadges = try #require(find(GitRefBadgesView.self, in: try cell(0)))
-            let badge = try #require(currentBadges.subviews.compactMap { $0 as? NSButton }.last)
-            badge.performClick(nil)
-            let popover = try #require(currentBadges.popover)
-            #expect(popover.isShown)
-            let text = try #require(find(NSTextView.self, in: popover.contentViewController?.view))
-            #expect(first.refDecorations.allSatisfy { text.string.contains($0.name) })
-            #expect(table.rect(ofRow: 2) == filePosition)
-            popover.close()
+
         }
     }
 

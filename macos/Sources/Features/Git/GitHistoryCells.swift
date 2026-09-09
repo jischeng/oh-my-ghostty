@@ -1,9 +1,9 @@
 import AppKit
 
 final class GitHistoryCell: NSTableCellView {
-    private let subject = NSTextField(labelWithString: "")
-    private let authorAndEmail = NSTextField(labelWithString: "")
-    private let timeAndHash = NSTextField(labelWithString: "")
+    private let subject = InspectorCopyableTextField(labelWithString: "")
+    private let authorAndEmail = InspectorCopyableTextField(labelWithString: "")
+    private let timeAndHash = InspectorCopyableTextField(labelWithString: "")
     private let badges = GitRefBadgesView()
     private let graph = GitGraphCellView()
     private let disclosure = NSButton()
@@ -26,6 +26,7 @@ final class GitHistoryCell: NSTableCellView {
         for label in [subject, authorAndEmail, timeAndHash] {
             label.lineBreakMode = label === subject ? .byTruncatingTail : .byTruncatingMiddle
             label.maximumNumberOfLines = 1
+            label.isSelectable = label !== subject
         }
         disclosure.isBordered = false
         disclosure.imagePosition = .imageOnly
@@ -51,7 +52,10 @@ final class GitHistoryCell: NSTableCellView {
         subject.stringValue = commit.subject.isEmpty ? "(no subject)" : commit.subject
         authorAndEmail.stringValue = commit.authorEmail.isEmpty ? commit.authorName : "\(commit.authorName) · \(commit.authorEmail)"
         timeAndHash.stringValue = "\(summary.date) · \(commit.id.shortSHA)"
-        badges.configure(summary.refs)
+        subject.copyItems = [("Copy subject", commit.subject)]
+        authorAndEmail.copyItems = [("Copy author", commit.authorName), ("Copy email", commit.authorEmail)].filter { !$0.1.isEmpty }
+        timeAndHash.copyItems = [("Copy time", commit.authoredAt.description), ("Copy commit SHA", commit.id.rawValue)]
+        badges.configure(state.expanded ? [] : summary.refs)
         disclosure.image = NSImage(systemSymbolName: state.expanded ? "chevron.down" : "chevron.right",
                                    accessibilityDescription: state.expanded ? "Collapse commit" : "Expand commit")?
             .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
@@ -61,7 +65,7 @@ final class GitHistoryCell: NSTableCellView {
     override func layout() {
         super.layout()
         graph.frame = NSRect(x: 0, y: 0, width: graphWidth, height: bounds.height)
-        disclosure.frame = NSRect(x: contentX - 21, y: 4, width: 18, height: 18)
+        disclosure.frame = NSRect(x: contentX - 21, y: GitGraphColumnLayout.contentAxisY - 9, width: 18, height: 18)
         let x = contentX
         let width = max(1, bounds.width - x - 8)
         subject.frame = NSRect(x: x, y: 4, width: width, height: 17)
@@ -79,12 +83,14 @@ final class GitHistoryDetailCell: NSTableCellView {
         case files(Int, GitDiffStatistics?, Bool)
         case file(GitDiffFile)
         case message(String, Bool?)
+        case refs([GitRefDecoration])
         case notice(String, Bool)
     }
     private let graph = GitGraphCellView()
-    private let label = NSTextField(wrappingLabelWithString: "")
+    private let label = InspectorCopyableTextField(wrappingLabelWithString: "")
     private let button = NSButton()
     private let openIcon = NSImageView()
+    private let fullRefs = GitRefListView()
     private var graphWidth: CGFloat = 20
     private var contentX: CGFloat = 36
     private var content = Content.notice("", false)
@@ -103,6 +109,7 @@ final class GitHistoryDetailCell: NSTableCellView {
         switch content {
         case .files: return 28
         case .file: return 23
+        case .refs(let refs): return GitRefListView.height(for: refs, width: width) + 8
         case .notice(let text, _): return max(26, textHeight(text, width: width) + 12)
         case .message(let text, let expanded):
             return messageIsExpanded(text, preference: expanded, width: width)
@@ -115,7 +122,7 @@ final class GitHistoryDetailCell: NSTableCellView {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        [graph, label, button, openIcon].forEach(addSubview)
+        [graph, label, button, openIcon, fullRefs].forEach(addSubview)
         label.font = .systemFont(ofSize: 11)
         button.isBordered = false
         button.alignment = .left
@@ -172,6 +179,7 @@ final class GitHistoryDetailCell: NSTableCellView {
         button.toolTip = nil
         button.isHidden = true
         openIcon.isHidden = true
+        fullRefs.isHidden = true
         switch content {
         case .files(let count, let stats, let collapsed):
             label.isHidden = true
@@ -194,6 +202,11 @@ final class GitHistoryDetailCell: NSTableCellView {
             label.frame = NSRect(x: x + 12, y: 4, width: max(1, width - 26), height: 15)
             openIcon.isHidden = false
             openIcon.frame = NSRect(x: x + width - 10, y: 7, width: 8, height: 8)
+        case .refs(let refs):
+            label.isHidden = true
+            fullRefs.isHidden = false
+            fullRefs.configure(refs)
+            fullRefs.frame = NSRect(x: x, y: 4, width: width, height: bounds.height - 8)
         case .notice(let text, let isError):
             label.stringValue = text
             label.textColor = isError ? .systemRed : .secondaryLabelColor

@@ -9,10 +9,11 @@ struct GitGraphColumnLayout: Equatable {
 
     // The graph's trailing empty space overlaps the disclosure hit target,
     // keeping mainline subjects at 36 pt without drawing through controls.
-    var contentX: CGFloat { width + 16 }
+    static let contentAxisY: CGFloat = 12
+    var contentX: CGFloat { width + 12 }
 
     static func width(for row: GitGraphRow) -> CGFloat {
-        20 + min(32, CGFloat(row.nodeLane) * 8)
+        24 + min(32, CGFloat(row.nodeLane) * 8)
     }
 
     init(row: GitGraphRow, previous: GitGraphRow? = nil, next: GitGraphRow? = nil) {
@@ -27,7 +28,7 @@ struct GitGraphColumnLayout: Equatable {
             return 7.5 + CGFloat(lane) * (nodeX - 7.5) / CGFloat(max(1, row.nodeLane))
         }
         let remaining = max(1, row.requiredLaneCount - row.nodeLane - 1)
-        return nodeX + CGFloat(lane - row.nodeLane) * (width - 7.5 - nodeX) / CGFloat(remaining)
+        return nodeX + CGFloat(lane - row.nodeLane) * min(8, (width - 7.5 - nodeX) / CGFloat(remaining))
     }
 
     func edgeX(lane: Int, count: Int, top: Bool) -> CGFloat {

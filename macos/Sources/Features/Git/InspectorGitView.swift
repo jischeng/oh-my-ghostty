@@ -93,6 +93,9 @@ struct InspectorGitView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .help(content.repository?.worktreePath ?? "")
+                    .contextMenu {
+                        Button("Copy repository name") { InspectorCopyMenu.copy(content.repository?.repositoryName ?? "Git") }
+                    }
 
                 Spacer(minLength: 4)
 
@@ -113,34 +116,43 @@ struct InspectorGitView: View {
                 .help("Refresh Git status")
             }
 
+            if let repository = content.repository {
+                InspectorCopyText(text: repository.worktreePath).frame(height: 14)
+                if let address = content.workingTree.remoteURL {
+                    InspectorCopyText(text: address).frame(height: 14)
+                }
+                let tags = currentTags
+                if !tags.isEmpty { GitRefBadgeRow(refs: tags).frame(height: 17) }
+            }
             if let connection = content.connectionLabel ?? content.repository?.sshConnection?.destination {
-                Text("SSH · " + connection).font(.caption2).foregroundStyle(.secondary)
-                    .lineLimit(1).truncationMode(.middle)
+                InspectorCopyText(text: "SSH · " + connection).frame(height: 14)
             }
             if let branch = content.branch, !branch.isEmpty {
                 HStack(spacing: 4) {
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(.tint)
-                    Text(branch)
-                        .lineLimit(1).truncationMode(.middle)
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(Color.secondary.opacity(0.12))
-                        )
+                    InspectorCopyText(text: branch).frame(height: 14)
                 }
             }
             if content.workingTree.branchesError == nil,
                let current = content.workingTree.branches.first(where: { $0.isCurrent }) {
-                Text(current.upstream.isEmpty ? "No upstream configured" :
-                        "\(current.upstream) \(current.tracking.isEmpty ? "· up to date" : current.tracking)")
-                    .font(.caption2).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .help("Compared with the locally cached upstream ref; refresh does not fetch.")
+                InspectorCopyText(text: current.upstream.isEmpty ? "No upstream configured" :
+                    "\(current.upstream) \(current.tracking.isEmpty ? "· up to date" : current.tracking)")
+                    .frame(height: 14)
             }
         }
+    }
+
+    private var currentTags: [GitRefDecoration] {
+        let head: GitCommitID?
+        switch content.status {
+        case .ready(_, _, let id): head = id
+        case .detached(_, let id): head = id
+        default: head = nil
+        }
+        guard let head else { return [] }
+        let refs = content.history.snapshot?.decorationsByCommitID[head] ??
+            content.history.commits.first(where: { $0.id == head })?.refDecorations ?? []
+        return refs.filter { $0.kind == .tag }
     }
 
     private var tabPickerView: some View {
@@ -232,22 +244,11 @@ struct InspectorGitView: View {
 
     private func historyView(headCommitID: String?) -> some View {
         VStack(spacing: 8) {
-            Menu {
-                ForEach(GitHistoryScope.allCases, id: \.self) { scope in
-                    Button(scope.displayName) { perform(.gitAction(.selectHistoryScope(scope))) }
-                }
-                Divider()
-                ForEach(content.workingTree.branches) { branch in
-                    Button { perform(.gitAction(.browseBranch(branch.id))) } label: {
-                        Label(branch.name, systemImage: branch.isRemote ? "network" : "arrow.triangle.branch")
-                    }
-                    .disabled(content.workingTree.branchesError != nil)
-                }
-            } label: {
-                Label(content.history.snapshot?.browsedBranch ?? content.history.scope.displayName,
-                      systemImage: "line.3.horizontal.decrease")
-                    .lineLimit(1).truncationMode(.middle).frame(maxWidth: .infinity, alignment: .leading)
+            GitHistoryScopePicker(title: content.history.snapshot?.browsedBranch ?? content.history.scope.displayName,
+                                  branches: content.workingTree.branches, enabled: content.workingTree.branchesError == nil) {
+                perform(.gitAction($0))
             }
+            .frame(height: 24)
             .padding(.horizontal, 12)
 
             if content.history.commits.isEmpty && !content.history.isLoading {

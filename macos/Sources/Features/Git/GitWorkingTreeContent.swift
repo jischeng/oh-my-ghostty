@@ -23,6 +23,13 @@ struct GitWorkingTreeContent: Equatable, Sendable {
 }
 
 extension GitRepositoryService {
+    func headCommit(for repository: GitRepositoryIdentity) async throws -> GitCommitID {
+        let result = try await (executor ?? repository.executor).execute(arguments: ["rev-parse", "--verify", "HEAD"],
+            workingDirectory: repository.worktreePath, stdin: nil, maxOutputBytes: 4096)
+        guard result.isSuccess else { throw GitDiffServiceError.gitFailed(result.stderrString) }
+        return GitCommitID(result.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
     func remoteAddress(for repository: GitRepositoryIdentity) async throws -> String? {
         let result = try await (executor ?? repository.executor).execute(arguments: ["config", "--get", "remote.origin.url"],
             workingDirectory: repository.worktreePath, stdin: nil, maxOutputBytes: 16 * 1024)

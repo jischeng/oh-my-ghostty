@@ -3,6 +3,7 @@ import Foundation
 /// The source of a diff shown by the Git inspector.
 enum GitDiffTarget: Hashable, Sendable, Equatable, CustomStringConvertible {
     case commit(GitCommitID)
+    case comparison(base: GitCommitID, head: GitCommitID)
     case staged
     case unstaged
 
@@ -10,6 +11,8 @@ enum GitDiffTarget: Hashable, Sendable, Equatable, CustomStringConvertible {
         switch self {
         case .commit(let commit):
             "commit \(commit.shortSHA)"
+        case .comparison(let base, let head):
+            "\(base.shortSHA) → \(head.shortSHA)"
         case .staged:
             "staged changes"
         case .unstaged:

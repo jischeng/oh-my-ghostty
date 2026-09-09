@@ -4,6 +4,9 @@ final class GitMetadataLine: NSView {
     struct Item { let text: String; let value: String; let label: String }
     private let first = InspectorMetadataText()
     private let second = InspectorMetadataText()
+    var contextMenuProvider: (() -> NSMenu?)? {
+        didSet { first.contextMenuProvider = contextMenuProvider; second.contextMenuProvider = contextMenuProvider }
+    }
     override var isFlipped: Bool { true }
     override init(frame: NSRect) {
         super.init(frame: frame)

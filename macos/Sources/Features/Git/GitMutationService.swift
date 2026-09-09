@@ -8,6 +8,8 @@ enum GitBranchOperation: String, Equatable, Sendable {
 }
 
 enum GitMutation: Equatable, Sendable {
+    case createBranch(name: String, commit: GitCommitID)
+    case applyCommit(GitCommitOperation, GitCommitID, mainline: Int?)
     case addWorktree(path: String, start: String, branch: String?, detached: Bool)
     case removeWorktree(String)
     case stage([String])
@@ -18,8 +20,17 @@ enum GitMutation: Equatable, Sendable {
     case push(branch: String, remote: String, destination: String)
     case setUpstream(branch: String, upstream: String)
 
+    var updatesIndexOnly: Bool {
+        switch self {
+        case .stage, .unstage: true
+        default: false
+        }
+    }
+
     var title: String {
         switch self {
+        case .createBranch: "Creating branch…"
+        case .applyCommit(let operation, _, _): operation == .cherryPick ? "Cherry-picking…" : "Reverting…"
         case .addWorktree: "Creating worktree…"
         case .removeWorktree: "Removing worktree…"
         case .stage: "Staging files…"
@@ -44,9 +55,23 @@ struct GitMutationService: Sendable {
 
     func perform(_ mutation: GitMutation, in repository: GitRepositoryIdentity) async throws {
         switch mutation {
+        case .createBranch(let name, let commit):
+            try await validateBranch(name, in: repository)
+            try await validateCommit(commit, in: repository)
+            _ = try await run(["branch", "--", name, commit.rawValue], in: repository)
+        case .applyCommit(let operation, let commit, let mainline):
+            guard operation == .cherryPick || operation == .revert else { throw GitDiffServiceError.gitFailed("Invalid commit operation.") }
+            try await validateCommit(commit, in: repository)
+            let status = try await run(["status", "--porcelain=v1", "-z"], in: repository)
+            guard status.stdout.isEmpty else { throw GitDiffServiceError.gitFailed("Commit or stash local changes before this operation.") }
+            var arguments = [operation == .cherryPick ? "cherry-pick" : "revert", "--no-edit"]
+            if let mainline { arguments += ["--mainline", String(mainline)] }
+            _ = try await run(arguments + ["--", commit.rawValue], in: repository)
         case .addWorktree(let path, let start, let branch, let detached):
             try validateWorktreePath(path)
-            if start != "HEAD" { try validateRef(start) }
+            if start != "HEAD" {
+                if start.hasPrefix("refs/") { try validateRef(start) } else { try await validateCommit(GitCommitID(start), in: repository) }
+            }
             var arguments = ["worktree", "add"]
             if let branch {
                 try await validateBranch(branch, in: repository)
@@ -56,9 +81,9 @@ struct GitMutationService: Sendable {
             _ = try await run(arguments + ["--", path, revision], in: repository)
         case .removeWorktree(let path):
             try validateWorktreePath(path)
-            let worktrees = try await GitRepositoryService(executor: executor).worktrees(for: repository)
+            let worktrees = try await GitRepositoryService(executor: executor).worktrees(for: repository, includeStatus: true)
             guard let worktree = worktrees.first(where: { $0.path == path }), worktree.canRemove else {
-                throw GitDiffServiceError.gitFailed("This worktree cannot be removed here.")
+                throw GitDiffServiceError.gitFailed("Cannot remove this worktree: it is current, main, locked, dirty, unavailable, or its status could not be checked.")
             }
             _ = try await run(["worktree", "remove", "--", path], in: repository)
         case .stage(let paths):
@@ -99,6 +124,13 @@ struct GitMutationService: Sendable {
             try validateRef(upstream)
             _ = try await run(["branch", "--set-upstream-to=\(upstream)", "--", branch], in: repository)
         }
+    }
+
+    private func validateCommit(_ commit: GitCommitID, in repository: GitRepositoryIdentity) async throws {
+        guard commit.rawValue.range(of: "^[a-fA-F0-9]{7,64}$", options: .regularExpression) != nil else {
+            throw GitDiffServiceError.invalidCommit(commit)
+        }
+        _ = try await run(["rev-parse", "--verify", commit.rawValue + "^{commit}"], in: repository)
     }
 
     private func validateWorktreePath(_ path: String) throws {

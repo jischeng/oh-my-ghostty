@@ -2,7 +2,9 @@ import AppKit
 
 @MainActor
 enum GitWorktreeActions {
-    static func creation(start: String?, repository: GitRepositoryIdentity, window: NSWindow?) async -> GitMutation? {
+    struct Creation { let mutation: GitMutation; let openAfterCreation: Bool }
+    static func creation(start: String?, repository: GitRepositoryIdentity, window: NSWindow?,
+                         detached: Bool = false) async -> Creation? {
         let alert = NSAlert()
         alert.messageText = "Create Worktree"
         alert.informativeText = "Choose a directory and how to check out \(start ?? "HEAD")."
@@ -13,21 +15,24 @@ enum GitWorktreeActions {
         let mode = NSPopUpButton()
         mode.addItems(withTitles: ["New branch", "Detached HEAD"])
         if start?.hasPrefix("refs/heads/") == true { mode.addItem(withTitle: "Existing branch") }
+        if detached { mode.selectItem(at: 1); mode.isEnabled = false; branch.isEnabled = false }
+        let open = NSButton(checkboxWithTitle: "Open in a new tab after creation", target: nil, action: nil)
+        open.state = .on
         let stack = NSStackView(views: [NSTextField(labelWithString: "Directory"), path,
                                        NSTextField(labelWithString: "Checkout"), mode,
-                                       NSTextField(labelWithString: "Branch name (for New branch)"), branch])
+                                       NSTextField(labelWithString: "Branch name (for New branch)"), branch, open])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 6
-        stack.frame = NSRect(x: 0, y: 0, width: 340, height: 170)
+        stack.frame = NSRect(x: 0, y: 0, width: 340, height: 196)
         for field in [path, branch] { field.widthAnchor.constraint(equalToConstant: 340).isActive = true }
         alert.accessoryView = stack
         alert.addButton(withTitle: "Create")
         alert.addButton(withTitle: "Cancel")
         guard await response(alert, window: window) == .alertFirstButtonReturn else { return nil }
-        return .addWorktree(path: path.stringValue, start: start ?? "HEAD",
+        return Creation(mutation: .addWorktree(path: path.stringValue, start: start ?? "HEAD",
                             branch: mode.indexOfSelectedItem == 0 ? branch.stringValue : nil,
-                            detached: mode.indexOfSelectedItem == 1)
+                            detached: mode.indexOfSelectedItem == 1), openAfterCreation: open.state == .on)
     }
 
     static func removal(_ worktree: GitWorktreeInfo, window: NSWindow?) async -> Bool {

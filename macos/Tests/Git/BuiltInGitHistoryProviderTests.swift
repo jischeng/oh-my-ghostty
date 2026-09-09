@@ -61,7 +61,13 @@ struct BuiltInGitHistoryProviderTests {
         let initial = try await waitFor { !$0.workingTree.unstaged.isEmpty }
         send(.updateCommitDraft("first"))
         send(.setFileStaged(initial.workingTree.unstaged[0], true))
-        _ = try await waitFor { $0.workingTree.staged.count == 1 }
+        if case .git(let pending) = registry.content(for: BuiltInGitInspectorProvider.paneID, context: context) {
+            #expect(pending.isUpdatingIndex && !pending.isLoading)
+            #expect(pending.workingTree.unstaged == initial.workingTree.unstaged)
+            #expect(pending.commitDraft == "first")
+        } else { Issue.record("Missing content during stage") }
+        let staged = try await waitFor { $0.workingTree.staged.count == 1 }
+        #expect(!staged.isUpdatingIndex && staged.commitDraft == "first")
         send(.commitStaged)
         let committed = try await waitFor { $0.history.commits.count == 1 && $0.workingTree.staged.isEmpty }
         #expect(committed.commitDraft.isEmpty)

@@ -9,11 +9,13 @@ struct GitHistoryTable: NSViewRepresentable {
     var hasMore = false
     var isLoading = false
     var automaticLoadingAllowed = true
+    var isBusy = false
     let onSelect: (GitCommitID) -> Void
     let onOpen: (GitCommitID) -> Void
     let onShowInTerminal: (GitCommitID) -> Void
     var onOpenFile: (GitCommitID, GitDiffFile) -> Void = { _, _ in }
     var onLoadMore: () -> Void = {}
+    var onCommitAction: (GitCommitOperation, GitCommitID) -> Void = { _, _ in }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
         CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
@@ -268,7 +270,8 @@ struct GitHistoryTable: NSViewRepresentable {
                 cell.configure(commit: commit, graph: graph, graphLayout: graphColumns[item.commitIndex],
                                summary: (dateFormatter.string(from: commit.authoredAt), decorations(for: commit)),
                                state: (head: isHead(commit), expanded: content.expandedCommits[commit.id] != nil),
-                               toggle: { [weak self] in self?.content?.onOpen(commit.id) })
+                               toggle: { [weak self] in self?.content?.onOpen(commit.id) },
+                               contextMenu: { [weak self] in self?.makeContextMenu(commitID: commit.id) })
                 return cell
             default:
                 let cell = (tableView.makeView(withIdentifier: .init("git-child"), owner: nil) as? GitHistoryDetailCell) ?? GitHistoryDetailCell()
@@ -358,8 +361,9 @@ struct GitHistoryTable: NSViewRepresentable {
             default: return commit.subject
             }
         }
-        func makeContextMenu() -> NSMenu {
-            let menu = InspectorCopyMenu()
+        func makeContextMenu(commitID: GitCommitID? = nil) -> NSMenu {
+            let menu = GitHistoryContextMenu()
+            menu.commitID = commitID
             menu.delegate = self
             return menu
         }
@@ -367,13 +371,26 @@ struct GitHistoryTable: NSViewRepresentable {
             guard let menu = menu as? InspectorCopyMenu else { return }
             menu.removeAllItems()
             guard let table = tableView, let content else { return }
-            let index = table.clickedRow >= 0 ? table.clickedRow : table.selectedRow
+            let index: Int
+            if let id = (menu as? GitHistoryContextMenu)?.commitID {
+                guard let commitIndex = content.commits.firstIndex(where: { $0.id == id }),
+                      let rowIndex = rows.firstIndex(where: { $0.commitIndex == commitIndex }) else { return }
+                index = rowIndex
+            } else { index = table.clickedRow >= 0 ? table.clickedRow : table.selectedRow }
             guard rows.indices.contains(index) else { return }
             let commit = content.commits[rows[index].commitIndex]
-            let toggle = NSMenuItem(title: "Expand / Collapse Commit", action: #selector(toggleContextCommit), keyEquivalent: "")
-            toggle.target = self
-            menu.addItem(toggle)
+            menu.autoenablesItems = false
+            for operation in GitCommitOperation.allCases {
+                if operation == .details || operation == .cherryPick { menu.addItem(.separator()) }
+                let item = NSMenuItem(title: operation.title, action: #selector(commitAction(_:)), keyEquivalent: "")
+                item.target = self
+                item.identifier = .init(operation.rawValue)
+                item.representedObject = commit.id.rawValue
+                item.isEnabled = !content.isBusy || !operation.modifiesRepository
+                menu.addItem(item)
+            }
             menu.addItem(.separator())
+            menu.addCopyItems([("Copy Commit Hash", commit.id.rawValue)])
             var values = [("Copy subject", commit.subject), ("Copy author", commit.authorName),
                           ("Copy email", commit.authorEmail), ("Copy commit SHA", commit.id.rawValue),
                           ("Copy refs", decorations(for: commit).map(\.name).joined(separator: "\n"))]
@@ -381,13 +398,18 @@ struct GitHistoryTable: NSViewRepresentable {
                 values.append(("Copy full commit message", message))
             }
             if case .file(_, let file) = rows[index] { values.append(("Copy file path", file.path)) }
-            menu.addCopyItems(values.filter { !$0.1.isEmpty })
+            let extra = NSMenuItem(title: "Copy More", action: nil, keyEquivalent: "")
+            extra.submenu = InspectorCopyMenu(values: values.filter { !$0.1.isEmpty }, pasteboard: menu.pasteboard)
+            menu.addItem(extra)
         }
-        @objc private func toggleContextCommit() {
-            guard let table = tableView, let content else { return }
-            let index = table.clickedRow >= 0 ? table.clickedRow : table.selectedRow
-            guard rows.indices.contains(index) else { return }
-            content.onOpen(content.commits[rows[index].commitIndex].id)
+        @objc private func commitAction(_ sender: NSMenuItem) {
+            guard let raw = sender.identifier?.rawValue, let operation = GitCommitOperation(rawValue: raw),
+                  let id = sender.representedObject as? String else { return }
+            content?.onCommitAction(operation, GitCommitID(id))
         }
     }
+}
+
+private final class GitHistoryContextMenu: InspectorCopyMenu {
+    var commitID: GitCommitID?
 }

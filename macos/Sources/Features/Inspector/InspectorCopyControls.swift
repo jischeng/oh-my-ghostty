@@ -6,6 +6,7 @@ class InspectorCopyableTextField: NSTextField {
     var pasteboard = NSPasteboard.general
     var copyValue: String?
     var copyItems: [(String, String)]?
+    var contextMenuProvider: (() -> NSMenu?)?
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -29,7 +30,7 @@ class InspectorCopyableTextField: NSTextField {
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
-        InspectorCopyMenu(values: copyItems ?? [("Copy", copyValue ?? stringValue)], pasteboard: pasteboard)
+        contextMenuProvider?() ?? InspectorCopyMenu(values: copyItems ?? [("Copy", copyValue ?? stringValue)], pasteboard: pasteboard)
     }
 }
 
@@ -43,6 +44,7 @@ final class InspectorMetadataText: NSButton {
     var pasteboard = NSPasteboard.general
     private var feedbackTask: Task<Void, Never>?
     var onDoubleClick: (() -> Void)?
+    var contextMenuProvider: (() -> NSMenu?)?
     var naturalWidth: CGFloat { max(40, ceil((displayText as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 10)]).width) + 4) }
 
     override init(frame: NSRect) {
@@ -129,7 +131,7 @@ final class InspectorMetadataText: NSButton {
         }
     }
     override func menu(for event: NSEvent) -> NSMenu? {
-        InspectorCopyMenu(values: [("Copy " + copyLabel.lowercased(), value)], pasteboard: pasteboard)
+        contextMenuProvider?() ?? InspectorCopyMenu(values: [("Copy " + copyLabel.lowercased(), value)], pasteboard: pasteboard)
     }
 }
 
@@ -156,7 +158,7 @@ final class InspectorCopyableTextView: NSTextView {
     }
 }
 
-final class InspectorCopyMenu: NSMenu {
+class InspectorCopyMenu: NSMenu {
     var pasteboard = NSPasteboard.general
     init(values: [(String, String)] = [], pasteboard: NSPasteboard = .general) {
         super.init(title: "")

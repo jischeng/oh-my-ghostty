@@ -20,7 +20,7 @@ struct InspectorGitView: View {
                         .buttonStyle(.plain).help("Dismiss Git error")
                 }.padding(8)
             }
-            if let operation = content.operation {
+            if let operation = content.operation, !content.isUpdatingIndex {
                 HStack { ProgressView().controlSize(.small); Text(operation).font(.caption) }.padding(6)
             }
 
@@ -160,23 +160,7 @@ struct InspectorGitView: View {
     }
 
     private var tabPickerView: some View {
-        HStack(spacing: 2) {
-            ForEach(InspectorGitContent.ActiveTab.allCases, id: \.self) { tab in
-                Button { perform(.gitAction(.selectTab(tab))) } label: {
-                    Text(tab.rawValue)
-                        .font(.system(size: 11, weight: content.activeTab == tab ? .semibold : .regular))
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity, minHeight: 30)
-                        .contentShape(Rectangle())
-                        .background(content.activeTab == tab ? Color.accentColor.opacity(0.16) : Color.clear,
-                                    in: RoundedRectangle(cornerRadius: 4))
-                }
-                .buttonStyle(.plain)
-                .accessibilityValue(content.activeTab == tab ? "Selected" : "")
-            }
-        }
-        .padding(2)
-        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+        GitSidebarNavigation(selected: content.activeTab) { perform(.gitAction(.selectTab($0))) }
     }
 
     @ViewBuilder
@@ -186,28 +170,20 @@ struct InspectorGitView: View {
             historyView(headCommitID: headCommitID)
 
         case .changes:
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                        changeSection("Staged", files: content.workingTree.staged, target: .staged,
-                                      error: content.workingTree.stagedError)
-                        changeSection("Unstaged / Untracked", files: content.workingTree.unstaged, target: .unstaged,
-                                      error: content.workingTree.unstagedError)
-                        Divider()
-                        Text("Checked files are staged for commit.").font(.caption2).foregroundStyle(.secondary)
-                        Text("Commit message").font(.caption).foregroundStyle(.secondary)
-                        TextEditor(text: Binding(get: { content.commitDraft }, set: {
-                            perform(.gitAction(.updateCommitDraft($0)))
-                        }))
-                        .font(.system(size: 12))
-                        .frame(height: 72)
-                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.2)))
-                        .accessibilityLabel("Commit message")
-                        Button("Commit Staged (\(content.workingTree.staged.count))") {
-                            perform(.gitAction(.commitStaged))
-                        }
-                        .disabled(content.operation != nil || content.workingTree.stagedError != nil || content.workingTree.staged.isEmpty ||
-                                  content.commitDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }.padding(.horizontal, 12)
+            VStack(spacing: 0) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        changeSection("Staged", files: content.workingTree.staged, target: .staged, error: content.workingTree.stagedError)
+                        changeSection("Unstaged / Untracked", files: content.workingTree.unstaged, target: .unstaged, error: content.workingTree.unstagedError)
+                    }.padding(.horizontal, 12).padding(.bottom, 10)
+                }
+                Divider()
+                GitCommitComposer(message: Binding(get: { content.commitDraft }, set: { perform(.gitAction(.updateCommitDraft($0))) }),
+                    stagedCount: content.workingTree.staged.count, isBusy: content.operation != nil,
+                    canCommit: content.workingTree.stagedError == nil, isUpdatingIndex: content.isUpdatingIndex) {
+                    perform(.gitAction(.commitStaged))
+                }
+                .padding(10)
             }
         case .branches:
             if let error = content.workingTree.branchesError {
@@ -287,13 +263,15 @@ struct InspectorGitView: View {
                     hasMore: content.history.hasMore,
                     isLoading: content.history.isLoading,
                     automaticLoadingAllowed: content.history.statusMessage == nil,
+                    isBusy: content.operation != nil,
                     onSelect: { perform(.gitAction(.selectCommit($0))) },
                     onOpen: { perform(.gitAction(.openCommit($0))) },
                     onShowInTerminal: {
                         perform(.gitAction(.sendHistoryToTerminal($0)))
                     },
                     onOpenFile: { commit, file in perform(.gitAction(.openDiff(file, .commit(commit)))) },
-                    onLoadMore: { perform(.gitAction(.loadMoreHistory)) }
+                    onLoadMore: { perform(.gitAction(.loadMoreHistory)) },
+                    onCommitAction: { perform(.gitAction(.commitOperation($0, $1))) }
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }

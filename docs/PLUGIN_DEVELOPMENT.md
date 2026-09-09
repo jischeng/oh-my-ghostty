@@ -1055,39 +1055,66 @@ blue, copied teal, type-changed purple and unknown secondary. Letters and
 accessible status labels remain available independently of color. Checkboxes reflect
 the real index: checking an unstaged row stages that whole file; unchecking a
 staged row unstages it without deleting the working file (including unborn
-repositories). Commit Staged submits the index via stdin commit message, never
+repositories). The pinned Commit composer submits the index via stdin commit message, never
 implicitly stages other files, and preserves the draft on failure. A file with
 both index and working-tree edits can appear in both sections. Staged,
 unstaged and branch queries keep independent results and errors. A failed
 query retains its last successful values for display and disables only actions
 that depend on those stale values; it does not hide other successful sections.
+Stage/unstage uses a quiet index update: keep the previous file arrays until the
+new staged/unstaged reads finish, do not enter global loading, insert a global
+operation banner, or rebuild history. The composer stays outside the file-list
+scroll view; its native text view preserves focus, selection and undo state when
+status updates. It grows from 44 to 112 points, then scrolls internally. The
+footer reserves space for index progress without moving the Commit action.
+
 
 History's scope menu includes current/all branches and every available local
-and remote branch. History/Changes/Branches tabs use full-width rectangular hit
-regions with a 30-point minimum height. Branches uses an expandable Local/Remotes folder tree with
+and remote branch. History/Changes/Branches form one compact, 28-point navigation
+bar with full rectangular hit regions, a thin selected underline and subtle
+hover feedback. Font weight and geometry stay fixed across selection and use
+semantic dark/light colors. Branches uses an expandable Local/Remotes folder tree with
 stable ref IDs. Single click selects; folder double-click toggles expansion,
-while branch double-click opens history. Leaf context
+while branch double-click opens its worktree if checked out, otherwise history.
+Checked-out branches show a worktree label and prioritize Open Worktree over
+checkout. Leaf context
 menus offer switching, creating and switching a branch from that ref, pushing
 a selected local branch, and setting its upstream. Remote refs can create local
 tracking branches. Push explicitly selects a configured remote/destination
 and uses a normal non-force refspec for the selected branch, even if it is not
 checked out. These host-owned actions add no external plugin wire capabilities.
 
-Branches also lists Worktrees with current/main, detached, locked and prunable
-state. Paths and lock/prune reasons remain available in tooltips; double-click
+Branches also lists Worktrees with branch, visible path, current, dirty and
+detached HEAD state. Lock/prune reasons remain available in tooltips; double-click
 or Open in New Tab opens that directory in a new local or replayed SSH terminal.
 No command is injected into the existing shell. Branch menus offer New Worktree
 from Here and Open Worktree for checked-out branches; the pane also has a New
 Worktree button. Creation supports a new branch, an existing local branch, or
-a detached HEAD and requires an absolute destination path. Remove Worktree asks
+a detached HEAD and requires an absolute destination path. A creation option
+opens the new worktree in a new OMG tab after Git succeeds. Remove Worktree asks
 for confirmation, keeps the branch, and refuses main/current/locked/prunable
-entries and unsaved editor buffers. The service re-reads the list before removing
-and never passes force, so Git rejects tracked or untracked dirty contents.
+entries, dirty/failed status and unsaved editor buffers. The service re-reads
+the list and status before removing and never passes force. Dirty checks include
+untracked files and run with at most four concurrent processes when Branches is
+active or explicitly refreshed; failures remain visible and disable removal.
 Worktrees use `git worktree list --porcelain -z`, preserving spaces, newlines and
 lock/prune reasons in paths/fields. Their refresh results and errors are
 independent of branch/status queries and use the same local/SSH executor.
 The host-only create/open/remove actions do not extend the external plugin wire
 protocol. See the [Git worktree contract](https://git-scm.com/docs/git-worktree).
+
+History commit context menus group creation, inspection, mutations and copying.
+Create Branch adds a ref at the selected commit without switching the worktree;
+Branch + Worktree and Detached Worktree reuse the worktree creation dialog.
+Details opens changed files in-place. Compare with HEAD captures the current HEAD
+ID once and reuses the existing bounded diff/file/source viewer for that pair.
+Cherry-pick/Revert ask for confirmation (and an explicit mainline parent for
+merges), require a clean worktree and preserve Git stderr on failure. Conflicts
+remain available for normal Git continue/abort; no automatic reset or abort runs.
+Mutation entries are disabled while another operation runs. Subject and metadata right-clicks route to this same commit menu. Menu actions
+retain the clicked commit ID even if selection changes; Copy Commit Hash is direct and
+other existing copy actions live in Copy More. These are host-only actions.
+
 
 Mutations are serialized per worktree and are separate from cancellable polling
 tasks. Git's refusal to overwrite dirty files, non-fast-forward rejection,
@@ -1095,8 +1122,9 @@ hooks, signing and authentication errors are shown in a dismissible pane banner;
 no forced checkout/push, stash, reset, hook bypass or terminal injection is performed.
 Unstaging before the first commit removes only the selected index entries with
 `git rm --cached --force`, preserving working files even if edited after staging.
-Switch/create also refuses unsaved editor buffers in that worktree.
-Success refreshes status, changes, refs and history; failed commits retain the
+Switch/create and cherry-pick/revert also refuse unsaved editor buffers in that worktree.
+Index-only success refreshes changes locally; other mutations refresh status,
+changes, refs and history. Failed commits retain the
 draft and index. The header reports configured upstream tracking against local
 cached refs, and routine refresh never fetches. Current branch, tag and remote
 decorations use distinct native SF Symbols, colors and accessible descriptions.

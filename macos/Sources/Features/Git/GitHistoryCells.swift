@@ -39,7 +39,7 @@ final class GitHistoryCell: NSTableCellView {
     @objc private func toggleCommit() { toggle() }
 
     func configure(commit: GitHistoryCommit, graph: GitGraphRow, graphLayout: GitGraphColumnLayout,
-                   summary: (date: String, refs: [GitRefDecoration]), state: (head: Bool, expanded: Bool), toggle: @escaping () -> Void) {
+                   summary: (date: String, refs: [GitRefDecoration]), state: (head: Bool, expanded: Bool), toggle: @escaping () -> Void, contextMenu: (() -> NSMenu?)? = nil) {
         self.toggle = toggle
         graphWidth = graphLayout.width
         contentX = graphLayout.contentX
@@ -52,6 +52,9 @@ final class GitHistoryCell: NSTableCellView {
         timeAndHash.configure(.init(text: summary.date, value: commit.authoredAt.description, label: "Time"),
             second: .init(text: commit.id.shortSHA, value: commit.id.rawValue, label: "Commit SHA"), onDoubleClick: doubleClick)
         subject.copyItems = [("Copy subject", commit.subject)]
+        subject.contextMenuProvider = contextMenu
+        authorAndEmail.contextMenuProvider = contextMenu
+        timeAndHash.contextMenuProvider = contextMenu
         badges.configure(summary.refs)
         disclosure.image = NSImage(systemSymbolName: state.expanded ? "chevron.down" : "chevron.right",
                                    accessibilityDescription: state.expanded ? "Collapse commit" : "Expand commit")?

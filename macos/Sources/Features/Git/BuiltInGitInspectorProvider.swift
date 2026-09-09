@@ -42,6 +42,7 @@ final class BuiltInGitInspectorProvider {
     private var pollTimer: Timer?
     private var mutationTasks: [String: Task<Void, Never>] = [:]
     private var operationTitles: [String: String] = [:]
+    private var indexUpdates = Set<String>()
     private struct DetailKey: Hashable {
         let tabID: UUID
         let worktree: String
@@ -93,6 +94,7 @@ final class BuiltInGitInspectorProvider {
             if let current = lastPublishedContent[action.context.tabID] {
                 publish(makeContent(from: current, activeTab: tab, history: state.history), tabID: action.context.tabID)
                 if tab == .history && state.history.snapshot == nil { loadHistory(context: action.context, force: true) }
+                if tab == .branches { load(context: action.context) }
             }
         case .selectHistoryScope(let scope):
             let key = currentWorktreeKey(for: action.context)
@@ -117,6 +119,7 @@ final class BuiltInGitInspectorProvider {
             guard let content = lastPublishedContent[action.context.tabID], let repository = content.repository else { return }
             let files: [GitDiffFile]
             switch target {
+            case .comparison: return
             case .staged:
                 guard content.workingTree.stagedError == nil else { return }
                 files = content.workingTree.staged
@@ -143,6 +146,8 @@ final class BuiltInGitInspectorProvider {
             save(state, tabID: action.context.tabID, worktreeKey: key)
             cancelHistoryTask(tabID: action.context.tabID)
             load(context: action.context, force: true)
+        case .commitOperation(let operation, let commit):
+            handleCommit(operation, id: commit, context: action.context)
         case .createWorktree, .openWorktree, .removeWorktree:
             handleWorktree(gitAction, context: action.context)
         case .branchOperation(let operation, let ref):
@@ -216,7 +221,7 @@ final class BuiltInGitInspectorProvider {
         let oldContent = lastPublishedContent[context.tabID].flatMap { value in
             value.repository?.matches(context.session) == true && resolvedDirectories[context.tabID] == directory ? value : nil
         }
-        if force || oldContent == nil {
+        if oldContent == nil {
             var loading = InspectorGitContent(repository: oldContent?.repository, branch: oldContent?.branch,
                 status: oldContent?.status ?? .notRepository(directory: directory), activeTab: activeTab,
                 history: state(for: context.tabID, worktreeKey: key).history, isLoading: true)
@@ -234,7 +239,7 @@ final class BuiltInGitInspectorProvider {
                 async let staged = Self.result { try await self.diffService.listFiles(for: repository, target: .staged).files }
                 async let unstaged = Self.result { try await self.diffService.listFiles(for: repository, target: .unstaged).files }
                 async let branches = Self.result { try await self.repositoryService.branches(for: repository) }
-                async let worktrees = Self.result { try await self.repositoryService.worktrees(for: repository) }
+                async let worktrees = Self.result { try await self.repositoryService.worktrees(for: repository, includeStatus: force || activeTab == .branches) }
                 Self.update(await staged, values: &workingTree.staged, error: &workingTree.stagedError)
                 Self.update(await unstaged, values: &workingTree.unstaged, error: &workingTree.unstagedError)
                 Self.update(await branches, values: &workingTree.branches, error: &workingTree.branchesError)
@@ -429,12 +434,55 @@ final class BuiltInGitInspectorProvider {
             content.commitDraft = state.commitDraft
             content.operationError = state.operationError
             content.operation = operationTitles[key]
+            content.isUpdatingIndex = indexUpdates.contains(key)
         }
         lastPublishedContent[tabID] = content
         do {
             try registry.updatePluginContent(paneID: Self.paneID, pluginID: Self.pluginID,
                                              tabID: tabID, content: .git(content))
         } catch { Self.logger.error("Git state publish failed: \(error.localizedDescription, privacy: .public)") }
+    }
+
+    private func handleCommit(_ operation: GitCommitOperation, id: GitCommitID, context: InspectorPaneContext) {
+        guard let content = lastPublishedContent[context.tabID], let repository = content.repository,
+              let commit = content.history.commits.first(where: { $0.id == id }) else { return }
+        if operation == .details {
+            if content.expandedCommits[id] == nil { toggleCommit(id, context: context) }
+            return
+        }
+        guard !operation.modifiesRepository || mutationTasks[repository.stateKey] == nil else { return }
+        let window = TerminalController.all.first { $0.tabSessionID == context.tabID }?.window
+        Task {
+            do {
+                switch operation {
+                case .compareWithHead:
+                    let head = try await self.repositoryService.headCommit(for: repository)
+                    guard self.lastPublishedContent[context.tabID]?.repository == repository else { return }
+                    EditorWorkspaceStore.shared.openGitDiff(repository: repository, target: .comparison(base: id, head: head), context: context)
+                case .createWorktree, .detachedWorktree:
+                    if let creation = await GitWorktreeActions.creation(start: id.rawValue, repository: repository, window: window,
+                                                                        detached: operation == .detachedWorktree) {
+                        self.mutate(creation.mutation, repository: repository, context: context, openCreatedWorktree: creation.openAfterCreation)
+                    }
+                case .createBranch, .cherryPick, .revert:
+                    if let mutation = await GitCommitActions.mutation(operation, commit: commit, window: window) {
+                        self.mutate(mutation, repository: repository, context: context)
+                    }
+                case .details: break
+                }
+            } catch { self.publishOperationError(error.localizedDescription, repository: repository, context: context) }
+        }
+    }
+
+    private func refreshIndex(repository: GitRepositoryIdentity) async {
+        async let staged = Self.result { try await self.diffService.listFiles(for: repository, target: .staged).files }
+        async let unstaged = Self.result { try await self.diffService.listFiles(for: repository, target: .unstaged).files }
+        let results = await (staged, unstaged)
+        for (tabID, var content) in lastPublishedContent where content.repository == repository {
+            Self.update(results.0, values: &content.workingTree.staged, error: &content.workingTree.stagedError)
+            Self.update(results.1, values: &content.workingTree.unstaged, error: &content.workingTree.unstagedError)
+            publish(content, tabID: tabID)
+        }
     }
 
     private func handleWorktree(_ action: InspectorGitAction, context: InspectorPaneContext) {
@@ -450,7 +498,7 @@ final class BuiltInGitInspectorProvider {
                   start == nil || (content.workingTree.branchesError == nil && content.workingTree.branches.contains { $0.id == start }) else { return }
             Task {
                 if let mutation = await GitWorktreeActions.creation(start: start, repository: repository, window: window) {
-                    self.mutate(mutation, repository: repository, context: context)
+                    self.mutate(mutation.mutation, repository: repository, context: context, openCreatedWorktree: mutation.openAfterCreation)
                 }
             }
         case .removeWorktree(let path):
@@ -465,7 +513,7 @@ final class BuiltInGitInspectorProvider {
         }
     }
 
-    private func mutate(_ mutation: GitMutation, repository: GitRepositoryIdentity, context: InspectorPaneContext) {
+    private func mutate(_ mutation: GitMutation, repository: GitRepositoryIdentity, context: InspectorPaneContext, openCreatedWorktree: Bool = false) {
         let key = repository.stateKey
         guard lastPublishedContent[context.tabID]?.repository == repository else { return }
         guard mutationTasks[key] == nil else {
@@ -479,7 +527,7 @@ final class BuiltInGitInspectorProvider {
                 publishOperationError("Save or discard unsaved editor changes before removing this worktree.", repository: repository, context: context)
                 return
             }
-        case .checkout, .create:
+        case .checkout, .create, .applyCommit:
             guard !EditorWorkspaceStore.shared.hasUnsavedDocuments(
                 in: repository.worktreePath,
                 endpoint: repository.sshConnection.map { .ssh(workspaceID: $0.workspaceID) } ?? .local
@@ -491,17 +539,23 @@ final class BuiltInGitInspectorProvider {
         default: break
         }
         operationTitles[key] = mutation.title
+        if mutation.updatesIndexOnly { indexUpdates.insert(key) }
         var state = state(for: context.tabID, worktreeKey: key)
         state.operationError = nil
         save(state, tabID: context.tabID, worktreeKey: key)
         for (tabID, content) in lastPublishedContent where content.repository == repository {
-            cancelTask(tabID: tabID)
+            if mutation.updatesIndexOnly { loadTasks.removeValue(forKey: tabID)?.cancel() } else { cancelTask(tabID: tabID) }
             _ = nextGeneration(for: tabID)
             publish(content, tabID: tabID)
         }
         mutationTasks[key] = Task {
             do {
                 try await self.mutationService.perform(mutation, in: repository)
+                if mutation.updatesIndexOnly { await self.refreshIndex(repository: repository) }
+                if openCreatedWorktree, case .addWorktree(let path, _, _, _) = mutation {
+                    try GitWorktreeActions.open(GitWorktreeInfo(path: path, head: nil, branchRef: nil, isMain: false, isCurrent: false),
+                                                repository: repository, context: context)
+                }
                 if case .commit(let submitted) = mutation {
                     var state = self.state(for: context.tabID, worktreeKey: key)
                     if state.commitDraft == submitted { state.commitDraft = "" }
@@ -510,9 +564,10 @@ final class BuiltInGitInspectorProvider {
             } catch { self.publishOperationError(error.localizedDescription, repository: repository, context: context) }
             self.mutationTasks.removeValue(forKey: key)
             self.operationTitles.removeValue(forKey: key)
+            self.indexUpdates.remove(key)
             for (tabID, content) in self.lastPublishedContent where content.repository == repository {
                 self.publish(content, tabID: tabID)
-                if let current = self.presentedContexts[tabID] { self.load(context: current, force: true) }
+                if !mutation.updatesIndexOnly, let current = self.presentedContexts[tabID] { self.load(context: current, force: true) }
             }
         }
     }

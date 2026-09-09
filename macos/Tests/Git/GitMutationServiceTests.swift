@@ -123,6 +123,49 @@ struct GitMutationServiceTests {
         #expect(try await git(["log", "-1", "--format=%s"], repo) == "base")
     }
 
+    @Test func commitActionsCreateWithoutSwitchingCompareCherryPickAndRevert() async throws {
+        let repo = try await repository()
+        defer { try? FileManager.default.removeItem(atPath: repo.worktreePath) }
+        let service = GitMutationService()
+        try write("base\n", "file", repo)
+        try await service.perform(.stage(["file"]), in: repo)
+        try await service.perform(.commit("base"), in: repo)
+        let base = GitCommitID(try await git(["rev-parse", "HEAD"], repo))
+        try await service.perform(.createBranch(name: "feature", commit: base), in: repo)
+        #expect(try await git(["branch", "--show-current"], repo) == "main")
+        try await service.perform(.checkout("feature"), in: repo)
+        try write("feature\n", "file", repo)
+        try await service.perform(.stage(["file"]), in: repo)
+        try await service.perform(.commit("feature"), in: repo)
+        let feature = GitCommitID(try await git(["rev-parse", "HEAD"], repo))
+        let target = GitDiffTarget.comparison(base: base, head: feature)
+        let diff = GitDiffService()
+        let files = try await diff.listFiles(for: repo, target: target)
+        #expect(files.files.map(\.path) == ["file"])
+        let file = try #require(files.files.first)
+        let sources = try await diff.sourceVersions(for: file, repository: repo, target: target)
+        #expect(sources.before == "base\n" && sources.after == "feature\n")
+        #expect(try await diff.loadDiff(for: file, repository: repo, target: target).text.contains("+feature"))
+        try await service.perform(.checkout("main"), in: repo)
+        try await service.perform(.applyCommit(.cherryPick, feature, mainline: nil), in: repo)
+        #expect(try await git(["show", "HEAD:file"], repo) == "feature")
+        try await service.perform(.applyCommit(.revert, feature, mainline: nil), in: repo)
+        #expect(try await git(["show", "HEAD:file"], repo) == "base")
+        try write("dirty", "file", repo)
+        await #expect(throws: (any Error).self) { try await service.perform(.applyCommit(.cherryPick, feature, mainline: nil), in: repo) }
+        #expect(try String(contentsOfFile: repo.worktreePath + "/file", encoding: .utf8) == "dirty")
+        try write("divergent\n", "file", repo)
+        try await service.perform(.stage(["file"]), in: repo)
+        try await service.perform(.commit("divergent"), in: repo)
+        do {
+            try await service.perform(.applyCommit(.cherryPick, feature, mainline: nil), in: repo)
+            Issue.record("Expected cherry-pick conflict")
+        } catch GitExecutionError.processFailed(let code, let stderr) {
+            #expect(code != 0 && stderr.contains("could not apply"))
+        }
+        #expect(try await git(["rev-parse", "CHERRY_PICK_HEAD"], repo) == feature.rawValue)
+    }
+
     @Test func worktreesCreateListOpenBranchAndRemoveWithoutDiscardingChanges() async throws {
         let repo = try await repository()
         defer { try? FileManager.default.removeItem(atPath: repo.worktreePath) }
@@ -131,14 +174,18 @@ struct GitMutationServiceTests {
         try await service.perform(.stage(["file"]), in: repo)
         try await service.perform(.commit("base"), in: repo)
         let linked = repo.worktreePath + "/linked '中文\nline"
-        try await service.perform(.addWorktree(path: linked, start: "refs/heads/main", branch: "feature/new", detached: false), in: repo)
+        let startingCommit = try await git(["rev-parse", "HEAD"], repo)
+        try await service.perform(.addWorktree(path: linked, start: startingCommit, branch: "feature/new", detached: false), in: repo)
         var worktrees = try await GitRepositoryService().worktrees(for: repo)
         #expect(worktrees.count == 2 && worktrees[0].isMain && worktrees[0].isCurrent)
         #expect(worktrees[1].path == linked)
         #expect(worktrees[1].branchRef == "refs/heads/feature/new")
         #expect(worktrees[1].canRemove)
+        #expect(try await GitRepositoryService().worktrees(for: repo, includeStatus: true)[1].isDirty == false)
         #expect(try await git(["branch", "--show-current"], repo) == "main")
         try Data("dirty".utf8).write(to: URL(fileURLWithPath: linked + "/file"))
+        let dirty = try await GitRepositoryService().worktrees(for: repo, includeStatus: true)[1]
+        #expect(dirty.isDirty == true && !dirty.canRemove)
         await #expect(throws: (any Error).self) { try await service.perform(.removeWorktree(linked), in: repo) }
         #expect(try String(contentsOfFile: linked + "/file", encoding: .utf8) == "dirty")
         try Data("base".utf8).write(to: URL(fileURLWithPath: linked + "/file"))

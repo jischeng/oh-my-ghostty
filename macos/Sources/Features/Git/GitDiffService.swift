@@ -35,6 +35,13 @@ struct GitDiffService: Sendable {
                 statistics: changes.statistics
             )
 
+        case .comparison(let base, let head):
+            let result = try await run(["--literal-pathspecs", "diff", "--no-ext-diff", "--raw", "--numstat", "-z", "--find-renames",
+                                        base.rawValue, head.rawValue, "--"], repository: repository, maxOutputBytes: 256 * 1024)
+            let changes = try GitCommitChanges(data: result.stdout)
+            return GitDiffFileList(repository: repository, target: target, files: changes.files,
+                                   baseDescription: target.description, statistics: changes.statistics)
+
         case .staged:
             let result = try await run(
                 ["--literal-pathspecs", "diff", "--cached", "--no-ext-diff", "--name-status", "-z", "--find-renames", "--"],
@@ -136,6 +143,12 @@ struct GitDiffService: Sendable {
             ] + (file.oldPath == nil ? [] : [file.path])
             allowsExitCodeOne = false
 
+        case .comparison(let from, let to):
+            base = baseDescription ?? target.description
+            arguments = ["--literal-pathspecs", "diff", "--no-ext-diff", "--no-color", "--unified=3", "--find-renames",
+                         from.rawValue, to.rawValue, "--", file.oldPath ?? file.path] + (file.oldPath == nil ? [] : [file.path])
+            allowsExitCodeOne = false
+
         case .staged:
             base = baseDescription ?? "index vs HEAD"
             arguments = [
@@ -206,6 +219,10 @@ struct GitDiffService: Sendable {
             let base = try await commitBase(for: commit, repository: repository, knownBase: knownBase)
             async let before = base.isRoot || file.kind == .added ? "" : blob(base.id, file.oldPath ?? file.path)
             async let after = file.kind == .deleted ? "" : blob(commit.rawValue, file.path)
+            return try await (before, after)
+        case .comparison(let base, let head):
+            async let before = file.kind == .added ? "" : blob(base.rawValue, file.oldPath ?? file.path)
+            async let after = file.kind == .deleted ? "" : blob(head.rawValue, file.path)
             return try await (before, after)
         case .staged:
             async let before = file.kind == .added ? "" : blob("HEAD", file.oldPath ?? file.path)

@@ -102,6 +102,7 @@ enum InspectorGitAction: Equatable, Sendable {
     case openDiff(GitDiffFile, GitDiffTarget)
     case browseBranch(String)
     case branchOperation(GitBranchOperation, String)
+    case commitOperation(GitCommitOperation, GitCommitID)
     case createWorktree(String?)
     case openWorktree(String)
     case removeWorktree(String)
@@ -127,6 +128,7 @@ struct InspectorGitContent: Equatable, Sendable {
     var expandedCommits: [GitCommitID: GitCommitExpansion] = [:]
     var commitDraft = ""
     var operation: String?
+    var isUpdatingIndex = false
     var operationError: String?
     var connectionLabel: String?
     let isLoading: Bool

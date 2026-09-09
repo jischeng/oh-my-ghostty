@@ -146,11 +146,16 @@ struct GitBranchTree: NSViewRepresentable {
         func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
             !(item as? GitBranchNode)!.children.isEmpty
         }
+        func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
+            (item as? GitBranchNode)?.worktree == nil ? 25 : 42
+        }
         func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
             guard let node = item as? GitBranchNode else { return nil }
+            if let worktree = node.worktree { return GitWorktreeCell(worktree) }
             let cell = NSTableCellView()
             let icon = NSImageView()
-            let name = NSTextField(labelWithString: node.title)
+            let occupied = node.branch.flatMap { branch in worktrees.first { $0.branchRef == branch.id } }
+            let name = NSTextField(labelWithString: node.title + (occupied == nil ? "" : " · worktree"))
             name.font = .systemFont(ofSize: 11, weight: node.branch?.isCurrent == true || node.worktree?.isCurrent == true ? .semibold : .regular)
             name.lineBreakMode = .byTruncatingMiddle
             name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -167,14 +172,8 @@ struct GitBranchTree: NSViewRepresentable {
                 name.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
                 name.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
             ])
-            if let worktree = node.worktree {
-                let state = [worktree.isCurrent ? "Current worktree" : nil, worktree.isMain ? "Main worktree" : nil,
-                             worktree.lockedReason.map { "Locked: " + $0 }, worktree.prunableReason.map { "Prunable: " + $0 }].compactMap { $0 }
-                cell.toolTip = ([worktree.path, worktree.branchName] + state).joined(separator: "\n")
-                cell.setAccessibilityLabel(node.title + " " + state.joined(separator: " "))
-                return cell
-            }
             cell.toolTip = node.branch.map { "\($0.name)\n\($0.upstream) \($0.tracking)" } ?? node.title
+            if let occupied { cell.toolTip = (cell.toolTip ?? "") + "\nWorktree: " + occupied.path }
             return cell
         }
 
@@ -191,7 +190,9 @@ struct GitBranchTree: NSViewRepresentable {
             if let worktree = node.worktree {
                 if worktreesAvailable && worktree.canOpen { perform(.openWorktree(worktree.path)) }
             } else if let branch = node.branch {
-                if branchesAvailable { perform(.browseBranch(branch.id)) }
+                if worktreesAvailable, let occupied = worktrees.first(where: { $0.branchRef == branch.id }), occupied.canOpen {
+                    perform(.openWorktree(occupied.path))
+                } else if branchesAvailable { perform(.browseBranch(branch.id)) }
             } else if tree.isItemExpanded(node) { tree.collapseItem(node) } else { tree.expandItem(node) }
         }
 
@@ -211,7 +212,6 @@ struct GitBranchTree: NSViewRepresentable {
                 menu.addItem(item)
             }
             menu.autoenablesItems = false
-            add("Show History", action: #selector(historyFromMenu(_:)), enabled: branchesAvailable)
             let occupied = worktrees.first { $0.branchRef == branch.id }
             if let occupied {
                 let item = NSMenuItem(title: "Open Worktree in New Tab", action: #selector(worktreeAction(_:)), keyEquivalent: "")
@@ -219,6 +219,7 @@ struct GitBranchTree: NSViewRepresentable {
                 item.isEnabled = worktreesAvailable && occupied.canOpen
                 menu.addItem(item)
             }
+            add("Show History", action: #selector(historyFromMenu(_:)), enabled: branchesAvailable)
             add("New Worktree from Here…", action: #selector(createWorktree(_:)), enabled: !busy && branchesAvailable && worktreesAvailable)
             menu.addItem(.separator())
             add(branch.isRemote ? "Checkout Tracking Branch…" : "Switch Branch",
@@ -262,4 +263,33 @@ struct GitBranchTree: NSViewRepresentable {
             perform(.branchOperation(operations[sender.tag], ref))
         }
     }
+}
+
+private final class GitWorktreeCell: NSTableCellView {
+    init(_ worktree: GitWorktreeInfo) {
+        super.init(frame: .zero)
+        let states = [worktree.isCurrent ? "current" : nil, worktree.isDirty == true ? "dirty" : nil,
+                      worktree.statusError != nil ? "status unavailable" : nil].compactMap { $0 }
+        let title = NSTextField(labelWithString: ([worktree.branchName] + states).joined(separator: " · "))
+        title.font = .systemFont(ofSize: 11, weight: worktree.isCurrent ? .semibold : .regular)
+        let path = NSTextField(labelWithString: worktree.path)
+        path.font = .systemFont(ofSize: 10)
+        path.textColor = .secondaryLabelColor
+        let symbol = worktree.isCurrent ? "checkmark.circle.fill" : (worktree.lockedReason != nil ? "lock.fill" : "folder")
+        let icon = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil) ?? NSImage())
+        icon.contentTintColor = worktree.isDirty == true ? .systemOrange : (worktree.isCurrent ? .controlAccentColor : .secondaryLabelColor)
+        for field in [title, path] { field.lineBreakMode = .byTruncatingMiddle; field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal) }
+        for view in [icon, title, path] { view.translatesAutoresizingMaskIntoConstraints = false; addSubview(view) }
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor), icon.topAnchor.constraint(equalTo: topAnchor, constant: 5),
+            icon.widthAnchor.constraint(equalToConstant: 14), icon.heightAnchor.constraint(equalToConstant: 14),
+            title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 5), title.topAnchor.constraint(equalTo: topAnchor, constant: 3),
+            title.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            path.leadingAnchor.constraint(equalTo: title.leadingAnchor), path.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 2),
+            path.trailingAnchor.constraint(equalTo: title.trailingAnchor),
+        ])
+        toolTip = ([worktree.path, worktree.branchName] + states + [worktree.lockedReason, worktree.prunableReason, worktree.statusError].compactMap { $0 }).joined(separator: "\n")
+        setAccessibilityLabel(toolTip)
+    }
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 }

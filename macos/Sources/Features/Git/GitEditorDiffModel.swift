@@ -25,6 +25,7 @@ final class GitEditorDiffModel: ObservableObject {
     private let request: GitEditorDiffRequest
     private let service: GitDiffService
     private var task: Task<Void, Never>?
+    private var commitBase: GitDiffCommitBase?
 
     init(request: GitEditorDiffRequest, service: GitDiffService = GitDiffService()) {
         self.request = request
@@ -39,6 +40,7 @@ final class GitEditorDiffModel: ObservableObject {
             let list = try await self.service.listFiles(for: self.request.repository, target: self.request.target)
             try Task.checkCancellation()
             self.files = list.files
+            self.commitBase = list.commitBase
             self.selected = path.flatMap { path in list.files.first { $0.path == path } } ?? list.files.first
             if let selected = self.selected {
                 self.phase = .diff
@@ -84,13 +86,14 @@ final class GitEditorDiffModel: ObservableObject {
     }
 
     private func load(_ file: GitDiffFile) async throws {
-        let document = try await service.loadDiff(for: file, repository: request.repository, target: request.target)
+        let document = try await service.loadDiff(for: file, repository: request.repository, target: request.target,
+                                                  knownBase: commitBase)
         try Task.checkCancellation()
         var content = Content(document: document)
         if !document.isBinary && !document.isTruncated {
             do {
                 let versions = try await service.sourceVersions(for: file, repository: request.repository,
-                                                                target: request.target)
+                                                                target: request.target, knownBase: commitBase)
                 try Task.checkCancellation()
                 content.before = versions.before
                 content.after = versions.after

@@ -6,11 +6,6 @@ struct GitDiffService: Sendable {
     private let executor: (any GitExecutor)?
     let diffByteLimit: Int
 
-    private struct CommitBase: Sendable {
-        let id: String
-        let isRoot: Bool
-    }
-
     init(
         executor: (any GitExecutor)? = nil,
         diffByteLimit: Int = GitDiffService.defaultDiffByteLimit
@@ -34,7 +29,8 @@ struct GitDiffService: Sendable {
                 repository: repository,
                 target: target,
                 files: parseNameStatus(result.stdout),
-                baseDescription: commitBase.isRoot ? "empty tree" : "parent \(GitCommitID(commitBase.id).shortSHA)"
+                baseDescription: commitBase.isRoot ? "empty tree" : "parent \(GitCommitID(commitBase.id).shortSHA)",
+                commitBase: commitBase
             )
 
         case .staged:
@@ -51,18 +47,18 @@ struct GitDiffService: Sendable {
             )
 
         case .unstaged:
-            let tracked = try await run(
+            async let tracked = run(
                 ["--literal-pathspecs", "diff", "--no-ext-diff", "--name-status", "-z", "--find-renames", "--"],
                 repository: repository,
                 maxOutputBytes: 256 * 1024
             )
-            let untracked = try await run(
+            async let untracked = run(
                 ["--literal-pathspecs", "ls-files", "--others", "--exclude-standard", "-z", "--"],
                 repository: repository,
                 maxOutputBytes: 256 * 1024
             )
-            var files = parseNameStatus(tracked.stdout)
-            files.append(contentsOf: parseUntracked(untracked.stdout))
+            var files = try await parseNameStatus(tracked.stdout)
+            try await files.append(contentsOf: parseUntracked(untracked.stdout))
             return GitDiffFileList(
                 repository: repository,
                 target: target,
@@ -116,7 +112,8 @@ struct GitDiffService: Sendable {
         for file: GitDiffFile,
         repository: GitRepositoryIdentity,
         target: GitDiffTarget,
-        baseDescription: String? = nil
+        baseDescription: String? = nil,
+        knownBase: GitDiffCommitBase? = nil
     ) async throws -> GitDiffDocument {
         guard !file.path.isEmpty, !file.path.hasPrefix("/") else {
             throw GitDiffServiceError.invalidPath(file.path)
@@ -127,7 +124,7 @@ struct GitDiffService: Sendable {
         let allowsExitCodeOne: Bool
         switch target {
         case .commit(let commit):
-            let resolvedBase = try await commitBase(for: commit, repository: repository)
+            let resolvedBase = try await commitBase(for: commit, repository: repository, knownBase: knownBase)
             base = baseDescription ?? (resolvedBase.isRoot
                 ? "empty tree"
                 : "parent \(GitCommitID(resolvedBase.id).shortSHA)")
@@ -193,7 +190,7 @@ struct GitDiffService: Sendable {
 
     /// Full source snapshots use the same bounded Git reader as patches.
     func sourceVersions(for file: GitDiffFile, repository: GitRepositoryIdentity,
-                        target: GitDiffTarget) async throws -> (before: String, after: String) {
+                        target: GitDiffTarget, knownBase: GitDiffCommitBase? = nil) async throws -> (before: String, after: String) {
         func blob(_ revision: String, _ path: String) async throws -> String {
             let result = try await run(["show", "\(revision):\(path)"], repository: repository,
                                        maxOutputBytes: diffByteLimit)
@@ -202,19 +199,19 @@ struct GitDiffService: Sendable {
             }
             return text
         }
-        let before: String
-        let after: String
         switch target {
         case .commit(let commit):
-            let base = try await commitBase(for: commit, repository: repository)
-            before = base.isRoot || file.kind == .added ? "" :
-                try await blob(base.id, file.oldPath ?? file.path)
-            after = file.kind == .deleted ? "" : try await blob(commit.rawValue, file.path)
+            let base = try await commitBase(for: commit, repository: repository, knownBase: knownBase)
+            async let before = base.isRoot || file.kind == .added ? "" : blob(base.id, file.oldPath ?? file.path)
+            async let after = file.kind == .deleted ? "" : blob(commit.rawValue, file.path)
+            return try await (before, after)
         case .staged:
-            before = file.kind == .added ? "" : try await blob("HEAD", file.oldPath ?? file.path)
-            after = file.kind == .deleted ? "" : try await blob("", file.path)
+            async let before = file.kind == .added ? "" : blob("HEAD", file.oldPath ?? file.path)
+            async let after = file.kind == .deleted ? "" : blob("", file.path)
+            return try await (before, after)
         case .unstaged:
-            before = file.isUntracked || file.kind == .added ? "" : try await blob("", file.oldPath ?? file.path)
+            async let before = file.isUntracked || file.kind == .added ? "" : blob("", file.oldPath ?? file.path)
+            let after: String
             if file.kind == .deleted {
                 after = ""
             } else {
@@ -227,14 +224,16 @@ struct GitDiffService: Sendable {
                 }
                 after = text
             }
+            return try await (before, after)
         }
-        return (before, after)
     }
 
     private func commitBase(
         for commit: GitCommitID,
-        repository: GitRepositoryIdentity
-    ) async throws -> CommitBase {
+        repository: GitRepositoryIdentity,
+        knownBase: GitDiffCommitBase? = nil
+    ) async throws -> GitDiffCommitBase {
+        if let knownBase, knownBase.commit == commit { return knownBase }
         let result = try await (executor ?? repository.executor).execute(
             arguments: ["rev-list", "--parents", "-n", "1", commit.rawValue],
             workingDirectory: repository.worktreePath,
@@ -249,7 +248,7 @@ struct GitDiffService: Sendable {
             throw GitDiffServiceError.invalidCommit(commit)
         }
         if let parent = parts.dropFirst().first {
-            return CommitBase(id: parent, isRoot: false)
+            return GitDiffCommitBase(commit: commit, id: parent, isRoot: false)
         }
         let emptyTree = try await (executor ?? repository.executor).execute(
             arguments: ["hash-object", "-t", "tree", "--stdin"],
@@ -260,7 +259,8 @@ struct GitDiffService: Sendable {
         guard emptyTree.isSuccess else {
             throw GitDiffServiceError.gitFailed(gitErrorMessage(from: emptyTree))
         }
-        return CommitBase(
+        return GitDiffCommitBase(
+            commit: commit,
             id: emptyTree.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines),
             isRoot: true
         )

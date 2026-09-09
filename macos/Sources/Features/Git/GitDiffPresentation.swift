@@ -63,8 +63,9 @@ struct GitDiffPresentation: Equatable {
             rows.append(Row(text: new[newIndex], beforeLine: oldIndex + 1, afterLine: newIndex + 1, added: nil))
             oldIndex += 1; newIndex += 1
         }
-        for raw in patch.split(separator: "\n", omittingEmptySubsequences: false) {
-            let line = raw.hasSuffix("\r") ? raw.dropLast() : raw
+        // Split LF bytes, not Swift Characters: CRLF is a single grapheme.
+        for raw in patch.components(separatedBy: "\n") {
+            let line = raw.hasSuffix("\r") ? raw.dropLast() : raw[...]
             if line.hasPrefix("@@ ") {
                 flush()
                 let fields = line.split(separator: " ")

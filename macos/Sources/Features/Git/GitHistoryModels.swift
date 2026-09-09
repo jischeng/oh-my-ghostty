@@ -123,6 +123,6 @@ struct GitCommitExpansion: Equatable, Sendable {
     var detailText: String {
         if let error { return error }
         guard let metadata else { return isLoading ? "Loading changed files…" : "No commit details" }
-        return "\(metadata.message)\n\n\(metadata.authorDescription)\n\(metadata.authoredAt)\n\(metadata.commitID.rawValue)"
+        return "Author  \(metadata.authorDescription)\nDate  \(metadata.authoredAt)\nCommit  \(metadata.commitID.rawValue)\n\nMessage\n\(metadata.message)"
     }
 }

@@ -79,8 +79,7 @@ struct GitHistoryTable: NSViewRepresentable {
         private var observers: [NSObjectProtocol] = []
         private let dateFormatter: DateFormatter = {
             let formatter = DateFormatter()
-            formatter.dateStyle = .short
-            formatter.timeStyle = .short
+            formatter.dateFormat = "yyyy-MM-dd HH:mm"
             return formatter
         }()
 
@@ -150,13 +149,13 @@ struct GitHistoryTable: NSViewRepresentable {
         private func measureRows() {
             guard let content, let table = tableView else { return }
             measuredWidth = max(1, table.enclosingScrollView?.contentSize.width ?? table.bounds.width)
-            let width = max(1, measuredWidth - graphWidth - 23)
+            let width = max(1, measuredWidth - graphWidth - 29)
             heights = rows.map { row in
                 let commit = content.commits[row.commitIndex]
                 switch row {
                 case .commit:
-                    let badges = GitRefBadgesView.height(for: commit.refDecorations, width: width + 5)
-                    return 39 + (badges > 0 ? badges + 3 : 0)
+                    let badges = GitRefBadgesView.height(for: commit.refDecorations, width: width)
+                    return 64 + (badges > 0 ? badges + 4 : 0)
                 case .details:
                     let text = content.expandedCommits[commit.id]?.detailText ?? ""
                     return GitHistoryChildCell.detailHeight(text, width: width)
@@ -248,7 +247,10 @@ struct GitHistoryTable: NSViewRepresentable {
 
 private final class GitHistoryCell: NSTableCellView {
     private let subject = NSTextField(labelWithString: "")
-    private let detail = NSTextField(labelWithString: "")
+    private let date = NSTextField(labelWithString: "")
+    private let author = NSTextField(labelWithString: "")
+    private let hashLabel = NSTextField(labelWithString: "")
+    private let headLabel = NSTextField(labelWithString: "HEAD")
     private let badges = GitRefBadgesView()
     private let graph = GitGraphCellView()
     private let disclosure = NSButton()
@@ -257,14 +259,31 @@ private final class GitHistoryCell: NSTableCellView {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        subject.font = .systemFont(ofSize: 12, weight: .medium)
-        detail.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
-        detail.textColor = .secondaryLabelColor
-        for label in [subject, detail] { label.lineBreakMode = .byTruncatingTail; label.maximumNumberOfLines = 1 }
+        subject.font = .systemFont(ofSize: 12)
+        author.font = .systemFont(ofSize: 11, weight: .medium)
+        date.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        hashLabel.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+        hashLabel.alignment = .right
+        date.textColor = .secondaryLabelColor
+        hashLabel.textColor = .secondaryLabelColor
+        headLabel.font = .systemFont(ofSize: 8, weight: .semibold)
+        headLabel.alignment = .center
+        headLabel.textColor = .controlAccentColor
+        headLabel.wantsLayer = true
+        headLabel.layer?.cornerRadius = 3
+        for label in [subject, author, date, hashLabel] {
+            label.lineBreakMode = .byTruncatingTail
+            label.maximumNumberOfLines = 1
+        }
         disclosure.isBordered = false
+        disclosure.imagePosition = .imageOnly
+        disclosure.imageScaling = .scaleNone
+        disclosure.controlSize = .small
+        disclosure.focusRingType = .none
+        disclosure.setButtonType(.momentaryChange)
         disclosure.target = self
         disclosure.action = #selector(toggleCommit)
-        [graph, disclosure, subject, detail, badges].forEach(addSubview)
+        [graph, disclosure, subject, date, author, hashLabel, headLabel, badges].forEach(addSubview)
     }
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override var isFlipped: Bool { true }
@@ -276,21 +295,30 @@ private final class GitHistoryCell: NSTableCellView {
         self.toggle = toggle
         self.graph.configure(row: graph, isHead: state.head, laneCount: graphLayout.lanes)
         subject.stringValue = commit.subject.isEmpty ? "(no subject)" : commit.subject
-        detail.stringValue = "\(commit.id.shortSHA)  \(commit.authorName)  \(date)"
+        self.date.stringValue = date
+        author.stringValue = commit.authorName
+        hashLabel.stringValue = commit.id.shortSHA
+        headLabel.isHidden = !state.head
+        headLabel.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.10).cgColor
         badges.configure(commit.refDecorations)
-        disclosure.image = NSImage(systemSymbolName: state.expanded ? "chevron.down" : "chevron.right", accessibilityDescription: state.expanded ? "Collapse commit" : "Expand commit")
+        disclosure.image = NSImage(systemSymbolName: state.expanded ? "chevron.down" : "chevron.right", accessibilityDescription: state.expanded ? "Collapse commit" : "Expand commit")?
+            .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
         toolTip = "\(commit.subject)\n\(commit.id.rawValue)\n\(commit.authorName) · \(date)"
         needsLayout = true
     }
     override func layout() {
         super.layout()
         graph.frame = NSRect(x: 0, y: 0, width: graphWidth, height: bounds.height)
-        disclosure.frame = NSRect(x: graphWidth, y: 6, width: 9, height: 14)
-        let x = graphWidth + 12
-        let width = max(1, bounds.width - x - 6)
-        subject.frame = NSRect(x: x, y: 4, width: width, height: 17)
-        detail.frame = NSRect(x: x, y: 23, width: width, height: 13)
-        badges.frame = NSRect(x: x, y: 38, width: width, height: max(0, bounds.height - 41))
+        disclosure.frame = NSRect(x: graphWidth, y: 5, width: 18, height: 18)
+        let x = graphWidth + 21
+        let width = max(1, bounds.width - x - 8)
+        let hashWidth: CGFloat = 52
+        date.frame = NSRect(x: x, y: 7, width: max(1, width - hashWidth - 6), height: 14)
+        hashLabel.frame = NSRect(x: x + width - hashWidth, y: 7, width: hashWidth, height: 14)
+        author.frame = NSRect(x: x, y: 24, width: max(1, width - (headLabel.isHidden ? 0 : 38)), height: 15)
+        headLabel.frame = NSRect(x: x + width - 32, y: 25, width: 32, height: 13)
+        subject.frame = NSRect(x: x, y: 42, width: width, height: 17)
+        badges.frame = NSRect(x: x, y: 63, width: width, height: max(0, bounds.height - 66))
     }
 }
 
@@ -301,12 +329,28 @@ private final class GitHistoryChildCell: NSTableCellView {
     private var isFile = false
     static func detailHeight(_ text: String, width: CGFloat) -> CGFloat {
         let cell = NSTextFieldCell(textCell: text)
-        cell.font = .systemFont(ofSize: 11)
+        cell.attributedStringValue = attributedDetail(text)
         cell.wraps = true
         cell.isScrollable = false
         cell.usesSingleLineMode = false
         let size = cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: max(1, width), height: .greatestFiniteMagnitude))
         return max(28, ceil(size.height) + 18)
+    }
+    private static func attributedDetail(_ text: String) -> NSAttributedString {
+        let value = NSMutableAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor,
+        ])
+        let separator = (text as NSString).range(of: "\n\nMessage\n")
+        if separator.location != NSNotFound {
+            let start = NSMaxRange(separator)
+            value.addAttribute(.foregroundColor, value: NSColor.labelColor,
+                               range: NSRange(location: start, length: value.length - start))
+            for title in ["Author", "Date", "Commit", "Message"] {
+                let range = (text as NSString).range(of: title)
+                value.addAttribute(.font, value: NSFont.systemFont(ofSize: 10, weight: .semibold), range: range)
+            }
+        }
+        return value
     }
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -326,7 +370,7 @@ private final class GitHistoryChildCell: NSTableCellView {
         label.lineBreakMode = isFile ? .byTruncatingMiddle : .byWordWrapping
         if let file {
             let text = NSMutableAttributedString(string: file.status + "  ", attributes: [
-                .foregroundColor: file.kind == .deleted ? NSColor.systemRed : NSColor.systemGreen,
+                .foregroundColor: file.kind.color,
                 .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .semibold),
             ])
             text.append(NSAttributedString(string: file.displayPath, attributes: [
@@ -334,15 +378,16 @@ private final class GitHistoryChildCell: NSTableCellView {
             ]))
             label.attributedStringValue = text
         } else {
-            label.stringValue = details?.detailText ?? ""
+            label.attributedStringValue = Self.attributedDetail(details?.detailText ?? "")
         }
-        toolTip = file?.displayPath ?? details?.detailText
+        toolTip = file.map { $0.kind.label + " · " + $0.displayPath } ?? details?.detailText
+        setAccessibilityLabel(toolTip)
         needsLayout = true
     }
     override func layout() {
         super.layout()
         graph.frame = NSRect(x: 0, y: 0, width: graphWidth, height: bounds.height)
-        label.frame = NSRect(x: graphWidth + 17, y: isFile ? 5 : 7,
-                             width: max(1, bounds.width - graphWidth - 23), height: max(1, bounds.height - (isFile ? 8 : 14)))
+        label.frame = NSRect(x: graphWidth + 21, y: isFile ? 5 : 7,
+                             width: max(1, bounds.width - graphWidth - 29), height: max(1, bounds.height - (isFile ? 8 : 14)))
     }
 }

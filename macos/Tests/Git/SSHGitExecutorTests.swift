@@ -79,8 +79,24 @@ private final class GitSSHTestServer {
         }
     }
 
+    func disconnect() {
+        if process.isRunning {
+            // Stopping only the listener leaves authenticated sshd children
+            // (and therefore multiplexed transports) alive. Stop this fixture's
+            // accepted sessions too, to model an actual server disconnect.
+            let children = Process()
+            children.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+            children.arguments = ["-TERM", "-P", String(process.processIdentifier)]
+            children.standardOutput = FileHandle.nullDevice
+            children.standardError = FileHandle.nullDevice
+            if (try? children.run()) != nil { children.waitUntilExit() }
+            process.terminate()
+            process.waitUntilExit()
+        }
+    }
+
     func stop() {
-        if process.isRunning { process.terminate(); process.waitUntilExit() }
+        disconnect()
         try? FileManager.default.removeItem(at: root)
     }
 
@@ -97,6 +113,39 @@ private final class GitSSHTestServer {
 
 @MainActor
 struct SSHGitExecutorTests {
+    @Test func privateMultiplexedConnectionReusesTransportAndKeepsEndpointsIsolated() async throws {
+        let server = try await GitSSHTestServer()
+        defer { server.stop() }
+        let remote = SSHGitExecutor(connection: server.connection)
+        let arguments = ["-c", "alias.transport=!printf '%s' \"$SSH_CONNECTION\"", "transport"]
+        let first = try await remote.execute(arguments: arguments, workingDirectory: server.root.path)
+        try #require(first.isSuccess && !first.stdout.isEmpty)
+        let start = Date()
+        for _ in 0..<5 {
+            let result = try await remote.execute(arguments: arguments, workingDirectory: server.root.path)
+            #expect(result.isSuccess && result.stdout == first.stdout)
+        }
+        let reused = Date().timeIntervalSince(start) / 5
+        let cold = SSHGitExecutor(connection: server.connection, multiplexing: false)
+        let coldStart = Date()
+        for _ in 0..<3 {
+            let result = try await cold.execute(arguments: arguments, workingDirectory: server.root.path)
+            #expect(result.isSuccess && result.stdout != first.stdout)
+        }
+        let fresh = Date().timeIntervalSince(coldStart) / 3
+        print("SSH transport benchmark: fresh=\(fresh)s reused=\(reused)s per command")
+        async let left = remote.execute(arguments: arguments, workingDirectory: server.root.path)
+        async let right = remote.execute(arguments: arguments, workingDirectory: server.root.path)
+        let pair = try await (left, right)
+        #expect(pair.0.stdout == first.stdout && pair.1.stdout == first.stdout)
+        let socket = try GitSSHControlSocket.path(for: server.connection, executablePath: "/usr/bin/ssh")
+        #expect(socket.utf8.count < 104)
+        let other = try GitSSHConnection(destination: server.connection.destination,
+            options: server.connection.options, localWorkingDirectory: server.root.path)
+        #expect(try GitSSHControlSocket.path(for: other, executablePath: "/usr/bin/ssh") != socket)
+        #expect(try GitSSHControlSocket.path(for: server.connection, executablePath: "/different/ssh") != socket)
+    }
+
     @Test func connectionPreservesRoutingOptionsWithoutRepeatingInteractiveSideEffects() throws {
         let ssh = PaneSessionContext.SSH(connectionID: "test", alias: "host", serverID: nil,
             replay: .init(version: 1, ssh: "/usr/bin/ssh", forwardEnv: false, terminfo: false, cache: false,
@@ -365,8 +414,7 @@ struct SSHGitExecutorTests {
         #expect(restored.commitDraft == "local draft" && restored.activeTab == .changes)
         #expect(restored.expandedCommits.isEmpty)
         registry.presentationDidChange(to: nil, context: localContext)
-        server.process.terminate()
-        server.process.waitUntilExit()
+        server.disconnect()
         await #expect(throws: (any Error).self) {
             try await remote.execute(arguments: ["hash-object", "--stdin"], workingDirectory: path.path, stdin: payload)
         }

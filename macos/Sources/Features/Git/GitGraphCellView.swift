@@ -84,7 +84,7 @@ final class GitGraphCellView: NSView {
 
     private func drawNode(_ row: GitGraphRow) {
         let center = point(for: .node(lane: row.nodeLane))
-        let diameter: CGFloat = isHead ? 10 : Self.nodeDiameter
+        let diameter = Self.nodeDiameter
         let radius = diameter / 2
         let rect = NSRect(
             x: center.x - radius,
@@ -101,12 +101,8 @@ final class GitGraphCellView: NSView {
         outline.lineWidth = 1
         outline.stroke()
         if isHead {
-            NSColor.controlAccentColor.setStroke()
-            let halo = NSBezierPath(ovalIn: rect.insetBy(dx: -2, dy: -2))
-            halo.lineWidth = 1.5
-            halo.stroke()
-            NSColor.white.setFill()
-            NSBezierPath(ovalIn: rect.insetBy(dx: 3.5, dy: 3.5)).fill()
+            NSColor.controlBackgroundColor.setFill()
+            NSBezierPath(ovalIn: rect.insetBy(dx: 2, dy: 2)).fill()
         }
     }
 

@@ -10,7 +10,7 @@ final class GitRefBadgesView: NSView {
         let color: NSColor
         let symbol: String
         switch decoration.kind {
-        case .currentBranch: color = .systemBlue; symbol = "checkmark.circle.fill"
+        case .currentBranch: color = .systemBlue; symbol = "arrow.triangle.branch"
         case .localBranch: color = .systemGreen; symbol = "arrow.triangle.branch"
         case .remoteBranch: color = .systemPurple; symbol = "network"
         case .tag: color = .systemOrange; symbol = "tag.fill"

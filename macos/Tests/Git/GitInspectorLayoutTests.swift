@@ -24,11 +24,14 @@ struct GitInspectorLayoutTests {
                   isRemote: false, upstream: "origin/main", tracking: "[ahead 12, behind 3]"),
         ]
         for width in [220.0, 360.0] {
-            let view = NSHostingView(rootView: InspectorGitView(content: content, perform: { _ in }))
+            let view = NSHostingView(rootView: InspectorGitView(content: content, perform: { _ in })
+                .background(Color(NSColor.windowBackgroundColor)))
             view.sizingOptions = []
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 500),
                                   styleMask: [.borderless], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false
+            window.backgroundColor = .windowBackgroundColor
+            window.appearance = NSAppearance(named: .darkAqua)
             window.contentView = view
             window.orderFront(nil)
             window.setContentSize(NSSize(width: width, height: 500))
@@ -45,6 +48,24 @@ struct GitInspectorLayoutTests {
                 view.cacheDisplay(in: view.bounds, to: bitmap)
                 let data = try #require(bitmap.representation(using: .png, properties: [:]))
                 try data.write(to: URL(fileURLWithPath: "/tmp/omg-git-history-\(Int(width)).png"))
+
+            }
+            if FileManager.default.fileExists(atPath: "/tmp/omg-git-render") {
+                var expanded = content
+                expanded.expandedCommits[commit.id] = GitCommitExpansion(metadata: .init(commitID: commit.id,
+                    authorName: "Contributor", authorEmail: "author@example.com", authoredAt: "2026-09-09 12:00",
+                    parents: [], message: "Clarify history metadata\n\nKeep author and time visible before the message."),
+                    files: [.init(path: "Sources/History.swift", status: "M"),
+                            .init(path: "Sources/Status.swift", status: "A"),
+                            .init(path: "Sources/OldWindow.swift", status: "D")])
+                view.rootView = InspectorGitView(content: expanded, perform: { _ in })
+                    .background(Color(NSColor.windowBackgroundColor))
+                try await Task.sleep(for: .milliseconds(150))
+                view.layoutSubtreeIfNeeded()
+                let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+                view.cacheDisplay(in: view.bounds, to: bitmap)
+                let data = try #require(bitmap.representation(using: .png, properties: [:]))
+                try data.write(to: URL(fileURLWithPath: "/tmp/omg-git-history-expanded-\(Int(width)).png"))
             }
             window.contentView = nil
             window.close()
@@ -193,6 +214,53 @@ struct GitInspectorLayoutTests {
         try expectPosition(nextRight, at: 62)
         try scroll(nextRight, to: 100)
         try expectPosition(nextLeft, at: 98)
+    }
+
+    @Test func deletedCRLFFileOpensNativeBeforeAndAfterEditors() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("git-deleted-view-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = "import Foundation\r\n\r\nlet removed = 42\r\n"
+        try Data(source.utf8).write(to: root.appendingPathComponent("removed.swift"))
+        for arguments in [["init", "--quiet"], ["config", "core.autocrlf", "false"], ["add", "."]] {
+            let result = try await LocalGitExecutor().execute(arguments: arguments, workingDirectory: root.path)
+            try #require(result.isSuccess)
+        }
+        try FileManager.default.removeItem(at: root.appendingPathComponent("removed.swift"))
+        let repository = GitRepositoryIdentity(worktreePath: root.path, gitDirPath: root.path + "/.git",
+                                               commonGitDirPath: root.path + "/.git")
+        let request = GitEditorDiffRequest(repository: repository, target: .unstaged,
+                                           file: .init(path: "removed.swift", status: "D"))
+        let view = NSHostingView(rootView: GitEditorDiffView(request: request, theme: .oneDark, close: {})
+            .background(Color(NSColor.windowBackgroundColor)))
+        view.sizingOptions = []
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 400),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.contentView = view
+        window.orderFront(nil)
+        defer { window.contentView = nil; window.close() }
+        func editors(in view: NSView) -> [TextView] {
+            if let text = view as? TextView { return [text] }
+            return view.subviews.flatMap { editors(in: $0) }
+        }
+        for _ in 0..<100 {
+            if editors(in: view).count == 2 { break }
+            try await Task.sleep(for: .milliseconds(30))
+        }
+        view.layoutSubtreeIfNeeded()
+        let sources = editors(in: view)
+        #expect(sources.count == 2)
+        #expect(sources.contains { $0.string == source })
+        #expect(sources.contains { $0.string.isEmpty })
+        #expect(sources.allSatisfy { !$0.isEditable })
+        if FileManager.default.fileExists(atPath: "/tmp/omg-git-render") {
+            let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            let data = try #require(bitmap.representation(using: .png, properties: [:]))
+            try data.write(to: URL(fileURLWithPath: "/tmp/omg-git-deleted-source.png"))
+        }
     }
 
     private func descendant<T: NSView>(_ type: T.Type, in view: NSView) -> T? {

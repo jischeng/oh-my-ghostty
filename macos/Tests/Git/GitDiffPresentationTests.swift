@@ -43,6 +43,17 @@ struct GitDiffPresentationTests {
         #expect(!stale.isConsistent)
     }
 
+    @Test func actualCRLFPatchPreservesEveryDeletedAndModifiedLine() {
+        let removed = GitDiffPresentation(before: "first\r\nsecond\r\n", after: "",
+            patch: "@@ -1,2 +0,0 @@\n-first\r\n-second\r\n")
+        #expect(removed.isConsistent)
+        #expect(removed.beforeHighlights == [0: false, 1: false])
+        let modified = GitDiffPresentation(before: "first\r\nold\r\n", after: "first\r\nnew\r\n",
+            patch: "@@ -1,2 +1,2 @@\n first\r\n-old\r\n+new\r\n")
+        #expect(modified.isConsistent)
+        #expect(modified.beforeHighlights == [1: false] && modified.afterHighlights == [1: true])
+    }
+
     @Test func bothSourceHighlightsIgnorePatchHeadersAndNoNewlineMarkers() {
         let patch = """
         diff --git a/file b/file

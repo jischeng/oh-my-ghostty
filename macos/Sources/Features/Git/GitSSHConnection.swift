@@ -60,19 +60,24 @@ struct GitSSHConnection: Hashable, Sendable {
     }
 
     var identity: String { ([destination, workspaceID, executablePath, localWorkingDirectory] + options).joined(separator: "\0") }
-    var arguments: [String] {
+    var arguments: [String] { arguments(controlSocket: nil) }
+
+    func arguments(controlSocket: String?) -> [String] {
         // These options precede user config/replay options: OpenSSH uses the first value.
         ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
          "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2",
          "-o", "ClearAllForwardings=yes", "-o", "PermitLocalCommand=no", "-o", "SessionType=default",
          "-o", "RemoteCommand=none", "-o", "RequestTTY=no", "-o", "StdinNull=no",
-         "-o", "ControlMaster=no", "-o", "ControlPersist=no"] + options + ["--", destination]
+         "-o", controlSocket == nil ? "ControlMaster=no" : "ControlMaster=auto",
+         "-o", controlSocket == nil ? "ControlPersist=no" : "ControlPersist=60"] + options +
+            (controlSocket.map { ["-S", $0] } ?? []) + ["--", destination]
     }
 }
 
 struct SSHGitExecutor: GitExecutor {
     let connection: GitSSHConnection
     var sshPath: String?
+    var multiplexing = true
     static let marker = Data("\u{1e}OMG-GIT-v1\u{1f}".utf8)
 
     static func quote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
@@ -114,9 +119,11 @@ struct SSHGitExecutor: GitExecutor {
         // decoded POSIX script is a -c argument, leaving SSH stdin for git commit.
         let encoded = Data(framed.utf8).base64EncodedString()
         let command = "exec /bin/sh -c 'exec /bin/sh -c \"$(printf %s " + encoded + " | base64 -d)\"'"
+        let executable = sshPath ?? connection.executablePath
+        let socket = multiplexing ? try GitSSHControlSocket.path(for: connection, executablePath: executable) : nil
         let result = try await GitProcessRunner().run(
-            executablePath: sshPath ?? connection.executablePath,
-            arguments: connection.arguments + [command], workingDirectory: connection.localWorkingDirectory,
+            executablePath: executable,
+            arguments: connection.arguments(controlSocket: socket) + [command], workingDirectory: connection.localWorkingDirectory,
             stdin: stdin, maxOutputBytes: limit.map { $0 + 64 * 1024 }
         )
         guard result.exitCode != 255 else {

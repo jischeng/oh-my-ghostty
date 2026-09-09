@@ -82,6 +82,69 @@ struct GitEditorDiffModelTests {
         #expect(model.content?.sourceError == nil)
     }
 
+    @Test func deletedCRLFFileUsesSourceDiffForWorkingTreeIndexAndCommit() async throws {
+        let root = try await makeRepository()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try await git(["config", "core.autocrlf", "false"], in: root)
+        try await git(["config", "user.name", "Diff Test"], in: root)
+        try await git(["config", "user.email", "diff@example.com"], in: root)
+        let source = "first\r\nsecond\r\nthird\r\n"
+        let file = root.appendingPathComponent("deleted.txt")
+        try Data(source.utf8).write(to: file)
+        try await git(["add", "."], in: root)
+        try await git(["commit", "-m", "initial"], in: root)
+        try FileManager.default.removeItem(at: file)
+        let repository = GitRepositoryIdentity(worktreePath: root.path, gitDirPath: root.path + "/.git",
+                                               commonGitDirPath: root.path + "/.git")
+        for target: GitDiffTarget in [.unstaged, .staged, .commit(GitCommitID("HEAD"))] {
+            if target == .staged { try await git(["add", "-u"], in: root) }
+            if case .commit = target { try await git(["commit", "-m", "delete"], in: root) }
+            let resolvedTarget: GitDiffTarget
+            if case .commit = target {
+                let head = try await LocalGitExecutor().execute(arguments: ["rev-parse", "HEAD"], workingDirectory: root.path)
+                resolvedTarget = .commit(GitCommitID(head.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines)))
+            } else { resolvedTarget = target }
+            let model = GitEditorDiffModel(request: .init(repository: repository, target: resolvedTarget, file: nil))
+            await model.reload().value
+            #expect(model.error == nil)
+            #expect(model.content?.sourceError == nil)
+            #expect(model.content?.before == source && model.content?.after == "")
+            #expect(model.content?.presentation?.isConsistent == true)
+            #expect(model.content?.presentation?.beforeHighlights.count == 3)
+            model.cancel()
+        }
+    }
+
+    @Test func commitDiffReusesItsResolvedParentWhenSwitchingFiles() async throws {
+        let root = try await makeRepository()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try await git(["config", "user.name", "Diff Test"], in: root)
+        try await git(["config", "user.email", "diff@example.com"], in: root)
+        for version in ["before", "after"] {
+            for name in ["a.txt", "b.txt"] {
+                try Data("\(name) \(version)\n".utf8).write(to: root.appendingPathComponent(name))
+            }
+            try await git(["add", "."], in: root)
+            try await git(["commit", "-m", version], in: root)
+        }
+        let head = try await LocalGitExecutor().execute(arguments: ["rev-parse", "HEAD"], workingDirectory: root.path)
+        let repository = GitRepositoryIdentity(worktreePath: root.path, gitDirPath: root.path + "/.git",
+                                               commonGitDirPath: root.path + "/.git")
+        let executor = CountingDiffExecutor()
+        let model = GitEditorDiffModel(request: .init(repository: repository,
+            target: .commit(GitCommitID(head.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines))), file: nil),
+            service: GitDiffService(executor: executor))
+        defer { model.cancel() }
+        await model.reload().value
+        #expect(model.error == nil && model.content?.sourceError == nil)
+        #expect(await executor.commands.count == 5)
+        let next = try #require(model.files.last)
+        await model.select(next)?.value
+        #expect(model.content?.presentation?.isConsistent == true)
+        #expect(await executor.commands.count == 8)
+        #expect(await executor.commands.filter { $0.first == "rev-list" }.count == 1)
+    }
+
     private func makeModel(root: URL, file: GitDiffFile? = nil) -> GitEditorDiffModel {
         let repository = GitRepositoryIdentity(worktreePath: root.path, gitDirPath: root.path + "/.git",
                                                commonGitDirPath: root.path + "/.git")
@@ -126,5 +189,15 @@ private actor DelayedDiffExecutor: GitExecutor {
 
     private func result(_ text: String) -> GitExecutionResult {
         GitExecutionResult(exitCode: 0, stdout: Data(text.utf8), stderr: Data())
+    }
+}
+
+private actor CountingDiffExecutor: GitExecutor {
+    var commands: [[String]] = []
+
+    func execute(arguments: [String], workingDirectory: String, stdin: Data?, maxOutputBytes: Int?) async throws -> GitExecutionResult {
+        commands.append(arguments)
+        return try await LocalGitExecutor().execute(arguments: arguments, workingDirectory: workingDirectory,
+                                                     stdin: stdin, maxOutputBytes: maxOutputBytes)
     }
 }

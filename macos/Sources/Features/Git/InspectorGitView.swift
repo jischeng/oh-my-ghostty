@@ -218,11 +218,12 @@ struct InspectorGitView: View {
                 Button { perform(.gitAction(.openDiff(file, target))) } label: {
                     HStack(spacing: 6) {
                         Text(file.isUntracked ? "?" : file.status).font(.caption.monospaced())
-                            .foregroundStyle(file.kind == .deleted ? Color.red : Color.green)
+                            .foregroundStyle(Color(file.kind.color))
                         Text(file.displayPath).lineLimit(2).truncationMode(.middle)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }.contentShape(Rectangle())
-                }.buttonStyle(.plain).help(file.displayPath).disabled(error != nil)
+                }.buttonStyle(.plain).help(file.kind.label + " · " + file.displayPath)
+                    .accessibilityLabel(file.kind.label + " " + file.displayPath).disabled(error != nil)
                 }
             }
             if files.isEmpty && error == nil { Text("No changes").font(.caption).foregroundStyle(.secondary) }

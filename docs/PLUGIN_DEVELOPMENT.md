@@ -956,8 +956,12 @@ loads a selected file's unified diff. File lists use Git's NUL-delimited
 remain intact. Renames and copies retain both old and new paths; untracked
 working-tree files are represented as additions.
 
-Double-clicking a history commit (or its disclosure control) expands its full
-message, author/time/hash and changed-file rows in the history list. Metadata
+History rows put timestamp, author and short commit ID before the subject,
+with separate text fields so long messages cannot hide metadata. Disclosure
+symbols have a fixed small glyph inside an 18-point hit target. The current
+commit has a compact HEAD label and a hollow graph node at the normal size.
+Double-clicking a history commit (or its disclosure control) expands labeled
+author/time/hash metadata, then a separate message section and changed files. Metadata
 and file lists load on demand, independently of history pagination; collapse
 cancels that commit's pending request. Only clicking a changed file routes to
 `EditorWorkspaceStore.openGitDiff(repository:target:file:context:)`, honoring the
@@ -968,12 +972,17 @@ native undo, selection, scroll position and Markdown edit/preview mode. Source c
 the editor's syntax highlighting and added/deleted line tints. Side by Side and
 Inline modes share the same snapshots and one parsed hunk/line mapping.
 Both side-by-side highlighting and inline rows are derived from that mapping.
+Patch lines split on LF code units, including CRLF source patches, so deleted
+CRLF files use the same source comparison as other text files.
 Inline interleaves removed/added source lines, retaining unchanged source context. Linked scrolling is on by default
 in Side by Side mode and maps source line positions through Git's hunks in both
 directions, including insertion/deletion offsets; it can be disabled.
 Binary and size-limit states remain explicit, and a raw patch is the fallback
 when complete source snapshots are unavailable or changed during loading. Commit diffs compare against the first parent, or the empty tree for a
 root commit; staged diffs compare HEAD/index, unstaged diffs index/worktree.
+The file list retains its resolved commit base for patch and source reads;
+switching files does not repeat the same parent lookup. Tracked and untracked
+working-tree lists load concurrently.
 Diff source views forward the host editor's hide, open, close, adjacent-document,
 focus and Save All callbacks. Shift+Escape hides the editor without discarding
 the diff preview, display mode or scroll position, as with ordinary editor
@@ -985,7 +994,10 @@ shown as an unstaged addition. Selection and refresh share one cancellable
 loader; an obsolete result cannot overwrite a newer selection. The raw patch
 view is retained as a fallback, without a separate detail-window lifecycle.
 
-Changes lists staged and unstaged/untracked paths separately. Checkboxes reflect
+Changes lists staged and unstaged/untracked paths separately. Changes and
+History share status colors: added green, modified orange, deleted red, renamed
+blue, copied teal, type-changed purple and unknown secondary. Letters and
+accessible status labels remain available independently of color. Checkboxes reflect
 the real index: checking an unstaged row stages that whole file; unchecking a
 staged row unstages it without deleting the working file (including unborn
 repositories). Commit Staged submits the index via stdin commit message, never
@@ -1018,7 +1030,7 @@ cached refs, and routine refresh never fetches. Current branch, tag and remote
 decorations use distinct native SF Symbols, colors and accessible descriptions.
 Branch badges precede tags, with main branches first, and flow into additional
 rows at narrow widths. The commit graph uses a compact lane-dependent gutter;
-the actual HEAD node has a larger ring/dot independent of table selection.
+the actual HEAD marker is independent of table selection.
 Expanded child rows continue graph lanes without introducing commit nodes.
 
 History fetches another frozen-snapshot page when scrolling near the bottom,
@@ -1047,13 +1059,19 @@ an instruction to run Git locally. The SSH destination remains visible during
 loading and errors.
 
 `SSHGitExecutor` uses OpenSSH batch mode with the session's replayed destination,
-port, user, identity, config, jump host and control-socket options. One OpenSSH
+port, user, identity, config and jump host options. One OpenSSH
 argv parser serves both foreground detection and replay, including combined
 flags such as `-4vp2222`; unknown options fail closed. Foreground
 OpenSSH sessions capture argv boundaries via `KERN_PROCARGS2` (not a whitespace
 split of ps output); if exact options cannot be recovered, Git asks for a
-reconnection rather than guessing a port. Existing SSH config/agent or
-multiplexed authentication applies. Auxiliary commands disable terminal
+reconnection rather than guessing a port. Existing SSH config and
+agent authentication apply. Git commands use a private OpenSSH master with
+`ControlMaster=auto` and a 60-second idle `ControlPersist`, instead of a fresh
+connection per query. Its socket key includes the full connection identity,
+executable, original cwd and application-session salt. The short socket directory
+is owned by the current user with mode 0700; interactive terminal control sockets
+are not reused or modified. OpenSSH owns concurrent channels and idle expiry;
+commands are never retried automatically after a transport failure. Auxiliary commands disable terminal
 allocation, port forwards, LocalCommand and RemoteCommand side effects.
 Configured agent forwarding, including explicit `-A`, is preserved.
 Auxiliary execution retains the original local launch directory, so relative

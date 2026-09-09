@@ -78,11 +78,18 @@ struct GitDiffFile: Hashable, Sendable, Equatable, Identifiable {
     }
 }
 
+struct GitDiffCommitBase: Hashable, Sendable {
+    let commit: GitCommitID
+    let id: String
+    let isRoot: Bool
+}
+
 struct GitDiffFileList: Hashable, Sendable, Equatable {
     let repository: GitRepositoryIdentity
     let target: GitDiffTarget
     let files: [GitDiffFile]
     let baseDescription: String
+    var commitBase: GitDiffCommitBase?
 }
 
 struct GitCommitMetadata: Hashable, Sendable, Equatable {

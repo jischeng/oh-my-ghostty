@@ -7,7 +7,9 @@ struct GitGraphLayout: Equatable, Sendable {
     private let primaryRanks: [GitCommitID: Int]
 
     init(activeLanes: [GitCommitID] = [], primaryFirstParents: [GitCommitID] = []) {
-        let initial = primaryFirstParents.first.map { tip in [tip] + activeLanes.filter { $0 != tip } } ?? activeLanes
+        // Only real continuations enter from above; the first-parent spine
+        // supplies ordering ranks, not an invented incoming edge at the tip.
+        let initial = activeLanes
         self.activeLanes = initial
         self.activeLaneColorIndices = initial.indices.map { $0 % GitGraphRow.paletteSize }
         self.nextColorIndex = initial.count % GitGraphRow.paletteSize

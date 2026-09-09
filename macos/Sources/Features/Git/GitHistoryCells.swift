@@ -7,8 +7,8 @@ final class GitHistoryCell: NSTableCellView {
     private let badges = GitRefBadgesView()
     private let graph = GitGraphCellView()
     private let disclosure = NSButton()
-    private let graphWidth = GitGraphColumnLayout.drawingWidth
-    private let contentX = GitHistoryRowMetrics.contentLeadingX
+    private var graphWidth: CGFloat = 10
+    private var contentX: CGFloat = 13
     private var toggle: () -> Void = {}
 
     static func height(commit: GitHistoryCommit, refs: [GitRefDecoration], width: CGFloat) -> CGFloat {
@@ -40,6 +40,8 @@ final class GitHistoryCell: NSTableCellView {
     func configure(commit: GitHistoryCommit, graph: GitGraphRow, graphLayout: GitGraphColumnLayout,
                    summary: (date: String, refs: [GitRefDecoration]), state: (head: Bool, expanded: Bool), toggle: @escaping () -> Void) {
         self.toggle = toggle
+        graphWidth = graphLayout.width
+        contentX = graphLayout.contentX
         self.graph.configure(row: graph, isHead: state.head, layout: graphLayout,
                              section: state.expanded ? .expandedCommit : .commit)
         subject.stringValue = commit.subject.isEmpty ? "(no subject)" : commit.subject
@@ -84,8 +86,8 @@ final class GitHistoryDetailCell: NSTableCellView {
     private let label = InspectorCopyableTextField(wrappingLabelWithString: "")
     private let button = NSButton()
     private let openIcon = NSImageView()
-    private let graphWidth = GitGraphColumnLayout.drawingWidth
-    private let contentX = GitHistoryRowMetrics.contentLeadingX
+    private var graphWidth: CGFloat = 10
+    private var contentX: CGFloat = 13
     private var content = Content.notice("", false)
     private var action: () -> Void = {}
 
@@ -143,6 +145,8 @@ final class GitHistoryDetailCell: NSTableCellView {
 
     func configure(graph: GitGraphRow, graphLayout: GitGraphColumnLayout, isLast: Bool,
                    content: Content, action: @escaping () -> Void) {
+        graphWidth = graphLayout.width
+        contentX = graphLayout.contentX
         self.graph.configure(row: graph, layout: graphLayout, section: isLast ? .expansionEnd : .continuation)
         self.content = content
         self.action = action

@@ -21,13 +21,12 @@ struct GitHistoryNavigatorTests {
         }
     }
 
-    @Test func graphProjectionKeepsNodeExtentsInsideAFixedSurface() {
-        var engine = GitGraphLayout()
-        let rows = fixture().map { engine.append(commitID: $0.id, parentIDs: $0.parentIDs) }
-        let columns = rows.map { _ in GitGraphColumnLayout() }
-        #expect(rows[0].nodeLane == 0 && rows[1].nodeLane == 0 && rows[5].nodeLane == 0)
-        #expect(columns[0].width == columns[1].width && columns[1].width == columns[5].width)
-        #expect(columns.allSatisfy { $0.width == 18 })
+    @Test func rowExtentsStayCompactAndBoundaryCoordinatesMatch() {
+        let rows = GitGraphLayout.rows(for: fixture())
+        let columns = rows.map { GitGraphColumnLayout(row: $0) }
+        #expect(columns.last?.contentX == 13)
+        #expect(columns[0].contentX == 33) // Three parent lanes right of the node.
+        #expect(columns[2].contentX == 37) // Rightmost lane now contains a node.
         for index in 0..<(rows.count - 1) {
             #expect(rows[index].bottomLanes == rows[index + 1].topLanes)
             for lane in rows[index].bottomLanes.indices {
@@ -36,28 +35,32 @@ struct GitHistoryNavigatorTests {
             }
         }
         for (row, column) in zip(rows, columns) {
-            for lane in 0..<row.requiredLaneCount {
-                #expect(column.middleX(lane: lane, row: row) >= 4)
-                #expect(column.middleX(lane: lane, row: row) <= column.width - 4)
+            #expect(column.middleX(lane: row.nodeLane, row: row) + 4.5 <= column.width)
+            for segment in row.segments {
+                #expect(column.edgeX(lane: segment.from.lane, count: 0) + 0.8 <= column.width)
+                #expect(column.edgeX(lane: segment.to.lane, count: 0) + 0.8 <= column.width)
             }
         }
     }
 
-    @Test func commonAndDenseLaneCountsNeverReserveMoreTextSpace() {
-        for count in [1, 2, 3, 8, 32] {
-            let ids = (0..<count).map { GitCommitID("lane-\($0)") }
-            var layout = GitGraphLayout(activeLanes: ids)
-            let row = layout.append(commitID: ids[count - 1], parentIDs: [])
-            let column = GitGraphColumnLayout()
-            #expect(column.width == 18)
-            for lane in 0..<row.requiredLaneCount {
-                let x = column.middleX(lane: lane, row: row)
-                #expect(x - 4 >= 0 && x + 4 <= column.width)
-            }
-            if count == 2 {
-                #expect(column.middleX(lane: 1, row: row) - column.middleX(lane: 0, row: row) == 8)
-            }
-        }
+    @Test func singleLaneAndMergeReserveOnlyTheirActualDrawing() {
+        var engine = GitGraphLayout()
+        let single = engine.append(commitID: .init("tip"), parentIDs: [.init("merge")])
+        let merge = engine.append(commitID: .init("merge"), parentIDs: [.init("main"), .init("side")])
+        let branch = engine.append(commitID: .init("side"), parentIDs: [.init("main")])
+        let root = engine.append(commitID: .init("main"), parentIDs: [])
+        #expect([single, merge, branch, root].map { GitGraphColumnLayout(row: $0).contentX } == [13, 17, 21, 13])
+    }
+
+    @Test func firstVisibleNodeHasNoInventedIncomingEdgeButContinuationDoes() {
+        let commits = fixture()
+        let rows = GitGraphLayout.rows(for: commits)
+        #expect(rows[0].topLanes.isEmpty)
+        #expect(!rows[0].segments.contains { $0.kind == .incoming })
+        #expect(rows[1].segments.contains { $0.kind == .incoming })
+        var continued = GitGraphLayout(activeLanes: [commits[0].id], primaryFirstParents: [commits[0].id])
+        #expect(continued.append(commitID: commits[0].id, parentIDs: commits[0].parentIDs)
+            .segments.contains { $0.kind == .incoming })
     }
 
     @Test func extremeNavigatorContentKeepsWidthsHeightsAndTopDisclosureStable() async throws {
@@ -108,7 +111,7 @@ struct GitHistoryNavigatorTests {
             let branch = try cell(7)
             let subject = try #require(find(NSTextField.self, in: main))
             #expect(subject.frame.minX == find(NSTextField.self, in: nextMain)?.frame.minX)
-            #expect(subject.frame.minX == find(NSTextField.self, in: branch)?.frame.minX)
+            #expect(subject.frame.minX < (find(NSTextField.self, in: branch)?.frame.minX ?? 0))
             #expect(subject.bounds.width > width * 0.70)
             #expect(foldedHeight == table.rect(ofRow: 6).height)
             func metadataButtons(_ view: NSView) -> [InspectorClickCopyText] {
@@ -143,7 +146,7 @@ struct GitHistoryNavigatorTests {
         }
     }
 
-    @Test func mainlineAndBranchTextUseTheSameLeadingBaseline() async throws {
+    @Test func textFollowsEachRowsActualGraphWidth() async throws {
         let input: [(String, [String], String)] = [
             ("tip", ["main", "side", "probe"], "feat: mainline start"),
             ("probe", ["base"], "feat: side branch work"),
@@ -171,10 +174,9 @@ struct GitHistoryNavigatorTests {
                 cell.layoutSubtreeIfNeeded()
                 return try #require(cell.subviews.compactMap { $0 as? NSTextField }.first).frame.minX
             }
-            let baseline = try x(0)
-            #expect(baseline == 22)
-            for row in [2, 3, 5] { #expect(try x(row) == baseline) }
-            for row in [1, 4] { #expect(try x(row) == baseline) }
+            for (row, expected) in [25.0, 29, 25, 17, 21, 13].enumerated() {
+                #expect(try x(row) == expected)
+            }
             try await capture(view, path: "/tmp/omg-git-mainline-\(Int(width)).png")
         }
     }

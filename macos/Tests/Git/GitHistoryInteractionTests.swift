@@ -39,7 +39,6 @@ struct GitHistoryInteractionTests {
         #expect(badges.contains { $0.isCount })
         #expect(Set(badges.flatMap(\.refs)) == Set(refs))
         #expect(badges.flatMap(\.refs).count == refs.count)
-        #expect(GitGraphColumnLayout.drawingWidth <= 20)
     }
 
     @Test func expandedRowsOnlyOpenDiffWhenAFileIsClickedAndHeadIsIndependentOfSelection() async throws {

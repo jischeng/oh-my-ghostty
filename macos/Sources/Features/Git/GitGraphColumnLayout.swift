@@ -1,26 +1,31 @@
 import Foundation
 
-/// Text geometry never depends on graph lane count or node position.
 enum GitHistoryRowMetrics {
-    static let contentLeadingX: CGFloat = 22
     static let contentAxisY: CGFloat = 12
 }
 
-/// Graph topology is projected into its own compact drawing surface. Two lanes
-/// retain an 8-point separation; denser graphs compress here, not in text layout.
+/// Reserve only this row's drawn node and edges, followed by a small text gap.
+/// Lane coordinates stay stable across row boundaries without a global gutter.
 struct GitGraphColumnLayout: Equatable {
-    static let drawingWidth: CGFloat = 18
-    var width: CGFloat { Self.drawingWidth }
+    let width: CGFloat
+    var contentX: CGFloat { width + 3 }
+
+    init(row: GitGraphRow) {
+        let nodeRight = Self.laneX(row.nodeLane) + 4.5
+        let edgeRight = row.segments.flatMap { [$0.from.lane, $0.to.lane] }
+            .map { Self.laneX($0) + 0.8 }.max() ?? 0
+        width = ceil(max(nodeRight, edgeRight))
+    }
 
     func middleX(lane: Int, row: GitGraphRow) -> CGFloat {
-        laneX(lane, count: row.requiredLaneCount)
+        Self.laneX(lane)
     }
 
     func edgeX(lane: Int, count: Int) -> CGFloat {
-        laneX(lane, count: count)
+        Self.laneX(lane)
     }
 
-    private func laneX(_ lane: Int, count: Int) -> CGFloat {
-        5 + CGFloat(lane) * 8 / CGFloat(max(1, count - 1))
+    private static func laneX(_ lane: Int) -> CGFloat {
+        5 + CGFloat(lane) * 8
     }
 }

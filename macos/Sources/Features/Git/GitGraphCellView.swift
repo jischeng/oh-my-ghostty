@@ -26,14 +26,14 @@ final class GitGraphCellView: NSView {
     }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: GitGraphColumnLayout.drawingWidth, height: NSView.noIntrinsicMetric)
+        NSSize(width: column?.width ?? 10, height: NSView.noIntrinsicMetric)
     }
 
     func configure(row: GitGraphRow, isHead: Bool = false, layout: GitGraphColumnLayout? = nil, section: Section = .commit) {
         self.row = row
         self.isHead = isHead
         self.section = section
-        column = layout ?? GitGraphColumnLayout()
+        column = layout ?? GitGraphColumnLayout(row: row)
         invalidateIntrinsicContentSize()
         needsDisplay = true
         toolTip = isHead ? "Current HEAD · \(row.commitID.shortSHA)" : row.commitID.shortSHA

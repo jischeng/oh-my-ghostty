@@ -994,12 +994,15 @@ Presentation folds do not refetch Git data. The commit rail spans child rows,
 including root commits; forks and lane compaction occur at the block end.
 Lane changes finish near nodes/boundaries, with adequate parallel spacing.
 The first-parent spine remains lane zero, including shared ancestors queued by
-side branches. This controls topology only. Text layout has its own fixed
-`contentLeadingX = 22` for every commit and its detail rows: no lane count,
-maximum lane count, lane index or node position enters the text origin. The
-graph draws in a separate 18-point surface; 1–2 lanes remain 8 points apart and
-denser graphs compress inside that surface. Mainline and branch content share
-the same baseline. Adjacent graph-edge coordinates match.
+side branches. Only actual active continuations create incoming edges; the first
+visible node has no artificial line above it. Explicit seeded continuations keep
+their incoming edges. This applies to folded and expanded commits alike.
+Each commit reserves only its own drawn graph extent (node outline or rightmost
+edge) plus a 3-point content gap. Lane centers are 8 points apart, starting at
+5 points; a single-lane commit's content starts at 13 points. Merge edges and
+passing lanes participate in that row's extent, without a global maximum gutter
+or shared text column. Detail rows use their owning commit's content origin and
+measurement width. Adjacent graph-edge coordinates match even as widths shrink.
 
 Inspector native copy routing precedes terminal shortcuts. The bounded branch
 scope picker displays compact titles but dispatches original ref IDs. Repository

@@ -4,11 +4,32 @@ struct GitGraphLayout: Equatable, Sendable {
     private(set) var activeLanes: [GitCommitID]
     private var activeLaneColorIndices: [Int]
     private var nextColorIndex: Int
+    private let primaryRanks: [GitCommitID: Int]
 
-    init(activeLanes: [GitCommitID] = []) {
-        self.activeLanes = activeLanes
-        self.activeLaneColorIndices = activeLanes.indices.map { $0 % GitGraphRow.paletteSize }
-        self.nextColorIndex = activeLanes.count % GitGraphRow.paletteSize
+    init(activeLanes: [GitCommitID] = [], primaryFirstParents: [GitCommitID] = []) {
+        let initial = primaryFirstParents.first.map { tip in [tip] + activeLanes.filter { $0 != tip } } ?? activeLanes
+        self.activeLanes = initial
+        self.activeLaneColorIndices = initial.indices.map { $0 % GitGraphRow.paletteSize }
+        self.nextColorIndex = initial.count % GitGraphRow.paletteSize
+        var ranks: [GitCommitID: Int] = [:]
+        for (index, id) in primaryFirstParents.enumerated() where ranks[id] == nil { ranks[id] = index }
+        primaryRanks = ranks
+    }
+
+    /// Anchor the displayed timeline's first-parent spine, rather than letting
+    /// unrelated pending tips become the new leftmost lane after a merge.
+    static func rows(for commits: [GitHistoryCommit]) -> [GitGraphRow] {
+        var firstParents: [GitCommitID: GitCommitID] = [:]
+        for commit in commits { firstParents[commit.id] = commit.parentIDs.first }
+        var primary: [GitCommitID] = []
+        var seen = Set<GitCommitID>()
+        var current = commits.first?.id
+        while let id = current, seen.insert(id).inserted {
+            primary.append(id)
+            current = firstParents[id]
+        }
+        var layout = GitGraphLayout(primaryFirstParents: primary)
+        return commits.map { layout.append(commitID: $0.id, parentIDs: $0.parentIDs) }
     }
 
     var activeCommitIDs: [GitCommitID] {
@@ -57,6 +78,19 @@ struct GitGraphLayout: Equatable, Sendable {
             parentColorIndices[parentID] = colorIndex
             insertionIndex = lane + 1
         }
+
+        // A side branch may have queued a future mainline ancestor to the
+        // right of other pending lanes. Promote the nearest unprocessed spine
+        // commit before emitting edges, keeping boundary coordinates consistent.
+        if let lane = bottomLanes.indices.filter({ primaryRanks[bottomLanes[$0]] != nil }).min(by: {
+            primaryRanks[bottomLanes[$0], default: .max] < primaryRanks[bottomLanes[$1], default: .max]
+        }), lane != 0 {
+            let id = bottomLanes.remove(at: lane)
+            let color = bottomLaneColorIndices.remove(at: lane)
+            bottomLanes.insert(id, at: 0)
+            bottomLaneColorIndices.insert(color, at: 0)
+        }
+        for parentID in uniqueParentIDs { parentLanes[parentID] = bottomLanes.firstIndex(of: parentID) }
 
         var segments: [GitGraphSegment] = []
         if wasActive {

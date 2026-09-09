@@ -127,8 +127,7 @@ struct GitHistoryTable: NSViewRepresentable {
                 let oldRows = rows
                 let oldHeights = heights
                 if commitsChanged {
-                    var layout = GitGraphLayout()
-                    graphRows = new.commits.map { layout.append(commitID: $0.id, parentIDs: $0.parentIDs) }
+                    graphRows = GitGraphLayout.rows(for: new.commits)
                     graphColumns = graphRows.indices.map { index in
                         GitGraphColumnLayout(row: graphRows[index], previous: graphRows[safe: index - 1], next: graphRows[safe: index + 1])
                     }

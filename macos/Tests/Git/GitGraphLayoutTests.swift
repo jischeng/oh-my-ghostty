@@ -2,6 +2,44 @@ import Testing
 @testable import Ghostty
 
 struct GitGraphLayoutTests {
+    @Test func pendingSideBranchesCannotDisplaceTheFirstParentSpine() {
+        let history = [
+            commit("tip", ["main", "side", "probe"]), commit("probe", ["base"]),
+            commit("main", ["base"]), commit("base", ["root"]),
+            commit("side", ["root"]), commit("root", []),
+        ]
+        let rows = GitGraphLayout.rows(for: history)
+        for index in [0, 2, 3, 5] { #expect(rows[index].nodeLane == 0) }
+        #expect(rows[1].nodeLane > 0 && rows[4].nodeLane > 0)
+        for index in 0..<(rows.count - 1) { #expect(rows[index].bottomLanes == rows[index + 1].topLanes) }
+        for row in rows {
+            #expect(Set(row.bottomLanes).count == row.bottomLanes.count)
+            for edge in row.segments where edge.kind == .parent {
+                #expect(row.bottomLanes[edge.to.lane] == edge.parentID)
+            }
+        }
+    }
+
+    @Test func manyHeldBranchesAndPaginationKeepOrdinaryCommitsOnLaneZero() {
+        let sides = (0..<24).map { "side-\($0)" }
+        let main = (0..<80).map { "main-\($0)" }
+        var history = [commit("tip", ["entry"] + sides + ["probe"]), commit("probe", [main[0]]), commit("entry", [main[0]])]
+        history += main.enumerated().map { index, name in commit(name, index + 1 < main.count ? [main[index + 1]] : ["root"]) }
+        history += sides.map { commit($0, ["root"]) }
+        history.append(commit("root", []))
+        let rows = GitGraphLayout.rows(for: history)
+        let mainIDs = Set((["tip", "entry", "root"] + main).map(id))
+        #expect(rows.filter { mainIDs.contains($0.commitID) }.allSatisfy { $0.nodeLane == 0 })
+        let page = GitGraphLayout.rows(for: Array(history.prefix(30)))
+        #expect(page.map(\.nodeLane) == rows.prefix(30).map(\.nodeLane))
+        #expect(page.map(\.topLanes) == rows.prefix(30).map(\.topLanes))
+    }
+
+    private func commit(_ value: String, _ parents: [String]) -> GitHistoryCommit {
+        GitHistoryCommit(id: id(value), parentIDs: parents.map(id), authorName: "Author", authorEmail: "a@example.com",
+            authoredAt: .distantPast, subject: "feat: " + value)
+    }
+
     @Test func linearHistoryKeepsParentConnectivityUntilRoot() {
         var layout = GitGraphLayout()
 

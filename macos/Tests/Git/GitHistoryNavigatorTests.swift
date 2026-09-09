@@ -128,6 +128,41 @@ struct GitHistoryNavigatorTests {
         }
     }
 
+    @Test func sharedAncestorKeepsMainlineTextLeftOfLocalBranchBulges() async throws {
+        let input: [(String, [String], String)] = [
+            ("tip", ["main", "side", "probe"], "feat: mainline start"),
+            ("probe", ["base"], "feat: side branch work"),
+            ("main", ["base"], "feat: mainline continues"),
+            ("base", ["root"], "feat: shared mainline ancestor"),
+            ("side", ["root"], "feat: another branch"),
+            ("root", [], "feat: mainline root"),
+        ]
+        let commits = input.map { value in GitHistoryCommit(id: .init(value.0), parentIDs: value.1.map(GitCommitID.init),
+            authorName: "Author", authorEmail: "author@example.com", authoredAt: Date(timeIntervalSince1970: 0), subject: value.2) }
+        for width in [220.0, 360.0] {
+            let view = NSHostingView(rootView: GitHistoryTable(commits: commits, selectedCommitID: nil,
+                onSelect: { _ in }, onOpen: { _ in }, onShowInTerminal: { _ in }).background(Color(NSColor.windowBackgroundColor)))
+            view.sizingOptions = []
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 420),
+                                  styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = view
+            window.orderFront(nil)
+            defer { window.contentView = nil; window.close() }
+            try await Task.sleep(for: .milliseconds(120))
+            let table = try #require(find(NSTableView.self, in: view))
+            func x(_ row: Int) throws -> CGFloat {
+                let cell = try #require(table.view(atColumn: 0, row: row, makeIfNecessary: true))
+                cell.layoutSubtreeIfNeeded()
+                return try #require(cell.subviews.compactMap { $0 as? NSTextField }.first).frame.minX
+            }
+            let baseline = try x(0)
+            for row in [2, 3, 5] { #expect(try x(row) == baseline) }
+            for row in [1, 4] { #expect(try x(row) > baseline) }
+            try await capture(view, path: "/tmp/omg-git-mainline-\(Int(width)).png")
+        }
+    }
+
     private func find<T: NSView>(_ type: T.Type, in view: NSView?) -> T? {
         if let value = view as? T { return value }
         return view?.subviews.compactMap { find(type, in: $0) }.first

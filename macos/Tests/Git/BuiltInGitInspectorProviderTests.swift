@@ -47,6 +47,7 @@ struct BuiltInGitInspectorProviderTests {
 
         try runCommand(["git", "init", "-b", "main"], in: dir.path)
         try runCommand(["git", "commit", "--allow-empty", "-m", "first commit"], in: dir.path)
+        try runCommand(["git", "worktree", "add", "--detach", "--", dir.path + "/linked"], in: dir.path)
 
         let registry = InspectorRegistry()
         let provider = BuiltInGitInspectorProvider(registry: registry)
@@ -71,6 +72,10 @@ struct BuiltInGitInspectorProviderTests {
                 for: BuiltInGitInspectorProvider.paneID,
                 context: context
             ), case .ready = content.status {
+                #expect(content.workingTree.worktreesError == nil)
+                #expect(content.workingTree.worktrees.count == 2)
+                #expect(content.workingTree.worktrees.first?.isCurrent == true)
+                #expect(content.workingTree.worktrees.last?.branchRef == nil)
                 #expect(content.branch == "main")
                 #expect(content.repository?.worktreePath.hasSuffix(dir.lastPathComponent) == true)
                 return

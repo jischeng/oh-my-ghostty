@@ -102,6 +102,9 @@ enum InspectorGitAction: Equatable, Sendable {
     case openDiff(GitDiffFile, GitDiffTarget)
     case browseBranch(String)
     case branchOperation(GitBranchOperation, String)
+    case createWorktree(String?)
+    case openWorktree(String)
+    case removeWorktree(String)
     case setFileStaged(GitDiffFile, Bool)
     case updateCommitDraft(String)
     case commitStaged

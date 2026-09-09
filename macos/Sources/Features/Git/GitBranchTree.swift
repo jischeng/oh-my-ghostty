@@ -5,13 +5,14 @@ final class GitBranchNode: NSObject {
     let id: String
     let title: String
     var branch: GitBranchInfo?
+    var worktree: GitWorktreeInfo?
     var children: [GitBranchNode] = []
 
     init(id: String, title: String, branch: GitBranchInfo? = nil) {
         self.id = id; self.title = title; self.branch = branch
     }
 
-    static func build(_ branches: [GitBranchInfo]) -> [GitBranchNode] {
+    static func build(_ branches: [GitBranchInfo], worktrees: [GitWorktreeInfo] = []) -> [GitBranchNode] {
         let local = GitBranchNode(id: "local", title: "Local")
         let remote = GitBranchNode(id: "remote", title: "Remotes")
         for branch in branches.sorted(by: { $0.name.localizedStandardCompare($1.name) == .orderedAscending }) {
@@ -27,13 +28,24 @@ final class GitBranchNode: NSObject {
                 }
             }
         }
-        return [local, remote]
+        guard !worktrees.isEmpty else { return [local, remote] }
+        let group = GitBranchNode(id: "worktrees", title: "Worktrees")
+        group.children = worktrees.map { worktree in
+            let name = (worktree.path as NSString).lastPathComponent
+            let node = GitBranchNode(id: "worktree:" + worktree.path, title: worktree.branchName + " · " + name)
+            node.worktree = worktree
+            return node
+        }
+        return [local, remote, group]
     }
 }
 
 struct GitBranchTree: NSViewRepresentable {
     let branches: [GitBranchInfo]
+    var worktrees: [GitWorktreeInfo] = []
     let isBusy: Bool
+    var branchesAvailable = true
+    var worktreesAvailable = true
     let perform: (InspectorGitAction) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(perform: perform) }
@@ -66,26 +78,34 @@ struct GitBranchTree: NSViewRepresentable {
         tree.menu = menu
         scroll.documentView = tree
         context.coordinator.tree = tree
-        context.coordinator.update(branches: branches, isBusy: isBusy, perform: perform)
+        context.coordinator.update(branches: branches, worktrees: worktrees, isBusy: isBusy,
+                                   branchesAvailable: branchesAvailable, worktreesAvailable: worktreesAvailable, perform: perform)
         return scroll
     }
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
-        context.coordinator.update(branches: branches, isBusy: isBusy, perform: perform)
+        context.coordinator.update(branches: branches, worktrees: worktrees, isBusy: isBusy,
+                                   branchesAvailable: branchesAvailable, worktreesAvailable: worktreesAvailable, perform: perform)
     }
 
     final class Coordinator: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate {
         weak var tree: NSOutlineView?
         private var roots: [GitBranchNode] = []
         private var branches: [GitBranchInfo] = []
+        private var worktrees: [GitWorktreeInfo] = []
         private var busy = false
+        private var branchesAvailable = true
+        private var worktreesAvailable = true
         private var perform: (InspectorGitAction) -> Void
         init(perform: @escaping (InspectorGitAction) -> Void) { self.perform = perform }
 
-        func update(branches: [GitBranchInfo], isBusy: Bool, perform: @escaping (InspectorGitAction) -> Void) {
+        func update(branches: [GitBranchInfo], worktrees: [GitWorktreeInfo], isBusy: Bool,
+                    branchesAvailable: Bool, worktreesAvailable: Bool, perform: @escaping (InspectorGitAction) -> Void) {
             self.perform = perform
             busy = isBusy
-            guard self.branches != branches || roots.isEmpty, let tree else { return }
+            self.branchesAvailable = branchesAvailable
+            self.worktreesAvailable = worktreesAvailable
+            guard self.branches != branches || self.worktrees != worktrees || roots.isEmpty, let tree else { return }
             let selected = (tree.item(atRow: tree.selectedRow) as? GitBranchNode)?.id
             var expanded = Set<String>()
             func visit(_ nodes: [GitBranchNode]) {
@@ -97,10 +117,11 @@ struct GitBranchTree: NSViewRepresentable {
             visit(roots)
             let first = self.branches.isEmpty
             self.branches = branches
-            roots = GitBranchNode.build(branches)
+            self.worktrees = worktrees
+            roots = GitBranchNode.build(branches, worktrees: worktrees)
             tree.reloadData()
             func containsCurrent(_ node: GitBranchNode) -> Bool {
-                node.branch?.isCurrent == true || node.children.contains(where: containsCurrent)
+                node.branch?.isCurrent == true || node.worktree?.isCurrent == true || node.children.contains(where: containsCurrent)
             }
             func restore(_ nodes: [GitBranchNode]) {
                 for node in nodes {
@@ -130,13 +151,14 @@ struct GitBranchTree: NSViewRepresentable {
             let cell = NSTableCellView()
             let icon = NSImageView()
             let name = NSTextField(labelWithString: node.title)
-            name.font = .systemFont(ofSize: 11, weight: node.branch?.isCurrent == true ? .semibold : .regular)
+            name.font = .systemFont(ofSize: 11, weight: node.branch?.isCurrent == true || node.worktree?.isCurrent == true ? .semibold : .regular)
             name.lineBreakMode = .byTruncatingMiddle
             name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            let symbol = node.branch.map { $0.isCurrent ? "checkmark.circle.fill" : ($0.isRemote ? "network" : "arrow.triangle.branch") }
+            let symbol = node.worktree.map { $0.isCurrent ? "checkmark.circle.fill" : ($0.lockedReason != nil ? "lock.fill" : "folder") }
+                ?? node.branch.map { $0.isCurrent ? "checkmark.circle.fill" : ($0.isRemote ? "network" : "arrow.triangle.branch") }
                 ?? (node.id == "remote" ? "network" : "folder")
             icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: symbol)
-            icon.contentTintColor = node.branch?.isCurrent == true ? .controlAccentColor : .secondaryLabelColor
+            icon.contentTintColor = node.branch?.isCurrent == true || node.worktree?.isCurrent == true ? .controlAccentColor : .secondaryLabelColor
             for view in [icon, name] { view.translatesAutoresizingMaskIntoConstraints = false; cell.addSubview(view) }
             NSLayoutConstraint.activate([
                 icon.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
@@ -145,6 +167,13 @@ struct GitBranchTree: NSViewRepresentable {
                 name.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
                 name.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
             ])
+            if let worktree = node.worktree {
+                let state = [worktree.isCurrent ? "Current worktree" : nil, worktree.isMain ? "Main worktree" : nil,
+                             worktree.lockedReason.map { "Locked: " + $0 }, worktree.prunableReason.map { "Prunable: " + $0 }].compactMap { $0 }
+                cell.toolTip = ([worktree.path, worktree.branchName] + state).joined(separator: "\n")
+                cell.setAccessibilityLabel(node.title + " " + state.joined(separator: " "))
+                return cell
+            }
             cell.toolTip = node.branch.map { "\($0.name)\n\($0.upstream) \($0.tracking)" } ?? node.title
             return cell
         }
@@ -159,11 +188,21 @@ struct GitBranchTree: NSViewRepresentable {
             guard let tree else { return }
             let row = tree.clickedRow >= 0 ? tree.clickedRow : tree.selectedRow
             guard let node = tree.item(atRow: row) as? GitBranchNode else { return }
-            if let branch = node.branch { perform(.browseBranch(branch.id)) } else if tree.isItemExpanded(node) { tree.collapseItem(node) } else { tree.expandItem(node) }
+            if let worktree = node.worktree {
+                if worktreesAvailable && worktree.canOpen { perform(.openWorktree(worktree.path)) }
+            } else if let branch = node.branch {
+                if branchesAvailable { perform(.browseBranch(branch.id)) }
+            } else if tree.isItemExpanded(node) { tree.collapseItem(node) } else { tree.expandItem(node) }
         }
 
         func menuNeedsUpdate(_ menu: NSMenu) {
             menu.removeAllItems()
+            guard let tree else { return }
+            let row = tree.clickedRow >= 0 ? tree.clickedRow : tree.selectedRow
+            if let worktree = (tree.item(atRow: row) as? GitBranchNode)?.worktree {
+                worktreeMenu(menu, worktree: worktree)
+                return
+            }
             guard let branch = clickedBranch else { return }
             func add(_ title: String, action: Selector, tag: Int = 0, enabled: Bool = true) {
                 let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
@@ -172,15 +211,46 @@ struct GitBranchTree: NSViewRepresentable {
                 menu.addItem(item)
             }
             menu.autoenablesItems = false
-            add("Show History", action: #selector(historyFromMenu(_:)))
+            add("Show History", action: #selector(historyFromMenu(_:)), enabled: branchesAvailable)
+            let occupied = worktrees.first { $0.branchRef == branch.id }
+            if let occupied {
+                let item = NSMenuItem(title: "Open Worktree in New Tab", action: #selector(worktreeAction(_:)), keyEquivalent: "")
+                item.target = self; item.representedObject = occupied.path; item.tag = 0
+                item.isEnabled = worktreesAvailable && occupied.canOpen
+                menu.addItem(item)
+            }
+            add("New Worktree from Here…", action: #selector(createWorktree(_:)), enabled: !busy && branchesAvailable && worktreesAvailable)
             menu.addItem(.separator())
             add(branch.isRemote ? "Checkout Tracking Branch…" : "Switch Branch",
-                action: #selector(branchAction(_:)), tag: 0, enabled: !busy && !branch.isCurrent)
-            add("New Branch from Here…", action: #selector(branchAction(_:)), tag: 1, enabled: !busy)
+                action: #selector(branchAction(_:)), tag: 0, enabled: !busy && branchesAvailable && !branch.isCurrent && occupied == nil)
+            add("New Branch from Here…", action: #selector(branchAction(_:)), tag: 1, enabled: !busy && branchesAvailable)
             if !branch.isRemote {
-                add("Push…", action: #selector(branchAction(_:)), tag: 2, enabled: !busy)
-                add("Set Upstream…", action: #selector(branchAction(_:)), tag: 3, enabled: !busy)
+                add("Push…", action: #selector(branchAction(_:)), tag: 2, enabled: !busy && branchesAvailable)
+                add("Set Upstream…", action: #selector(branchAction(_:)), tag: 3, enabled: !busy && branchesAvailable)
             }
+        }
+
+        private func worktreeMenu(_ menu: NSMenu, worktree: GitWorktreeInfo) {
+            menu.autoenablesItems = false
+            for (index, title) in ["Open in New Tab", "Copy Worktree Path", "Remove Worktree…"].enumerated() {
+                let item = NSMenuItem(title: title, action: #selector(worktreeAction(_:)), keyEquivalent: "")
+                item.target = self; item.tag = index; item.representedObject = worktree.path
+                item.isEnabled = index == 1 || (worktreesAvailable && (index == 0 ? worktree.canOpen : !busy && worktree.canRemove))
+                menu.addItem(item)
+            }
+        }
+
+        @objc private func worktreeAction(_ sender: NSMenuItem) {
+            guard let path = sender.representedObject as? String else { return }
+            switch sender.tag {
+            case 0: perform(.openWorktree(path))
+            case 1: InspectorCopyMenu.copy(path)
+            case 2: perform(.removeWorktree(path))
+            default: break
+            }
+        }
+        @objc private func createWorktree(_ sender: NSMenuItem) {
+            if let ref = sender.representedObject as? String { perform(.createWorktree(ref)) }
         }
 
         @objc private func historyFromMenu(_ sender: NSMenuItem) {

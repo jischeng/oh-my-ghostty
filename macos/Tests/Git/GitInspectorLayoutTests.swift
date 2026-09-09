@@ -112,6 +112,51 @@ struct GitInspectorLayoutTests {
         }
     }
 
+    @Test func worktreesShowTheirOwnActionsAndProtectCurrentAndLockedDirectories() async throws {
+        let repo = GitRepositoryIdentity(worktreePath: "/repo/main", gitDirPath: "/repo/main/.git", commonGitDirPath: "/repo/main/.git")
+        let branch = GitBranchInfo(name: "main", commit: .init("abc"), isCurrent: true, isRemote: false, upstream: "", tracking: "")
+        let worktrees = [
+            GitWorktreeInfo(path: "/repo/main", head: .init("abc"), branchRef: "refs/heads/main", isMain: true, isCurrent: true),
+            GitWorktreeInfo(path: "/repo/feature-ui", head: .init("def"), branchRef: "refs/heads/feature/ui", isMain: false, isCurrent: false),
+            GitWorktreeInfo(path: "/repo/review", head: .init("def"), branchRef: nil, isMain: false, isCurrent: false, lockedReason: "Review in progress"),
+        ]
+        var content = InspectorGitContent(repository: repo, branch: "main", status: .ready(repository: repo, branch: "main", headCommitID: .init("abc")), activeTab: .branches)
+        content.workingTree.branches = [branch]
+        content.workingTree.worktrees = worktrees
+        var actions: [InspectorPaneActionKind] = []
+        let view = NSHostingView(rootView: InspectorGitView(content: content) { actions.append($0) }
+            .background(Color(NSColor.windowBackgroundColor)))
+        view.sizingOptions = []
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 440),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = view
+        window.orderFront(nil)
+        defer { window.contentView = nil; window.close() }
+        try await Task.sleep(for: .milliseconds(150))
+        view.layoutSubtreeIfNeeded()
+        let tree = try #require(descendant(NSOutlineView.self, in: view))
+        let coordinator = try #require(tree.target as? GitBranchTree.Coordinator)
+        let menu = try #require(tree.menu)
+        for worktree in worktrees {
+            let row = try #require((0..<tree.numberOfRows).first { (tree.item(atRow: $0) as? GitBranchNode)?.worktree?.path == worktree.path })
+            tree.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            coordinator.openHistory()
+            #expect(actions.last == .gitAction(.openWorktree(worktree.path)))
+            coordinator.menuNeedsUpdate(menu)
+            #expect(menu.items.map(\.title) == ["Open in New Tab", "Copy Worktree Path", "Remove Worktree…"])
+            #expect(menu.items.last?.isEnabled == worktree.canRemove)
+            let cell = try #require(tree.view(atColumn: 0, row: row, makeIfNecessary: true))
+            #expect(cell.toolTip?.contains(worktree.path) == true)
+        }
+        if FileManager.default.fileExists(atPath: "/tmp/omg-git-render") {
+            let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            let data = try #require(bitmap.representation(using: .png, properties: [:]))
+            try data.write(to: URL(fileURLWithPath: "/tmp/omg-git-worktrees.png"))
+        }
+    }
+
     @Test func branchSelectionDoesNotNavigateUntilDoubleClickAndMenuHasWriteActions() async throws {
         let branch = GitBranchInfo(name: "main", commit: GitCommitID("abc"), isCurrent: true,
                                    isRemote: false, upstream: "origin/main", tracking: "")

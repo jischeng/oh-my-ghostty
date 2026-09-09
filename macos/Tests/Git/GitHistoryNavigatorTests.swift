@@ -25,7 +25,7 @@ struct GitHistoryNavigatorTests {
         let rows = GitGraphLayout.rows(for: fixture())
         let columns = rows.map { GitGraphColumnLayout(row: $0) }
         #expect(columns.last?.contentX == 16)
-        #expect(columns[0].contentX == 42) // Three parent lanes right of the node.
+        #expect(columns[0].contentX == 46) // Three parent lanes right of the node.
         #expect(columns[2].contentX == 46) // Rightmost lane now contains a node.
         for index in 0..<(rows.count - 1) {
             #expect(rows[index].bottomLanes == rows[index + 1].topLanes)
@@ -49,7 +49,7 @@ struct GitHistoryNavigatorTests {
         let merge = engine.append(commitID: .init("merge"), parentIDs: [.init("main"), .init("side")])
         let branch = engine.append(commitID: .init("side"), parentIDs: [.init("main")])
         let root = engine.append(commitID: .init("main"), parentIDs: [])
-        #expect([single, merge, branch, root].map { GitGraphColumnLayout(row: $0).contentX } == [16, 22, 26, 16])
+        #expect([single, merge, branch, root].map { GitGraphColumnLayout(row: $0).contentX } == [16, 26, 26, 16])
     }
 
     @Test func firstVisibleNodeHasNoInventedIncomingEdgeButContinuationDoes() {
@@ -111,7 +111,7 @@ struct GitHistoryNavigatorTests {
             let branch = try cell(7)
             let subject = try #require(find(NSTextField.self, in: main))
             #expect(subject.frame.minX == find(NSTextField.self, in: nextMain)?.frame.minX)
-            #expect(subject.frame.minX < (find(NSTextField.self, in: branch)?.frame.minX ?? 0))
+            #expect(subject.frame.minX == find(NSTextField.self, in: branch)?.frame.minX)
             #expect(subject.bounds.width > width * 0.65)
             #expect(foldedHeight == table.rect(ofRow: 6).height)
             func metadataButtons(_ view: NSView) -> [InspectorMetadataText] {
@@ -174,7 +174,7 @@ struct GitHistoryNavigatorTests {
                 cell.layoutSubtreeIfNeeded()
                 return try #require(cell.subviews.compactMap { $0 as? NSTextField }.first).frame.minX
             }
-            for (row, expected) in [32.0, 36, 32, 22, 26, 16].enumerated() {
+            for (row, expected) in [36.0, 36, 36, 26, 26, 16].enumerated() {
                 #expect(try x(row) == expected)
             }
             try await capture(view, path: "/tmp/omg-git-mainline-\(Int(width)).png")

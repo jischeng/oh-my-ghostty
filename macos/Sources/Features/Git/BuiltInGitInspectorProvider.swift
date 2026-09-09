@@ -143,6 +143,8 @@ final class BuiltInGitInspectorProvider {
             save(state, tabID: action.context.tabID, worktreeKey: key)
             cancelHistoryTask(tabID: action.context.tabID)
             load(context: action.context, force: true)
+        case .createWorktree, .openWorktree, .removeWorktree:
+            handleWorktree(gitAction, context: action.context)
         case .branchOperation(let operation, let ref):
             guard let content = lastPublishedContent[action.context.tabID], let repository = content.repository,
                   content.workingTree.branchesError == nil,
@@ -232,9 +234,11 @@ final class BuiltInGitInspectorProvider {
                 async let staged = Self.result { try await self.diffService.listFiles(for: repository, target: .staged).files }
                 async let unstaged = Self.result { try await self.diffService.listFiles(for: repository, target: .unstaged).files }
                 async let branches = Self.result { try await self.repositoryService.branches(for: repository) }
+                async let worktrees = Self.result { try await self.repositoryService.worktrees(for: repository) }
                 Self.update(await staged, values: &workingTree.staged, error: &workingTree.stagedError)
                 Self.update(await unstaged, values: &workingTree.unstaged, error: &workingTree.unstagedError)
                 Self.update(await branches, values: &workingTree.branches, error: &workingTree.branchesError)
+                Self.update(await worktrees, values: &workingTree.worktrees, error: &workingTree.worktreesError)
                 if force || oldContent?.repository != repository {
                     workingTree.remoteURL = try? await self.repositoryService.remoteAddress(for: repository)
                 }
@@ -433,6 +437,34 @@ final class BuiltInGitInspectorProvider {
         } catch { Self.logger.error("Git state publish failed: \(error.localizedDescription, privacy: .public)") }
     }
 
+    private func handleWorktree(_ action: InspectorGitAction, context: InspectorPaneContext) {
+        guard let content = lastPublishedContent[context.tabID], let repository = content.repository,
+              content.workingTree.worktreesError == nil else { return }
+        let window = TerminalController.all.first { $0.tabSessionID == context.tabID }?.window
+        switch action {
+        case .openWorktree(let path):
+            guard let worktree = content.workingTree.worktrees.first(where: { $0.path == path }) else { return }
+            do { try GitWorktreeActions.open(worktree, repository: repository, context: context) } catch { publishOperationError(error.localizedDescription, repository: repository, context: context) }
+        case .createWorktree(let start):
+            guard mutationTasks[repository.stateKey] == nil,
+                  start == nil || (content.workingTree.branchesError == nil && content.workingTree.branches.contains { $0.id == start }) else { return }
+            Task {
+                if let mutation = await GitWorktreeActions.creation(start: start, repository: repository, window: window) {
+                    self.mutate(mutation, repository: repository, context: context)
+                }
+            }
+        case .removeWorktree(let path):
+            guard mutationTasks[repository.stateKey] == nil,
+                  let worktree = content.workingTree.worktrees.first(where: { $0.path == path }), worktree.canRemove else { return }
+            Task {
+                if await GitWorktreeActions.removal(worktree, window: window) {
+                    self.mutate(.removeWorktree(path), repository: repository, context: context)
+                }
+            }
+        default: break
+        }
+    }
+
     private func mutate(_ mutation: GitMutation, repository: GitRepositoryIdentity, context: InspectorPaneContext) {
         let key = repository.stateKey
         guard lastPublishedContent[context.tabID]?.repository == repository else { return }
@@ -441,6 +473,12 @@ final class BuiltInGitInspectorProvider {
             return
         }
         switch mutation {
+        case .removeWorktree(let path):
+            guard !EditorWorkspaceStore.shared.hasUnsavedDocuments(in: path,
+                endpoint: repository.sshConnection.map { .ssh(workspaceID: $0.workspaceID) } ?? .local) else {
+                publishOperationError("Save or discard unsaved editor changes before removing this worktree.", repository: repository, context: context)
+                return
+            }
         case .checkout, .create:
             guard !EditorWorkspaceStore.shared.hasUnsavedDocuments(
                 in: repository.worktreePath,

@@ -8,6 +8,8 @@ enum GitBranchOperation: String, Equatable, Sendable {
 }
 
 enum GitMutation: Equatable, Sendable {
+    case addWorktree(path: String, start: String, branch: String?, detached: Bool)
+    case removeWorktree(String)
     case stage([String])
     case unstage([String])
     case commit(String)
@@ -18,6 +20,8 @@ enum GitMutation: Equatable, Sendable {
 
     var title: String {
         switch self {
+        case .addWorktree: "Creating worktree…"
+        case .removeWorktree: "Removing worktree…"
         case .stage: "Staging files…"
         case .unstage: "Unstaging files…"
         case .commit: "Committing…"
@@ -40,6 +44,23 @@ struct GitMutationService: Sendable {
 
     func perform(_ mutation: GitMutation, in repository: GitRepositoryIdentity) async throws {
         switch mutation {
+        case .addWorktree(let path, let start, let branch, let detached):
+            try validateWorktreePath(path)
+            if start != "HEAD" { try validateRef(start) }
+            var arguments = ["worktree", "add"]
+            if let branch {
+                try await validateBranch(branch, in: repository)
+                arguments += ["-b", branch]
+            } else if detached { arguments.append("--detach") } else if !start.hasPrefix("refs/heads/") { throw GitDiffServiceError.gitFailed("Select a local branch or create a new branch.") }
+            let revision = branch == nil && !detached ? String(start.dropFirst("refs/heads/".count)) : start
+            _ = try await run(arguments + ["--", path, revision], in: repository)
+        case .removeWorktree(let path):
+            try validateWorktreePath(path)
+            let worktrees = try await GitRepositoryService(executor: executor).worktrees(for: repository)
+            guard let worktree = worktrees.first(where: { $0.path == path }), worktree.canRemove else {
+                throw GitDiffServiceError.gitFailed("This worktree cannot be removed here.")
+            }
+            _ = try await run(["worktree", "remove", "--", path], in: repository)
         case .stage(let paths):
             try validate(paths)
             _ = try await run(["--literal-pathspecs", "add", "--"] + paths, in: repository)
@@ -77,6 +98,12 @@ struct GitMutationService: Sendable {
             try await validateBranch(branch, in: repository)
             try validateRef(upstream)
             _ = try await run(["branch", "--set-upstream-to=\(upstream)", "--", branch], in: repository)
+        }
+    }
+
+    private func validateWorktreePath(_ path: String) throws {
+        guard path.hasPrefix("/"), !path.contains("\0") else {
+            throw GitDiffServiceError.gitFailed("Enter an absolute worktree directory.")
         }
     }
 

@@ -11,10 +11,9 @@ struct GitGraphColumnLayout: Equatable {
     var contentX: CGFloat { width + 3 }
 
     init(row: GitGraphRow) {
-        let nodeRight = Self.laneX(row.nodeLane) + 4.5
-        let edgeRight = row.segments.flatMap { [$0.from.lane, $0.to.lane] }
-            .map { Self.laneX($0) + 0.8 }.max() ?? 0
-        width = ceil(max(nodeRight, edgeRight))
+        let rightmostLane = max(row.nodeLane, row.segments.flatMap { [$0.from.lane, $0.to.lane] }.max() ?? 0)
+        // Give passing lines the same clearance as a node on that lane.
+        width = ceil(Self.laneX(rightmostLane) + 4.5)
     }
 
     func middleX(lane: Int, row: GitGraphRow) -> CGFloat {

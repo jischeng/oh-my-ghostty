@@ -166,8 +166,8 @@ struct InspectorGitView: View {
                     Text(tab.rawValue)
                         .font(.system(size: 11, weight: content.activeTab == tab ? .semibold : .regular))
                         .lineLimit(1)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 5)
+                        .frame(maxWidth: .infinity, minHeight: 30)
+                        .contentShape(Rectangle())
                         .background(content.activeTab == tab ? Color.accentColor.opacity(0.16) : Color.clear,
                                     in: RoundedRectangle(cornerRadius: 4))
                 }
@@ -213,8 +213,20 @@ struct InspectorGitView: View {
             if let error = content.workingTree.branchesError {
                 Text(error).font(.caption).foregroundStyle(.red).padding(8)
             }
-            GitBranchTree(branches: content.workingTree.branches,
-                          isBusy: content.operation != nil || content.workingTree.branchesError != nil) {
+            HStack {
+                Text("Branches & Worktrees").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button { perform(.gitAction(.createWorktree(nil))) } label: { Image(systemName: "plus") }
+                    .buttonStyle(.borderless).help("New Worktree")
+                    .disabled(content.operation != nil || content.workingTree.worktreesError != nil)
+            }.padding(.horizontal, 12)
+            if let error = content.workingTree.worktreesError {
+                Text(error).font(.caption).foregroundStyle(.red).padding(.horizontal, 12)
+            }
+            GitBranchTree(branches: content.workingTree.branches, worktrees: content.workingTree.worktrees,
+                          isBusy: content.operation != nil,
+                          branchesAvailable: content.workingTree.branchesError == nil,
+                          worktreesAvailable: content.workingTree.worktreesError == nil) {
                 perform(.gitAction($0))
             }
         }

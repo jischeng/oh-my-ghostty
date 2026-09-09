@@ -6,14 +6,16 @@ struct GitMutationServiceTests {
     private func repository() async throws -> GitRepositoryIdentity {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("git-write-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let repo = GitRepositoryIdentity(worktreePath: directory.path, gitDirPath: directory.path + "/.git",
-                                         commonGitDirPath: directory.path + "/.git")
+        let canonical = directory.resolvingSymlinksInPath().path
+        let repo = GitRepositoryIdentity(worktreePath: canonical, gitDirPath: canonical + "/.git",
+                                         commonGitDirPath: canonical + "/.git")
         _ = try await git(["init", "-b", "main"], repo)
         _ = try await git(["config", "user.name", "Git Mutation Test"], repo)
         _ = try await git(["config", "user.email", "mutation@example.com"], repo)
         _ = try await git(["config", "commit.gpgSign", "false"], repo)
         _ = try await git(["config", "core.hooksPath", repo.gitDirPath + "/hooks"], repo)
-        return repo
+        let root = try await git(["rev-parse", "--show-toplevel"], repo)
+        return GitRepositoryIdentity(worktreePath: root, gitDirPath: root + "/.git", commonGitDirPath: root + "/.git")
     }
 
     private func git(_ args: [String], _ repo: GitRepositoryIdentity) async throws -> String {
@@ -119,6 +121,54 @@ struct GitMutationServiceTests {
         await #expect(throws: (any Error).self) { try await service.perform(.commit("must fail"), in: repo) }
         #expect(try await git(["diff", "--cached", "--name-only"], repo) == "file")
         #expect(try await git(["log", "-1", "--format=%s"], repo) == "base")
+    }
+
+    @Test func worktreesCreateListOpenBranchAndRemoveWithoutDiscardingChanges() async throws {
+        let repo = try await repository()
+        defer { try? FileManager.default.removeItem(atPath: repo.worktreePath) }
+        let service = GitMutationService()
+        try write("base", "file", repo)
+        try await service.perform(.stage(["file"]), in: repo)
+        try await service.perform(.commit("base"), in: repo)
+        let linked = repo.worktreePath + "/linked '中文\nline"
+        try await service.perform(.addWorktree(path: linked, start: "refs/heads/main", branch: "feature/new", detached: false), in: repo)
+        var worktrees = try await GitRepositoryService().worktrees(for: repo)
+        #expect(worktrees.count == 2 && worktrees[0].isMain && worktrees[0].isCurrent)
+        #expect(worktrees[1].path == linked)
+        #expect(worktrees[1].branchRef == "refs/heads/feature/new")
+        #expect(worktrees[1].canRemove)
+        #expect(try await git(["branch", "--show-current"], repo) == "main")
+        try Data("dirty".utf8).write(to: URL(fileURLWithPath: linked + "/file"))
+        await #expect(throws: (any Error).self) { try await service.perform(.removeWorktree(linked), in: repo) }
+        #expect(try String(contentsOfFile: linked + "/file", encoding: .utf8) == "dirty")
+        try Data("base".utf8).write(to: URL(fileURLWithPath: linked + "/file"))
+        _ = try await git(["worktree", "lock", "--reason", "test lock", "--", linked], repo)
+        worktrees = try await GitRepositoryService().worktrees(for: repo)
+        #expect(worktrees[1].lockedReason == "test lock" && !worktrees[1].canRemove)
+        await #expect(throws: (any Error).self) { try await service.perform(.removeWorktree(linked), in: repo) }
+        _ = try await git(["worktree", "unlock", "--", linked], repo)
+        let linkedRepo = GitRepositoryIdentity(worktreePath: linked, gitDirPath: repo.gitDirPath, commonGitDirPath: repo.commonGitDirPath)
+        await #expect(throws: (any Error).self) { try await service.perform(.removeWorktree(linked), in: linkedRepo) }
+        await #expect(throws: (any Error).self) { try await service.perform(.removeWorktree(repo.worktreePath), in: repo) }
+        try await service.perform(.removeWorktree(linked), in: repo)
+        #expect(!FileManager.default.fileExists(atPath: linked))
+        #expect(try await GitRepositoryService().branches(for: repo).contains { $0.id == "refs/heads/feature/new" })
+        try await service.perform(.addWorktree(path: linked, start: "refs/heads/feature/new", branch: nil, detached: false), in: repo)
+        #expect(try await GitRepositoryService().worktrees(for: repo).last?.branchRef == "refs/heads/feature/new")
+        try await service.perform(.removeWorktree(linked), in: repo)
+        try await service.perform(.addWorktree(path: linked, start: "HEAD", branch: nil, detached: true), in: repo)
+        #expect(try await GitRepositoryService().worktrees(for: repo).last?.branchRef == nil)
+        try await service.perform(.removeWorktree(linked), in: repo)
+    }
+
+    @Test func worktreePorcelainPreservesPathsAndFlags() throws {
+        let text = "worktree /repo\0bare\0\0worktree /linked\nwith space\0HEAD abc\0detached\0locked line1\nline2\0prunable missing directory\0\0"
+        let values = try GitWorktreeInfo.parse(Data(text.utf8), currentPath: "/linked\nwith space")
+        #expect(values.count == 2 && values[0].isBare && !values[0].canOpen)
+        #expect(values[1].isCurrent && values[1].branchRef == nil && values[1].head == GitCommitID("abc"))
+        #expect(values[1].lockedReason == "line1\nline2" && values[1].prunableReason == "missing directory")
+        #expect(!values[1].canOpen && !values[1].canRemove)
+        #expect(throws: (any Error).self) { try GitWorktreeInfo.parse(Data([0xff]), currentPath: "/") }
     }
 
     @Test func rejectsPathTraversalAndOptionLikeBranchNames() async throws {

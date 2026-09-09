@@ -998,8 +998,8 @@ The first-parent spine remains lane zero, including shared ancestors queued by
 side branches. Only actual active continuations create incoming edges; the first
 visible node has no artificial line above it. Explicit seeded continuations keep
 their incoming edges. This applies to folded and expanded commits alike.
-Each commit reserves only its own drawn graph extent (node outline or rightmost
-edge) plus a 3-point content gap. Lane centers are 10 points apart, starting at
+Each commit reserves its rightmost occupied lane using the same node-outline
+clearance for nodes and passing lines, plus a 3-point content gap. Lane centers are 10 points apart, starting at
 8 points; a single-lane commit's content starts at 16 points. Merge edges and
 passing lanes participate in that row's extent, without a global maximum gutter
 or shared text column. Detail rows use their owning commit's content origin and
@@ -1059,7 +1059,8 @@ query retains its last successful values for display and disables only actions
 that depend on those stale values; it does not hide other successful sections.
 
 History's scope menu includes current/all branches and every available local
-and remote branch. Branches uses an expandable Local/Remotes folder tree with
+and remote branch. History/Changes/Branches tabs use full-width rectangular hit
+regions with a 30-point minimum height. Branches uses an expandable Local/Remotes folder tree with
 stable ref IDs. Single click selects; folder double-click toggles expansion,
 while branch double-click opens history. Leaf context
 menus offer switching, creating and switching a branch from that ref, pushing
@@ -1067,6 +1068,22 @@ a selected local branch, and setting its upstream. Remote refs can create local
 tracking branches. Push explicitly selects a configured remote/destination
 and uses a normal non-force refspec for the selected branch, even if it is not
 checked out. These host-owned actions add no external plugin wire capabilities.
+
+Branches also lists Worktrees with current/main, detached, locked and prunable
+state. Paths and lock/prune reasons remain available in tooltips; double-click
+or Open in New Tab opens that directory in a new local or replayed SSH terminal.
+No command is injected into the existing shell. Branch menus offer New Worktree
+from Here and Open Worktree for checked-out branches; the pane also has a New
+Worktree button. Creation supports a new branch, an existing local branch, or
+a detached HEAD and requires an absolute destination path. Remove Worktree asks
+for confirmation, keeps the branch, and refuses main/current/locked/prunable
+entries and unsaved editor buffers. The service re-reads the list before removing
+and never passes force, so Git rejects tracked or untracked dirty contents.
+Worktrees use `git worktree list --porcelain -z`, preserving spaces, newlines and
+lock/prune reasons in paths/fields. Their refresh results and errors are
+independent of branch/status queries and use the same local/SSH executor.
+The host-only create/open/remove actions do not extend the external plugin wire
+protocol. See the [Git worktree contract](https://git-scm.com/docs/git-worktree).
 
 Mutations are serialized per worktree and are separate from cancellable polling
 tasks. Git's refusal to overwrite dirty files, non-fast-forward rejection,

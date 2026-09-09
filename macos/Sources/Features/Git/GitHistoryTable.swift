@@ -75,13 +75,12 @@ struct GitHistoryTable: NSViewRepresentable {
         private var rows: [Row] = []
         private var graphRows: [GitGraphRow] = []
         private var heights: [CGFloat] = []
-        private var graphWidth: CGFloat = 15
-        private var laneCount = 1
+        private var graphColumns: [GitGraphColumnLayout] = []
         private var measuredWidth: CGFloat = 0
         private var updating = false
         private var requestedCount: Int?
         private var collapsedFiles = Set<GitCommitID>()
-        private var expandedMessages = Set<GitCommitID>()
+        private var messageExpansion: [GitCommitID: Bool] = [:]
         private var observers: [NSObjectProtocol] = []
         private let dateFormatter: DateFormatter = {
             let formatter = DateFormatter()
@@ -109,7 +108,7 @@ struct GitHistoryTable: NSViewRepresentable {
             if content?.commits != new.commits { requestedCount = nil }
             let previous = content
             collapsedFiles.formIntersection(new.expandedCommits.keys)
-            expandedMessages.formIntersection(new.expandedCommits.keys)
+            messageExpansion = messageExpansion.filter { new.expandedCommits[$0.key] != nil }
             content = new
             guard let table = tableView else { return }
             updating = true
@@ -124,8 +123,9 @@ struct GitHistoryTable: NSViewRepresentable {
                 let offset = top >= 0 ? table.visibleRect.minY - table.rect(ofRow: top).minY : 0
                 var layout = GitGraphLayout()
                 graphRows = new.commits.map { layout.append(commitID: $0.id, parentIDs: $0.parentIDs) }
-                laneCount = max(1, graphRows.map(\.requiredLaneCount).max() ?? 1)
-                graphWidth = min(31, GitGraphCellView.preferredWidth(laneCount: laneCount))
+                graphColumns = graphRows.indices.map { index in
+                    GitGraphColumnLayout(row: graphRows[index], previous: graphRows[safe: index - 1], next: graphRows[safe: index + 1])
+                }
                 rows = []
                 for (index, commit) in new.commits.enumerated() {
                     rows.append(.commit(index))
@@ -164,8 +164,8 @@ struct GitHistoryTable: NSViewRepresentable {
         private func measureRows() {
             guard let content, let table = tableView else { return }
             measuredWidth = max(1, table.enclosingScrollView?.contentSize.width ?? table.bounds.width)
-            let width = max(1, measuredWidth - graphWidth - 29)
             heights = rows.map { row in
+                let width = max(1, measuredWidth - graphColumns[row.commitIndex].contentX - 8)
                 let commit = content.commits[row.commitIndex]
                 switch row {
                 case .commit:
@@ -210,7 +210,7 @@ struct GitHistoryTable: NSViewRepresentable {
             case .commit:
                 let cell = (tableView.makeView(withIdentifier: .init("git-commit"), owner: nil) as? GitHistoryCell) ?? GitHistoryCell()
                 cell.identifier = .init("git-commit")
-                cell.configure(commit: commit, graph: graph, graphLayout: (graphWidth, laneCount),
+                cell.configure(commit: commit, graph: graph, graphLayout: graphColumns[item.commitIndex],
                                summary: (dateFormatter.string(from: commit.authoredAt), decorations(for: commit)),
                                state: (head: isHead(commit), expanded: content.expandedCommits[commit.id] != nil),
                                toggle: { [weak self] in self?.content?.onOpen(commit.id) })
@@ -219,7 +219,7 @@ struct GitHistoryTable: NSViewRepresentable {
                 let cell = (tableView.makeView(withIdentifier: .init("git-child"), owner: nil) as? GitHistoryDetailCell) ?? GitHistoryDetailCell()
                 cell.identifier = .init("git-child")
                 let isLast = row + 1 == rows.count || rows[row + 1].commitIndex != item.commitIndex
-                cell.configure(graph: graph, graphWidth: graphWidth, laneCount: laneCount, isLast: isLast,
+                cell.configure(graph: graph, graphLayout: graphColumns[item.commitIndex], isLast: isLast,
                                content: childContent(for: item), action: { [weak self] in
                     self?.activateChild(item, commitID: commit.id)
                 })
@@ -245,7 +245,7 @@ struct GitHistoryTable: NSViewRepresentable {
             case .files:
                 return .files(details?.files.count ?? 0, details?.statistics, collapsedFiles.contains(commit.id))
             case .file(_, let file): return .file(file)
-            case .message: return .message(details?.metadata?.body ?? "", expandedMessages.contains(commit.id))
+            case .message: return .message(details?.metadata?.body ?? "", messageExpansion[commit.id])
             default: return .notice(details?.error ?? "Loading changed files…", details?.error != nil)
             }
         }
@@ -257,7 +257,10 @@ struct GitHistoryTable: NSViewRepresentable {
             case .files:
                 if !collapsedFiles.insert(id).inserted { collapsedFiles.remove(id) }
             case .message:
-                if !expandedMessages.insert(id).inserted { expandedMessages.remove(id) }
+                guard let index = content.commits.firstIndex(where: { $0.id == id }) else { return }
+                let width = max(1, measuredWidth - graphColumns[index].contentX - 8)
+                messageExpansion[id] = !GitHistoryDetailCell.messageIsExpanded(details.metadata?.body ?? "",
+                    preference: messageExpansion[id], width: width)
             case .file(_, let file):
                 guard details.files.contains(file) else { return }
                 content.onOpenFile(id, file)

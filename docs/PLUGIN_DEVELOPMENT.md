@@ -958,17 +958,30 @@ without another SSH round trip. Tabs, newlines and Unicode in paths remain
 intact. Binary files contribute to a separate count, not invented line totals;
 untracked working-tree files are represented as additions.
 
-History keeps the subject first, followed by Author · Time · Short SHA, author
-email, and a shared HEAD/branch/tag badge flow. Expanding a commit preserves
+History keeps the subject first, followed by two secondary metadata lines:
+Author · Email, then Time · Short SHA. HEAD/branch/remote/tag badges occupy a
+single fixed 17-point row. Each badge is capped at 104 points; overflow groups
+show counts of the represented branches or tags, retaining a primary branch
+name when it fits. Clicking any named or count badge opens the complete,
+selectable ref list in a bounded scrolling popover. Ref names and counts never
+increase summary height or the sidebar's width. Expanding a commit preserves
 these summary fields and their positions. It adds the changed-file count and
 additions/deletions, then clickable A/M/D/R file rows, and only then the optional
 message body. It never repeats metadata labels or the subject. Short bodies
-(up to four rendered lines) are shown directly; longer bodies default to a
-collapsed “Commit message” control and offer “Show less” after expansion.
-The changed-file group can fold independently and remains before the body.
+(up to four rendered lines) default to expanded; longer bodies default to
+collapsed. Both use the same “Commit message” disclosure.
+Long-body disclosure headers stay at the same top position when expanded,
+show their source line count, and collapse the body on a second click. There
+is no bottom-only “Show less” control. The changed-file group can fold
+independently and remains before the body.
 Presentation-only folds do not refetch Git data. A continuous current-commit
 rail spans its child rows, including root commits; parent forks and passing
-lane compaction occur at the end of the expanded block.
+lane compaction occur at the end of the expanded block. Graph drawing and text
+placement use per-commit geometry: lane-zero subjects keep a fixed 36-point
+origin, while only a node on a branch gets a bounded local offset. The maximum
+lane count of other commits cannot move this origin. Shared row-boundary
+coordinates and curved segments keep joins continuous as local gutters widen
+and narrow; edges remain outside text and disclosure glyphs.
 
 Double-clicking a commit or using its disclosure loads metadata/files on demand,
 independently of history pagination; collapsing cancels that pending request.
@@ -1037,16 +1050,15 @@ Success refreshes status, changes, refs and history; failed commits retain the
 draft and index. The header reports configured upstream tracking against local
 cached refs, and routine refresh never fetches. Current branch, tag and remote
 decorations use distinct native SF Symbols, colors and accessible descriptions.
-Branch badges precede tags, with main branches first, and flow into additional
-rows at narrow widths. The commit graph uses a compact lane-dependent gutter;
+Branch badges precede tags, with main branches first, and aggregate at narrow
+widths instead of flowing into additional rows. The commit graph uses a compact lane-dependent gutter;
 the actual HEAD marker is independent of table selection.
 Expanded child rows continue the commit rail without introducing commit nodes.
 
 History fetches another frozen-snapshot page when scrolling near the bottom,
 deduplicates pending requests, and stops at Git's true end of history. A failed
 page retains existing commits, the snapshot and has-more state for manual retry.
-Refreshing refs preserves the already-loaded depth. Row heights track badge
-wrapping and expanded metadata; inserting child rows does not affect Git page
+Refreshing refs preserves the already-loaded depth. Row heights track explicitly expanded bodies; inserting child rows does not affect Git page
 offsets, and an append preserves the current viewport anchor. Repository refresh
 and history pagination have independent cancellation/generation ownership, so
 paging or changing scope cannot interrupt a Changes/Branches refresh. A ref

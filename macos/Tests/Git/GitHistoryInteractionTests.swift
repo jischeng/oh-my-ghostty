@@ -25,7 +25,7 @@ struct GitHistoryInteractionTests {
         return view?.subviews.compactMap { find(type, in: $0) }.first
     }
 
-    @Test func decorationsPutMainAndBranchesBeforeTagsAndWrap() {
+    @Test func decorationsPutMainAndBranchesBeforeTagsAndAggregate() {
         let refs: [GitRefDecoration] = [
             .init(name: "v1", kind: .tag), .init(name: "feature", kind: .currentBranch),
             .init(name: "origin/main", kind: .remoteBranch), .init(name: "main", kind: .localBranch),
@@ -34,11 +34,11 @@ struct GitHistoryInteractionTests {
         #expect(GitRefDecoration.orderedForDisplay(refs).map(\.name) == ["main", "origin/main", "feature", "develop", "v1"])
         let narrow = GitRefBadgesView.height(for: refs, width: 130)
         let wide = GitRefBadgesView.height(for: refs, width: 600)
-        #expect(narrow > wide)
-        let frames = GitRefBadgesView.frames(widths: [300, 60, 60], availableWidth: 130)
-        #expect(frames.count == 3)
-        #expect(frames.allSatisfy { $0.maxX <= 130 })
-        #expect(frames[1].minY > frames[0].minY)
+        #expect(narrow == wide)
+        let badges = GitRefBadgesView.badges(for: refs, width: 130)
+        #expect(badges.contains { $0.isCount })
+        #expect(Set(badges.flatMap(\.refs)) == Set(refs))
+        #expect(badges.flatMap(\.refs).count == refs.count)
         #expect(GitGraphCellView.preferredWidth(laneCount: 1) <= 20)
     }
 
@@ -81,6 +81,14 @@ struct GitHistoryInteractionTests {
         let requiredHeight = try #require(detailLabel.cell?.cellSize(forBounds: NSRect(
             x: 0, y: 0, width: detailLabel.bounds.width, height: .greatestFiniteMagnitude)).height)
         #expect(detailLabel.bounds.height >= requiredHeight)
+        let shortBodyHeader = try #require(find(NSButton.self, in: metadata))
+        #expect(shortBodyHeader.title == "Commit message · 1 line")
+        let headerY = shortBodyHeader.frame.minY
+        shortBodyHeader.performClick(nil)
+        let closedBody = try #require(table.view(atColumn: 0, row: 3, makeIfNecessary: true))
+        closedBody.layoutSubtreeIfNeeded()
+        #expect(table.rect(ofRow: 3).height == 28)
+        #expect(find(NSButton.self, in: closedBody)?.frame.minY == headerY)
         if FileManager.default.fileExists(atPath: "/tmp/omg-git-render"), let view = window.contentView {
             view.layoutSubtreeIfNeeded()
             let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
@@ -130,7 +138,8 @@ struct GitHistoryInteractionTests {
             message.layoutSubtreeIfNeeded()
             #expect(table.rect(ofRow: 8).height == 28)
             let toggle = try #require(find(NSButton.self, in: message))
-            #expect(toggle.title == "Commit message")
+            #expect(toggle.title == "Commit message · 100 lines")
+            let toggleFrame = toggle.frame
             toggle.performClick(nil)
             #expect(table.rect(ofRow: 8).height > 500)
             #expect(table.rect(ofRow: 2).minY == filesTop)
@@ -138,7 +147,8 @@ struct GitHistoryInteractionTests {
             expanded.layoutSubtreeIfNeeded()
             #expect(find(NSTextField.self, in: expanded)?.stringValue.contains("Explanation line 99") == true)
             let less = try #require(find(NSButton.self, in: expanded))
-            #expect(less.title == "Show less")
+            #expect(less.title == "Commit message · 100 lines")
+            #expect(less.frame == toggleFrame)
             less.performClick(nil)
             #expect(table.rect(ofRow: 8).height == 28)
             #expect(NSLocationInRange(9, table.rows(in: table.visibleRect)))

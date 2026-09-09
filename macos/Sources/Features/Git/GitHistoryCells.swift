@@ -2,27 +2,28 @@ import AppKit
 
 final class GitHistoryCell: NSTableCellView {
     private let subject = NSTextField(labelWithString: "")
-    private let metadata = NSTextField(labelWithString: "")
-    private let email = NSTextField(labelWithString: "")
+    private let authorAndEmail = NSTextField(labelWithString: "")
+    private let timeAndHash = NSTextField(labelWithString: "")
     private let badges = GitRefBadgesView()
     private let graph = GitGraphCellView()
     private let disclosure = NSButton()
-    private var graphWidth: CGFloat = 15
+    private var graphWidth: CGFloat = 20
+    private var contentX: CGFloat = 36
     private var toggle: () -> Void = {}
 
     static func height(commit: GitHistoryCommit, refs: [GitRefDecoration], width: CGFloat) -> CGFloat {
         let badges = GitRefBadgesView.height(for: refs, width: width)
-        return (commit.authorEmail.isEmpty ? 41 : 56) + (badges > 0 ? badges + 5 : 0)
+        return 56 + (badges > 0 ? badges + 5 : 0)
     }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         subject.font = .systemFont(ofSize: 12, weight: .medium)
-        metadata.font = .systemFont(ofSize: 10)
-        metadata.textColor = .secondaryLabelColor
-        email.font = .systemFont(ofSize: 10)
-        email.textColor = .secondaryLabelColor
-        for label in [subject, metadata, email] {
+        authorAndEmail.font = .systemFont(ofSize: 10)
+        authorAndEmail.textColor = .secondaryLabelColor
+        timeAndHash.font = .systemFont(ofSize: 10)
+        timeAndHash.textColor = .secondaryLabelColor
+        for label in [subject, authorAndEmail, timeAndHash] {
             label.lineBreakMode = label === subject ? .byTruncatingTail : .byTruncatingMiddle
             label.maximumNumberOfLines = 1
         }
@@ -34,22 +35,22 @@ final class GitHistoryCell: NSTableCellView {
         disclosure.setButtonType(.momentaryChange)
         disclosure.target = self
         disclosure.action = #selector(toggleCommit)
-        [graph, disclosure, subject, metadata, email, badges].forEach(addSubview)
+        [graph, disclosure, subject, authorAndEmail, timeAndHash, badges].forEach(addSubview)
     }
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override var isFlipped: Bool { true }
     @objc private func toggleCommit() { toggle() }
 
-    func configure(commit: GitHistoryCommit, graph: GitGraphRow, graphLayout: (width: CGFloat, lanes: Int),
+    func configure(commit: GitHistoryCommit, graph: GitGraphRow, graphLayout: GitGraphColumnLayout,
                    summary: (date: String, refs: [GitRefDecoration]), state: (head: Bool, expanded: Bool), toggle: @escaping () -> Void) {
         graphWidth = graphLayout.width
+        contentX = graphLayout.contentX
         self.toggle = toggle
-        self.graph.configure(row: graph, isHead: state.head, laneCount: graphLayout.lanes,
+        self.graph.configure(row: graph, isHead: state.head, layout: graphLayout,
                              section: state.expanded ? .expandedCommit : .commit)
         subject.stringValue = commit.subject.isEmpty ? "(no subject)" : commit.subject
-        metadata.stringValue = "\(commit.authorName) · \(summary.date) · \(commit.id.shortSHA)"
-        email.stringValue = commit.authorEmail
-        email.isHidden = commit.authorEmail.isEmpty
+        authorAndEmail.stringValue = commit.authorEmail.isEmpty ? commit.authorName : "\(commit.authorName) · \(commit.authorEmail)"
+        timeAndHash.stringValue = "\(summary.date) · \(commit.id.shortSHA)"
         badges.configure(summary.refs)
         disclosure.image = NSImage(systemSymbolName: state.expanded ? "chevron.down" : "chevron.right",
                                    accessibilityDescription: state.expanded ? "Collapse commit" : "Expand commit")?
@@ -60,13 +61,13 @@ final class GitHistoryCell: NSTableCellView {
     override func layout() {
         super.layout()
         graph.frame = NSRect(x: 0, y: 0, width: graphWidth, height: bounds.height)
-        disclosure.frame = NSRect(x: graphWidth, y: 4, width: 18, height: 18)
-        let x = graphWidth + 21
+        disclosure.frame = NSRect(x: contentX - 21, y: 4, width: 18, height: 18)
+        let x = contentX
         let width = max(1, bounds.width - x - 8)
         subject.frame = NSRect(x: x, y: 4, width: width, height: 17)
-        metadata.frame = NSRect(x: x, y: 23, width: width, height: 14)
-        email.frame = NSRect(x: x, y: 39, width: width, height: 13)
-        let badgeY: CGFloat = email.isHidden ? 41 : 56
+        authorAndEmail.frame = NSRect(x: x, y: 23, width: width, height: 14)
+        timeAndHash.frame = NSRect(x: x, y: 39, width: width, height: 13)
+        let badgeY: CGFloat = 56
         badges.frame = NSRect(x: x, y: badgeY, width: width, height: max(0, bounds.height - badgeY - 5))
     }
 }
@@ -77,14 +78,15 @@ final class GitHistoryDetailCell: NSTableCellView {
     enum Content {
         case files(Int, GitDiffStatistics?, Bool)
         case file(GitDiffFile)
-        case message(String, Bool)
+        case message(String, Bool?)
         case notice(String, Bool)
     }
     private let graph = GitGraphCellView()
     private let label = NSTextField(wrappingLabelWithString: "")
     private let button = NSButton()
     private let openIcon = NSImageView()
-    private var graphWidth: CGFloat = 15
+    private var graphWidth: CGFloat = 20
+    private var contentX: CGFloat = 36
     private var content = Content.notice("", false)
     private var action: () -> Void = {}
 
@@ -103,10 +105,14 @@ final class GitHistoryDetailCell: NSTableCellView {
         case .file: return 23
         case .notice(let text, _): return max(26, textHeight(text, width: width) + 12)
         case .message(let text, let expanded):
-            let height = textHeight(text, width: width)
-            return height <= 56 ? height + 12 : (expanded ? height + 36 : 28)
+            return messageIsExpanded(text, preference: expanded, width: width)
+                ? textHeight(text, width: width - 12) + 36 : 28
         }
     }
+    static func messageIsExpanded(_ text: String, preference: Bool?, width: CGFloat) -> Bool {
+        preference ?? (textHeight(text, width: width - 12) <= 56)
+    }
+
     override init(frame: NSRect) {
         super.init(frame: frame)
         [graph, label, button, openIcon].forEach(addSubview)
@@ -127,10 +133,11 @@ final class GitHistoryDetailCell: NSTableCellView {
     override var isFlipped: Bool { true }
     @objc private func activate() { action() }
 
-    func configure(graph: GitGraphRow, graphWidth: CGFloat, laneCount: Int, isLast: Bool,
+    func configure(graph: GitGraphRow, graphLayout: GitGraphColumnLayout, isLast: Bool,
                    content: Content, action: @escaping () -> Void) {
-        self.graphWidth = graphWidth
-        self.graph.configure(row: graph, laneCount: laneCount, section: isLast ? .expansionEnd : .continuation)
+        self.graphWidth = graphLayout.width
+        contentX = graphLayout.contentX
+        self.graph.configure(row: graph, layout: graphLayout, section: isLast ? .expansionEnd : .continuation)
         self.content = content
         self.action = action
         toolTip = nil
@@ -153,7 +160,7 @@ final class GitHistoryDetailCell: NSTableCellView {
     override func layout() {
         super.layout()
         graph.frame = NSRect(x: 0, y: 0, width: graphWidth, height: bounds.height)
-        let x = graphWidth + 21
+        let x = contentX
         let width = max(1, bounds.width - x - 8)
         label.frame = NSRect(x: x, y: 6, width: width, height: max(1, bounds.height - 12))
         label.isHidden = false
@@ -190,18 +197,16 @@ final class GitHistoryDetailCell: NSTableCellView {
         case .notice(let text, let isError):
             label.stringValue = text
             label.textColor = isError ? .systemRed : .secondaryLabelColor
-        case .message(let text, let expanded):
-            let height = Self.textHeight(text, width: width)
-            let isLong = height > 56
+        case .message(let text, let preference):
+            let expanded = Self.messageIsExpanded(text, preference: preference, width: width)
             label.stringValue = text
-            label.isHidden = isLong && !expanded
-            if isLong {
-                button.isHidden = false
-                button.title = expanded ? "Show less" : "Commit message"
-                button.image = Self.chevron(expanded ? "up" : "right")
-                button.frame = NSRect(x: x, y: expanded ? height + 10 : 4, width: width, height: 20)
-                label.frame.size.height = height
-            }
+            label.isHidden = !expanded
+            button.isHidden = false
+            let lines = text.components(separatedBy: "\n").count
+            button.title = "Commit message · \(lines) \(lines == 1 ? "line" : "lines")"
+            button.image = Self.chevron(expanded ? "down" : "right")
+            button.frame = NSRect(x: x, y: 4, width: width, height: 20)
+            label.frame = NSRect(x: x + 12, y: 30, width: max(1, width - 12), height: max(1, bounds.height - 36))
         }
     }
     private static func chevron(_ direction: String) -> NSImage? {

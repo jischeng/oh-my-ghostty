@@ -21,7 +21,7 @@ final class GitGraphCellView: NSView {
     private(set) var isHead = false
     enum Section { case commit, expandedCommit, continuation, expansionEnd }
     private(set) var section = Section.commit
-    private var displayLaneCount = 1
+    private var column: GitGraphColumnLayout?
 
     override var isFlipped: Bool {
         true
@@ -32,7 +32,7 @@ final class GitGraphCellView: NSView {
             return NSSize(width: Self.preferredWidth(laneCount: 1), height: NSView.noIntrinsicMetric)
         }
         return NSSize(
-            width: Self.preferredWidth(laneCount: row.requiredLaneCount),
+            width: GitGraphColumnLayout.width(for: row),
             height: NSView.noIntrinsicMetric
         )
     }
@@ -42,11 +42,11 @@ final class GitGraphCellView: NSView {
         return horizontalInset * 2 + CGFloat(lanes - 1) * laneSpacing + nodeDiameter
     }
 
-    func configure(row: GitGraphRow, isHead: Bool = false, laneCount: Int? = nil, section: Section = .commit) {
+    func configure(row: GitGraphRow, isHead: Bool = false, layout: GitGraphColumnLayout? = nil, section: Section = .commit) {
         self.row = row
         self.isHead = isHead
         self.section = section
-        displayLaneCount = laneCount ?? row.requiredLaneCount
+        column = layout ?? GitGraphColumnLayout(row: row)
         invalidateIntrinsicContentSize()
         needsDisplay = true
         toolTip = isHead ? "Current HEAD · \(row.commitID.shortSHA)" : row.commitID.shortSHA
@@ -70,7 +70,10 @@ final class GitGraphCellView: NSView {
         let bendY = ending ? max(0, bounds.height - 10) : bounds.height
         for segment in row.segments where segment.kind == .passthrough {
             let top = point(for: segment.from)
-            var points = [top, NSPoint(x: top.x, y: bendY)]
+            let middleX = column?.middleX(lane: segment.from.lane, row: row) ?? top.x
+            var points = [top]
+            if section == .expandedCommit { points.append(NSPoint(x: middleX, y: min(14, bounds.midY))) }
+            points.append(NSPoint(x: middleX, y: bendY))
             if ending { points.append(point(for: segment.to)) }
             stroke(points, colorIndex: segment.colorIndex)
         }
@@ -95,13 +98,28 @@ final class GitGraphCellView: NSView {
         path.lineJoinStyle = .round
         path.lineWidth = Self.lineWidth
         path.move(to: first)
-        for point in points.dropFirst() { path.line(to: point) }
+        var previous = first
+        for point in points.dropFirst() {
+            if point.x == previous.x {
+                path.line(to: point)
+            } else {
+                let middleY = (previous.y + point.y) / 2
+                path.curve(to: point, controlPoint1: NSPoint(x: previous.x, y: middleY),
+                           controlPoint2: NSPoint(x: point.x, y: middleY))
+            }
+            previous = point
+        }
         color(for: colorIndex).setStroke()
         path.stroke()
     }
 
     private func draw(_ segment: GitGraphSegment) {
-        stroke([point(for: segment.from), point(for: segment.to)], colorIndex: segment.colorIndex)
+        var points = [point(for: segment.from)]
+        if segment.kind == .passthrough, let row, let column {
+            points.append(NSPoint(x: column.middleX(lane: segment.from.lane, row: row), y: min(14, bounds.midY)))
+        }
+        points.append(point(for: segment.to))
+        stroke(points, colorIndex: segment.colorIndex)
     }
 
     private func drawNode(_ row: GitGraphRow) {
@@ -129,9 +147,19 @@ final class GitGraphCellView: NSView {
     }
 
     private func point(for graphPoint: GitGraphPoint) -> NSPoint {
-        let lanes = max(1, displayLaneCount - 1)
-        let spacing = min(Self.laneSpacing, max(1, bounds.width - Self.horizontalInset * 2 - Self.nodeDiameter) / CGFloat(lanes))
-        let x = Self.horizontalInset + Self.nodeDiameter / 2 + CGFloat(graphPoint.lane) * spacing
+        guard let row, let column else { return .zero }
+        let x: CGFloat
+        switch graphPoint {
+        case .node(let lane): x = column.middleX(lane: lane, row: row)
+        case .top(let lane):
+            x = section == .continuation || section == .expansionEnd
+                ? column.middleX(lane: lane, row: row)
+                : column.edgeX(lane: lane, count: row.topLanes.count, top: true)
+        case .bottom(let lane):
+            x = section == .expandedCommit || section == .continuation
+                ? column.middleX(lane: lane, row: row)
+                : column.edgeX(lane: lane, count: row.bottomLanes.count, top: false)
+        }
         let y: CGFloat
         switch graphPoint {
         case .top:

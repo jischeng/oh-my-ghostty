@@ -19,7 +19,7 @@ final class GitRefBadgesView: NSView {
 
     static func attributed(_ decoration: GitRefDecoration) -> NSAttributedString {
         let color = tint(for: decoration.kind)
-        let symbol = symbol(for: decoration.kind)
+        let symbol = decoration.kind == .head ? nil : symbol(for: decoration.kind)
         let text = NSMutableAttributedString(string: " ")
         if let symbol, let image = NSImage(systemSymbolName: symbol, accessibilityDescription: decoration.kind.rawValue)?
             .withSymbolConfiguration(.init(pointSize: 10, weight: .medium))?
@@ -81,13 +81,17 @@ final class GitRefBadgesView: NSView {
             }
         }
         let head = ordered.filter { $0.kind == .head }.map(named)
-        let branches = ordered.filter { $0.kind != .head && $0.kind != .tag }
+        let branches = ordered.filter { $0.kind == .currentBranch || $0.kind == .localBranch }
+        let remotes = ordered.filter { $0.kind == .remoteBranch }
         let tags = ordered.filter { $0.kind == .tag }
         let tagBadges = tags.prefix(1).map(named) + count(Array(tags.dropFirst()), kind: .tag)
-        if let all = fit(head + branches.map(named) + tagBadges) { return all }
-        let primary = head + branches.prefix(1).map(named) + count(Array(branches.dropFirst()), kind: .localBranch) + tagBadges
+        if let all = fit(head + branches.map(named) + remotes.map(named) + tagBadges) { return all }
+        let remoteBadges = branches.isEmpty ? remotes.prefix(1).map(named) + count(Array(remotes.dropFirst()), kind: .remoteBranch)
+            : count(remotes, kind: .remoteBranch)
+        let primary = head + branches.prefix(1).map(named) + count(Array(branches.dropFirst()), kind: .localBranch) + remoteBadges + tagBadges
         if let result = fit(primary) { return result }
-        if let result = fit(head + count(branches, kind: .localBranch) + tagBadges) { return result }
+        if let result = fit(head + count(branches, kind: .localBranch) + count(remotes, kind: .remoteBranch) + tagBadges) { return result }
+        if let result = fit(head + count(branches, kind: .localBranch) + count(remotes, kind: .remoteBranch) + count(tags, kind: .tag)) { return result }
         let others = ordered.filter { $0.kind != .tag }
         let otherBadge = others.isEmpty ? [] : [Badge(decoration: .init(name: "\(others.count) refs", kind: .head), refs: others, isCount: true)]
         if let result = fit(otherBadge + tagBadges) { return result }
@@ -149,33 +153,18 @@ final class GitRefBadgesView: NSView {
     @objc private func showRefs(_ sender: NSButton) {
         popover?.close()
         let view = GitRefListView()
-        view.configure(refs)
+        let selected = buttons.firstIndex(where: { $0 === sender }).flatMap { rendered[$0].refs.first }
         view.frame = NSRect(x: 0, y: 0, width: 360, height: GitRefListView.height(for: refs, width: 360))
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 360, height: min(320, max(60, view.frame.height))))
-        scroll.drawsBackground = true
-        scroll.backgroundColor = .windowBackgroundColor
-        scroll.hasVerticalScroller = true
-        scroll.documentView = view
+        view.configure(refs, selected: selected)
         let controller = NSViewController()
-        controller.view = scroll
+        controller.view = view
         let popover = NSPopover()
         popover.behavior = .transient
+        popover.animates = false
         popover.contentViewController = controller
-        popover.contentSize = scroll.frame.size
+        popover.contentSize = view.frame.size
         self.popover = popover
         popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minX)
     }
 
-    static func fullText(for refs: [GitRefDecoration]) -> String {
-        let groups: [(String, [GitRefDecorationKind])] = [
-            ("HEAD", [.head]), ("Branches", [.currentBranch, .localBranch]),
-            ("Remote branches", [.remoteBranch]), ("Tags", [.tag]),
-        ]
-        let ordered = GitRefDecoration.orderedForDisplay(refs)
-        return groups.compactMap { title, kinds in
-            let names = ordered.filter { kinds.contains($0.kind) }.map(\.name)
-            if title == "HEAD", names == ["HEAD"] { return "HEAD" }
-            return names.isEmpty ? nil : title + "\n" + names.joined(separator: "\n")
-        }.joined(separator: "\n\n")
-    }
 }

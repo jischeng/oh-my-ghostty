@@ -54,12 +54,11 @@ struct GitHistoryTable: NSViewRepresentable {
             case commit(Int)
             case files(Int)
             case message(Int)
-            case refs(Int)
             case notice(Int)
             case file(Int, GitDiffFile)
             var commitIndex: Int {
                 switch self {
-                case .commit(let index), .files(let index), .message(let index), .refs(let index), .notice(let index), .file(let index, _): index
+                case .commit(let index), .files(let index), .message(let index), .notice(let index), .file(let index, _): index
                 }
             }
             var suffix: String {
@@ -67,7 +66,6 @@ struct GitHistoryTable: NSViewRepresentable {
                 case .commit: "commit"
                 case .files: "files"
                 case .message: "message"
-                case .refs: "refs"
                 case .notice: "notice"
                 case .file(_, let file): file.id
                 }
@@ -140,7 +138,6 @@ struct GitHistoryTable: NSViewRepresentable {
                             if !collapsedFiles.contains(commit.id) {
                                 rows.append(contentsOf: details.files.map { .file(index, $0) })
                             }
-                            if !decorations(for: commit).isEmpty { rows.append(.refs(index)) }
                             if details.metadata?.body.isEmpty == false { rows.append(.message(index)) }
                         }
                     }
@@ -173,7 +170,7 @@ struct GitHistoryTable: NSViewRepresentable {
                 let commit = content.commits[row.commitIndex]
                 switch row {
                 case .commit:
-                    return GitHistoryCell.height(commit: commit, refs: content.expandedCommits[commit.id] == nil ? decorations(for: commit) : [], width: width)
+                    return GitHistoryCell.height(commit: commit, refs: decorations(for: commit), width: width)
                 default:
                     return GitHistoryDetailCell.height(for: childContent(for: row), width: width)
                 }
@@ -249,7 +246,6 @@ struct GitHistoryTable: NSViewRepresentable {
             case .files:
                 return .files(details?.files.count ?? 0, details?.statistics, collapsedFiles.contains(commit.id))
             case .file(_, let file): return .file(file)
-            case .refs: return .refs(decorations(for: commit))
             case .message: return .message(details?.metadata?.body ?? "", messageExpansion[commit.id])
             default: return .notice(details?.error ?? "Loading changed files…", details?.error != nil)
             }
@@ -283,7 +279,6 @@ struct GitHistoryTable: NSViewRepresentable {
             guard let content, rows.indices.contains(index) else { return }
             switch rows[index] {
             case .file(let commit, let file) where !doubleClick: content.onOpenFile(content.commits[commit].id, file)
-            case .commit(let commit) where doubleClick: content.onOpen(content.commits[commit].id)
             case .files where !doubleClick: activateChild(rows[index])
             default: break
             }
@@ -303,7 +298,6 @@ struct GitHistoryTable: NSViewRepresentable {
             switch row {
             case .file(_, let file): return file.path
             case .message: return content.expandedCommits[commit.id]?.metadata?.body
-            case .refs: return decorations(for: commit).map(\.name).joined(separator: "\n")
             default: return commit.subject
             }
         }

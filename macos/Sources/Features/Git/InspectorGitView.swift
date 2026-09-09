@@ -121,18 +121,12 @@ struct InspectorGitView: View {
                 if let address = content.workingTree.remoteURL {
                     InspectorCopyText(text: address).frame(height: 14)
                 }
-                let tags = currentTags
-                if !tags.isEmpty { GitRefBadgeRow(refs: tags).frame(height: 17) }
+
             }
             if let connection = content.connectionLabel ?? content.repository?.sshConnection?.destination {
                 InspectorCopyText(text: "SSH · " + connection).frame(height: 14)
             }
-            if let branch = content.branch, !branch.isEmpty {
-                HStack(spacing: 4) {
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.tint)
-                    InspectorCopyText(text: branch).frame(height: 14)
-                }
-            }
+            if !headerReferences.isEmpty { GitRefBadgeRow(refs: headerReferences).frame(height: 17) }
             if content.workingTree.branchesError == nil,
                let current = content.workingTree.branches.first(where: { $0.isCurrent }) {
                 InspectorCopyText(text: current.upstream.isEmpty ? "No upstream configured" :
@@ -140,6 +134,16 @@ struct InspectorGitView: View {
                     .frame(height: 14)
             }
         }
+    }
+
+    private var headerReferences: [GitRefDecoration] {
+        let branch: [GitRefDecoration]
+        switch content.status {
+        case .ready(_, let name, _), .unborn(_, let name): branch = [.init(name: name, kind: .currentBranch)]
+        case .detached: branch = [.init(name: "HEAD", kind: .head)]
+        default: branch = []
+        }
+        return branch + currentTags
     }
 
     private var currentTags: [GitRefDecoration] {

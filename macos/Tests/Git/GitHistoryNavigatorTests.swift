@@ -89,16 +89,20 @@ struct GitHistoryNavigatorTests {
             let coordinator = try #require(table.target as? GitHistoryTable.Coordinator)
             coordinator.update(root)
             let main = try cell(0)
-            let nextMain = try cell(7)
-            let branch = try cell(8)
+            let nextMain = try cell(6)
+            let branch = try cell(7)
             let subject = try #require(find(NSTextField.self, in: main))
             #expect(subject.frame.minX == find(NSTextField.self, in: nextMain)?.frame.minX)
             #expect(subject.frame.minX < (find(NSTextField.self, in: branch)?.frame.minX ?? 0))
             #expect(subject.bounds.width > width * 0.70)
-            #expect(foldedHeight == table.rect(ofRow: 7).height)
-            let meta = main.subviews.compactMap { $0 as? NSTextField }
-            #expect(meta[1].stringValue == "renjiejiang02 · renjiejiang02@deeproute.ai")
-            #expect(meta[2].stringValue.hasSuffix(" · main001"))
+            #expect(foldedHeight == table.rect(ofRow: 6).height)
+            func metadataButtons(_ view: NSView) -> [InspectorClickCopyText] {
+                if let button = view as? InspectorClickCopyText { return [button] }
+                return view.subviews.flatMap(metadataButtons)
+            }
+            let meta = metadataButtons(main)
+            #expect(meta.contains { $0.value == "renjiejiang02@deeproute.ai" })
+            #expect(meta.contains { $0.value == "main001" })
             for value in [nextMain, branch] {
                 let group = try #require(find(GitRefBadgesView.self, in: value))
                 let named = group.subviews.compactMap { $0 as? NSButton }
@@ -106,16 +110,14 @@ struct GitHistoryNavigatorTests {
                 #expect(group.bounds.height == 17)
             }
             let badges = try #require(find(GitRefBadgesView.self, in: main))
-            #expect(badges.bounds.height == 0)
-            let references = try #require(find(GitRefListView.self, in: try cell(5)))
-            #expect(first.refDecorations.allSatisfy { references.refs.contains($0) })
-            #expect(table.rect(ofRow: 2).minY < table.rect(ofRow: 5).minY)
-            let message = try cell(6)
+            #expect(badges.bounds.height == 17)
+            #expect(find(GitRefListView.self, in: main) == nil)
+            let message = try cell(5)
             let control = try #require(find(NSButton.self, in: message))
             let controlFrame = control.frame
             let filePosition = table.rect(ofRow: 2)
             control.performClick(nil)
-            let openControl = try #require(find(NSButton.self, in: try cell(6)))
+            let openControl = try #require(find(NSButton.self, in: try cell(5)))
             #expect(openControl.title == "Commit message · 18 lines")
             #expect(openControl.frame == controlFrame)
             #expect(table.rect(ofRow: 2) == filePosition)
@@ -132,7 +134,9 @@ struct GitHistoryNavigatorTests {
     }
     private func capture(_ view: NSView, path: String) async throws {
         guard FileManager.default.fileExists(atPath: "/tmp/omg-git-render") else { return }
+        try await Task.sleep(for: .milliseconds(100))
         view.layoutSubtreeIfNeeded()
+        view.window?.displayIfNeeded()
         let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
         view.cacheDisplay(in: view.bounds, to: bitmap)
         let data = try #require(bitmap.representation(using: .png, properties: [:]))

@@ -959,45 +959,38 @@ intact. Binary files contribute to a separate count, not invented line totals;
 untracked working-tree files are represented as additions.
 
 History keeps the subject first, followed by two secondary metadata lines:
-Author · Email, then Time · Short SHA. HEAD/branch/remote/tag badges occupy a
-single fixed 17-point row. Each badge is capped at 104 points. Folded summaries preserve one named tag
-and combine remaining tags into a count; branch names shrink or aggregate first
-when space is tight. Clicking a badge opens a bounded scrolling list with the
-same ref colors/symbols, selectable full names and per-row/Copy All buttons.
-Expanded commits replace compact badges with the full ref list after Changed
-Files and before the body, keeping file actions reachable even with many refs.
-Ref names and counts never widen the sidebar; folded summaries stay bounded. Expanding a commit preserves
-these summary fields and their positions. It adds the changed-file count and
-additions/deletions, then clickable A/M/D/R file rows, and only then the optional
-message body. It never repeats metadata labels or the subject. Short bodies
-(up to four rendered lines) default to expanded; longer bodies default to
-collapsed. Both use the same “Commit message” disclosure.
-Long-body disclosure headers stay at the same top position when expanded,
-show their source line count, and collapse the body on a second click. There
-is no bottom-only “Show less” control. The changed-file group can fold
-independently and remains before the body.
-Presentation-only folds do not refetch Git data.
-Inspector text selection routes Copy/Select All before terminal shortcuts.
-Commit rows also support keyboard Copy and field-specific context-menu copies;
-ref rows offer explicit copy buttons. These controls copy full values even
-when the displayed label is truncated. The branch scope picker bounds displayed
-menu titles by measured width but dispatches the original ref ID. Its tooltip
-retains the full name. The repository header shows the worktree path, configured
-origin address and tags on the actual HEAD (not a browsed branch). Origin is read
-on initial/forced repository refresh, not every poll; HTTP user info and query
-credentials are omitted from its display address. A continuous current-commit
-rail spans its child rows, including root commits; parent forks and passing
-lane compaction occur at the end of the expanded block. Lane changes finish
-near nodes/boundaries rather than bending across a whole row; parallel lanes
-have extra spacing without moving mainline text. Node/disclosure centers share
-the subject's optical center. Graph drawing and text
-placement use per-commit geometry: lane-zero subjects keep a fixed 36-point
-origin, while only a node on a branch gets a bounded local offset. The maximum
-lane count of other commits cannot move this origin. Shared row-boundary
-coordinates and curved segments keep joins continuous as local gutters widen
-and narrow; edges remain outside text and disclosure glyphs.
+Author · Email, then Time · Short SHA. These are independent text-only click
+copy targets, with subtle hover feedback and a temporary Copied state; hash
+clicks copy the full SHA. The subject and message body use native text selection,
+word selection and Cmd+C instead of copy icons. Only the trailing, low-contrast
+7-point chevron toggles a commit; the graph gutter contains topology alone.
 
-Double-clicking a commit or using its disclosure loads metadata/files on demand,
+HEAD/branch/remote/tag badges remain compact even while a commit is expanded.
+They occupy one 17-point row, cap each name at 104 points, and aggregate local
+branches, remote branches and tags separately when needed. Clicking a badge
+opens References, never copies it. That popover separates HEAD, Branches, Remote
+Branches and Tags; branches use visual slash-delimited folders while leaves
+retain exact ref names. Selecting a leaf reveals its full name for native
+selection/copy; keyboard/context-menu copying is also available. No permanent
+copy-icon column or expanded inline ref list is added to the timeline.
+
+Expanding a commit adds changed-file count and line statistics, clickable file
+rows, then the optional message body without repeating metadata or the subject.
+Short bodies default to expanded and long bodies to collapsed. Their disclosure
+header stays above the text with a line count; clicking or selecting the text
+never toggles the section. Changed Files stays before the body.
+Presentation folds do not refetch Git data. The commit rail spans child rows,
+including root commits; forks and lane compaction occur at the block end.
+Lane changes finish near nodes/boundaries, with adequate parallel spacing.
+Mainline content has a fixed origin independent of other commits' lane counts;
+only a branch node adds a bounded local offset. Adjacent edge coordinates match.
+
+Inspector native copy routing precedes terminal shortcuts. The bounded branch
+scope picker displays compact titles but dispatches original ref IDs. Repository
+headers show selectable worktree/origin addresses and HEAD tags. Origin is read
+on initial/forced refresh rather than each poll; HTTP credentials are omitted.
+
+Using the trailing commit disclosure loads metadata/files on demand,
 independently of history pagination; collapsing cancels that pending request.
 Only clicking a changed file routes to
 `EditorWorkspaceStore.openGitDiff(repository:target:file:context:)`, honoring the

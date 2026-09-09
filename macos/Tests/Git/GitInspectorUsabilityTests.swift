@@ -22,7 +22,7 @@ struct GitInspectorUsabilityTests {
             charactersIgnoringModifiers: char, isARepeat: false, keyCode: char == "c" ? 8 : 0))
     }
 
-    @Test func nativeInspectorSelectionAndRefButtonsActuallyCopyFullValues() async throws {
+    @Test func nativeInspectorSelectionAndRefDetailsActuallyCopyFullValues() async throws {
         let value = "renjiejiang02 · renjiejiang02@deeproute.ai"
         let field = InspectorCopyableTextField(labelWithString: value)
         field.isSelectable = true
@@ -45,16 +45,13 @@ struct GitInspectorUsabilityTests {
         list.frame = NSRect(x: 0, y: 0, width: 360, height: GitRefListView.height(for: [ref], width: 360))
         host.contentView = list
         list.layoutSubtreeIfNeeded()
-        let copy = try #require(find(InspectorCopyButton.self, in: list).last { $0.value == ref.name })
-        copy.pasteboard = board
-        copy.performClick(nil)
-        #expect(board.string(forType: .string) == ref.name)
-        let refField = try #require(find(InspectorCopyableTextField.self, in: list).first)
-        refField.pasteboard = board
-        refField.selectText(nil)
+        list.pasteboard = board
+        let detail = try #require(find(InspectorCopyableTextView.self, in: list).first)
+        host.makeFirstResponder(detail)
         #expect(EditorCommandRouter.shared.handle(try key("a", in: host)))
         #expect(EditorCommandRouter.shared.handle(try key("c", in: host)))
         #expect(board.string(forType: .string) == ref.name)
+
     }
 
     @Test func tableShortcutAndContextMenuCopyCommitFields() async throws {
@@ -84,13 +81,129 @@ struct GitInspectorUsabilityTests {
         let subject = try #require(find(NSTextField.self, in: cell).first)
         let center = subject.frame.minY + subject.firstBaselineOffsetFromTop - (subject.font?.capHeight ?? 0) / 2
         #expect(abs(center - GitGraphColumnLayout.contentAxisY) <= 0.5)
-        let fields = cell.subviews.compactMap { $0 as? InspectorCopyableTextField }
-        let identity = try #require(fields.first { $0.stringValue.contains(commit.authorEmail) })
+        let identity = try #require(find(InspectorClickCopyText.self, in: cell).first { $0.value == commit.authorEmail })
         identity.pasteboard = board
-        let copyMenu = try #require(identity.menu(for: try key("c", in: host)))
-        let emailIndex = try #require(copyMenu.items.firstIndex { $0.title == "Copy email" })
-        copyMenu.performActionForItem(at: emailIndex)
+        identity.performClick(nil)
         #expect(board.string(forType: .string) == commit.authorEmail)
+        #expect(identity.isCopied)
+
+    }
+
+    @Test func metadataCopiesIndependentlyAndDisclosureLivesAfterTheSubject() async throws {
+        let commit = GitHistoryCommit(id: .init("0123456789abcdef0123456789abcdef01234567"), parentIDs: [],
+            authorName: "jischeng", authorEmail: "j.s.cheng@hotmail.com", authoredAt: Date(), subject: "Commit subject remains primary")
+        let view = NSHostingView(rootView: GitHistoryTable(commits: [commit], selectedCommitID: nil,
+            onSelect: { _ in }, onOpen: { _ in }, onShowInTerminal: { _ in }).background(Color(NSColor.windowBackgroundColor)))
+        view.sizingOptions = []
+        let host = window(view, width: 280, height: 200)
+        defer { host.contentView = nil; host.close() }
+        try await Task.sleep(for: .milliseconds(100))
+        let table = try #require(find(NSTableView.self, in: view).first)
+        let cell = try #require(table.view(atColumn: 0, row: 0, makeIfNecessary: true))
+        cell.layoutSubtreeIfNeeded()
+        let subject = try #require(cell.subviews.compactMap { $0 as? NSTextField }.first)
+        let graph = try #require(find(GitGraphCellView.self, in: cell).first)
+        let disclosure = try #require(cell.subviews.compactMap { $0 as? NSButton }.first)
+        #expect(graph.frame.maxX < subject.frame.minX)
+        #expect(disclosure.frame.minX > subject.frame.maxX)
+        #expect(subject.isSelectable)
+        let buttons = find(InspectorClickCopyText.self, in: cell)
+        let board = NSPasteboard.withUniqueName()
+        for value in [commit.authorName, commit.authorEmail, commit.authoredAt.description, commit.id.rawValue] {
+            let button = try #require(buttons.first { $0.value == value })
+            button.pasteboard = board
+            let frame = button.frame
+            button.performClick(nil)
+            #expect(board.string(forType: .string) == value)
+            #expect(button.isCopied && button.attributedTitle.string == "Copied")
+            #expect(button.frame == frame && button.image == nil)
+        }
+        try await Task.sleep(for: .milliseconds(1100))
+        #expect(buttons.allSatisfy { !$0.isCopied })
+    }
+
+    @Test func referencesHaveTypedFolderTreesWithoutClickToCopy() async throws {
+        let refs: [GitRefDecoration] = [
+            .init(name: "HEAD", kind: .head), .init(name: "main", kind: .currentBranch),
+            .init(name: "feature/git/history", kind: .localBranch), .init(name: "feature/git/diff", kind: .localBranch),
+            .init(name: "feature/editor/markdown", kind: .localBranch), .init(name: "fix/ssh/reconnect", kind: .localBranch),
+            .init(name: "origin/main", kind: .remoteBranch), .init(name: "origin/feature/git/history", kind: .remoteBranch),
+            .init(name: "v0.11.2", kind: .tag), .init(name: "releases/dev-v0.11.2-169a6eb4", kind: .tag),
+        ]
+        let roots = GitReferenceNode.build(refs)
+        #expect(roots.map(\.title) == ["HEAD", "Branches", "Remote Branches", "Tags"])
+        let feature = try #require(roots[1].children.first { $0.title == "feature" })
+        let git = try #require(feature.children.first { $0.title == "git" })
+        #expect(git.children.map(\.title) == ["diff", "history"])
+        #expect(git.children.last?.ref?.name == "feature/git/history")
+        #expect(roots[2].children.first?.title == "origin")
+        #expect(roots[3].children.contains { $0.title == "releases/dev-v0.11.2-169a6eb4" })
+        let list = GitRefListView()
+        let board = NSPasteboard.withUniqueName()
+        list.pasteboard = board
+        InspectorCopyMenu.copy("unchanged", to: board)
+        list.configure(refs, selected: refs[2])
+        let host = window(list, height: 380)
+        defer { host.contentView = nil; host.close() }
+        try await Task.sleep(for: .milliseconds(150))
+        list.layoutSubtreeIfNeeded()
+        host.displayIfNeeded()
+        #expect(list.tree.frame.width > 300 && list.tree.visibleRect.height > 200)
+        let visibleRows = list.tree.rows(in: list.tree.visibleRect)
+        #expect(visibleRows.length >= 6)
+        for index in visibleRows.location..<NSMaxRange(visibleRows) {
+            let cell = try #require(list.tree.view(atColumn: 0, row: index, makeIfNecessary: true))
+            cell.layoutSubtreeIfNeeded()
+            #expect(find(NSTextField.self, in: cell).first?.bounds.width ?? 0 > 100)
+        }
+        #expect(board.string(forType: .string) == "unchanged")
+        #expect(find(InspectorClickCopyText.self, in: list).isEmpty)
+        #expect(find(NSButton.self, in: list).allSatisfy { $0.toolTip?.hasPrefix("Copy") != true })
+        host.makeFirstResponder(list.tree)
+        #expect(EditorCommandRouter.shared.handle(try key("c", in: host)))
+        #expect(board.string(forType: .string) == "feature/git/history")
+        if FileManager.default.fileExists(atPath: "/tmp/omg-git-render") {
+            let bitmap = try #require(list.bitmapImageRepForCachingDisplay(in: list.bounds))
+            list.cacheDisplay(in: list.bounds, to: bitmap)
+            let data = try #require(bitmap.representation(using: .png, properties: [:]))
+            try data.write(to: URL(fileURLWithPath: "/tmp/omg-git-reference-tree.png"))
+        }
+    }
+
+    @Test func messageBodyUsesNativeWordSelectionWithoutTogglingDisclosure() async throws {
+        let commit = GitHistoryCommit(id: .init("1234567"), parentIDs: [], authorName: "Author", authorEmail: "a@example.com",
+            authoredAt: Date(), subject: "Subject")
+        let body = "alpha beta gamma\nsecond explanatory line"
+        let expansion = GitCommitExpansion(metadata: .init(commitID: commit.id, authorName: commit.authorName,
+            authorEmail: commit.authorEmail, authoredAt: "2026-09-09", parents: [], message: "Subject\n\n" + body))
+        var opened = 0
+        let view = NSHostingView(rootView: GitHistoryTable(commits: [commit], selectedCommitID: nil,
+            expandedCommits: [commit.id: expansion], onSelect: { _ in }, onOpen: { _ in opened += 1 }, onShowInTerminal: { _ in }))
+        view.sizingOptions = []
+        let host = window(view)
+        defer { host.contentView = nil; host.close() }
+        try await Task.sleep(for: .milliseconds(100))
+        let table = try #require(find(NSTableView.self, in: view).first)
+        let cell = try #require(table.view(atColumn: 0, row: 2, makeIfNecessary: true))
+        cell.layoutSubtreeIfNeeded()
+        let field = try #require(find(InspectorCopyableTextField.self, in: cell).first)
+        let board = NSPasteboard.withUniqueName()
+        field.pasteboard = board
+        field.selectText(nil)
+        let editor = try #require(field.currentEditor() as? NSTextView)
+        let word = editor.selectionRange(forProposedRange: NSRange(location: 7, length: 0), granularity: .selectByWord)
+        editor.setSelectedRange(word)
+        #expect(EditorCommandRouter.shared.handle(try key("c", in: host)))
+        #expect(board.string(forType: .string) == "beta")
+        let before = table.rect(ofRow: 2).height
+        let coordinator = try #require(table.target as? GitHistoryTable.Coordinator)
+        coordinator.activateRow(2, doubleClick: false)
+        coordinator.activateRow(2, doubleClick: true)
+        #expect(table.rect(ofRow: 2).height == before && opened == 0)
+        let controls = cell.subviews.compactMap { $0 as? NSButton }
+        #expect(controls.count == 1)
+        controls[0].performClick(nil)
+        #expect(table.rect(ofRow: 2).height == 28)
     }
 
     @Test func repositoryHeaderShowsCopyablePathRemoteAndHeadTags() async throws {

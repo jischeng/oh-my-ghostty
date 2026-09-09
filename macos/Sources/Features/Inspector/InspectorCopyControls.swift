@@ -33,23 +33,97 @@ class InspectorCopyableTextField: NSTextField {
     }
 }
 
-final class InspectorCopyButton: NSButton {
-    var value = ""
+/// Small metadata values copy on explicit click, without adding an icon column.
+final class InspectorClickCopyText: NSButton {
+    private(set) var value = ""
+    private var displayText = ""
+    private(set) var isCopied = false
     var pasteboard = NSPasteboard.general
+    private var hoverArea: NSTrackingArea?
+    private var hovered = false
+    private var feedbackTask: Task<Void, Never>?
+    var naturalWidth: CGFloat { max(40, ceil((displayText as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 10)]).width) + 4) }
+
     override init(frame: NSRect) {
         super.init(frame: frame)
-        image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy")?
-            .withSymbolConfiguration(.init(pointSize: 10, weight: .regular))
         isBordered = false
-        imagePosition = .imageOnly
-        contentTintColor = .secondaryLabelColor
+        alignment = .left
+        imagePosition = .noImage
+        cell?.lineBreakMode = .byTruncatingMiddle
+        wantsLayer = true
+        layer?.cornerRadius = 3
         target = self
         action = #selector(copyValue(_:))
-        toolTip = "Copy"
-        setAccessibilityLabel("Copy")
     }
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    @objc private func copyValue(_ sender: Any?) { InspectorCopyMenu.copy(value, to: pasteboard) }
+    func configure(text: String, value: String, label: String) {
+        if self.value != value || displayText != text {
+            feedbackTask?.cancel()
+            isCopied = false
+        }
+        self.value = value
+        displayText = text
+        toolTip = "Copy " + label.lowercased() + " · " + value
+        setAccessibilityLabel(label + ": " + value)
+        present()
+    }
+    private func present() {
+        attributedTitle = NSAttributedString(string: isCopied ? "Copied" : displayText, attributes: [
+            .font: NSFont.systemFont(ofSize: 10),
+            .foregroundColor: isCopied ? NSColor.controlAccentColor : NSColor.secondaryLabelColor,
+        ])
+        layer?.backgroundColor = (hovered ? NSColor.labelColor.withAlphaComponent(0.07) : .clear).cgColor
+        setAccessibilityValue(isCopied ? "Copied" : "")
+    }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(rect: bounds, options: [.activeInKeyWindow, .mouseEnteredAndExited, .inVisibleRect], owner: self, userInfo: nil)
+        addTrackingArea(area)
+        hoverArea = area
+    }
+    override func mouseEntered(with event: NSEvent) { hovered = true; present() }
+    override func mouseExited(with event: NSEvent) { hovered = false; present() }
+    override func resetCursorRects() { super.resetCursorRects(); addCursorRect(bounds, cursor: .pointingHand) }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { feedbackTask?.cancel(); isCopied = false; present() }
+    }
+    @objc private func copyValue(_ sender: Any?) {
+        InspectorCopyMenu.copy(value, to: pasteboard)
+        feedbackTask?.cancel()
+        isCopied = true
+        present()
+        feedbackTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            self?.isCopied = false
+            self?.present()
+        }
+    }
+}
+
+final class InspectorCopyableTextView: NSTextView {
+    var pasteboard = NSPasteboard.general
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        EditorCommandRouter.shared.unregister(owner: self)
+        guard window != nil else { return }
+        EditorCommandRouter.shared.register(owner: self) { [weak self] event in
+            guard let self, event.window === self.window, self.window?.firstResponder === self,
+                  event.modifierFlags.intersection([.command, .control, .option, .shift]) == .command else { return false }
+            switch event.charactersIgnoringModifiers?.lowercased() {
+            case "a": self.selectAll(nil); return true
+            case "c":
+                let range = self.selectedRange()
+                if range.length > 0, NSMaxRange(range) <= (self.string as NSString).length {
+                    InspectorCopyMenu.copy((self.string as NSString).substring(with: range), to: self.pasteboard)
+                }
+                return true
+            default: return false
+            }
+        }
+    }
 }
 
 final class InspectorCopyMenu: NSMenu {

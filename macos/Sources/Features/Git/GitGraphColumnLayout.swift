@@ -7,10 +7,9 @@ struct GitGraphColumnLayout: Equatable {
     let topWidth: CGFloat
     let bottomWidth: CGFloat
 
-    // The graph's trailing empty space overlaps the disclosure hit target,
-    // keeping mainline subjects at 36 pt without drawing through controls.
+    // The graph has its own gutter; disclosure lives at the row's trailing edge.
     static let contentAxisY: CGFloat = 12
-    var contentX: CGFloat { width + 12 }
+    var contentX: CGFloat { width + 4 }
 
     static func width(for row: GitGraphRow) -> CGFloat {
         24 + min(32, CGFloat(row.nodeLane) * 8)

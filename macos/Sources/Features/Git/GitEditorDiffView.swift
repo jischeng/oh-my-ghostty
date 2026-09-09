@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import CodeEditSourceEditor
 
@@ -8,10 +9,21 @@ struct GitEditorDiffRequest: Identifiable {
     let file: GitDiffFile?
 }
 
+struct GitDiffEditorActions {
+    var hide: () -> Void = {}
+    var open: () -> Void = {}
+    var nextDocument: () -> Void = {}
+    var previousDocument: () -> Void = {}
+    var saveAll: () -> Void = {}
+    var focus: () -> Void = {}
+    var isSurfaceFocused: () -> Bool = { true }
+}
+
 struct GitEditorDiffView: View {
     let request: GitEditorDiffRequest
     let theme: EditorTheme
     var isActive = true
+    var actions = GitDiffEditorActions()
     let close: () -> Void
     @State private var files: [GitDiffFile] = []
     @State private var selected: GitDiffFile?
@@ -32,7 +44,10 @@ struct GitEditorDiffView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text(request.target.description).font(.caption).lineLimit(1)
+                Text(request.repository.sshConnection.map { "SSH · " + $0.destination + " · " + request.target.description }
+                     ?? request.target.description)
+                    .font(.caption).lineLimit(1).truncationMode(.middle)
+                    .help(request.repository.worktreePath)
                 Spacer()
                 Picker("View", selection: $mode) {
                     Text("Side by Side").tag("Side by Side")
@@ -74,9 +89,12 @@ struct GitEditorDiffView: View {
                     }
                 } else {
                     CodeEditorView(text: .constant(presentation.text),
-                                   fileURL: URL(fileURLWithPath: document.file.path),
+                                   fileURL: URL(fileURLWithPath: document.file.path, isDirectory: false),
                                    diffLines: presentation.highlights,
-                                   isEditable: false, isActive: isActive, terminalTheme: theme, onClose: close)
+                                   isEditable: false, isActive: isActive, isSurfaceFocused: actions.isSurfaceFocused,
+                                   terminalTheme: theme, onFocus: actions.focus, onClose: close, onOpen: actions.open,
+                                   onNextDocument: actions.nextDocument, onPreviousDocument: actions.previousDocument,
+                                   onSaveAll: actions.saveAll, onHide: actions.hide)
                         .id("inline-\(selected?.id ?? "")")
                 }
             } else if !loading && error == nil {
@@ -84,6 +102,11 @@ struct GitEditorDiffView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(GitDiffFallbackCommands(
+            isActive: isActive && (loading || document == nil || document?.isBinary == true ||
+                                  document?.isTruncated == true || sourceError != nil),
+            actions: actions, close: close
+        ))
         .task {
             do {
                 let list = try await service.listFiles(for: request.repository, target: request.target)
@@ -134,8 +157,52 @@ struct GitEditorDiffView: View {
                 .background(title == "Before" ? Color.red.opacity(0.12) : Color.green.opacity(0.12))
             GitDiffLinkedEditor(text: text, path: path,
                                 highlights: title == "Before" ? lineMap.before : lineMap.after,
-                                isActive: isActive, theme: theme, link: scroll, side: side, close: close)
+                                isActive: isActive, theme: theme, link: scroll, side: side, actions: actions, close: close)
                 .id("\(selected?.id ?? "")-\(title)")
         }.frame(minWidth: 120)
+    }
+}
+
+/// Loading, binary and error views have no CodeEditorView to own shortcuts.
+private struct GitDiffFallbackCommands: NSViewRepresentable {
+    let isActive: Bool
+    let actions: GitDiffEditorActions
+    let close: () -> Void
+
+    final class Scope: NSView {
+        var active = false
+        var actions = GitDiffEditorActions()
+        var close: () -> Void = {}
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        func handle(_ event: NSEvent) -> Bool {
+            guard active, window != nil, event.window === window, actions.isSurfaceFocused(),
+                  let action = OhMyGhosttySettings.shared.editorSettings.keymap.action(for: event) else { return false }
+            switch action {
+            case .hide: actions.hide()
+            case .close: close()
+            case .open: actions.open()
+            case .nextDocument: actions.nextDocument()
+            case .previousDocument: actions.previousDocument()
+            case .saveAll: actions.saveAll()
+            case .save: break
+            default: return false
+            }
+            return true
+        }
+    }
+
+    func makeNSView(context: Context) -> Scope {
+        let view = Scope()
+        EditorCommandRouter.shared.register(owner: view) { [weak view] event in view?.handle(event) ?? false }
+        return view
+    }
+    func updateNSView(_ view: Scope, context: Context) {
+        view.active = isActive
+        view.actions = actions
+        view.close = close
+    }
+    static func dismantleNSView(_ view: Scope, coordinator: ()) {
+        EditorCommandRouter.shared.unregister(owner: view)
     }
 }

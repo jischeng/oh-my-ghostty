@@ -1,9 +1,9 @@
 import Foundation
 
 struct GitRepositoryService: Sendable {
-    let executor: any GitExecutor
+    let executor: (any GitExecutor)?
 
-    init(executor: any GitExecutor = LocalGitExecutor()) {
+    init(executor: (any GitExecutor)? = nil) {
         self.executor = executor
     }
 
@@ -11,42 +11,41 @@ struct GitRepositoryService: Sendable {
         workingDirectory: String?,
         session: PaneSessionContext? = nil
     ) async -> GitRepositoryStatusKind {
-        // 1. Check for remote SSH sessions
-        if let session {
-            switch session.state {
-            case .sshReady(let ssh, let remoteDir):
-                return .ssh(host: ssh.alias, workingDirectory: remoteDir)
-            case .sshConnecting(let ssh):
-                return .ssh(
-                    host: ssh.alias,
-                    workingDirectory: session.workingDirectory ?? ""
-                )
-            case .local:
-                break
-            }
-        }
+        let connection: GitSSHConnection?
+        do {
+            if let session, case .sshReady(let ssh, _) = session.state {
+                connection = try GitSSHConnection(session: ssh)
+            } else if let session, case .sshConnecting(let ssh) = session.state {
+                return .ssh(host: ssh.alias, workingDirectory: "")
+            } else { connection = nil }
+        } catch { return .error(title: "SSH Git", message: error.localizedDescription) }
+        let command: any GitExecutor
+        if let executor { command = executor } else if let connection { command = SSHGitExecutor(connection: connection) } else { command = LocalGitExecutor() }
 
         // 2. Validate working directory
-        guard let directory = workingDirectory?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
+        guard let directory = workingDirectory,
               !directory.isEmpty else {
             return .notRepository(directory: "")
         }
 
-        guard FileManager.default.fileExists(atPath: directory) else {
+        guard directory.hasPrefix("/"), !directory.contains("\0"),
+              !directory.contains("\n"), !directory.contains("\r") else {
+            return .error(title: "Git Path", message: "Repository directories must be absolute paths without line breaks.")
+        }
+        guard connection != nil || FileManager.default.fileExists(atPath: directory) else {
             return .notRepository(directory: directory)
         }
 
         // 3. Query repository identity
         do {
-            let result = try await executor.execute(
+            let result = try await command.execute(
                 arguments: [
                     "rev-parse",
-                    "--path-format=absolute",
                     "--is-inside-work-tree",
                     "--show-toplevel",
-                    "--git-dir",
+                    "--absolute-git-dir",
                     "--git-common-dir",
+                    "--show-prefix",
                 ],
                 workingDirectory: directory,
                 stdin: nil,
@@ -54,23 +53,27 @@ struct GitRepositoryService: Sendable {
             )
 
             guard result.isSuccess else {
-                return .notRepository(directory: directory)
+                if result.stderrString.contains("not a git repository") { return .notRepository(directory: directory) }
+                return .error(title: "Git Error", message: result.stderrString.isEmpty ? "Git repository check failed." : result.stderrString)
             }
 
             let lines = result.stdoutString
                 .split(separator: "\n", omittingEmptySubsequences: false)
-                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .map(String.init)
 
-            guard lines.count >= 4, lines[0] == "true" else {
-                return .notRepository(directory: directory)
+            guard lines.count == 6, lines[0] == "true", lines[1].hasPrefix("/"), lines[2].hasPrefix("/"),
+                  lines.allSatisfy({ !$0.contains("\r") && !$0.contains("\0") }) else {
+                return .error(title: "Git Path", message: "Git returned unsupported repository paths. Use Git 2.23+ and a repository root without line breaks.")
             }
 
             let worktreePath = lines[1]
             let gitDir = lines[2]
-            let commonGitDir = lines[3]
+            let prefix = lines.count > 4 ? lines[4] : ""
+            let commonGitDir = Self.absolutePath(lines[3], relativeTo: worktreePath + "/" + prefix)
 
             let identity = GitRepositoryIdentity(
-                target: .local,
+                target: connection.map { .remote(host: $0.destination, user: nil) } ?? .local,
+                sshConnection: connection,
                 worktreePath: worktreePath,
                 gitDirPath: gitDir,
                 commonGitDirPath: commonGitDir
@@ -83,24 +86,36 @@ struct GitRepositoryService: Sendable {
             case .cancelled:
                 return .error(title: "Cancelled", message: "Git check was cancelled")
             case .processFailed, .executionFailed, .outputLimitExceeded:
-                return .notRepository(directory: directory)
+                return .error(title: connection == nil ? "Git Error" : "SSH Git Error", message: error.localizedDescription)
             }
         } catch {
             return .error(title: "Git Error", message: error.localizedDescription)
         }
     }
 
+    /// Git paths must be normalized lexically, never through the Mac filesystem
+    /// when the repository belongs to an SSH endpoint.
+    static func absolutePath(_ path: String, relativeTo directory: String) -> String {
+        let absolute = path.hasPrefix("/") ? path : directory + "/" + path
+        var parts: [Substring] = []
+        for part in absolute.split(separator: "/") {
+            if part == "." { continue }
+            if part == ".." { if !parts.isEmpty { parts.removeLast() } } else { parts.append(part) }
+        }
+        return "/" + parts.joined(separator: "/")
+    }
+
     private func resolveHeadState(
         for identity: GitRepositoryIdentity
     ) async -> GitRepositoryStatusKind {
         do {
-            async let branchResult = executor.execute(
+            async let branchResult = (executor ?? identity.executor).execute(
                 arguments: ["symbolic-ref", "--quiet", "--short", "HEAD"],
                 workingDirectory: identity.worktreePath,
                 stdin: nil,
                 maxOutputBytes: 16 * 1024
             )
-            async let headResult = executor.execute(
+            async let headResult = (executor ?? identity.executor).execute(
                 arguments: ["rev-parse", "--quiet", "--verify", "HEAD"],
                 workingDirectory: identity.worktreePath,
                 stdin: nil,

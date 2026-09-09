@@ -29,6 +29,11 @@ struct GitRepositoryServiceTests {
         }
     }
 
+    @Test func refusesAmbiguousRepositoryRootsInsteadOfResolvingAnotherPath() async {
+        let status = await GitRepositoryService().resolveStatus(workingDirectory: "/tmp/repo\n/other")
+        guard case .error = status else { Issue.record("Line-delimited identity must reject roots containing line breaks"); return }
+    }
+
     @Test func detectsNonRepositoryDirectory() async throws {
         let dir = createTempDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -146,7 +151,7 @@ struct GitRepositoryServiceTests {
     }
 
     @Test func identifiesSSHSessionWithoutRunningLocalGit() async throws {
-        let service = GitRepositoryService()
+        let service = GitRepositoryService(executor: RemoteRepositoryProbe())
         var session = PaneSessionContext(workingDirectory: "/local/path", terminalTitle: "Terminal")
         session.observeForegroundSSH(
             alias: "prod-server",
@@ -154,7 +159,8 @@ struct GitRepositoryServiceTests {
             processGroupID: 1234,
             currentWorkingDirectory: "/local/path",
             currentTerminalTitle: "Terminal",
-            remoteWorkingDirectory: "/remote/repo"
+            remoteWorkingDirectory: "/remote/repo",
+            replay: .init(version: 1, ssh: "/usr/bin/ssh", forwardEnv: false, terminfo: false, cache: false, args: ["user@host"])
         )
 
         let status = await service.resolveStatus(
@@ -162,11 +168,22 @@ struct GitRepositoryServiceTests {
             session: session
         )
 
-        guard case .ssh(let host, let remoteDir) = status else {
-            Issue.record("Expected .ssh, got \(status)")
+        guard case .ready(let repository, let branch, _) = status else {
+            Issue.record("Expected remote repository, got \(status)")
             return
         }
-        #expect(host == "prod-server")
-        #expect(remoteDir == "/remote/repo")
+        #expect(branch == "main")
+        #expect(repository.worktreePath == "/remote/repo")
+        #expect(repository.sshConnection?.destination == "user@host")
+
+    }
+}
+
+private struct RemoteRepositoryProbe: GitExecutor {
+    func execute(arguments: [String], workingDirectory: String, stdin: Data?, maxOutputBytes: Int?) async throws -> GitExecutionResult {
+        #expect(workingDirectory == "/remote/repo")
+        let output: String
+        if arguments.contains("--show-toplevel") { output = "true\n/remote/repo\n/remote/repo/.git\n/remote/repo/.git\n\n" } else if arguments.first == "symbolic-ref" { output = "main\n" } else { output = String(repeating: "a", count: 40) + "\n" }
+        return GitExecutionResult(exitCode: 0, stdout: Data(output.utf8), stderr: Data())
     }
 }

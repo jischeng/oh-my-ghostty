@@ -30,8 +30,8 @@ enum GitMutation: Equatable, Sendable {
 }
 
 struct GitMutationService: Sendable {
-    let executor: any GitExecutor
-    init(executor: any GitExecutor = LocalGitExecutor()) { self.executor = executor }
+    let executor: (any GitExecutor)?
+    init(executor: (any GitExecutor)? = nil) { self.executor = executor }
 
     func remotes(in repository: GitRepositoryIdentity) async throws -> [String] {
         let result = try await run(["remote"], in: repository)
@@ -45,7 +45,7 @@ struct GitMutationService: Sendable {
             _ = try await run(["--literal-pathspecs", "add", "--"] + paths, in: repository)
         case .unstage(let paths):
             try validate(paths)
-            let head = try await executor.execute(arguments: ["rev-parse", "--verify", "HEAD"],
+            let head = try await (executor ?? repository.executor).execute(arguments: ["rev-parse", "--verify", "HEAD"],
                                                  workingDirectory: repository.worktreePath)
             if head.isSuccess {
                 _ = try await run(["--literal-pathspecs", "restore", "--staged", "--"] + paths, in: repository)
@@ -100,7 +100,7 @@ struct GitMutationService: Sendable {
 
     private func run(_ arguments: [String], in repository: GitRepositoryIdentity,
                      stdin: Data? = nil) async throws -> GitExecutionResult {
-        let result = try await executor.execute(arguments: arguments, workingDirectory: repository.worktreePath,
+        let result = try await (executor ?? repository.executor).execute(arguments: arguments, workingDirectory: repository.worktreePath,
                                                 stdin: stdin, maxOutputBytes: 1024 * 1024)
         guard result.isSuccess else {
             throw GitExecutionError.processFailed(exitCode: result.exitCode, stderr: result.stderrString)

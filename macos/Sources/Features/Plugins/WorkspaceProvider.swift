@@ -168,7 +168,8 @@ struct PaneSessionContext: Equatable, Sendable {
         processGroupID: Int,
         currentWorkingDirectory: String?,
         currentTerminalTitle: String,
-        remoteWorkingDirectory: String? = nil
+        remoteWorkingDirectory: String? = nil,
+        replay: SSHReplayDescriptor? = nil
     ) {
         guard processGroupID > 0, SSHPlugin.validAlias(alias) else { return }
         let activeSSH: SSH? = switch state {
@@ -195,7 +196,7 @@ struct PaneSessionContext: Equatable, Sendable {
             connectionID: "omg-ssh-foreground-\(processGroupID)",
             alias: alias,
             serverID: nil,
-            replay: nil,
+            replay: replay ?? activeSSH?.replay,
             transferTarget: transferTarget,
             localProcessGroupID: processGroupID
         )

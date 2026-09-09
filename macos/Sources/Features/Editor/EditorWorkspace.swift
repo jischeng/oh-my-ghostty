@@ -33,6 +33,11 @@ final class EditorWorkspace: ObservableObject {
 
     func selectAdjacentDocument(offset: Int) {
         guard !documents.isEmpty else { return }
+        if gitDiff != nil, selectedID == nil {
+            selectedID = offset >= 0 ? documents.first?.id : documents.last?.id
+            isVisible = true
+            return
+        }
         let current = documents.firstIndex { $0.id == selectedID } ?? 0
         let index = ((current + offset) % documents.count + documents.count) % documents.count
         selectedID = documents[index].id
@@ -252,11 +257,14 @@ final class EditorWorkspaceStore {
     private var closing = Set<UUID>()
     private var isResolvingTermination = false
 
-    func hasUnsavedDocuments(in worktreePath: String) -> Bool {
-        let root = URL(fileURLWithPath: worktreePath).resolvingSymlinksInPath().path
+    func hasUnsavedDocuments(in worktreePath: String, endpoint: EditorDocumentID.Endpoint = .local) -> Bool {
+        let root = endpoint == .local ? URL(fileURLWithPath: worktreePath).resolvingSymlinksInPath().path : worktreePath
         return workspaces.values.contains { workspace in
             workspace.documents.contains { document in
-                guard document.id.endpoint == .local, document.isDirty || document.isSaving else { return false }
+                guard document.id.endpoint == endpoint, document.isDirty || document.isSaving else { return false }
+                // A remote editor path may alias this worktree through a symlink.
+                // Do not resolve it against the Mac's filesystem.
+                if endpoint != .local { return true }
                 let path = URL(fileURLWithPath: document.path).resolvingSymlinksInPath().path
                 return path == root || path.hasPrefix(root + "/")
             }

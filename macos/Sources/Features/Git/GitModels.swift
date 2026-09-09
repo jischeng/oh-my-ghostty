@@ -16,22 +16,53 @@ struct GitCommitID: Hashable, Sendable, Equatable, CustomStringConvertible {
 
 struct GitRepositoryIdentity: Hashable, Sendable, Equatable {
     let target: GitExecutionTarget
+    let sshConnection: GitSSHConnection?
     let worktreePath: String
     let gitDirPath: String
     let commonGitDirPath: String
 
+    var stateKey: String {
+        if let sshConnection { return "ssh\0" + sshConnection.identity + "\0" + worktreePath }
+        switch target {
+        case .local: return worktreePath
+        case .remote(let host, let user): return "ssh\0" + (user ?? "") + "@" + host + "\0" + worktreePath
+        }
+    }
+
+    var executor: any GitExecutor {
+        if let sshConnection { return SSHGitExecutor(connection: sshConnection) }
+        switch target {
+        case .local: return LocalGitExecutor()
+        case .remote(let host, let user):
+            if let connection = try? GitSSHConnection(destination: user.map { $0 + "@" + host } ?? host) {
+                return SSHGitExecutor(connection: connection)
+            }
+            return UnavailableGitExecutor()
+        }
+    }
+
+    func matches(_ session: PaneSessionContext) -> Bool {
+        switch session.state {
+        case .local: return sshConnection == nil && target == .local
+        case .sshConnecting: return false
+        case .sshReady(let ssh, _): return (try? GitSSHConnection(session: ssh)) == sshConnection && sshConnection != nil
+        }
+    }
+
     var repositoryName: String {
-        let name = URL(fileURLWithPath: worktreePath).lastPathComponent
+        let name = WorkspacePathPresentation.folderName(worktreePath)
         return name.isEmpty ? worktreePath : name
     }
 
     init(
         target: GitExecutionTarget = .local,
+        sshConnection: GitSSHConnection? = nil,
         worktreePath: String,
         gitDirPath: String,
         commonGitDirPath: String
     ) {
         self.target = target
+        self.sshConnection = sshConnection
         self.worktreePath = worktreePath
         self.gitDirPath = gitDirPath
         self.commonGitDirPath = commonGitDirPath

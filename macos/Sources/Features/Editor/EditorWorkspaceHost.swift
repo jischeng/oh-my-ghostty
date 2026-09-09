@@ -48,7 +48,7 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                 .opacity(workspace.isVisible ? 0 : 1)
                 .allowsHitTesting(!workspace.isVisible)
                 .accessibilityHidden(workspace.isVisible)
-            if !workspace.documents.isEmpty || workspace.isVisible {
+            if !workspace.documents.isEmpty || workspace.gitDiff != nil || workspace.isVisible {
                 editor
                     .opacity(workspace.isVisible ? 1 : 0)
                     .allowsHitTesting(workspace.isVisible)
@@ -128,7 +128,16 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                 ProgressView("Opening file…").padding(8)
             }
             if let request = workspace.gitDiff {
-                GitEditorDiffView(request: request, theme: appearanceTheme, isActive: workspace.isVisible) {
+                GitEditorDiffView(request: request, theme: appearanceTheme, isActive: workspace.isVisible,
+                    actions: GitDiffEditorActions(
+                        hide: { workspace.isVisible = false },
+                        open: openFile,
+                        nextDocument: { workspace.selectAdjacentDocument(offset: 1) },
+                        previousDocument: { workspace.selectAdjacentDocument(offset: -1) },
+                        saveAll: { Task { await workspace.saveAll() } },
+                        focus: { controller.focusedSurface = surfaceView },
+                        isSurfaceFocused: { (controller.focusedSurface ?? controller.surfaceTree.first) === surfaceView }
+                    )) {
                     workspace.gitDiff = nil
                     workspace.selectedID = workspace.documents.last?.id
                     if workspace.documents.isEmpty { workspace.isVisible = false }

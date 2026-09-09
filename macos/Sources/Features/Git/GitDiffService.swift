@@ -3,7 +3,7 @@ import Foundation
 struct GitDiffService: Sendable {
     static let defaultDiffByteLimit = 512 * 1024
 
-    private let executor: any GitExecutor
+    private let executor: (any GitExecutor)?
     let diffByteLimit: Int
 
     private struct CommitBase: Sendable {
@@ -12,7 +12,7 @@ struct GitDiffService: Sendable {
     }
 
     init(
-        executor: any GitExecutor = LocalGitExecutor(),
+        executor: (any GitExecutor)? = nil,
         diffByteLimit: Int = GitDiffService.defaultDiffByteLimit
     ) {
         self.executor = executor
@@ -77,9 +77,9 @@ struct GitDiffService: Sendable {
         for commit: GitCommitID,
         repository: GitRepositoryIdentity
     ) async throws -> GitCommitMetadata {
-        let result = try await executor.execute(
+        let result = try await (executor ?? repository.executor).execute(
             arguments: [
-                "show", "--no-ext-diff", "--no-color", "--no-patch",
+                "show", "--encoding=UTF-8", "--no-ext-diff", "--no-color", "--no-patch",
                 "--format=%H%x00%an%x00%ae%x00%aI%x00%P%x00%B%x00",
                 commit.rawValue,
             ],
@@ -148,9 +148,7 @@ struct GitDiffService: Sendable {
         case .unstaged:
             base = baseDescription ?? "working tree vs index"
             if file.isUntracked {
-                let absolutePath = URL(fileURLWithPath: repository.worktreePath)
-                    .appendingPathComponent(file.path)
-                    .path
+                let absolutePath = GitRepositoryService.absolutePath(file.path, relativeTo: repository.worktreePath)
                 arguments = ["--literal-pathspecs", "diff", "--no-index", "--no-color", "--unified=3", "/dev/null", absolutePath]
                 allowsExitCodeOne = true
             } else {
@@ -163,7 +161,7 @@ struct GitDiffService: Sendable {
         }
 
         do {
-            let result = try await executor.execute(
+            let result = try await (executor ?? repository.executor).execute(
                 arguments: arguments,
                 workingDirectory: repository.worktreePath,
                 stdin: nil,
@@ -220,15 +218,10 @@ struct GitDiffService: Sendable {
             if file.kind == .deleted {
                 after = ""
             } else {
-                let url = URL(fileURLWithPath: repository.worktreePath).appendingPathComponent(file.path)
-                let root = URL(fileURLWithPath: repository.worktreePath).resolvingSymlinksInPath().path
-                guard url.resolvingSymlinksInPath().path.hasPrefix(root + "/") else {
-                    throw GitDiffServiceError.invalidPath(file.path)
-                }
-                let handle = try FileHandle(forReadingFrom: url)
-                defer { try? handle.close() }
-                let data = try handle.read(upToCount: diffByteLimit + 1) ?? Data()
-                guard data.count <= diffByteLimit else { throw GitExecutionError.outputLimitExceeded(maxBytes: diffByteLimit) }
+                let path = (repository.worktreePath as NSString).appendingPathComponent(file.path)
+                let data = try await (executor ?? repository.executor).readWorkingFile(
+                    at: path, root: repository.worktreePath, limit: diffByteLimit
+                )
                 guard !data.contains(0), let text = String(data: data, encoding: .utf8) else {
                     throw EditorDocumentError.binaryFile
                 }
@@ -242,7 +235,7 @@ struct GitDiffService: Sendable {
         for commit: GitCommitID,
         repository: GitRepositoryIdentity
     ) async throws -> CommitBase {
-        let result = try await executor.execute(
+        let result = try await (executor ?? repository.executor).execute(
             arguments: ["rev-list", "--parents", "-n", "1", commit.rawValue],
             workingDirectory: repository.worktreePath,
             stdin: nil,
@@ -258,7 +251,7 @@ struct GitDiffService: Sendable {
         if let parent = parts.dropFirst().first {
             return CommitBase(id: parent, isRoot: false)
         }
-        let emptyTree = try await executor.execute(
+        let emptyTree = try await (executor ?? repository.executor).execute(
             arguments: ["hash-object", "-t", "tree", "--stdin"],
             workingDirectory: repository.worktreePath,
             stdin: Data(),
@@ -278,7 +271,7 @@ struct GitDiffService: Sendable {
         repository: GitRepositoryIdentity,
         maxOutputBytes: Int
     ) async throws -> GitExecutionResult {
-        let result = try await executor.execute(
+        let result = try await (executor ?? repository.executor).execute(
             arguments: arguments,
             workingDirectory: repository.worktreePath,
             stdin: nil,

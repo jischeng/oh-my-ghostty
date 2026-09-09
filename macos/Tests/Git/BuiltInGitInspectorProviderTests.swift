@@ -163,7 +163,7 @@ struct BuiltInGitInspectorProviderTests {
 
     @Test func handlesSSHContextImmediately() throws {
         let registry = InspectorRegistry()
-        let provider = BuiltInGitInspectorProvider(registry: registry)
+        let provider = BuiltInGitInspectorProvider(registry: registry, repositoryService: GitRepositoryService(executor: UnavailableGitExecutor()))
         try provider.register()
 
         var session = PaneSessionContext(workingDirectory: "/local", terminalTitle: "Terminal")
@@ -198,11 +198,9 @@ struct BuiltInGitInspectorProviderTests {
             return
         }
 
-        guard case .ssh(let host, let dir) = content.status else {
-            Issue.record("Expected .ssh status, got \(String(describing: content.status))")
-            return
-        }
-        #expect(host == "remote-host")
-        #expect(dir == "/remote/project")
+        #expect(content.isLoading)
+        #expect(content.repository == nil)
+        registry.presentationDidChange(to: nil, context: context)
+
     }
 }

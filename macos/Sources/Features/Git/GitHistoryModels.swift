@@ -24,6 +24,20 @@ struct GitRefDecoration: Hashable, Equatable, Sendable {
     let name: String
     let kind: GitRefDecorationKind
 
+    static func orderedForDisplay(_ refs: [Self]) -> [Self] {
+        func rank(_ ref: Self) -> Int {
+            if ref.kind == .tag { return 6 }
+            if ref.kind == .head { return 5 }
+            if ref.name == "main" { return 0 }
+            if ref.kind == .remoteBranch && ref.name.hasSuffix("/main") { return 1 }
+            if ref.kind == .currentBranch { return 2 }
+            return ref.kind == .localBranch ? 3 : 4
+        }
+        return refs.sorted {
+            if rank($0) != rank($1) { return rank($0) < rank($1) }
+            return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }
+    }
 }
 
 struct GitHistoryCommit: Identifiable, Hashable, Equatable, Sendable {
@@ -97,5 +111,18 @@ struct InspectorGitHistoryContent: Equatable, Sendable {
         self.isLoading = isLoading
         self.statusMessage = statusMessage
         self.snapshot = snapshot
+    }
+}
+
+struct GitCommitExpansion: Equatable, Sendable {
+    var metadata: GitCommitMetadata?
+    var files: [GitDiffFile] = []
+    var isLoading = false
+    var error: String?
+
+    var detailText: String {
+        if let error { return error }
+        guard let metadata else { return isLoading ? "Loading changed files…" : "No commit details" }
+        return "\(metadata.message)\n\n\(metadata.authorDescription)\n\(metadata.authoredAt)\n\(metadata.commitID.rawValue)"
     }
 }

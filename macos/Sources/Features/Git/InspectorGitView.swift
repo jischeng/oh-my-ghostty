@@ -57,7 +57,7 @@ struct InspectorGitView: View {
                     systemImage: "network",
                     title: "Remote Git (\(host))",
                     subtitle: directory.isEmpty ? host : directory,
-                    hint: "Remote Git inspection is not available yet."
+                    hint: "Waiting for the SSH session to report its remote working directory."
                 )
 
             case .error(let title, let message):
@@ -84,7 +84,7 @@ struct InspectorGitView: View {
     private var headerView: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Image(systemName: "arrow.triangle.branch")
+                Image(systemName: content.connectionLabel == nil ? "arrow.triangle.branch" : "network")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.tint)
 
@@ -113,6 +113,10 @@ struct InspectorGitView: View {
                 .help("Refresh Git status")
             }
 
+            if let connection = content.connectionLabel ?? content.repository?.sshConnection?.destination {
+                Text("SSH · " + connection).font(.caption2).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle)
+            }
             if let branch = content.branch, !branch.isEmpty {
                 HStack(spacing: 4) {
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(.tint)
@@ -258,15 +262,25 @@ struct InspectorGitView: View {
                 GitHistoryTable(
                     commits: content.history.commits,
                     selectedCommitID: content.history.selectedCommitID,
+                    headCommitID: content.history.snapshot?.headCommitID,
+                    expandedCommits: content.expandedCommits,
+                    hasMore: content.history.hasMore,
+                    isLoading: content.history.isLoading,
+                    automaticLoadingAllowed: content.history.statusMessage == nil,
                     onSelect: { perform(.gitAction(.selectCommit($0))) },
                     onOpen: { perform(.gitAction(.openCommit($0))) },
                     onShowInTerminal: {
                         perform(.gitAction(.sendHistoryToTerminal($0)))
-                    }
+                    },
+                    onOpenFile: { commit, file in perform(.gitAction(.openDiff(file, .commit(commit)))) },
+                    onLoadMore: { perform(.gitAction(.loadMoreHistory)) }
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
+            if let message = content.history.statusMessage, !content.history.commits.isEmpty {
+                Text(message).font(.caption).foregroundStyle(.red).padding(.horizontal, 12)
+            }
             if content.history.isLoading {
                 ProgressView()
                     .controlSize(.small)

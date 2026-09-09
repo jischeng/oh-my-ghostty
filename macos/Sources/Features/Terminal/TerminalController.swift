@@ -1135,7 +1135,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 let agent = detectsAgents ? commands.flatMap {
                     LocalAgentProcessDetector.detect(in: $0)
                 } : nil
-                let ssh = commands.map {
+                let exactSSH = SSHProcessArguments.observe(groupID: processGroupID)
+                let ssh = exactSSH?.observation ?? commands.map {
                     ForegroundSSHProcessDetector.observe(in: $0)
                 } ?? .none
                 DispatchQueue.main.async { [weak self] in
@@ -1147,7 +1148,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                         agent: agent,
                         ssh: ssh,
                         processGroupID: processGroupID,
-                        surfaceID: surfaceID
+                        surfaceID: surfaceID,
+                        sshReplay: exactSSH?.replay
                     )
                 }
             }
@@ -1158,7 +1160,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         agent: SupportedAgent?,
         ssh: ForegroundSSHProcessObservation,
         processGroupID: Int,
-        surfaceID: UUID
+        surfaceID: UUID,
+        sshReplay: SSHReplayDescriptor? = nil
     ) {
         switch ssh {
         case .interactive(let alias, let transferTarget):
@@ -1184,7 +1187,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 processGroupID: processGroupID,
                 currentWorkingDirectory: surface.pwd,
                 currentTerminalTitle: surface.title,
-                remoteWorkingDirectory: remoteWorkingDirectory
+                remoteWorkingDirectory: remoteWorkingDirectory,
+                replay: sshReplay
             )
             updatePaneSessionContext(context, for: surfaceID)
             updateSSHResumeDescriptor(context, for: surfaceID)

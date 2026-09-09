@@ -117,6 +117,14 @@ struct GitInspectorLayoutTests {
         #expect(menu.items.contains { $0.title == "Push…" })
         #expect(menu.items.contains { $0.title == "Set Upstream…" })
         #expect(menu.items.first(where: { $0.title == "Switch Branch" })?.isEnabled == false)
+        tree.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        let folder = try #require(tree.item(atRow: 0))
+        #expect(tree.isItemExpanded(folder))
+        coordinator.openHistory()
+        #expect(!tree.isItemExpanded(folder))
+        coordinator.openHistory()
+        #expect(tree.isItemExpanded(folder))
+        #expect(actions == [.browseBranch(branch.id)])
     }
 
     @Test func linkedDiffScrollsBothDirectionsBySourceLinesAndCanBeDisabled() async throws {

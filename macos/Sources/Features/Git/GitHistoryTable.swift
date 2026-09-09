@@ -4,249 +4,345 @@ import SwiftUI
 struct GitHistoryTable: NSViewRepresentable {
     let commits: [GitHistoryCommit]
     let selectedCommitID: GitCommitID?
+    var headCommitID: GitCommitID?
+    var expandedCommits: [GitCommitID: GitCommitExpansion] = [:]
+    var hasMore = false
+    var isLoading = false
+    var automaticLoadingAllowed = true
     let onSelect: (GitCommitID) -> Void
     let onOpen: (GitCommitID) -> Void
     let onShowInTerminal: (GitCommitID) -> Void
+    var onOpenFile: (GitCommitID, GitDiffFile) -> Void = { _, _ in }
+    var onLoadMore: () -> Void = {}
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
         CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
     }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(
-            onSelect: onSelect,
-            onOpen: onOpen,
-            onShowInTerminal: onShowInTerminal
-        )
-    }
-
+    func makeCoordinator() -> Coordinator { Coordinator() }
     func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSScrollView()
-        scrollView.drawsBackground = false
-        scrollView.borderType = .noBorder
-        scrollView.hasVerticalScroller = true
-        scrollView.autohidesScrollers = true
+        let scroll = NSScrollView()
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
         let table = NSTableView()
         table.headerView = nil
+        table.style = .plain
         table.backgroundColor = .clear
-        table.intercellSpacing = NSSize(width: 0, height: 1)
-        table.rowHeight = 62
+        table.intercellSpacing = .zero
         table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
-        table.usesAlternatingRowBackgroundColors = false
         table.allowsEmptySelection = true
-        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("git-history"))
+        let column = NSTableColumn(identifier: .init("git-history"))
         column.minWidth = 0
         column.resizingMask = .autoresizingMask
         table.addTableColumn(column)
         table.dataSource = context.coordinator
         table.delegate = context.coordinator
         table.target = context.coordinator
+        table.action = #selector(Coordinator.clickedRow)
         table.doubleAction = #selector(Coordinator.openSelectedCommit)
         table.menu = context.coordinator.makeContextMenu()
-        scrollView.documentView = table
-        context.coordinator.tableView = table
-        context.coordinator.update(
-            commits: commits,
-            selectedCommitID: selectedCommitID,
-            onSelect: onSelect,
-            onOpen: onOpen,
-            onShowInTerminal: onShowInTerminal
-        )
-        return scrollView
+        scroll.documentView = table
+        context.coordinator.attach(table: table, scroll: scroll)
+        context.coordinator.update(self)
+        return scroll
     }
-
-    func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        context.coordinator.update(
-            commits: commits,
-            selectedCommitID: selectedCommitID,
-            onSelect: onSelect,
-            onOpen: onOpen,
-            onShowInTerminal: onShowInTerminal
-        )
-    }
+    func updateNSView(_ scroll: NSScrollView, context: Context) { context.coordinator.update(self) }
 
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+        private enum Row {
+            case commit(Int)
+            case details(Int)
+            case file(Int, GitDiffFile)
+            var commitIndex: Int {
+                switch self {
+                case .commit(let index), .details(let index), .file(let index, _): index
+                }
+            }
+            var suffix: String {
+                switch self {
+                case .commit: "commit"
+                case .details: "details"
+                case .file(_, let file): file.id
+                }
+            }
+        }
         weak var tableView: NSTableView?
-        private var commits: [GitHistoryCommit] = []
+        private var content: GitHistoryTable?
+        private var rows: [Row] = []
         private var graphRows: [GitGraphRow] = []
-        private var selectedCommitID: GitCommitID?
-        private var onSelect: (GitCommitID) -> Void
-        private var onOpen: (GitCommitID) -> Void
-        private var onShowInTerminal: (GitCommitID) -> Void
-        private let dateFormatter: ISO8601DateFormatter = {
-            let formatter = ISO8601DateFormatter()
-            formatter.formatOptions = [.withInternetDateTime, .withDashSeparatorInDate]
+        private var heights: [CGFloat] = []
+        private var graphWidth: CGFloat = 15
+        private var laneCount = 1
+        private var measuredWidth: CGFloat = 0
+        private var updating = false
+        private var requestedCount: Int?
+        private var observers: [NSObjectProtocol] = []
+        private let dateFormatter: DateFormatter = {
+            let formatter = DateFormatter()
+            formatter.dateStyle = .short
+            formatter.timeStyle = .short
             return formatter
         }()
 
-        init(
-            onSelect: @escaping (GitCommitID) -> Void,
-            onOpen: @escaping (GitCommitID) -> Void,
-            onShowInTerminal: @escaping (GitCommitID) -> Void
-        ) {
-            self.onSelect = onSelect
-            self.onOpen = onOpen
-            self.onShowInTerminal = onShowInTerminal
+        deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+
+        func attach(table: NSTableView, scroll: NSScrollView) {
+            tableView = table
+            scroll.contentView.postsBoundsChangedNotifications = true
+            scroll.contentView.postsFrameChangedNotifications = true
+            for name in [NSView.boundsDidChangeNotification, NSView.frameDidChangeNotification] {
+                observers.append(NotificationCenter.default.addObserver(forName: name, object: scroll.contentView,
+                                                                         queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.viewportChanged() }
+                })
+            }
         }
 
-        func update(
-            commits: [GitHistoryCommit],
-            selectedCommitID: GitCommitID?,
-            onSelect: @escaping (GitCommitID) -> Void,
-            onOpen: @escaping (GitCommitID) -> Void,
-            onShowInTerminal: @escaping (GitCommitID) -> Void
-        ) {
-            let changed = self.commits != commits || self.selectedCommitID != selectedCommitID
-            self.commits = commits
+        func update(_ new: GitHistoryTable) {
+            let changed = content?.commits != new.commits || content?.expandedCommits != new.expandedCommits ||
+                content?.headCommitID != new.headCommitID
+            if content?.commits != new.commits { requestedCount = nil }
+            let previous = content
+            content = new
+            guard let table = tableView else { return }
+            updating = true
+            defer {
+                updating = false
+                DispatchQueue.main.async { [weak self] in self?.viewportChanged() }
+            }
             if changed {
+                let top = table.row(at: NSPoint(x: 1, y: table.visibleRect.minY + 1))
+                let anchor = rows.indices.contains(top) ? rows[top] : nil
+                let anchorID = anchor.flatMap { row in previous?.commits[safe: row.commitIndex]?.id }
+                let offset = top >= 0 ? table.visibleRect.minY - table.rect(ofRow: top).minY : 0
                 var layout = GitGraphLayout()
-                graphRows = commits.map {
-                    layout.append(commitID: $0.id, parentIDs: $0.parentIDs)
+                graphRows = new.commits.map { layout.append(commitID: $0.id, parentIDs: $0.parentIDs) }
+                laneCount = max(1, graphRows.map(\.requiredLaneCount).max() ?? 1)
+                graphWidth = min(31, GitGraphCellView.preferredWidth(laneCount: laneCount))
+                rows = []
+                for (index, commit) in new.commits.enumerated() {
+                    rows.append(.commit(index))
+                    if let details = new.expandedCommits[commit.id] {
+                        rows.append(.details(index))
+                        rows.append(contentsOf: details.files.map { .file(index, $0) })
+                    }
+                }
+                measureRows()
+                table.reloadData()
+                if let anchorID, let index = rows.firstIndex(where: {
+                    new.commits[$0.commitIndex].id == anchorID && $0.suffix == anchor?.suffix
+                }), let clip = table.enclosingScrollView?.contentView {
+                    clip.scroll(to: NSPoint(x: 0, y: max(0, table.rect(ofRow: index).minY + offset)))
+                    table.enclosingScrollView?.reflectScrolledClipView(clip)
                 }
             }
-            self.selectedCommitID = selectedCommitID
-            self.onSelect = onSelect
-            self.onOpen = onOpen
-            self.onShowInTerminal = onShowInTerminal
-            guard changed, let tableView else { return }
-            tableView.reloadData()
-            if let selectedCommitID, let row = commits.firstIndex(where: { $0.id == selectedCommitID }) {
-                tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-            } else {
-                tableView.deselectAll(nil)
+            if let selected = new.selectedCommitID {
+                let selectedRow = table.selectedRow
+                let alreadySelected = rows.indices.contains(selectedRow) &&
+                    new.commits[rows[selectedRow].commitIndex].id == selected
+                if !alreadySelected, let index = rows.firstIndex(where: {
+                    if case .commit = $0 { return new.commits[$0.commitIndex].id == selected }
+                    return false
+                }) { table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false) }
+            } else { table.deselectAll(nil) }
+        }
+
+        private func measureRows() {
+            guard let content, let table = tableView else { return }
+            measuredWidth = max(1, table.enclosingScrollView?.contentSize.width ?? table.bounds.width)
+            let width = max(1, measuredWidth - graphWidth - 23)
+            heights = rows.map { row in
+                let commit = content.commits[row.commitIndex]
+                switch row {
+                case .commit:
+                    let badges = GitRefBadgesView.height(for: commit.refDecorations, width: width + 5)
+                    return 39 + (badges > 0 ? badges + 3 : 0)
+                case .details:
+                    let text = content.expandedCommits[commit.id]?.detailText ?? ""
+                    return GitHistoryChildCell.detailHeight(text, width: width)
+                case .file: return 26
+                }
             }
         }
 
-        func numberOfRows(in tableView: NSTableView) -> Int { commits.count }
+        private func viewportChanged() {
+            guard !updating, let table = tableView else { return }
+            let width = max(1, table.enclosingScrollView?.contentSize.width ?? table.bounds.width)
+            if abs(width - measuredWidth) > 0.5 {
+                updating = true
+                measureRows()
+                table.noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: rows.indices))
+                table.enumerateAvailableRowViews { view, _ in view.needsLayout = true }
+                updating = false
+            }
+            requestMoreIfNeeded()
+        }
 
+        func requestMoreIfNeeded() {
+            guard !updating, let content, let table = tableView,
+                  content.hasMore, !content.isLoading, content.automaticLoadingAllowed,
+                  !content.commits.isEmpty, table.visibleRect.height > 0 else { return }
+            guard table.visibleRect.maxY >= table.bounds.height - 100 else { requestedCount = nil; return }
+            guard requestedCount != content.commits.count else { return }
+            requestedCount = content.commits.count
+            content.onLoadMore()
+        }
+
+        func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+        func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat { heights[safe: row] ?? 40 }
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-            guard commits.indices.contains(row) else { return nil }
-            let identifier = GitHistoryCell.reuseIdentifier
-            let cell = tableView.makeView(withIdentifier: identifier, owner: nil) as? GitHistoryCell ?? GitHistoryCell()
-            cell.identifier = identifier
-            cell.configure(
-                commit: commits[row],
-                graphRow: graphRows[row],
-                date: dateFormatter.string(from: commits[row].authoredAt)
-            )
-            return cell
+            guard let content, rows.indices.contains(row) else { return nil }
+            let item = rows[row]
+            let commit = content.commits[item.commitIndex]
+            let graph = graphRows[item.commitIndex]
+            switch item {
+            case .commit:
+                let cell = (tableView.makeView(withIdentifier: .init("git-commit"), owner: nil) as? GitHistoryCell) ?? GitHistoryCell()
+                cell.identifier = .init("git-commit")
+                cell.configure(commit: commit, graph: graph, graphLayout: (graphWidth, laneCount),
+                               date: dateFormatter.string(from: commit.authoredAt),
+                               state: (head: content.headCommitID == commit.id ||
+                                   (content.headCommitID == nil && commit.refDecorations.contains { $0.kind == .head || $0.kind == .currentBranch }),
+                                       expanded: content.expandedCommits[commit.id] != nil),
+                               toggle: { [weak self] in self?.content?.onOpen(commit.id) })
+                return cell
+            case .details, .file:
+                let cell = (tableView.makeView(withIdentifier: .init("git-child"), owner: nil) as? GitHistoryChildCell) ?? GitHistoryChildCell()
+                cell.identifier = .init("git-child")
+                let file: GitDiffFile?
+                if case .file(_, let value) = item { file = value } else { file = nil }
+                cell.configure(graph: graph, graphWidth: graphWidth, laneCount: laneCount,
+                               details: content.expandedCommits[commit.id], file: file)
+                return cell
+            }
         }
-
         func tableViewSelectionDidChange(_ notification: Notification) {
-            guard let tableView, tableView.selectedRow >= 0, commits.indices.contains(tableView.selectedRow) else { return }
-            onSelect(commits[tableView.selectedRow].id)
+            guard !updating, let table = tableView, rows.indices.contains(table.selectedRow), let content else { return }
+            content.onSelect(content.commits[rows[table.selectedRow].commitIndex].id)
         }
-
+        func activateRow(_ index: Int, doubleClick: Bool) {
+            guard let content, rows.indices.contains(index) else { return }
+            switch rows[index] {
+            case .file(let commit, let file) where !doubleClick: content.onOpenFile(content.commits[commit].id, file)
+            case .commit(let commit) where doubleClick: content.onOpen(content.commits[commit].id)
+            default: break
+            }
+        }
+        @objc func clickedRow() {
+            guard let table = tableView else { return }
+            activateRow(table.clickedRow, doubleClick: false)
+        }
         @objc func openSelectedCommit() {
-            guard let commitID = clickedCommitID else { return }
-            onOpen(commitID)
+            guard let table = tableView else { return }
+            activateRow(table.clickedRow >= 0 ? table.clickedRow : table.selectedRow, doubleClick: true)
         }
-
-        @objc private func showSelectedCommitInTerminal() {
-            guard let commitID = clickedCommitID else { return }
-            onShowInTerminal(commitID)
-        }
-
         func makeContextMenu() -> NSMenu {
             let menu = NSMenu()
-            let open = NSMenuItem(
-                title: "Open Commit in Editor",
-                action: #selector(openSelectedCommit),
-                keyEquivalent: ""
-            )
-            open.target = self
-            menu.addItem(open)
+            let item = NSMenuItem(title: "Expand / Collapse Commit", action: #selector(openSelectedCommit), keyEquivalent: "")
+            item.target = self
+            menu.addItem(item)
             return menu
-        }
-
-        private var clickedCommitID: GitCommitID? {
-            guard let tableView else { return nil }
-            let row = tableView.clickedRow >= 0
-                ? tableView.clickedRow
-                : tableView.selectedRow
-            guard commits.indices.contains(row) else { return nil }
-            return commits[row].id
         }
     }
 }
 
 private final class GitHistoryCell: NSTableCellView {
-    static let reuseIdentifier = NSUserInterfaceItemIdentifier("git-history-cell")
     private let subject = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
-    private let refs = NSTextField(labelWithString: "")
-    private let stack = NSStackView()
+    private let badges = GitRefBadgesView()
     private let graph = GitGraphCellView()
+    private let disclosure = NSButton()
+    private var graphWidth: CGFloat = 15
+    private var toggle: () -> Void = {}
 
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
+    override init(frame: NSRect) {
+        super.init(frame: frame)
         subject.font = .systemFont(ofSize: 12, weight: .medium)
-        subject.lineBreakMode = .byTruncatingTail
         detail.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
         detail.textColor = .secondaryLabelColor
-        detail.lineBreakMode = .byTruncatingTail
-        refs.lineBreakMode = .byTruncatingTail
-        for label in [subject, detail, refs] {
-            label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            label.maximumNumberOfLines = 1
-        }
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 2
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.addArrangedSubview(subject)
-        stack.addArrangedSubview(detail)
-        stack.addArrangedSubview(refs)
-        graph.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
-        addSubview(graph)
-        NSLayoutConstraint.activate([
-            graph.leadingAnchor.constraint(equalTo: leadingAnchor),
-            graph.topAnchor.constraint(equalTo: topAnchor),
-            graph.bottomAnchor.constraint(equalTo: bottomAnchor),
-            graph.widthAnchor.constraint(equalToConstant: 48),
-            subject.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            detail.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            refs.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            stack.leadingAnchor.constraint(equalTo: graph.trailingAnchor, constant: 4),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            stack.topAnchor.constraint(equalTo: topAnchor, constant: 5),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -5),
-        ])
+        for label in [subject, detail] { label.lineBreakMode = .byTruncatingTail; label.maximumNumberOfLines = 1 }
+        disclosure.isBordered = false
+        disclosure.target = self
+        disclosure.action = #selector(toggleCommit)
+        [graph, disclosure, subject, detail, badges].forEach(addSubview)
     }
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override var isFlipped: Bool { true }
+    @objc private func toggleCommit() { toggle() }
 
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    func configure(commit: GitHistoryCommit, graphRow: GitGraphRow, date: String) {
-        graph.configure(row: graphRow)
+    func configure(commit: GitHistoryCommit, graph: GitGraphRow, graphLayout: (width: CGFloat, lanes: Int),
+                   date: String, state: (head: Bool, expanded: Bool), toggle: @escaping () -> Void) {
+        self.graphWidth = graphLayout.width
+        self.toggle = toggle
+        self.graph.configure(row: graph, isHead: state.head, laneCount: graphLayout.lanes)
         subject.stringValue = commit.subject.isEmpty ? "(no subject)" : commit.subject
         detail.stringValue = "\(commit.id.shortSHA)  \(commit.authorName)  \(date)"
-        let badges = NSMutableAttributedString()
-        for decoration in commit.refDecorations {
-            let color: NSColor
-            let symbol: String
-            switch decoration.kind {
-            case .currentBranch: color = .systemBlue; symbol = "checkmark.circle.fill"
-            case .localBranch: color = .systemGreen; symbol = "arrow.triangle.branch"
-            case .remoteBranch: color = .systemPurple; symbol = "network"
-            case .tag: color = .systemOrange; symbol = "tag.fill"
-            case .head: color = .systemBlue; symbol = "scope"
-            }
-            if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: decoration.kind.rawValue)?
-                .withSymbolConfiguration(.init(pointSize: 10, weight: .medium))?
-                .withSymbolConfiguration(.init(paletteColors: [color])) {
-                let attachment = NSTextAttachment()
-                attachment.image = image
-                attachment.bounds = NSRect(x: 0, y: -2, width: 11, height: 11)
-                badges.append(NSAttributedString(attachment: attachment))
-            }
-            badges.append(NSAttributedString(string: " " + decoration.name + "  ", attributes: [
-                .foregroundColor: color, .font: NSFont.systemFont(ofSize: 10, weight: .medium),
+        badges.configure(commit.refDecorations)
+        disclosure.image = NSImage(systemSymbolName: state.expanded ? "chevron.down" : "chevron.right", accessibilityDescription: state.expanded ? "Collapse commit" : "Expand commit")
+        toolTip = "\(commit.subject)\n\(commit.id.rawValue)\n\(commit.authorName) · \(date)"
+        needsLayout = true
+    }
+    override func layout() {
+        super.layout()
+        graph.frame = NSRect(x: 0, y: 0, width: graphWidth, height: bounds.height)
+        disclosure.frame = NSRect(x: graphWidth, y: 6, width: 9, height: 14)
+        let x = graphWidth + 12
+        let width = max(1, bounds.width - x - 6)
+        subject.frame = NSRect(x: x, y: 4, width: width, height: 17)
+        detail.frame = NSRect(x: x, y: 23, width: width, height: 13)
+        badges.frame = NSRect(x: x, y: 38, width: width, height: max(0, bounds.height - 41))
+    }
+}
+
+private final class GitHistoryChildCell: NSTableCellView {
+    private let graph = GitGraphCellView()
+    private let label = NSTextField(wrappingLabelWithString: "")
+    private var graphWidth: CGFloat = 15
+    private var isFile = false
+    static func detailHeight(_ text: String, width: CGFloat) -> CGFloat {
+        let cell = NSTextFieldCell(textCell: text)
+        cell.font = .systemFont(ofSize: 11)
+        cell.wraps = true
+        cell.isScrollable = false
+        cell.usesSingleLineMode = false
+        let size = cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: max(1, width), height: .greatestFiniteMagnitude))
+        return max(28, ceil(size.height) + 18)
+    }
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        addSubview(graph); addSubview(label)
+        label.font = .systemFont(ofSize: 11)
+        label.textColor = .secondaryLabelColor
+    }
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override var isFlipped: Bool { true }
+    func configure(graph: GitGraphRow, graphWidth: CGFloat, laneCount: Int,
+                   details: GitCommitExpansion?, file: GitDiffFile?) {
+        self.graphWidth = graphWidth
+        self.graph.configure(row: graph, continuation: true, laneCount: laneCount)
+        isFile = file != nil
+        label.isSelectable = !isFile
+        label.maximumNumberOfLines = isFile ? 1 : 0
+        label.lineBreakMode = isFile ? .byTruncatingMiddle : .byWordWrapping
+        if let file {
+            let text = NSMutableAttributedString(string: file.status + "  ", attributes: [
+                .foregroundColor: file.kind == .deleted ? NSColor.systemRed : NSColor.systemGreen,
+                .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .semibold),
+            ])
+            text.append(NSAttributedString(string: file.displayPath, attributes: [
+                .foregroundColor: NSColor.labelColor, .font: NSFont.systemFont(ofSize: 11),
             ]))
+            label.attributedStringValue = text
+        } else {
+            label.stringValue = details?.detailText ?? ""
         }
-        refs.attributedStringValue = badges
-        refs.toolTip = commit.refDecorations.map { "\($0.kind.rawValue): \($0.name)" }.joined(separator: "\n")
-        toolTip = "\(commit.subject)\n\(detail.stringValue)\n\(refs.toolTip ?? "")"
+        toolTip = file?.displayPath ?? details?.detailText
+        needsLayout = true
+    }
+    override func layout() {
+        super.layout()
+        graph.frame = NSRect(x: 0, y: 0, width: graphWidth, height: bounds.height)
+        label.frame = NSRect(x: graphWidth + 17, y: isFile ? 5 : 7,
+                             width: max(1, bounds.width - graphWidth - 23), height: max(1, bounds.height - (isFile ? 8 : 14)))
     }
 }

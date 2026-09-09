@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 struct GitExecutionResult: Sendable, Equatable {
@@ -51,6 +52,7 @@ enum GitExecutionTarget: Hashable, Sendable, Equatable {
 }
 
 protocol GitExecutor: Sendable {
+    func readWorkingFile(at path: String, root: String, limit: Int) async throws -> Data
     func execute(
         arguments: [String],
         workingDirectory: String,
@@ -60,6 +62,21 @@ protocol GitExecutor: Sendable {
 }
 
 extension GitExecutor {
+    func readWorkingFile(at path: String, root: String, limit: Int) async throws -> Data {
+        let url = URL(fileURLWithPath: path)
+        let resolvedRoot = URL(fileURLWithPath: root).resolvingSymlinksInPath().path
+        let boundary = resolvedRoot == "/" ? "/" : resolvedRoot + "/"
+        guard path.hasPrefix("/"), url.resolvingSymlinksInPath().path.hasPrefix(boundary),
+              try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]).isRegularFile == true else {
+            throw GitExecutionError.executionFailed("Use patch view for files outside this worktree or non-regular files.")
+        }
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let data = try handle.read(upToCount: limit + 1) ?? Data()
+        guard data.count <= limit else { throw GitExecutionError.outputLimitExceeded(maxBytes: limit) }
+        return data
+    }
+
     func execute(
         arguments: [String],
         workingDirectory: String,
@@ -77,9 +94,13 @@ extension GitExecutor {
 
 final class LocalGitExecutor: GitExecutor {
     private let gitPath: String?
+    private let prefixArguments: [String]
+    private let localWorkingDirectory: String?
 
-    init(gitPath: String? = nil) {
+    init(gitPath: String? = nil, prefixArguments: [String] = [], localWorkingDirectory: String? = nil) {
         self.gitPath = gitPath
+        self.prefixArguments = prefixArguments
+        self.localWorkingDirectory = localWorkingDirectory
     }
 
     func execute(
@@ -93,12 +114,12 @@ final class LocalGitExecutor: GitExecutor {
         let process = Process()
         if let explicit = gitPath {
             process.executableURL = URL(fileURLWithPath: explicit)
-            process.arguments = arguments
+            process.arguments = prefixArguments + arguments
         } else {
             process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
             process.arguments = ["git"] + arguments
         }
-        process.currentDirectoryURL = URL(fileURLWithPath: workingDirectory)
+        process.currentDirectoryURL = URL(fileURLWithPath: localWorkingDirectory ?? workingDirectory)
 
         var env = ProcessInfo.processInfo.environment
         let existingPath = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
@@ -117,6 +138,11 @@ final class LocalGitExecutor: GitExecutor {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
         process.standardInput = stdin != nil ? stdinPipe : FileHandle.nullDevice
+        if stdin != nil {
+            // An SSH connection can fail before consuming its input. Treat a
+            // closed pipe as a write error rather than delivering SIGPIPE.
+            _ = fcntl(stdinPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
+        }
 
         let state = ProcessOutputState(maxOutputBytes: maxOutputBytes)
 
@@ -136,8 +162,11 @@ final class LocalGitExecutor: GitExecutor {
             do {
                 try process.run()
                 if let stdinData = stdin {
-                    try stdinPipe.fileHandleForWriting.write(contentsOf: stdinData)
-                    try? stdinPipe.fileHandleForWriting.close()
+                    try? stdinPipe.fileHandleForReading.close()
+                    Task.detached {
+                        try? stdinPipe.fileHandleForWriting.write(contentsOf: stdinData)
+                        try? stdinPipe.fileHandleForWriting.close()
+                    }
                 }
             } catch {
                 stdoutPipe.fileHandleForReading.readabilityHandler = nil

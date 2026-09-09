@@ -121,9 +121,11 @@ struct InspectorGitContent: Equatable, Sendable {
     let activeTab: ActiveTab
     let history: InspectorGitHistoryContent
     var workingTree = GitWorkingTreeContent()
+    var expandedCommits: [GitCommitID: GitCommitExpansion] = [:]
     var commitDraft = ""
     var operation: String?
     var operationError: String?
+    var connectionLabel: String?
     let isLoading: Bool
     let statusMessage: String?
 

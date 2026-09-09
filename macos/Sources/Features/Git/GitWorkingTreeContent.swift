@@ -19,7 +19,7 @@ struct GitWorkingTreeContent: Equatable, Sendable {
 
 extension GitRepositoryService {
     func branches(for repository: GitRepositoryIdentity) async throws -> [GitBranchInfo] {
-        let result = try await executor.execute(
+        let result = try await (executor ?? repository.executor).execute(
             arguments: ["for-each-ref",
                         "--format=%(refname)%00%(objectname)%00%(HEAD)%00%(upstream:short)%00%(upstream:track)%00%(symref)",
                         "refs/heads", "refs/remotes"],

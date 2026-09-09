@@ -90,18 +90,24 @@ struct GitDiffLinkedEditor: View {
     let isActive: Bool
     let theme: EditorTheme
     let close: () -> Void
+    let actions: GitDiffEditorActions
     @State private var endpoint: GitDiffScrollEndpoint
 
     init(text: String, path: String, highlights: [Int: Bool], isActive: Bool,
-         theme: EditorTheme, link: GitDiffScrollLink, side: Int, close: @escaping () -> Void) {
+         theme: EditorTheme, link: GitDiffScrollLink, side: Int,
+         actions: GitDiffEditorActions = GitDiffEditorActions(), close: @escaping () -> Void) {
         self.text = text; self.path = path; self.highlights = highlights
         self.isActive = isActive; self.theme = theme; self.close = close
+        self.actions = actions
         _endpoint = State(initialValue: GitDiffScrollEndpoint(link: link, side: side))
     }
 
     var body: some View {
-        CodeEditorView(text: .constant(text), fileURL: URL(fileURLWithPath: path),
+        CodeEditorView(text: .constant(text), fileURL: URL(fileURLWithPath: path, isDirectory: false),
                        diffLines: highlights, additionalCoordinators: [endpoint],
-                       isEditable: false, isActive: isActive, terminalTheme: theme, onClose: close)
+                       isEditable: false, isActive: isActive, isSurfaceFocused: actions.isSurfaceFocused,
+                       terminalTheme: theme, onFocus: actions.focus, onClose: close, onOpen: actions.open,
+                       onNextDocument: actions.nextDocument, onPreviousDocument: actions.previousDocument,
+                       onSaveAll: actions.saveAll, onHide: actions.hide)
     }
 }

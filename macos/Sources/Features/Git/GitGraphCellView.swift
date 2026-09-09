@@ -1,8 +1,8 @@
 import AppKit
 
 final class GitGraphCellView: NSView {
-    static let laneSpacing: CGFloat = 11
-    static let horizontalInset: CGFloat = 6
+    static let laneSpacing: CGFloat = 8
+    static let horizontalInset: CGFloat = 4
     static let nodeDiameter: CGFloat = 7
     static let lineWidth: CGFloat = 1.6
 
@@ -18,6 +18,9 @@ final class GitGraphCellView: NSView {
     ]
 
     private var row: GitGraphRow?
+    private(set) var isHead = false
+    private var isContinuation = false
+    private var displayLaneCount = 1
 
     override var isFlipped: Bool {
         true
@@ -38,11 +41,15 @@ final class GitGraphCellView: NSView {
         return horizontalInset * 2 + CGFloat(lanes - 1) * laneSpacing + nodeDiameter
     }
 
-    func configure(row: GitGraphRow) {
+    func configure(row: GitGraphRow, isHead: Bool = false, continuation: Bool = false, laneCount: Int? = nil) {
         self.row = row
+        self.isHead = isHead
+        isContinuation = continuation
+        displayLaneCount = laneCount ?? row.requiredLaneCount
         invalidateIntrinsicContentSize()
         needsDisplay = true
-        toolTip = row.commitID.shortSHA
+        toolTip = isHead ? "Current HEAD · \(row.commitID.shortSHA)" : row.commitID.shortSHA
+        setAccessibilityLabel(toolTip)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -51,11 +58,17 @@ final class GitGraphCellView: NSView {
 
         NSGraphicsContext.current?.cgContext.setShouldAntialias(true)
 
-        for segment in row.segments {
-            draw(segment)
+        if isContinuation {
+            var drawn = Set<Int>()
+            for segment in row.segments {
+                guard case .bottom(let lane) = segment.to, drawn.insert(lane).inserted else { continue }
+                draw(GitGraphSegment(kind: .passthrough, from: .top(lane: lane), to: .bottom(lane: lane),
+                                     colorIndex: segment.colorIndex, commitID: segment.commitID, parentID: nil))
+            }
+        } else {
+            for segment in row.segments { draw(segment) }
+            drawNode(row)
         }
-
-        drawNode(row)
     }
 
     private func draw(_ segment: GitGraphSegment) {
@@ -71,12 +84,13 @@ final class GitGraphCellView: NSView {
 
     private func drawNode(_ row: GitGraphRow) {
         let center = point(for: .node(lane: row.nodeLane))
-        let radius = Self.nodeDiameter / 2
+        let diameter: CGFloat = isHead ? 10 : Self.nodeDiameter
+        let radius = diameter / 2
         let rect = NSRect(
             x: center.x - radius,
             y: center.y - radius,
-            width: Self.nodeDiameter,
-            height: Self.nodeDiameter
+            width: diameter,
+            height: diameter
         )
 
         color(for: row.nodeColorIndex).setFill()
@@ -86,10 +100,18 @@ final class GitGraphCellView: NSView {
         let outline = NSBezierPath(ovalIn: rect.insetBy(dx: -0.5, dy: -0.5))
         outline.lineWidth = 1
         outline.stroke()
+        if isHead {
+            NSColor.controlAccentColor.setStroke()
+            let halo = NSBezierPath(ovalIn: rect.insetBy(dx: -2, dy: -2))
+            halo.lineWidth = 1.5
+            halo.stroke()
+            NSColor.white.setFill()
+            NSBezierPath(ovalIn: rect.insetBy(dx: 3.5, dy: 3.5)).fill()
+        }
     }
 
     private func point(for graphPoint: GitGraphPoint) -> NSPoint {
-        let lanes = max(1, (row?.requiredLaneCount ?? 1) - 1)
+        let lanes = max(1, displayLaneCount - 1)
         let spacing = min(Self.laneSpacing, max(1, bounds.width - Self.horizontalInset * 2 - Self.nodeDiameter) / CGFloat(lanes))
         let x = Self.horizontalInset + Self.nodeDiameter / 2 + CGFloat(graphPoint.lane) * spacing
         let y: CGFloat
@@ -97,7 +119,7 @@ final class GitGraphCellView: NSView {
         case .top:
             y = bounds.minY
         case .node:
-            y = bounds.midY
+            y = min(14, bounds.midY)
         case .bottom:
             y = bounds.maxY
         }

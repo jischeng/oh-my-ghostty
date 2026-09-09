@@ -956,9 +956,12 @@ loads a selected file's unified diff. File lists use Git's NUL-delimited
 remain intact. Renames and copies retain both old and new paths; untracked
 working-tree files are represented as additions.
 
-The built-in inspector routes commit and changed-file actions through
+Double-clicking a history commit (or its disclosure control) expands its full
+message, author/time/hash and changed-file rows in the history list. Metadata
+and file lists load on demand, independently of history pagination; collapse
+cancels that commit's pending request. Only clicking a changed file routes to
 `EditorWorkspaceStore.openGitDiff(repository:target:file:context:)`, honoring the
-editor pane destination setting. The editor binds each preview to its original
+editor pane destination setting and the exact commit/file selection. The editor binds each preview to its original
 repository and target and keeps regular documents (including unsaved buffers)
 separate. Source comparison uses bounded, read-only before/after snapshots with
 the editor's syntax highlighting and added/deleted line tints. Side by Side and
@@ -969,6 +972,11 @@ directions, including insertion/deletion offsets; it can be disabled.
 Binary and size-limit states remain explicit, and a raw patch is the fallback
 when complete source snapshots are unavailable or changed during loading. Commit diffs compare against the first parent, or the empty tree for a
 root commit; staged diffs compare HEAD/index, unstaged diffs index/worktree.
+Diff source views forward the host editor's hide, open, close, adjacent-document,
+focus and Save All callbacks. Shift+Escape hides the editor without discarding
+the diff preview, display mode or scroll position, as with ordinary editor
+documents. Loading, binary and error states retain the same workspace shortcuts
+through a focused-surface fallback; hidden previews do not consume keys.
 The legacy native detail window remains available internally.
 
 Changes lists staged and unstaged/untracked paths separately. Checkboxes reflect
@@ -980,7 +988,8 @@ both index and working-tree edits can appear in both sections.
 
 History's scope menu includes current/all branches and every available local
 and remote branch. Branches uses an expandable Local/Remotes folder tree with
-stable ref IDs. Single click selects; double click opens history. Leaf context
+stable ref IDs. Single click selects; folder double-click toggles expansion,
+while branch double-click opens history. Leaf context
 menus offer switching, creating and switching a branch from that ref, pushing
 a selected local branch, and setting its upstream. Remote refs can create local
 tracking branches. Push explicitly selects a configured remote/destination
@@ -998,6 +1007,56 @@ Success refreshes status, changes, refs and history; failed commits retain the
 draft and index. The header reports configured upstream tracking against local
 cached refs, and routine refresh never fetches. Current branch, tag and remote
 decorations use distinct native SF Symbols, colors and accessible descriptions.
+Branch badges precede tags, with main branches first, and flow into additional
+rows at narrow widths. The commit graph uses a compact lane-dependent gutter;
+the actual HEAD node has a larger ring/dot independent of table selection.
+Expanded child rows continue graph lanes without introducing commit nodes.
+
+History fetches another frozen-snapshot page when scrolling near the bottom,
+deduplicates pending requests, and stops at Git's true end of history. A failed
+page retains existing commits, the snapshot and has-more state for manual retry.
+Refreshing refs preserves the already-loaded depth. Row heights track badge
+wrapping and expanded metadata; inserting child rows does not affect Git page
+offsets, and an append preserves the current viewport anchor.
+
+### SSH Git parity and transport
+
+A ready SSH pane uses the same Git provider, History/branch tree, commit
+expansion, stage/unstage, commit, branch actions, and editor diff as a local
+pane. Connecting sessions remain non-actionable. Repository identity, read
+caches, commit drafts, expanded state and mutation locks include the SSH
+destination/options as well as the worktree path; reconnect/host changes cannot
+reuse a local or another host's same-path state. SSH failures are errors, never
+an instruction to run Git locally. The SSH destination remains visible during
+loading and errors.
+
+`SSHGitExecutor` uses OpenSSH batch mode with the session's replayed destination,
+port, user, identity, config, jump host and control-socket options. Foreground
+OpenSSH sessions capture argv boundaries via `KERN_PROCARGS2` (not a whitespace
+split of ps output); if exact options cannot be recovered, Git asks for a
+reconnection rather than guessing a port. Existing SSH config/agent or
+multiplexed authentication applies. Auxiliary commands disable terminal
+allocation, port forwards, LocalCommand and RemoteCommand side effects.
+Configured agent forwarding, including explicit `-A`, is preserved.
+
+The transport requires a Unix SSH host with Git 2.23+ and standard `/bin/sh`,
+`base64 -d`, `head` utilities for full parity. A base64-encoded POSIX command
+argument avoids login-shell quoting differences (including fish), while SSH
+stdin stays independent for commit messages. An output marker removes shell
+startup banners without losing NUL-delimited Git paths. Output is bounded,
+connection liveness is checked, repository roots with line breaks are rejected,
+and remote working-file reads are bounded and
+validated on the server rather than through local FileManager. Symlinks and
+non-regular files retain the patch fallback. A lost connection during a write
+reports an uncertain outcome and keeps the draft for refresh/reconciliation.
+
+Remote polling is throttled to ten seconds; explicit refresh and completed
+mutations refresh immediately. No fetch, force-push, stash, or host-key bypass
+is added. Remote branch switching also protects unsaved editor documents in
+the SSH workspace conservatively, since symlink aliases cannot be resolved
+through the Mac filesystem. Tests run an isolated loopback sshd with private
+temporary keys and a pinned known_hosts file, covering real SSH reads, writes,
+diff source versions, local bare-remote pushes and endpoint-state isolation.
 
 ### Editor appearance settings
 

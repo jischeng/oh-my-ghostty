@@ -156,8 +156,10 @@ struct GitBranchTree: NSViewRepresentable {
         }
 
         @objc func openHistory() {
-            guard let branch = clickedBranch else { return }
-            perform(.browseBranch(branch.id))
+            guard let tree else { return }
+            let row = tree.clickedRow >= 0 ? tree.clickedRow : tree.selectedRow
+            guard let node = tree.item(atRow: row) as? GitBranchNode else { return }
+            if let branch = node.branch { perform(.browseBranch(branch.id)) } else if tree.isItemExpanded(node) { tree.collapseItem(node) } else { tree.expandItem(node) }
         }
 
         func menuNeedsUpdate(_ menu: NSMenu) {

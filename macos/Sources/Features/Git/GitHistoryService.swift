@@ -17,9 +17,9 @@ enum GitHistoryError: Error, Equatable, Sendable, LocalizedError {
 struct GitHistoryService: Sendable {
     static let pageSize = 100
 
-    private let executor: any GitExecutor
+    private let executor: (any GitExecutor)?
 
-    init(executor: any GitExecutor = LocalGitExecutor()) {
+    init(executor: (any GitExecutor)? = nil) {
         self.executor = executor
     }
 
@@ -27,7 +27,7 @@ struct GitHistoryService: Sendable {
         for repository: GitRepositoryIdentity,
         scope: GitHistoryScope
     ) async throws -> GitHistorySnapshot {
-        async let refsResult = executor.execute(
+        async let refsResult = (executor ?? repository.executor).execute(
             arguments: [
                 "for-each-ref",
                 "--format=%(refname)%00%(objectname)%00%(*objectname)%1e",
@@ -39,13 +39,13 @@ struct GitHistoryService: Sendable {
             stdin: nil,
             maxOutputBytes: 2 * 1024 * 1024
         )
-        async let branchResult = executor.execute(
+        async let branchResult = (executor ?? repository.executor).execute(
             arguments: ["symbolic-ref", "--quiet", "--short", "HEAD"],
             workingDirectory: repository.worktreePath,
             stdin: nil,
             maxOutputBytes: 16 * 1024
         )
-        async let headResult = executor.execute(
+        async let headResult = (executor ?? repository.executor).execute(
             arguments: ["rev-parse", "--quiet", "--verify", "HEAD"],
             workingDirectory: repository.worktreePath,
             stdin: nil,
@@ -160,9 +160,10 @@ struct GitHistoryService: Sendable {
         }
 
         let requestedCount = pageSize + 1
-        let result = try await executor.execute(
+        let result = try await (executor ?? repository.executor).execute(
             arguments: [
                 "log",
+                "--encoding=UTF-8",
                 "--topo-order",
                 "--no-color",
                 "--no-decorate",

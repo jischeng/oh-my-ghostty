@@ -191,12 +191,68 @@ final class GitRefListView: NSView, NSOutlineViewDataSource, NSOutlineViewDelega
     }
 }
 
-struct GitRefBadgeRow: NSViewRepresentable {
+/// Repository refs stay named and visible; long names wrap instead of aggregating.
+struct GitHeaderReferences: NSViewRepresentable {
     let refs: [GitRefDecoration]
-    func makeNSView(context: Context) -> GitRefBadgesView { GitRefBadgesView() }
-    func updateNSView(_ view: GitRefBadgesView, context: Context) { view.configure(refs) }
-    func sizeThatFits(_ proposal: ProposedViewSize, nsView: GitRefBadgesView, context: Context) -> CGSize? {
-        CGSize(width: proposal.width ?? 0, height: refs.isEmpty ? 0 : 17)
+    func makeNSView(context: Context) -> GitHeaderReferencesView {
+        let view = GitHeaderReferencesView()
+        view.configure(refs)
+        return view
+    }
+    func updateNSView(_ view: GitHeaderReferencesView, context: Context) { view.configure(refs) }
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: GitHeaderReferencesView, context: Context) -> CGSize? {
+        let width = proposal.width ?? 240
+        return CGSize(width: width, height: nsView.frames(width: width).map(\.maxY).max() ?? 0)
+    }
+}
+
+final class GitHeaderReferencesView: NSView {
+    private var refs: [GitRefDecoration] = []
+    private var fields: [InspectorCopyableTextField] = []
+    override var isFlipped: Bool { true }
+
+    func configure(_ refs: [GitRefDecoration]) {
+        guard self.refs != refs else { return }
+        self.refs = refs
+        fields.forEach { $0.removeFromSuperview() }
+        fields = refs.map { ref in
+            let field = InspectorCopyableTextField(wrappingLabelWithString: "")
+            field.attributedStringValue = GitRefBadgesView.attributed(ref)
+            field.isSelectable = true
+            field.lineBreakMode = .byCharWrapping
+            field.maximumNumberOfLines = 0
+            field.copyValue = ref.name
+            field.toolTip = ref.name
+            field.setAccessibilityLabel(ref.kind.rawValue + ": " + ref.name)
+            field.wantsLayer = true
+            field.layer?.cornerRadius = 3
+            field.layer?.backgroundColor = GitRefBadgesView.tint(for: ref.kind).withAlphaComponent(0.10).cgColor
+            addSubview(field)
+            return field
+        }
+        needsLayout = true
+    }
+
+    func frames(width: CGFloat) -> [NSRect] {
+        let available = max(1, width)
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        return fields.map { field in
+            let width = min(available, ceil(field.attributedStringValue.size().width) + 4)
+            if x > 0, x + width > available { x = 0; y += rowHeight + 4; rowHeight = 0 }
+            let height = max(17, ceil(field.cell?.cellSize(forBounds:
+                NSRect(x: 0, y: 0, width: width, height: .greatestFiniteMagnitude)).height ?? 17))
+            let frame = NSRect(x: x, y: y, width: width, height: height)
+            x += width + 4
+            rowHeight = max(rowHeight, height)
+            return frame
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        for (field, frame) in zip(fields, frames(width: bounds.width)) { field.frame = frame }
     }
 }
 

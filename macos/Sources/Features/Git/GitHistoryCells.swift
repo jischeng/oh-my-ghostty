@@ -45,7 +45,7 @@ final class GitHistoryCell: NSTableCellView {
         self.graph.configure(row: graph, isHead: state.head, layout: graphLayout,
                              section: state.expanded ? .expandedCommit : .commit)
         subject.stringValue = commit.subject.isEmpty ? "(no subject)" : commit.subject
-        let doubleClick = { [weak self] in self?.cancelPendingCopy(); toggle() }
+        let doubleClick = toggle
         authorAndEmail.configure(.init(text: commit.authorName, value: commit.authorName, label: "Author"),
             second: commit.authorEmail.isEmpty ? nil : .init(text: commit.authorEmail, value: commit.authorEmail, label: "Email"), onDoubleClick: doubleClick)
         timeAndHash.configure(.init(text: summary.date, value: commit.authoredAt.description, label: "Time"),
@@ -58,7 +58,6 @@ final class GitHistoryCell: NSTableCellView {
         toolTip = "\(commit.subject)\n\(commit.authorName) <\(commit.authorEmail)>\n\(commit.authoredAt)\n\(commit.id.rawValue)"
         needsLayout = true
     }
-    func cancelPendingCopy() { authorAndEmail.cancelPendingCopy(); timeAndHash.cancelPendingCopy() }
     override func layout() {
         super.layout()
         graph.frame = NSRect(x: 0, y: 0, width: graphWidth, height: bounds.height)

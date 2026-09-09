@@ -126,7 +126,7 @@ struct InspectorGitView: View {
             if let connection = content.connectionLabel ?? content.repository?.sshConnection?.destination {
                 InspectorCopyText(text: "SSH · " + connection).frame(height: 14)
             }
-            if !headerReferences.isEmpty { GitRefBadgeRow(refs: headerReferences).frame(height: 17) }
+            if !headerReferences.isEmpty { GitHeaderReferences(refs: headerReferences) }
             if content.workingTree.branchesError == nil,
                let current = content.workingTree.branches.first(where: { $0.isCurrent }) {
                 InspectorCopyText(text: current.upstream.isEmpty ? "No upstream configured" :

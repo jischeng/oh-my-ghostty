@@ -960,11 +960,12 @@ untracked working-tree files are represented as additions.
 
 History keeps the subject first, followed by two secondary metadata lines:
 Author and Email, then Time and Short SHA, separated by whitespace rather
-than dot labels. These are independent click-copy targets; feedback keeps the
-original text and uses a temporary accent/underline instead of replacing it.
-Hash clicks copy the full SHA. Double-clicking a summary, including metadata
-and blank space, toggles the commit. Metadata mouse clicks wait for the system
-double-click interval so a double-click can cancel copying and expand instead.
+than dot labels. Clicking a metadata field selects and highlights its complete
+value without changing the clipboard; Command-C copies that selected field
+(including the full SHA behind a short hash). Only one field owns keyboard focus,
+and changing focus clears its selection highlight. Copy feedback preserves the
+original text. Double-clicking a summary, including metadata and blank space,
+toggles the commit without copying or waiting on a single-click timer.
 The trailing 7-point chevron remains available; the graph gutter is topology only.
 Subjects and bodies use row selection/whole-value copying without word selection.
 
@@ -998,15 +999,17 @@ side branches. Only actual active continuations create incoming edges; the first
 visible node has no artificial line above it. Explicit seeded continuations keep
 their incoming edges. This applies to folded and expanded commits alike.
 Each commit reserves only its own drawn graph extent (node outline or rightmost
-edge) plus a 3-point content gap. Lane centers are 8 points apart, starting at
-5 points; a single-lane commit's content starts at 13 points. Merge edges and
+edge) plus a 3-point content gap. Lane centers are 10 points apart, starting at
+8 points; a single-lane commit's content starts at 16 points. Merge edges and
 passing lanes participate in that row's extent, without a global maximum gutter
 or shared text column. Detail rows use their owning commit's content origin and
 measurement width. Adjacent graph-edge coordinates match even as widths shrink.
 
 Inspector native copy routing precedes terminal shortcuts. The bounded branch
 scope picker displays compact titles but dispatches original ref IDs. Repository
-headers show selectable worktree/origin addresses and HEAD tags. Origin is read
+headers show selectable worktree/origin addresses and every current branch/HEAD
+tag by name. Header refs wrap onto additional lines instead of truncating or
+collapsing into count badges; history-row badges remain compact. Origin is read
 on initial/forced refresh rather than each poll; HTTP credentials are omitted.
 
 Commit disclosure or double-click loads metadata/files on demand,

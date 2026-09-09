@@ -334,7 +334,6 @@ struct GitHistoryTable: NSViewRepresentable {
             guard let content, rows.indices.contains(index) else { return }
             switch rows[index] {
             case .commit(let commit) where doubleClick:
-                (tableView?.view(atColumn: 0, row: index, makeIfNecessary: false) as? GitHistoryCell)?.cancelPendingCopy()
                 content.onOpen(content.commits[commit].id)
             case .file(let commit, let file) where !doubleClick: content.onOpenFile(content.commits[commit].id, file)
             case .files where !doubleClick: activateChild(rows[index])

@@ -81,9 +81,12 @@ struct GitInspectorUsabilityTests {
         let subject = try #require(find(NSTextField.self, in: cell).first)
         let center = subject.frame.minY + subject.firstBaselineOffsetFromTop - (subject.font?.capHeight ?? 0) / 2
         #expect(abs(center - GitHistoryRowMetrics.contentAxisY) <= 0.5)
-        let identity = try #require(find(InspectorClickCopyText.self, in: cell).first { $0.value == commit.authorEmail })
+        let identity = try #require(find(InspectorMetadataText.self, in: cell).first { $0.value == commit.authorEmail })
         identity.pasteboard = board
+        InspectorCopyMenu.copy("unchanged", to: board)
         identity.performClick(nil)
+        #expect(identity.isValueSelected && board.string(forType: .string) == "unchanged")
+        #expect(EditorCommandRouter.shared.handle(try key("c", in: host)))
         #expect(board.string(forType: .string) == commit.authorEmail)
         #expect(identity.isCopied)
 
@@ -107,14 +110,18 @@ struct GitInspectorUsabilityTests {
         #expect(graph.frame.maxX < subject.frame.minX)
         #expect(disclosure.frame.minX > subject.frame.maxX)
         #expect(!subject.isSelectable)
-        let buttons = find(InspectorClickCopyText.self, in: cell)
+        let buttons = find(InspectorMetadataText.self, in: cell)
         let board = NSPasteboard.withUniqueName()
         for value in [commit.authorName, commit.authorEmail, commit.authoredAt.description, commit.id.rawValue] {
             let button = try #require(buttons.first { $0.value == value })
             button.pasteboard = board
             let frame = button.frame
             let title = button.attributedTitle.string
+            InspectorCopyMenu.copy("unchanged", to: board)
             button.activate(clickCount: 1)
+            #expect(button.isValueSelected && board.string(forType: .string) == "unchanged")
+            #expect(buttons.filter(\.isValueSelected).count == 1)
+            #expect(EditorCommandRouter.shared.handle(try key("c", in: host)))
             #expect(board.string(forType: .string) == value)
             #expect(button.isCopied && button.attributedTitle.string == title)
             #expect(button.frame == frame && button.image == nil)
@@ -158,7 +165,7 @@ struct GitInspectorUsabilityTests {
             #expect(find(NSTextField.self, in: cell).first?.bounds.width ?? 0 > 100)
         }
         #expect(board.string(forType: .string) == "unchanged")
-        #expect(find(InspectorClickCopyText.self, in: list).isEmpty)
+        #expect(find(InspectorMetadataText.self, in: list).isEmpty)
         #expect(find(NSButton.self, in: list).allSatisfy { $0.toolTip?.hasPrefix("Copy") != true })
         list.tree.sendAction(list.tree.action, to: list.tree.target)
         #expect(board.string(forType: .string) == "feature/git/history")
@@ -221,11 +228,11 @@ struct GitInspectorUsabilityTests {
         let commits = rows.enumerated().map { index, row in
             GitHistoryCommit(id: .init(row.0), parentIDs: row.1.map(GitCommitID.init), authorName: "jischeng",
                 authorEmail: "j.s.cheng@hotmail.com", authoredAt: Date(timeIntervalSince1970: 1_788_800_000), subject: row.2,
-                refDecorations: [.init(name: "codex/markdown-source-editor", kind: index == 0 ? .currentBranch : .localBranch),
+                refDecorations: [.init(name: "codex/markdown-source-editor/compact-header-references", kind: index == 0 ? .currentBranch : .localBranch),
                                  .init(name: "dev-v0.11.0-" + row.0, kind: .tag), .init(name: "release-" + row.0, kind: .tag)])
         }
-        var content = InspectorGitContent(repository: repository, branch: "codex/markdown-source-editor",
-            status: .ready(repository: repository, branch: "main", headCommitID: commits[0].id),
+        var content = InspectorGitContent(repository: repository, branch: "codex/markdown-source-editor/compact-header-references",
+            status: .ready(repository: repository, branch: "codex/markdown-source-editor/compact-header-references", headCommitID: commits[0].id),
             history: .init(commits: commits))
         content.workingTree.remoteURL = "https://example.com/team/oh-my-ghostty.git"
         let view = NSHostingView(rootView: InspectorGitView(content: content, perform: { _ in })
@@ -239,15 +246,12 @@ struct GitInspectorUsabilityTests {
         let fields = find(InspectorCopyableTextField.self, in: view)
         #expect(fields.contains { $0.stringValue == repository.worktreePath })
         #expect(fields.contains { $0.stringValue == content.workingTree.remoteURL })
-        let headerRefs = try #require(find(GitRefBadgesView.self, in: view).first { group in
-            var ancestor = group.superview
-            while let value = ancestor {
-                if value is NSTableView { return false }
-                ancestor = value.superview
-            }
-            return true
-        })
-        #expect(find(NSButton.self, in: headerRefs).contains { $0.attributedTitle.string.contains("dev-v0.11.0-3df9918") })
+        let headerRefs = try #require(find(GitHeaderReferencesView.self, in: view).first)
+        let namedRefs = find(InspectorCopyableTextField.self, in: headerRefs)
+        #expect(namedRefs.map(\.copyValue) == ["codex/markdown-source-editor/compact-header-references", "dev-v0.11.0-3df9918", "release-3df9918"])
+        #expect(namedRefs.allSatisfy { $0.frame.maxX <= headerRefs.bounds.width && $0.frame.maxY <= headerRefs.bounds.height })
+        #expect(headerRefs.bounds.height > 17)
+        #expect(namedRefs.first?.frame.height ?? 0 > 17)
         if FileManager.default.fileExists(atPath: "/tmp/omg-git-render") {
             let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
             view.cacheDisplay(in: view.bounds, to: bitmap)

@@ -33,17 +33,15 @@ class InspectorCopyableTextField: NSTextField {
     }
 }
 
-/// Small metadata values copy on explicit click, without adding an icon column.
-final class InspectorClickCopyText: NSButton {
+/// Metadata clicks select one complete value; Copy uses the normal responder route.
+final class InspectorMetadataText: NSButton {
     private(set) var value = ""
     private var displayText = ""
     private var copyLabel = ""
     private(set) var isCopied = false
+    private(set) var isValueSelected = false
     var pasteboard = NSPasteboard.general
-    private var hoverArea: NSTrackingArea?
-    private var hovered = false
     private var feedbackTask: Task<Void, Never>?
-    private var pendingCopy: Task<Void, Never>?
     var onDoubleClick: (() -> Void)?
     var naturalWidth: CGFloat { max(40, ceil((displayText as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 10)]).width) + 4) }
 
@@ -56,14 +54,25 @@ final class InspectorClickCopyText: NSButton {
         wantsLayer = true
         layer?.cornerRadius = 3
         target = self
-        action = #selector(copyValue(_:))
+        action = #selector(selectValue(_:))
     }
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override var acceptsFirstResponder: Bool { true }
+    override func becomeFirstResponder() -> Bool {
+        isValueSelected = true
+        present()
+        return true
+    }
+    override func resignFirstResponder() -> Bool {
+        isValueSelected = false
+        present()
+        return true
+    }
     func configure(text: String, value: String, label: String) {
         if self.value != value || displayText != text {
             feedbackTask?.cancel()
-            pendingCopy?.cancel()
             isCopied = false
+            if window?.firstResponder === self { window?.makeFirstResponder(nil) }
         }
         self.value = value
         displayText = text
@@ -74,52 +83,40 @@ final class InspectorClickCopyText: NSButton {
     private func present() {
         attributedTitle = NSAttributedString(string: displayText, attributes: [
             .font: NSFont.systemFont(ofSize: 10),
-            .foregroundColor: isCopied ? NSColor.controlAccentColor : NSColor.secondaryLabelColor,
+            .foregroundColor: isValueSelected ? NSColor.labelColor : NSColor.secondaryLabelColor,
         ])
-        layer?.backgroundColor = (isCopied ? NSColor.controlAccentColor.withAlphaComponent(0.06) : .clear).cgColor
-        if hovered || isCopied {
-            let value = NSMutableAttributedString(attributedString: attributedTitle)
-            value.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: NSRange(location: 0, length: value.length))
-            attributedTitle = value
-        }
-        toolTip = isCopied ? "Copied" : "Copy " + copyLabel.lowercased() + " · " + value
-        setAccessibilityValue(isCopied ? "Copied" : "")
+        layer?.backgroundColor = (isValueSelected ? NSColor.controlAccentColor.withAlphaComponent(0.18) : .clear).cgColor
+        toolTip = isCopied ? "Copied" : "Select " + copyLabel.lowercased() + " · ⌘C to copy · " + value
+        setAccessibilityValue(isCopied ? "Copied" : (isValueSelected ? "Selected" : ""))
     }
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let hoverArea { removeTrackingArea(hoverArea) }
-        let area = NSTrackingArea(rect: bounds, options: [.activeInKeyWindow, .mouseEnteredAndExited, .inVisibleRect], owner: self, userInfo: nil)
-        addTrackingArea(area)
-        hoverArea = area
-    }
-    override func mouseEntered(with event: NSEvent) { hovered = true; present() }
-    override func mouseExited(with event: NSEvent) { hovered = false; present() }
-    override func resetCursorRects() { super.resetCursorRects(); addCursorRect(bounds, cursor: .pointingHand) }
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window == nil { feedbackTask?.cancel(); pendingCopy?.cancel(); isCopied = false; present() }
+        EditorCommandRouter.shared.unregister(owner: self)
+        guard window != nil else {
+            feedbackTask?.cancel()
+            isCopied = false
+            isValueSelected = false
+            present()
+            return
+        }
+        EditorCommandRouter.shared.register(owner: self) { [weak self] event in
+            guard let self, event.window === self.window, self.window?.firstResponder === self,
+                  event.modifierFlags.intersection([.command, .control, .option, .shift]) == .command,
+                  event.charactersIgnoringModifiers?.lowercased() == "c" else { return false }
+            self.copy(nil)
+            return true
+        }
     }
-    func cancelPendingCopy() { pendingCopy?.cancel(); pendingCopy = nil }
     override func mouseDown(with event: NSEvent) {
         if event.clickCount >= 2, onDoubleClick != nil { activate(clickCount: event.clickCount); return }
         super.mouseDown(with: event)
     }
-    @objc private func copyValue(_ sender: Any?) {
-        let mouse = NSApp.currentEvent.map { $0.window === window && ($0.type == .leftMouseDown || $0.type == .leftMouseUp) } ?? false
-        activate(clickCount: 1, deferSingle: mouse)
-    }
-    func activate(clickCount: Int, deferSingle: Bool = false) {
-        cancelPendingCopy()
+    @objc private func selectValue(_ sender: Any?) { activate(clickCount: 1) }
+    func activate(clickCount: Int) {
         if clickCount >= 2, let onDoubleClick { onDoubleClick(); return }
-        if deferSingle, onDoubleClick != nil {
-            pendingCopy = Task { [weak self] in
-                try? await Task.sleep(for: .seconds(NSEvent.doubleClickInterval))
-                guard !Task.isCancelled else { return }
-                self?.commitCopy()
-            }
-        } else { commitCopy() }
+        window?.makeFirstResponder(self)
     }
-    private func commitCopy() {
+    @objc func copy(_ sender: Any?) {
         InspectorCopyMenu.copy(value, to: pasteboard)
         feedbackTask?.cancel()
         isCopied = true
@@ -130,6 +127,9 @@ final class InspectorClickCopyText: NSButton {
             self?.isCopied = false
             self?.present()
         }
+    }
+    override func menu(for event: NSEvent) -> NSMenu? {
+        InspectorCopyMenu(values: [("Copy " + copyLabel.lowercased(), value)], pasteboard: pasteboard)
     }
 }
 

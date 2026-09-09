@@ -2,8 +2,8 @@ import AppKit
 
 final class GitMetadataLine: NSView {
     struct Item { let text: String; let value: String; let label: String }
-    private let first = InspectorClickCopyText()
-    private let second = InspectorClickCopyText()
+    private let first = InspectorMetadataText()
+    private let second = InspectorMetadataText()
     override var isFlipped: Bool { true }
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -14,11 +14,11 @@ final class GitMetadataLine: NSView {
         self.first.onDoubleClick = onDoubleClick
         self.second.onDoubleClick = onDoubleClick
         self.first.configure(text: first.text, value: first.value, label: first.label)
+        if second == nil, window?.firstResponder === self.second { window?.makeFirstResponder(nil) }
         self.second.isHidden = second == nil
         if let second { self.second.configure(text: second.text, value: second.value, label: second.label) }
         needsLayout = true
     }
-    func cancelPendingCopy() { first.cancelPendingCopy(); second.cancelPendingCopy() }
     override func layout() {
         super.layout()
         let firstWidth = min(first.naturalWidth, second.isHidden ? bounds.width : max(28, bounds.width * 0.44))

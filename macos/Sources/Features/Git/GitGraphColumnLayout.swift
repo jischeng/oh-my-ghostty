@@ -26,6 +26,6 @@ struct GitGraphColumnLayout: Equatable {
     }
 
     private static func laneX(_ lane: Int) -> CGFloat {
-        5 + CGFloat(lane) * 8
+        8 + CGFloat(lane) * 10
     }
 }

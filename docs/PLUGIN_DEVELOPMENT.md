@@ -951,21 +951,30 @@ implementation, tests, and a stability designation land.
 
 The built-in Git diff surface is host-owned Swift code. `GitDiffService` first
 lists paths for a `GitDiffTarget` (`commit`, `staged`, or `unstaged`) and only
-loads a selected file's unified diff. File lists use Git's NUL-delimited
-`--name-status -z` output, so spaces, Unicode, and other valid path characters
-remain intact. Renames and copies retain both old and new paths; untracked
-working-tree files are represented as additions.
+loads a selected file's unified diff. Working-tree file lists use Git's NUL-delimited
+`--name-status -z` output. Committed files use combined `--raw --numstat -z`
+records to obtain statuses, rename pairs and line statistics in one command,
+without another SSH round trip. Tabs, newlines and Unicode in paths remain
+intact. Binary files contribute to a separate count, not invented line totals;
+untracked working-tree files are represented as additions.
 
-History rows put timestamp, author and short commit ID before the subject,
-with separate text fields so long messages cannot hide metadata. Disclosure
-symbols have a fixed small glyph inside an 18-point hit target. The current
-commit has a compact HEAD label and a hollow graph node at the normal size.
-Double-clicking a history commit (or its disclosure control) expands labeled
-author/time/hash metadata, then a separate message section and changed files. Metadata
-and file lists load on demand, independently of history pagination; collapse
-cancels that commit's pending request. Only clicking a changed file routes to
+History keeps the subject first, followed by Author · Time · Short SHA, author
+email, and a shared HEAD/branch/tag badge flow. Expanding a commit preserves
+these summary fields and their positions. It adds the changed-file count and
+additions/deletions, then clickable A/M/D/R file rows, and only then the optional
+message body. It never repeats metadata labels or the subject. Short bodies
+(up to four rendered lines) are shown directly; longer bodies default to a
+collapsed “Commit message” control and offer “Show less” after expansion.
+The changed-file group can fold independently and remains before the body.
+Presentation-only folds do not refetch Git data. A continuous current-commit
+rail spans its child rows, including root commits; parent forks and passing
+lane compaction occur at the end of the expanded block.
+
+Double-clicking a commit or using its disclosure loads metadata/files on demand,
+independently of history pagination; collapsing cancels that pending request.
+Only clicking a changed file routes to
 `EditorWorkspaceStore.openGitDiff(repository:target:file:context:)`, honoring the
-editor pane destination setting and the exact commit/file selection. The editor binds each preview to its original
+editor pane destination setting and exact commit/file selection. The editor binds each preview to its original
 repository and target. Regular document views remain mounted underneath a
 selected diff, just as they do when another document is selected, preserving
 native undo, selection, scroll position and Markdown edit/preview mode. Source comparison uses bounded, read-only before/after snapshots with
@@ -1031,7 +1040,7 @@ decorations use distinct native SF Symbols, colors and accessible descriptions.
 Branch badges precede tags, with main branches first, and flow into additional
 rows at narrow widths. The commit graph uses a compact lane-dependent gutter;
 the actual HEAD marker is independent of table selection.
-Expanded child rows continue graph lanes without introducing commit nodes.
+Expanded child rows continue the commit rail without introducing commit nodes.
 
 History fetches another frozen-snapshot page when scrolling near the bottom,
 deduplicates pending requests, and stops at Git's true end of history. A failed

@@ -86,6 +86,7 @@ struct GitHistoryExpansionProviderTests {
         #expect(expanded.expandedCommits[commit]?.files.map(\.path) == ["file.swift"])
         #expect(expanded.expandedCommits[commit]?.metadata?.message == "Commit 0\n\nBody 0")
         #expect(expanded.expandedCommits[commit]?.metadata?.authorName == "Test")
+        #expect(expanded.expandedCommits[commit]?.statistics == GitDiffStatistics(additions: 1, deletions: 0, binaryFiles: 0))
         registry.performAction(paneID: BuiltInGitInspectorProvider.paneID,
                                action: .init(context: context, kind: .gitAction(.openCommit(commit))))
         _ = try await waitFor(registry, context: context) { $0.expandedCommits.isEmpty }

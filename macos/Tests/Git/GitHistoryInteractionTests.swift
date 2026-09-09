@@ -11,7 +11,7 @@ struct GitHistoryInteractionTests {
                          authoredAt: Date(timeIntervalSince1970: 0), subject: "Commit " + id, refDecorations: refs)
     }
     private func hostWindow<V: View>(_ root: V, width: CGFloat = 260, height: CGFloat = 450) -> NSWindow {
-        let host = NSHostingView(rootView: root)
+        let host = NSHostingView(rootView: root.background(Color(NSColor.windowBackgroundColor)))
         host.sizingOptions = []
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
                               styleMask: [.borderless], backing: .buffered, defer: false)
@@ -60,7 +60,7 @@ struct GitHistoryInteractionTests {
         defer { window.contentView = nil; window.close() }
         try await Task.sleep(for: .milliseconds(150))
         let table = try #require(find(NSTableView.self, in: window.contentView))
-        #expect(table.numberOfRows == 4)
+        #expect(table.numberOfRows == 5)
         #expect(table.effectiveStyle == .plain)
         let coordinator = try #require(table.target as? GitHistoryTable.Coordinator)
         coordinator.activateRow(0, doubleClick: false)
@@ -70,12 +70,12 @@ struct GitHistoryInteractionTests {
         coordinator.activateRow(2, doubleClick: false)
         #expect(opened == [file])
         let firstCell = table.view(atColumn: 0, row: 0, makeIfNecessary: true)
-        let headCell = table.view(atColumn: 0, row: 3, makeIfNecessary: true)
+        let headCell = table.view(atColumn: 0, row: 4, makeIfNecessary: true)
         let firstGraph = try #require(find(GitGraphCellView.self, in: firstCell))
         let headGraph = try #require(find(GitGraphCellView.self, in: headCell))
         #expect(!firstGraph.isHead && headGraph.isHead)
         #expect(firstGraph.frame.width > 0 && firstGraph.frame.width <= 31)
-        let metadata = table.view(atColumn: 0, row: 1, makeIfNecessary: true)
+        let metadata = table.view(atColumn: 0, row: 3, makeIfNecessary: true)
         let detailLabel = try #require(find(NSTextField.self, in: metadata))
         #expect(detailLabel.stringValue.contains("Commit body"))
         let requiredHeight = try #require(detailLabel.cell?.cellSize(forBounds: NSRect(
@@ -87,6 +87,73 @@ struct GitHistoryInteractionTests {
             view.cacheDisplay(in: view.bounds, to: bitmap)
             let data = try #require(bitmap.representation(using: .png, properties: [:]))
             try data.write(to: URL(fileURLWithPath: "/tmp/omg-git-expanded.png"))
+        }
+    }
+
+    @Test func longBodyFoldsAfterFilesWithoutMovingTheSummaryOrRepeatingMetadata() async throws {
+        for width in [220.0, 360.0] {
+            let first = commit("1234567", refs: [.init(name: "main", kind: .currentBranch), .init(name: "v1.2", kind: .tag)])
+            let files = (0..<6).map { GitDiffFile(path: "Sources/File\($0).swift", status: $0 == 1 ? "A" : "M") }
+            let details = GitCommitExpansion(metadata: .init(commitID: first.id, authorName: "Author",
+                authorEmail: "a@example.com", authoredAt: "2026-09-09", parents: [],
+                message: "Commit 1234567\n\n" + (0..<100).map { "Explanation line \($0)" }.joined(separator: "\n")),
+                files: files, statistics: .init(additions: 642, deletions: 87, binaryFiles: 0))
+            var root = GitHistoryTable(commits: [first, commit("next001"), commit("next002")], selectedCommitID: nil,
+                headCommitID: first.id, onSelect: { _ in }, onOpen: { _ in }, onShowInTerminal: { _ in })
+            let window = hostWindow(root, width: width, height: 680)
+            defer { window.contentView = nil; window.close() }
+            try await Task.sleep(for: .milliseconds(120))
+            let table = try #require(find(NSTableView.self, in: window.contentView))
+            let coordinator = try #require(table.target as? GitHistoryTable.Coordinator)
+            let originalHeight = table.rect(ofRow: 0).height
+            func labels(in view: NSView) -> [NSTextField] {
+                if let label = view as? NSTextField { return [label] }
+                return view.subviews.flatMap { labels(in: $0) }
+            }
+            func summary() throws -> [String] {
+                let cell = try #require(table.view(atColumn: 0, row: 0, makeIfNecessary: true))
+                cell.layoutSubtreeIfNeeded()
+                return labels(in: cell).map { $0.stringValue + NSStringFromRect($0.frame) }
+            }
+            let originalSummary = try summary()
+            root.expandedCommits = [first.id: details]
+            coordinator.update(root)
+            window.contentView?.layoutSubtreeIfNeeded()
+            #expect(table.numberOfRows == 11)
+            #expect(table.rect(ofRow: 0).height == originalHeight)
+            #expect(try summary() == originalSummary)
+            let header = try #require(table.view(atColumn: 0, row: 1, makeIfNecessary: true))
+            header.layoutSubtreeIfNeeded()
+            #expect(find(NSButton.self, in: header)?.attributedTitle.string == "6 files changed · +642 −87")
+            let filesTop = table.rect(ofRow: 2).minY
+            let message = try #require(table.view(atColumn: 0, row: 8, makeIfNecessary: true))
+            message.layoutSubtreeIfNeeded()
+            #expect(table.rect(ofRow: 8).height == 28)
+            let toggle = try #require(find(NSButton.self, in: message))
+            #expect(toggle.title == "Commit message")
+            toggle.performClick(nil)
+            #expect(table.rect(ofRow: 8).height > 500)
+            #expect(table.rect(ofRow: 2).minY == filesTop)
+            let expanded = try #require(table.view(atColumn: 0, row: 8, makeIfNecessary: true))
+            expanded.layoutSubtreeIfNeeded()
+            #expect(find(NSTextField.self, in: expanded)?.stringValue.contains("Explanation line 99") == true)
+            let less = try #require(find(NSButton.self, in: expanded))
+            #expect(less.title == "Show less")
+            less.performClick(nil)
+            #expect(table.rect(ofRow: 8).height == 28)
+            #expect(NSLocationInRange(9, table.rows(in: table.visibleRect)))
+            #expect(table.rect(ofRow: 2).minY == filesTop)
+            if FileManager.default.fileExists(atPath: "/tmp/omg-git-render"), let view = window.contentView {
+                view.layoutSubtreeIfNeeded()
+                let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+                view.cacheDisplay(in: view.bounds, to: bitmap)
+                let data = try #require(bitmap.representation(using: .png, properties: [:]))
+                try data.write(to: URL(fileURLWithPath: "/tmp/omg-git-timeline-\(Int(width)).png"))
+            }
+            coordinator.activateRow(1, doubleClick: false)
+            #expect(table.numberOfRows == 5)
+            coordinator.activateRow(1, doubleClick: false)
+            #expect(table.numberOfRows == 11)
         }
     }
 

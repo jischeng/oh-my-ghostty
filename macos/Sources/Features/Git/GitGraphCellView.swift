@@ -19,7 +19,8 @@ final class GitGraphCellView: NSView {
 
     private var row: GitGraphRow?
     private(set) var isHead = false
-    private var isContinuation = false
+    enum Section { case commit, expandedCommit, continuation, expansionEnd }
+    private(set) var section = Section.commit
     private var displayLaneCount = 1
 
     override var isFlipped: Bool {
@@ -41,10 +42,10 @@ final class GitGraphCellView: NSView {
         return horizontalInset * 2 + CGFloat(lanes - 1) * laneSpacing + nodeDiameter
     }
 
-    func configure(row: GitGraphRow, isHead: Bool = false, continuation: Bool = false, laneCount: Int? = nil) {
+    func configure(row: GitGraphRow, isHead: Bool = false, laneCount: Int? = nil, section: Section = .commit) {
         self.row = row
         self.isHead = isHead
-        isContinuation = continuation
+        self.section = section
         displayLaneCount = laneCount ?? row.requiredLaneCount
         invalidateIntrinsicContentSize()
         needsDisplay = true
@@ -58,28 +59,49 @@ final class GitGraphCellView: NSView {
 
         NSGraphicsContext.current?.cgContext.setShouldAntialias(true)
 
-        if isContinuation {
-            var drawn = Set<Int>()
-            for segment in row.segments {
-                guard case .bottom(let lane) = segment.to, drawn.insert(lane).inserted else { continue }
-                draw(GitGraphSegment(kind: .passthrough, from: .top(lane: lane), to: .bottom(lane: lane),
-                                     colorIndex: segment.colorIndex, commitID: segment.commitID, parentID: nil))
-            }
-        } else {
+        if section == .commit {
             for segment in row.segments { draw(segment) }
+            drawNode(row)
+            return
+        }
+        // Keep the current lane and all passing lanes vertical through the
+        // expanded block. Forks and lane compaction happen only at its end.
+        let ending = section == .expansionEnd
+        let bendY = ending ? max(0, bounds.height - 10) : bounds.height
+        for segment in row.segments where segment.kind == .passthrough {
+            let top = point(for: segment.from)
+            var points = [top, NSPoint(x: top.x, y: bendY)]
+            if ending { points.append(point(for: segment.to)) }
+            stroke(points, colorIndex: segment.colorIndex)
+        }
+        let start = point(for: section == .expandedCommit ? .node(lane: row.nodeLane) : .top(lane: row.nodeLane))
+        let bend = NSPoint(x: start.x, y: bendY)
+        stroke([start, bend], colorIndex: row.nodeColorIndex)
+        if ending {
+            for segment in row.segments where segment.kind == .parent {
+                stroke([bend, point(for: segment.to)], colorIndex: segment.colorIndex)
+            }
+        }
+        if section == .expandedCommit {
+            for segment in row.segments where segment.kind == .incoming { draw(segment) }
             drawNode(row)
         }
     }
 
-    private func draw(_ segment: GitGraphSegment) {
+    private func stroke(_ points: [NSPoint], colorIndex: Int) {
+        guard let first = points.first else { return }
         let path = NSBezierPath()
         path.lineCapStyle = .round
         path.lineJoinStyle = .round
         path.lineWidth = Self.lineWidth
-        path.move(to: point(for: segment.from))
-        path.line(to: point(for: segment.to))
-        color(for: segment.colorIndex).setStroke()
+        path.move(to: first)
+        for point in points.dropFirst() { path.line(to: point) }
+        color(for: colorIndex).setStroke()
         path.stroke()
+    }
+
+    private func draw(_ segment: GitGraphSegment) {
+        stroke([point(for: segment.from), point(for: segment.to)], colorIndex: segment.colorIndex)
     }
 
     private func drawNode(_ row: GitGraphRow) {

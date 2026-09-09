@@ -21,16 +21,18 @@ struct GitDiffService: Sendable {
         case .commit(let commit):
             let commitBase = try await commitBase(for: commit, repository: repository)
             let result = try await run(
-                ["--literal-pathspecs", "diff", "--no-ext-diff", "--name-status", "-z", "--find-renames", commitBase.id, commit.rawValue, "--"],
+                ["--literal-pathspecs", "diff", "--no-ext-diff", "--raw", "--numstat", "-z", "--find-renames", commitBase.id, commit.rawValue, "--"],
                 repository: repository,
                 maxOutputBytes: 256 * 1024
             )
+            let changes = try GitCommitChanges(data: result.stdout)
             return GitDiffFileList(
                 repository: repository,
                 target: target,
-                files: parseNameStatus(result.stdout),
+                files: changes.files,
                 baseDescription: commitBase.isRoot ? "empty tree" : "parent \(GitCommitID(commitBase.id).shortSHA)",
-                commitBase: commitBase
+                commitBase: commitBase,
+                statistics: changes.statistics
             )
 
         case .staged:

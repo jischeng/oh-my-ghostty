@@ -27,7 +27,7 @@ struct GitRefDecoration: Hashable, Equatable, Sendable {
     static func orderedForDisplay(_ refs: [Self]) -> [Self] {
         func rank(_ ref: Self) -> Int {
             if ref.kind == .tag { return 6 }
-            if ref.kind == .head { return 5 }
+            if ref.kind == .head { return -1 }
             if ref.name == "main" { return 0 }
             if ref.kind == .remoteBranch && ref.name.hasSuffix("/main") { return 1 }
             if ref.kind == .currentBranch { return 2 }
@@ -120,9 +120,5 @@ struct GitCommitExpansion: Equatable, Sendable {
     var isLoading = false
     var error: String?
 
-    var detailText: String {
-        if let error { return error }
-        guard let metadata else { return isLoading ? "Loading changed files…" : "No commit details" }
-        return "Author  \(metadata.authorDescription)\nDate  \(metadata.authoredAt)\nCommit  \(metadata.commitID.rawValue)\n\nMessage\n\(metadata.message)"
-    }
+    var statistics: GitDiffStatistics?
 }

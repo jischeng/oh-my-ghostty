@@ -84,12 +84,19 @@ struct GitDiffCommitBase: Hashable, Sendable {
     let isRoot: Bool
 }
 
+struct GitDiffStatistics: Hashable, Sendable {
+    let additions: Int
+    let deletions: Int
+    let binaryFiles: Int
+}
+
 struct GitDiffFileList: Hashable, Sendable, Equatable {
     let repository: GitRepositoryIdentity
     let target: GitDiffTarget
     let files: [GitDiffFile]
     let baseDescription: String
     var commitBase: GitDiffCommitBase?
+    var statistics: GitDiffStatistics?
 }
 
 struct GitCommitMetadata: Hashable, Sendable, Equatable {
@@ -102,6 +109,13 @@ struct GitCommitMetadata: Hashable, Sendable, Equatable {
 
     var subject: String {
         message.split(whereSeparator: { $0.isNewline }).first.map(String.init) ?? "(no commit message)"
+    }
+
+    /// Git's subject is the first paragraph; only later paragraphs are body.
+    var body: String {
+        let lines = message.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
+        guard let separator = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces).isEmpty }) else { return "" }
+        return lines.dropFirst(separator + 1).joined(separator: "\n").trimmingCharacters(in: .newlines)
     }
 
     var authorDescription: String {

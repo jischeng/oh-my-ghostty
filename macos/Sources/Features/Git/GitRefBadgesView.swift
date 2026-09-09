@@ -7,17 +7,17 @@ final class GitRefBadgesView: NSView {
     override var isFlipped: Bool { true }
 
     static func attributed(_ decoration: GitRefDecoration) -> NSAttributedString {
-        let color: NSColor
-        let symbol: String
+        let color = tint(for: decoration.kind)
+        let symbol: String?
         switch decoration.kind {
-        case .currentBranch: color = .systemBlue; symbol = "arrow.triangle.branch"
-        case .localBranch: color = .systemGreen; symbol = "arrow.triangle.branch"
-        case .remoteBranch: color = .systemPurple; symbol = "network"
-        case .tag: color = .systemOrange; symbol = "tag.fill"
-        case .head: color = .systemBlue; symbol = "scope"
+        case .currentBranch: symbol = "arrow.triangle.branch"
+        case .localBranch: symbol = "arrow.triangle.branch"
+        case .remoteBranch: symbol = "network"
+        case .tag: symbol = "tag.fill"
+        case .head: symbol = nil
         }
-        let text = NSMutableAttributedString()
-        if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: decoration.kind.rawValue)?
+        let text = NSMutableAttributedString(string: " ")
+        if let symbol, let image = NSImage(systemSymbolName: symbol, accessibilityDescription: decoration.kind.rawValue)?
             .withSymbolConfiguration(.init(pointSize: 10, weight: .medium))?
             .withSymbolConfiguration(.init(paletteColors: [color])) {
             let attachment = NSTextAttachment()
@@ -25,10 +25,19 @@ final class GitRefBadgesView: NSView {
             attachment.bounds = NSRect(x: 0, y: -2, width: 11, height: 11)
             text.append(NSAttributedString(attachment: attachment))
         }
-        text.append(NSAttributedString(string: " " + decoration.name, attributes: [
+        text.append(NSAttributedString(string: " " + decoration.name + " ", attributes: [
             .foregroundColor: color, .font: NSFont.systemFont(ofSize: 10, weight: .medium),
         ]))
         return text
+    }
+
+    private static func tint(for kind: GitRefDecorationKind) -> NSColor {
+        switch kind {
+        case .head, .currentBranch: .systemBlue
+        case .localBranch: .systemGreen
+        case .remoteBranch: .systemPurple
+        case .tag: .systemOrange
+        }
     }
 
     static func frames(widths: [CGFloat], availableWidth: CGFloat) -> [NSRect] {
@@ -57,6 +66,11 @@ final class GitRefBadgesView: NSView {
             let label = NSTextField(labelWithAttributedString: Self.attributed(ref))
             label.lineBreakMode = .byTruncatingMiddle
             label.maximumNumberOfLines = 1
+            label.drawsBackground = true
+            label.backgroundColor = Self.tint(for: ref.kind).withAlphaComponent(0.10)
+            label.wantsLayer = true
+            label.layer?.cornerRadius = 3
+            label.layer?.masksToBounds = true
             label.toolTip = "\(ref.kind.rawValue): \(ref.name)"
             label.setAccessibilityLabel(label.toolTip)
             widths.append(ceil(label.attributedStringValue.size().width) + 4)

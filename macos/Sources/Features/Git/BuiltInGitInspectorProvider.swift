@@ -329,7 +329,7 @@ final class BuiltInGitInspectorProvider {
                 let service = self.diffService
                 async let metadata = service.loadCommitMetadata(for: commit, repository: repository)
                 async let list = service.listFiles(for: repository, target: .commit(commit))
-                detail = try await GitCommitExpansion(metadata: metadata, files: list.files)
+                detail = try await GitCommitExpansion(metadata: metadata, files: list.files, statistics: list.statistics)
             } catch { detail = GitCommitExpansion(error: error.localizedDescription) }
             guard !Task.isCancelled else { return }
             var current = self.state(for: context.tabID, worktreeKey: worktree)

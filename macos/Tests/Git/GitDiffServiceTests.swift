@@ -3,6 +3,38 @@ import Testing
 @testable import Ghostty
 
 struct GitDiffServiceTests {
+    @Test func commitFileListIncludesNumericStatsAndBinaryRenamesInOneResponse() async throws {
+        let dir = try makeRepository()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        for (name, text) in [("modified", "one\ntwo\n"), ("deleted", "gone\n"), ("old", "rename\n")] {
+            try write(text, to: dir.appendingPathComponent(name))
+        }
+        try Data([0, 1, 2]).write(to: dir.appendingPathComponent("binary"))
+        try run(["git", "add", "."], in: dir.path)
+        let initial = try commit(in: dir, message: "initial")
+        let repository = try await repositoryIdentity(for: dir)
+        let service = GitDiffService()
+        let root = try await service.listFiles(for: repository, target: .commit(GitCommitID(initial)))
+        #expect(root.statistics == GitDiffStatistics(additions: 4, deletions: 0, binaryFiles: 1))
+        try write("one\nnew\nextra\n", to: dir.appendingPathComponent("modified"))
+        try write("a\nb\nc\n", to: dir.appendingPathComponent("added"))
+        try FileManager.default.removeItem(at: dir.appendingPathComponent("deleted"))
+        let renamed = "renamed\t中文\nfile"
+        try FileManager.default.moveItem(at: dir.appendingPathComponent("old"), to: dir.appendingPathComponent(renamed))
+        try Data([0, 2, 3]).write(to: dir.appendingPathComponent("binary"))
+        try run(["git", "add", "-A"], in: dir.path)
+        let id = try commit(in: dir, message: "changes\n\nDetails")
+        let changes = try await service.listFiles(for: repository, target: .commit(GitCommitID(id)))
+        #expect(changes.files.count == 5)
+        #expect(changes.statistics == GitDiffStatistics(additions: 5, deletions: 2, binaryFiles: 1))
+        #expect(changes.files.first { $0.path == renamed }?.oldPath == "old")
+        #expect(changes.files.first { $0.path == renamed }?.kind == .renamed)
+        #expect(changes.files.first { $0.path == "deleted" }?.kind == .deleted)
+        #expect(changes.files.first { $0.path == "added" }?.kind == .added)
+        let metadata = try await service.loadCommitMetadata(for: GitCommitID(id), repository: repository)
+        #expect(metadata.body == "Details")
+    }
+
     @Test func editorSnapshotsSeparateHeadIndexAndWorkingTree() async throws {
         let dir = try makeRepository()
         defer { try? FileManager.default.removeItem(at: dir) }

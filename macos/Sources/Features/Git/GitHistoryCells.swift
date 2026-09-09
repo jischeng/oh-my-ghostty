@@ -18,6 +18,7 @@ final class GitHistoryCell: NSTableCellView {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
+        subject.cell = GitHistorySubjectCell(textCell: "")
         subject.font = .systemFont(ofSize: 12, weight: .medium)
         subject.lineBreakMode = .byTruncatingTail
         subject.maximumNumberOfLines = 1
@@ -236,5 +237,20 @@ final class GitHistoryDetailCell: NSTableCellView {
         }
         value.addAttribute(.font, value: NSFont.systemFont(ofSize: 10, weight: .medium), range: NSRange(location: 0, length: value.length))
         return value
+    }
+}
+
+/// Draw at the row's content origin without NSTextField's internal text inset.
+/// Subject selection/copy remains owned by the history table.
+private final class GitHistorySubjectCell: NSTextFieldCell {
+    override func drawInterior(withFrame cellFrame: NSRect, in controlView: NSView) {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = lineBreakMode
+        let text = NSAttributedString(string: stringValue, attributes: [
+            .font: font ?? NSFont.systemFont(ofSize: 12, weight: .medium),
+            .foregroundColor: textColor ?? NSColor.labelColor,
+            .paragraphStyle: paragraph,
+        ])
+        text.draw(in: cellFrame)
     }
 }

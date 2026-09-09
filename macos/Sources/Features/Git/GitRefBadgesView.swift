@@ -17,10 +17,10 @@ final class GitRefBadgesView: NSView {
     private(set) var popover: NSPopover?
     override var isFlipped: Bool { true }
 
-    static func attributed(_ decoration: GitRefDecoration) -> NSAttributedString {
+    static func attributed(_ decoration: GitRefDecoration, inset: Bool = true) -> NSAttributedString {
         let color = tint(for: decoration.kind)
         let symbol = decoration.kind == .head ? nil : symbol(for: decoration.kind)
-        let text = NSMutableAttributedString(string: " ")
+        let text = NSMutableAttributedString(string: inset ? " " : "")
         if let symbol, let image = NSImage(systemSymbolName: symbol, accessibilityDescription: decoration.kind.rawValue)?
             .withSymbolConfiguration(.init(pointSize: 10, weight: .medium))?
             .withSymbolConfiguration(.init(paletteColors: [color])) {
@@ -29,7 +29,7 @@ final class GitRefBadgesView: NSView {
             attachment.bounds = NSRect(x: 0, y: -2, width: 11, height: 11)
             text.append(NSAttributedString(attachment: attachment))
         }
-        text.append(NSAttributedString(string: " " + decoration.name + " ", attributes: [
+        text.append(NSAttributedString(string: (inset || symbol != nil ? " " : "") + decoration.name + " ", attributes: [
             .foregroundColor: color, .font: NSFont.systemFont(ofSize: 10, weight: .medium),
         ]))
         return text
@@ -99,7 +99,7 @@ final class GitRefBadgesView: NSView {
     }
 
     private static func badgeWidth(_ badge: Badge) -> CGFloat {
-        min(badge.widthLimit, ceil(attributed(badge.decoration).size().width) + 4)
+        min(badge.widthLimit, ceil(attributed(badge.decoration, inset: false).size().width) + 4)
     }
 
     static func height(for refs: [GitRefDecoration], width: CGFloat) -> CGFloat {
@@ -128,7 +128,7 @@ final class GitRefBadgesView: NSView {
                 button.isBordered = false
                 button.alignment = .left
                 button.controlSize = .small
-                button.attributedTitle = Self.attributed(badge.decoration)
+                button.attributedTitle = Self.attributed(badge.decoration, inset: false)
                 button.cell?.lineBreakMode = .byTruncatingTail
                 button.wantsLayer = true
                 button.layer?.cornerRadius = 3

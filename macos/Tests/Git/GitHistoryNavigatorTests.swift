@@ -181,6 +181,57 @@ struct GitHistoryNavigatorTests {
         }
     }
 
+    @Test func subjectMetadataAndRefsShareTheRenderedLeadingEdge() async throws {
+        let commits = fixture()
+        let rows = GitGraphLayout.rows(for: commits)
+        for row in [rows[0], rows[2], rows.last!] {
+            let column = GitGraphColumnLayout(row: row)
+            let commit = GitHistoryCommit(id: row.commitID, parentIDs: row.parentIDs, authorName: "MMMM",
+                authorEmail: "MMMM", authoredAt: .distantPast, subject: "MMMM")
+            let cell = GitHistoryCell(frame: NSRect(x: 0, y: 0, width: 260, height: 78))
+            cell.configure(commit: commit, graph: row, graphLayout: column, summary: ("MMMM", [.init(name: "MMMM", kind: .head)]),
+                           state: (false, false), toggle: {})
+            let window = NSWindow(contentRect: cell.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.appearance = NSAppearance(named: .darkAqua)
+            window.contentView = cell
+            window.orderFront(nil)
+            defer { window.contentView = nil; window.close() }
+            cell.layoutSubtreeIfNeeded()
+            let subject = try #require(cell.subviews.compactMap { $0 as? NSTextField }.first)
+            // Equal glyph/font isolates control-internal padding from glyph bearings.
+            subject.font = .systemFont(ofSize: 10)
+            try await Task.sleep(for: .milliseconds(80))
+            window.displayIfNeeded()
+            let bitmap = try #require(cell.bitmapImageRepForCachingDisplay(in: cell.bounds))
+            cell.cacheDisplay(in: cell.bounds, to: bitmap)
+            let scale = CGFloat(bitmap.pixelsWide) / cell.bounds.width
+            func inkX(_ view: NSView) throws -> CGFloat {
+                let rect = view.convert(view.bounds, to: cell)
+                for x in Int(rect.minX * scale)..<Int(rect.maxX * scale) {
+                    for y in Int(rect.minY * scale)..<Int(rect.maxY * scale) {
+                        let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB)
+                        if let color, color.alphaComponent > 0.05, max(color.redComponent, color.greenComponent, color.blueComponent) > 0.4 {
+                            return CGFloat(x) / scale
+                        }
+                    }
+                }
+                throw NSError(domain: "Missing rendered text: \(type(of: view))", code: 1)
+            }
+            let titleX = try inkX(subject)
+            let metadata = cell.subviews.compactMap { $0 as? GitMetadataLine }
+            for line in metadata {
+                let first = try #require(line.subviews.compactMap { $0 as? InspectorMetadataText }.first)
+                #expect(abs(try inkX(first) - titleX) <= 0.5)
+                #expect(line.frame.minX == column.contentX)
+            }
+            let refs = try #require(find(GitRefBadgesView.self, in: cell))
+            let badge = try #require(refs.subviews.compactMap { $0 as? NSButton }.first)
+            #expect(subject.frame.minX == refs.frame.minX)
+            #expect(badge.attributedTitle.string.first == "M")
+        }
+    }
+
     private func find<T: NSView>(_ type: T.Type, in view: NSView?) -> T? {
         if let value = view as? T { return value }
         return view?.subviews.compactMap { find(type, in: $0) }.first

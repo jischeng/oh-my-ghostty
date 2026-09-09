@@ -1004,6 +1004,10 @@ clearance for nodes and passing lines, plus a 3-point content gap. Lane centers 
 passing lanes participate in that row's extent, without a global maximum gutter
 or shared text column. Detail rows use their owning commit's content origin and
 measurement width. Adjacent graph-edge coordinates match even as widths shrink.
+Within a commit summary, subject glyphs, metadata groups and the refs row share
+that one content origin. Subject drawing omits the native text-field inset, and
+history badges omit leading spacer characters. These controls add no separate
+leading offset; different commits still use their own graph-dependent origins.
 
 Inspector native copy routing precedes terminal shortcuts. The bounded branch
 scope picker displays compact titles but dispatches original ref IDs. Repository

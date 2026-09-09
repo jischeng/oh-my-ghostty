@@ -993,11 +993,13 @@ reuses already-loaded parent IDs, avoiding a redundant parent query.
 Presentation folds do not refetch Git data. The commit rail spans child rows,
 including root commits; forks and lane compaction occur at the block end.
 Lane changes finish near nodes/boundaries, with adequate parallel spacing.
-The first-parent spine of the displayed timeline's starting commit is kept in
-lane zero, including when a side branch has already queued a shared ancestor
-behind other pending lanes. Mainline content therefore keeps its fixed origin;
-only actual side-branch nodes add a bounded local offset. Lane promotion happens
-before edge generation so adjacent rows retain matching topology boundaries. Adjacent edge coordinates match.
+The first-parent spine remains lane zero, including shared ancestors queued by
+side branches. This controls topology only. Text layout has its own fixed
+`contentLeadingX = 22` for every commit and its detail rows: no lane count,
+maximum lane count, lane index or node position enters the text origin. The
+graph draws in a separate 18-point surface; 1–2 lanes remain 8 points apart and
+denser graphs compress inside that surface. Mainline and branch content share
+the same baseline. Adjacent graph-edge coordinates match.
 
 Inspector native copy routing precedes terminal shortcuts. The bounded branch
 scope picker displays compact titles but dispatches original ref IDs. Repository

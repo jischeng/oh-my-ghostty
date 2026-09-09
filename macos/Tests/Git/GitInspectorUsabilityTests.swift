@@ -80,7 +80,7 @@ struct GitInspectorUsabilityTests {
         cell.layoutSubtreeIfNeeded()
         let subject = try #require(find(NSTextField.self, in: cell).first)
         let center = subject.frame.minY + subject.firstBaselineOffsetFromTop - (subject.font?.capHeight ?? 0) / 2
-        #expect(abs(center - GitGraphColumnLayout.contentAxisY) <= 0.5)
+        #expect(abs(center - GitHistoryRowMetrics.contentAxisY) <= 0.5)
         let identity = try #require(find(InspectorClickCopyText.self, in: cell).first { $0.value == commit.authorEmail })
         identity.pasteboard = board
         identity.performClick(nil)

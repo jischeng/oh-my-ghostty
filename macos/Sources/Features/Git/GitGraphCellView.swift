@@ -1,8 +1,6 @@
 import AppKit
 
 final class GitGraphCellView: NSView {
-    static let laneSpacing: CGFloat = 8
-    static let horizontalInset: CGFloat = 4
     static let nodeDiameter: CGFloat = 7
     static let lineWidth: CGFloat = 1.6
 
@@ -28,25 +26,14 @@ final class GitGraphCellView: NSView {
     }
 
     override var intrinsicContentSize: NSSize {
-        guard let row else {
-            return NSSize(width: Self.preferredWidth(laneCount: 1), height: NSView.noIntrinsicMetric)
-        }
-        return NSSize(
-            width: GitGraphColumnLayout.width(for: row),
-            height: NSView.noIntrinsicMetric
-        )
-    }
-
-    static func preferredWidth(laneCount: Int) -> CGFloat {
-        let lanes = max(laneCount, 1)
-        return horizontalInset * 2 + CGFloat(lanes - 1) * laneSpacing + nodeDiameter
+        NSSize(width: GitGraphColumnLayout.drawingWidth, height: NSView.noIntrinsicMetric)
     }
 
     func configure(row: GitGraphRow, isHead: Bool = false, layout: GitGraphColumnLayout? = nil, section: Section = .commit) {
         self.row = row
         self.isHead = isHead
         self.section = section
-        column = layout ?? GitGraphColumnLayout(row: row)
+        column = layout ?? GitGraphColumnLayout()
         invalidateIntrinsicContentSize()
         needsDisplay = true
         toolTip = isHead ? "Current HEAD · \(row.commitID.shortSHA)" : row.commitID.shortSHA
@@ -72,7 +59,7 @@ final class GitGraphCellView: NSView {
             let top = point(for: segment.from)
             let middleX = column?.middleX(lane: segment.from.lane, row: row) ?? top.x
             var points = [top]
-            if section == .expandedCommit { points.append(NSPoint(x: middleX, y: min(GitGraphColumnLayout.contentAxisY, bounds.midY))) }
+            if section == .expandedCommit { points.append(NSPoint(x: middleX, y: min(GitHistoryRowMetrics.contentAxisY, bounds.midY))) }
             points.append(NSPoint(x: middleX, y: bendY))
             if ending { points.append(point(for: segment.to)) }
             stroke(points, colorIndex: segment.colorIndex)
@@ -126,7 +113,7 @@ final class GitGraphCellView: NSView {
             points.append(NSPoint(x: end.x, y: min(end.y, start.y + 16)))
         case .passthrough:
             let x = column.middleX(lane: segment.from.lane, row: row)
-            points.append(NSPoint(x: x, y: min(GitGraphColumnLayout.contentAxisY, bounds.midY)))
+            points.append(NSPoint(x: x, y: min(GitHistoryRowMetrics.contentAxisY, bounds.midY)))
             points.append(NSPoint(x: x, y: max(bounds.midY, bounds.height - 12)))
         }
         points.append(end)
@@ -165,18 +152,18 @@ final class GitGraphCellView: NSView {
         case .top(let lane):
             x = section == .continuation || section == .expansionEnd
                 ? column.middleX(lane: lane, row: row)
-                : column.edgeX(lane: lane, count: row.topLanes.count, top: true)
+                : column.edgeX(lane: lane, count: row.topLanes.count)
         case .bottom(let lane):
             x = section == .expandedCommit || section == .continuation
                 ? column.middleX(lane: lane, row: row)
-                : column.edgeX(lane: lane, count: row.bottomLanes.count, top: false)
+                : column.edgeX(lane: lane, count: row.bottomLanes.count)
         }
         let y: CGFloat
         switch graphPoint {
         case .top:
             y = bounds.minY
         case .node:
-            y = min(GitGraphColumnLayout.contentAxisY, bounds.midY)
+            y = min(GitHistoryRowMetrics.contentAxisY, bounds.midY)
         case .bottom:
             y = bounds.maxY
         }

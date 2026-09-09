@@ -21,26 +21,41 @@ struct GitHistoryNavigatorTests {
         }
     }
 
-    @Test func graphUsesLocalNodeWidthsAndMatchingBoundaryCoordinates() {
+    @Test func graphProjectionKeepsNodeExtentsInsideAFixedSurface() {
         var engine = GitGraphLayout()
         let rows = fixture().map { engine.append(commitID: $0.id, parentIDs: $0.parentIDs) }
-        let columns = rows.indices.map {
-            GitGraphColumnLayout(row: rows[$0], previous: rows[safe: $0 - 1], next: rows[safe: $0 + 1])
-        }
+        let columns = rows.map { _ in GitGraphColumnLayout() }
         #expect(rows[0].nodeLane == 0 && rows[1].nodeLane == 0 && rows[5].nodeLane == 0)
         #expect(columns[0].width == columns[1].width && columns[1].width == columns[5].width)
-        #expect(columns[2].width > columns[1].width)
+        #expect(columns.allSatisfy { $0.width == 18 })
         for index in 0..<(rows.count - 1) {
             #expect(rows[index].bottomLanes == rows[index + 1].topLanes)
             for lane in rows[index].bottomLanes.indices {
-                #expect(columns[index].edgeX(lane: lane, count: rows[index].bottomLanes.count, top: false) ==
-                        columns[index + 1].edgeX(lane: lane, count: rows[index + 1].topLanes.count, top: true))
+                #expect(columns[index].edgeX(lane: lane, count: rows[index].bottomLanes.count) ==
+                        columns[index + 1].edgeX(lane: lane, count: rows[index + 1].topLanes.count))
             }
         }
         for (row, column) in zip(rows, columns) {
             for lane in 0..<row.requiredLaneCount {
-                #expect(column.middleX(lane: lane, row: row) >= 7.5)
-                #expect(column.middleX(lane: lane, row: row) <= column.width - 7.5)
+                #expect(column.middleX(lane: lane, row: row) >= 4)
+                #expect(column.middleX(lane: lane, row: row) <= column.width - 4)
+            }
+        }
+    }
+
+    @Test func commonAndDenseLaneCountsNeverReserveMoreTextSpace() {
+        for count in [1, 2, 3, 8, 32] {
+            let ids = (0..<count).map { GitCommitID("lane-\($0)") }
+            var layout = GitGraphLayout(activeLanes: ids)
+            let row = layout.append(commitID: ids[count - 1], parentIDs: [])
+            let column = GitGraphColumnLayout()
+            #expect(column.width == 18)
+            for lane in 0..<row.requiredLaneCount {
+                let x = column.middleX(lane: lane, row: row)
+                #expect(x - 4 >= 0 && x + 4 <= column.width)
+            }
+            if count == 2 {
+                #expect(column.middleX(lane: 1, row: row) - column.middleX(lane: 0, row: row) == 8)
             }
         }
     }
@@ -93,7 +108,7 @@ struct GitHistoryNavigatorTests {
             let branch = try cell(7)
             let subject = try #require(find(NSTextField.self, in: main))
             #expect(subject.frame.minX == find(NSTextField.self, in: nextMain)?.frame.minX)
-            #expect(subject.frame.minX < (find(NSTextField.self, in: branch)?.frame.minX ?? 0))
+            #expect(subject.frame.minX == find(NSTextField.self, in: branch)?.frame.minX)
             #expect(subject.bounds.width > width * 0.70)
             #expect(foldedHeight == table.rect(ofRow: 6).height)
             func metadataButtons(_ view: NSView) -> [InspectorClickCopyText] {
@@ -128,7 +143,7 @@ struct GitHistoryNavigatorTests {
         }
     }
 
-    @Test func sharedAncestorKeepsMainlineTextLeftOfLocalBranchBulges() async throws {
+    @Test func mainlineAndBranchTextUseTheSameLeadingBaseline() async throws {
         let input: [(String, [String], String)] = [
             ("tip", ["main", "side", "probe"], "feat: mainline start"),
             ("probe", ["base"], "feat: side branch work"),
@@ -157,8 +172,9 @@ struct GitHistoryNavigatorTests {
                 return try #require(cell.subviews.compactMap { $0 as? NSTextField }.first).frame.minX
             }
             let baseline = try x(0)
+            #expect(baseline == 22)
             for row in [2, 3, 5] { #expect(try x(row) == baseline) }
-            for row in [1, 4] { #expect(try x(row) > baseline) }
+            for row in [1, 4] { #expect(try x(row) == baseline) }
             try await capture(view, path: "/tmp/omg-git-mainline-\(Int(width)).png")
         }
     }

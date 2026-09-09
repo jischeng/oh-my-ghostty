@@ -127,25 +127,12 @@ struct EditorWorkspaceHost<Terminal: View>: View {
             if workspace.isLoading {
                 ProgressView("Opening file…").padding(8)
             }
-            if let request = workspace.gitDiff {
-                GitEditorDiffView(request: request, theme: appearanceTheme, isActive: workspace.isVisible,
-                    actions: GitDiffEditorActions(
-                        hide: { workspace.isVisible = false },
-                        open: openFile,
-                        nextDocument: { workspace.selectAdjacentDocument(offset: 1) },
-                        previousDocument: { workspace.selectAdjacentDocument(offset: -1) },
-                        saveAll: { Task { await workspace.saveAll() } },
-                        focus: { controller.focusedSurface = surfaceView },
-                        isSurfaceFocused: { (controller.focusedSurface ?? controller.surfaceTree.first) === surfaceView }
-                    )) {
-                    workspace.gitDiff = nil
-                    workspace.selectedID = workspace.documents.last?.id
-                    if workspace.documents.isEmpty { workspace.isVisible = false }
-                }.id(request.id)
-            } else if !workspace.documents.isEmpty {
-                ZStack {
+            ZStack {
+                // Every open document keeps its native editor while another
+                // document or a diff is selected, preserving undo and view state.
+                if !workspace.documents.isEmpty {
                     ForEach(workspace.documents, id: \.id) { document in
-                        let selected = workspace.selectedID == document.id
+                        let selected = workspace.gitDiff == nil && workspace.selectedID == document.id
                         EditorDocumentView(
                             document: document,
                             isActive: selected && workspace.isVisible,
@@ -173,14 +160,30 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                         .accessibilityHidden(!selected)
                     }
                 }
-            } else {
-                VStack(spacing: 12) {
-                    Image(systemName: "doc.text").font(.largeTitle)
-                    Text("Open a file from Files or choose Open File.")
-                    Button("Open File", action: openFile)
+                if let request = workspace.gitDiff {
+                    GitEditorDiffView(request: request, theme: appearanceTheme, isActive: workspace.isVisible,
+                        actions: GitDiffEditorActions(
+                            hide: { workspace.isVisible = false },
+                            open: openFile,
+                            nextDocument: { workspace.selectAdjacentDocument(offset: 1) },
+                            previousDocument: { workspace.selectAdjacentDocument(offset: -1) },
+                            saveAll: { Task { await workspace.saveAll() } },
+                            focus: { controller.focusedSurface = surfaceView },
+                            isSurfaceFocused: { (controller.focusedSurface ?? controller.surfaceTree.first) === surfaceView }
+                        )) {
+                        workspace.gitDiff = nil
+                        workspace.selectedID = workspace.documents.last?.id
+                        if workspace.documents.isEmpty { workspace.isVisible = false }
+                    }.id(request.id)
+                } else if workspace.documents.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: "doc.text").font(.largeTitle)
+                        Text("Open a file from Files or choose Open File.")
+                        Button("Open File", action: openFile)
+                    }
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .background(EditorBackdrop(color: appearanceTheme.background, opacity: appearanceOpacity, blur: appearanceBlur,

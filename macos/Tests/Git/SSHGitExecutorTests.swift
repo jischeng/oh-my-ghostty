@@ -15,7 +15,7 @@ private final class GitSSHTestServer {
         self.root = root
         self.process = Process()
         for key in ["host_key", "client_key"] {
-            let result = try await LocalGitExecutor(gitPath: "/usr/bin/ssh-keygen").execute(
+            let result = try await GitProcessRunner().run(executablePath: "/usr/bin/ssh-keygen",
                 arguments: ["-q", "-t", "ed25519", "-N", "", "-f", root.appendingPathComponent(key).path],
                 workingDirectory: root.path)
             try #require(result.isSuccess)
@@ -85,12 +85,12 @@ private final class GitSSHTestServer {
     }
 
     func session(directory: String) -> PaneSessionContext {
-        var session = PaneSessionContext(workingDirectory: "/local", terminalTitle: "Test")
+        var session = PaneSessionContext(workingDirectory: root.path, terminalTitle: "Test")
         let replay = SSHReplayDescriptor(version: 1, ssh: "/usr/bin/ssh", forwardEnv: false,
                                          terminfo: false, cache: false, args: connection.options + [connection.destination])
         let hex = directory.utf8.map { String(format: "%02x", $0) }.joined()
         session.apply(.init(action: .start, id: "omg-ssh-test", metadata: "type=remote;targethost=test-remote;cwdhex=" + hex),
-                      currentWorkingDirectory: "/local", currentTerminalTitle: "Test", sshReplay: replay)
+                      currentWorkingDirectory: root.path, currentTerminalTitle: "Test", sshReplay: replay)
         return session
     }
 }
@@ -108,11 +108,109 @@ struct SSHGitExecutorTests {
         #expect(connection.arguments.contains("RemoteCommand=none"))
         #expect(!connection.arguments.contains("-tt"))
         let other = try GitSSHConnection(destination: "user@host", options: ["-p", "2223"])
-        let first = GitRepositoryIdentity(target: .remote(host: "host", user: "user"), sshConnection: connection,
+        let first = GitRepositoryIdentity(target: .ssh(connection),
                                           worktreePath: "/repo", gitDirPath: "/repo/.git", commonGitDirPath: "/repo/.git")
-        let second = GitRepositoryIdentity(target: .remote(host: "host", user: "user"), sshConnection: other,
+        let second = GitRepositoryIdentity(target: .ssh(other),
                                            worktreePath: "/repo", gitDirPath: "/repo/.git", commonGitDirPath: "/repo/.git")
         #expect(first.stateKey != second.stateKey && first.stateKey != "/repo")
+    }
+
+    @Test func sharedSSHParserPreservesCombinedValueOptionsAndRejectsUnknownOptions() throws {
+        let arguments = ["-4vp2222", "-Ai", "/key path", "-oProxyCommand=proxy %h %p", "--", "user@host"]
+        let replay = SSHReplayDescriptor(version: 1, ssh: "/usr/bin/ssh", forwardEnv: false, terminfo: false,
+                                         cache: false, args: arguments)
+        let ssh = PaneSessionContext.SSH(connectionID: "test", alias: "host", serverID: nil, replay: replay,
+                                         transferTarget: "user@host", localProcessGroupID: nil)
+        #expect(ForegroundSSHProcessDetector.interactiveDestination(arguments) == "user@host")
+        let connection = try GitSSHConnection(session: ssh)
+        #expect(connection.options == ["-4", "-p", "2222", "-A", "-i", "/key path", "-o", "ProxyCommand=proxy %h %p"])
+        for invalid in [["-Z", "host"], ["-vZ", "host"], ["-p"], ["-vp", "2222"], ["-vN", "host"], ["host", "uptime"]] {
+            #expect(ForegroundSSHProcessDetector.interactiveDestination(invalid) == nil)
+            let rejected = PaneSessionContext.SSH(connectionID: "test", alias: "host", serverID: nil,
+                replay: .init(version: 1, ssh: "/usr/bin/ssh", forwardEnv: false, terminfo: false, cache: false, args: invalid),
+                transferTarget: "host", localProcessGroupID: nil)
+            #expect(throws: (any Error).self) { try GitSSHConnection(session: rejected) }
+        }
+    }
+
+    @Test func executableResolutionUsesCapturedDirectoryAndExplicitSearchPath() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let bin = root.appendingPathComponent("custom-bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let executable = bin.appendingPathComponent("ssh")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        #expect(SSHProcessArguments.executablePath(for: "ssh", workingDirectory: root.path, searchPath: "custom-bin:/usr/bin") == executable.path)
+        #expect(SSHProcessArguments.executablePath(for: "custom-bin/ssh", workingDirectory: root.path) == executable.path)
+        #expect(SSHProcessArguments.executablePath(for: "ssh", workingDirectory: root.path, searchPath: "missing") == nil)
+        #expect(SSHProcessArguments.workingDirectory(pid: getpid()) == FileManager.default.currentDirectoryPath)
+
+        let replay = SSHReplayDescriptor(version: 1, ssh: "custom-bin/ssh", forwardEnv: false, terminfo: false,
+                                         cache: false, args: ["host"], localWorkingDirectory: root.path)
+        var session = PaneSessionContext(workingDirectory: "/stale-local-directory", terminalTitle: "Test")
+        session.observeForegroundSSH(alias: "host", transferTarget: "host", processGroupID: 123,
+                                     currentWorkingDirectory: nil, currentTerminalTitle: "Test",
+                                     remoteWorkingDirectory: "/remote", replay: replay)
+        let connection = try GitSSHConnection(session: session)
+        #expect(connection.localWorkingDirectory == root.path)
+        #expect(connection.executablePath == executable.path)
+        let decoded = try JSONDecoder().decode(SSHReplayDescriptor.self, from: JSONEncoder().encode(replay))
+        #expect(decoded.localWorkingDirectory == root.path)
+    }
+
+    @Test func replayUsesTheCapturedLaunchDirectoryWithoutChangingItsCaller() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ssh-replay-\(UUID().uuidString)")
+        let original = root.appendingPathComponent("original ' cwd")
+        try FileManager.default.createDirectory(at: original, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let executable = root.appendingPathComponent("omg")
+        try "#!/bin/sh\npwd -P\n".write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        let replay = SSHReplayDescriptor(version: 1, ssh: "/usr/bin/ssh", forwardEnv: false, terminfo: false,
+                                         cache: false, args: ["-F", "./config", "host"], localWorkingDirectory: original.path)
+        let command = try #require(replay.command(executablePath: executable.path))
+        let result = try await GitProcessRunner().run(executablePath: "/bin/sh", arguments: ["-c", command + "; pwd -P"],
+                                                      workingDirectory: root.path)
+        #expect(result.isSuccess)
+        let observed = result.stdoutString.split(separator: "\n").map(String.init)
+        try #require(observed.count == 2)
+        for (actual, expected) in zip(observed, [original, root]) {
+            let actualAttributes = try FileManager.default.attributesOfItem(atPath: actual)
+            let expectedAttributes = try FileManager.default.attributesOfItem(atPath: expected.path)
+            #expect(actualAttributes[.systemNumber] as? NSNumber == expectedAttributes[.systemNumber] as? NSNumber)
+            #expect(actualAttributes[.systemFileNumber] as? NSNumber == expectedAttributes[.systemFileNumber] as? NSNumber)
+        }
+    }
+
+    @Test func relativeSSHConfigurationIdentityAndProxyKeepTheOriginalLaunchDirectory() async throws {
+        let server = try await GitSSHTestServer()
+        defer { server.stop() }
+        let portIndex = try #require(server.connection.options.firstIndex(of: "-p"))
+        let port = server.connection.options[portIndex + 1]
+        let configuration = """
+        Host history-review
+            HostName 127.0.0.1
+            User \(NSUserName())
+            Port \(port)
+            IdentitiesOnly yes
+            UserKnownHostsFile ./known_hosts
+            StrictHostKeyChecking yes
+        """
+        try configuration.write(to: server.root.appendingPathComponent("client_config"), atomically: true, encoding: .utf8)
+        let proxy = server.root.appendingPathComponent("proxy")
+        try "#!/bin/sh\nexec /usr/bin/nc \"$1\" \"$2\"\n".write(to: proxy, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: proxy.path)
+        let replay = SSHReplayDescriptor(version: 1, ssh: "/usr/bin/ssh", forwardEnv: false, terminfo: false,
+            cache: false, args: ["-F", "./client_config", "-i", "./client_key", "-o", "ProxyCommand=./proxy %h %p", "history-review"])
+        var session = PaneSessionContext(workingDirectory: server.root.path, terminalTitle: "Test")
+        session.observeForegroundSSH(alias: "history-review", transferTarget: "history-review", processGroupID: 123,
+                                     currentWorkingDirectory: server.root.path, currentTerminalTitle: "Test",
+                                     remoteWorkingDirectory: "/", replay: replay)
+        let connection = try GitSSHConnection(session: session)
+        #expect(connection.localWorkingDirectory == server.root.path)
+        let result = try await SSHGitExecutor(connection: connection).execute(arguments: ["--version"], workingDirectory: "/")
+        #expect(result.isSuccess && result.stdoutString.hasPrefix("git version"))
     }
 
     @Test func rawProcessArgumentsPreserveBoundariesAndDoNotReadEnvironment() throws {
@@ -134,7 +232,7 @@ struct SSHGitExecutorTests {
     }
 
     @Test func rejectedCommandWithLargeStdinDoesNotBlockOrSignalTheApp() async throws {
-        let result = try await LocalGitExecutor(gitPath: "/bin/sh").execute(
+        let result = try await GitProcessRunner().run(executablePath: "/bin/sh",
             arguments: ["-c", "exit 1"], workingDirectory: "/", stdin: Data(repeating: 42, count: 1024 * 1024))
         #expect(result.exitCode == 1)
     }

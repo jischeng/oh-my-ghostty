@@ -14,6 +14,31 @@ private actor OnePageFailure: GitExecutor {
     }
 }
 
+actor GitWorkingTreeReadProbe: GitExecutor {
+    enum Component: CaseIterable, Sendable, Equatable { case staged, unstaged, branches }
+    private var failure: Component?
+    private(set) var writes = 0
+
+    func fail(_ component: Component?) { failure = component }
+
+    func execute(arguments: [String], workingDirectory: String, stdin: Data?, maxOutputBytes: Int?) async throws -> GitExecutionResult {
+        let component: Component?
+        if arguments.contains("--cached") {
+            component = .staged
+        } else if arguments.contains("ls-files") {
+            component = .unstaged
+        } else if arguments.contains(where: { $0.contains("%(upstream:track)") }) {
+            component = .branches
+        } else { component = nil }
+        if let component, component == failure {
+            return GitExecutionResult(exitCode: 1, stdout: Data(), stderr: Data("\(component) read failed".utf8))
+        }
+        if arguments.contains("add") || arguments.contains("restore") || arguments.first == "commit" { writes += 1 }
+        return try await LocalGitExecutor().execute(arguments: arguments, workingDirectory: workingDirectory,
+                                                     stdin: stdin, maxOutputBytes: maxOutputBytes)
+    }
+}
+
 @MainActor
 struct GitHistoryExpansionProviderTests {
     private func repository(commits: Int) async throws -> URL {
@@ -97,5 +122,96 @@ struct GitHistoryExpansionProviderTests {
                                action: .init(context: context, kind: .gitAction(.refresh)))
         let refreshed = try await waitFor(registry, context: context) { $0.history.commits.count == 230 }
         #expect(!refreshed.history.hasMore)
+    }
+
+    @Test(arguments: [true, false])
+    func refreshAndPagingKeepChangesAndLoadedHistory(refreshFirst: Bool) async throws {
+        let directory = try await repository(commits: 230)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data("untracked".utf8).write(to: directory.appendingPathComponent("untracked.swift"))
+        let registry = InspectorRegistry()
+        let provider = BuiltInGitInspectorProvider(registry: registry)
+        try provider.register()
+        let context = InspectorPaneContext(tabID: UUID(), surfaceID: UUID(), title: "Terminal", workingDirectory: directory.path)
+        registry.presentationDidChange(to: BuiltInGitInspectorProvider.paneID, context: context)
+        defer { registry.presentationDidChange(to: nil, context: context) }
+        let initial = try await waitFor(registry, context: context) { $0.history.commits.count == 100 }
+        try #require(!initial.workingTree.unstaged.isEmpty && !initial.workingTree.branches.isEmpty)
+        func send(_ action: InspectorGitAction) {
+            registry.performAction(paneID: BuiltInGitInspectorProvider.paneID,
+                action: .init(context: context, kind: .gitAction(action)))
+        }
+        send(refreshFirst ? .refresh : .loadMoreHistory)
+        send(refreshFirst ? .loadMoreHistory : .refresh)
+        if case .git(let loading) = registry.content(for: BuiltInGitInspectorProvider.paneID, context: context) {
+            #expect(loading.workingTree == initial.workingTree)
+        }
+        let loaded = try await waitFor(registry, context: context) { $0.history.commits.count == 200 }
+        #expect(loaded.workingTree == initial.workingTree)
+        #expect(loaded.history.hasMore)
+        send(.refresh)
+        send(.selectHistoryScope(.currentBranch))
+        let filtered = try await waitFor(registry, context: context) { $0.history.snapshot?.scope == .currentBranch }
+        #expect(filtered.workingTree == initial.workingTree)
+        #expect(filtered.history.commits.count == 100)
+    }
+
+    @Test(arguments: GitWorkingTreeReadProbe.Component.allCases)
+    func independentWorkingTreeFailuresPreserveOtherResultsAndGuardOnlyAffectedActions(
+        failed: GitWorkingTreeReadProbe.Component
+    ) async throws {
+        let directory = try await repository(commits: 1)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executor = LocalGitExecutor()
+        _ = try await executor.execute(arguments: ["reset", "--hard", "HEAD"], workingDirectory: directory.path)
+        try Data("staged".utf8).write(to: directory.appendingPathComponent("staged.swift"))
+        try Data("unstaged".utf8).write(to: directory.appendingPathComponent("unstaged.swift"))
+        _ = try await executor.execute(arguments: ["add", "--", "staged.swift"], workingDirectory: directory.path)
+        let probe = GitWorkingTreeReadProbe()
+        let registry = InspectorRegistry()
+        let provider = BuiltInGitInspectorProvider(registry: registry, executor: probe)
+        try provider.register()
+        let context = InspectorPaneContext(tabID: UUID(), surfaceID: UUID(), title: "Terminal", workingDirectory: directory.path)
+        registry.presentationDidChange(to: BuiltInGitInspectorProvider.paneID, context: context)
+        defer { registry.presentationDidChange(to: nil, context: context) }
+        func send(_ action: InspectorGitAction) {
+            registry.performAction(paneID: BuiltInGitInspectorProvider.paneID,
+                action: .init(context: context, kind: .gitAction(action)))
+        }
+        let initial = try await waitFor(registry, context: context) { $0.history.commits.count == 1 }
+        let staged = try #require(initial.workingTree.staged.first)
+        let unstaged = try #require(initial.workingTree.unstaged.first)
+        await probe.fail(failed)
+        send(.refresh)
+        let failedContent = try await waitFor(registry, context: context) {
+            [$0.workingTree.stagedError, $0.workingTree.unstagedError, $0.workingTree.branchesError].compactMap { $0 }.count == 1
+        }
+        #expect(failedContent.workingTree.staged == initial.workingTree.staged)
+        #expect(failedContent.workingTree.unstaged == initial.workingTree.unstaged)
+        #expect(failedContent.workingTree.branches == initial.workingTree.branches)
+        switch failed {
+        case .staged:
+            send(.updateCommitDraft("must not commit stale index data"))
+            send(.commitStaged)
+            send(.setFileStaged(staged, false))
+        case .unstaged: send(.setFileStaged(unstaged, true))
+        case .branches:
+            send(.selectTab(.changes))
+            send(.browseBranch("refs/heads/main"))
+            if case .git(let content) = registry.content(for: BuiltInGitInspectorProvider.paneID, context: context) {
+                #expect(content.activeTab == .changes)
+            }
+        }
+        #expect(await probe.writes == 0)
+        // A separate, successfully read component remains actionable.
+        send(failed == .unstaged ? .setFileStaged(staged, false) : .setFileStaged(unstaged, true))
+        _ = try await waitFor(registry, context: context) { $0.operation == nil }
+        #expect(await probe.writes == 1)
+        await probe.fail(nil)
+        send(.refresh)
+        let recovered = try await waitFor(registry, context: context) {
+            $0.workingTree.stagedError == nil && $0.workingTree.unstagedError == nil && $0.workingTree.branchesError == nil
+        }
+        #expect(recovered.workingTree.staged.count == (failed == .unstaged ? 0 : 2))
     }
 }

@@ -444,33 +444,7 @@ enum ForegroundSSHProcessDetector {
     }
 
     static func interactiveDestination(_ args: [String]) -> String? {
-        let optionsWithValue = "BbcDEeFIiJLlmOoPpQRSWw"
-        let noninteractiveOptions = "GNOQTVWfn"
-        var index = 0
-        while index < args.count {
-            let argument = args[index]
-            if argument == "--" {
-                index += 1
-                break
-            }
-            guard argument.first == "-", argument != "-" else { break }
-            guard let firstOption = argument.dropFirst().first else { return nil }
-            if noninteractiveOptions.contains(firstOption) { return nil }
-            if optionsWithValue.contains(firstOption) {
-                if argument.count == 2 {
-                    index += 1
-                    guard index < args.count else { return nil }
-                }
-                index += 1
-                continue
-            }
-            if argument.dropFirst().contains(where: noninteractiveOptions.contains) {
-                return nil
-            }
-            index += 1
-        }
-        guard index < args.count, index + 1 == args.count else { return nil }
-        return args[index]
+        OpenSSHArguments(args)?.interactiveDestination
     }
 
     private static func destinationLabel(_ destination: String) -> String? {
@@ -510,6 +484,9 @@ struct SSHReplayDescriptor: Codable, Equatable, Sendable {
     let terminfo: Bool
     let cache: Bool
     let args: [String]
+    /// Captured from the foreground process when available. Older +ssh
+    /// descriptors use the pane's saved local working directory instead.
+    var localWorkingDirectory: String?
 
     enum CodingKeys: String, CodingKey {
         case version
@@ -518,6 +495,7 @@ struct SSHReplayDescriptor: Codable, Equatable, Sendable {
         case terminfo
         case cache
         case args
+        case localWorkingDirectory = "local_working_directory"
     }
 
     var transferTarget: String? {
@@ -565,7 +543,11 @@ struct SSHReplayDescriptor: Codable, Equatable, Sendable {
         }
         argv.append("--")
         argv.append(contentsOf: args)
-        return argv.map(Self.shellQuote).joined(separator: " ")
+        let command = argv.map(Self.shellQuote).joined(separator: " ")
+        guard let localWorkingDirectory else { return command }
+        guard localWorkingDirectory.hasPrefix("/"), localWorkingDirectory.utf8.count <= 4_096,
+              !localWorkingDirectory.contains("\0") else { return nil }
+        return "(cd " + Self.shellQuote(localWorkingDirectory) + " && " + command + ")"
     }
 
     private static func shellQuote(_ value: String) -> String {

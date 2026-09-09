@@ -85,4 +85,25 @@ struct GitHistoryServiceTests {
         #expect(secondPage.commits.allSatisfy { !$0.subject.contains("new-after-snapshot") })
         #expect(Set(firstPage.commits.map(\.id)).isDisjoint(with: secondPage.commits.map(\.id)))
     }
+
+    @Test func controlCharactersAndEmptySubjectsPreserveHistoryRecordsAndPageBoundaries() async throws {
+        let directory = createTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try runCommand(["git", "init", "-b", "main"], in: directory.path)
+        try runCommand(["git", "commit", "--allow-empty", "--allow-empty-message", "--cleanup=verbatim", "-m", ""], in: directory.path)
+        let subject = "first\u{1e}second\t尾部"
+        try runCommand(["git", "commit", "--allow-empty", "--cleanup=verbatim", "-m", subject], in: directory.path)
+        let repository = try await identity(for: directory)
+        let service = GitHistoryService()
+        let snapshot = try await service.captureSnapshot(for: repository, scope: .currentBranch)
+        let first = try await service.loadPage(snapshot: snapshot, repository: repository, offset: 0, pageSize: 1)
+        #expect(first.commits.map(\.subject) == [subject])
+        #expect(first.hasMore)
+        let second = try await service.loadPage(snapshot: snapshot, repository: repository, offset: 1, pageSize: 1)
+        #expect(second.commits.map(\.subject) == [""])
+        #expect(second.commits.first?.parentIDs == [])
+        #expect(!second.hasMore)
+        let last = try await service.loadPage(snapshot: snapshot, repository: repository, offset: 2, pageSize: 1)
+        #expect(last.commits.isEmpty && !last.hasMore)
+    }
 }

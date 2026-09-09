@@ -962,11 +962,13 @@ and file lists load on demand, independently of history pagination; collapse
 cancels that commit's pending request. Only clicking a changed file routes to
 `EditorWorkspaceStore.openGitDiff(repository:target:file:context:)`, honoring the
 editor pane destination setting and the exact commit/file selection. The editor binds each preview to its original
-repository and target and keeps regular documents (including unsaved buffers)
-separate. Source comparison uses bounded, read-only before/after snapshots with
+repository and target. Regular document views remain mounted underneath a
+selected diff, just as they do when another document is selected, preserving
+native undo, selection, scroll position and Markdown edit/preview mode. Source comparison uses bounded, read-only before/after snapshots with
 the editor's syntax highlighting and added/deleted line tints. Side by Side and
-Inline modes share the same snapshots. Inline interleaves removed/added source
-lines, retaining unchanged source context. Linked scrolling is on by default
+Inline modes share the same snapshots and one parsed hunk/line mapping.
+Both side-by-side highlighting and inline rows are derived from that mapping.
+Inline interleaves removed/added source lines, retaining unchanged source context. Linked scrolling is on by default
 in Side by Side mode and maps source line positions through Git's hunks in both
 directions, including insertion/deletion offsets; it can be disabled.
 Binary and size-limit states remain explicit, and a raw patch is the fallback
@@ -977,14 +979,21 @@ focus and Save All callbacks. Shift+Escape hides the editor without discarding
 the diff preview, display mode or scroll position, as with ordinary editor
 documents. Loading, binary and error states retain the same workspace shortcuts
 through a focused-surface fallback; hidden previews do not consume keys.
-The legacy native detail window remains available internally.
+Diff refresh re-enumerates files before resolving the selected path and loading
+its latest status/sources. A file moved from untracked to the index is no longer
+shown as an unstaged addition. Selection and refresh share one cancellable
+loader; an obsolete result cannot overwrite a newer selection. The raw patch
+view is retained as a fallback, without a separate detail-window lifecycle.
 
 Changes lists staged and unstaged/untracked paths separately. Checkboxes reflect
 the real index: checking an unstaged row stages that whole file; unchecking a
 staged row unstages it without deleting the working file (including unborn
 repositories). Commit Staged submits the index via stdin commit message, never
 implicitly stages other files, and preserves the draft on failure. A file with
-both index and working-tree edits can appear in both sections.
+both index and working-tree edits can appear in both sections. Staged,
+unstaged and branch queries keep independent results and errors. A failed
+query retains its last successful values for display and disables only actions
+that depend on those stale values; it does not hide other successful sections.
 
 History's scope menu includes current/all branches and every available local
 and remote branch. Branches uses an expandable Local/Remotes folder tree with
@@ -1017,13 +1026,20 @@ deduplicates pending requests, and stops at Git's true end of history. A failed
 page retains existing commits, the snapshot and has-more state for manual retry.
 Refreshing refs preserves the already-loaded depth. Row heights track badge
 wrapping and expanded metadata; inserting child rows does not affect Git page
-offsets, and an append preserves the current viewport anchor.
+offsets, and an append preserves the current viewport anchor. Repository refresh
+and history pagination have independent cancellation/generation ownership, so
+paging or changing scope cannot interrupt a Changes/Branches refresh. A ref
+refresh waits for an in-flight page and preserves its loaded depth. History
+records use six NUL-delimited fields and Git's NUL record terminator rather
+than a text control character that may occur in a legal commit subject.
 
 ### SSH Git parity and transport
 
 A ready SSH pane uses the same Git provider, History/branch tree, commit
 expansion, stage/unstage, commit, branch actions, and editor diff as a local
-pane. Connecting sessions remain non-actionable. Repository identity, read
+pane. Connecting sessions remain non-actionable. A repository has one execution
+target, either local or a complete SSH connection; there is no incomplete
+host-only fallback or second mutable transport field. Repository identity, read
 caches, commit drafts, expanded state and mutation locks include the SSH
 destination/options as well as the worktree path; reconnect/host changes cannot
 reuse a local or another host's same-path state. SSH failures are errors, never
@@ -1031,19 +1047,34 @@ an instruction to run Git locally. The SSH destination remains visible during
 loading and errors.
 
 `SSHGitExecutor` uses OpenSSH batch mode with the session's replayed destination,
-port, user, identity, config, jump host and control-socket options. Foreground
+port, user, identity, config, jump host and control-socket options. One OpenSSH
+argv parser serves both foreground detection and replay, including combined
+flags such as `-4vp2222`; unknown options fail closed. Foreground
 OpenSSH sessions capture argv boundaries via `KERN_PROCARGS2` (not a whitespace
 split of ps output); if exact options cannot be recovered, Git asks for a
 reconnection rather than guessing a port. Existing SSH config/agent or
 multiplexed authentication applies. Auxiliary commands disable terminal
 allocation, port forwards, LocalCommand and RemoteCommand side effects.
 Configured agent forwarding, including explicit `-A`, is preserved.
+Auxiliary execution retains the original local launch directory, so relative
+`-F`, `-i`, config options and ProxyCommand values keep their meaning without
+per-option path rewriting. Foreground capture records executable and cwd;
+replay v1 adds optional `local_working_directory` while older records remain
+readable. Replaying a captured cwd uses a subshell so its caller's cwd is kept.
+Older typed records with a bare executable use the host application's explicit
+PATH because those records did not preserve the original executable/PATH.
 
 The transport requires a Unix SSH host with Git 2.23+ and standard `/bin/sh`,
 `base64 -d`, `head` utilities for full parity. A base64-encoded POSIX command
 argument avoids login-shell quoting differences (including fish), while SSH
 stdin stays independent for commit messages. An output marker removes shell
-startup banners without losing NUL-delimited Git paths. Output is bounded,
+startup banners without losing NUL-delimited Git paths. Local Git and SSH both
+compose `GitProcessRunner`, which owns stdin and separate stdout/stderr channels,
+cancellation and combined output limits. Normal results are published only
+after streams drain; excess output terminates the spawned process (with a
+bounded termination grace period), instead of waiting forever for it to exit.
+The executor interface has no implicit local-file read: each transport owns
+its working-file reader. Output is bounded,
 connection liveness is checked, repository roots with line breaks are rejected,
 and remote working-file reads are bounded and
 validated on the server rather than through local FileManager. Symlinks and

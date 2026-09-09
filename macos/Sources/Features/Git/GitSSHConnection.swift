@@ -5,58 +5,61 @@ struct GitSSHConnection: Hashable, Sendable {
     let options: [String]
     let workspaceID: String
     let executablePath: String
+    let localWorkingDirectory: String
 
-    init(destination: String, options: [String] = [], workspaceID: String? = nil, executablePath: String = "/usr/bin/ssh") throws {
+    init(destination: String, options: [String] = [], workspaceID: String? = nil,
+         executablePath: String = "/usr/bin/ssh", localWorkingDirectory: String = "/") throws {
         guard !destination.isEmpty, !destination.hasPrefix("-"),
               !destination.contains(where: { $0.isWhitespace || $0 == "\0" }),
               options.allSatisfy({ !$0.contains("\0") }),
               !(workspaceID ?? "").contains("\0"), executablePath.hasPrefix("/"),
-              !executablePath.contains("\0") else {
+              !executablePath.contains("\0"), localWorkingDirectory.hasPrefix("/"),
+              !localWorkingDirectory.contains("\0") else {
             throw GitExecutionError.executionFailed("Invalid SSH connection.")
         }
         self.executablePath = executablePath
         self.destination = destination
         self.options = options
         self.workspaceID = workspaceID ?? "ssh:\(destination)"
+        self.localWorkingDirectory = localWorkingDirectory
     }
 
-    init(session: PaneSessionContext.SSH) throws {
-        guard session.replay != nil else {
+    init(session: PaneSessionContext) throws {
+        let ssh: PaneSessionContext.SSH
+        switch session.state {
+        case .local:
+            throw GitExecutionError.executionFailed("The pane has no SSH connection.")
+        case .sshConnecting(let connection), .sshReady(let connection, _):
+            ssh = connection
+        }
+        guard let directory = ssh.replay?.localWorkingDirectory ?? session.local.workingDirectory else {
+            throw GitExecutionError.executionFailed("The original local SSH working directory is unavailable. Reconnect this SSH session.")
+        }
+        try self.init(session: ssh, localWorkingDirectory: directory)
+    }
+
+    init(session: PaneSessionContext.SSH, localWorkingDirectory: String = "/") throws {
+        guard let replay = session.replay else {
             throw GitExecutionError.executionFailed("Exact SSH options are unavailable. Reconnect this SSH session to capture its original connection parameters.")
         }
-        var options: [String] = []
-        var executablePath = "/usr/bin/ssh"
-        if let replay = session.replay {
-            guard replay.version == 1, replay.ssh == "ssh" || (replay.ssh.hasPrefix("/") && (replay.ssh as NSString).lastPathComponent == "ssh"),
-                  replay.transferTarget == session.transferTarget else {
-                throw GitExecutionError.executionFailed("Git requires a replayable OpenSSH connection.")
-            }
-            executablePath = replay.ssh == "ssh" ? "/usr/bin/ssh" : replay.ssh
-            let takesValue: Set<String> = ["-B", "-I", "-P", "-p", "-l", "-i", "-F", "-J", "-S", "-b", "-c", "-m", "-o"]
-            let skipsValue: Set<String> = ["-L", "-R", "-D", "-E", "-e"]
-            var index = 0
-            while index < replay.args.count {
-                let arg = replay.args[index]
-                if arg == session.transferTarget { break }
-                if takesValue.contains(arg) || skipsValue.contains(arg) {
-                    guard index + 1 < replay.args.count else { throw GitExecutionError.executionFailed("Incomplete SSH option.") }
-                    if takesValue.contains(arg) { options += [arg, replay.args[index + 1]] }
-                    index += 2
-                } else if arg.count > 2, takesValue.contains(String(arg.prefix(2))) {
-                    options += [String(arg.prefix(2)), String(arg.dropFirst(2))]
-                    index += 1
-                } else {
-                    if arg.hasPrefix("-"), arg.dropFirst().allSatisfy({ "46AaCvqtxXYy".contains($0) }) {
-                        options += arg.dropFirst().filter { "46AaC".contains($0) }.map { "-" + String($0) }
-                    }
-                    index += 1
-                }
-            }
+        guard replay.version == 1, (replay.ssh as NSString).lastPathComponent == "ssh",
+              let parsed = OpenSSHArguments(replay.args),
+              parsed.interactiveDestination == session.transferTarget else {
+            throw GitExecutionError.executionFailed("Git requires a replayable OpenSSH connection with recognized options.")
         }
-        try self.init(destination: session.transferTarget, options: options, workspaceID: "ssh:\(session.alias)", executablePath: executablePath)
+        let directory = replay.localWorkingDirectory ?? localWorkingDirectory
+        guard let executablePath = SSHProcessArguments.executablePath(for: replay.ssh, workingDirectory: directory) else {
+            throw GitExecutionError.executionFailed("The captured SSH executable was not found on the host application's PATH.")
+        }
+        let values = "BIPpliFJSbcmo"
+        let flags = "46AaCKk"
+        let options = parsed.options.filter { $0.value == nil ? flags.contains($0.name) : values.contains($0.name) }
+            .flatMap(\.arguments)
+        try self.init(destination: session.transferTarget, options: options, workspaceID: "ssh:\(session.alias)",
+                      executablePath: executablePath, localWorkingDirectory: directory)
     }
 
-    var identity: String { ([destination, workspaceID, executablePath] + options).joined(separator: "\0") }
+    var identity: String { ([destination, workspaceID, executablePath, localWorkingDirectory] + options).joined(separator: "\0") }
     var arguments: [String] {
         // These options precede user config/replay options: OpenSSH uses the first value.
         ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
@@ -111,10 +114,10 @@ struct SSHGitExecutor: GitExecutor {
         // decoded POSIX script is a -c argument, leaving SSH stdin for git commit.
         let encoded = Data(framed.utf8).base64EncodedString()
         let command = "exec /bin/sh -c 'exec /bin/sh -c \"$(printf %s " + encoded + " | base64 -d)\"'"
-        let result = try await LocalGitExecutor(gitPath: sshPath ?? connection.executablePath, prefixArguments: connection.arguments,
-                                                localWorkingDirectory: "/").execute(
-            arguments: [command], workingDirectory: "/", stdin: stdin,
-            maxOutputBytes: limit.map { $0 + 64 * 1024 }
+        let result = try await GitProcessRunner().run(
+            executablePath: sshPath ?? connection.executablePath,
+            arguments: connection.arguments + [command], workingDirectory: connection.localWorkingDirectory,
+            stdin: stdin, maxOutputBytes: limit.map { $0 + 64 * 1024 }
         )
         guard result.exitCode != 255 else {
             throw GitExecutionError.executionFailed("SSH connection failed. If a write was in progress, refresh before retrying; its outcome may be unknown.\n" + result.stderrString)
@@ -125,14 +128,5 @@ struct SSHGitExecutor: GitExecutor {
         let output = Data(result.stdout[marker.upperBound...])
         if let limit, output.count > limit { throw GitExecutionError.outputLimitExceeded(maxBytes: limit) }
         return GitExecutionResult(exitCode: result.exitCode, stdout: output, stderr: result.stderr)
-    }
-}
-
-struct UnavailableGitExecutor: GitExecutor {
-    func execute(arguments: [String], workingDirectory: String, stdin: Data?, maxOutputBytes: Int?) async throws -> GitExecutionResult {
-        throw GitExecutionError.executionFailed("Invalid SSH target.")
-    }
-    func readWorkingFile(at path: String, root: String, limit: Int) async throws -> Data {
-        throw GitExecutionError.executionFailed("Invalid SSH target.")
     }
 }

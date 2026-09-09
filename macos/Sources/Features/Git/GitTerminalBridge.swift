@@ -93,21 +93,7 @@ final class GitTerminalBridge {
         _ target: GitExecutionTarget,
         with session: PaneSessionContext
     ) -> Bool {
-        switch (target, session.state) {
-        case (.local, .local):
-            return true
-        case (.remote(let host, let user), .sshReady(let ssh, _)):
-            let hostMatches = host == ssh.alias || host == ssh.transferTarget
-            let userMatches: Bool
-            if let user {
-                userMatches = ssh.transferTarget.hasPrefix("\(user)@")
-            } else {
-                userMatches = true
-            }
-            return hostMatches && userMatches
-        default:
-            return false
-        }
+        (try? GitExecutionTarget(session: session)) == target
     }
 
     private static func liveSurface(

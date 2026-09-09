@@ -204,3 +204,9 @@ struct BuiltInGitInspectorProviderTests {
 
     }
 }
+
+private struct UnavailableGitExecutor: GitExecutor {
+    func execute(arguments: [String], workingDirectory: String, stdin: Data?, maxOutputBytes: Int?) async throws -> GitExecutionResult {
+        throw GitExecutionError.executionFailed("Unavailable test transport.")
+    }
+}

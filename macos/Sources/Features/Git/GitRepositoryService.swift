@@ -11,16 +11,12 @@ struct GitRepositoryService: Sendable {
         workingDirectory: String?,
         session: PaneSessionContext? = nil
     ) async -> GitRepositoryStatusKind {
-        let connection: GitSSHConnection?
-        do {
-            if let session, case .sshReady(let ssh, _) = session.state {
-                connection = try GitSSHConnection(session: ssh)
-            } else if let session, case .sshConnecting(let ssh) = session.state {
-                return .ssh(host: ssh.alias, workingDirectory: "")
-            } else { connection = nil }
-        } catch { return .error(title: "SSH Git", message: error.localizedDescription) }
-        let command: any GitExecutor
-        if let executor { command = executor } else if let connection { command = SSHGitExecutor(connection: connection) } else { command = LocalGitExecutor() }
+        if let session, case .sshConnecting(let ssh) = session.state {
+            return .ssh(host: ssh.alias, workingDirectory: "")
+        }
+        let target: GitExecutionTarget
+        do { target = try session.map { try GitExecutionTarget(session: $0) } ?? .local } catch { return .error(title: "SSH Git", message: error.localizedDescription) }
+        let command = executor ?? target.executor
 
         // 2. Validate working directory
         guard let directory = workingDirectory,
@@ -32,7 +28,7 @@ struct GitRepositoryService: Sendable {
               !directory.contains("\n"), !directory.contains("\r") else {
             return .error(title: "Git Path", message: "Repository directories must be absolute paths without line breaks.")
         }
-        guard connection != nil || FileManager.default.fileExists(atPath: directory) else {
+        guard target != .local || FileManager.default.fileExists(atPath: directory) else {
             return .notRepository(directory: directory)
         }
 
@@ -72,8 +68,7 @@ struct GitRepositoryService: Sendable {
             let commonGitDir = Self.absolutePath(lines[3], relativeTo: worktreePath + "/" + prefix)
 
             let identity = GitRepositoryIdentity(
-                target: connection.map { .remote(host: $0.destination, user: nil) } ?? .local,
-                sshConnection: connection,
+                target: target,
                 worktreePath: worktreePath,
                 gitDirPath: gitDir,
                 commonGitDirPath: commonGitDir
@@ -86,7 +81,7 @@ struct GitRepositoryService: Sendable {
             case .cancelled:
                 return .error(title: "Cancelled", message: "Git check was cancelled")
             case .processFailed, .executionFailed, .outputLimitExceeded:
-                return .error(title: connection == nil ? "Git Error" : "SSH Git Error", message: error.localizedDescription)
+                return .error(title: target == .local ? "Git Error" : "SSH Git Error", message: error.localizedDescription)
             }
         } catch {
             return .error(title: "Git Error", message: error.localizedDescription)

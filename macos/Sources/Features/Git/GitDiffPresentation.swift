@@ -17,6 +17,18 @@ struct GitDiffPresentation: Equatable {
     var highlights: [Int: Bool] {
         Dictionary(uniqueKeysWithValues: rows.enumerated().compactMap { index, row in row.added.map { (index, $0) } })
     }
+    var beforeHighlights: [Int: Bool] {
+        Dictionary(uniqueKeysWithValues: rows.compactMap { row in
+            guard row.added == false, let line = row.beforeLine else { return nil }
+            return (line - 1, false)
+        })
+    }
+    var afterHighlights: [Int: Bool] {
+        Dictionary(uniqueKeysWithValues: rows.compactMap { row in
+            guard row.added == true, let line = row.afterLine else { return nil }
+            return (line - 1, true)
+        })
+    }
 
     init(before: String, after: String, patch: String) {
         func lines(_ text: String) -> [String] {

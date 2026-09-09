@@ -8,6 +8,8 @@ struct GitDiffPresentationTests {
         #expect(value.isConsistent)
         #expect(value.text == "one\nold\nnew\nextra\nlast")
         #expect(value.highlights == [1: false, 2: true, 3: true])
+        #expect(value.beforeHighlights == [1: false])
+        #expect(value.afterHighlights == [1: true, 2: true])
         #expect(value.beforeToAfter[2] == 3)
         #expect(value.afterToBefore[3] == 2)
         #expect(value.rows[1].beforeLine == 2 && value.rows[1].afterLine == nil)
@@ -20,19 +22,49 @@ struct GitDiffPresentationTests {
         #expect(insertion.isConsistent)
         #expect(insertion.beforeToAfter[1] == 3)
         #expect(insertion.afterToBefore[4] == 2)
+        #expect(insertion.beforeHighlights.isEmpty)
+        #expect(insertion.afterHighlights == [1: true, 2: true])
         let deletion = GitDiffPresentation(before: "a\nb\nc\n", after: "a\nc\n",
                                             patch: "@@ -2 +1,0 @@\n-b\n")
         #expect(deletion.isConsistent)
         #expect(deletion.beforeToAfter[2] == 1)
+        #expect(deletion.beforeHighlights == [1: false])
+        #expect(deletion.afterHighlights.isEmpty)
     }
 
     @Test func emptyFileAndCRLFAndStaleSnapshot() {
         let added = GitDiffPresentation(before: "", after: "let x = 1\r\n", patch: "@@ -0,0 +1 @@\n+let x = 1\n")
         #expect(added.isConsistent && added.highlights == [0: true])
+        #expect(added.beforeHighlights.isEmpty && added.afterHighlights == [0: true])
         let removed = GitDiffPresentation(before: "gone\n", after: "", patch: "@@ -1 +0,0 @@\n-gone\n")
         #expect(removed.isConsistent && removed.highlights == [0: false])
+        #expect(removed.beforeHighlights == [0: false] && removed.afterHighlights.isEmpty)
         let stale = GitDiffPresentation(before: "old\n", after: "newer\n", patch: "@@ -1 +1 @@\n-old\n+new\n")
         #expect(!stale.isConsistent)
+    }
+
+    @Test func bothSourceHighlightsIgnorePatchHeadersAndNoNewlineMarkers() {
+        let patch = """
+        diff --git a/file b/file
+        --- a/file
+        +++ b/file
+        @@ -2,2 +2,3 @@
+         same
+        -old
+        +new
+        +extra
+        @@ -10 +11 @@
+        -last
+        \\ No newline at end of file
+        +changed
+        \\ No newline at end of file
+        """
+        let unchanged = (4...9).map { "line \($0)" }.joined(separator: "\n")
+        let value = GitDiffPresentation(before: "first\nsame\nold\n\(unchanged)\nlast",
+                                        after: "first\nsame\nnew\nextra\n\(unchanged)\nchanged", patch: patch)
+        #expect(value.isConsistent)
+        #expect(value.beforeHighlights == [2: false, 9: false])
+        #expect(value.afterHighlights == [2: true, 3: true, 10: true])
     }
 
     @Test func branchTreeSeparatesLocalRemoteAndFolderPrefixes() {

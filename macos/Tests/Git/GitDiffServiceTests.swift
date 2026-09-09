@@ -54,26 +54,6 @@ struct GitDiffServiceTests {
         #expect(!detached.contains(where: { $0.isCurrent }))
     }
 
-    @Test func diffLineMapIgnoresHeadersAndNoNewlineMarkers() {
-        let patch = """
-        diff --git a/file b/file
-        --- a/file
-        +++ b/file
-        @@ -2,2 +2,3 @@
-         same
-        -old
-        +new
-        +extra
-        \\ No newline at end of file
-        @@ -10 +11 @@
-        -last
-        +changed
-        """
-        let lines = GitDiffLineMap(patch)
-        #expect(lines.before == [2: false, 9: false])
-        #expect(lines.after == [2: true, 3: true, 10: true])
-    }
-
     @Test func listsRootCommitAndPreservesUnicodeSpacePath() async throws {
         let dir = try makeRepository()
         defer { try? FileManager.default.removeItem(at: dir) }

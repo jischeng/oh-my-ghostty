@@ -60,14 +60,14 @@ struct GitTerminalBridgeTests {
         #expect(result.displayMessage == nil)
     }
 
-    @Test func rejectsMissingOrMismatchedTargetsWithoutWriting() {
+    @Test func rejectsMissingOrMismatchedTargetsWithoutWriting() throws {
         let tabID = UUID()
         let bridge = GitTerminalBridge(
             surfaceLookup: { _, _ in Issue.record("lookup must not run"); return nil },
             focusSurface: { _ in Issue.record("focus must not run") }
         )
         let repository = GitRepositoryIdentity(
-            target: .remote(host: "prod", user: nil),
+            target: .ssh(try GitSSHConnection(destination: "prod")),
             worktreePath: "/srv/project",
             gitDirPath: "/srv/project/.git",
             commonGitDirPath: "/srv/project/.git"

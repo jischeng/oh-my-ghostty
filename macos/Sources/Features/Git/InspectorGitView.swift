@@ -132,7 +132,8 @@ struct InspectorGitView: View {
                         )
                 }
             }
-            if let current = content.workingTree.branches.first(where: { $0.isCurrent }) {
+            if content.workingTree.branchesError == nil,
+               let current = content.workingTree.branches.first(where: { $0.isCurrent }) {
                 Text(current.upstream.isEmpty ? "No upstream configured" :
                         "\(current.upstream) \(current.tracking.isEmpty ? "· up to date" : current.tracking)")
                     .font(.caption2).foregroundStyle(.secondary)
@@ -171,11 +172,10 @@ struct InspectorGitView: View {
         case .changes:
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    if let error = content.workingTree.error {
-                        Text(error).foregroundStyle(.red)
-                    } else {
-                        changeSection("Staged", files: content.workingTree.staged, target: .staged)
-                        changeSection("Unstaged / Untracked", files: content.workingTree.unstaged, target: .unstaged)
+                        changeSection("Staged", files: content.workingTree.staged, target: .staged,
+                                      error: content.workingTree.stagedError)
+                        changeSection("Unstaged / Untracked", files: content.workingTree.unstaged, target: .unstaged,
+                                      error: content.workingTree.unstagedError)
                         Divider()
                         Text("Checked files are staged for commit.").font(.caption2).foregroundStyle(.secondary)
                         Text("Commit message").font(.caption).foregroundStyle(.secondary)
@@ -189,31 +189,32 @@ struct InspectorGitView: View {
                         Button("Commit Staged (\(content.workingTree.staged.count))") {
                             perform(.gitAction(.commitStaged))
                         }
-                        .disabled(content.operation != nil || content.workingTree.staged.isEmpty ||
+                        .disabled(content.operation != nil || content.workingTree.stagedError != nil || content.workingTree.staged.isEmpty ||
                                   content.commitDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    }
                 }.padding(.horizontal, 12)
             }
         case .branches:
-            if let error = content.workingTree.error {
+            if let error = content.workingTree.branchesError {
                 Text(error).font(.caption).foregroundStyle(.red).padding(8)
             }
-            GitBranchTree(branches: content.workingTree.branches, isBusy: content.operation != nil) {
+            GitBranchTree(branches: content.workingTree.branches,
+                          isBusy: content.operation != nil || content.workingTree.branchesError != nil) {
                 perform(.gitAction($0))
             }
         }
     }
 
-    private func changeSection(_ title: String, files: [GitDiffFile], target: GitDiffTarget) -> some View {
+    private func changeSection(_ title: String, files: [GitDiffFile], target: GitDiffTarget, error: String?) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("\(title) (\(files.count))").font(.caption).foregroundStyle(.secondary)
+            if let error { Text(error).font(.caption).foregroundStyle(.red) }
             ForEach(files) { file in
                 HStack(alignment: .top, spacing: 5) {
                     Toggle("Stage \(file.path)", isOn: Binding(get: { target == .staged }, set: {
                         perform(.gitAction(.setFileStaged(file, $0)))
                     }))
                     .toggleStyle(.checkbox).labelsHidden()
-                    .disabled(content.operation != nil)
+                    .disabled(content.operation != nil || error != nil)
                 Button { perform(.gitAction(.openDiff(file, target))) } label: {
                     HStack(spacing: 6) {
                         Text(file.isUntracked ? "?" : file.status).font(.caption.monospaced())
@@ -221,10 +222,10 @@ struct InspectorGitView: View {
                         Text(file.displayPath).lineLimit(2).truncationMode(.middle)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }.contentShape(Rectangle())
-                }.buttonStyle(.plain).help(file.displayPath)
+                }.buttonStyle(.plain).help(file.displayPath).disabled(error != nil)
                 }
             }
-            if files.isEmpty { Text("No changes").font(.caption).foregroundStyle(.secondary) }
+            if files.isEmpty && error == nil { Text("No changes").font(.caption).foregroundStyle(.secondary) }
         }
     }
 
@@ -239,6 +240,7 @@ struct InspectorGitView: View {
                     Button { perform(.gitAction(.browseBranch(branch.id))) } label: {
                         Label(branch.name, systemImage: branch.isRemote ? "network" : "arrow.triangle.branch")
                     }
+                    .disabled(content.workingTree.branchesError != nil)
                 }
             } label: {
                 Label(content.history.snapshot?.browsedBranch ?? content.history.scope.displayName,

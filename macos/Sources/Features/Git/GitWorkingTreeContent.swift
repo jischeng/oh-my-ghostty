@@ -14,7 +14,9 @@ struct GitWorkingTreeContent: Equatable, Sendable {
     var staged: [GitDiffFile] = []
     var unstaged: [GitDiffFile] = []
     var branches: [GitBranchInfo] = []
-    var error: String?
+    var stagedError: String?
+    var unstagedError: String?
+    var branchesError: String?
 }
 
 extension GitRepositoryService {

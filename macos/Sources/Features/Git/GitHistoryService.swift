@@ -167,7 +167,8 @@ struct GitHistoryService: Sendable {
                 "--topo-order",
                 "--no-color",
                 "--no-decorate",
-                "--format=%H%x00%P%x00%an%x00%ae%x00%aI%x00%s%x1e",
+                "-z",
+                "--format=%H%x00%P%x00%an%x00%ae%x00%aI%x00%s",
                 "--skip=\(offset)",
                 "--max-count=\(requestedCount)",
             ] + snapshot.tipCommitIDs.map(\.rawValue),
@@ -179,25 +180,29 @@ struct GitHistoryService: Sendable {
             throw GitHistoryError.commandFailed(result.stderrString)
         }
 
-        let records = result.stdout
-            .split(separator: 0x1e, omittingEmptySubsequences: true)
-            .filter { !$0.allSatisfy { $0 == 0x0a || $0 == 0x0d } }
-        let hasMore = records.count > pageSize
-        let commits = try records.prefix(pageSize).map {
-            try parseCommit(record: Data($0), snapshot: snapshot)
+        // NUL cannot occur in Git's text fields. `-z` terminates each record,
+        // so fixed groups of six fields also preserve empty parents/subjects
+        // and legal control characters such as the record separator (0x1e).
+        guard result.stdout.isEmpty || result.stdout.last == 0 else {
+            throw GitHistoryError.malformedCommit("Unterminated history record")
+        }
+        let fields: [Data] = result.stdout.isEmpty ? [] : result.stdout.dropLast()
+            .split(separator: 0, omittingEmptySubsequences: false).map { Data($0) }
+        guard fields.count.isMultiple(of: 6) else {
+            throw GitHistoryError.malformedCommit("Incomplete history record")
+        }
+        let recordCount = fields.count / 6
+        let hasMore = recordCount > pageSize
+        let commits = try (0..<min(pageSize, recordCount)).map { index in
+            try parseCommit(fields: Array(fields[(index * 6)..<(index * 6 + 6)]), snapshot: snapshot)
         }
         return GitHistoryPage(commits: commits, offset: offset, hasMore: hasMore)
     }
 
     private func parseCommit(
-        record: Data,
+        fields: [Data],
         snapshot: GitHistorySnapshot
     ) throws -> GitHistoryCommit {
-        let normalizedRecord = record.drop(while: { $0 == 0x0a || $0 == 0x0d })
-        let fields = normalizedRecord.split(separator: 0, omittingEmptySubsequences: false)
-        guard fields.count >= 6 else {
-            throw GitHistoryError.malformedCommit(String(bytes: normalizedRecord, encoding: .utf8) ?? "")
-        }
         let id = GitCommitID(String(bytes: fields[0], encoding: .utf8) ?? "")
         let parentIDs = (String(bytes: fields[1], encoding: .utf8) ?? "")
             .split(whereSeparator: { $0 == " " || $0 == "\n" })

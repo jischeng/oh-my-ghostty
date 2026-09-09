@@ -25,21 +25,20 @@ struct GitEditorDiffView: View {
     var isActive = true
     var actions = GitDiffEditorActions()
     let close: () -> Void
-    @State private var files: [GitDiffFile] = []
-    @State private var selected: GitDiffFile?
-    @State private var document: GitDiffDocument?
-    @State private var before = ""
-    @State private var after = ""
-    @State private var lineMap = GitDiffLineMap("")
-    @State private var error: String?
-    @State private var sourceError: String?
-    @State private var loading = true
+    @StateObject private var model: GitEditorDiffModel
     @State private var mode = "Side by Side"
-    @State private var presentation = GitDiffPresentation(before: "", after: "", patch: "")
     @State private var scroll = GitDiffScrollLink()
     @State private var linkedScrolling = true
-    @State private var reloadVersion = 0
-    private let service = GitDiffService()
+
+    init(request: GitEditorDiffRequest, theme: EditorTheme, isActive: Bool = true,
+         actions: GitDiffEditorActions = GitDiffEditorActions(), close: @escaping () -> Void) {
+        self.request = request
+        self.theme = theme
+        self.isActive = isActive
+        self.actions = actions
+        self.close = close
+        _model = StateObject(wrappedValue: GitEditorDiffModel(request: request))
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -58,107 +57,73 @@ struct GitEditorDiffView: View {
                         Image(systemName: linkedScrolling ? "link" : "link.slash")
                     }.help(linkedScrolling ? "Disable linked scrolling" : "Enable linked scrolling")
                 }
-                Button { reloadVersion += 1 } label: { Image(systemName: "arrow.clockwise") }
-                    .help("Refresh diff").disabled(loading)
+                Button { model.reload() } label: { Image(systemName: "arrow.clockwise") }
+                    .help("Refresh diff").disabled(model.isLoading)
                 Button(action: close) { Image(systemName: "xmark") }.buttonStyle(.borderless)
             }.padding(8)
-            if !files.isEmpty {
+            if !model.files.isEmpty {
                 Menu {
-                    ForEach(files) { file in
-                        Button(file.displayPath) { selected = file }
+                    ForEach(model.files) { file in
+                        Button(file.displayPath) { model.select(file) }
                     }
                 } label: {
-                    Text(selected?.displayPath ?? "Select file")
+                    Text(model.selected?.displayPath ?? "Select file")
                         .lineLimit(1).truncationMode(.middle).frame(maxWidth: .infinity, alignment: .leading)
                 }.padding(.horizontal, 8)
 
             }
             Divider()
-            if loading { ProgressView().padding() }
-            if let error { Text(error).foregroundStyle(.red).padding() }
-            if let document, !loading {
+            if model.isLoading { ProgressView().padding() }
+            if let error = model.error { Text(error).foregroundStyle(.red).padding() }
+            if let content = model.content {
+                let document = content.document
                 if document.isBinary || document.isTruncated {
                     Text(document.summary ?? document.text).padding()
-                } else if let sourceError {
+                } else if let sourceError = content.sourceError {
                     Text(sourceError).foregroundStyle(.secondary).padding()
                     GitDiffTextView(text: document.text)
-                } else if mode == "Side by Side" {
-                    HSplitView {
-                        sourcePane("Before", text: before, path: document.file.oldPath ?? document.file.path, side: 0)
-                        sourcePane("After", text: after, path: document.file.path, side: 1)
+                } else if let presentation = content.presentation {
+                    if mode == "Side by Side" {
+                        HSplitView {
+                            sourcePane("Before", text: content.before, path: document.file.oldPath ?? document.file.path,
+                                       highlights: presentation.beforeHighlights, side: 0)
+                            sourcePane("After", text: content.after, path: document.file.path,
+                                       highlights: presentation.afterHighlights, side: 1)
+                        }
+                    } else {
+                        CodeEditorView(text: .constant(presentation.text),
+                                       fileURL: URL(fileURLWithPath: document.file.path, isDirectory: false),
+                                       diffLines: presentation.highlights,
+                                       isEditable: false, isActive: isActive, isSurfaceFocused: actions.isSurfaceFocused,
+                                       terminalTheme: theme, onFocus: actions.focus, onClose: close, onOpen: actions.open,
+                                       onNextDocument: actions.nextDocument, onPreviousDocument: actions.previousDocument,
+                                       onSaveAll: actions.saveAll, onHide: actions.hide)
+                            .id("inline-\(model.selected?.id ?? "")")
                     }
-                } else {
-                    CodeEditorView(text: .constant(presentation.text),
-                                   fileURL: URL(fileURLWithPath: document.file.path, isDirectory: false),
-                                   diffLines: presentation.highlights,
-                                   isEditable: false, isActive: isActive, isSurfaceFocused: actions.isSurfaceFocused,
-                                   terminalTheme: theme, onFocus: actions.focus, onClose: close, onOpen: actions.open,
-                                   onNextDocument: actions.nextDocument, onPreviousDocument: actions.previousDocument,
-                                   onSaveAll: actions.saveAll, onHide: actions.hide)
-                        .id("inline-\(selected?.id ?? "")")
                 }
-            } else if !loading && error == nil {
+            } else if !model.isLoading && model.error == nil {
                 Text("No changed files").foregroundStyle(.secondary).padding()
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(GitDiffFallbackCommands(
-            isActive: isActive && (loading || document == nil || document?.isBinary == true ||
-                                  document?.isTruncated == true || sourceError != nil),
+            isActive: isActive && (model.content?.presentation == nil || model.content?.sourceError != nil),
             actions: actions, close: close
         ))
-        .task {
-            do {
-                let list = try await service.listFiles(for: request.repository, target: request.target)
-                try Task.checkCancellation()
-                files = list.files
-                selected = request.file.flatMap { requested in files.first { $0.id == requested.id } } ?? files.first
-                loading = false
-            } catch is CancellationError {
-            } catch { self.error = error.localizedDescription; loading = false }
-        }
+        .onAppear { model.reload() }
+        .onDisappear { model.cancel() }
         .onChange(of: linkedScrolling) { scroll.enabled = $0 }
-        .task(id: "\(selected?.id ?? "")-\(reloadVersion)") {
-            guard let selected else { return }
-            document = nil
-            error = nil
-            sourceError = nil
-            loading = true
-            do {
-                let diff = try await service.loadDiff(for: selected, repository: request.repository, target: request.target)
-                try Task.checkCancellation()
-                document = diff
-                lineMap = GitDiffLineMap(diff.text)
-                if !diff.isBinary && !diff.isTruncated {
-                    do {
-                        let versions = try await service.sourceVersions(for: selected, repository: request.repository,
-                                                                        target: request.target)
-                        try Task.checkCancellation()
-                        before = versions.before
-                        after = versions.after
-                        presentation = GitDiffPresentation(before: before, after: after, patch: diff.text)
-                        scroll.presentation = presentation
-                        if !presentation.isConsistent {
-                            sourceError = "Source snapshots do not match this patch. Refresh to retry; the patch is shown below."
-                        }
-                    } catch is CancellationError { return
-                    } catch { sourceError = error.localizedDescription }
-                }
-                loading = false
-            } catch is CancellationError {
-            } catch { self.error = error.localizedDescription; loading = false }
-        }
+        .onChange(of: model.content?.presentation) { scroll.presentation = $0 ?? GitDiffPresentation(before: "", after: "", patch: "") }
     }
 
-    private func sourcePane(_ title: String, text: String, path: String, side: Int) -> some View {
+    private func sourcePane(_ title: String, text: String, path: String, highlights: [Int: Bool], side: Int) -> some View {
         VStack(spacing: 0) {
             Text(title).font(.caption).padding(6)
                 .frame(maxWidth: .infinity)
-                .background(title == "Before" ? Color.red.opacity(0.12) : Color.green.opacity(0.12))
-            GitDiffLinkedEditor(text: text, path: path,
-                                highlights: title == "Before" ? lineMap.before : lineMap.after,
+                .background(side == 0 ? Color.red.opacity(0.12) : Color.green.opacity(0.12))
+            GitDiffLinkedEditor(text: text, path: path, highlights: highlights,
                                 isActive: isActive, theme: theme, link: scroll, side: side, actions: actions, close: close)
-                .id("\(selected?.id ?? "")-\(title)")
+                .id("\(model.selected?.id ?? "")-\(side)")
         }.frame(minWidth: 120)
     }
 }

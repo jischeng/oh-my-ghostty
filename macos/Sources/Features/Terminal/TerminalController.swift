@@ -1923,12 +1923,15 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     // MARK: Vertical Tabs
 
     func selectVerticalTab(_ controller: TerminalController) {
-        guard tabControllers.contains(where: { $0 === controller }),
-              let targetWindow = controller.window else { return }
-        let tabGroup = window?.tabGroup
+        guard let targetWindow = controller.window,
+              NSApp.windows.contains(where: { $0 === targetWindow }) else { return }
+        // The row's controller identifies the target. UI projections and the
+        // source's group can lag behind native reorder/restore notifications.
+        let tabGroup = targetWindow.tabGroup
         tabGroup?.selectedWindow = targetWindow
         controller.markTabActivated()
-        if !targetWindow.isKeyWindow { targetWindow.makeKeyAndOrderFront(nil) }
+        // Key status alone does not guarantee native tab/front ordering.
+        targetWindow.makeKeyAndOrderFront(nil)
         Self.refreshTabs(in: tabGroup)
         if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
     }

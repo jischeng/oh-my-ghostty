@@ -319,3 +319,9 @@ only calls it at the existing visibility boundary. OpenGL is unchanged.
 Synchronous layer-display requests also honor terminal visibility. Background
 layout invalidations must not recreate the spare GPU frames after an occlusion
 trim; the last presented image remains available until visibility resumes.
+
+Vertical-tab mouse actions resolve the clicked controller's live AppKit window
+and native tab group. Deferred sidebar controller arrays are presentation data,
+not a gate for accepting a click. Selection explicitly orders the target window
+front, matching keyboard tab selection even when key status or group projection
+has not yet settled.

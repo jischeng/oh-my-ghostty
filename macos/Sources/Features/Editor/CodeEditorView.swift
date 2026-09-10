@@ -384,6 +384,7 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
     let highlightProviders: [HighlightProviding] = [EditorSyntaxHighlightProvider(), MarkdownHighlightProvider()]
     private weak var controller: TextViewController?
     private var diffOverlay: EditorDiffLineOverlay?
+    private var layoutDelegate: EditorLayoutDelegate?
     private var diffLines: [Int: Bool] = [:]
     private weak var completionState: CompletionState?
     private var completionTask: Task<Void, Never>?
@@ -477,6 +478,8 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
 
     func prepareCoordinator(controller: TextViewController) {
         self.controller = controller
+        layoutDelegate = EditorLayoutDelegate(textView: controller.textView)
+        controller.textView.layoutManager.delegate = layoutDelegate
         setDiffLines(diffLines)
         if let scrollView = controller.textView.enclosingScrollView {
             scrollView.automaticallyAdjustsContentInsets = false

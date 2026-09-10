@@ -717,13 +717,15 @@ struct RightInspectorHost: View {
         Group {
             if let paneID = selectedPaneID,
                let content = registry.content(for: paneID, context: context) {
-                InspectorPaneContentView(
-                    content: content,
-                    paneID: paneID,
-                    context: context,
-                    dividerColor: controller.sidebarDividerColor,
-                    registry: registry
-                )
+                InspectorPaneDeck(paneID: paneID, tabID: context.tabID,
+                    availableIDs: Set(registry.entries.map(\.id)),
+                    content: AnyView(InspectorPaneContentView(
+                        content: content,
+                        paneID: paneID,
+                        context: context,
+                        dividerColor: controller.sidebarDividerColor,
+                        registry: registry
+                    )))
             }
         }
         .background(backgroundColor.opacity(backgroundOpacity))
@@ -769,12 +771,12 @@ struct RightInspectorHost: View {
     }
 }
 
-private struct InspectorPaneContentView: View {
+struct InspectorPaneContentView: View {
     let content: InspectorPaneContent
     let paneID: String
     let context: InspectorPaneContext
     let dividerColor: Color
-    @ObservedObject var registry: InspectorRegistry
+    let registry: InspectorRegistry
 
     var body: some View {
         switch content {

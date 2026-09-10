@@ -954,7 +954,21 @@ configuration, including restored agent commands, before shell directory reports
 arrive. Inspector providers consume this shared context rather than waiting for
 the agent to exit. Subsequent shell reports remain authoritative.
 
+The trailing Inspector retains visited native pane views within the current tab,
+so Files/Agent History/Git/Info switches hide and reveal existing views rather
+than rebuilding large trees. Only the selected pane receives provider lifecycle;
+hidden views cannot receive input or automatically paginate. Cache entries are
+removed when their pane is unregistered or the owning tab changes. This cache
+does not own or rebuild terminal surfaces or PTYs.
+
+Native editors defer layout-manager geometry callbacks until the active layout
+pass finishes. Resizing or revealing a sidebar must not synchronously re-enter
+line layout through scroll-position compensation; word wrapping and stored text
+remain unchanged.
+
 Git sidebar tab switches retain the native History table and its scroll position.
+Re-entering a ready Git pane uses its cached snapshot; normal polling refreshes
+it without launching and cancelling full SSH reads on every pane switch.
 They display the current snapshot immediately; normal polling refreshes branch and
 worktree information. Hidden History views do not automatically paginate. Unchanged
 content is not republished, and background snapshot checks do not show a loading
@@ -983,9 +997,9 @@ select and navigate; blank-space clicks and Escape clear selection. Space toggle
 the selected files only when the table owns keyboard focus; search and commit
 editors retain ordinary text entry.
 
-A selected checkbox operates on the complete selection. The master checkbox
-covers all changed files, including collapsed folders; folder checkboxes aggregate
-all descendants across both index sides. All-staged batches unstage; every other
+A selected checkbox operates on the complete selection. Changes starts with its
+Staged and Unstaged sections, without a duplicate master-checkbox heading.
+Folder checkboxes aggregate all descendants across both index sides. All-staged batches unstage; every other
 batch stages. Chevron, checkbox and name hit targets remain separate. Bulk writes
 use one NUL-delimited stdin pathspec command and one complete status refresh,
 then reconcile affected rows, remap selection across index sides and preserve
@@ -1023,6 +1037,10 @@ has created its scroll view. Scroll and resize invalidations are coalesced until
 lazy wrapped-line layout settles, then highlights are redrawn from the current
 visible source lines. This applies equally to local/SSH and inline/side-by-side
 snapshots; patch parsing and line identities remain transport-independent.
+
+History pagination is the last row of the scrollable native table, including its
+loading indicator. Appending commits moves that row to the new document end
+while retaining the viewport anchor; it is never a permanently pinned footer.
 
 Git UI text comes from `GitStrings.json` through `GitL10n`, following the existing
 application language preference (system, English or Simplified Chinese). Language

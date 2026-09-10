@@ -99,10 +99,7 @@ struct GitBatchInteractionTests {
         folder.checkbox.performClick(nil)
         #expect(coordinator.rows[try index(folderID)].expanded == expanded)
         if case .setFilesStaged(let files, let stage) = actions.last { #expect(stage && Set(files.map(\.path)) == ["src/a.cpp", "src/b.cpp"]) } else { Issue.record("Folder checkbox should batch its descendants") }
-        let all = try #require(table.view(atColumn: 0, row: index("changes/master"), makeIfNecessary: true) as? GitCollectionCell)
-        #expect(all.checkbox.state == .mixed)
-        all.checkbox.performClick(nil)
-        if case .setFilesStaged(let files, let stage) = actions.last { #expect(stage && files.count == 5) } else { Issue.record("All-files checkbox must include collapsed files") }
+        #expect(!coordinator.rows.contains { $0.id == "changes/master" })
     }
 
     @Test func hoverHasOneOwnerAcrossScrollingRecyclingAndModelUpdates() async throws {

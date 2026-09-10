@@ -179,6 +179,8 @@ struct GitHistoryInteractionTests {
         let scroll = try #require(table.enclosingScrollView)
         let coordinator = try #require(table.target as? GitHistoryTable.Coordinator)
         #expect(requested == 0)
+        #expect(table.numberOfRows == 101)
+        #expect(table.rect(ofRow: 100).minY > table.visibleRect.maxY)
         scroll.contentView.scroll(to: NSPoint(x: 0, y: table.bounds.height - scroll.contentSize.height))
         scroll.reflectScrolledClipView(scroll.contentView)
         coordinator.requestMoreIfNeeded()
@@ -193,6 +195,21 @@ struct GitHistoryInteractionTests {
         coordinator.update(root)
         coordinator.requestMoreIfNeeded()
         #expect(requested == 1)
+        root.automaticLoadingAllowed = true
+        root = GitHistoryTable(commits: (0..<200).map { commit(String($0)) }, selectedCommitID: nil,
+            hasMore: true, onSelect: { _ in }, onOpen: { _ in }, onShowInTerminal: { _ in }, onLoadMore: { requested += 1 })
+        coordinator.update(root)
+        coordinator.requestMoreIfNeeded()
+        #expect(table.numberOfRows == 201)
+        #expect(table.rect(ofRow: 200).minY > table.visibleRect.maxY)
+        #expect(requested == 1, "Appending a page must move pagination below the new rows")
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: table.bounds.height - scroll.contentSize.height))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        coordinator.requestMoreIfNeeded()
+        #expect(requested == 2)
+        root.hasMore = false
+        coordinator.update(root)
+        #expect(table.numberOfRows == 200)
     }
 
     @Test func diffErrorViewStillSupportsHideAndClose() async throws {

@@ -81,7 +81,17 @@ final class BuiltInGitInspectorProvider {
 
     private func handle(_ event: InspectorPaneLifecycleEvent) {
         switch event {
-        case .appeared(let context): presentedContexts[context.tabID] = context; load(context: context); ensurePollingTimer()
+        case .appeared(let context):
+            let returning = presentedContexts[context.tabID] == nil
+            presentedContexts[context.tabID] = context
+            let cached = lastPublishedContent[context.tabID]
+            let canReuse = returning && cached?.repository?.matches(context.session) == true &&
+                resolvedDirectories[context.tabID] == context.workingDirectory &&
+                cached?.isLoading == false && cached?.history.isLoading == false
+            // Re-enter with the ready snapshot. Normal polling refreshes it;
+            // rapid pane switches must not launch/cancel full SSH queries.
+            if !canReuse { load(context: context) }
+            ensurePollingTimer()
         case .disappeared(let context): cancelTask(tabID: context.tabID); presentedContexts.removeValue(forKey: context.tabID); if presentedContexts.isEmpty { stopPollingTimer() }
         }
     }

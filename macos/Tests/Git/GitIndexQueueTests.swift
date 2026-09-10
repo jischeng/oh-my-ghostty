@@ -71,6 +71,19 @@ struct GitIndexQueueTests {
         #expect(await probe.commands.filter { $0.contains("status") }.count == 1)
     }
 
+    @Test func revisitingReadyGitPaneUsesSnapshotWithoutStartingAnotherQuery() async throws {
+        let probe = IndexExecutionProbe()
+        let fixture = try await Fixture(files: ["file.txt"], probe: probe)
+        defer { fixture.close() }
+        fixture.send(.updateCommitDraft("retained draft"))
+        fixture.registry.presentationDidChange(to: nil, context: fixture.context)
+        await probe.clear()
+        fixture.registry.presentationDidChange(to: BuiltInGitInspectorProvider.paneID, context: fixture.context)
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(await probe.commands.isEmpty)
+        #expect(fixture.content.commitDraft == "retained draft")
+    }
+
     @Test func batchTimeoutClearsPendingAndAllowsTheNextOperation() async throws {
         let probe = IndexExecutionProbe()
         let fixture = try await Fixture(files: ["dir/a", "dir/b"], probe: probe)

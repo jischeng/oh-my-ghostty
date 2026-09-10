@@ -266,16 +266,8 @@ struct InspectorGitView: View {
             if let message = content.history.statusMessage, !content.history.commits.isEmpty {
                 Text(message).font(.caption).foregroundStyle(.red).padding(.horizontal, 12)
             }
-            if content.history.isLoading {
-                ProgressView()
-                    .controlSize(.small)
-                    .padding(.vertical, 4)
-            } else if content.history.hasMore {
-                Button(GitL10n.text("Load more history")) {
-                    perform(.gitAction(.loadMoreHistory))
-                }
-                .buttonStyle(.link)
-                .padding(.bottom, 5)
+            if content.history.isLoading && content.history.commits.isEmpty {
+                ProgressView().controlSize(.small).padding(.vertical, 4)
             }
         }
     }

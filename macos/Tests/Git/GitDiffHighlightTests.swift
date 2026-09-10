@@ -6,6 +6,32 @@ import Testing
 
 @MainActor
 struct GitDiffHighlightTests {
+    @Test func sidebarWidthChangesKeepWrappedEditorAlive() async throws {
+        let text = (0..<420).map { "\($0) 每行还包含 `trip_completed`、`trip_end_time_us`、`trip_end_time_cn`。" }.joined(separator: "\n")
+        let host = NSHostingView(rootView: CodeEditorView(text: .constant(text), fileURL: URL(fileURLWithPath: "/file.md"),
+            diffLines: [324: true, 325: true], isEditable: false, isActive: true, terminalTheme: .oneDark))
+        host.sizingOptions = []
+        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 780, height: 650), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = host; window.makeKeyAndOrderFront(nil)
+        defer { window.contentView = nil; window.close() }
+        func find(_ view: NSView) -> TextView? { (view as? TextView) ?? view.subviews.lazy.compactMap(find).first }
+        try await Task.sleep(for: .milliseconds(150))
+        let editor = try #require(find(host))
+        #expect(editor.layoutManager.delegate is EditorLayoutDelegate)
+        let clip = try #require(editor.enclosingScrollView?.contentView)
+        for _ in 0..<3 {
+            for width: CGFloat in [315.5, 780, 360, 780] {
+                window.setContentSize(.init(width: width, height: 650))
+                let line = try #require(editor.layoutManager.textLineForIndex(320))
+                clip.scroll(to: .init(x: 0, y: line.yPos))
+                editor.enclosingScrollView?.reflectScrolledClipView(clip)
+                try await Task.sleep(for: .milliseconds(40))
+                #expect(editor.string == text)
+                #expect(find(host) === editor)
+            }
+        }
+    }
+
     @Test(arguments: [false, true]) func changedLinesRemainHighlightedAfterScrolling(realCase: Bool) async throws {
         let lines = (0..<420).map { "\($0) Each record contains trip_completed, trip_end_time_us and trip_end_time_cn, with additional metadata for wrapping." }
         var text = lines.joined(separator: "\n")

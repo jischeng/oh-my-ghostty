@@ -116,7 +116,8 @@ struct GitHistoryTable: NSViewRepresentable {
         func update(_ new: GitHistoryTable, change: LocalChange? = nil) {
             let commitsChanged = content?.commits != new.commits
             let languageChanged = content?.languageCode != new.languageCode
-            let changed = commitsChanged || content?.expandedCommits != new.expandedCommits ||
+            let footerChanged = content?.hasMore != new.hasMore
+            let changed = footerChanged || commitsChanged || content?.expandedCommits != new.expandedCommits ||
                 content?.headCommitID != new.headCommitID || change != nil || languageChanged
             if commitsChanged { requestedCount = nil }
             let previous = content
@@ -157,7 +158,7 @@ struct GitHistoryTable: NSViewRepresentable {
                     }
                 }
                 measureRows()
-                if commitsChanged || languageChanged {
+                if commitsChanged || languageChanged || footerChanged {
                     table.reloadData()
                 } else {
                     updateVisibleRows(previous: previous, oldRows: oldRows, oldHeights: oldHeights, change: change)
@@ -168,6 +169,9 @@ struct GitHistoryTable: NSViewRepresentable {
                     clip.scroll(to: NSPoint(x: 0, y: max(0, table.rect(ofRow: index).minY + min(offset, max(0, table.rect(ofRow: index).height - 1)))))
                     table.enclosingScrollView?.reflectScrolledClipView(clip)
                 }
+            }
+            if !changed, new.hasMore, previous?.isLoading != new.isLoading {
+                table.reloadData(forRowIndexes: IndexSet(integer: rows.count), columnIndexes: IndexSet(integer: 0))
             }
             if let selected = new.selectedCommitID {
                 let selectedRow = table.selectedRow
@@ -258,23 +262,32 @@ struct GitHistoryTable: NSViewRepresentable {
         func requestMoreIfNeeded() {
             guard !updating, let content, let table = tableView,
                   content.hasMore, !content.isLoading, content.automaticLoadingAllowed,
-                  !content.commits.isEmpty, table.visibleRect.height > 0 else { return }
-            guard table.visibleRect.maxY >= table.bounds.height - 100 else { requestedCount = nil; return }
+                  !content.commits.isEmpty, !table.isHiddenOrHasHiddenAncestor, table.visibleRect.height > 0 else { return }
+            guard table.visibleRect.maxY >= table.bounds.height - 32 else { requestedCount = nil; return }
             guard requestedCount != content.commits.count else { return }
             requestedCount = content.commits.count
             content.onLoadMore()
         }
 
-        func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+        func numberOfRows(in tableView: NSTableView) -> Int { rows.count + (content?.hasMore == true ? 1 : 0) }
+        func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { rows.indices.contains(row) }
         func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
             let view = GitCollectionRowView()
             view.colors = content?.colors ?? .init()
+            view.showsHighlight = rows.indices.contains(row)
             if let table = tableView as? GitHoverTableView { view.isPointerHovered = table.hoveredRowID == table.rowIdentity(row) }
             return view
         }
-        func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat { heights[safe: row] ?? 40 }
+        func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat { row == rows.count ? 32 : heights[safe: row] ?? 40 }
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-            guard let content, rows.indices.contains(row) else { return nil }
+            guard let content else { return nil }
+            if row == rows.count, content.hasMore {
+                let cell = (tableView.makeView(withIdentifier: .init("git-pagination"), owner: nil) as? GitHistoryPaginationCell) ?? GitHistoryPaginationCell()
+                cell.identifier = .init("git-pagination")
+                cell.configure(loading: content.isLoading, action: content.onLoadMore)
+                return cell
+            }
+            guard rows.indices.contains(row) else { return nil }
             let item = rows[row]
             let commit = content.commits[item.commitIndex]
             let graph = graphRows[item.commitIndex]
@@ -427,4 +440,34 @@ struct GitHistoryTable: NSViewRepresentable {
 
 private final class GitHistoryContextMenu: InspectorCopyMenu {
     var commitID: GitCommitID?
+}
+
+/// Pagination participates in the scrollable document, never the pinned chrome.
+final class GitHistoryPaginationCell: NSTableCellView {
+    private let button = NSButton()
+    private let progress = NSProgressIndicator()
+    private var action: () -> Void = {}
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        button.isBordered = false
+        button.font = .systemFont(ofSize: 11)
+        button.target = self; button.action = #selector(loadMore)
+        progress.style = .spinning; progress.controlSize = .small
+        progress.isDisplayedWhenStopped = false
+        addSubview(button); addSubview(progress)
+        setAccessibilityIdentifier("git-history-pagination")
+    }
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    func configure(loading: Bool, action: @escaping () -> Void) {
+        self.action = action
+        button.title = GitL10n.text("Load more history")
+        button.isEnabled = !loading
+        if loading { progress.startAnimation(nil) } else { progress.stopAnimation(nil) }
+    }
+    override func layout() {
+        super.layout()
+        button.frame = bounds.insetBy(dx: 10, dy: 2)
+        progress.frame = .init(x: 10, y: bounds.midY - 6, width: 12, height: 12)
+    }
+    @objc private func loadMore() { action() }
 }

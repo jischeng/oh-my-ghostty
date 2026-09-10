@@ -102,12 +102,8 @@ enum GitCollectionBuilder {
         case .decorations(let refs): return referenceNodes(refs, mode: mode, query: query)
         case .changes(let staged, let unstaged, let stagedError, let unstagedError):
             let entries = GitStageBatch.entries(staged: staged, unstaged: unstaged)
-            let all = GitStageBatch(entries: entries)
             let folders = GitStageBatch.folders(entries)
             let writable = canWrite && stagedError == nil && unstagedError == nil
-            let allToggle = GitCollectionNode(.init(id: "changes/master", title: GitL10n.text("Changes"), kind: .category(all.files.count),
-                enabled: writable && !all.isEmpty && all.paths.isDisjoint(with: pending),
-                pending: !all.paths.isDisjoint(with: pending), stageBatch: all))
             let sections = [(GitChangeSection.staged, staged, stagedError), (.unstaged, unstaged, unstagedError)].map { section, files, error in
                 let key = "changes/" + section.rawValue
                 let entries = files.filter { matches(query, text: $0.displayPath) }.map { file in
@@ -136,7 +132,7 @@ enum GitCollectionBuilder {
                 return category(key, title: section.title, count: files.count, children: children, error: error,
                                 empty: query.isEmpty ? GitL10n.text("No changes") : GitL10n.text("No matching files"))
             }
-            return [allToggle] + sections
+            return sections
         case .refs(let branches, let worktrees, let scopes, let branchesError, let worktreesError):
             let occupied = Dictionary(grouping: worktrees.compactMap { tree in tree.branchRef.map { ($0, tree.path) } }, by: { $0.0 })
             var roots = scopes && query.isEmpty ? GitHistoryScope.allCases.map { scope in

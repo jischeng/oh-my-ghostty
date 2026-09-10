@@ -960,6 +960,12 @@ worktree information. Hidden History views do not automatically paginate. Unchan
 content is not republished, and background snapshot checks do not show a loading
 indicator when history is already available.
 
+Changes uses one lazy list of section headers and file rows. It instantiates only
+rows near the viewport, including for large SSH worktrees; it must not build one
+native checkbox per changed path when switching tabs. The composer stays outside
+that scroll view. The retained History scope menu updates only when its inputs
+change and never repeatedly assigns an unchanged title during layout.
+
 Working-tree refresh reads staged and unstaged paths together with one NUL-delimited
 porcelain status command, falling back to independent reads on failure so one
 unreadable side does not disable the other. Rename origins, conflicts, untracked paths and partially
@@ -1140,7 +1146,8 @@ tasks. Git's refusal to overwrite dirty files, non-fast-forward rejection,
 hooks, signing and authentication errors are shown in a dismissible pane banner;
 no forced checkout/push, stash, reset, hook bypass or terminal injection is performed.
 Unstaging before the first commit removes only the selected index entries with
-`git rm --cached --force`, preserving working files even if edited after staging.
+path-only `git reset --quiet -- <paths>`, preserving working files even if edited
+after staging.
 Switch/create and cherry-pick/revert also refuse unsaved editor buffers in that worktree.
 Index-only success refreshes changes locally; other mutations refresh status,
 changes, refs and history. Failed commits retain the

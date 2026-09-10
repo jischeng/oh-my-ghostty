@@ -286,8 +286,17 @@ struct GitInspectorUsabilityTests {
         let control = try #require(find(GitHistoryScopePicker.Control.self, in: view).first)
         let menu = try #require(control.menu)
         let index = try #require(menu.items.firstIndex { $0.toolTip == name })
+        let branchItem = menu.items[index]
+        for _ in 0..<100 {
+            control.configure(title: name, branches: [branch], enabled: true)
+            control.layoutSubtreeIfNeeded()
+        }
+        #expect(menu.items[index] === branchItem, "Unchanged updates must preserve the menu and avoid layout invalidation")
         menu.performActionForItem(at: index)
         #expect(actions == [.browseBranch(branch.id)])
         #expect(control.bounds.width <= 220)
+        control.configure(title: "All branches", branches: [branch], enabled: false)
+        #expect(control.menu?.items.first { $0.toolTip == name }?.isEnabled == false)
+        #expect(control.fullTitle == "All branches")
     }
 }

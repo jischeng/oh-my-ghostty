@@ -5,6 +5,31 @@ import Testing
 
 @MainActor
 struct GitSidebarV1Tests {
+    @Test func largeRemoteChangesCreateOnlyVisibleControls() async throws {
+        let connection = try GitSSHConnection(destination: "test-host")
+        let repo = GitRepositoryIdentity(target: .ssh(connection), worktreePath: "/remote/repo",
+                                         gitDirPath: "/remote/repo/.git", commonGitDirPath: "/remote/repo/.git")
+        let status = GitRepositoryStatusKind.ready(repository: repo, branch: "main", headCommitID: nil)
+        var content = InspectorGitContent(repository: repo, branch: "main", status: status)
+        let files = (0..<1600).map { GitDiffFile(path: "research/output/experiment-\($0)/results/long-file-name-\($0).json", status: "A", isUntracked: true) }
+        content.workingTree.unstaged = files
+        let host = NSHostingView(rootView: InspectorGitView(content: content, perform: { _ in }))
+        host.sizingOptions = []
+        let win = window(host)
+        defer { win.contentView = nil; win.close() }
+        try await Task.sleep(for: .milliseconds(100))
+        var changes = InspectorGitContent(repository: repo, branch: "main", status: status, activeTab: .changes)
+        changes.workingTree = content.workingTree
+        let start = Date()
+        host.rootView = InspectorGitView(content: changes, perform: { _ in })
+        host.layoutSubtreeIfNeeded()
+        let elapsed = Date().timeIntervalSince(start) * 1000
+        try await Task.sleep(for: .milliseconds(100))
+        let buttons = find(NSButton.self, in: host)
+        print("Changes UI benchmark (1600 remote files): first layout=\(elapsed)ms, native buttons=\(buttons.count)")
+        #expect(buttons.count < 100, "Offscreen file checkboxes must not be instantiated")
+    }
+
     @Test func sidebarTabSwitchesKeepHistoryTableAndScrollPosition() async throws {
         let repo = GitRepositoryIdentity(worktreePath: "/repo", gitDirPath: "/repo/.git", commonGitDirPath: "/repo/.git")
         let commits = (0..<100).map { GitHistoryCommit(id: .init("commit-\($0)"), parentIDs: [], authorName: "A", authorEmail: "", authoredAt: .distantPast, subject: "Commit \($0)") }
@@ -63,12 +88,20 @@ struct GitSidebarV1Tests {
         let editor = try #require(find(InspectorCopyableTextView.self, in: host).first)
         let composer = try #require(editor.enclosingScrollView)
         let files = try #require(find(NSScrollView.self, in: host).first { $0 !== composer && ($0.documentView?.bounds.height ?? 0) > 600 })
-        files.contentView.scroll(to: NSPoint(x: 0, y: 160))
-        files.reflectScrolledClipView(files.contentView)
+        let wheel = try #require(CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
+            wheelCount: 1, wheel1: -160, wheel2: 0, wheel3: 0).flatMap(NSEvent.init(cgEvent:)))
+        files.scrollWheel(with: wheel)
+        try await Task.sleep(for: .milliseconds(80))
+        #expect(files.contentView.bounds.origin.y > 0, "The file list must settle at the scrolled position")
         win.makeFirstResponder(editor)
         editor.setSelectedRange(NSRange(location: 2, length: 5))
         let originalY = composer.convert(composer.bounds, to: host).minY
         let offset = files.contentView.bounds.origin
+        let anchor = try #require(find(NSButton.self, in: files).first { button in
+            let frame = button.convert(button.bounds, to: files.contentView)
+            return files.contentView.bounds.contains(frame)
+        })
+        let anchorY = anchor.convert(anchor.bounds, to: host).minY
         for busy in [true, false] {
             content.isUpdatingIndex = busy
             content.operation = busy ? "Staging files…" : nil
@@ -80,7 +113,11 @@ struct GitSidebarV1Tests {
             #expect(win.firstResponder === editor)
             #expect(editor.string == "A draft message" && editor.selectedRange() == NSRange(location: 2, length: 5))
             #expect(abs(composer.convert(composer.bounds, to: host).minY - originalY) <= 0.5)
-            #expect(files.contentView.bounds.origin == offset)
+            if busy { #expect(files.contentView.bounds.origin == offset) }
+            // Moving a row between sections changes the content above the
+            // viewport. Preserve the visible file, not an obsolete pixel offset.
+            #expect(find(NSButton.self, in: files).contains { $0 === anchor })
+            #expect(abs(anchor.convert(anchor.bounds, to: host).minY - anchorY) <= 0.5)
         }
         for appearance in [NSAppearance.Name.darkAqua, .aqua] {
             win.appearance = NSAppearance(named: appearance)

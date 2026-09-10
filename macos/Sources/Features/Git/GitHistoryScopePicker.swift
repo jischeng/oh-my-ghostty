@@ -10,9 +10,46 @@ struct GitHistoryScopePicker: NSViewRepresentable {
     final class Control: NSPopUpButton {
         var fullTitle = ""
         var perform: (InspectorGitAction) -> Void = { _ in }
+        private var branches: [GitBranchInfo] = []
+        private var branchesEnabled = true
         override func layout() {
             super.layout()
-            item(at: 0)?.title = GitHistoryScopePicker.compact(fullTitle, width: max(40, bounds.width - 28), font: font ?? .systemFont(ofSize: 11))
+            updateTitle()
+        }
+        private func updateTitle() {
+            let displayed = GitHistoryScopePicker.compact(fullTitle, width: max(40, bounds.width - 28), font: font ?? .systemFont(ofSize: 11))
+            if item(at: 0)?.title != displayed { item(at: 0)?.title = displayed }
+        }
+        func configure(title: String, branches: [GitBranchInfo], enabled: Bool) {
+            fullTitle = title
+            if toolTip != title { toolTip = title }
+            // SwiftUI can update a retained, hidden History view on every
+            // Changes interaction. Rebuilding the popup invalidates layout.
+            if numberOfItems == 0 || self.branches != branches || branchesEnabled != enabled {
+                self.branches = branches
+                branchesEnabled = enabled
+                removeAllItems()
+                addItem(withTitle: "")
+                menu?.autoenablesItems = false
+                for scope in GitHistoryScope.allCases {
+                    let item = NSMenuItem(title: scope.displayName, action: #selector(choose(_:)), keyEquivalent: "")
+                    item.target = self
+                    item.representedObject = InspectorGitAction.selectHistoryScope(scope)
+                    menu?.addItem(item)
+                }
+                menu?.addItem(.separator())
+                for branch in branches {
+                    let item = NSMenuItem(title: GitHistoryScopePicker.compact(branch.name), action: #selector(choose(_:)), keyEquivalent: "")
+                    item.target = self
+                    item.toolTip = branch.name
+                    item.image = NSImage(systemSymbolName: branch.isRemote ? "network" : "arrow.triangle.branch", accessibilityDescription: nil)
+                    item.representedObject = InspectorGitAction.browseBranch(branch.id)
+                    item.isEnabled = enabled
+                    menu?.addItem(item)
+                }
+                selectItem(at: 0)
+            }
+            updateTitle()
         }
         @objc func choose(_ sender: Any?) {
             guard let action = ((sender as? NSMenuItem)?.representedObject ?? selectedItem?.representedObject) as? InspectorGitAction else { return }
@@ -29,30 +66,8 @@ struct GitHistoryScopePicker: NSViewRepresentable {
         return view
     }
     func updateNSView(_ view: Control, context: Context) {
-        view.fullTitle = title
         view.perform = perform
-        view.toolTip = title
-        view.removeAllItems()
-        view.addItem(withTitle: Self.compact(title))
-        view.menu?.autoenablesItems = false
-        for scope in GitHistoryScope.allCases {
-            let item = NSMenuItem(title: scope.displayName, action: #selector(Control.choose(_:)), keyEquivalent: "")
-            item.target = view
-            item.representedObject = InspectorGitAction.selectHistoryScope(scope)
-            view.menu?.addItem(item)
-        }
-        view.menu?.addItem(.separator())
-        for branch in branches {
-            let item = NSMenuItem(title: Self.compact(branch.name), action: #selector(Control.choose(_:)), keyEquivalent: "")
-            item.target = view
-            item.toolTip = branch.name
-            item.image = NSImage(systemSymbolName: branch.isRemote ? "network" : "arrow.triangle.branch", accessibilityDescription: nil)
-            item.representedObject = InspectorGitAction.browseBranch(branch.id)
-            item.isEnabled = enabled
-            view.menu?.addItem(item)
-        }
-        view.selectItem(at: 0)
-        view.needsLayout = true
+        view.configure(title: title, branches: branches, enabled: enabled)
     }
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: Control, context: Context) -> CGSize? {
         CGSize(width: proposal.width ?? 0, height: 24)

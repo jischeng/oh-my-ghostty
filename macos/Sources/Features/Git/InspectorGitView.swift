@@ -183,7 +183,7 @@ struct InspectorGitView: View {
         case .changes:
             VStack(spacing: 0) {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
+                    LazyVStack(alignment: .leading, spacing: 8) {
                         changeSection("Staged", files: content.workingTree.staged, target: .staged, error: content.workingTree.stagedError)
                         changeSection("Unstaged / Untracked", files: content.workingTree.unstaged, target: .unstaged, error: content.workingTree.unstagedError)
                     }
@@ -222,8 +222,7 @@ struct InspectorGitView: View {
     }
 
     private func changeSection(_ title: String, files: [GitDiffFile], target: GitDiffTarget, error: String?) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("\(title) (\(files.count))").font(.caption).foregroundStyle(.secondary)
+        Section {
             if let error { Text(error).font(.caption).foregroundStyle(.red) }
             ForEach(files) { file in
                 HStack(alignment: .top, spacing: 5) {
@@ -244,6 +243,10 @@ struct InspectorGitView: View {
                 }
             }
             if files.isEmpty && error == nil { Text("No changes").font(.caption).foregroundStyle(.secondary) }
+        } header: {
+            Text("\(title) (\(files.count))").font(.caption).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 4)
         }
     }
 

@@ -101,6 +101,7 @@ enum InspectorGitAction: Equatable, Sendable {
     case sendHistoryToTerminal(GitCommitID?)
     case openDiff(GitDiffFile, GitDiffTarget)
     case browseBranch(String)
+    case browseWorktree(String)
     case branchOperation(GitBranchOperation, String)
     case commitOperation(GitCommitOperation, GitCommitID)
     case createWorktree(String?)
@@ -129,6 +130,7 @@ struct InspectorGitContent: Equatable, Sendable {
     var commitDraft = ""
     var operation: String?
     var isUpdatingIndex = false
+    var pendingIndexPaths: Set<String> = []
     var operationError: String?
     var connectionLabel: String?
     let isLoading: Bool

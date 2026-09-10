@@ -135,13 +135,13 @@ struct GitInspectorLayoutTests {
         defer { window.contentView = nil; window.close() }
         try await Task.sleep(for: .milliseconds(150))
         view.layoutSubtreeIfNeeded()
-        let tree = try #require(descendant(NSOutlineView.self, in: view))
-        let coordinator = try #require(tree.target as? GitBranchTree.Coordinator)
+        let tree = try #require(descendant(GitCollectionTableView.self, in: view))
+        let coordinator = try #require(tree.target as? GitCollectionView.Coordinator)
         let menu = try #require(tree.menu)
         for worktree in worktrees {
-            let row = try #require((0..<tree.numberOfRows).first { (tree.item(atRow: $0) as? GitBranchNode)?.worktree?.path == worktree.path })
+            let row = try #require(coordinator.rows.firstIndex { $0.id == "worktree:" + worktree.path })
             tree.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-            coordinator.openHistory()
+            coordinator.activateSelected()
             #expect(actions.last == .gitAction(.openWorktree(worktree.path)))
             coordinator.menuNeedsUpdate(menu)
             #expect(menu.items.map(\.title) == ["Open in New Tab", "Copy Worktree Path", "Remove Worktree…"])
@@ -161,7 +161,7 @@ struct GitInspectorLayoutTests {
         let branch = GitBranchInfo(name: "main", commit: GitCommitID("abc"), isCurrent: true,
                                    isRemote: false, upstream: "origin/main", tracking: "")
         var actions: [InspectorGitAction] = []
-        let view = NSHostingView(rootView: GitBranchTree(branches: [branch], isBusy: false) { actions.append($0) }
+        let view = NSHostingView(rootView: GitRefBrowser(branches: [branch], isBusy: false) { actions.append($0) }
             .frame(width: 240, height: 260))
         view.sizingOptions = []
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 240, height: 260),
@@ -171,11 +171,11 @@ struct GitInspectorLayoutTests {
         window.orderFront(nil)
         defer { window.contentView = nil; window.close() }
         try await Task.sleep(for: .milliseconds(150))
-        let tree = try #require(descendant(NSOutlineView.self, in: view))
+        let tree = try #require(descendant(GitCollectionTableView.self, in: view))
         tree.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
         #expect(actions.isEmpty)
-        let coordinator = try #require(tree.target as? GitBranchTree.Coordinator)
-        coordinator.openHistory()
+        let coordinator = try #require(tree.target as? GitCollectionView.Coordinator)
+        coordinator.activateSelected()
         #expect(actions == [.browseBranch(branch.id)])
         let menu = try #require(tree.menu)
         coordinator.menuNeedsUpdate(menu)
@@ -183,13 +183,8 @@ struct GitInspectorLayoutTests {
         #expect(menu.items.contains { $0.title == "Push…" })
         #expect(menu.items.contains { $0.title == "Set Upstream…" })
         #expect(menu.items.first(where: { $0.title == "Switch Branch" })?.isEnabled == false)
-        tree.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-        let folder = try #require(tree.item(atRow: 0))
-        #expect(tree.isItemExpanded(folder))
-        coordinator.openHistory()
-        #expect(!tree.isItemExpanded(folder))
-        coordinator.openHistory()
-        #expect(tree.isItemExpanded(folder))
+        #expect(coordinator.rows[0].item.isCategory)
+        #expect(!coordinator.rows[0].item.isSelectable)
         #expect(actions == [.browseBranch(branch.id)])
     }
 

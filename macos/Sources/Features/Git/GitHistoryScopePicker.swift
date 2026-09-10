@@ -5,86 +5,73 @@ struct GitHistoryScopePicker: NSViewRepresentable {
     let title: String
     let branches: [GitBranchInfo]
     let enabled: Bool
+    var isBusy = false
+    var worktrees: [GitWorktreeInfo] = []
+    var worktreesError: String?
+    var state: GitCollectionState?
+    var stateKey = "history-refs"
+    var selectedID: String?
     let perform: (InspectorGitAction) -> Void
+    @Environment(\.gitCollectionColors) private var colors
 
-    final class Control: NSPopUpButton {
-        var fullTitle = ""
-        var perform: (InspectorGitAction) -> Void = { _ in }
-        private var branches: [GitBranchInfo] = []
-        private var branchesEnabled = true
-        override func layout() {
-            super.layout()
-            updateTitle()
+    final class Control: NSButton {
+        private static let pickerSize = NSSize(width: 380, height: 380)
+        fileprivate var content: GitHistoryScopePicker?
+        private(set) var popover: NSPopover?
+        private var host: NSHostingController<AnyView>?
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            font = .systemFont(ofSize: 11)
+            alignment = .left
+            isBordered = false
+            imagePosition = .imageRight
+            cell?.lineBreakMode = .byTruncatingMiddle
+            image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: 8, weight: .medium))
+            target = self
+            action = #selector(showPicker)
+            setAccessibilityLabel("Choose history branch or worktree")
         }
-        private func updateTitle() {
-            let displayed = GitHistoryScopePicker.compact(fullTitle, width: max(40, bounds.width - 28), font: font ?? .systemFont(ofSize: 11))
-            if item(at: 0)?.title != displayed { item(at: 0)?.title = displayed }
+        @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+        func configure(_ content: GitHistoryScopePicker) {
+            self.content = content
+            if title != content.title { title = content.title }
+            toolTip = content.title
+            contentTintColor = content.colors.text
+            if popover?.isShown == true { host?.rootView = browser() }
         }
-        func configure(title: String, branches: [GitBranchInfo], enabled: Bool) {
-            fullTitle = title
-            if toolTip != title { toolTip = title }
-            // SwiftUI can update a retained, hidden History view on every
-            // Changes interaction. Rebuilding the popup invalidates layout.
-            if numberOfItems == 0 || self.branches != branches || branchesEnabled != enabled {
-                self.branches = branches
-                branchesEnabled = enabled
-                removeAllItems()
-                addItem(withTitle: "")
-                menu?.autoenablesItems = false
-                for scope in GitHistoryScope.allCases {
-                    let item = NSMenuItem(title: scope.displayName, action: #selector(choose(_:)), keyEquivalent: "")
-                    item.target = self
-                    item.representedObject = InspectorGitAction.selectHistoryScope(scope)
-                    menu?.addItem(item)
-                }
-                menu?.addItem(.separator())
-                for branch in branches {
-                    let item = NSMenuItem(title: GitHistoryScopePicker.compact(branch.name), action: #selector(choose(_:)), keyEquivalent: "")
-                    item.target = self
-                    item.toolTip = branch.name
-                    item.image = NSImage(systemSymbolName: branch.isRemote ? "network" : "arrow.triangle.branch", accessibilityDescription: nil)
-                    item.representedObject = InspectorGitAction.browseBranch(branch.id)
-                    item.isEnabled = enabled
-                    menu?.addItem(item)
-                }
-                selectItem(at: 0)
-            }
-            updateTitle()
+        private func browser() -> AnyView {
+            guard let content else { return AnyView(EmptyView()) }
+            return AnyView(GitRefBrowser(branches: content.branches, worktrees: content.worktrees, isBusy: content.isBusy,
+                branchesError: content.enabled ? nil : "Branch status unavailable", worktreesError: content.worktreesError,
+                isPicker: true, state: content.state, stateKey: content.stateKey, selectedID: content.selectedID,
+                close: { [weak self] in self?.popover?.performClose(nil) }, perform: content.perform)
+                .padding(.vertical, 10)
+                .frame(width: Self.pickerSize.width, height: Self.pickerSize.height)
+                .background(Color(content.colors.background))
+                .environment(\.gitCollectionColors, content.colors))
         }
-        @objc func choose(_ sender: Any?) {
-            guard let action = ((sender as? NSMenuItem)?.representedObject ?? selectedItem?.representedObject) as? InspectorGitAction else { return }
-            selectItem(at: 0)
-            perform(action)
+        @objc func showPicker() {
+            guard window != nil else { return }
+            if popover?.isShown == true { popover?.performClose(nil); return }
+            let host = NSHostingController(rootView: browser())
+            let popover = NSPopover()
+            popover.behavior = .transient
+            popover.animates = false
+            popover.contentViewController = host
+            popover.contentSize = Self.pickerSize
+            self.host = host
+            self.popover = popover
+            popover.show(relativeTo: bounds, of: self, preferredEdge: .minX)
+        }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window == nil { popover?.performClose(nil) }
         }
     }
-    func makeNSView(context: Context) -> Control {
-        let view = Control(frame: .zero, pullsDown: true)
-        view.font = .systemFont(ofSize: 11)
-        view.cell?.lineBreakMode = .byTruncatingMiddle
-        view.target = view
-        view.action = #selector(Control.choose(_:))
-        return view
-    }
-    func updateNSView(_ view: Control, context: Context) {
-        view.perform = perform
-        view.configure(title: title, branches: branches, enabled: enabled)
-    }
+    func makeNSView(context: Context) -> Control { Control() }
+    func updateNSView(_ view: Control, context: Context) { view.configure(self) }
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: Control, context: Context) -> CGSize? {
         CGSize(width: proposal.width ?? 0, height: 24)
-    }
-    static func compact(_ text: String, width: CGFloat = 220, font: NSFont = .menuFont(ofSize: 0)) -> String {
-        func fits(_ value: String) -> Bool { (value as NSString).size(withAttributes: [.font: font]).width <= width }
-        if fits(text) { return text }
-        let characters = Array(text)
-        var low = 0
-        var high = max(0, characters.count - 1)
-        var result = "…"
-        while low <= high {
-            let count = (low + high) / 2
-            let left = (count * 2 + 2) / 3
-            let candidate = String(characters.prefix(left)) + "…" + String(characters.suffix(count - left))
-            if fits(candidate) { result = candidate; low = count + 1 } else { high = count - 1 }
-        }
-        return result
     }
 }

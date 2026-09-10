@@ -15,6 +15,7 @@ final class BuiltInGitInspectorProvider {
     struct WorktreeUIState: Equatable, Sendable {
         var activeTab: InspectorGitContent.ActiveTab = .history
         var browsedBranch: String?
+        var browsedWorktree: String?
         var commitDraft: String = ""
         var operationError: String?
         var detailCache: [GitCommitID: GitCommitExpansion] = [:]
@@ -43,6 +44,12 @@ final class BuiltInGitInspectorProvider {
     private var mutationTasks: [String: Task<Void, Never>] = [:]
     private var operationTitles: [String: String] = [:]
     private var indexUpdates = Set<String>()
+    private struct IndexRequest {
+        let mutation: GitMutation
+        let context: InspectorPaneContext
+    }
+    private var indexQueues: [String: [IndexRequest]] = [:]
+    private var pendingIndexPaths: [String: Set<String>] = [:]
     private struct DetailKey: Hashable {
         let tabID: UUID
         let worktree: String
@@ -98,8 +105,9 @@ final class BuiltInGitInspectorProvider {
         case .selectHistoryScope(let scope):
             let key = currentWorktreeKey(for: action.context)
             var state = state(for: action.context.tabID, worktreeKey: key)
-            guard state.historyScope != scope || state.browsedBranch != nil else { return }
+            guard state.historyScope != scope || state.browsedBranch != nil || state.browsedWorktree != nil else { return }
             state.browsedBranch = nil
+            state.browsedWorktree = nil
             state.historyScope = scope; state.selectedCommitID = nil; state.history = InspectorGitHistoryContent(scope: scope, isLoading: true); save(state, tabID: action.context.tabID, worktreeKey: key)
             if let current = lastPublishedContent[action.context.tabID] { publish(makeContent(from: current, history: state.history), tabID: action.context.tabID) }
             loadHistory(context: action.context, force: true)
@@ -140,11 +148,25 @@ final class BuiltInGitInspectorProvider {
             var state = state(for: action.context.tabID, worktreeKey: key)
             state.activeTab = .history
             state.browsedBranch = name
+            state.browsedWorktree = nil
             state.selectedCommitID = nil
             state.history = InspectorGitHistoryContent(scope: state.historyScope)
             save(state, tabID: action.context.tabID, worktreeKey: key)
-            cancelHistoryTask(tabID: action.context.tabID)
-            load(context: action.context, force: true)
+            publish(makeContent(from: content, activeTab: .history, history: state.history), tabID: action.context.tabID)
+            loadHistory(context: action.context, force: true)
+        case .browseWorktree(let path):
+            guard let content = lastPublishedContent[action.context.tabID], let repository = content.repository,
+                  content.workingTree.worktreesError == nil,
+                  content.workingTree.worktrees.contains(where: { $0.path == path && !$0.isBare }) else { return }
+            var state = state(for: action.context.tabID, worktreeKey: repository.stateKey)
+            state.activeTab = .history
+            state.browsedBranch = nil
+            state.browsedWorktree = path
+            state.selectedCommitID = nil
+            state.history = InspectorGitHistoryContent(scope: state.historyScope)
+            save(state, tabID: action.context.tabID, worktreeKey: repository.stateKey)
+            publish(makeContent(from: content, activeTab: .history, history: state.history), tabID: action.context.tabID)
+            loadHistory(context: action.context, force: true)
         case .commitOperation(let operation, let commit):
             handleCommit(operation, id: commit, context: action.context)
         case .createWorktree, .openWorktree, .removeWorktree:
@@ -377,6 +399,17 @@ final class BuiltInGitInspectorProvider {
 
     private func captureSnapshot(repository: GitRepositoryIdentity, state: WorktreeUIState) async throws -> GitHistorySnapshot {
         let snapshot = try await historyService.captureSnapshot(for: repository, scope: state.historyScope)
+        if let path = state.browsedWorktree {
+            let trees = try await repositoryService.worktrees(for: repository)
+            guard let tree = trees.first(where: { $0.path == path && !$0.isBare }) else {
+                throw GitDiffServiceError.gitFailed("Worktree no longer exists: \(path)")
+            }
+            return GitHistorySnapshot(scope: snapshot.scope, branchName: snapshot.branchName,
+                headCommitID: tree.head, tipCommitIDs: tree.head.map { [$0] } ?? [],
+                decorationsByCommitID: snapshot.decorationsByCommitID,
+                browsedBranch: tree.branchRef == nil ? tree.head?.shortSHA ?? "No commits" : tree.branchName,
+                browsedWorktree: path)
+        }
         guard let branch = state.browsedBranch else { return snapshot }
         let branches = try await repositoryService.branches(for: repository)
         guard let tip = branches.first(where: { $0.id == branch }) else {
@@ -384,7 +417,7 @@ final class BuiltInGitInspectorProvider {
         }
         return GitHistorySnapshot(scope: snapshot.scope, branchName: snapshot.branchName,
                                   headCommitID: snapshot.headCommitID, tipCommitIDs: [tip.commit],
-                                  decorationsByCommitID: snapshot.decorationsByCommitID, browsedBranch: tip.name)
+                                  decorationsByCommitID: snapshot.decorationsByCommitID, browsedBranch: tip.name, browsedRef: tip.id)
     }
 
     private func ensurePollingTimer() {
@@ -434,6 +467,7 @@ final class BuiltInGitInspectorProvider {
             content.operationError = state.operationError
             content.operation = operationTitles[key]
             content.isUpdatingIndex = indexUpdates.contains(key)
+            content.pendingIndexPaths = pendingIndexPaths[key] ?? []
         }
         guard lastPublishedContent[tabID] != content else { return }
         lastPublishedContent[tabID] = content
@@ -474,11 +508,59 @@ final class BuiltInGitInspectorProvider {
         }
     }
 
-    private func refreshIndex(repository: GitRepositoryIdentity) async {
-        let files = await Self.readFiles(service: self.diffService, repository: repository)
+    private func refreshIndex(repository: GitRepositoryIdentity, paths: [String]) async {
+        let files = await Self.result { try await self.diffService.workingTreeFiles(for: repository, paths: paths) }
+        let fallback: (staged: Result<[GitDiffFile], Error>, unstaged: Result<[GitDiffFile], Error>)?
+        if case .failure = files { fallback = await Self.readFiles(service: diffService, repository: repository) } else { fallback = nil }
+        pendingIndexPaths[repository.stateKey]?.subtract(paths)
         for (tabID, var content) in lastPublishedContent where content.repository == repository {
-            Self.updateFiles(files, workingTree: &content.workingTree)
+            if let fallback { Self.updateFiles(fallback, workingTree: &content.workingTree) } else if case .success(let files) = files {
+                content.workingTree.applyIndexChanges(paths: paths, staged: files.staged, unstaged: files.unstaged)
+            }
             publish(content, tabID: tabID)
+        }
+    }
+
+    private func enqueueIndexMutation(_ mutation: GitMutation, repository: GitRepositoryIdentity, context: InspectorPaneContext) {
+        let key = repository.stateKey
+        guard let paths = mutation.indexPaths else { return }
+        guard mutationTasks[key] == nil || indexUpdates.contains(key) else {
+            publishOperationError("Another Git operation is running in this worktree.", repository: repository, context: context)
+            return
+        }
+        guard pendingIndexPaths[key, default: []].isDisjoint(with: paths) else { return }
+        indexQueues[key, default: []].append(.init(mutation: mutation, context: context))
+        pendingIndexPaths[key, default: []].formUnion(paths)
+        indexUpdates.insert(key)
+        operationTitles[key] = operationTitles[key] ?? mutation.title
+        var state = state(for: context.tabID, worktreeKey: key)
+        state.operationError = nil
+        save(state, tabID: context.tabID, worktreeKey: key)
+        for (tabID, content) in lastPublishedContent where content.repository == repository {
+            loadTasks.removeValue(forKey: tabID)?.cancel()
+            _ = nextGeneration(for: tabID)
+            publish(content, tabID: tabID)
+        }
+        guard mutationTasks[key] == nil else { return }
+        mutationTasks[key] = Task {
+            while let request = self.indexQueues[key]?.first, let paths = request.mutation.indexPaths {
+                let mutation = request.mutation
+                self.indexQueues[key]?.removeFirst()
+                self.operationTitles[key] = mutation.title
+                do {
+                    try await self.mutationService.perform(mutation, in: repository)
+                    await self.refreshIndex(repository: repository, paths: paths)
+                } catch {
+                    self.pendingIndexPaths[key]?.subtract(paths)
+                    self.publishOperationError(error.localizedDescription, repository: repository, context: request.context)
+                }
+            }
+            self.indexQueues.removeValue(forKey: key)
+            self.pendingIndexPaths.removeValue(forKey: key)
+            self.indexUpdates.remove(key)
+            self.operationTitles.removeValue(forKey: key)
+            self.mutationTasks.removeValue(forKey: key)
+            for (tabID, content) in self.lastPublishedContent where content.repository == repository { self.publish(content, tabID: tabID) }
         }
     }
 
@@ -535,6 +617,10 @@ final class BuiltInGitInspectorProvider {
     private func mutate(_ mutation: GitMutation, repository: GitRepositoryIdentity, context: InspectorPaneContext, openCreatedWorktree: Bool = false) {
         let key = repository.stateKey
         guard lastPublishedContent[context.tabID]?.repository == repository else { return }
+        if mutation.updatesIndexOnly {
+            enqueueIndexMutation(mutation, repository: repository, context: context)
+            return
+        }
         guard mutationTasks[key] == nil else {
             publishOperationError("Another Git operation is running in this worktree.", repository: repository, context: context)
             return
@@ -558,19 +644,17 @@ final class BuiltInGitInspectorProvider {
         default: break
         }
         operationTitles[key] = mutation.title
-        if mutation.updatesIndexOnly { indexUpdates.insert(key) }
         var state = state(for: context.tabID, worktreeKey: key)
         state.operationError = nil
         save(state, tabID: context.tabID, worktreeKey: key)
         for (tabID, content) in lastPublishedContent where content.repository == repository {
-            if mutation.updatesIndexOnly { loadTasks.removeValue(forKey: tabID)?.cancel() } else { cancelTask(tabID: tabID) }
+            cancelTask(tabID: tabID)
             _ = nextGeneration(for: tabID)
             publish(content, tabID: tabID)
         }
         mutationTasks[key] = Task {
             do {
                 try await self.mutationService.perform(mutation, in: repository)
-                if mutation.updatesIndexOnly { await self.refreshIndex(repository: repository) }
                 if openCreatedWorktree, case .addWorktree(let path, _, _, _) = mutation {
                     try GitWorktreeActions.open(GitWorktreeInfo(path: path, head: nil, branchRef: nil, isMain: false, isCurrent: false),
                                                 repository: repository, context: context)
@@ -583,10 +667,9 @@ final class BuiltInGitInspectorProvider {
             } catch { self.publishOperationError(error.localizedDescription, repository: repository, context: context) }
             self.mutationTasks.removeValue(forKey: key)
             self.operationTitles.removeValue(forKey: key)
-            self.indexUpdates.remove(key)
             for (tabID, content) in self.lastPublishedContent where content.repository == repository {
                 self.publish(content, tabID: tabID)
-                if !mutation.updatesIndexOnly, let current = self.presentedContexts[tabID] { self.load(context: current, force: true) }
+                if let current = self.presentedContexts[tabID] { self.load(context: current, force: true) }
             }
         }
     }

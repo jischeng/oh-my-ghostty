@@ -27,6 +27,13 @@ enum GitMutation: Equatable, Sendable {
         }
     }
 
+    var indexPaths: [String]? {
+        switch self {
+        case .stage(let paths), .unstage(let paths): paths
+        default: nil
+        }
+    }
+
     var title: String {
         switch self {
         case .createBranch: "Creating branch…"

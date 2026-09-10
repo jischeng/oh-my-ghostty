@@ -727,6 +727,7 @@ struct RightInspectorHost: View {
             }
         }
         .background(backgroundColor.opacity(backgroundOpacity))
+        .environment(\.gitCollectionColors, GitCollectionColors(config: controller.ghostty.config, background: NSColor(backgroundColor)))
         .onAppear {
             reconcileSelection()
             registry.presentationDidChange(to: selectedPaneID, context: context)

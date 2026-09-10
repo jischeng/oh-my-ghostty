@@ -3,6 +3,12 @@ import SwiftUI
 struct InspectorGitView: View {
     let content: InspectorGitContent
     let perform: (InspectorPaneActionKind) -> Void
+    @State private var collectionState = GitCollectionState()
+    @State private var changesController = GitCollectionController()
+    @State private var changesQuery = ""
+    @AppStorage("git.changes.viewMode") private var changesMode: GitCollectionMode = .list
+
+    private var collectionKey: String { content.repository?.stateKey ?? "git" }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -182,14 +188,15 @@ struct InspectorGitView: View {
 
         case .changes:
             VStack(spacing: 0) {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 8) {
-                        changeSection("Staged", files: content.workingTree.staged, target: .staged, error: content.workingTree.stagedError)
-                        changeSection("Unstaged / Untracked", files: content.workingTree.unstaged, target: .unstaged, error: content.workingTree.unstagedError)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 12).padding(.bottom, 10)
-                }
+                GitCollectionToolbar(query: $changesQuery, mode: $changesMode, placeholder: "Search files…",
+                                     controller: changesController, cancel: { changesQuery = "" })
+                    .padding(.horizontal, 10).padding(.bottom, 6)
+                GitCollectionView(source: .changes(content.workingTree), mode: changesMode, query: changesQuery,
+                    pending: content.pendingIndexPaths, canWrite: content.operation == nil || content.isUpdatingIndex,
+                    state: collectionState, stateKey: collectionKey + "/changes", controller: changesController,
+                    cancel: { changesQuery = "" }, perform: {
+                    perform(.gitAction($0))
+                })
                 Divider()
                 GitCommitComposer(message: Binding(get: { content.commitDraft }, set: { perform(.gitAction(.updateCommitDraft($0))) }),
                     stagedCount: content.workingTree.staged.count, isBusy: content.operation != nil,
@@ -199,61 +206,22 @@ struct InspectorGitView: View {
                 .padding(10)
             }
         case .branches:
-            if let error = content.workingTree.branchesError {
-                Text(error).font(.caption).foregroundStyle(.red).padding(8)
-            }
-            HStack {
-                Text("Branches & Worktrees").font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Button { perform(.gitAction(.createWorktree(nil))) } label: { Image(systemName: "plus") }
-                    .buttonStyle(.borderless).help("New Worktree")
-                    .disabled(content.operation != nil || content.workingTree.worktreesError != nil)
-            }.padding(.horizontal, 12)
-            if let error = content.workingTree.worktreesError {
-                Text(error).font(.caption).foregroundStyle(.red).padding(.horizontal, 12)
-            }
-            GitBranchTree(branches: content.workingTree.branches, worktrees: content.workingTree.worktrees,
-                          isBusy: content.operation != nil,
-                          branchesAvailable: content.workingTree.branchesError == nil,
-                          worktreesAvailable: content.workingTree.worktreesError == nil) {
+            GitRefBrowser(branches: content.workingTree.branches, worktrees: content.workingTree.worktrees,
+                          isBusy: content.operation != nil, branchesError: content.workingTree.branchesError,
+                          worktreesError: content.workingTree.worktreesError,
+                          state: collectionState, stateKey: collectionKey + "/refs/sidebar") {
                 perform(.gitAction($0))
             }
-        }
-    }
-
-    private func changeSection(_ title: String, files: [GitDiffFile], target: GitDiffTarget, error: String?) -> some View {
-        Section {
-            if let error { Text(error).font(.caption).foregroundStyle(.red) }
-            ForEach(files) { file in
-                HStack(alignment: .top, spacing: 5) {
-                    Toggle("Stage \(file.path)", isOn: Binding(get: { target == .staged }, set: {
-                        perform(.gitAction(.setFileStaged(file, $0)))
-                    }))
-                    .toggleStyle(.checkbox).labelsHidden()
-                    .disabled(content.operation != nil || error != nil)
-                Button { perform(.gitAction(.openDiff(file, target))) } label: {
-                    HStack(spacing: 6) {
-                        Text(file.isUntracked ? "?" : file.status).font(.caption.monospaced())
-                            .foregroundStyle(Color(file.kind.color))
-                        Text(file.displayPath).lineLimit(2).truncationMode(.middle)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }.contentShape(Rectangle())
-                }.buttonStyle(.plain).help(file.kind.label + " · " + file.displayPath)
-                    .accessibilityLabel(file.kind.label + " " + file.displayPath).disabled(error != nil)
-                }
-            }
-            if files.isEmpty && error == nil { Text("No changes").font(.caption).foregroundStyle(.secondary) }
-        } header: {
-            Text("\(title) (\(files.count))").font(.caption).foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.top, 4)
         }
     }
 
     private func historyView(headCommitID: String?) -> some View {
         VStack(spacing: 8) {
             GitHistoryScopePicker(title: content.history.snapshot?.browsedBranch ?? content.history.scope.displayName,
-                                  branches: content.workingTree.branches, enabled: content.workingTree.branchesError == nil) {
+                                  branches: content.workingTree.branches, enabled: content.workingTree.branchesError == nil,
+                                  isBusy: content.operation != nil,
+                                  worktrees: content.workingTree.worktrees, worktreesError: content.workingTree.worktreesError,
+                                  state: collectionState, stateKey: collectionKey + "/refs/picker", selectedID: historySelectionID) {
                 perform(.gitAction($0))
             }
             .frame(height: 24)
@@ -307,6 +275,11 @@ struct InspectorGitView: View {
                 .padding(.bottom, 5)
             }
         }
+    }
+
+    private var historySelectionID: String {
+        if let path = content.history.snapshot?.browsedWorktree { return "worktree:" + path }
+        return content.history.snapshot?.browsedRef ?? "scope:" + content.history.scope.rawValue
     }
 
     private func emptyStateView(

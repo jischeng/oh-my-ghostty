@@ -183,7 +183,7 @@ class InspectorCopyMenu: NSMenu {
     }
 }
 
-final class InspectorCopyTableView: NSTableView {
+class InspectorCopyTableView: NSTableView {
     var copyValue: (() -> String?)?
     var pasteboard = NSPasteboard.general
     override func viewDidMoveToWindow() {

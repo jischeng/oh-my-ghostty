@@ -16,9 +16,9 @@ struct GitDiffService: Sendable {
 
     /// Read both sides of the index in one invocation, including untracked
     /// files. This also avoids three SSH sessions for each checkbox update.
-    func workingTreeFiles(for repository: GitRepositoryIdentity) async throws -> (staged: [GitDiffFile], unstaged: [GitDiffFile]) {
+    func workingTreeFiles(for repository: GitRepositoryIdentity, paths: [String]? = nil) async throws -> (staged: [GitDiffFile], unstaged: [GitDiffFile]) {
         let result = try await run(
-            ["--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--renames"],
+            ["--literal-pathspecs", "--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--renames", "--"] + (paths ?? []),
             repository: repository, maxOutputBytes: 512 * 1024
         )
         return try Self.parseWorkingTreeFiles(result.stdout)

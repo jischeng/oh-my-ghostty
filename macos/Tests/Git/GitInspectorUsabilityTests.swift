@@ -275,7 +275,6 @@ struct GitInspectorUsabilityTests {
         #expect(compactTags.filter { $0.decoration.kind == .tag && !$0.isCount }.count == 1)
         #expect(compactTags.contains { $0.decoration.kind == .tag && $0.isCount })
         let name = String(repeating: "超长分支名称/", count: 30)
-        #expect((GitHistoryScopePicker.compact(name) as NSString).size(withAttributes: [.font: NSFont.menuFont(ofSize: 0)]).width <= 220)
         let branch = GitBranchInfo(name: name, commit: .init("a"), isCurrent: true, isRemote: false, upstream: "", tracking: "")
         var actions: [InspectorGitAction] = []
         let view = NSHostingView(rootView: GitHistoryScopePicker(title: name, branches: [branch], enabled: true) { actions.append($0) })
@@ -284,19 +283,18 @@ struct GitInspectorUsabilityTests {
         defer { host.contentView = nil; host.close() }
         try await Task.sleep(for: .milliseconds(100))
         let control = try #require(find(GitHistoryScopePicker.Control.self, in: view).first)
-        let menu = try #require(control.menu)
-        let index = try #require(menu.items.firstIndex { $0.toolTip == name })
-        let branchItem = menu.items[index]
-        for _ in 0..<100 {
-            control.configure(title: name, branches: [branch], enabled: true)
-            control.layoutSubtreeIfNeeded()
-        }
-        #expect(menu.items[index] === branchItem, "Unchanged updates must preserve the menu and avoid layout invalidation")
-        menu.performActionForItem(at: index)
+        control.showPicker()
+        try await Task.sleep(for: .milliseconds(100))
+        let popover = try #require(control.popover)
+        let picker = try #require(popover.contentViewController?.view)
+        let table = try #require(find(GitCollectionTableView.self, in: picker).first)
+        let coordinator = try #require(table.target as? GitCollectionView.Coordinator)
+        let index = try #require(coordinator.rows.firstIndex { $0.id == branch.id })
+        for _ in 0..<20 { picker.layoutSubtreeIfNeeded() }
+        #expect(find(GitCollectionTableView.self, in: picker).first === table)
+        coordinator.activate(row: index)
         #expect(actions == [.browseBranch(branch.id)])
+        #expect(!popover.isShown)
         #expect(control.bounds.width <= 220)
-        control.configure(title: "All branches", branches: [branch], enabled: false)
-        #expect(control.menu?.items.first { $0.toolTip == name }?.isEnabled == false)
-        #expect(control.fullTitle == "All branches")
     }
 }

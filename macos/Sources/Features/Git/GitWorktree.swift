@@ -24,7 +24,11 @@ struct GitWorktreeInfo: Equatable, Sendable, Identifiable {
         var fields: [String: String] = [:]
         func append() {
             guard let path = fields["worktree"] else { return }
-            result.append(GitWorktreeInfo(path: path, head: fields["HEAD"].map(GitCommitID.init),
+            // Git uses the null object ID for a worktree before its first commit.
+            let head = fields["HEAD"].flatMap { value in
+                value.isEmpty || value.allSatisfy { $0 == "0" } ? nil : GitCommitID(value)
+            }
+            result.append(GitWorktreeInfo(path: path, head: head,
                 branchRef: fields["branch"], isMain: result.isEmpty,
                 isCurrent: (path as NSString).standardizingPath == (currentPath as NSString).standardizingPath,
                 isBare: fields["bare"] != nil, lockedReason: fields["locked"], prunableReason: fields["prunable"]))

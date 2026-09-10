@@ -20,6 +20,16 @@ struct GitWorkingTreeContent: Equatable, Sendable {
     var branchesError: String?
     var worktreesError: String?
     var remoteURL: String?
+
+    mutating func applyIndexChanges(paths: [String], staged: [GitDiffFile], unstaged: [GitDiffFile]) {
+        let affected = Set(paths + (staged + unstaged).flatMap { [$0.path] + ($0.oldPath.map { [$0] } ?? []) })
+        func merge(_ current: [GitDiffFile], _ changes: [GitDiffFile]) -> [GitDiffFile] {
+            (current.filter { !affected.contains($0.path) && !($0.oldPath.map(affected.contains) ?? false) } + changes)
+                .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+        }
+        self.staged = merge(self.staged, staged)
+        self.unstaged = merge(self.unstaged, unstaged)
+    }
 }
 
 extension GitRepositoryService {

@@ -76,6 +76,8 @@ struct GitHistorySnapshot: Equatable, Sendable {
     let decorationsByCommitID: [GitCommitID: [GitRefDecoration]]
 
     var browsedBranch: String?
+    var browsedRef: String?
+    var browsedWorktree: String?
 
     var isEmpty: Bool { tipCommitIDs.isEmpty }
 }

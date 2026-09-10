@@ -960,17 +960,28 @@ worktree information. Hidden History views do not automatically paginate. Unchan
 content is not republished, and background snapshot checks do not show a loading
 indicator when history is already available.
 
-Changes uses one lazy list of section headers and file rows. It instantiates only
-rows near the viewport, including for large SSH worktrees; it must not build one
-native checkbox per changed path when switching tabs. The composer stays outside
-that scroll view. The retained History scope menu updates only when its inputs
-change and never repeatedly assigns an unchanged title during layout.
+Changes, Branches and the History ref picker share `GitCollectionView`: one
+virtualized native table, row renderer, category header, search field and compact
+List/Tree mode control. Only visible cells are instantiated. Row insertions,
+removals and state changes apply incrementally, preserving surviving visible
+rows; the table is not reloaded for a single index update. The commit composer
+stays outside the scrolling collection.
+
+Changes row IDs include the index side and filesystem path, and exclude mutable
+status letters. A partially staged path therefore has two distinct rows. Cells
+always derive checked state from their current item, including after reuse.
+List rows show a single-line filename and a truncated secondary directory; Tree
+rows use filesystem folders. Folders are presentation groups, not Git objects.
+Folder expansion, selection and viewport anchors are stored separately from Git
+status and survive refresh and List/Tree switches.
 
 Working-tree refresh reads staged and unstaged paths together with one NUL-delimited
 porcelain status command, falling back to independent reads on failure so one
 unreadable side does not disable the other. Rename origins, conflicts, untracked paths and partially
-staged files are preserved. Index-only mutations refresh this list without reloading
-history. Path-only reset unstages files, including before the first commit, without
+staged files are preserved. Index-only success reads only affected literal paths
+and merges that patch into the latest snapshot without reloading history or
+unrelated rows. A failed scoped read falls back to the regular status reader.
+Path-only reset unstages files, including before the first commit, without
 an extra HEAD probe. Diff layout automatically persists the last Side by Side or
 Inline selection in app preferences; no separate settings control is exposed.
 
@@ -1074,9 +1085,11 @@ shown as an unstaged addition. Selection and refresh share one cancellable
 loader; an obsolete result cannot overwrite a newer selection. The raw patch
 view is retained as a fallback, without a separate detail-window lifecycle.
 
-Changes lists staged and unstaged/untracked paths separately. Changes and
-History share status colors: added green, modified orange, deleted red, renamed
-blue, copied teal, type-changed purple and unknown secondary. Letters and
+Changes lists staged and unstaged/untracked paths separately. Changes derives
+foreground, accent, selection and status colors from Ghostty's resolved theme
+tokens, including custom palettes. Status letters have less visual weight than
+filenames; untracked `?` uses the secondary foreground rather than bright green.
+History retains its semantic status colors. Letters and
 accessible status labels remain available independently of color. Checkboxes reflect
 the real index: checking an unstaged row stages that whole file; unchecking a
 staged row unstages it without deleting the working file (including unborn
@@ -1086,20 +1099,38 @@ both index and working-tree edits can appear in both sections. Staged,
 unstaged and branch queries keep independent results and errors. A failed
 query retains its last successful values for display and disables only actions
 that depend on those stale values; it does not hide other successful sections.
-Stage/unstage uses a quiet index update: keep the previous file arrays until the
-new staged/unstaged reads finish, do not enter global loading, insert a global
-operation banner, or rebuild history. The composer stays outside the file-list
+Stage/unstage requests are queued and serialized per worktree. Only affected
+checkboxes show a small pending indicator; unrelated files remain actionable and
+can enter the queue. Successful status patches move rows and update both counts
+in the current page. A failed write preserves the previous state, clears its
+pending flag and reports the error while other queued files can complete. No
+optimistic index contents are invented. Index updates never enter global loading,
+insert an operation banner, or rebuild history. The composer stays outside the file-list
 scroll view; its native text view preserves focus, selection and undo state when
 status updates. It grows from 44 to 112 points, then scrolls internally. The
 footer reserves space for index progress without moving the Commit action.
 
 
-History's scope menu includes current/all branches and every available local
-and remote branch. History/Changes/Branches form one compact, 28-point navigation
+History's ref picker embeds the same `GitRefBrowser` as Branches. Search and the
+List/Tree control live inside the popover on one row. Categories are Branches,
+Remote Branches and Worktrees, plus current/all-history scope choices. Search is
+case-insensitive and reuses the command palette's matching helper. Up/Down move
+through matching entries, Enter activates the full ref/worktree identity and Esc
+closes the popover. Browsing a worktree reads its HEAD (including detached HEAD)
+without opening a terminal or changing Git refs. Ref selection refreshes history
+only. Worktrees remain physical checkout rows with visible paths; branch rows
+mark associated worktrees.
+
+Changes has its own remembered mode; Branches and the picker share the remembered
+ref mode. Ref Tree grouping splits full branch names on `/`, with the remote as
+the first remote-branch level (`origin/feature/foo`, not `feature/origin/foo`).
+Grouping never changes the complete ref passed to Git or actions.
+
+History/Changes/Branches form one compact, 28-point navigation
 bar with full rectangular hit regions, a thin selected underline and subtle
 hover feedback. Font weight and geometry stay fixed across selection and use
-semantic dark/light colors. Branches uses an expandable Local/Remotes folder tree with
-stable ref IDs. Single click selects; folder double-click toggles expansion,
+semantic dark/light colors. Branches supports List and Tree with stable ref IDs.
+Single click selects; folder disclosure or double-click toggles expansion,
 while branch double-click opens its worktree if checked out, otherwise history.
 Checked-out branches show a worktree label and prioritize Open Worktree over
 checkout. Leaf context
@@ -1144,7 +1175,7 @@ other existing copy actions live in Copy More. These are host-only actions.
 Mutations are serialized per worktree and are separate from cancellable polling
 tasks. Git's refusal to overwrite dirty files, non-fast-forward rejection,
 hooks, signing and authentication errors are shown in a dismissible pane banner;
-no forced checkout/push, stash, reset, hook bypass or terminal injection is performed.
+no forced checkout/push, automatic stash, worktree reset, hook bypass or terminal injection is performed.
 Unstaging before the first commit removes only the selected index entries with
 path-only `git reset --quiet -- <paths>`, preserving working files even if edited
 after staging.
@@ -1196,7 +1227,7 @@ connection per query. Its socket key includes the full connection identity,
 executable, original cwd and application-session salt. The short socket directory
 is owned by the current user with mode 0700; interactive terminal control sockets
 are not reused or modified. OpenSSH owns concurrent channels and idle expiry;
-commands are never retried automatically after a transport failure. Auxiliary commands disable terminal
+mutations are never retried automatically after a transport failure. Auxiliary commands disable terminal
 allocation, port forwards, LocalCommand and RemoteCommand side effects.
 Configured agent forwarding, including explicit `-A`, is preserved.
 Auxiliary execution retains the original local launch directory, so relative

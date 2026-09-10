@@ -43,6 +43,55 @@ actor GitWorkingTreeReadProbe: GitExecutor {
 
 @MainActor
 struct GitHistoryExpansionProviderTests {
+    @Test func unbornWorktreePickerShowsEmptyHistoryInsteadOfQueryingNullCommit() async throws {
+        let directory = try await repository(commits: 0)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let registry = InspectorRegistry()
+        let provider = BuiltInGitInspectorProvider(registry: registry)
+        try provider.register()
+        let context = InspectorPaneContext(tabID: UUID(), surfaceID: UUID(), title: "Test", workingDirectory: directory.path)
+        registry.presentationDidChange(to: BuiltInGitInspectorProvider.paneID, context: context)
+        defer { registry.presentationDidChange(to: nil, context: context) }
+        let initial = try await waitFor(registry, context: context) { $0.history.snapshot != nil }
+        let tree = try #require(initial.workingTree.worktrees.first)
+        #expect(tree.head == nil)
+        registry.performAction(paneID: BuiltInGitInspectorProvider.paneID,
+            action: .init(context: context, kind: .gitAction(.browseWorktree(tree.path))))
+        let browsed = try await waitFor(registry, context: context) { $0.history.snapshot?.browsedWorktree == tree.path }
+        #expect(browsed.history.commits.isEmpty && browsed.history.statusMessage == nil)
+        #expect(browsed.history.snapshot?.tipCommitIDs.isEmpty == true)
+    }
+
+    @Test func detachedWorktreePickerUsesItsHeadWithoutChangingTheInspectedWorktree() async throws {
+        let directory = try await repository(commits: 3)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executor = LocalGitExecutor()
+        let head = try await executor.execute(arguments: ["rev-parse", "HEAD~1"], workingDirectory: directory.path)
+        let commit = GitCommitID(head.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines))
+        let path = directory.appendingPathComponent("detached").path
+        let created = try await executor.execute(arguments: ["worktree", "add", "--detach", "--", path, commit.rawValue], workingDirectory: directory.path)
+        try #require(created.isSuccess)
+        let registry = InspectorRegistry()
+        let provider = BuiltInGitInspectorProvider(registry: registry)
+        try provider.register()
+        let context = InspectorPaneContext(tabID: UUID(), surfaceID: UUID(), title: "Test", workingDirectory: directory.path)
+        registry.presentationDidChange(to: BuiltInGitInspectorProvider.paneID, context: context)
+        defer { registry.presentationDidChange(to: nil, context: context) }
+        let initial = try await waitFor(registry, context: context) { $0.history.commits.count == 3 }
+        let canonicalPath = try #require(initial.workingTree.worktrees.first { $0.path.hasSuffix("/detached") }?.path)
+        registry.performAction(paneID: BuiltInGitInspectorProvider.paneID,
+            action: .init(context: context, kind: .gitAction(.browseWorktree(canonicalPath))))
+        let browsed = try await waitFor(registry, context: context) { $0.history.snapshot?.browsedWorktree == canonicalPath }
+        #expect(browsed.history.commits.first?.id == commit)
+        #expect(browsed.history.snapshot?.headCommitID == commit)
+        #expect(browsed.repository == initial.repository && browsed.workingTree == initial.workingTree)
+        registry.performAction(paneID: BuiltInGitInspectorProvider.paneID,
+            action: .init(context: context, kind: .gitAction(.browseBranch("refs/heads/main"))))
+        let main = try await waitFor(registry, context: context) { $0.history.snapshot?.browsedRef == "refs/heads/main" }
+        #expect(main.history.commits.first?.id == initial.history.commits.first?.id)
+        #expect(main.history.snapshot?.browsedWorktree == nil && main.workingTree == initial.workingTree)
+    }
+
     private func repository(commits: Int) async throws -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("git-expand-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

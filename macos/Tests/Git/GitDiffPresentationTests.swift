@@ -85,10 +85,12 @@ struct GitDiffPresentationTests {
             GitBranchInfo(name: "feature/two", commit: id, isCurrent: false, isRemote: false, upstream: "", tracking: ""),
             GitBranchInfo(name: "origin/feature/one", commit: id, isCurrent: false, isRemote: true, upstream: "", tracking: ""),
         ]
-        let roots = GitBranchNode.build(branches)
-        #expect(roots[0].children[0].title == "feature")
+        let roots = GitCollectionBuilder.nodes(source: .refs(branches: branches, worktrees: [], scopes: false, branchesError: nil, worktreesError: nil), mode: .tree)
+        #expect(roots[0].children[0].item.title == "feature")
         #expect(roots[0].children[0].children.count == 2)
-        #expect(roots[1].children[0].title == "origin")
-        #expect(roots[1].children[0].children[0].children[0].branch?.isRemote == true)
+        #expect(roots[1].children[0].item.title == "origin")
+        if case .branch(let remote, _) = roots[1].children[0].children[0].children[0].item.kind {
+            #expect(remote.isRemote)
+        } else { Issue.record("Expected a remote branch leaf") }
     }
 }

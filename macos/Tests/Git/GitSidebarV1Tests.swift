@@ -5,7 +5,8 @@ import Testing
 
 @MainActor
 struct GitSidebarV1Tests {
-    @Test func largeRemoteChangesCreateOnlyVisibleControls() async throws {
+    @Test(arguments: GitCollectionMode.allCases)
+    func largeRemoteChangesCreateOnlyVisibleControls(mode: GitCollectionMode) async throws {
         let connection = try GitSSHConnection(destination: "test-host")
         let repo = GitRepositoryIdentity(target: .ssh(connection), worktreePath: "/remote/repo",
                                          gitDirPath: "/remote/repo/.git", commonGitDirPath: "/remote/repo/.git")
@@ -13,7 +14,11 @@ struct GitSidebarV1Tests {
         var content = InspectorGitContent(repository: repo, branch: "main", status: status)
         let files = (0..<1600).map { GitDiffFile(path: "research/output/experiment-\($0)/results/long-file-name-\($0).json", status: "A", isUntracked: true) }
         content.workingTree.unstaged = files
-        let host = NSHostingView(rootView: InspectorGitView(content: content, perform: { _ in }))
+        let suite = "git-large-collection-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defaults.set(mode.rawValue, forKey: "git.changes.viewMode")
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let host = NSHostingView(rootView: InspectorGitView(content: content, perform: { _ in }).defaultAppStorage(defaults))
         host.sizingOptions = []
         let win = window(host)
         defer { win.contentView = nil; win.close() }
@@ -21,12 +26,12 @@ struct GitSidebarV1Tests {
         var changes = InspectorGitContent(repository: repo, branch: "main", status: status, activeTab: .changes)
         changes.workingTree = content.workingTree
         let start = Date()
-        host.rootView = InspectorGitView(content: changes, perform: { _ in })
+        host.rootView = InspectorGitView(content: changes, perform: { _ in }).defaultAppStorage(defaults)
         host.layoutSubtreeIfNeeded()
         let elapsed = Date().timeIntervalSince(start) * 1000
         try await Task.sleep(for: .milliseconds(100))
         let buttons = find(NSButton.self, in: host)
-        print("Changes UI benchmark (1600 remote files): first layout=\(elapsed)ms, native buttons=\(buttons.count)")
+        print("Changes UI benchmark (1600 remote files, \(mode.rawValue)): first layout=\(elapsed)ms, native buttons=\(buttons.count)")
         #expect(buttons.count < 100, "Offscreen file checkboxes must not be instantiated")
     }
 
@@ -97,9 +102,9 @@ struct GitSidebarV1Tests {
         editor.setSelectedRange(NSRange(location: 2, length: 5))
         let originalY = composer.convert(composer.bounds, to: host).minY
         let offset = files.contentView.bounds.origin
-        let anchor = try #require(find(NSButton.self, in: files).first { button in
+        let anchor = try #require(find(GitStageCheckbox.self, in: files).first { button in
             let frame = button.convert(button.bounds, to: files.contentView)
-            return files.contentView.bounds.contains(frame)
+            return !button.isHidden && files.contentView.bounds.contains(frame)
         })
         let anchorY = anchor.convert(anchor.bounds, to: host).minY
         for busy in [true, false] {

@@ -263,6 +263,7 @@ final class InspectorRegistry: ObservableObject {
     private var actionHandlers: [String: ActionHandler] = [:]
     private var pluginContent: [PluginContentKey: InspectorPaneContent] = [:]
     private var presentedPanes: [UUID: PresentedPane] = [:]
+    private var closedTabIDs = Set<UUID>()
 
     var isEmpty: Bool { entries.isEmpty }
 
@@ -346,11 +347,15 @@ final class InspectorRegistry: ObservableObject {
         guard descriptor.source == .plugin(pluginID) else {
             throw RegistryError.ownerMismatch
         }
-        pluginContent[.init(paneID: paneID, tabID: tabID)] = content
+        if let tabID, closedTabIDs.contains(tabID) { return }
+        let key = PluginContentKey(paneID: paneID, tabID: tabID)
+        guard pluginContent[key] != content else { return }
+        pluginContent[key] = content
         contentRevision &+= 1
     }
 
     func performAction(paneID: String, action: InspectorPaneAction) {
+        guard !closedTabIDs.contains(action.context.tabID) else { return }
         actionHandlers[paneID]?(action)
     }
 
@@ -379,6 +384,18 @@ final class InspectorRegistry: ObservableObject {
         }
     }
 
+    func isTabClosed(_ tabID: UUID) -> Bool { closedTabIDs.contains(tabID) }
+    func openTab(_ tabID: UUID) { closedTabIDs.remove(tabID) }
+
+    func closeTab(_ tabID: UUID) {
+        guard closedTabIDs.insert(tabID).inserted else { return }
+        if let previous = presentedPanes.removeValue(forKey: tabID) {
+            lifecycleHandlers[previous.paneID]?(.disappeared(previous.context))
+        }
+        pluginContent = pluginContent.filter { $0.key.tabID != tabID }
+        contentRevision &+= 1
+    }
+
     func disconnectPlugin(_ pluginID: String) {
         unregister(source: .plugin(pluginID))
     }
@@ -390,6 +407,7 @@ final class InspectorRegistry: ObservableObject {
 
     func presentationDidChange(to paneID: String?, context: InspectorPaneContext) {
         let hostID = context.tabID
+        guard !closedTabIDs.contains(hostID) else { return }
         let next = paneID.map { PresentedPane(paneID: $0, context: context) }
         guard presentedPanes[hostID] != next else { return }
         if let previous = presentedPanes[hostID] {

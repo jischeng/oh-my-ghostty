@@ -698,6 +698,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             surfaceTree: tree,
             tabLayoutState: initialLayoutState
         )
+        (NSApp.delegate as? AppDelegate)?.inspectorRegistry.openTab(self.tabSessionID)
 
         // Setup our notifications for behaviors
         let center = NotificationCenter.default
@@ -1927,9 +1928,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let tabGroup = window?.tabGroup
         tabGroup?.selectedWindow = targetWindow
         controller.markTabActivated()
-        targetWindow.makeKeyAndOrderFront(nil)
+        if !targetWindow.isKeyWindow { targetWindow.makeKeyAndOrderFront(nil) }
         Self.refreshTabs(in: tabGroup)
-        NSApp.activate(ignoringOtherApps: true)
+        if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
     }
 
     func markTabActivated() {
@@ -3744,6 +3745,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     override func windowWillClose(_ notification: Notification) {
         super.windowWillClose(notification)
         EditorWorkspaceStore.shared.remove(tabID: tabSessionID)
+        (NSApp.delegate as? AppDelegate)?.releaseInspectorState(tabID: tabSessionID)
         (NSApp.delegate as? AppDelegate)?.tabActivities.removeSession(tabSessionID)
         cancelPendingInitialPresentation()
         self.relabelTabs()

@@ -43,6 +43,11 @@ struct RendererMemoryTests {
         for handle in handles { ghostty_surface_set_occlusion(handle, false) }
         try await Task.sleep(for: .milliseconds(500))
         try await footprint("hidden")
+        for _ in 0..<4 {
+            for view in views { view.layer?.display() }
+            try await Task.sleep(for: .milliseconds(60))
+        }
+        try await footprint("hidden-redraw")
         for view in views { #expect(view.layer?.contents != nil) }
         for handle in handles { ghostty_surface_set_occlusion(handle, true); ghostty_surface_refresh(handle) }
         try await Task.sleep(for: .milliseconds(200))

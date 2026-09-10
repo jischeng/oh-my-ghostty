@@ -4,6 +4,32 @@ import Testing
 
 @MainActor
 struct InspectorRegistryTests {
+    @Test func closedTabsReleaseSnapshotsAndRejectLateResults() throws {
+        let registry = InspectorRegistry()
+        let descriptor = paneDescriptor(id: "cache", source: .plugin("owner"))
+        var actions = 0
+        try registry.registerPluginPane(descriptor, action: { _ in actions += 1 })
+        let first = InspectorPaneContext(tabID: UUID(), surfaceID: nil, title: "first", workingDirectory: nil)
+        let second = InspectorPaneContext(tabID: UUID(), surfaceID: nil, title: "second", workingDirectory: nil)
+        let content = InspectorPaneContent.empty(title: "data", message: String(repeating: "large transcript ", count: 10000))
+        for context in [first, second] {
+            try registry.updatePluginContent(paneID: "cache", pluginID: "owner", tabID: context.tabID, content: content)
+        }
+        registry.closeTab(first.tabID)
+        #expect(registry.isTabClosed(first.tabID))
+        #expect(registry.content(for: "cache", context: first) != content)
+        #expect(registry.content(for: "cache", context: second) == content)
+        registry.presentationDidChange(to: "cache", context: first)
+        registry.performAction(paneID: "cache", action: .init(context: first, kind: .refresh))
+        #expect(actions == 0)
+        try registry.updatePluginContent(paneID: "cache", pluginID: "owner", tabID: first.tabID, content: content)
+        #expect(registry.isTabClosed(first.tabID))
+        #expect(registry.content(for: "cache", context: first) != content)
+        registry.openTab(first.tabID)
+        try registry.updatePluginContent(paneID: "cache", pluginID: "owner", tabID: first.tabID, content: content)
+        #expect(registry.content(for: "cache", context: first) == content)
+    }
+
     @Test func inspectorToggleOwnsAFixedTrailingSlot() {
         #expect(InspectorTitlebarLayout.pluginWidth(
             totalWidth: TerminalTitlebarMetrics.inspectorCollapsedWidth

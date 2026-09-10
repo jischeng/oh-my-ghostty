@@ -4,6 +4,32 @@ import Testing
 
 @MainActor
 struct AgentHistoryInspectorTests {
+    @Test func hostSessionStorageIsSharedAcrossTabs() async throws {
+        let sessions = (0..<1000).map { index in
+            AgentHistorySession(agent: .codex, conversationID: AgentConversationID("session-\(index)")!,
+                title: "Session \(index)", workingDirectory: "/repo", updatedAt: .distantPast,
+                sourcePath: "/tmp/session-\(index)", isActive: false)
+        }
+        let registry = InspectorRegistry()
+        let provider = BuiltInAgentHistoryInspectorProvider(registry: registry, cachedSessionLoader: { [] }, sessionLoader: { sessions })
+        try provider.register()
+        let a = InspectorPaneContext(tabID: UUID(), surfaceID: nil, title: "a", workingDirectory: "/repo")
+        let b = InspectorPaneContext(tabID: UUID(), surfaceID: nil, title: "b", workingDirectory: "/repo")
+        registry.presentationDidChange(to: BuiltInAgentHistoryInspectorProvider.paneID, context: a)
+        try await Task.sleep(for: .milliseconds(80))
+        registry.presentationDidChange(to: BuiltInAgentHistoryInspectorProvider.paneID, context: b)
+        guard case .agentHistory(let first) = registry.content(for: BuiltInAgentHistoryInspectorProvider.paneID, context: a),
+              case .agentHistory(let second) = registry.content(for: BuiltInAgentHistoryInspectorProvider.paneID, context: b) else {
+            Issue.record("Missing history snapshots"); return
+        }
+        #expect(first.sessions.count == 1000 && second.sessions.count == 1000)
+        let left = first.sessions.withUnsafeBufferPointer { $0.baseAddress }
+        let right = second.sessions.withUnsafeBufferPointer { $0.baseAddress }
+        #expect(left == right, "Per-tab snapshots should share host metadata storage")
+        registry.closeTab(a.tabID); provider.forgetTab(a.tabID)
+        #expect(registry.content(for: BuiltInAgentHistoryInspectorProvider.paneID, context: b) == .agentHistory(second))
+    }
+
     @Test func discoversAndParsesAgentSpecificLocalHistories() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("agent-history-\(UUID().uuidString)")

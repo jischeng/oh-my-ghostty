@@ -118,7 +118,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         focused: bool,
 
         /// True if the window is visible.
-        visible: bool,
+        visible: std.atomic.Value(bool),
 
         /// Flag to indicate that our focus state changed for custom
         /// shaders to update their state.
@@ -723,7 +723,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .grid_metrics = font_critical.metrics,
                 .size = options.size,
                 .focused = true,
-                .visible = true,
+                .visible = .init(true),
                 .scrollbar = .zero,
                 .scrollbar_dirty = false,
                 .last_bottom_node = null,
@@ -1057,7 +1057,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         ///
         /// Must be called on the render thread.
         pub fn setVisible(self: *Self, visible: bool) void {
-            self.visible = visible;
+            // AppKit display callbacks also read this flag. Do not make a
+            // visibility notification wait for an in-flight GPU draw.
+            self.visible.store(visible, .release);
             self.syncDisplayLink(null, null);
             if (comptime GraphicsAPI.swap_chain_count > 1) {
                 if (!visible) @import("omg_memory.zig").trimInactive(self, global.io()) catch |err| {
@@ -1110,7 +1112,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // If we're not visible, then we want to stop the display link
             // because it is a waste of resources and we can move to pure
             // change-driven updates.
-            if (self.visible and self.focused) {
+            if (self.visible.load(.acquire) and self.focused) {
                 display_link.start() catch {};
             } else {
                 display_link.stop() catch {};
@@ -1619,10 +1621,18 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self: *Self,
             sync: bool,
         ) !void {
+            // Hidden-layer callbacks must not block AppKit behind GPU cleanup.
+            if (!self.visible.load(.acquire)) return;
+
             // We hold a the draw mutex to prevent changes to any
             // data we access while we're in the middle of drawing.
             self.draw_mutex.lockUncancelable(global.io());
             defer self.draw_mutex.unlock(global.io());
+
+            // CoreAnimation can request a synchronous display even for a
+            // hidden tab after a layout change. Keep its last image instead of
+            // reallocating the spare GPU resources we just released.
+            if (!self.visible.load(.acquire)) return;
 
             // After the graphics API is complete (so we defer) we want to
             // update our scrollbar state.

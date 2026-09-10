@@ -79,6 +79,23 @@ final class BuiltInGitInspectorProvider {
         try registry.registerPluginPane(descriptor, lifecycle: { [weak self] event in self?.handle(event) }, action: { [weak self] action in self?.handle(action) })
     }
 
+    func forgetTab(_ tabID: UUID) {
+        cancelTask(tabID: tabID)
+        for key in detailTasks.keys where key.tabID == tabID { detailTasks.removeValue(forKey: key)?.cancel() }
+        presentedContexts.removeValue(forKey: tabID)
+        // Keep authored drafts for tab restoration without retaining history,
+        // file lists or expanded commit details behind a closed window.
+        let drafts = tabWorktreeStates[tabID, default: [:]].filter { !$0.value.commitDraft.isEmpty }
+            .mapValues { WorktreeUIState(commitDraft: $0.commitDraft) }
+        if drafts.isEmpty { tabWorktreeStates.removeValue(forKey: tabID) } else { tabWorktreeStates[tabID] = drafts }
+        lastPublishedContent.removeValue(forKey: tabID)
+        resolvedDirectories.removeValue(forKey: tabID)
+        lastRemotePoll.removeValue(forKey: tabID)
+        generations.removeValue(forKey: tabID)
+        historyGenerations.removeValue(forKey: tabID)
+        if presentedContexts.isEmpty { stopPollingTimer() }
+    }
+
     private func handle(_ event: InspectorPaneLifecycleEvent) {
         switch event {
         case .appeared(let context):
@@ -475,8 +492,9 @@ final class BuiltInGitInspectorProvider {
     }
 
     private func state(for tabID: UUID, worktreeKey: String) -> WorktreeUIState { tabWorktreeStates[tabID]?[worktreeKey] ?? WorktreeUIState() }
-    private func save(_ state: WorktreeUIState, tabID: UUID, worktreeKey: String) { var states = tabWorktreeStates[tabID] ?? [:]; states[worktreeKey] = state; tabWorktreeStates[tabID] = states }
+    private func save(_ state: WorktreeUIState, tabID: UUID, worktreeKey: String) { guard !registry.isTabClosed(tabID) else { return }; var states = tabWorktreeStates[tabID] ?? [:]; states[worktreeKey] = state; tabWorktreeStates[tabID] = states }
     private func publish(_ value: InspectorGitContent, tabID: UUID) {
+        guard !registry.isTabClosed(tabID) else { return }
         var content = value
         if let context = presentedContexts[tabID] {
             switch context.session.state {

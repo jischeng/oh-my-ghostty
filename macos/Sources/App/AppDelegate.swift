@@ -131,6 +131,14 @@ class AppDelegate: NSObject,
     /// In-tree Info Inspector and app-owned SSH port-forward process lifecycle.
     @MainActor private lazy var builtInInfoInspector =
         BuiltInInfoInspectorProvider(registry: inspectorRegistry)
+
+    @MainActor func releaseInspectorState(tabID: UUID) {
+        inspectorRegistry.closeTab(tabID)
+        builtInGitInspector.forgetTab(tabID)
+        builtInFilesInspector.forgetTab(tabID)
+        builtInAgentHistoryInspector.forgetTab(tabID)
+    }
+
     @MainActor private var pluginManagementCancellables = Set<AnyCancellable>()
 
     /// The global undo manager for app-level state such as window restoration.

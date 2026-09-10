@@ -64,6 +64,11 @@ final class BuiltInFilesInspectorProvider {
         )
     }
 
+    func forgetTab(_ tabID: UUID) {
+        cancelTasks(tabID: tabID)
+        states.removeValue(forKey: tabID)
+    }
+
     private func handle(_ event: InspectorPaneLifecycleEvent) {
         guard case .appeared(let context) = event else {
             if case .disappeared(let previousContext) = event {

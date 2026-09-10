@@ -954,6 +954,14 @@ configuration, including restored agent commands, before shell directory reports
 arrive. Inspector providers consume this shared context rather than waiting for
 the agent to exit. Subsequent shell reports remain authoritative.
 
+Closing a terminal tab releases its registry snapshots and built-in Git, Files
+and Agent History derived presentation state. Nonempty authored Git commit
+drafts remain available for tab restoration without retaining full history or
+file snapshots. Late asynchronous content updates for a closed tab are ignored. Closing or hiding an Inspector view does not terminate
+managed port forwards. Identical plugin snapshots do not broadcast another UI
+revision; Agent History reuses one decorated session array per host and active
+session set instead of allocating it separately for every tab.
+
 The trailing Inspector retains visited native pane views within the current tab,
 so Files/Agent History/Git/Info switches hide and reveal existing views rather
 than rebuilding large trees. Only the selected pane receives provider lifecycle;

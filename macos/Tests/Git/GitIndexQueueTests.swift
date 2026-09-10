@@ -71,6 +71,25 @@ struct GitIndexQueueTests {
         #expect(await probe.commands.filter { $0.contains("status") }.count == 1)
     }
 
+    @Test func closingTabDropsGitPresentationState() async throws {
+        let probe = IndexExecutionProbe()
+        let fixture = try await Fixture(files: ["a.txt"], probe: probe)
+        defer { fixture.close() }
+        fixture.send(.updateCommitDraft("draft owned by closed tab"))
+        fixture.registry.closeTab(fixture.context.tabID)
+        fixture.provider.forgetTab(fixture.context.tabID)
+        fixture.registry.presentationDidChange(to: BuiltInGitInspectorProvider.paneID, context: fixture.context)
+        try await Task.sleep(for: .milliseconds(80))
+        #expect(fixture.registry.isTabClosed(fixture.context.tabID))
+        if case .git = fixture.registry.content(for: BuiltInGitInspectorProvider.paneID, context: fixture.context) {
+            Issue.record("A closed tab must not recreate its Git snapshot")
+        }
+        fixture.registry.openTab(fixture.context.tabID)
+        fixture.registry.presentationDidChange(to: BuiltInGitInspectorProvider.paneID, context: fixture.context)
+        let restored = try await fixture.wait { $0.repository != nil && !$0.isLoading && !$0.history.isLoading }
+        #expect(restored.commitDraft == "draft owned by closed tab")
+    }
+
     @Test func revisitingReadyGitPaneUsesSnapshotWithoutStartingAnotherQuery() async throws {
         let probe = IndexExecutionProbe()
         let fixture = try await Fixture(files: ["file.txt"], probe: probe)

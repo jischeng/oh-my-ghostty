@@ -315,3 +315,7 @@ terminal draws again. This does not discard scrollback, restart the PTY, alter
 terminal dimensions or reduce the visible surface's triple buffering. The
 fork-owned implementation is `src/renderer/omg_memory.zig`; the generic renderer
 only calls it at the existing visibility boundary. OpenGL is unchanged.
+
+Synchronous layer-display requests also honor terminal visibility. Background
+layout invalidations must not recreate the spare GPU frames after an occlusion
+trim; the last presented image remains available until visibility resumes.

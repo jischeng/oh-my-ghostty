@@ -32,7 +32,10 @@ final class BuiltInAgentHistoryInspectorProvider {
     private let transcriptLoader: TranscriptLoader
     private let sessionResumer: SessionResumer
     private let sessionForker: SessionForker
-    private var sessionsByHost: [String: [AgentHistorySession]] = [:]
+    private var sessionsByHost: [String: [AgentHistorySession]] = [:] {
+        didSet { presentedSessionCache.removeAll() }
+    }
+    private var presentedSessionCache: [String: (activeIDs: Set<String>, sessions: [AgentHistorySession])] = [:]
     private var loadingHosts: Set<String> = []
     private var loadTasks: [UUID: Task<Void, Never>] = [:]
     private var transcriptTasks: [UUID: Task<Void, Never>] = [:]
@@ -136,6 +139,12 @@ final class BuiltInAgentHistoryInspectorProvider {
             )
         }
         publishPresentedContexts()
+    }
+
+    func forgetTab(_ tabID: UUID) {
+        transcriptTasks.removeValue(forKey: tabID)?.cancel()
+        tabStates.removeValue(forKey: tabID)
+        presentedContexts.removeValue(forKey: tabID)
     }
 
     private func handle(_ event: InspectorPaneLifecycleEvent) {
@@ -310,10 +319,16 @@ final class BuiltInAgentHistoryInspectorProvider {
         let state = tabStates[context.tabID] ?? .init(hostKey: hostKey)
         let activeIDs = Self.activeSessionIDs()
         let hostSessions = sessionsByHost[hostKey]
-        let presentedSessions = (hostSessions ?? []).map { session in
-            var session = session
-            session.isActive = activeIDs.contains(session.id)
-            return session
+        let presentedSessions: [AgentHistorySession]
+        if let cached = presentedSessionCache[hostKey], cached.activeIDs == activeIDs {
+            presentedSessions = cached.sessions
+        } else {
+            presentedSessions = (hostSessions ?? []).map { session in
+                var session = session
+                session.isActive = activeIDs.contains(session.id)
+                return session
+            }
+            presentedSessionCache[hostKey] = (activeIDs, presentedSessions)
         }
         let isLoading = hostSessions == nil && loadingHosts.contains(hostKey)
         let hostLabel: String? = if case .sshReady(let ssh, _) = context.session.state {

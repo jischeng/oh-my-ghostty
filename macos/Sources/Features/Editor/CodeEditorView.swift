@@ -487,17 +487,20 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
         installTextObservers(controller: controller)
         // A read-only snapshot never gets an edit to initialize the provider's
         // visible range. Notify it once after the native viewport is laid out.
-        DispatchQueue.main.async { [weak controller] in
-            guard let scroll = controller?.textView.enclosingScrollView else { return }
-            NotificationCenter.default.post(name: NSView.boundsDidChangeNotification, object: scroll.contentView)
-        }
-        if let clip = controller.textView.enclosingScrollView?.contentView {
-            clip.postsBoundsChangedNotifications = true
+        DispatchQueue.main.async { [weak self, weak controller] in
+            guard let self, let controller, self.controller === controller,
+                  let scroll = controller.textView.enclosingScrollView else { return }
+            // prepareCoordinator precedes the editor's scroll-view creation.
+            // Register only after mounting, otherwise long-document scrolling
+            // never invalidates the diff overlay at all.
+            if let viewportObserver { NotificationCenter.default.removeObserver(viewportObserver) }
+            scroll.contentView.postsBoundsChangedNotifications = true
             viewportObserver = NotificationCenter.default.addObserver(
-                forName: NSView.boundsDidChangeNotification, object: clip, queue: .main
+                forName: NSView.boundsDidChangeNotification, object: scroll.contentView, queue: .main
             ) { [weak self] _ in
                 MainActor.assumeIsolated { self?.repositionCompletion(); self?.diffOverlay?.refresh() }
             }
+            NotificationCenter.default.post(name: NSView.boundsDidChangeNotification, object: scroll.contentView)
         }
         installMouseMonitor()
         if isActive { registerCommands() }
@@ -1032,15 +1035,39 @@ private final class EditorDiffLineOverlay {
     let layer = CALayer()
     private weak var textView: TextView?
     var lines: [Int: Bool] = [:]
+    private var refreshPending = false
+    private var observations: [NSObjectProtocol] = []
+
+    deinit { observations.forEach(NotificationCenter.default.removeObserver) }
 
     init(textView: TextView) {
         self.textView = textView
+        layer.name = "omg.diff-line-overlay"
         textView.wantsLayer = true
         textView.layer?.addSublayer(layer)
+        for name in [NSView.frameDidChangeNotification, NSView.boundsDidChangeNotification] {
+            observations.append(NotificationCenter.default.addObserver(forName: name, object: textView, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.refresh() }
+            })
+        }
     }
 
     func refresh() {
-        guard let textView else { return }
+        guard !refreshPending else { return }
+        refreshPending = true
+        // Scroll notifications arrive before lazy line layout has settled.
+        // Coalesce them, then obtain final wrapped-line positions on the next
+        // main-loop turn. Drawing inside a layout callback can re-enter layout.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            defer { refreshPending = false }
+            guard let textView else { return }
+            textView.layoutSubtreeIfNeeded()
+            drawHighlights(in: textView)
+        }
+    }
+
+    private func drawHighlights(in textView: TextView) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         layer.frame = textView.bounds

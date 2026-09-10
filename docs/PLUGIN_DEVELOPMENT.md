@@ -1018,6 +1018,12 @@ completed. Writes are never automatically retried. A bulk status failure keeps
 the last snapshot and reports the error rather than launching repeated fallback
 queries. Users refresh before retrying a timed-out write.
 
+Source diff overlays register their viewport observer after the native editor
+has created its scroll view. Scroll and resize invalidations are coalesced until
+lazy wrapped-line layout settles, then highlights are redrawn from the current
+visible source lines. This applies equally to local/SSH and inline/side-by-side
+snapshots; patch parsing and line identities remain transport-independent.
+
 Git UI text comes from `GitStrings.json` through `GitL10n`, following the existing
 application language preference (system, English or Simplified Chinese). Language
 changes update visible Git chrome. Branch/tag/remote names, author data, paths,

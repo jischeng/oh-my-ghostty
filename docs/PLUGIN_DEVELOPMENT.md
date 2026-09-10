@@ -1116,7 +1116,8 @@ List/Tree control live inside the popover on one row. Categories are Branches,
 Remote Branches and Worktrees, plus current/all-history scope choices. Search is
 case-insensitive and reuses the command palette's matching helper. Up/Down move
 through matching entries, Enter activates the full ref/worktree identity and Esc
-closes the popover. Browsing a worktree reads its HEAD (including detached HEAD)
+closes the popover. Background ref refreshes and mode switches preserve the
+keyboard candidate. Browsing a worktree reads its HEAD (including detached HEAD)
 without opening a terminal or changing Git refs. Ref selection refreshes history
 only. Worktrees remain physical checkout rows with visible paths; branch rows
 mark associated worktrees.

@@ -112,8 +112,11 @@ struct GitCollectionView: NSViewRepresentable {
                 let collapsed = value.query.isEmpty ? state.collapsed[value.stateKey, default: []] : filterCollapsed
                 let initial: String?
                 if case .refs(let branches, _, _, _, _) = value.source { initial = branches.first(where: \.isCurrent)?.id } else { initial = nil }
+                let selection = old == nil || changedContext || old?.selectedID != value.selectedID
+                    ? value.selectedID ?? state.selected[value.stateKey] ?? initial
+                    : state.selected[value.stateKey] ?? value.selectedID ?? initial
                 apply(GitCollectionBuilder.rows(nodes, collapsed: collapsed), reset: changedContext || changedMode,
-                      preferredSelection: value.selectedID ?? state.selected[value.stateKey] ?? initial)
+                      preferredSelection: selection)
                 if value.interaction == .picker, old == nil || changedQuery, table.selectedRow >= 0 {
                     table.scrollRowToVisible(table.selectedRow)
                 }
@@ -211,6 +214,9 @@ struct GitCollectionView: NSViewRepresentable {
             } else if input.interaction == .picker, let index = rows.firstIndex(where: { $0.item.isSelectable && !$0.item.isFolder && $0.item.enabled }) {
                 table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
             } else { table.deselectAll(nil) }
+            if rows.indices.contains(table.selectedRow) {
+                state.selected[input.stateKey] = rows[table.selectedRow].id
+            }
             restore(saved)
         }
 

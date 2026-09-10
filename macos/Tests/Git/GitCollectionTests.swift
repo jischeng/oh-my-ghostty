@@ -6,6 +6,32 @@ import Testing
 
 @MainActor
 struct GitCollectionTests {
+    @Test func pickerKeepsKeyboardCandidateDuringRefRefreshAndModeChanges() async throws {
+        let branches = [branch("main"), branch("feature/query"), branch("feature/quota")]
+        let state = GitCollectionState()
+        state.selected["picker"] = "refs/heads/feature/quota"
+        var root = GitCollectionView(source: .refs(branches: branches, worktrees: [], scopes: true, branchesError: nil, worktreesError: nil),
+            interaction: .picker, state: state, stateKey: "picker", selectedID: "scope:allBranches", perform: { _ in })
+        let host = NSHostingView(rootView: root)
+        host.sizingOptions = []
+        let win = window(host)
+        defer { win.contentView = nil; win.close() }
+        try await Task.sleep(for: .milliseconds(80))
+        let table = try #require(find(GitCollectionTableView.self, in: host).first)
+        let coordinator = try #require(table.target as? GitCollectionView.Coordinator)
+        #expect(state.selected["picker"] == "scope:allBranches")
+        let candidate = "refs/heads/feature/quota"
+        table.selectRowIndexes(IndexSet(integer: try #require(coordinator.rows.firstIndex { $0.id == candidate })), byExtendingSelection: false)
+        root.source = .refs(branches: branches + [branch("fix/new")], worktrees: [], scopes: true, branchesError: nil, worktreesError: nil)
+        host.rootView = root
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(coordinator.rows[table.selectedRow].id == candidate)
+        root.mode = .tree
+        host.rootView = root
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(coordinator.rows[table.selectedRow].id == candidate)
+    }
+
     private func branch(_ name: String, remote: Bool = false) -> GitBranchInfo {
         .init(name: name, commit: .init("abc1234"), isCurrent: name == "main", isRemote: remote, upstream: "", tracking: "")
     }

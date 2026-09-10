@@ -165,9 +165,20 @@ struct InspectorGitView: View {
 
     @ViewBuilder
     private func tabContentView(headCommitID: String?) -> some View {
+        ZStack {
+            historyView(headCommitID: headCommitID)
+                .opacity(content.activeTab == .history ? 1 : 0)
+                .allowsHitTesting(content.activeTab == .history)
+                .accessibilityHidden(content.activeTab != .history)
+            nonHistoryTabContent
+        }
+    }
+
+    @ViewBuilder
+    private var nonHistoryTabContent: some View {
         switch content.activeTab {
         case .history:
-            historyView(headCommitID: headCommitID)
+            EmptyView()
 
         case .changes:
             VStack(spacing: 0) {
@@ -175,7 +186,9 @@ struct InspectorGitView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         changeSection("Staged", files: content.workingTree.staged, target: .staged, error: content.workingTree.stagedError)
                         changeSection("Unstaged / Untracked", files: content.workingTree.unstaged, target: .unstaged, error: content.workingTree.unstagedError)
-                    }.padding(.horizontal, 12).padding(.bottom, 10)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12).padding(.bottom, 10)
                 }
                 Divider()
                 GitCommitComposer(message: Binding(get: { content.commitDraft }, set: { perform(.gitAction(.updateCommitDraft($0))) }),
@@ -262,7 +275,7 @@ struct InspectorGitView: View {
                     expandedCommits: content.expandedCommits,
                     hasMore: content.history.hasMore,
                     isLoading: content.history.isLoading,
-                    automaticLoadingAllowed: content.history.statusMessage == nil,
+                    automaticLoadingAllowed: content.activeTab == .history && content.history.statusMessage == nil,
                     isBusy: content.operation != nil,
                     onSelect: { perform(.gitAction(.selectCommit($0))) },
                     onOpen: { perform(.gitAction(.openCommit($0))) },

@@ -5,6 +5,32 @@ import Testing
 
 @MainActor
 struct GitSidebarV1Tests {
+    @Test func sidebarTabSwitchesKeepHistoryTableAndScrollPosition() async throws {
+        let repo = GitRepositoryIdentity(worktreePath: "/repo", gitDirPath: "/repo/.git", commonGitDirPath: "/repo/.git")
+        let commits = (0..<100).map { GitHistoryCommit(id: .init("commit-\($0)"), parentIDs: [], authorName: "A", authorEmail: "", authoredAt: .distantPast, subject: "Commit \($0)") }
+        var content = InspectorGitContent(repository: repo, branch: "main", status: .ready(repository: repo, branch: "main", headCommitID: nil),
+                                          history: .init(commits: commits))
+        let host = NSHostingView(rootView: InspectorGitView(content: content, perform: { _ in }))
+        host.sizingOptions = []
+        let win = window(host)
+        defer { win.contentView = nil; win.close() }
+        try await Task.sleep(for: .milliseconds(100))
+        let table = try #require(find(NSTableView.self, in: host).first)
+        let scroll = try #require(table.enclosingScrollView)
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: 250))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        let offset = scroll.contentView.bounds.origin
+        for tab in [InspectorGitContent.ActiveTab.changes, .branches, .history] {
+            content = InspectorGitContent(repository: repo, branch: "main", status: content.status,
+                                           activeTab: tab, history: content.history)
+            host.rootView = InspectorGitView(content: content, perform: { _ in })
+            try await Task.sleep(for: .milliseconds(80))
+            host.layoutSubtreeIfNeeded()
+            #expect(find(NSTableView.self, in: host).contains { $0 === table })
+            #expect(scroll.contentView.bounds.origin == offset)
+        }
+    }
+
     private func find<T: NSView>(_ type: T.Type, in view: NSView) -> [T] {
         (view as? T).map { [$0] } ?? view.subviews.flatMap { find(type, in: $0) }
     }
@@ -67,6 +93,12 @@ struct GitSidebarV1Tests {
         try await Task.sleep(for: .milliseconds(100))
         #expect(composer.bounds.height <= 112 && composer.bounds.height > 44)
         #expect(win.firstResponder === editor)
+        content.workingTree.staged = []
+        content.workingTree.unstaged = []
+        host.rootView = InspectorGitView(content: content, perform: { _ in }).background(Color(NSColor.windowBackgroundColor))
+        try await Task.sleep(for: .milliseconds(100))
+        win.displayIfNeeded()
+        try capture(host, path: "/tmp/omg-git-changes-empty.png")
     }
 
     @Test func commitMenuIsGroupedAndKeepsTheClickedCommitWhileSelectionChanges() async throws {

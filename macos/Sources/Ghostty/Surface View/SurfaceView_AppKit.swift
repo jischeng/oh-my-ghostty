@@ -385,6 +385,11 @@ extension Ghostty {
 
             // Setup our surface. This will also initialize all the terminal IO.
             let surface_cfg = baseConfig ?? SurfaceConfiguration()
+            // A restored command can launch an agent before any shell prompt
+            // reports OSC 7. Seed the known launch directory for all consumers.
+            if let directory = surface_cfg.workingDirectory, directory.hasPrefix("/") {
+                self.pwd = directory
+            }
             let surface = surface_cfg.withCValue(view: self) { surface_cfg_c in
                 ghostty_surface_new(app, &surface_cfg_c)
             }

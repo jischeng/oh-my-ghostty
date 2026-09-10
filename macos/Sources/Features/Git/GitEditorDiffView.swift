@@ -26,7 +26,7 @@ struct GitEditorDiffView: View {
     var actions = GitDiffEditorActions()
     let close: () -> Void
     @StateObject private var model: GitEditorDiffModel
-    @State private var mode = "Side by Side"
+    @AppStorage("git.diff.viewMode") private var mode = "Side by Side"
     @State private var scroll = GitDiffScrollLink()
     @State private var linkedScrolling = true
 

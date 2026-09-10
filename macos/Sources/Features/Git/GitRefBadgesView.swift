@@ -13,6 +13,7 @@ final class GitRefBadgesView: NSView {
     }
     private var refs: [GitRefDecoration] = []
     private var rendered: [Badge] = []
+    private var layoutWidth: CGFloat?
     private var buttons: [NSButton] = []
     private(set) var popover: NSPopover?
     override var isFlipped: Bool { true }
@@ -107,7 +108,9 @@ final class GitRefBadgesView: NSView {
     }
 
     func configure(_ refs: [GitRefDecoration]) {
-        if self.refs != refs { popover?.close() }
+        guard self.refs != refs else { return }
+        popover?.close()
+        layoutWidth = nil
         self.refs = refs
         needsLayout = true
     }
@@ -117,8 +120,16 @@ final class GitRefBadgesView: NSView {
         if window == nil { popover?.close() }
     }
 
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        layoutWidth = nil
+        needsLayout = true
+    }
+
     override func layout() {
         super.layout()
+        guard layoutWidth != bounds.width else { return }
+        layoutWidth = bounds.width
         let next = Self.badges(for: refs, width: bounds.width)
         if next != rendered {
             buttons.forEach { $0.removeFromSuperview() }

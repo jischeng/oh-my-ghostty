@@ -1,9 +1,36 @@
+import AppKit
 import Foundation
 import Testing
 @testable import Ghostty
 
 @MainActor
 struct BuiltInGitInspectorProviderTests {
+    @Test func commandLaunchProvidesRepositoryContextBeforeAnyShellPrompt() async throws {
+        let directory = createTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try runCommand(["git", "init", "-b", "main"], in: directory.path)
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        var configuration = Ghostty.SurfaceConfiguration()
+        configuration.workingDirectory = directory.path
+        configuration.command = "/bin/sleep 30"
+        let controller = TerminalController(app, withBaseConfig: configuration)
+        defer {
+            controller.window?.delegate = nil
+            controller.window?.close()
+        }
+        let surface = try #require(controller.surfaceTree.first)
+        #expect(surface.pwd == directory.path)
+        let session = try #require(controller.paneSessionContext(for: surface))
+        #expect(session.workingDirectory == directory.path)
+        let status = await GitRepositoryService().resolveStatus(workingDirectory: session.workingDirectory, session: session)
+        #expect(status.repository != nil)
+        // A later OSC 7 update still wins over the launch directory.
+        let subdirectory = directory.appendingPathComponent("subdir")
+        try FileManager.default.createDirectory(at: subdirectory, withIntermediateDirectories: true)
+        surface.pwd = subdirectory.path
+        #expect(controller.paneSessionContext(for: surface)?.workingDirectory == subdirectory.path)
+    }
+
     private func createTempDirectory() -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("git-provider-test-\(UUID().uuidString)")

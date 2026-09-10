@@ -94,7 +94,6 @@ final class BuiltInGitInspectorProvider {
             if let current = lastPublishedContent[action.context.tabID] {
                 publish(makeContent(from: current, activeTab: tab, history: state.history), tabID: action.context.tabID)
                 if tab == .history && state.history.snapshot == nil { loadHistory(context: action.context, force: true) }
-                if tab == .branches { load(context: action.context) }
             }
         case .selectHistoryScope(let scope):
             let key = currentWorktreeKey(for: action.context)
@@ -236,12 +235,10 @@ final class BuiltInGitInspectorProvider {
             var workingTree = oldContent?.repository == status.repository
                 ? (oldContent?.workingTree ?? GitWorkingTreeContent()) : GitWorkingTreeContent()
             if let repository = status.repository {
-                async let staged = Self.result { try await self.diffService.listFiles(for: repository, target: .staged).files }
-                async let unstaged = Self.result { try await self.diffService.listFiles(for: repository, target: .unstaged).files }
+                async let files = Self.readFiles(service: self.diffService, repository: repository)
                 async let branches = Self.result { try await self.repositoryService.branches(for: repository) }
                 async let worktrees = Self.result { try await self.repositoryService.worktrees(for: repository, includeStatus: force || activeTab == .branches) }
-                Self.update(await staged, values: &workingTree.staged, error: &workingTree.stagedError)
-                Self.update(await unstaged, values: &workingTree.unstaged, error: &workingTree.unstagedError)
+                Self.updateFiles(await files, workingTree: &workingTree)
                 Self.update(await branches, values: &workingTree.branches, error: &workingTree.branchesError)
                 Self.update(await worktrees, values: &workingTree.worktrees, error: &workingTree.worktreesError)
                 if force || oldContent?.repository != repository {
@@ -259,7 +256,7 @@ final class BuiltInGitInspectorProvider {
                                               activeTab: latestState.activeTab, history: latestState.history)
             content.workingTree = workingTree
             self.publish(content, tabID: context.tabID)
-            if repo != nil { self.loadHistory(context: context, force: force, refreshing: true) }
+            if repo != nil, content.activeTab == .history || force { self.loadHistory(context: context, force: force, refreshing: true) }
         }
     }
 
@@ -284,7 +281,9 @@ final class BuiltInGitInspectorProvider {
         loadingState.history = loading
         if replacing { loadingState.selectedCommitID = nil }
         save(loadingState, tabID: context.tabID, worktreeKey: key)
-        publish(makeContent(from: current, history: loading), tabID: context.tabID)
+        if !refreshing || force || stateBefore.history.snapshot == nil {
+            publish(makeContent(from: current, history: loading), tabID: context.tabID)
+        }
         historyTasks[context.tabID] = Task { [weak self] in
             guard let self else { return }
             defer {
@@ -436,6 +435,7 @@ final class BuiltInGitInspectorProvider {
             content.operation = operationTitles[key]
             content.isUpdatingIndex = indexUpdates.contains(key)
         }
+        guard lastPublishedContent[tabID] != content else { return }
         lastPublishedContent[tabID] = content
         do {
             try registry.updatePluginContent(paneID: Self.paneID, pluginID: Self.pluginID,
@@ -475,14 +475,33 @@ final class BuiltInGitInspectorProvider {
     }
 
     private func refreshIndex(repository: GitRepositoryIdentity) async {
-        async let staged = Self.result { try await self.diffService.listFiles(for: repository, target: .staged).files }
-        async let unstaged = Self.result { try await self.diffService.listFiles(for: repository, target: .unstaged).files }
-        let results = await (staged, unstaged)
+        let files = await Self.readFiles(service: self.diffService, repository: repository)
         for (tabID, var content) in lastPublishedContent where content.repository == repository {
-            Self.update(results.0, values: &content.workingTree.staged, error: &content.workingTree.stagedError)
-            Self.update(results.1, values: &content.workingTree.unstaged, error: &content.workingTree.unstagedError)
+            Self.updateFiles(files, workingTree: &content.workingTree)
             publish(content, tabID: tabID)
         }
+    }
+
+    nonisolated private static func readFiles(service: GitDiffService, repository: GitRepositoryIdentity)
+        async -> (staged: Result<[GitDiffFile], Error>, unstaged: Result<[GitDiffFile], Error>) {
+        do {
+            let files = try await service.workingTreeFiles(for: repository)
+            return (.success(files.staged), .success(files.unstaged))
+        } catch {
+            guard !Task.isCancelled else { return (.failure(error), .failure(error)) }
+            // Preserve independent error handling if only one side is readable.
+            async let staged = result { try await service.listFiles(for: repository, target: .staged).files }
+            async let unstaged = result { try await service.listFiles(for: repository, target: .unstaged).files }
+            return await (staged, unstaged)
+        }
+    }
+
+    private static func updateFiles(
+        _ result: (staged: Result<[GitDiffFile], Error>, unstaged: Result<[GitDiffFile], Error>),
+        workingTree: inout GitWorkingTreeContent
+    ) {
+        update(result.staged, values: &workingTree.staged, error: &workingTree.stagedError)
+        update(result.unstaged, values: &workingTree.unstaged, error: &workingTree.unstagedError)
     }
 
     private func handleWorktree(_ action: InspectorGitAction, context: InspectorPaneContext) {

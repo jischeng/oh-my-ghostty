@@ -3,6 +3,38 @@ import Testing
 @testable import Ghostty
 
 struct GitDiffServiceTests {
+    @Test func combinedWorkingTreeStatusPreservesBothSidesAndRenamePaths() async throws {
+        let dir = try makeRepository()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try write("base\n", to: dir.appendingPathComponent("partial"))
+        try write("rename\n", to: dir.appendingPathComponent("old\nname"))
+        try run(["git", "add", "."], in: dir.path)
+        _ = try commit(in: dir, message: "base")
+        try write("index\n", to: dir.appendingPathComponent("partial"))
+        try run(["git", "mv", "old\nname", "new\t中文"], in: dir.path)
+        try run(["git", "add", "partial"], in: dir.path)
+        try write("working\n", to: dir.appendingPathComponent("partial"))
+        try write("later\n", to: dir.appendingPathComponent("new\t中文"))
+        try write("new\n", to: dir.appendingPathComponent("untracked\n中文"))
+        let repository = try await repositoryIdentity(for: dir)
+        let files = try await GitDiffService().workingTreeFiles(for: repository)
+        #expect(files.staged.count == 2 && files.unstaged.count == 3)
+        #expect(files.staged.first { $0.path == "new\t中文" }?.oldPath == "old\nname")
+        #expect(files.unstaged.first { $0.path == "new\t中文" }?.oldPath == nil)
+        #expect(files.staged.first { $0.path == "partial" }?.kind == .modified)
+        #expect(files.unstaged.first { $0.path == "partial" }?.kind == .modified)
+        #expect(files.unstaged.first { $0.path == "untracked\n中文" }?.isUntracked == true)
+    }
+
+    @Test func combinedStatusHandlesConflictsAndRejectsTruncatedRenames() throws {
+        let files = try GitDiffService.parseWorkingTreeFiles(Data("UU conflict\0DD deleted\0 A intent\0".utf8))
+        #expect(files.staged.map(\.status) == ["U", "U"])
+        #expect(files.unstaged.map(\.status) == ["U", "U", "A"])
+        #expect(throws: (any Error).self) {
+            try GitDiffService.parseWorkingTreeFiles(Data("R  destination\0".utf8))
+        }
+    }
+
     @Test func commitFileListIncludesNumericStatsAndBinaryRenamesInOneResponse() async throws {
         let dir = try makeRepository()
         defer { try? FileManager.default.removeItem(at: dir) }

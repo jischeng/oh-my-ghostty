@@ -949,6 +949,25 @@ implementation, tests, and a stability designation land.
 
 ## Built-in Git editor diff
 
+The terminal seeds its initial absolute working directory from its launch
+configuration, including restored agent commands, before shell directory reports
+arrive. Inspector providers consume this shared context rather than waiting for
+the agent to exit. Subsequent shell reports remain authoritative.
+
+Git sidebar tab switches retain the native History table and its scroll position.
+They display the current snapshot immediately; normal polling refreshes branch and
+worktree information. Hidden History views do not automatically paginate. Unchanged
+content is not republished, and background snapshot checks do not show a loading
+indicator when history is already available.
+
+Working-tree refresh reads staged and unstaged paths together with one NUL-delimited
+porcelain status command, falling back to independent reads on failure so one
+unreadable side does not disable the other. Rename origins, conflicts, untracked paths and partially
+staged files are preserved. Index-only mutations refresh this list without reloading
+history. Path-only reset unstages files, including before the first commit, without
+an extra HEAD probe. Diff layout automatically persists the last Side by Side or
+Inline selection in app preferences; no separate settings control is exposed.
+
 The built-in Git diff surface is host-owned Swift code. `GitDiffService` first
 lists paths for a `GitDiffTarget` (`commit`, `staged`, or `unstaged`) and only
 loads a selected file's unified diff. Working-tree file lists use Git's NUL-delimited

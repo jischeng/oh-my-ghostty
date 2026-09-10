@@ -14,6 +14,57 @@ struct GitDiffService: Sendable {
         self.diffByteLimit = max(1, diffByteLimit)
     }
 
+    /// Read both sides of the index in one invocation, including untracked
+    /// files. This also avoids three SSH sessions for each checkbox update.
+    func workingTreeFiles(for repository: GitRepositoryIdentity) async throws -> (staged: [GitDiffFile], unstaged: [GitDiffFile]) {
+        let result = try await run(
+            ["--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--renames"],
+            repository: repository, maxOutputBytes: 512 * 1024
+        )
+        return try Self.parseWorkingTreeFiles(result.stdout)
+    }
+
+    static func parseWorkingTreeFiles(_ data: Data) throws -> (staged: [GitDiffFile], unstaged: [GitDiffFile]) {
+        let records = data.split(separator: 0, omittingEmptySubsequences: false)
+        var staged: [GitDiffFile] = []
+        var unstaged: [GitDiffFile] = []
+        var index = 0
+        while index < records.count {
+            let record = records[index]
+            index += 1
+            if record.isEmpty && index == records.count { break }
+            let bytes = Array(record.prefix(3))
+            guard bytes.count == 3, bytes[2] == 32,
+                  let path = String(bytes: record.dropFirst(3), encoding: .utf8), !path.isEmpty else {
+                throw GitDiffServiceError.gitFailed("Git returned an invalid status record.")
+            }
+            let x = String(UnicodeScalar(bytes[0]))
+            let y = String(UnicodeScalar(bytes[1]))
+            var oldPath: String?
+            if x == "R" || x == "C" || y == "R" || y == "C" {
+                guard index < records.count, !records[index].isEmpty,
+                      let original = String(bytes: records[index], encoding: .utf8) else {
+                    throw GitDiffServiceError.gitFailed("Git returned an incomplete rename record.")
+                }
+                oldPath = original
+                index += 1
+            }
+            if x == "?" && y == "?" {
+                unstaged.append(.init(path: path, status: "A", isUntracked: true))
+            } else if ["DD", "AU", "UD", "UA", "DU", "AA", "UU"].contains(x + y) {
+                staged.append(.init(path: path, status: "U"))
+                unstaged.append(.init(path: path, status: "U"))
+            } else {
+                if x != " " && x != "!" { staged.append(.init(path: path, oldPath: x == "R" || x == "C" ? oldPath : nil, status: x)) }
+                if y != " " && y != "!" { unstaged.append(.init(path: path, oldPath: y == "R" || y == "C" ? oldPath : nil, status: y)) }
+            }
+        }
+        func sorted(_ files: [GitDiffFile]) -> [GitDiffFile] {
+            files.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+        }
+        return (sorted(staged), sorted(unstaged))
+    }
+
     /// Lists changed paths without reading their contents. Git's `-z` output is
     /// parsed as records so spaces, unicode, quotes and newlines in paths survive.
     func listFiles(for repository: GitRepositoryIdentity, target: GitDiffTarget, parentIDs: [GitCommitID]? = nil) async throws -> GitDiffFileList {

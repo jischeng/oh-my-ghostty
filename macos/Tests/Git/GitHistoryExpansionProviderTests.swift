@@ -23,7 +23,9 @@ actor GitWorkingTreeReadProbe: GitExecutor {
 
     func execute(arguments: [String], workingDirectory: String, stdin: Data?, maxOutputBytes: Int?) async throws -> GitExecutionResult {
         let component: Component?
-        if arguments.contains("--cached") {
+        if arguments.contains("--porcelain=v1"), failure == .staged || failure == .unstaged {
+            component = failure
+        } else if arguments.contains("--cached") {
             component = .staged
         } else if arguments.contains("ls-files") {
             component = .unstaged
@@ -33,7 +35,7 @@ actor GitWorkingTreeReadProbe: GitExecutor {
         if let component, component == failure {
             return GitExecutionResult(exitCode: 1, stdout: Data(), stderr: Data("\(component) read failed".utf8))
         }
-        if arguments.contains("add") || arguments.contains("restore") || arguments.first == "commit" { writes += 1 }
+        if arguments.contains("add") || arguments.contains("restore") || arguments.contains("reset") || arguments.first == "commit" { writes += 1 }
         return try await LocalGitExecutor().execute(arguments: arguments, workingDirectory: workingDirectory,
                                                      stdin: stdin, maxOutputBytes: maxOutputBytes)
     }

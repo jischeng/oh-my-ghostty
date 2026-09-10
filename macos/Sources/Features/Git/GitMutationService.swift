@@ -91,14 +91,9 @@ struct GitMutationService: Sendable {
             _ = try await run(["--literal-pathspecs", "add", "--"] + paths, in: repository)
         case .unstage(let paths):
             try validate(paths)
-            let head = try await (executor ?? repository.executor).execute(arguments: ["rev-parse", "--verify", "HEAD"],
-                                                 workingDirectory: repository.worktreePath)
-            if head.isSuccess {
-                _ = try await run(["--literal-pathspecs", "restore", "--staged", "--"] + paths, in: repository)
-            } else {
-                // The empty-tree index is the base before the first commit.
-                _ = try await run(["--literal-pathspecs", "rm", "--cached", "--force", "--"] + paths, in: repository)
-            }
+            // With no explicit revision, path reset also handles an unborn
+            // HEAD. Only the selected index entries change; files stay intact.
+            _ = try await run(["--literal-pathspecs", "reset", "--quiet", "--"] + paths, in: repository)
         case .commit(let message):
             guard !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw GitDiffServiceError.gitFailed("Enter a commit message.")

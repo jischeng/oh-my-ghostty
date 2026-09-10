@@ -354,6 +354,18 @@ struct SSHGitExecutorTests {
         try await mutations.perform(.stage(["file.swift"]), in: repository)
         try await mutations.perform(.unstage(["file.swift"]), in: repository)
         #expect(try await diff.listFiles(for: repository, target: .staged).files.isEmpty)
+        let statusFiles = try await diff.workingTreeFiles(for: repository)
+        #expect(statusFiles.staged.isEmpty && statusFiles.unstaged.map(\.path) == ["file.swift"])
+        var checkboxTimings: [Double] = []
+        for _ in 0..<5 {
+            let start = Date()
+            try await mutations.perform(.stage(["file.swift"]), in: repository)
+            let stagedFiles = try await diff.workingTreeFiles(for: repository)
+            #expect(stagedFiles.staged.map(\.path) == ["file.swift"] && stagedFiles.unstaged.isEmpty)
+            checkboxTimings.append(Date().timeIntervalSince(start) * 1000)
+            try await mutations.perform(.unstage(["file.swift"]), in: repository)
+        }
+        print("SSH checkbox benchmark (loopback, mutation + refreshed status): median=\(checkboxTimings.sorted()[2])ms")
         try await mutations.perform(.stage(["file.swift"]), in: repository)
         try await mutations.perform(.commit("second"), in: repository)
         try await mutations.perform(.create(name: "feature/ssh", start: "refs/heads/main"), in: repository)

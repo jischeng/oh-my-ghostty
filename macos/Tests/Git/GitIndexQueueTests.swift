@@ -9,6 +9,10 @@ private actor IndexExecutionProbe: GitExecutor {
     private(set) var maximumConcurrentWrites = 0
     private var activeWrites = 0
     private var failurePath: String?
+    private var timeOutWrite = false
+    private let executor: any GitExecutor
+    init(executor: any GitExecutor = LocalGitExecutor()) { self.executor = executor }
+    func timeoutNextWrite() { timeOutWrite = true }
     func fail(_ path: String?) { failurePath = path }
     func clear() { commands = []; inputs = []; maximumConcurrentWrites = 0 }
     func execute(arguments: [String], workingDirectory: String, stdin: Data?, maxOutputBytes: Int?) async throws -> GitExecutionResult {
@@ -21,6 +25,7 @@ private actor IndexExecutionProbe: GitExecutor {
         }
         defer { if writes { activeWrites -= 1 } }
         if writes {
+            if timeOutWrite { timeOutWrite = false; throw GitExecutionError.timedOut }
             try await Task.sleep(for: .milliseconds(60))
             if let failurePath, arguments.contains(failurePath) || stdin.map({ data in
                 data.split(separator: 0).contains { String(bytes: $0, encoding: .utf8) == failurePath }
@@ -28,17 +33,21 @@ private actor IndexExecutionProbe: GitExecutor {
                 return .init(exitCode: 1, stdout: Data(), stderr: Data("Injected index write failure".utf8))
             }
         }
-        return try await LocalGitExecutor().execute(arguments: arguments, workingDirectory: workingDirectory,
+        return try await executor.execute(arguments: arguments, workingDirectory: workingDirectory,
                                                      stdin: stdin, maxOutputBytes: maxOutputBytes)
     }
 }
 
 @MainActor
 struct GitIndexQueueTests {
-    @Test func bulkWritesUseOneCommandAndOneStatusRefresh() async throws {
-        let probe = IndexExecutionProbe()
+    @Test(arguments: [false, true]) func bulkWritesUseOneCommandAndOneStatusRefresh(remote: Bool) async throws {
+        let server = remote ? try await GitSSHTestServer() : nil
+        defer { server?.stop() }
+        let executor: any GitExecutor
+        if let server { executor = SSHGitExecutor(connection: server.connection) } else { executor = LocalGitExecutor() }
+        let probe = IndexExecutionProbe(executor: executor)
         let names = (0..<1100).map { "output/result-\($0).json" } + ["literal [one]*.txt", "换行\n文件.cpp"]
-        let fixture = try await Fixture(files: names, probe: probe)
+        let fixture = try await Fixture(files: names, probe: probe, server: server)
         defer { fixture.close() }
         let initial = fixture.content
         var stagedCounts: [Int] = []
@@ -62,12 +71,26 @@ struct GitIndexQueueTests {
         #expect(await probe.commands.filter { $0.contains("status") }.count == 1)
     }
 
+    @Test func batchTimeoutClearsPendingAndAllowsTheNextOperation() async throws {
+        let probe = IndexExecutionProbe()
+        let fixture = try await Fixture(files: ["dir/a", "dir/b"], probe: probe)
+        defer { fixture.close() }
+        await probe.timeoutNextWrite()
+        fixture.send(.setFilesStaged(fixture.content.workingTree.unstaged, true))
+        let failed = try await fixture.wait { $0.operation == nil && $0.operationError != nil }
+        #expect(failed.pendingIndexPaths.isEmpty && !failed.isUpdatingIndex)
+        #expect(failed.workingTree.staged.isEmpty)
+        #expect(await probe.commands.filter { $0.contains("status") }.isEmpty)
+        fixture.send(.setFilesStaged(failed.workingTree.unstaged, true))
+        _ = try await fixture.wait { $0.operation == nil && $0.workingTree.staged.count == 2 }
+    }
+
     @MainActor private final class Fixture {
         let root: URL
         let registry = InspectorRegistry()
         let context: InspectorPaneContext
         let provider: BuiltInGitInspectorProvider
-        init(files: [String], probe: IndexExecutionProbe) async throws {
+        init(files: [String], probe: IndexExecutionProbe, server: GitSSHTestServer? = nil) async throws {
             root = FileManager.default.temporaryDirectory.appendingPathComponent("git-index-queue-\(UUID().uuidString)")
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             let result = try await LocalGitExecutor().execute(arguments: ["init", "-b", "main"], workingDirectory: root.path)
@@ -78,7 +101,7 @@ struct GitIndexQueueTests {
                 try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try Data("original\n".utf8).write(to: file)
             }
-            context = .init(tabID: UUID(), surfaceID: UUID(), title: "Index test", workingDirectory: root.path)
+            context = .init(tabID: UUID(), surfaceID: UUID(), title: "Index test", workingDirectory: root.path, session: server?.session(directory: root.path))
             provider = BuiltInGitInspectorProvider(registry: registry, executor: probe)
             try provider.register()
             registry.presentationDidChange(to: BuiltInGitInspectorProvider.paneID, context: context)
@@ -94,7 +117,7 @@ struct GitIndexQueueTests {
             registry.performAction(paneID: BuiltInGitInspectorProvider.paneID, action: .init(context: context, kind: .gitAction(action)))
         }
         func wait(_ predicate: (InspectorGitContent) -> Bool) async throws -> InspectorGitContent {
-            for _ in 0..<160 {
+            for _ in 0..<500 {
                 if predicate(content) { return content }
                 try await Task.sleep(for: .milliseconds(20))
             }

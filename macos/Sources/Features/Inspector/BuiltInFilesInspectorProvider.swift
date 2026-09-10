@@ -226,7 +226,7 @@ final class BuiltInFilesInspectorProvider {
         alert.messageText = "Rename \(node.name)"
         alert.addButton(withTitle: "Rename")
         alert.addButton(withTitle: "Cancel")
-        let field = NSTextField(string: node.name)
+        let field = NSTextField(string: (node.id as NSString).lastPathComponent)
         field.frame = NSRect(x: 0, y: 0, width: 300, height: 24)
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
@@ -236,7 +236,7 @@ final class BuiltInFilesInspectorProvider {
             showError(error)
             return
         }
-        guard name != node.name else { return }
+        guard name != (node.id as NSString).lastPathComponent else { return }
         guard !EditorWorkspaceStore.shared.containsOpenDocument(path: path, descriptor: state.filesystem.descriptor) else {
             showError(WorkspaceFilesystemError.operationFailed("Close this file and any open files inside this folder before renaming it."))
             return
@@ -561,7 +561,7 @@ final class BuiltInFilesInspectorProvider {
     ) async throws -> [InspectorFileNode] {
         guard depth < 24, !Task.isCancelled else { return [] }
         let started = ContinuousClock.now
-        let entries = try await filesystem.listDirectory(at: path)
+        let entries = try await filesystem.listTreeDirectory(at: path)
         let boundedEntries = Array(entries.prefix(500))
         let elapsed = ContinuousClock.now - started
         Self.logger.debug("Files directory read path=\(path, privacy: .public) depth=\(depth) entries=\(boundedEntries.count) elapsed=\(elapsed)")

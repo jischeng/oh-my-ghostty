@@ -2014,7 +2014,7 @@ struct InspectorPluginContextHeader: View {
     }
 }
 
-private struct InspectorFileTreeView: View {
+struct InspectorFileTreeView: View {
     let tree: InspectorFileTree
     let perform: (InspectorPaneActionKind) -> Void
     @State private var selectedNodeID: String?
@@ -2069,7 +2069,7 @@ private struct InspectorFileTreeNodeView: View {
                             Color.clear
                         }
                     }
-                    .frame(width: 10, height: 14)
+                    .frame(width: InspectorTreeLayout.disclosureWidth - 6, height: 14)
 
                     InspectorFileIconView(node: node)
                     Text(node.name)
@@ -2083,7 +2083,7 @@ private struct InspectorFileTreeNodeView: View {
                 }
                 .padding(
                     .leading,
-                    CGFloat(depth) * 14 + InspectorContentMetrics.treeRowLeadingInset
+                    CGFloat(depth) * InspectorTreeLayout.indent + InspectorTreeLayout.leading
                 )
                 .padding(.trailing, 8)
                 .frame(height: 27)
@@ -2097,6 +2097,7 @@ private struct InspectorFileTreeNodeView: View {
             }
             .buttonStyle(.plain)
             .onHover { hovered = $0 }
+            .help(node.id)
             .onTapGesture(count: 2) {
                 selectedNodeID = node.id
                 if node.isDirectory {
@@ -2144,7 +2145,6 @@ private struct InspectorFileTreeNodeView: View {
                 .clipped()
             }
         }
-        .padding(.horizontal, InspectorContentMetrics.treeOuterInset)
         .animation(.easeInOut(duration: 0.16), value: node.isExpanded)
         .animation(
             .easeInOut(duration: 0.16),
@@ -2173,7 +2173,7 @@ private struct InspectorFileIconView: View {
                     .foregroundStyle(color)
             }
         }
-        .frame(width: 16, height: 16)
+        .frame(width: InspectorTreeLayout.iconWidth, height: InspectorTreeLayout.iconWidth)
     }
 
     private var color: Color {

@@ -115,7 +115,7 @@ struct GitCollectionTests {
         host.rootView = root
         try await Task.sleep(for: .milliseconds(50))
         #expect(state.collapsed["test/changes"]?.contains(folder) == true)
-        #expect(coordinator.rows.first { $0.id == folder }?.expanded == false)
+        #expect(coordinator.rows.first { $0.representedIDs.contains(folder) }?.expanded == false)
         root.mode = .list
         host.rootView = root
         try await Task.sleep(for: .milliseconds(50))
@@ -123,7 +123,7 @@ struct GitCollectionTests {
         root.mode = .tree
         host.rootView = root
         try await Task.sleep(for: .milliseconds(50))
-        #expect(coordinator.rows.first { $0.id == folder }?.expanded == false)
+        #expect(coordinator.rows.first { $0.representedIDs.contains(folder) }?.expanded == false)
         #expect(find(GitCollectionTableView.self, in: host).first === table)
     }
 

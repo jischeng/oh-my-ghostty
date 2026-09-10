@@ -293,13 +293,15 @@ struct GitCollectionView: NSViewRepresentable {
         func toggleFolder(_ id: String) {
             guard let input else { return }
             var collapsed = input.query.isEmpty ? state.collapsed[input.stateKey, default: []] : filterCollapsed
-            let collapsing = !collapsed.contains(id)
-            var identities = [id]
-            if input.interaction == .changes, id.contains("/folder/") {
-                let other = id.contains("changes/staged/")
-                    ? id.replacingOccurrences(of: "changes/staged/", with: "changes/unstaged/")
-                    : id.replacingOccurrences(of: "changes/unstaged/", with: "changes/staged/")
-                identities.append(other)
+            let row = rows.first { $0.id == id }
+            let collapsing = row?.expanded ?? !collapsed.contains(id)
+            var identities = row?.representedIDs.isEmpty == false ? row!.representedIDs : [id]
+            if input.interaction == .changes {
+                identities += identities.filter { $0.contains("/folder/") }.map {
+                    $0.contains("changes/staged/")
+                        ? $0.replacingOccurrences(of: "changes/staged/", with: "changes/unstaged/")
+                        : $0.replacingOccurrences(of: "changes/unstaged/", with: "changes/staged/")
+                }
             }
             for identity in identities {
                 if collapsing { collapsed.insert(identity) } else { collapsed.remove(identity) }
@@ -430,16 +432,25 @@ struct GitCollectionView: NSViewRepresentable {
         }
         private func remapSelection(_ selected: Set<String>, previous: [GitCollectionRow], next: [GitCollectionRow]) -> Set<String> {
             let existing = Set(next.map(\.id))
-            var result = selected.intersection(existing)
+            var visibleIDs: [String: String] = [:]
+            for row in next {
+                visibleIDs[row.id] = row.id
+                for id in row.representedIDs { visibleIDs[id] = row.id }
+            }
+            var result = Set(selected.compactMap { visibleIDs[$0] })
             for row in previous where selected.contains(row.id) && !existing.contains(row.id) {
+                if let replacement = visibleIDs[row.id] {
+                    result.insert(replacement)
+                    continue
+                }
                 switch row.item.kind {
                 case .file(let file, let section):
                     let other = (section == .staged ? GitChangeSection.unstaged : .staged).rowID(path: file.path)
-                    if existing.contains(other) { result.insert(other) }
+                    if let visible = visibleIDs[other] { result.insert(visible) }
                 case .folder:
                     let other = row.id.contains("changes/staged/") ? row.id.replacingOccurrences(of: "changes/staged/", with: "changes/unstaged/")
                         : row.id.replacingOccurrences(of: "changes/unstaged/", with: "changes/staged/")
-                    if existing.contains(other) { result.insert(other) }
+                    if let visible = visibleIDs[other] { result.insert(visible) }
                 default: break
                 }
             }

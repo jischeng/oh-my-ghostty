@@ -28,6 +28,7 @@ enum GitExecutionError: Error, Sendable, Equatable, LocalizedError {
     case processFailed(exitCode: Int32, stderr: String)
     case outputLimitExceeded(maxBytes: Int)
     case cancelled
+    case timedOut
     case executionFailed(String)
 
     var errorDescription: String? {
@@ -37,6 +38,8 @@ enum GitExecutionError: Error, Sendable, Equatable, LocalizedError {
             return trimmed.isEmpty ? GitL10n.format("Git command exited with code {0}", String(describing: code)) : trimmed
         case .outputLimitExceeded(let maxBytes):
             return GitL10n.format("Git command output exceeded limit of {0} bytes", String(describing: maxBytes))
+        case .timedOut:
+            return GitL10n.text("Git command timed out. Refresh before retrying; a write may have completed remotely.")
         case .cancelled:
             return GitL10n.text("Git command was cancelled")
         case .executionFailed(let reason):

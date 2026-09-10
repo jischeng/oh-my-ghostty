@@ -3,6 +3,18 @@ import Testing
 @testable import Ghostty
 
 struct GitProcessRunnerTests {
+    @Test func timeoutSettlesStalledInputAndInheritedPipes() async throws {
+        for script in ["sleep 3", "sleep 3 & exit 0"] {
+            let start = ContinuousClock.now
+            do {
+                _ = try await GitProcessRunner().run(executablePath: "/bin/sh", arguments: ["-c", script],
+                    workingDirectory: "/", stdin: Data(repeating: 65, count: 200_000), timeout: 0.2)
+                Issue.record("A stalled command must time out")
+            } catch let error as GitExecutionError { #expect(error == .timedOut) }
+            #expect(ContinuousClock.now - start < .seconds(2))
+        }
+    }
+
     @Test func concurrentBinaryPipesAreDrainedBeforePublishingResults() async throws {
         let payload = Data((0..<200_000).map { UInt8($0 % 256) })
         try await withThrowingTaskGroup(of: Void.self) { group in

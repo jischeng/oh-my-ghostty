@@ -998,6 +998,26 @@ the complete tag ref to its commit and does not check out the working tree.
 List/Tree buttons have full 32-by-28-point targets. Search and commit inputs share
 theme-derived normal, hover, focus and disabled fills and borders.
 
+Trees share a 16-point indentation step and reserve a disclosure column before
+checkbox/icon/name columns. Consecutive directory-only chains are compacted into
+one slash-separated label in Changes, Branches/ref browsing and Files. Git rows
+retain their represented folder IDs for collapse/selection reconciliation and
+operate on the deepest real folder's descendants. Branch refs remain unchanged.
+Files uses `WorkspaceFilesystem.listTreeDirectory` separately from ordinary
+listings: local and SSH implementations inspect at most 24 directory levels,
+stop at files, siblings, symlinks or unreadable directories, and retain the real
+terminal path for opening, copying, renaming and expanding. SSH resolves the
+listing and compact chains in one remote query, with the existing SFTP listing
+as fallback on hosts without Python. Tooltips show complete paths.
+
+Git subprocesses have a 60-second deadline covering both process exit and pipe
+drain, including SSH sessions whose descendants retain inherited pipe handles.
+Cancellation/timeout closes IO channels and settles the mutation queue; pending
+checkboxes recover and the error reports that a remote write may already have
+completed. Writes are never automatically retried. A bulk status failure keeps
+the last snapshot and reports the error rather than launching repeated fallback
+queries. Users refresh before retrying a timed-out write.
+
 Git UI text comes from `GitStrings.json` through `GitL10n`, following the existing
 application language preference (system, English or Simplified Chinese). Language
 changes update visible Git chrome. Branch/tag/remote names, author data, paths,

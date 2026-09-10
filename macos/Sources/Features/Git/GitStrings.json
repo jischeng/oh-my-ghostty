@@ -1066,5 +1066,9 @@
   "Tag": {
     "en": "Tag",
     "zh-Hans": "标签"
+  },
+  "Git command timed out. Refresh before retrying; a write may have completed remotely.": {
+    "en": "Git command timed out. Refresh before retrying; a write may have completed remotely.",
+    "zh-Hans": "Git 命令超时。请刷新后再重试；远程写入可能已经完成。"
   }
 }

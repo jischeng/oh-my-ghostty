@@ -4,7 +4,7 @@ import Testing
 @testable import Ghostty
 
 @MainActor
-private final class GitSSHTestServer {
+final class GitSSHTestServer {
     let root: URL
     let process: Process
     let connection: GitSSHConnection

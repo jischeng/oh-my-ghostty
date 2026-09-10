@@ -10,7 +10,8 @@ struct GitProcessRunner: Sendable {
         workingDirectory: String,
         environment: [String: String]? = nil,
         stdin: Data? = nil,
-        maxOutputBytes: Int? = 10 * 1024 * 1024
+        maxOutputBytes: Int? = 10 * 1024 * 1024,
+        timeout: TimeInterval = 60
     ) async throws -> GitExecutionResult {
         guard maxOutputBytes.map({ $0 >= 0 }) ?? true else {
             throw GitExecutionError.executionFailed(GitL10n.text("The output limit must not be negative."))
@@ -35,6 +36,11 @@ struct GitProcessRunner: Sendable {
         }
         let invocation = Invocation(process: process, limit: maxOutputBytes)
         process.terminationHandler = { [weak invocation] _ in invocation?.terminated() }
+        let deadline = Task {
+            do { try await Task.sleep(for: .seconds(timeout)) } catch { return }
+            invocation.abort(.timedOut)
+        }
+        defer { deadline.cancel() }
         let io = DispatchGroup()
         return try await withTaskCancellationHandler {
             try invocation.launch()

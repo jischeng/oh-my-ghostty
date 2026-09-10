@@ -80,7 +80,7 @@ struct GitRepositoryService: Sendable {
             switch error {
             case .cancelled:
                 return .error(title: GitL10n.text("Cancelled"), message: GitL10n.text("Git check was cancelled"))
-            case .processFailed, .executionFailed, .outputLimitExceeded:
+            case .processFailed, .executionFailed, .outputLimitExceeded, .timedOut:
                 return .error(title: target == .local ? GitL10n.text("Git Error") : GitL10n.text("SSH Git Error"), message: error.localizedDescription)
             }
         } catch {

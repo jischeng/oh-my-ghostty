@@ -527,7 +527,13 @@ final class BuiltInGitInspectorProvider {
         // command argument and N successive refreshes for N files.
         let files = await Self.result { try await self.diffService.workingTreeFiles(for: repository, paths: paths.count > 1 ? nil : paths) }
         let fallback: (staged: Result<[GitDiffFile], Error>, unstaged: Result<[GitDiffFile], Error>)?
-        if case .failure = files { fallback = await Self.readFiles(service: diffService, repository: repository) } else { fallback = nil }
+        if case .failure(let error) = files {
+            // A bulk action owns one status read. Retain the previous snapshot
+            // on failure rather than starting another chain of remote reads.
+            if paths.count > 1 || (error as? GitExecutionError) == .timedOut {
+                fallback = (.failure(error), .failure(error))
+            } else { fallback = await Self.readFiles(service: diffService, repository: repository) }
+        } else { fallback = nil }
         pendingIndexPaths[repository.stateKey]?.subtract(paths)
         for (tabID, var content) in lastPublishedContent where content.repository == repository {
             if let fallback { Self.updateFiles(fallback, workingTree: &content.workingTree) } else if case .success(let files) = files {

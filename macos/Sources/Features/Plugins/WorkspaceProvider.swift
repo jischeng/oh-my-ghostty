@@ -638,7 +638,7 @@ struct WorkspaceDescriptor: Equatable, Sendable {
     }
 }
 
-struct WorkspaceFileEntry: Equatable, Sendable {
+struct WorkspaceFileEntry: Codable, Equatable, Sendable {
     let path: String
     let name: String
     let isDirectory: Bool
@@ -681,6 +681,7 @@ protocol WorkspaceFilesystem: Sendable {
     var descriptor: WorkspaceDescriptor { get }
 
     func listDirectory(at path: String) async throws -> [WorkspaceFileEntry]
+    func listTreeDirectory(at path: String) async throws -> [WorkspaceFileEntry]
     func createFile(named name: String, in directory: String) async throws
     func createDirectory(named name: String, in directory: String) async throws
     func renameItem(at path: String, to name: String) async throws
@@ -709,6 +710,9 @@ enum WorkspaceFileActions {
 }
 
 extension WorkspaceFilesystem {
+    func listTreeDirectory(at path: String) async throws -> [WorkspaceFileEntry] {
+        try await listDirectory(at: path)
+    }
     func renameItem(at path: String, to name: String) async throws {
         throw WorkspaceFilesystemError.unavailable
     }

@@ -10,9 +10,11 @@ enum GitRefPopoverStyle {
 }
 
 final class GitScopeButtonCell: NSButtonCell {
+    override func imageRect(forBounds rect: NSRect) -> NSRect {
+        NSRect(x: rect.minX + 10, y: rect.midY - 7, width: 14, height: 14)
+    }
     override func titleRect(forBounds rect: NSRect) -> NSRect {
-        var value = super.titleRect(forBounds: rect)
-        value.size.width = max(0, value.width - 20)
-        return value
+        NSRect(x: rect.minX + 30, y: super.titleRect(forBounds: rect).minY,
+               width: max(0, rect.width - 58), height: super.titleRect(forBounds: rect).height)
     }
 }

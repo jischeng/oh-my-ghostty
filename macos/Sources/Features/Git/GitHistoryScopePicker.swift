@@ -82,7 +82,7 @@ struct GitHistoryScopePicker: NSViewRepresentable {
         }
         override func layout() {
             super.layout()
-            chevron.frame = NSRect(x: bounds.width - 18, y: (bounds.height - 12) / 2, width: 12, height: 12)
+            chevron.frame = NSRect(x: bounds.width - 22, y: (bounds.height - 12) / 2, width: 12, height: 12)
         }
     }
     func makeNSView(context: Context) -> Control { Control() }

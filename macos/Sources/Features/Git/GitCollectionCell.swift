@@ -127,24 +127,25 @@ final class GitCollectionCell: NSTableCellView {
     override func layout() {
         super.layout()
         guard let row else { return }
-        let x: CGFloat = 10 + CGFloat(row.depth) * 12
+        let x = InspectorTreeLayout.leading + CGFloat(row.depth) * InspectorTreeLayout.indent
         var textX = x
         let center = subtitle.isHidden ? bounds.height / 2 : 12
         if row.item.isFolder {
             disclosure.frame = .init(x: x - 5, y: 0, width: 18, height: bounds.height)
             let hasCheckbox = row.item.stageBatch != nil
-            checkbox.frame = .init(x: x + 13, y: center - 12, width: 22, height: 24)
+            checkbox.frame = .init(x: x + 14, y: center - 12, width: 22, height: 24)
             progress.frame = .init(x: x + 18, y: center - 6, width: 12, height: 12)
-            let iconX = x + (hasCheckbox ? 37 : 14)
+            let iconX = x + (hasCheckbox ? 38 : 18)
             icon.frame = .init(x: iconX, y: center - 7, width: 14, height: 14)
             textX = iconX + 19
         } else if !checkbox.isHidden || !progress.isHidden || !status.isHidden {
-            checkbox.frame = .init(x: x - 4, y: center - 12, width: 22, height: 24)
-            progress.frame = .init(x: x + 1, y: center - 6, width: 12, height: 12)
-            status.frame = .init(x: x + 20, y: center - 6, width: 11, height: 13)
-            textX = x + (status.isHidden ? 24 : 37)
+            let alignedX = x + (row.isTree ? InspectorTreeLayout.disclosureWidth : 0)
+            checkbox.frame = .init(x: alignedX - 4, y: center - 12, width: 22, height: 24)
+            progress.frame = .init(x: alignedX + 1, y: center - 6, width: 12, height: 12)
+            status.frame = .init(x: alignedX + 20, y: center - 6, width: 11, height: 13)
+            textX = alignedX + (status.isHidden ? 24 : 37)
         } else if !icon.isHidden {
-            let iconX = x + (row.item.isFolder ? 14 : 0)
+            let iconX = x + (row.isTree ? InspectorTreeLayout.disclosureWidth : 0)
             disclosure.frame = .init(x: x - 3, y: center - 7, width: 14, height: 14)
             icon.frame = .init(x: iconX, y: center - 7, width: 14, height: 14)
             textX = iconX + 19

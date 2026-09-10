@@ -41,11 +41,13 @@ struct GitCollectionItem: Equatable {
     var enabled = true
     var pending = false
     var stageBatch: GitStageBatch?
+    var fullPath: String?
 
     var isFolder: Bool { if case .folder = kind { return true }; return false }
     var isCategory: Bool { if case .category = kind { return true }; return false }
     var isSelectable: Bool { !isCategory && { if case .notice = kind { return false }; return true }() }
     var tooltip: String {
+        if let fullPath { return fullPath }
         switch kind {
         case .ref(let ref): return ref.name
         case .file(let file, _): return (file.isUntracked ? GitL10n.text("Untracked") : file.kind.label) + " · " + file.displayPath
@@ -72,6 +74,8 @@ struct GitCollectionRow: Equatable {
     var item: GitCollectionItem
     let depth: Int
     var expanded = false
+    var isTree = false
+    var representedIDs: [String] = []
     var id: String { item.id }
     var height: CGFloat {
         switch item.kind {
@@ -181,11 +185,23 @@ enum GitCollectionBuilder {
 
     static func rows(_ nodes: [GitCollectionNode], collapsed: Set<String> = []) -> [GitCollectionRow] {
         var result: [GitCollectionRow] = []
+        func hasFolders(_ nodes: [GitCollectionNode]) -> Bool {
+            nodes.contains { $0.item.isFolder || hasFolders($0.children) }
+        }
+        let isTree = hasFolders(nodes)
         func append(_ nodes: [GitCollectionNode], depth: Int) {
             for node in nodes {
-                let expanded = !collapsed.contains(node.item.id)
-                result.append(.init(item: node.item, depth: depth, expanded: expanded))
-                if expanded || node.item.isCategory { append(node.children, depth: node.item.isCategory ? depth : depth + 1) }
+                let chain = InspectorTreeLayout.chain(from: node) { current in
+                    guard current.item.isFolder, current.children.count == 1,
+                          let child = current.children.first, child.item.isFolder else { return nil }
+                    return child
+                }
+                let tail = chain[chain.count - 1]
+                var item = tail.item
+                if chain.count > 1 { item.title = chain.map { $0.item.title }.joined(separator: "/") }
+                let expanded = !chain.contains { collapsed.contains($0.item.id) }
+                result.append(.init(item: item, depth: depth, expanded: expanded, isTree: isTree, representedIDs: chain.map { $0.item.id }))
+                if expanded || item.isCategory { append(tail.children, depth: item.isCategory ? depth : depth + 1) }
             }
         }
         append(nodes, depth: 0)
@@ -221,10 +237,10 @@ enum GitCollectionBuilder {
                 if let existing = folders[key] {
                     folder = existing
                     if case .folder(let count) = folder.item.kind {
-                        folder.item = .init(id: key, title: part, kind: .folder(count + 1))
+                        folder.item = .init(id: key, title: part, kind: .folder(count + 1), fullPath: String(prefix.dropFirst()))
                     }
                 } else {
-                    folder = GitCollectionNode(.init(id: key, title: part, kind: .folder(1)))
+                    folder = GitCollectionNode(.init(id: key, title: part, kind: .folder(1), fullPath: String(prefix.dropFirst())))
                     folders[key] = folder
                     parent.children.append(folder)
                 }

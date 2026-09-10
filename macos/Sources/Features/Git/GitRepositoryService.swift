@@ -15,7 +15,7 @@ struct GitRepositoryService: Sendable {
             return .ssh(host: ssh.alias, workingDirectory: "")
         }
         let target: GitExecutionTarget
-        do { target = try session.map { try GitExecutionTarget(session: $0) } ?? .local } catch { return .error(title: "SSH Git", message: error.localizedDescription) }
+        do { target = try session.map { try GitExecutionTarget(session: $0) } ?? .local } catch { return .error(title: GitL10n.text("SSH Git"), message: error.localizedDescription) }
         let command = executor ?? target.executor
 
         // 2. Validate working directory
@@ -26,7 +26,7 @@ struct GitRepositoryService: Sendable {
 
         guard directory.hasPrefix("/"), !directory.contains("\0"),
               !directory.contains("\n"), !directory.contains("\r") else {
-            return .error(title: "Git Path", message: "Repository directories must be absolute paths without line breaks.")
+            return .error(title: GitL10n.text("Git Path"), message: GitL10n.text("Repository directories must be absolute paths without line breaks."))
         }
         guard target != .local || FileManager.default.fileExists(atPath: directory) else {
             return .notRepository(directory: directory)
@@ -50,7 +50,7 @@ struct GitRepositoryService: Sendable {
 
             guard result.isSuccess else {
                 if result.stderrString.contains("not a git repository") { return .notRepository(directory: directory) }
-                return .error(title: "Git Error", message: result.stderrString.isEmpty ? "Git repository check failed." : result.stderrString)
+                return .error(title: GitL10n.text("Git Error"), message: result.stderrString.isEmpty ? GitL10n.text("Git repository check failed.") : result.stderrString)
             }
 
             let lines = result.stdoutString
@@ -59,7 +59,7 @@ struct GitRepositoryService: Sendable {
 
             guard lines.count == 6, lines[0] == "true", lines[1].hasPrefix("/"), lines[2].hasPrefix("/"),
                   lines.allSatisfy({ !$0.contains("\r") && !$0.contains("\0") }) else {
-                return .error(title: "Git Path", message: "Git returned unsupported repository paths. Use Git 2.23+ and a repository root without line breaks.")
+                return .error(title: GitL10n.text("Git Path"), message: GitL10n.text("Git returned unsupported repository paths. Use Git 2.23+ and a repository root without line breaks."))
             }
 
             let worktreePath = lines[1]
@@ -79,12 +79,12 @@ struct GitRepositoryService: Sendable {
         } catch let error as GitExecutionError {
             switch error {
             case .cancelled:
-                return .error(title: "Cancelled", message: "Git check was cancelled")
+                return .error(title: GitL10n.text("Cancelled"), message: GitL10n.text("Git check was cancelled"))
             case .processFailed, .executionFailed, .outputLimitExceeded:
-                return .error(title: target == .local ? "Git Error" : "SSH Git Error", message: error.localizedDescription)
+                return .error(title: target == .local ? GitL10n.text("Git Error") : GitL10n.text("SSH Git Error"), message: error.localizedDescription)
             }
         } catch {
-            return .error(title: "Git Error", message: error.localizedDescription)
+            return .error(title: GitL10n.text("Git Error"), message: error.localizedDescription)
         }
     }
 
@@ -145,7 +145,7 @@ struct GitRepositoryService: Sendable {
                 }
             }
         } catch {
-            return .error(title: "Head Resolution Error", message: error.localizedDescription)
+            return .error(title: GitL10n.text("Head Resolution Error"), message: error.localizedDescription)
         }
     }
 }

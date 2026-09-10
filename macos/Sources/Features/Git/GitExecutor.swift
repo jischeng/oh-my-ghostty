@@ -34,13 +34,13 @@ enum GitExecutionError: Error, Sendable, Equatable, LocalizedError {
         switch self {
         case .processFailed(let code, let stderr):
             let trimmed = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? "Git command exited with code \(code)" : trimmed
+            return trimmed.isEmpty ? GitL10n.format("Git command exited with code {0}", String(describing: code)) : trimmed
         case .outputLimitExceeded(let maxBytes):
-            return "Git command output exceeded limit of \(maxBytes) bytes"
+            return GitL10n.format("Git command output exceeded limit of {0} bytes", String(describing: maxBytes))
         case .cancelled:
-            return "Git command was cancelled"
+            return GitL10n.text("Git command was cancelled")
         case .executionFailed(let reason):
-            return "Failed to execute Git command: \(reason)"
+            return GitL10n.format("Failed to execute Git command: {0}", String(describing: reason))
         }
     }
 }
@@ -57,7 +57,7 @@ protocol GitExecutor: Sendable {
 
 extension GitExecutor {
     func readWorkingFile(at path: String, root: String, limit: Int) async throws -> Data {
-        throw GitExecutionError.executionFailed("Working-file reads are unavailable for this executor.")
+        throw GitExecutionError.executionFailed(GitL10n.text("Working-file reads are unavailable for this executor."))
     }
 
     func execute(
@@ -103,7 +103,7 @@ struct LocalGitExecutor: GitExecutor {
         let boundary = resolvedRoot == "/" ? "/" : resolvedRoot + "/"
         guard path.hasPrefix("/"), url.resolvingSymlinksInPath().path.hasPrefix(boundary),
               try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]).isRegularFile == true else {
-            throw GitExecutionError.executionFailed("Use patch view for files outside this worktree or non-regular files.")
+            throw GitExecutionError.executionFailed(GitL10n.text("Use patch view for files outside this worktree or non-regular files."))
         }
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }

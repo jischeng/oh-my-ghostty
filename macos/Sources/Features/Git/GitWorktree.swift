@@ -18,7 +18,7 @@ struct GitWorktreeInfo: Equatable, Sendable, Identifiable {
 
     static func parse(_ data: Data, currentPath: String) throws -> [GitWorktreeInfo] {
         guard let text = String(data: data, encoding: .utf8) else {
-            throw GitDiffServiceError.gitFailed("Worktree paths could not be decoded as UTF-8.")
+            throw GitDiffServiceError.gitFailed(GitL10n.text("Worktree paths could not be decoded as UTF-8."))
         }
         var result: [GitWorktreeInfo] = []
         var fields: [String: String] = [:]

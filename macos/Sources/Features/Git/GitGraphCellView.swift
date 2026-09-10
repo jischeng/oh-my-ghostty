@@ -36,7 +36,7 @@ final class GitGraphCellView: NSView {
         column = layout ?? GitGraphColumnLayout(row: row)
         invalidateIntrinsicContentSize()
         needsDisplay = true
-        toolTip = isHead ? "Current HEAD · \(row.commitID.shortSHA)" : row.commitID.shortSHA
+        toolTip = isHead ? GitL10n.format("Current HEAD · {0}", String(describing: row.commitID.shortSHA)) : row.commitID.shortSHA
         setAccessibilityLabel(toolTip)
     }
 

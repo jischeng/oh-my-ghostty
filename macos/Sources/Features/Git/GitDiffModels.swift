@@ -10,13 +10,13 @@ enum GitDiffTarget: Hashable, Sendable, Equatable, CustomStringConvertible {
     var description: String {
         switch self {
         case .commit(let commit):
-            "commit \(commit.shortSHA)"
+            GitL10n.format("commit {0}", String(describing: commit.shortSHA))
         case .comparison(let base, let head):
             "\(base.shortSHA) → \(head.shortSHA)"
         case .staged:
-            "staged changes"
+            GitL10n.text("staged changes")
         case .unstaged:
-            "working tree changes"
+            GitL10n.text("working tree changes")
         }
     }
 }
@@ -46,14 +46,14 @@ enum GitDiffChangeKind: String, Hashable, Sendable, Equatable {
 
     var label: String {
         switch self {
-        case .added: "Added"
-        case .copied: "Copied"
-        case .deleted: "Deleted"
-        case .modified: "Modified"
-        case .renamed: "Renamed"
-        case .typeChanged: "Type changed"
+        case .added: GitL10n.text("Added")
+        case .copied: GitL10n.text("Copied")
+        case .deleted: GitL10n.text("Deleted")
+        case .modified: GitL10n.text("Modified")
+        case .renamed: GitL10n.text("Renamed")
+        case .typeChanged: GitL10n.text("Type changed")
         case .unmerged: "Unmerged"
-        case .unknown: "Changed"
+        case .unknown: GitL10n.text("Changed")
         }
     }
 }
@@ -111,7 +111,7 @@ struct GitCommitMetadata: Hashable, Sendable, Equatable {
     let message: String
 
     var subject: String {
-        message.split(whereSeparator: { $0.isNewline }).first.map(String.init) ?? "(no commit message)"
+        message.split(whereSeparator: { $0.isNewline }).first.map(String.init) ?? GitL10n.text("(no commit message)")
     }
 
     let body: String
@@ -147,7 +147,7 @@ struct GitDiffDocument: Hashable, Sendable, Equatable {
     var summary: String? {
         guard isBinary else { return nil }
         return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? "Binary file"
+            ? GitL10n.text("Binary file")
             : text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
@@ -159,8 +159,8 @@ enum GitDiffServiceError: Error, Sendable, Equatable, LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .invalidCommit(let commit): "Commit \(commit) does not exist."
-        case .invalidPath(let path): "The file path is invalid: \(path)"
+        case .invalidCommit(let commit): GitL10n.format("Commit {0} does not exist.", String(describing: commit))
+        case .invalidPath(let path): GitL10n.format("The file path is invalid: {0}", String(describing: path))
         case .gitFailed(let message): message
         }
     }

@@ -9,24 +9,24 @@ struct GitCommitComposer: View {
     let isUpdatingIndex: Bool
     let commit: () -> Void
     @State private var editorHeight: CGFloat = 44
+    @State private var focused = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            GitCommitMessageEditor(text: $message, height: $editorHeight)
+            GitCommitMessageEditor(text: $message, height: $editorHeight, focusChanged: { focused = $0 })
                 .frame(height: editorHeight)
                 .overlay(alignment: .topLeading) {
                     if message.isEmpty {
-                        Text("Commit message").font(.system(size: 11)).foregroundStyle(.tertiary)
+                        Text(GitL10n.text("Commit message")).font(.system(size: 11)).foregroundStyle(.tertiary)
                             .padding(.leading, 9).padding(.top, 6).allowsHitTesting(false)
                     }
                 }
-                .background(Color(NSColor.textBackgroundColor).opacity(0.5), in: RoundedRectangle(cornerRadius: 4))
-                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.2), lineWidth: 0.5))
+                .modifier(GitInputSurface(focused: focused))
             HStack(spacing: 6) {
-                Text("\(stagedCount) staged").font(.system(size: 10)).foregroundStyle(.secondary)
+                Text(GitL10n.format("{0} staged", String(describing: stagedCount))).font(.system(size: 10)).foregroundStyle(.secondary)
                 ProgressView().controlSize(.mini).frame(width: 12, height: 12).opacity(isUpdatingIndex ? 1 : 0)
                 Spacer(minLength: 4)
-                Button("Commit", action: commit)
+                Button(GitL10n.text("Commit"), action: commit)
                     .controlSize(.small)
                     .disabled(isBusy || !canCommit || stagedCount == 0 || message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
@@ -38,13 +38,18 @@ struct GitCommitComposer: View {
 struct GitCommitMessageEditor: NSViewRepresentable {
     @Binding var text: String
     @Binding var height: CGFloat
+    var focusChanged: (Bool) -> Void = { _ in }
+    @Environment(\.gitCollectionColors) private var colors
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 200, height: 44))
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
-        let editor = InspectorCopyableTextView(frame: scroll.bounds)
+        let editor = GitCommitTextView(frame: scroll.bounds)
+        editor.focusChanged = { [weak coordinator = context.coordinator] focused in
+            DispatchQueue.main.async { coordinator?.parent.focusChanged(focused) }
+        }
         editor.isRichText = false
         editor.allowsUndo = true
         editor.drawsBackground = false
@@ -56,7 +61,7 @@ struct GitCommitMessageEditor: NSViewRepresentable {
         editor.autoresizingMask = [.width]
         editor.textContainer?.widthTracksTextView = true
         editor.textContainer?.containerSize = NSSize(width: 200, height: CGFloat.greatestFiniteMagnitude)
-        editor.setAccessibilityLabel("Commit message")
+        editor.setAccessibilityLabel(GitL10n.text("Commit message"))
         editor.delegate = context.coordinator
         scroll.documentView = editor
         return scroll
@@ -64,6 +69,7 @@ struct GitCommitMessageEditor: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
         guard let editor = scroll.documentView as? NSTextView else { return }
+        editor.textColor = colors.text
         if editor.string != text {
             let selection = editor.selectedRange()
             editor.string = text

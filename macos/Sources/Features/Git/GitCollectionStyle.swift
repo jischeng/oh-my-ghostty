@@ -1,6 +1,20 @@
 import AppKit
 import SwiftUI
 
+extension NSColor {
+    /// Keep system semantic colors dynamic when applying opacity. Resolving
+    /// labelColor while building a dark view must not freeze it for light mode.
+    func gitOpacity(_ alpha: CGFloat) -> NSColor {
+        NSColor(name: nil) { appearance in
+            var result = self
+            appearance.performAsCurrentDrawingAppearance {
+                result = (self.usingColorSpace(.deviceRGB) ?? self).withAlphaComponent(alpha)
+            }
+            return result
+        }
+    }
+}
+
 struct GitCollectionColors: Equatable {
     var text = NSColor.labelColor
     var accent = NSColor.controlAccentColor
@@ -10,9 +24,9 @@ struct GitCollectionColors: Equatable {
     var modified = GitDiffChangeKind.modified.color
     var deleted = GitDiffChangeKind.deleted.color
     var renamed = GitDiffChangeKind.renamed.color
-    var secondary: NSColor { text.withAlphaComponent(0.62) }
-    var separator: NSColor { text.withAlphaComponent(0.13) }
-    var hover: NSColor { text.withAlphaComponent(0.055) }
+    var secondary: NSColor { text.gitOpacity(0.62) }
+    var separator: NSColor { text.gitOpacity(0.13) }
+    var hover: NSColor { text.gitOpacity(0.055) }
 
     init() {}
     init(config: Ghostty.Config, background: NSColor) {
@@ -50,22 +64,44 @@ struct GitCollectionModePicker: View {
     @Binding var mode: GitCollectionMode
     @Environment(\.gitCollectionColors) private var colors
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: 0) {
             ForEach(GitCollectionMode.allCases, id: \.self) { value in
                 Button { mode = value } label: {
                     Image(systemName: value.symbol)
                         .font(.system(size: 11))
                         .foregroundStyle(Color(mode == value ? colors.text : colors.secondary))
-                        .frame(width: 23, height: 23)
-                        .background(Color(colors.text).opacity(mode == value ? 0.08 : 0), in: RoundedRectangle(cornerRadius: 3))
+                        .frame(width: 32, height: 28)
+                        .contentShape(Rectangle())
+                        .background(Color(colors.text).opacity(mode == value ? 0.08 : 0), in: RoundedRectangle(cornerRadius: 4))
                 }
                 .buttonStyle(.plain)
-                .help(value.title + " view")
-                .accessibilityLabel(value.title + " view")
-                .accessibilityValue(mode == value ? "Selected" : "")
+                .buttonStyle(GitModeButtonStyle(colors: colors, selected: mode == value))
+                .help(GitL10n.format("{0} view", value.title))
+                .accessibilityLabel(GitL10n.format("{0} view", value.title))
+                .accessibilityValue(mode == value ? GitL10n.text("Selected") : "")
             }
         }
         .fixedSize()
+    }
+}
+
+private struct GitModeButtonStyle: ButtonStyle {
+    let colors: GitCollectionColors
+    let selected: Bool
+    func makeBody(configuration: Configuration) -> some View {
+        GitModeButtonBody(configuration: configuration, colors: colors, selected: selected)
+    }
+    private struct GitModeButtonBody: View {
+        let configuration: ButtonStyleConfiguration
+        let colors: GitCollectionColors
+        let selected: Bool
+        @State private var hover = false
+        var body: some View {
+            configuration.label
+                .background(Color(colors.text).opacity(configuration.isPressed ? 0.12 : hover ? 0.06 : 0), in: RoundedRectangle(cornerRadius: 4))
+                .contentShape(Rectangle())
+                .onHover { hover = $0 }
+        }
     }
 }
 
@@ -80,22 +116,27 @@ final class GitStageCheckbox: NSButton {
         imagePosition = .imageOnly
         imageScaling = .scaleProportionallyDown
         setButtonType(.momentaryChange)
+        allowsMixedState = true
         setAccessibilityRole(.checkBox)
         target = self
         action = #selector(clicked)
     }
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func configure(checked: Bool, enabled: Bool, colors: GitCollectionColors) {
+        configure(state: checked ? .on : .off, enabled: enabled, colors: colors)
+    }
+    func configure(state: NSControl.StateValue, enabled: Bool, colors: GitCollectionColors) {
         self.colors = colors
-        state = checked ? .on : .off
+        self.state = state
+        hovered = false
         isEnabled = enabled
-        setAccessibilityValue(NSNumber(value: checked))
+        setAccessibilityValue(NSNumber(value: state.rawValue))
         updateImage()
     }
     private func updateImage() {
-        image = NSImage(systemSymbolName: state == .on ? "checkmark.square.fill" : "square", accessibilityDescription: nil)?
+        image = NSImage(systemSymbolName: state == .mixed ? "minus.square.fill" : state == .on ? "checkmark.square.fill" : "square", accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 11, weight: .regular))
-        contentTintColor = state == .on || (hovered && isEnabled) ? colors.accent : colors.secondary
+        contentTintColor = state != .off || (hovered && isEnabled) ? colors.accent : colors.secondary
         alphaValue = isEnabled ? 1 : 0.4
     }
     override func updateTrackingAreas() {
@@ -112,24 +153,22 @@ final class GitStageCheckbox: NSButton {
 final class GitCollectionRowView: NSTableRowView {
     var colors = GitCollectionColors() { didSet { needsDisplay = true } }
     var showsHighlight = true
-    private var hovered = false
-    private var tracking: NSTrackingArea?
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let tracking { removeTrackingArea(tracking) }
-        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
-        addTrackingArea(area); tracking = area
-    }
-    override func mouseEntered(with event: NSEvent) { hovered = true; needsDisplay = true }
-    override func mouseExited(with event: NSEvent) { hovered = false; needsDisplay = true }
+    var isPointerHovered = false { didSet { if oldValue != isPointerHovered { needsDisplay = true } } }
+    var isMultipleSelection = false { didSet { if oldValue != isMultipleSelection { needsDisplay = true } } }
     override func drawBackground(in dirtyRect: NSRect) {
-        guard showsHighlight, hovered, !isSelected else { return }
+        guard showsHighlight, isPointerHovered, !isSelected else { return }
         colors.hover.setFill()
         NSBezierPath(roundedRect: bounds.insetBy(dx: 4, dy: 1), xRadius: 3, yRadius: 3).fill()
     }
     override func drawSelection(in dirtyRect: NSRect) {
         guard showsHighlight else { return }
-        colors.selection.withAlphaComponent(0.3).setFill()
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 4, dy: 1), xRadius: 3, yRadius: 3).fill()
+        let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 4, dy: 1), xRadius: 4, yRadius: 4)
+        colors.accent.withAlphaComponent(isMultipleSelection ? 0.22 : 0.15).setFill()
+        shape.fill()
+        if isMultipleSelection {
+            colors.accent.withAlphaComponent(0.28).setStroke()
+            shape.lineWidth = 0.5
+            shape.stroke()
+        }
     }
 }

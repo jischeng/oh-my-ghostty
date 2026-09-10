@@ -24,7 +24,7 @@ enum GitExecutionTarget: Hashable, Sendable {
         switch session.state {
         case .local: self = .local
         case .sshReady: self = .ssh(try GitSSHConnection(session: session))
-        case .sshConnecting: throw GitExecutionError.executionFailed("The SSH session is not ready.")
+        case .sshConnecting: throw GitExecutionError.executionFailed(GitL10n.text("The SSH session is not ready."))
         }
     }
 
@@ -99,9 +99,9 @@ enum GitRepositoryStatusKind: Equatable, Sendable {
         case .ready(_, let branch, _):
             branch
         case .unborn(_, let branch):
-            "\(branch) (initial)"
+            GitL10n.format("{0} (initial)", String(describing: branch))
         case .detached(_, let commitID):
-            "detached at \(commitID.shortSHA)"
+            GitL10n.format("detached at {0}", String(describing: commitID.shortSHA))
         case .notRepository, .ssh, .error:
             nil
         }

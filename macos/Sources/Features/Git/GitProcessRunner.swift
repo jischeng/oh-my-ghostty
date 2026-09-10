@@ -13,7 +13,7 @@ struct GitProcessRunner: Sendable {
         maxOutputBytes: Int? = 10 * 1024 * 1024
     ) async throws -> GitExecutionResult {
         guard maxOutputBytes.map({ $0 >= 0 }) ?? true else {
-            throw GitExecutionError.executionFailed("The output limit must not be negative.")
+            throw GitExecutionError.executionFailed(GitL10n.text("The output limit must not be negative."))
         }
         try Task.checkCancellation()
         let process = Process()
@@ -59,7 +59,7 @@ struct GitProcessRunner: Sendable {
     private func channel(_ handle: FileHandle, invocation: Invocation) throws -> DispatchIO {
         let descriptor = dup(handle.fileDescriptor)
         guard descriptor >= 0 else {
-            throw GitExecutionError.executionFailed("Could not create a process IO channel.")
+            throw GitExecutionError.executionFailed(GitL10n.text("Could not create a process IO channel."))
         }
         _ = fcntl(descriptor, F_SETNOSIGPIPE, 1)
         let channel = DispatchIO(type: .stream, fileDescriptor: descriptor, queue: .global(qos: .utility)) { _ in
@@ -78,7 +78,7 @@ struct GitProcessRunner: Sendable {
             channel.read(offset: 0, length: .max, queue: .global(qos: .utility)) { done, data, error in
                 if let data, !data.isEmpty { invocation.append(Data(data), stream: stream) }
                 if error != 0 && error != ECANCELED {
-                    invocation.abort(.executionFailed("Could not read process output (\(error))."))
+                    invocation.abort(.executionFailed(GitL10n.format("Could not read process output ({0}).", String(describing: error))))
                 }
                 if done {
                     channel.close()
@@ -205,7 +205,7 @@ struct GitProcessRunner: Sendable {
             defer { lock.unlock() }
             if let failure { throw failure }
             if process.terminationStatus == 0, let inputError {
-                throw GitExecutionError.executionFailed("Could not send the complete process input (\(inputError)).")
+                throw GitExecutionError.executionFailed(GitL10n.format("Could not send the complete process input ({0}).", String(describing: inputError)))
             }
             return GitExecutionResult(exitCode: process.terminationStatus, stdout: output, stderr: errors)
         }

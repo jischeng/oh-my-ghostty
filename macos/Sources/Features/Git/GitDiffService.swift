@@ -36,7 +36,7 @@ struct GitDiffService: Sendable {
             let bytes = Array(record.prefix(3))
             guard bytes.count == 3, bytes[2] == 32,
                   let path = String(bytes: record.dropFirst(3), encoding: .utf8), !path.isEmpty else {
-                throw GitDiffServiceError.gitFailed("Git returned an invalid status record.")
+                throw GitDiffServiceError.gitFailed(GitL10n.text("Git returned an invalid status record."))
             }
             let x = String(UnicodeScalar(bytes[0]))
             let y = String(UnicodeScalar(bytes[1]))
@@ -44,7 +44,7 @@ struct GitDiffService: Sendable {
             if x == "R" || x == "C" || y == "R" || y == "C" {
                 guard index < records.count, !records[index].isEmpty,
                       let original = String(bytes: records[index], encoding: .utf8) else {
-                    throw GitDiffServiceError.gitFailed("Git returned an incomplete rename record.")
+                    throw GitDiffServiceError.gitFailed(GitL10n.text("Git returned an incomplete rename record."))
                 }
                 oldPath = original
                 index += 1
@@ -81,7 +81,7 @@ struct GitDiffService: Sendable {
                 repository: repository,
                 target: target,
                 files: changes.files,
-                baseDescription: commitBase.isRoot ? "empty tree" : "parent \(GitCommitID(commitBase.id).shortSHA)",
+                baseDescription: commitBase.isRoot ? GitL10n.text("empty tree") : GitL10n.format("parent {0}", String(describing: GitCommitID(commitBase.id).shortSHA)),
                 commitBase: commitBase,
                 statistics: changes.statistics
             )
@@ -103,7 +103,7 @@ struct GitDiffService: Sendable {
                 repository: repository,
                 target: target,
                 files: parseNameStatus(result.stdout),
-                baseDescription: "index vs HEAD"
+                baseDescription: GitL10n.text("index vs HEAD")
             )
 
         case .unstaged:
@@ -123,7 +123,7 @@ struct GitDiffService: Sendable {
                 repository: repository,
                 target: target,
                 files: files.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending },
-                baseDescription: "working tree vs index"
+                baseDescription: GitL10n.text("working tree vs index")
             )
         }
     }
@@ -152,7 +152,7 @@ struct GitDiffService: Sendable {
         guard fields.count >= 6,
               !fields[0].isEmpty,
               !fields[3].isEmpty else {
-            throw GitDiffServiceError.gitFailed("Git returned incomplete commit metadata.")
+            throw GitDiffServiceError.gitFailed(GitL10n.text("Git returned incomplete commit metadata."))
         }
         let parents = fields[4]
             .split(whereSeparator: { $0.isWhitespace })
@@ -186,8 +186,8 @@ struct GitDiffService: Sendable {
         case .commit(let commit):
             let resolvedBase = try await commitBase(for: commit, repository: repository, knownBase: knownBase)
             base = baseDescription ?? (resolvedBase.isRoot
-                ? "empty tree"
-                : "parent \(GitCommitID(resolvedBase.id).shortSHA)")
+                ? GitL10n.text("empty tree")
+                : GitL10n.format("parent {0}", String(describing: GitCommitID(resolvedBase.id).shortSHA)))
             arguments = [
                 "--literal-pathspecs", "diff", "--no-ext-diff", "--no-color", "--unified=3", "--find-renames",
                 resolvedBase.id, commit.rawValue, "--", file.oldPath ?? file.path,
@@ -201,7 +201,7 @@ struct GitDiffService: Sendable {
             allowsExitCodeOne = false
 
         case .staged:
-            base = baseDescription ?? "index vs HEAD"
+            base = baseDescription ?? GitL10n.text("index vs HEAD")
             arguments = [
                 "--literal-pathspecs", "diff", "--cached", "--no-ext-diff", "--no-color", "--unified=3", "--find-renames",
                 "--", file.oldPath ?? file.path,
@@ -209,7 +209,7 @@ struct GitDiffService: Sendable {
             allowsExitCodeOne = false
 
         case .unstaged:
-            base = baseDescription ?? "working tree vs index"
+            base = baseDescription ?? GitL10n.text("working tree vs index")
             if file.isUntracked {
                 let absolutePath = GitRepositoryService.absolutePath(file.path, relativeTo: repository.worktreePath)
                 arguments = ["--literal-pathspecs", "diff", "--no-index", "--no-color", "--unified=3", "/dev/null", absolutePath]
@@ -245,7 +245,7 @@ struct GitDiffService: Sendable {
         } catch GitExecutionError.outputLimitExceeded {
             return GitDiffDocument(
                 file: file,
-                text: "Diff exceeds the \(formatBytes(diffByteLimit)) display limit and was truncated.\n",
+                text: GitL10n.format("Diff exceeds the {0} display limit and was truncated.\n", String(describing: formatBytes(diffByteLimit))),
                 isBinary: false,
                 isTruncated: true,
                 byteLimit: diffByteLimit,
@@ -391,7 +391,7 @@ struct GitDiffService: Sendable {
 
     private func gitErrorMessage(from result: GitExecutionResult) -> String {
         let message = result.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
-        return message.isEmpty ? "Git command failed with exit code \(result.exitCode)." : message
+        return message.isEmpty ? GitL10n.format("Git command failed with exit code {0}.", String(describing: result.exitCode)) : message
     }
 
     private func formatBytes(_ bytes: Int) -> String {

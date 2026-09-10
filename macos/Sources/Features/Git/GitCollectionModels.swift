@@ -3,17 +3,18 @@ import Foundation
 enum GitCollectionMode: String, CaseIterable {
     case list, tree
     var symbol: String { self == .list ? "list.bullet" : "list.bullet.indent" }
-    var title: String { self == .list ? "List" : "Tree" }
+    var title: String { self == .list ? GitL10n.text("List") : GitL10n.text("Tree") }
 }
 
 enum GitChangeSection: String, Equatable, Sendable {
     case staged, unstaged
     var target: GitDiffTarget { self == .staged ? .staged : .unstaged }
-    var title: String { self == .staged ? "Staged" : "Unstaged / Untracked" }
+    var title: String { self == .staged ? GitL10n.text("Staged") : GitL10n.text("Unstaged / Untracked") }
     func rowID(path: String) -> String { "changes/\(rawValue)/file/\(path)" }
 }
 
 enum GitCollectionSource: Equatable {
+    case decorations([GitRefDecoration])
     case changes(staged: [GitDiffFile], unstaged: [GitDiffFile], stagedError: String?, unstagedError: String?)
     case refs(branches: [GitBranchInfo], worktrees: [GitWorktreeInfo], scopes: Bool, branchesError: String?, worktreesError: String?)
 
@@ -30,6 +31,7 @@ struct GitCollectionItem: Equatable {
         case branch(GitBranchInfo, worktrees: [String])
         case worktree(GitWorktreeInfo)
         case scope(GitHistoryScope)
+        case ref(GitRefDecoration)
         case notice(error: Bool)
     }
     let id: String
@@ -38,18 +40,20 @@ struct GitCollectionItem: Equatable {
     let kind: Kind
     var enabled = true
     var pending = false
+    var stageBatch: GitStageBatch?
 
     var isFolder: Bool { if case .folder = kind { return true }; return false }
     var isCategory: Bool { if case .category = kind { return true }; return false }
     var isSelectable: Bool { !isCategory && { if case .notice = kind { return false }; return true }() }
     var tooltip: String {
         switch kind {
-        case .file(let file, _): return (file.isUntracked ? "Untracked" : file.kind.label) + " · " + file.displayPath
+        case .ref(let ref): return ref.name
+        case .file(let file, _): return (file.isUntracked ? GitL10n.text("Untracked") : file.kind.label) + " · " + file.displayPath
         case .branch(let branch, let paths):
-            return ([branch.name, branch.upstream + " " + branch.tracking] + paths.map { "Worktree: " + $0 })
+            return ([branch.name, branch.upstream + " " + branch.tracking] + paths.map { GitL10n.text("Worktree: ") + $0 })
                 .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }.joined(separator: "\n")
         case .worktree(let worktree):
-            return [worktree.branchName, worktree.path, worktree.isDirty == true ? "Dirty" : nil,
+            return [worktree.branchName, worktree.path, worktree.isDirty == true ? GitL10n.text("Dirty") : nil,
                     worktree.lockedReason, worktree.prunableReason, worktree.statusError].compactMap { $0 }.joined(separator: "\n")
         default: return [title, subtitle].compactMap { $0 }.joined(separator: "\n")
         }
@@ -65,7 +69,7 @@ final class GitCollectionNode {
 }
 
 struct GitCollectionRow: Equatable {
-    let item: GitCollectionItem
+    var item: GitCollectionItem
     let depth: Int
     var expanded = false
     var id: String { item.id }
@@ -83,15 +87,24 @@ struct GitCollectionRow: Equatable {
 final class GitCollectionState {
     var collapsed: [String: Set<String>] = [:]
     var selected: [String: String] = [:]
+    var selections: [String: Set<String>] = [:]
     var scrollAnchors: [String: (id: String, offset: CGFloat)] = [:]
 }
 
 enum GitCollectionBuilder {
     static func nodes(source: GitCollectionSource, mode: GitCollectionMode, query: String = "",
-                      pending: Set<String> = [], canWrite: Bool = true) -> [GitCollectionNode] {
+                      pending: Set<String> = [], canWrite: Bool = true, extraRefs: [GitRefDecoration] = []) -> [GitCollectionNode] {
         switch source {
+        case .decorations(let refs): return referenceNodes(refs, mode: mode, query: query)
         case .changes(let staged, let unstaged, let stagedError, let unstagedError):
-            return [(GitChangeSection.staged, staged, stagedError), (.unstaged, unstaged, unstagedError)].map { section, files, error in
+            let entries = GitStageBatch.entries(staged: staged, unstaged: unstaged)
+            let all = GitStageBatch(entries: entries)
+            let folders = GitStageBatch.folders(entries)
+            let writable = canWrite && stagedError == nil && unstagedError == nil
+            let allToggle = GitCollectionNode(.init(id: "changes/master", title: GitL10n.text("Changes"), kind: .category(all.files.count),
+                enabled: writable && !all.isEmpty && all.paths.isDisjoint(with: pending),
+                pending: !all.paths.isDisjoint(with: pending), stageBatch: all))
+            let sections = [(GitChangeSection.staged, staged, stagedError), (.unstaged, unstaged, unstagedError)].map { section, files, error in
                 let key = "changes/" + section.rawValue
                 let entries = files.filter { matches(query, text: $0.displayPath) }.map { file in
                     let folder = (file.path as NSString).deletingLastPathComponent
@@ -99,12 +112,27 @@ enum GitCollectionBuilder {
                         title: (file.path as NSString).lastPathComponent,
                         subtitle: mode == .list ? folder : nil,
                         kind: .file(file, section), enabled: canWrite && error == nil && !pending.contains(file.path),
-                        pending: pending.contains(file.path)))
+                        pending: pending.contains(file.path), stageBatch: .init(entries: [.init(file: file, section: section)])))
                 }
                 let children = grouped(entries, category: key, mode: mode)
+                func configureFolders(_ nodes: [GitCollectionNode]) {
+                    for node in nodes {
+                        if node.item.isFolder {
+                            let path = String(node.item.id.dropFirst((key + "/folder/").count))
+                            if let batch = folders[path] {
+                                node.item.stageBatch = batch
+                                node.item.pending = !batch.paths.isDisjoint(with: pending)
+                                node.item.enabled = writable && !node.item.pending
+                            }
+                        }
+                        configureFolders(node.children)
+                    }
+                }
+                configureFolders(children)
                 return category(key, title: section.title, count: files.count, children: children, error: error,
-                                empty: query.isEmpty ? "No changes" : "No matching files")
+                                empty: query.isEmpty ? GitL10n.text("No changes") : GitL10n.text("No matching files"))
             }
+            return [allToggle] + sections
         case .refs(let branches, let worktrees, let scopes, let branchesError, let worktreesError):
             let occupied = Dictionary(grouping: worktrees.compactMap { tree in tree.branchRef.map { ($0, tree.path) } }, by: { $0.0 })
             var roots = scopes && query.isEmpty ? GitHistoryScope.allCases.map { scope in
@@ -117,19 +145,37 @@ enum GitCollectionBuilder {
                     (branch.name, GitCollectionItem(id: branch.id, title: branch.name,
                         kind: .branch(branch, worktrees: occupied[branch.id, default: []].map(\.1)), enabled: branchesError == nil))
                 }
-                roots.append(category(key, title: remote ? "Remote Branches" : "Branches", count: all.count,
+                roots.append(category(key, title: remote ? GitL10n.text("Remote Branches") : GitL10n.text("Branches"), count: all.count,
                     children: grouped(entries, category: key, mode: mode), error: branchesError,
-                    empty: query.isEmpty ? "No branches" : "No matching branches"))
+                    empty: query.isEmpty ? GitL10n.text("No branches") : GitL10n.text("No matching branches")))
             }
             let trees = worktrees.filter { matches(query, text: $0.branchName + " " + $0.path + " " + ($0.head?.rawValue ?? "")) }
                 .map { worktree in
                     GitCollectionNode(.init(id: "worktree:" + worktree.path,
-                        title: worktree.branchRef == nil ? worktree.head?.shortSHA ?? "No commits" : worktree.branchName,
+                        title: worktree.branchRef == nil ? worktree.head?.shortSHA ?? GitL10n.text("No commits") : worktree.branchName,
                         subtitle: worktree.path, kind: .worktree(worktree), enabled: worktreesError == nil && !worktree.isBare))
                 }
-            roots.append(category("worktrees", title: "Worktrees", count: worktrees.count, children: trees,
-                                  error: worktreesError, empty: query.isEmpty ? "No worktrees" : "No matching worktrees"))
+            roots.append(category("worktrees", title: GitL10n.text("Worktrees"), count: worktrees.count, children: trees,
+                                  error: worktreesError, empty: query.isEmpty ? GitL10n.text("No worktrees") : GitL10n.text("No matching worktrees")))
+            if !extraRefs.isEmpty { roots += referenceNodes(extraRefs, mode: mode, query: query) }
             return roots
+        }
+    }
+
+    static func referenceID(_ ref: GitRefDecoration) -> String { "ref:" + ref.kind.rawValue + ":" + ref.name }
+    private static func referenceNodes(_ refs: [GitRefDecoration], mode: GitCollectionMode, query: String) -> [GitCollectionNode] {
+        let groups: [(String, String, Set<GitRefDecorationKind>)] = [
+            ("head", "HEAD", [.head]), ("branches", GitL10n.text("Branches"), [.currentBranch, .localBranch]),
+            ("remote", GitL10n.text("Remote Branches"), [.remoteBranch]), ("tags", GitL10n.text("Tags"), [.tag]),
+        ]
+        return groups.compactMap { key, title, kinds in
+            let all = refs.filter { kinds.contains($0.kind) }
+            guard !all.isEmpty else { return nil }
+            let entries = all.filter { matches(query, text: $0.name) }.map { ref in
+                (ref.name, GitCollectionItem(id: referenceID(ref), title: ref.name, kind: .ref(ref)))
+            }
+            return category("decorations/" + key, title: title, count: all.count,
+                            children: grouped(entries, category: "decorations/" + key, mode: mode), error: nil, empty: GitL10n.text("No matching references"))
         }
     }
 

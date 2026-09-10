@@ -101,6 +101,7 @@ enum InspectorGitAction: Equatable, Sendable {
     case sendHistoryToTerminal(GitCommitID?)
     case openDiff(GitDiffFile, GitDiffTarget)
     case browseBranch(String)
+    case browseRef(String)
     case browseWorktree(String)
     case branchOperation(GitBranchOperation, String)
     case commitOperation(GitCommitOperation, GitCommitID)
@@ -108,6 +109,7 @@ enum InspectorGitAction: Equatable, Sendable {
     case openWorktree(String)
     case removeWorktree(String)
     case setFileStaged(GitDiffFile, Bool)
+    case setFilesStaged([GitDiffFile], Bool)
     case updateCommitDraft(String)
     case commitStaged
     case clearOperationError

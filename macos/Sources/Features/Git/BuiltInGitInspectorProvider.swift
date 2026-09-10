@@ -140,10 +140,10 @@ final class BuiltInGitInspectorProvider {
             guard files.contains(file) else { return }
             EditorWorkspaceStore.shared.openGitDiff(repository: repository, target: target,
                                                      file: file, context: action.context)
-        case .browseBranch(let name):
+        case .browseBranch(let name), .browseRef(let name):
             guard let content = lastPublishedContent[action.context.tabID],
-                  content.workingTree.branchesError == nil,
-                  content.workingTree.branches.contains(where: { $0.id == name }) else { return }
+                  (content.workingTree.branchesError == nil && content.workingTree.branches.contains(where: { $0.id == name })) ||
+                    content.history.snapshot?.decorationsByCommitID.values.joined().contains(where: { $0.kind == .tag && $0.fullRef == name }) == true else { return }
             let key = currentWorktreeKey(for: action.context)
             var state = state(for: action.context.tabID, worktreeKey: key)
             state.activeTab = .history
@@ -191,6 +191,13 @@ final class BuiltInGitInspectorProvider {
                   (staged ? content.workingTree.unstagedError : content.workingTree.stagedError) == nil,
                   (staged ? content.workingTree.unstaged : content.workingTree.staged).contains(file) else { return }
             let paths = Array(Set([file.path] + (file.oldPath.map { [$0] } ?? []))).sorted()
+            mutate(staged ? .stage(paths) : .unstage(paths), repository: repository, context: action.context)
+        case .setFilesStaged(let files, let staged):
+            guard let content = lastPublishedContent[action.context.tabID], let repository = content.repository else { return }
+            let available = Set(content.workingTree.staged + content.workingTree.unstaged)
+            guard !files.isEmpty, content.workingTree.stagedError == nil, content.workingTree.unstagedError == nil,
+                  files.allSatisfy(available.contains) else { return }
+            let paths = Array(Set(files.flatMap { [$0.path] + ($0.oldPath.map { [$0] } ?? []) })).sorted()
             mutate(staged ? .stage(paths) : .unstage(paths), repository: repository, context: action.context)
         case .updateCommitDraft(let draft):
             let key = currentWorktreeKey(for: action.context)
@@ -402,18 +409,25 @@ final class BuiltInGitInspectorProvider {
         if let path = state.browsedWorktree {
             let trees = try await repositoryService.worktrees(for: repository)
             guard let tree = trees.first(where: { $0.path == path && !$0.isBare }) else {
-                throw GitDiffServiceError.gitFailed("Worktree no longer exists: \(path)")
+                throw GitDiffServiceError.gitFailed(GitL10n.format("Worktree no longer exists: {0}", String(describing: path)))
             }
             return GitHistorySnapshot(scope: snapshot.scope, branchName: snapshot.branchName,
                 headCommitID: tree.head, tipCommitIDs: tree.head.map { [$0] } ?? [],
                 decorationsByCommitID: snapshot.decorationsByCommitID,
-                browsedBranch: tree.branchRef == nil ? tree.head?.shortSHA ?? "No commits" : tree.branchName,
+                browsedBranch: tree.branchRef == nil ? tree.head?.shortSHA ?? GitL10n.text("No commits") : tree.branchName,
                 browsedWorktree: path)
         }
         guard let branch = state.browsedBranch else { return snapshot }
+        if branch.hasPrefix("refs/tags/") {
+            let result = try await (repositoryService.executor ?? repository.executor).execute(arguments: ["rev-parse", "--verify", branch + "^{commit}"], workingDirectory: repository.worktreePath)
+            guard result.isSuccess else { throw GitDiffServiceError.gitFailed(result.stderrString) }
+            return GitHistorySnapshot(scope: snapshot.scope, branchName: snapshot.branchName,
+                headCommitID: snapshot.headCommitID, tipCommitIDs: [.init(result.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines))],
+                decorationsByCommitID: snapshot.decorationsByCommitID, browsedBranch: String(branch.dropFirst("refs/tags/".count)), browsedRef: branch)
+        }
         let branches = try await repositoryService.branches(for: repository)
         guard let tip = branches.first(where: { $0.id == branch }) else {
-            throw GitDiffServiceError.gitFailed("Branch no longer exists: \(branch)")
+            throw GitDiffServiceError.gitFailed(GitL10n.format("Branch no longer exists: {0}", String(describing: branch)))
         }
         return GitHistorySnapshot(scope: snapshot.scope, branchName: snapshot.branchName,
                                   headCommitID: snapshot.headCommitID, tipCommitIDs: [tip.commit],
@@ -509,13 +523,20 @@ final class BuiltInGitInspectorProvider {
     }
 
     private func refreshIndex(repository: GitRepositoryIdentity, paths: [String]) async {
-        let files = await Self.result { try await self.diffService.workingTreeFiles(for: repository, paths: paths) }
+        // Bulk operations use one complete status read, avoiding a huge SSH
+        // command argument and N successive refreshes for N files.
+        let files = await Self.result { try await self.diffService.workingTreeFiles(for: repository, paths: paths.count > 1 ? nil : paths) }
         let fallback: (staged: Result<[GitDiffFile], Error>, unstaged: Result<[GitDiffFile], Error>)?
         if case .failure = files { fallback = await Self.readFiles(service: diffService, repository: repository) } else { fallback = nil }
         pendingIndexPaths[repository.stateKey]?.subtract(paths)
         for (tabID, var content) in lastPublishedContent where content.repository == repository {
             if let fallback { Self.updateFiles(fallback, workingTree: &content.workingTree) } else if case .success(let files) = files {
-                content.workingTree.applyIndexChanges(paths: paths, staged: files.staged, unstaged: files.unstaged)
+                if paths.count > 1 {
+                    content.workingTree.staged = files.staged
+                    content.workingTree.unstaged = files.unstaged
+                    content.workingTree.stagedError = nil
+                    content.workingTree.unstagedError = nil
+                } else { content.workingTree.applyIndexChanges(paths: paths, staged: files.staged, unstaged: files.unstaged) }
             }
             publish(content, tabID: tabID)
         }
@@ -525,7 +546,7 @@ final class BuiltInGitInspectorProvider {
         let key = repository.stateKey
         guard let paths = mutation.indexPaths else { return }
         guard mutationTasks[key] == nil || indexUpdates.contains(key) else {
-            publishOperationError("Another Git operation is running in this worktree.", repository: repository, context: context)
+            publishOperationError(GitL10n.text("Another Git operation is running in this worktree."), repository: repository, context: context)
             return
         }
         guard pendingIndexPaths[key, default: []].isDisjoint(with: paths) else { return }
@@ -622,14 +643,14 @@ final class BuiltInGitInspectorProvider {
             return
         }
         guard mutationTasks[key] == nil else {
-            publishOperationError("Another Git operation is running in this worktree.", repository: repository, context: context)
+            publishOperationError(GitL10n.text("Another Git operation is running in this worktree."), repository: repository, context: context)
             return
         }
         switch mutation {
         case .removeWorktree(let path):
             guard !EditorWorkspaceStore.shared.hasUnsavedDocuments(in: path,
                 endpoint: repository.sshConnection.map { .ssh(workspaceID: $0.workspaceID) } ?? .local) else {
-                publishOperationError("Save or discard unsaved editor changes before removing this worktree.", repository: repository, context: context)
+                publishOperationError(GitL10n.text("Save or discard unsaved editor changes before removing this worktree."), repository: repository, context: context)
                 return
             }
         case .checkout, .create, .applyCommit:
@@ -637,7 +658,7 @@ final class BuiltInGitInspectorProvider {
                 in: repository.worktreePath,
                 endpoint: repository.sshConnection.map { .ssh(workspaceID: $0.workspaceID) } ?? .local
             ) else {
-                publishOperationError("Save or discard unsaved editor changes before switching branches.",
+                publishOperationError(GitL10n.text("Save or discard unsaved editor changes before switching branches."),
                                       repository: repository, context: context)
                 return
             }

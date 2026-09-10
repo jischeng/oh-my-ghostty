@@ -100,7 +100,7 @@ final class GitEditorDiffModel: ObservableObject {
                 let presentation = GitDiffPresentation(before: versions.before, after: versions.after, patch: document.text)
                 content.presentation = presentation
                 if !presentation.isConsistent {
-                    content.sourceError = "Source snapshots do not match this patch. Refresh to retry; the patch is shown below."
+                    content.sourceError = GitL10n.text("Source snapshots do not match this patch. Refresh to retry; the patch is shown below.")
                 }
             } catch {
                 try Task.checkCancellation()

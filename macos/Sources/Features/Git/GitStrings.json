@@ -1,0 +1,1070 @@
+{
+  "History": {
+    "en": "History",
+    "zh-Hans": "历史"
+  },
+  "Changes": {
+    "en": "Changes",
+    "zh-Hans": "更改"
+  },
+  "Branches": {
+    "en": "Branches",
+    "zh-Hans": "分支"
+  },
+  "List": {
+    "en": "List",
+    "zh-Hans": "列表"
+  },
+  "Tree": {
+    "en": "Tree",
+    "zh-Hans": "树状"
+  },
+  "Staged": {
+    "en": "Staged",
+    "zh-Hans": "已暂存"
+  },
+  "Unstaged": {
+    "en": "Unstaged",
+    "zh-Hans": "未暂存"
+  },
+  "Unstaged / Untracked": {
+    "en": "Unstaged / Untracked",
+    "zh-Hans": "未暂存 / 未跟踪"
+  },
+  "Untracked": {
+    "en": "Untracked",
+    "zh-Hans": "未跟踪"
+  },
+  "Worktree: ": {
+    "en": "Worktree: ",
+    "zh-Hans": "Worktree："
+  },
+  "No changes": {
+    "en": "No changes",
+    "zh-Hans": "没有更改"
+  },
+  "No matching files": {
+    "en": "No matching files",
+    "zh-Hans": "没有匹配的文件"
+  },
+  "Remote Branches": {
+    "en": "Remote Branches",
+    "zh-Hans": "远程分支"
+  },
+  "No branches": {
+    "en": "No branches",
+    "zh-Hans": "没有分支"
+  },
+  "No matching branches": {
+    "en": "No matching branches",
+    "zh-Hans": "没有匹配的分支"
+  },
+  "No commits": {
+    "en": "No commits",
+    "zh-Hans": "暂无提交"
+  },
+  "Worktrees": {
+    "en": "Worktrees",
+    "zh-Hans": "Worktree"
+  },
+  "No worktrees": {
+    "en": "No worktrees",
+    "zh-Hans": "没有 Worktree"
+  },
+  "No matching worktrees": {
+    "en": "No matching worktrees",
+    "zh-Hans": "没有匹配的 Worktree"
+  },
+  "Tags": {
+    "en": "Tags",
+    "zh-Hans": "标签"
+  },
+  "References": {
+    "en": "References",
+    "zh-Hans": "引用"
+  },
+  "No matching references": {
+    "en": "No matching references",
+    "zh-Hans": "没有匹配的引用"
+  },
+  "Creating branch…": {
+    "en": "Creating branch…",
+    "zh-Hans": "正在创建分支…"
+  },
+  "Creating worktree…": {
+    "en": "Creating worktree…",
+    "zh-Hans": "正在创建 Worktree…"
+  },
+  "Removing worktree…": {
+    "en": "Removing worktree…",
+    "zh-Hans": "正在删除 Worktree…"
+  },
+  "Staging files…": {
+    "en": "Staging files…",
+    "zh-Hans": "正在暂存文件…"
+  },
+  "Unstaging files…": {
+    "en": "Unstaging files…",
+    "zh-Hans": "正在取消暂存…"
+  },
+  "Switching branch…": {
+    "en": "Switching branch…",
+    "zh-Hans": "正在切换分支…"
+  },
+  "Setting upstream…": {
+    "en": "Setting upstream…",
+    "zh-Hans": "正在设置上游分支…"
+  },
+  "Committing…": {
+    "en": "Committing…",
+    "zh-Hans": "正在提交…"
+  },
+  "Pushing…": {
+    "en": "Pushing…",
+    "zh-Hans": "正在推送…"
+  },
+  "Cherry-picking…": {
+    "en": "Cherry-picking…",
+    "zh-Hans": "正在 Cherry-pick…"
+  },
+  "Reverting…": {
+    "en": "Reverting…",
+    "zh-Hans": "正在还原提交…"
+  },
+  "Invalid commit operation.": {
+    "en": "Invalid commit operation.",
+    "zh-Hans": "无效的提交操作。"
+  },
+  "Commit or stash local changes before this operation.": {
+    "en": "Commit or stash local changes before this operation.",
+    "zh-Hans": "执行此操作前，请先提交或 stash 本地更改。"
+  },
+  "Select a local branch or create a new branch.": {
+    "en": "Select a local branch or create a new branch.",
+    "zh-Hans": "请选择本地分支或创建新分支。"
+  },
+  "Cannot remove this worktree: it is current, main, locked, dirty, unavailable, or its status could not be checked.": {
+    "en": "Cannot remove this worktree: it is current, main, locked, dirty, unavailable, or its status could not be checked.",
+    "zh-Hans": "无法删除此 Worktree：它是当前或主 Worktree、已锁定、含有更改、不可用，或无法检查其状态。"
+  },
+  "Enter a commit message.": {
+    "en": "Enter a commit message.",
+    "zh-Hans": "请输入提交消息。"
+  },
+  "The selected remote no longer exists.": {
+    "en": "The selected remote no longer exists.",
+    "zh-Hans": "所选 remote 已不存在。"
+  },
+  "Enter an absolute worktree directory.": {
+    "en": "Enter an absolute worktree directory.",
+    "zh-Hans": "请输入 Worktree 的绝对路径。"
+  },
+  "Invalid file selection.": {
+    "en": "Invalid file selection.",
+    "zh-Hans": "无效的文件选择。"
+  },
+  "Invalid branch reference.": {
+    "en": "Invalid branch reference.",
+    "zh-Hans": "无效的分支引用。"
+  },
+  "Invalid branch name.": {
+    "en": "Invalid branch name.",
+    "zh-Hans": "无效的分支名。"
+  },
+  "Create and Switch Branch": {
+    "en": "Create and Switch Branch",
+    "zh-Hans": "创建并切换分支"
+  },
+  "Create and Switch": {
+    "en": "Create and Switch",
+    "zh-Hans": "创建并切换"
+  },
+  "No Git remotes configured.": {
+    "en": "No Git remotes configured.",
+    "zh-Hans": "尚未配置 Git remote。"
+  },
+  "Choose the remote and destination branch. This uses a normal push; Git will reject non-fast-forward updates.": {
+    "en": "Choose the remote and destination branch. This uses a normal push; Git will reject non-fast-forward updates.",
+    "zh-Hans": "请选择 remote 和目标分支。此操作使用普通推送，Git 会拒绝非快进更新。"
+  },
+  "Destination branch": {
+    "en": "Destination branch",
+    "zh-Hans": "目标分支"
+  },
+  "No remote branches available. Fetch remote refs first.": {
+    "en": "No remote branches available. Fetch remote refs first.",
+    "zh-Hans": "没有可用的远程分支。请先获取远程引用。"
+  },
+  "Select the remote branch to track.": {
+    "en": "Select the remote branch to track.",
+    "zh-Hans": "请选择要跟踪的远程分支。"
+  },
+  "Set Upstream": {
+    "en": "Set Upstream",
+    "zh-Hans": "设置上游分支"
+  },
+  "Cancel": {
+    "en": "Cancel",
+    "zh-Hans": "取消"
+  },
+  "Git returned a path that is not UTF-8.": {
+    "en": "Git returned a path that is not UTF-8.",
+    "zh-Hans": "Git 返回了非 UTF-8 路径。"
+  },
+  "Git returned an incomplete changed-file record.": {
+    "en": "Git returned an incomplete changed-file record.",
+    "zh-Hans": "Git 返回的更改文件记录不完整。"
+  },
+  "Git returned an incomplete rename record.": {
+    "en": "Git returned an incomplete rename record.",
+    "zh-Hans": "Git 返回的重命名记录不完整。"
+  },
+  "Git returned incomplete change statistics.": {
+    "en": "Git returned incomplete change statistics.",
+    "zh-Hans": "Git 返回的更改统计不完整。"
+  },
+  "Git returned incomplete rename statistics.": {
+    "en": "Git returned incomplete rename statistics.",
+    "zh-Hans": "Git 返回的重命名统计不完整。"
+  },
+  "Git returned duplicate change statistics.": {
+    "en": "Git returned duplicate change statistics.",
+    "zh-Hans": "Git 返回了重复的更改统计。"
+  },
+  "Git change statistics exceeded the supported range.": {
+    "en": "Git change statistics exceeded the supported range.",
+    "zh-Hans": "Git 更改统计超出了支持范围。"
+  },
+  "Git returned invalid change statistics.": {
+    "en": "Git returned invalid change statistics.",
+    "zh-Hans": "Git 返回了无效的更改统计。"
+  },
+  "Git returned mismatched files and change statistics.": {
+    "en": "Git returned mismatched files and change statistics.",
+    "zh-Hans": "Git 返回的文件与更改统计不一致。"
+  },
+  "Selected": {
+    "en": "Selected",
+    "zh-Hans": "已选中"
+  },
+  "Side by Side": {
+    "en": "Side by Side",
+    "zh-Hans": "并排"
+  },
+  "Inline": {
+    "en": "Inline",
+    "zh-Hans": "行内"
+  },
+  "View": {
+    "en": "View",
+    "zh-Hans": "视图"
+  },
+  "Disable linked scrolling": {
+    "en": "Disable linked scrolling",
+    "zh-Hans": "关闭联动滚动"
+  },
+  "Enable linked scrolling": {
+    "en": "Enable linked scrolling",
+    "zh-Hans": "开启联动滚动"
+  },
+  "Refresh diff": {
+    "en": "Refresh diff",
+    "zh-Hans": "刷新差异"
+  },
+  "Select file": {
+    "en": "Select file",
+    "zh-Hans": "选择文件"
+  },
+  "No changed files": {
+    "en": "No changed files",
+    "zh-Hans": "没有更改的文件"
+  },
+  "Invalid Git history page range": {
+    "en": "Invalid Git history page range",
+    "zh-Hans": "无效的 Git 历史分页范围"
+  },
+  "Unterminated history record": {
+    "en": "Unterminated history record",
+    "zh-Hans": "历史记录缺少结束标记"
+  },
+  "Incomplete history record": {
+    "en": "Incomplete history record",
+    "zh-Hans": "历史记录不完整"
+  },
+  "SSH Git": {
+    "en": "SSH Git",
+    "zh-Hans": "SSH Git"
+  },
+  "Git Path": {
+    "en": "Git Path",
+    "zh-Hans": "Git 路径"
+  },
+  "Repository directories must be absolute paths without line breaks.": {
+    "en": "Repository directories must be absolute paths without line breaks.",
+    "zh-Hans": "仓库目录必须是绝对路径，且不能包含换行符。"
+  },
+  "Git Error": {
+    "en": "Git Error",
+    "zh-Hans": "Git 错误"
+  },
+  "Git repository check failed.": {
+    "en": "Git repository check failed.",
+    "zh-Hans": "Git 仓库检查失败。"
+  },
+  "Git returned unsupported repository paths. Use Git 2.23+ and a repository root without line breaks.": {
+    "en": "Git returned unsupported repository paths. Use Git 2.23+ and a repository root without line breaks.",
+    "zh-Hans": "Git 返回了不支持的仓库路径。请使用 Git 2.23 或更新版本，仓库根路径不能包含换行符。"
+  },
+  "Git check was cancelled": {
+    "en": "Git check was cancelled",
+    "zh-Hans": "Git 检查已取消"
+  },
+  "Cancelled": {
+    "en": "Cancelled",
+    "zh-Hans": "已取消"
+  },
+  "SSH Git Error": {
+    "en": "SSH Git Error",
+    "zh-Hans": "SSH Git 错误"
+  },
+  "Head Resolution Error": {
+    "en": "Head Resolution Error",
+    "zh-Hans": "HEAD 解析错误"
+  },
+  "Commit message": {
+    "en": "Commit message",
+    "zh-Hans": "提交消息"
+  },
+  "Commit": {
+    "en": "Commit",
+    "zh-Hans": "提交"
+  },
+  "Search branches…": {
+    "en": "Search branches…",
+    "zh-Hans": "搜索分支…"
+  },
+  "Search references…": {
+    "en": "Search references…",
+    "zh-Hans": "搜索引用…"
+  },
+  "Search files…": {
+    "en": "Search files…",
+    "zh-Hans": "搜索更改…"
+  },
+  "New Worktree": {
+    "en": "New Worktree",
+    "zh-Hans": "新建 Worktree"
+  },
+  "Copied": {
+    "en": "Copied",
+    "zh-Hans": "已复制"
+  },
+  "Git command was cancelled": {
+    "en": "Git command was cancelled",
+    "zh-Hans": "Git 命令已取消"
+  },
+  "Working-file reads are unavailable for this executor.": {
+    "en": "Working-file reads are unavailable for this executor.",
+    "zh-Hans": "此执行器不支持读取工作区文件。"
+  },
+  "Use patch view for files outside this worktree or non-regular files.": {
+    "en": "Use patch view for files outside this worktree or non-regular files.",
+    "zh-Hans": "Worktree 之外的文件或非常规文件请使用补丁视图。"
+  },
+  "Another Git operation is running in this worktree.": {
+    "en": "Another Git operation is running in this worktree.",
+    "zh-Hans": "此 Worktree 中已有另一个 Git 操作正在运行。"
+  },
+  "Save or discard unsaved editor changes before removing this worktree.": {
+    "en": "Save or discard unsaved editor changes before removing this worktree.",
+    "zh-Hans": "删除此 Worktree 前，请先保存或放弃编辑器中的未保存更改。"
+  },
+  "Save or discard unsaved editor changes before switching branches.": {
+    "en": "Save or discard unsaved editor changes before switching branches.",
+    "zh-Hans": "切换分支前，请先保存或放弃编辑器中的未保存更改。"
+  },
+  "Show complete refs": {
+    "en": "Show complete refs",
+    "zh-Hans": "显示完整引用"
+  },
+  "Cannot create the SSH connection directory.": {
+    "en": "Cannot create the SSH connection directory.",
+    "zh-Hans": "无法创建 SSH 连接目录。"
+  },
+  "The SSH connection directory must be private and owned by this user.": {
+    "en": "The SSH connection directory must be private and owned by this user.",
+    "zh-Hans": "SSH 连接目录必须为当前用户所有，且不可供其他用户访问。"
+  },
+  "The SSH session is not ready.": {
+    "en": "The SSH session is not ready.",
+    "zh-Hans": "SSH 会话尚未就绪。"
+  },
+  "Create Worktree": {
+    "en": "Create Worktree",
+    "zh-Hans": "创建 Worktree"
+  },
+  "Absolute worktree directory": {
+    "en": "Absolute worktree directory",
+    "zh-Hans": "Worktree 绝对路径"
+  },
+  "New branch name": {
+    "en": "New branch name",
+    "zh-Hans": "新分支名"
+  },
+  "New branch": {
+    "en": "New branch",
+    "zh-Hans": "新分支"
+  },
+  "Existing branch": {
+    "en": "Existing branch",
+    "zh-Hans": "现有分支"
+  },
+  "Open in a new tab after creation": {
+    "en": "Open in a new tab after creation",
+    "zh-Hans": "创建后在新标签页中打开"
+  },
+  "Checkout": {
+    "en": "Checkout",
+    "zh-Hans": "检出"
+  },
+  "Branch name (for New branch)": {
+    "en": "Branch name (for New branch)",
+    "zh-Hans": "分支名（用于新分支）"
+  },
+  "Create": {
+    "en": "Create",
+    "zh-Hans": "创建"
+  },
+  "Remove Worktree?": {
+    "en": "Remove Worktree?",
+    "zh-Hans": "删除 Worktree？"
+  },
+  "The source terminal session is no longer available.": {
+    "en": "The source terminal session is no longer available.",
+    "zh-Hans": "原终端会话已不可用。"
+  },
+  "This SSH session cannot be opened in another tab.": {
+    "en": "This SSH session cannot be opened in another tab.",
+    "zh-Hans": "无法在另一个标签页中打开此 SSH 会话。"
+  },
+  "Wait for the SSH session to connect.": {
+    "en": "Wait for the SSH session to connect.",
+    "zh-Hans": "请等待 SSH 会话连接完成。"
+  },
+  "Could not open a terminal for this worktree.": {
+    "en": "Could not open a terminal for this worktree.",
+    "zh-Hans": "无法为此 Worktree 打开终端。"
+  },
+  "Choose history branch or worktree": {
+    "en": "Choose history branch or worktree",
+    "zh-Hans": "选择历史分支或 Worktree"
+  },
+  "Branch status unavailable": {
+    "en": "Branch status unavailable",
+    "zh-Hans": "分支状态不可用"
+  },
+  "Invalid SSH connection.": {
+    "en": "Invalid SSH connection.",
+    "zh-Hans": "无效的 SSH 连接。"
+  },
+  "The pane has no SSH connection.": {
+    "en": "The pane has no SSH connection.",
+    "zh-Hans": "此面板没有 SSH 连接。"
+  },
+  "The original local SSH working directory is unavailable. Reconnect this SSH session.": {
+    "en": "The original local SSH working directory is unavailable. Reconnect this SSH session.",
+    "zh-Hans": "原始本地 SSH 工作目录不可用。请重新连接此 SSH 会话。"
+  },
+  "Exact SSH options are unavailable. Reconnect this SSH session to capture its original connection parameters.": {
+    "en": "Exact SSH options are unavailable. Reconnect this SSH session to capture its original connection parameters.",
+    "zh-Hans": "无法获取准确的 SSH 选项。请重新连接以记录原始连接参数。"
+  },
+  "Git requires a replayable OpenSSH connection with recognized options.": {
+    "en": "Git requires a replayable OpenSSH connection with recognized options.",
+    "zh-Hans": "Git 需要使用可重放且选项可识别的 OpenSSH 连接。"
+  },
+  "The captured SSH executable was not found on the host application's PATH.": {
+    "en": "The captured SSH executable was not found on the host application's PATH.",
+    "zh-Hans": "在应用的 PATH 中找不到已记录的 SSH 可执行文件。"
+  },
+  "Invalid remote Git path or argument.": {
+    "en": "Invalid remote Git path or argument.",
+    "zh-Hans": "无效的远程 Git 路径或参数。"
+  },
+  "Invalid remote file path.": {
+    "en": "Invalid remote file path.",
+    "zh-Hans": "无效的远程文件路径。"
+  },
+  "SSH connection failed. If a write was in progress, refresh before retrying; its outcome may be unknown.\n": {
+    "en": "SSH connection failed. If a write was in progress, refresh before retrying; its outcome may be unknown.\n",
+    "zh-Hans": "SSH 连接失败。如果当时正在写入，请先刷新再重试，写入结果可能尚不确定。\n"
+  },
+  "SSH did not start the Git command.\n": {
+    "en": "SSH did not start the Git command.\n",
+    "zh-Hans": "SSH 未能启动 Git 命令。\n"
+  },
+  "Loading changed files…": {
+    "en": "Loading changed files…",
+    "zh-Hans": "正在加载更改的文件…"
+  },
+  "Copy Commit Hash": {
+    "en": "Copy Commit Hash",
+    "zh-Hans": "复制提交哈希"
+  },
+  "Copy subject": {
+    "en": "Copy subject",
+    "zh-Hans": "复制提交标题"
+  },
+  "Copy author": {
+    "en": "Copy author",
+    "zh-Hans": "复制作者"
+  },
+  "Copy email": {
+    "en": "Copy email",
+    "zh-Hans": "复制邮箱"
+  },
+  "Copy commit SHA": {
+    "en": "Copy commit SHA",
+    "zh-Hans": "复制提交 SHA"
+  },
+  "Copy refs": {
+    "en": "Copy refs",
+    "zh-Hans": "复制引用"
+  },
+  "Copy full commit message": {
+    "en": "Copy full commit message",
+    "zh-Hans": "复制完整提交消息"
+  },
+  "Copy file path": {
+    "en": "Copy file path",
+    "zh-Hans": "复制文件路径"
+  },
+  "Copy More": {
+    "en": "Copy More",
+    "zh-Hans": "更多复制选项"
+  },
+  "Create Branch from This Commit…": {
+    "en": "Create Branch from This Commit…",
+    "zh-Hans": "从此提交创建分支…"
+  },
+  "Create Branch + Worktree…": {
+    "en": "Create Branch + Worktree…",
+    "zh-Hans": "创建分支和 Worktree…"
+  },
+  "Create Detached Worktree…": {
+    "en": "Create Detached Worktree…",
+    "zh-Hans": "创建 Detached Worktree…"
+  },
+  "Show Commit Details / Changed Files": {
+    "en": "Show Commit Details / Changed Files",
+    "zh-Hans": "显示提交详情 / 更改文件"
+  },
+  "Compare with HEAD": {
+    "en": "Compare with HEAD",
+    "zh-Hans": "与 HEAD 比较"
+  },
+  "Create Branch": {
+    "en": "Create Branch",
+    "zh-Hans": "创建分支"
+  },
+  "Cherry-pick": {
+    "en": "Cherry-pick",
+    "zh-Hans": "Cherry-pick"
+  },
+  "Cherry-pick…": {
+    "en": "Cherry-pick…",
+    "zh-Hans": "Cherry-pick…"
+  },
+  "Revert": {
+    "en": "Revert",
+    "zh-Hans": "还原提交"
+  },
+  "Revert…": {
+    "en": "Revert…",
+    "zh-Hans": "还原提交…"
+  },
+  "Push": {
+    "en": "Push",
+    "zh-Hans": "推送"
+  },
+  "Push…": {
+    "en": "Push…",
+    "zh-Hans": "推送…"
+  },
+  "\nChoose the merge parent to use as the mainline.": {
+    "en": "\nChoose the merge parent to use as the mainline.",
+    "zh-Hans": "\n请选择作为主线的合并父提交。"
+  },
+  "Source snapshots do not match this patch. Refresh to retry; the patch is shown below.": {
+    "en": "Source snapshots do not match this patch. Refresh to retry; the patch is shown below.",
+    "zh-Hans": "源文件快照与此补丁不一致。请刷新后重试；下方保留补丁内容。"
+  },
+  "Dismiss Git error": {
+    "en": "Dismiss Git error",
+    "zh-Hans": "关闭 Git 错误提示"
+  },
+  "Not a Git Repository": {
+    "en": "Not a Git Repository",
+    "zh-Hans": "不是 Git 仓库"
+  },
+  "The terminal has not reported a working directory.": {
+    "en": "The terminal has not reported a working directory.",
+    "zh-Hans": "终端尚未报告工作目录。"
+  },
+  "The current directory is not tracked by Git.": {
+    "en": "The current directory is not tracked by Git.",
+    "zh-Hans": "当前目录不在 Git 仓库中。"
+  },
+  "Run 'git init' in the terminal to initialize a repository.": {
+    "en": "Run 'git init' in the terminal to initialize a repository.",
+    "zh-Hans": "在终端运行 'git init' 来初始化仓库。"
+  },
+  "Waiting for the SSH session to report its remote working directory.": {
+    "en": "Waiting for the SSH session to report its remote working directory.",
+    "zh-Hans": "正在等待 SSH 会话报告远程工作目录。"
+  },
+  "Copy repository name": {
+    "en": "Copy repository name",
+    "zh-Hans": "复制仓库名称"
+  },
+  "Refresh Git status": {
+    "en": "Refresh Git status",
+    "zh-Hans": "刷新 Git 状态"
+  },
+  "No upstream configured": {
+    "en": "No upstream configured",
+    "zh-Hans": "未配置上游分支"
+  },
+  "· up to date": {
+    "en": "· up to date",
+    "zh-Hans": "· 已同步"
+  },
+  "No commits yet": {
+    "en": "No commits yet",
+    "zh-Hans": "暂无提交"
+  },
+  "No history found": {
+    "en": "No history found",
+    "zh-Hans": "未找到历史记录"
+  },
+  "Load more history": {
+    "en": "Load more history",
+    "zh-Hans": "加载更多历史"
+  },
+  "Current branch": {
+    "en": "Current branch",
+    "zh-Hans": "当前分支"
+  },
+  "All branches": {
+    "en": "All branches",
+    "zh-Hans": "所有分支"
+  },
+  "Git returned an invalid status record.": {
+    "en": "Git returned an invalid status record.",
+    "zh-Hans": "Git 返回了无效的状态记录。"
+  },
+  "empty tree": {
+    "en": "empty tree",
+    "zh-Hans": "空树"
+  },
+  "index vs HEAD": {
+    "en": "index vs HEAD",
+    "zh-Hans": "暂存区与 HEAD"
+  },
+  "working tree vs index": {
+    "en": "working tree vs index",
+    "zh-Hans": "工作区与暂存区"
+  },
+  "Git returned incomplete commit metadata.": {
+    "en": "Git returned incomplete commit metadata.",
+    "zh-Hans": "Git 返回的提交元数据不完整。"
+  },
+  "Git command could not find the selected terminal surface.": {
+    "en": "Git command could not find the selected terminal surface.",
+    "zh-Hans": "Git 命令找不到所选终端面板。"
+  },
+  "Git command target is no longer available.": {
+    "en": "Git command target is no longer available.",
+    "zh-Hans": "Git 命令目标已不可用。"
+  },
+  "Git command target is still starting.": {
+    "en": "Git command target is still starting.",
+    "zh-Hans": "Git 命令目标仍在启动中。"
+  },
+  "Git command target does not match this terminal session.": {
+    "en": "Git command target does not match this terminal session.",
+    "zh-Hans": "Git 命令目标与此终端会话不匹配。"
+  },
+  "Copy full ref name": {
+    "en": "Copy full ref name",
+    "zh-Hans": "复制完整引用名"
+  },
+  "Open Worktree in New Tab": {
+    "en": "Open Worktree in New Tab",
+    "zh-Hans": "在新标签页中打开 Worktree"
+  },
+  "Show History": {
+    "en": "Show History",
+    "zh-Hans": "查看历史"
+  },
+  "New Worktree from Here…": {
+    "en": "New Worktree from Here…",
+    "zh-Hans": "从此处新建 Worktree…"
+  },
+  "Checkout Tracking Branch…": {
+    "en": "Checkout Tracking Branch…",
+    "zh-Hans": "检出跟踪分支…"
+  },
+  "Switch Branch": {
+    "en": "Switch Branch",
+    "zh-Hans": "切换分支"
+  },
+  "New Branch from Here…": {
+    "en": "New Branch from Here…",
+    "zh-Hans": "从此处新建分支…"
+  },
+  "Set Upstream…": {
+    "en": "Set Upstream…",
+    "zh-Hans": "设置上游分支…"
+  },
+  "Copy Branch Name": {
+    "en": "Copy Branch Name",
+    "zh-Hans": "复制分支名"
+  },
+  "Open in New Tab": {
+    "en": "Open in New Tab",
+    "zh-Hans": "在新标签页中打开"
+  },
+  "Copy Worktree Path": {
+    "en": "Copy Worktree Path",
+    "zh-Hans": "复制 Worktree 路径"
+  },
+  "Remove Worktree…": {
+    "en": "Remove Worktree…",
+    "zh-Hans": "删除 Worktree…"
+  },
+  "Unstage File": {
+    "en": "Unstage File",
+    "zh-Hans": "取消暂存文件"
+  },
+  "Stage File": {
+    "en": "Stage File",
+    "zh-Hans": "暂存文件"
+  },
+  "Open Diff": {
+    "en": "Open Diff",
+    "zh-Hans": "打开差异"
+  },
+  "Copy Path": {
+    "en": "Copy Path",
+    "zh-Hans": "复制路径"
+  },
+  "The output limit must not be negative.": {
+    "en": "The output limit must not be negative.",
+    "zh-Hans": "输出上限不能为负数。"
+  },
+  "Could not create a process IO channel.": {
+    "en": "Could not create a process IO channel.",
+    "zh-Hans": "无法创建进程 IO 通道。"
+  },
+  "staged changes": {
+    "en": "staged changes",
+    "zh-Hans": "已暂存的更改"
+  },
+  "working tree changes": {
+    "en": "working tree changes",
+    "zh-Hans": "工作区更改"
+  },
+  "Added": {
+    "en": "Added",
+    "zh-Hans": "已添加"
+  },
+  "Deleted": {
+    "en": "Deleted",
+    "zh-Hans": "已删除"
+  },
+  "Modified": {
+    "en": "Modified",
+    "zh-Hans": "已修改"
+  },
+  "Renamed": {
+    "en": "Renamed",
+    "zh-Hans": "已重命名"
+  },
+  "Type changed": {
+    "en": "Type changed",
+    "zh-Hans": "类型更改"
+  },
+  "Conflict": {
+    "en": "Conflict",
+    "zh-Hans": "冲突"
+  },
+  "Changed": {
+    "en": "Changed",
+    "zh-Hans": "已更改"
+  },
+  "(no commit message)": {
+    "en": "(no commit message)",
+    "zh-Hans": "（无提交消息）"
+  },
+  "Binary file": {
+    "en": "Binary file",
+    "zh-Hans": "二进制文件"
+  },
+  "Worktree paths could not be decoded as UTF-8.": {
+    "en": "Worktree paths could not be decoded as UTF-8.",
+    "zh-Hans": "无法将 Worktree 路径解码为 UTF-8。"
+  },
+  "Stage files": {
+    "en": "Stage files",
+    "zh-Hans": "暂存文件"
+  },
+  "Unstage files": {
+    "en": "Unstage files",
+    "zh-Hans": "取消暂存文件"
+  },
+  "Updating index…": {
+    "en": "Updating index…",
+    "zh-Hans": "正在更新暂存区…"
+  },
+  "Collapse folder": {
+    "en": "Collapse folder",
+    "zh-Hans": "折叠文件夹"
+  },
+  "Expand folder": {
+    "en": "Expand folder",
+    "zh-Hans": "展开文件夹"
+  },
+  "Unstage ": {
+    "en": "Unstage ",
+    "zh-Hans": "取消暂存 "
+  },
+  "Stage ": {
+    "en": "Stage ",
+    "zh-Hans": "暂存 "
+  },
+  "Updating index for ": {
+    "en": "Updating index for ",
+    "zh-Hans": "正在更新暂存区："
+  },
+  "Detached": {
+    "en": "Detached",
+    "zh-Hans": "Detached"
+  },
+  "current": {
+    "en": "current",
+    "zh-Hans": "当前"
+  },
+  "dirty": {
+    "en": "dirty",
+    "zh-Hans": "有修改"
+  },
+  "Dirty": {
+    "en": "Dirty",
+    "zh-Hans": "有修改"
+  },
+  "(no subject)": {
+    "en": "(no subject)",
+    "zh-Hans": "（无标题）"
+  },
+  "Author": {
+    "en": "Author",
+    "zh-Hans": "作者"
+  },
+  "Email": {
+    "en": "Email",
+    "zh-Hans": "邮箱"
+  },
+  "Time": {
+    "en": "Time",
+    "zh-Hans": "时间"
+  },
+  "Commit SHA": {
+    "en": "Commit SHA",
+    "zh-Hans": "提交 SHA"
+  },
+  "Collapse commit": {
+    "en": "Collapse commit",
+    "zh-Hans": "折叠提交"
+  },
+  "Expand commit": {
+    "en": "Expand commit",
+    "zh-Hans": "展开提交"
+  },
+  "Open diff · ": {
+    "en": "Open diff · ",
+    "zh-Hans": "打开差异 · "
+  },
+  "Stage All": {
+    "en": "Stage All",
+    "zh-Hans": "全部暂存"
+  },
+  "Unstage All": {
+    "en": "Unstage All",
+    "zh-Hans": "全部取消暂存"
+  },
+  "Stage folder": {
+    "en": "Stage folder",
+    "zh-Hans": "暂存文件夹"
+  },
+  "Unstage folder": {
+    "en": "Unstage folder",
+    "zh-Hans": "取消暂存文件夹"
+  },
+  "{0} view": {
+    "en": "{0} view",
+    "zh-Hans": "{0}视图"
+  },
+  "{0} staged": {
+    "en": "{0} staged",
+    "zh-Hans": "已暂存 {0} 个文件"
+  },
+  "Starting from {0}. Enter the new local branch name.": {
+    "en": "Starting from {0}. Enter the new local branch name.",
+    "zh-Hans": "基于 {0}，请输入新的本地分支名。"
+  },
+  "Push {0}": {
+    "en": "Push {0}",
+    "zh-Hans": "推送 {0}"
+  },
+  "Set Upstream for {0}": {
+    "en": "Set Upstream for {0}",
+    "zh-Hans": "为 {0} 设置上游分支"
+  },
+  "Git returned an invalid commit record: {0}": {
+    "en": "Git returned an invalid commit record: {0}",
+    "zh-Hans": "Git 返回了无效的提交记录：{0}"
+  },
+  "Git returned an invalid author date: {0}": {
+    "en": "Git returned an invalid author date: {0}",
+    "zh-Hans": "Git 返回了无效的作者日期：{0}"
+  },
+  "Git command exited with code {0}": {
+    "en": "Git command exited with code {0}",
+    "zh-Hans": "Git 命令已退出，退出码为 {0}"
+  },
+  "Git command output exceeded limit of {0} bytes": {
+    "en": "Git command output exceeded limit of {0} bytes",
+    "zh-Hans": "Git 命令输出超过了 {0} 字节的上限"
+  },
+  "Failed to execute Git command: {0}": {
+    "en": "Failed to execute Git command: {0}",
+    "zh-Hans": "无法执行 Git 命令：{0}"
+  },
+  "Worktree no longer exists: {0}": {
+    "en": "Worktree no longer exists: {0}",
+    "zh-Hans": "Worktree 已不存在：{0}"
+  },
+  "Branch no longer exists: {0}": {
+    "en": "Branch no longer exists: {0}",
+    "zh-Hans": "分支已不存在：{0}"
+  },
+  "{0} refs": {
+    "en": "{0} refs",
+    "zh-Hans": "{0} 个引用"
+  },
+  "{0} (initial)": {
+    "en": "{0} (initial)",
+    "zh-Hans": "{0}（首次提交前）"
+  },
+  "detached at {0}": {
+    "en": "detached at {0}",
+    "zh-Hans": "Detached 于 {0}"
+  },
+  "Choose a directory and how to check out {0}.": {
+    "en": "Choose a directory and how to check out {0}.",
+    "zh-Hans": "请选择目录以及检出 {0} 的方式。"
+  },
+  "Remove {0}? Its branch will be kept. Worktrees with uncommitted changes will not be removed.": {
+    "en": "Remove {0}? Its branch will be kept. Worktrees with uncommitted changes will not be removed.",
+    "zh-Hans": "删除 {0}？分支将保留，含有未提交更改的 Worktree 不会被删除。"
+  },
+  "Current HEAD · {0}": {
+    "en": "Current HEAD · {0}",
+    "zh-Hans": "当前 HEAD · {0}"
+  },
+  "Create a branch at {0}. The current branch will stay checked out.": {
+    "en": "Create a branch at {0}. The current branch will stay checked out.",
+    "zh-Hans": "在 {0} 创建分支，当前检出分支保持不变。"
+  },
+  "{0} {1}?": {
+    "en": "{0} {1}?",
+    "zh-Hans": "{0} {1}？"
+  },
+  "{0}\n\nThis creates a commit on the current branch.": {
+    "en": "{0}\n\nThis creates a commit on the current branch.",
+    "zh-Hans": "{0}\n\n此操作会在当前分支上创建一个提交。"
+  },
+  "Parent {0} · {1}": {
+    "en": "Parent {0} · {1}",
+    "zh-Hans": "父提交 {0} · {1}"
+  },
+  "Remote Git ({0})": {
+    "en": "Remote Git ({0})",
+    "zh-Hans": "远程 Git（{0}）"
+  },
+  "parent {0}": {
+    "en": "parent {0}",
+    "zh-Hans": "父提交 {0}"
+  },
+  "Diff exceeds the {0} display limit and was truncated.\n": {
+    "en": "Diff exceeds the {0} display limit and was truncated.\n",
+    "zh-Hans": "差异超过了 {0} 的显示上限，已被截断。\n"
+  },
+  "Git command failed with exit code {0}.": {
+    "en": "Git command failed with exit code {0}.",
+    "zh-Hans": "Git 命令失败，退出码为 {0}。"
+  },
+  "Could not read process output ({0}).": {
+    "en": "Could not read process output ({0}).",
+    "zh-Hans": "无法读取进程输出（{0}）。"
+  },
+  "Could not send the complete process input ({0}).": {
+    "en": "Could not send the complete process input ({0}).",
+    "zh-Hans": "无法发送完整的进程输入（{0}）。"
+  },
+  "commit {0}": {
+    "en": "commit {0}",
+    "zh-Hans": "提交 {0}"
+  },
+  "Commit {0} does not exist.": {
+    "en": "Commit {0} does not exist.",
+    "zh-Hans": "提交 {0} 不存在。"
+  },
+  "The file path is invalid: {0}": {
+    "en": "The file path is invalid: {0}",
+    "zh-Hans": "文件路径无效：{0}"
+  },
+  "Commit message · {0} lines": {
+    "en": "Commit message · {0} lines",
+    "zh-Hans": "提交消息 · {0} 行"
+  },
+  "{0} files changed": {
+    "en": "{0} files changed",
+    "zh-Hans": "{0} 个文件更改"
+  },
+  " · {0} binary": {
+    "en": " · {0} binary",
+    "zh-Hans": " · {0} 个二进制文件"
+  },
+  "Commit message · {0} line": {
+    "en": "Commit message · {0} line",
+    "zh-Hans": "提交消息 · {0} 行"
+  },
+  "{0} file changed": {
+    "en": "{0} file changed",
+    "zh-Hans": "{0} 个文件更改"
+  },
+  "Local branch": {
+    "en": "Local branch",
+    "zh-Hans": "本地分支"
+  },
+  "Remote branch": {
+    "en": "Remote branch",
+    "zh-Hans": "远程分支"
+  },
+  "Tag": {
+    "en": "Tag",
+    "zh-Hans": "标签"
+  }
+}

@@ -30,7 +30,7 @@ class InspectorCopyableTextField: NSTextField {
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
-        contextMenuProvider?() ?? InspectorCopyMenu(values: copyItems ?? [("Copy", copyValue ?? stringValue)], pasteboard: pasteboard)
+        contextMenuProvider?() ?? InspectorCopyMenu(values: copyItems ?? [(SettingsStrings(language: OhMyGhosttySettings.shared.language).copyTitle, copyValue ?? stringValue)], pasteboard: pasteboard)
     }
 }
 
@@ -88,8 +88,9 @@ final class InspectorMetadataText: NSButton {
             .foregroundColor: isValueSelected ? NSColor.labelColor : NSColor.secondaryLabelColor,
         ])
         layer?.backgroundColor = (isValueSelected ? NSColor.controlAccentColor.withAlphaComponent(0.18) : .clear).cgColor
-        toolTip = isCopied ? "Copied" : "Select " + copyLabel.lowercased() + " · ⌘C to copy · " + value
-        setAccessibilityValue(isCopied ? "Copied" : (isValueSelected ? "Selected" : ""))
+        let strings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
+        toolTip = isCopied ? strings.copiedTitle : strings.selectionCopyHint(copyLabel, value: value)
+        setAccessibilityValue(isCopied ? strings.copiedTitle : (isValueSelected ? strings.selectedTitle : ""))
     }
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -131,11 +132,11 @@ final class InspectorMetadataText: NSButton {
         }
     }
     override func menu(for event: NSEvent) -> NSMenu? {
-        contextMenuProvider?() ?? InspectorCopyMenu(values: [("Copy " + copyLabel.lowercased(), value)], pasteboard: pasteboard)
+        contextMenuProvider?() ?? InspectorCopyMenu(values: [(SettingsStrings(language: OhMyGhosttySettings.shared.language).copyTitle(copyLabel), value)], pasteboard: pasteboard)
     }
 }
 
-final class InspectorCopyableTextView: NSTextView {
+class InspectorCopyableTextView: NSTextView {
     var pasteboard = NSPasteboard.general
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -185,13 +186,16 @@ class InspectorCopyMenu: NSMenu {
 
 class InspectorCopyTableView: NSTableView {
     var copyValue: (() -> String?)?
+    var focusedKeyHandler: ((NSEvent) -> Bool)?
     var pasteboard = NSPasteboard.general
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         EditorCommandRouter.shared.unregister(owner: self)
         guard window != nil else { return }
         EditorCommandRouter.shared.register(owner: self) { [weak self] event in
-            guard let self, event.window === self.window, self.window?.firstResponder === self,
+            guard let self, event.window === self.window, self.window?.firstResponder === self else { return false }
+            if self.focusedKeyHandler?(event) == true { return true }
+            guard
                   event.modifierFlags.intersection([.command, .control, .option, .shift]) == .command,
                   event.charactersIgnoringModifiers?.lowercased() == "c" else { return false }
             if let value = self.copyValue?() { InspectorCopyMenu.copy(value, to: self.pasteboard) }

@@ -39,7 +39,7 @@ final class GitCollectionCell: NSTableCellView {
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func configure(_ row: GitCollectionRow, colors: GitCollectionColors, toggle: @escaping () -> Void,
-                   stage: @escaping (GitDiffFile, Bool) -> Void) {
+                   stage: @escaping () -> Void) {
         self.row = row
         self.toggle = toggle
         let item = row.item
@@ -60,27 +60,40 @@ final class GitCollectionCell: NSTableCellView {
         toolTip = item.tooltip
         setAccessibilityIdentifier(item.id)
         setAccessibilityLabel(item.tooltip)
+        if let batch = item.stageBatch {
+            checkbox.configure(state: batch.isMixed ? .mixed : batch.allStaged ? .on : .off, enabled: item.enabled, colors: colors)
+            checkbox.activate = stage
+            checkbox.setAccessibilityIdentifier(item.id + "/checkbox")
+            let actionTitle = item.isCategory ? (batch.shouldStage ? GitL10n.text("Stage All") : GitL10n.text("Unstage All"))
+                : item.isFolder ? (batch.shouldStage ? GitL10n.text("Stage folder") : GitL10n.text("Unstage folder"))
+                : batch.shouldStage ? GitL10n.text("Stage files") : GitL10n.text("Unstage files")
+            checkbox.setAccessibilityLabel(actionTitle)
+            checkbox.toolTip = item.pending ? GitL10n.text("Updating index…") : actionTitle
+            checkbox.isHidden = item.pending
+            if item.pending { progress.isHidden = false; progress.startAnimation(nil) }
+        }
         switch item.kind {
+        case .ref(let ref):
+            setIcon(GitRefBadgesView.symbol(for: ref.kind) ?? "arrow.triangle.branch")
+            icon.contentTintColor = ref.kind == .tag ? colors.modified : colors.accent
         case .category(let count):
             badge.stringValue = NumberFormatter.localizedString(from: NSNumber(value: count), number: .decimal)
-            badge.isHidden = false; rule.isHidden = false
+            badge.isHidden = false; rule.isHidden = item.stageBatch != nil
         case .folder(let count):
             disclosure.isHidden = false
-            disclosure.image = NSImage(systemSymbolName: row.expanded ? "chevron.down" : "chevron.right", accessibilityDescription: row.expanded ? "Collapse folder" : "Expand folder")?
+            disclosure.image = NSImage(systemSymbolName: row.expanded ? "chevron.down" : "chevron.right", accessibilityDescription: row.expanded ? GitL10n.text("Collapse folder") : GitL10n.text("Expand folder"))?
                 .withSymbolConfiguration(.init(pointSize: 8, weight: .medium))
             setIcon("folder")
             badge.stringValue = NumberFormatter.localizedString(from: NSNumber(value: count), number: .decimal)
             badge.isHidden = false
         case .file(let file, let section):
-            checkbox.configure(checked: section == .staged, enabled: item.enabled, colors: colors)
             checkbox.setAccessibilityIdentifier(item.id + "/checkbox")
-            checkbox.setAccessibilityLabel((section == .staged ? "Unstage " : "Stage ") + file.path)
-            checkbox.toolTip = item.pending ? "Updating index…" : (section == .staged ? "Unstage " : "Stage ") + file.path
-            checkbox.activate = { stage(file, section != .staged) }
+            checkbox.setAccessibilityLabel((section == .staged ? GitL10n.text("Unstage ") : GitL10n.text("Stage ")) + file.path)
+            checkbox.toolTip = item.pending ? GitL10n.text("Updating index…") : (section == .staged ? GitL10n.text("Unstage ") : GitL10n.text("Stage ")) + file.path
             checkbox.isHidden = item.pending
             if item.pending {
                 progress.isHidden = false
-                progress.setAccessibilityLabel("Updating index for " + file.path)
+                progress.setAccessibilityLabel(GitL10n.text("Updating index for ") + file.path)
                 progress.startAnimation(nil)
             }
             status.stringValue = file.isUntracked ? "?" : String(file.status.prefix(1))
@@ -93,7 +106,7 @@ final class GitCollectionCell: NSTableCellView {
         case .worktree(let tree):
             setIcon(tree.isCurrent ? "checkmark.circle" : tree.lockedReason != nil ? "lock" : "folder")
             if tree.isCurrent { icon.contentTintColor = colors.accent }
-            let states = [tree.branchRef == nil ? "Detached" : nil, tree.isCurrent ? "current" : nil, tree.isDirty == true ? "dirty" : nil]
+            let states = [tree.branchRef == nil ? GitL10n.text("Detached") : nil, tree.isCurrent ? GitL10n.text("current") : nil, tree.isDirty == true ? GitL10n.text("dirty") : nil]
             badge.stringValue = states.compactMap { $0 }.joined(separator: " · ")
             badge.isHidden = badge.stringValue.isEmpty
         case .scope:
@@ -117,11 +130,19 @@ final class GitCollectionCell: NSTableCellView {
         let x: CGFloat = 10 + CGFloat(row.depth) * 12
         var textX = x
         let center = subtitle.isHidden ? bounds.height / 2 : 12
-        if !checkbox.isHidden || !progress.isHidden || !status.isHidden {
-            checkbox.frame = .init(x: x, y: center - 7, width: 14, height: 14)
+        if row.item.isFolder {
+            disclosure.frame = .init(x: x - 5, y: 0, width: 18, height: bounds.height)
+            let hasCheckbox = row.item.stageBatch != nil
+            checkbox.frame = .init(x: x + 13, y: center - 12, width: 22, height: 24)
+            progress.frame = .init(x: x + 18, y: center - 6, width: 12, height: 12)
+            let iconX = x + (hasCheckbox ? 37 : 14)
+            icon.frame = .init(x: iconX, y: center - 7, width: 14, height: 14)
+            textX = iconX + 19
+        } else if !checkbox.isHidden || !progress.isHidden || !status.isHidden {
+            checkbox.frame = .init(x: x - 4, y: center - 12, width: 22, height: 24)
             progress.frame = .init(x: x + 1, y: center - 6, width: 12, height: 12)
-            status.frame = .init(x: x + 19, y: center - 6, width: 11, height: 13)
-            textX = x + 35
+            status.frame = .init(x: x + 20, y: center - 6, width: 11, height: 13)
+            textX = x + (status.isHidden ? 24 : 37)
         } else if !icon.isHidden {
             let iconX = x + (row.item.isFolder ? 14 : 0)
             disclosure.frame = .init(x: x - 3, y: center - 7, width: 14, height: 14)

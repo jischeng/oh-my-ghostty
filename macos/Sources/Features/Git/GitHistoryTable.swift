@@ -10,12 +10,14 @@ struct GitHistoryTable: NSViewRepresentable {
     var isLoading = false
     var automaticLoadingAllowed = true
     var isBusy = false
+    var languageCode = GitL10n.current.languageCode
     let onSelect: (GitCommitID) -> Void
     let onOpen: (GitCommitID) -> Void
     let onShowInTerminal: (GitCommitID) -> Void
     var onOpenFile: (GitCommitID, GitDiffFile) -> Void = { _, _ in }
     var onLoadMore: () -> Void = {}
     var onCommitAction: (GitCommitOperation, GitCommitID) -> Void = { _, _ in }
+    @Environment(\.gitCollectionColors) private var colors
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
         CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
@@ -26,7 +28,7 @@ struct GitHistoryTable: NSViewRepresentable {
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
-        let table = InspectorCopyTableView()
+        let table = GitHoverTableView()
         table.copyValue = { [weak coordinator = context.coordinator] in coordinator?.selectedCopyValue() }
         table.headerView = nil
         table.style = .plain
@@ -96,6 +98,11 @@ struct GitHistoryTable: NSViewRepresentable {
 
         func attach(table: NSTableView, scroll: NSScrollView) {
             tableView = table
+            (table as? GitHoverTableView)?.rowIdentity = { [weak self] index in
+                guard let self, let content = self.content, self.rows.indices.contains(index) else { return nil }
+                let row = self.rows[index]
+                return content.commits[row.commitIndex].id.rawValue + "/" + row.suffix
+            }
             scroll.contentView.postsBoundsChangedNotifications = true
             scroll.contentView.postsFrameChangedNotifications = true
             for name in [NSView.boundsDidChangeNotification, NSView.frameDidChangeNotification] {
@@ -108,8 +115,9 @@ struct GitHistoryTable: NSViewRepresentable {
 
         func update(_ new: GitHistoryTable, change: LocalChange? = nil) {
             let commitsChanged = content?.commits != new.commits
+            let languageChanged = content?.languageCode != new.languageCode
             let changed = commitsChanged || content?.expandedCommits != new.expandedCommits ||
-                content?.headCommitID != new.headCommitID || change != nil
+                content?.headCommitID != new.headCommitID || change != nil || languageChanged
             if commitsChanged { requestedCount = nil }
             let previous = content
             collapsedFiles.formIntersection(new.expandedCommits.keys)
@@ -119,6 +127,7 @@ struct GitHistoryTable: NSViewRepresentable {
             updating = true
             defer {
                 updating = false
+                (table as? GitHoverTableView)?.updateHoverFromPointer()
                 DispatchQueue.main.async { [weak self] in self?.viewportChanged() }
             }
             if changed {
@@ -148,7 +157,7 @@ struct GitHistoryTable: NSViewRepresentable {
                     }
                 }
                 measureRows()
-                if commitsChanged {
+                if commitsChanged || languageChanged {
                     table.reloadData()
                 } else {
                     updateVisibleRows(previous: previous, oldRows: oldRows, oldHeights: oldHeights, change: change)
@@ -257,6 +266,12 @@ struct GitHistoryTable: NSViewRepresentable {
         }
 
         func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+        func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+            let view = GitCollectionRowView()
+            view.colors = content?.colors ?? .init()
+            if let table = tableView as? GitHoverTableView { view.isPointerHovered = table.hoveredRowID == table.rowIdentity(row) }
+            return view
+        }
         func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat { heights[safe: row] ?? 40 }
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
             guard let content, rows.indices.contains(row) else { return nil }
@@ -271,7 +286,7 @@ struct GitHistoryTable: NSViewRepresentable {
                                summary: (dateFormatter.string(from: commit.authoredAt), decorations(for: commit)),
                                state: (head: isHead(commit), expanded: content.expandedCommits[commit.id] != nil),
                                toggle: { [weak self] in self?.content?.onOpen(commit.id) },
-                               contextMenu: { [weak self] in self?.makeContextMenu(commitID: commit.id) })
+                               contextMenu: { [weak self] in self?.makeContextMenu(commitID: commit.id) }, colors: content.colors)
                 return cell
             default:
                 let cell = (tableView.makeView(withIdentifier: .init("git-child"), owner: nil) as? GitHistoryDetailCell) ?? GitHistoryDetailCell()
@@ -304,7 +319,7 @@ struct GitHistoryTable: NSViewRepresentable {
                 return .files(details?.files.count ?? 0, details?.statistics, collapsedFiles.contains(commit.id))
             case .file(_, let file): return .file(file)
             case .message: return .message(details?.metadata?.body ?? "", messageExpansion[commit.id])
-            default: return .notice(details?.error ?? "Loading changed files…", details?.error != nil)
+            default: return .notice(details?.error ?? GitL10n.text("Loading changed files…"), details?.error != nil)
             }
         }
 
@@ -390,15 +405,15 @@ struct GitHistoryTable: NSViewRepresentable {
                 menu.addItem(item)
             }
             menu.addItem(.separator())
-            menu.addCopyItems([("Copy Commit Hash", commit.id.rawValue)])
-            var values = [("Copy subject", commit.subject), ("Copy author", commit.authorName),
-                          ("Copy email", commit.authorEmail), ("Copy commit SHA", commit.id.rawValue),
-                          ("Copy refs", decorations(for: commit).map(\.name).joined(separator: "\n"))]
+            menu.addCopyItems([(GitL10n.text("Copy Commit Hash"), commit.id.rawValue)])
+            var values = [(GitL10n.text("Copy subject"), commit.subject), (GitL10n.text("Copy author"), commit.authorName),
+                          (GitL10n.text("Copy email"), commit.authorEmail), (GitL10n.text("Copy commit SHA"), commit.id.rawValue),
+                          (GitL10n.text("Copy refs"), decorations(for: commit).map(\.name).joined(separator: "\n"))]
             if let message = content.expandedCommits[commit.id]?.metadata?.message {
-                values.append(("Copy full commit message", message))
+                values.append((GitL10n.text("Copy full commit message"), message))
             }
-            if case .file(_, let file) = rows[index] { values.append(("Copy file path", file.path)) }
-            let extra = NSMenuItem(title: "Copy More", action: nil, keyEquivalent: "")
+            if case .file(_, let file) = rows[index] { values.append((GitL10n.text("Copy file path"), file.path)) }
+            let extra = NSMenuItem(title: GitL10n.text("Copy More"), action: nil, keyEquivalent: "")
             extra.submenu = InspectorCopyMenu(values: values.filter { !$0.1.isEmpty }, pasteboard: menu.pasteboard)
             menu.addItem(extra)
         }

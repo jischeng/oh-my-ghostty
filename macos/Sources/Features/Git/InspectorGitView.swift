@@ -3,6 +3,7 @@ import SwiftUI
 struct InspectorGitView: View {
     let content: InspectorGitContent
     let perform: (InspectorPaneActionKind) -> Void
+    @ObservedObject private var settings = OhMyGhosttySettings.shared
     @State private var collectionState = GitCollectionState()
     @State private var changesController = GitCollectionController()
     @State private var changesQuery = ""
@@ -23,7 +24,7 @@ struct InspectorGitView: View {
                     ScrollView { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
                         .frame(maxHeight: 90)
                     Button { perform(.gitAction(.clearOperationError)) } label: { Image(systemName: "xmark") }
-                        .buttonStyle(.plain).help("Dismiss Git error")
+                        .buttonStyle(.plain).help(GitL10n.text("Dismiss Git error"))
                 }.padding(8)
             }
             if let operation = content.operation, !content.isUpdatingIndex {
@@ -34,11 +35,11 @@ struct InspectorGitView: View {
             case .notRepository(let directory):
                 emptyStateView(
                     systemImage: "folder.badge.questionmark",
-                    title: "Not a Git Repository",
+                    title: GitL10n.text("Not a Git Repository"),
                     subtitle: directory.isEmpty
-                        ? "The terminal has not reported a working directory."
-                        : "The current directory is not tracked by Git.",
-                    hint: "Run 'git init' in the terminal to initialize a repository."
+                        ? GitL10n.text("The terminal has not reported a working directory.")
+                        : GitL10n.text("The current directory is not tracked by Git."),
+                    hint: GitL10n.text("Run 'git init' in the terminal to initialize a repository.")
                 )
 
             case .unborn:
@@ -61,9 +62,9 @@ struct InspectorGitView: View {
             case .ssh(let host, let directory):
                 emptyStateView(
                     systemImage: "network",
-                    title: "Remote Git (\(host))",
+                    title: GitL10n.format("Remote Git ({0})", String(describing: host)),
                     subtitle: directory.isEmpty ? host : directory,
-                    hint: "Waiting for the SSH session to report its remote working directory."
+                    hint: GitL10n.text("Waiting for the SSH session to report its remote working directory.")
                 )
 
             case .error(let title, let message):
@@ -85,6 +86,7 @@ struct InspectorGitView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .onChange(of: settings.language) { _ in perform(.gitAction(.refresh)) }
     }
 
     private var headerView: some View {
@@ -100,7 +102,7 @@ struct InspectorGitView: View {
                     .truncationMode(.middle)
                     .help(content.repository?.worktreePath ?? "")
                     .contextMenu {
-                        Button("Copy repository name") { InspectorCopyMenu.copy(content.repository?.repositoryName ?? "Git") }
+                        Button(GitL10n.text("Copy repository name")) { InspectorCopyMenu.copy(content.repository?.repositoryName ?? "Git") }
                     }
 
                 Spacer(minLength: 4)
@@ -119,7 +121,7 @@ struct InspectorGitView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
-                .help("Refresh Git status")
+                .help(GitL10n.text("Refresh Git status"))
             }
 
             if let repository = content.repository {
@@ -135,8 +137,8 @@ struct InspectorGitView: View {
             if !headerReferences.isEmpty { GitHeaderReferences(refs: headerReferences) }
             if content.workingTree.branchesError == nil,
                let current = content.workingTree.branches.first(where: { $0.isCurrent }) {
-                InspectorCopyText(text: current.upstream.isEmpty ? "No upstream configured" :
-                    "\(current.upstream) \(current.tracking.isEmpty ? "· up to date" : current.tracking)")
+                InspectorCopyText(text: current.upstream.isEmpty ? GitL10n.text("No upstream configured") :
+                    "\(current.upstream) \(current.tracking.isEmpty ? GitL10n.text("· up to date") : current.tracking)")
                     .frame(height: 14)
             }
         }
@@ -188,7 +190,7 @@ struct InspectorGitView: View {
 
         case .changes:
             VStack(spacing: 0) {
-                GitCollectionToolbar(query: $changesQuery, mode: $changesMode, placeholder: "Search files…",
+                GitCollectionToolbar(query: $changesQuery, mode: $changesMode, placeholder: GitL10n.text("Search files…"),
                                      controller: changesController, cancel: { changesQuery = "" })
                     .padding(.horizontal, 10).padding(.bottom, 6)
                 GitCollectionView(source: .changes(content.workingTree), mode: changesMode, query: changesQuery,
@@ -221,10 +223,11 @@ struct InspectorGitView: View {
                                   branches: content.workingTree.branches, enabled: content.workingTree.branchesError == nil,
                                   isBusy: content.operation != nil,
                                   worktrees: content.workingTree.worktrees, worktreesError: content.workingTree.worktreesError,
-                                  state: collectionState, stateKey: collectionKey + "/refs/picker", selectedID: historySelectionID) {
+                                  state: collectionState, stateKey: collectionKey + "/refs/picker", selectedID: historySelectionID,
+                                  tags: Array(Set(content.history.snapshot?.decorationsByCommitID.values.joined().filter { $0.kind == .tag } ?? [])).sorted { $0.name < $1.name }) {
                 perform(.gitAction($0))
             }
-            .frame(height: 24)
+            .frame(height: 28)
             .padding(.horizontal, 12)
 
             if content.history.commits.isEmpty && !content.history.isLoading {
@@ -232,7 +235,7 @@ struct InspectorGitView: View {
                     Image(systemName: "clock.arrow.circlepath")
                         .font(.system(size: 25))
                         .foregroundStyle(.secondary)
-                    Text(content.history.statusMessage ?? (headCommitID == nil ? "No commits yet" : "No history found"))
+                    Text(content.history.statusMessage ?? (headCommitID == nil ? GitL10n.text("No commits yet") : GitL10n.text("No history found")))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -268,7 +271,7 @@ struct InspectorGitView: View {
                     .controlSize(.small)
                     .padding(.vertical, 4)
             } else if content.history.hasMore {
-                Button("Load more history") {
+                Button(GitL10n.text("Load more history")) {
                     perform(.gitAction(.loadMoreHistory))
                 }
                 .buttonStyle(.link)

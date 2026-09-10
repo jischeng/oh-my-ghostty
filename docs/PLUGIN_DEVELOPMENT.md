@@ -960,7 +960,7 @@ worktree information. Hidden History views do not automatically paginate. Unchan
 content is not republished, and background snapshot checks do not show a loading
 indicator when history is already available.
 
-Changes, Branches and the History ref picker share `GitCollectionView`: one
+Changes, Branches, History ref badges and the History ref picker share `GitCollectionView`: one
 virtualized native table, row renderer, category header, search field and compact
 List/Tree mode control. Only visible cells are instantiated. Row insertions,
 removals and state changes apply incrementally, preserving surviving visible
@@ -975,10 +975,38 @@ rows use filesystem folders. Folders are presentation groups, not Git objects.
 Folder expansion, selection and viewport anchors are stored separately from Git
 status and survive refresh and List/Tree switches.
 
+Changes keeps transient hover, navigation selection, batch selection and index
+state separate. Each table owns one hovered row identity, reconciled on scrolling,
+reuse and snapshot updates. Cmd-click toggles a selection and Shift-click selects
+visible file rows from the anchor without opening a diff. Ordinary file clicks
+select and navigate; blank-space clicks and Escape clear selection. Space toggles
+the selected files only when the table owns keyboard focus; search and commit
+editors retain ordinary text entry.
+
+A selected checkbox operates on the complete selection. The master checkbox
+covers all changed files, including collapsed folders; folder checkboxes aggregate
+all descendants across both index sides. All-staged batches unstage; every other
+batch stages. Chevron, checkbox and name hit targets remain separate. Bulk writes
+use one NUL-delimited stdin pathspec command and one complete status refresh,
+then reconcile affected rows, remap selection across index sides and preserve
+viewport, expansion, draft and focus. Git 2.25+ supports these bulk pathspec flags.
+
+Ref badge popovers and the scope picker use the same ref browser and popover
+style, including search, tree/list rows and selected state. Scope icons distinguish
+all-history, local, remote and tag refs; long labels truncate. Tag browsing resolves
+the complete tag ref to its commit and does not check out the working tree.
+List/Tree buttons have full 32-by-28-point targets. Search and commit inputs share
+theme-derived normal, hover, focus and disabled fills and borders.
+
+Git UI text comes from `GitStrings.json` through `GitL10n`, following the existing
+application language preference (system, English or Simplified Chinese). Language
+changes update visible Git chrome. Branch/tag/remote names, author data, paths,
+SHAs, commit messages and raw Git command output are never translated.
+
 Working-tree refresh reads staged and unstaged paths together with one NUL-delimited
 porcelain status command, falling back to independent reads on failure so one
 unreadable side does not disable the other. Rename origins, conflicts, untracked paths and partially
-staged files are preserved. Index-only success reads only affected literal paths
+staged files are preserved. Single-path index success reads only affected literal paths
 and merges that patch into the latest snapshot without reloading history or
 unrelated rows. A failed scoped read falls back to the regular status reader.
 Path-only reset unstages files, including before the first commit, without
@@ -1239,7 +1267,7 @@ readable. Replaying a captured cwd uses a subshell so its caller's cwd is kept.
 Older typed records with a bare executable use the host application's explicit
 PATH because those records did not preserve the original executable/PATH.
 
-The transport requires a Unix SSH host with Git 2.23+ and standard `/bin/sh`,
+The transport requires a Unix SSH host with Git 2.25+ and standard `/bin/sh`,
 `base64 -d`, `head` utilities for full parity. A base64-encoded POSIX command
 argument avoids login-shell quoting differences (including fish), while SSH
 stdin stays independent for commit messages. An output marker removes shell

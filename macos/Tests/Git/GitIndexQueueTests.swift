@@ -5,13 +5,15 @@ import Testing
 
 private actor IndexExecutionProbe: GitExecutor {
     private(set) var commands: [[String]] = []
+    private(set) var inputs: [Data?] = []
     private(set) var maximumConcurrentWrites = 0
     private var activeWrites = 0
     private var failurePath: String?
     func fail(_ path: String?) { failurePath = path }
-    func clear() { commands = []; maximumConcurrentWrites = 0 }
+    func clear() { commands = []; inputs = []; maximumConcurrentWrites = 0 }
     func execute(arguments: [String], workingDirectory: String, stdin: Data?, maxOutputBytes: Int?) async throws -> GitExecutionResult {
         commands.append(arguments)
+        inputs.append(stdin)
         let writes = arguments.contains("add") || arguments.contains("reset")
         if writes {
             activeWrites += 1
@@ -20,7 +22,9 @@ private actor IndexExecutionProbe: GitExecutor {
         defer { if writes { activeWrites -= 1 } }
         if writes {
             try await Task.sleep(for: .milliseconds(60))
-            if let failurePath, arguments.contains(failurePath) {
+            if let failurePath, arguments.contains(failurePath) || stdin.map({ data in
+                data.split(separator: 0).contains { String(bytes: $0, encoding: .utf8) == failurePath }
+            }) == true {
                 return .init(exitCode: 1, stdout: Data(), stderr: Data("Injected index write failure".utf8))
             }
         }
@@ -31,6 +35,33 @@ private actor IndexExecutionProbe: GitExecutor {
 
 @MainActor
 struct GitIndexQueueTests {
+    @Test func bulkWritesUseOneCommandAndOneStatusRefresh() async throws {
+        let probe = IndexExecutionProbe()
+        let names = (0..<1100).map { "output/result-\($0).json" } + ["literal [one]*.txt", "换行\n文件.cpp"]
+        let fixture = try await Fixture(files: names, probe: probe)
+        defer { fixture.close() }
+        let initial = fixture.content
+        var stagedCounts: [Int] = []
+        let observation = fixture.registry.objectWillChange.sink { _ in stagedCounts.append(fixture.content.workingTree.staged.count) }
+        defer { observation.cancel() }
+        fixture.send(.setFilesStaged(initial.workingTree.unstaged, true))
+        let staged = try await fixture.wait { $0.operation == nil && $0.workingTree.staged.count == names.count }
+        let commands = await probe.commands
+        #expect(commands.filter { $0.contains("add") }.count == 1)
+        #expect(commands.filter { $0.contains("status") }.count == 1)
+        #expect(commands.first { $0.contains("add") }?.contains("--pathspec-from-file=-") == true)
+        let payload = try #require(await probe.inputs.compactMap { $0 }.first)
+        #expect(Set(payload.split(separator: 0).map { String(bytes: $0, encoding: .utf8) }) == Set(names))
+        #expect(Set(stagedCounts).isSubset(of: [0, names.count]))
+        #expect(staged.history == initial.history && staged.pendingIndexPaths.isEmpty)
+        await probe.clear()
+        fixture.send(.setFilesStaged(staged.workingTree.staged, false))
+        let unstaged = try await fixture.wait { $0.operation == nil && $0.workingTree.staged.isEmpty }
+        #expect(unstaged.workingTree.unstaged.count == names.count)
+        #expect(await probe.commands.filter { $0.contains("reset") }.count == 1)
+        #expect(await probe.commands.filter { $0.contains("status") }.count == 1)
+    }
+
     @MainActor private final class Fixture {
         let root: URL
         let registry = InspectorRegistry()

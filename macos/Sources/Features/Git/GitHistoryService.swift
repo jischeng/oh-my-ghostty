@@ -8,8 +8,8 @@ enum GitHistoryError: Error, Equatable, Sendable, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .commandFailed(let message): message
-        case .malformedCommit(let value): "Git returned an invalid commit record: \(value)"
-        case .invalidDate(let value): "Git returned an invalid author date: \(value)"
+        case .malformedCommit(let value): GitL10n.format("Git returned an invalid commit record: {0}", String(describing: value))
+        case .invalidDate(let value): GitL10n.format("Git returned an invalid author date: {0}", String(describing: value))
         }
     }
 }
@@ -153,7 +153,7 @@ struct GitHistoryService: Sendable {
         pageSize: Int = GitHistoryService.pageSize
     ) async throws -> GitHistoryPage {
         guard offset >= 0, pageSize > 0 else {
-            throw GitHistoryError.commandFailed("Invalid Git history page range")
+            throw GitHistoryError.commandFailed(GitL10n.text("Invalid Git history page range"))
         }
         guard !snapshot.tipCommitIDs.isEmpty else {
             return GitHistoryPage(commits: [], offset: offset, hasMore: false)
@@ -184,12 +184,12 @@ struct GitHistoryService: Sendable {
         // so fixed groups of six fields also preserve empty parents/subjects
         // and legal control characters such as the record separator (0x1e).
         guard result.stdout.isEmpty || result.stdout.last == 0 else {
-            throw GitHistoryError.malformedCommit("Unterminated history record")
+            throw GitHistoryError.malformedCommit(GitL10n.text("Unterminated history record"))
         }
         let fields: [Data] = result.stdout.isEmpty ? [] : result.stdout.dropLast()
             .split(separator: 0, omittingEmptySubsequences: false).map { Data($0) }
         guard fields.count.isMultiple(of: 6) else {
-            throw GitHistoryError.malformedCommit("Incomplete history record")
+            throw GitHistoryError.malformedCommit(GitL10n.text("Incomplete history record"))
         }
         let recordCount = fields.count / 6
         let hasMore = recordCount > pageSize

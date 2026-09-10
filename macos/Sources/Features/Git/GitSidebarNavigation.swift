@@ -21,7 +21,7 @@ struct GitSidebarNavigation: View {
         @State private var hovered = false
         var body: some View {
             Button(action: action) {
-                Text(tab.rawValue)
+                Text(GitL10n.text(tab.rawValue))
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(selected ? Color.primary : Color.secondary)
                     .frame(maxWidth: .infinity, minHeight: 28)
@@ -34,7 +34,7 @@ struct GitSidebarNavigation: View {
             }
             .buttonStyle(.plain)
             .onHover { hovered = $0 }
-            .accessibilityValue(selected ? "Selected" : "")
+            .accessibilityValue(selected ? GitL10n.text("Selected") : "")
         }
     }
 }

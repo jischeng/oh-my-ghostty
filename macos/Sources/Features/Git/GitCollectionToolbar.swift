@@ -4,7 +4,7 @@ import SwiftUI
 struct GitCollectionToolbar: View {
     @Binding var query: String
     @Binding var mode: GitCollectionMode
-    var placeholder = "Search branches…"
+    var placeholder = GitL10n.text("Search branches…")
     var autofocus = false
     let controller: GitCollectionController
     var cancel: () -> Void = {}
@@ -13,7 +13,7 @@ struct GitCollectionToolbar: View {
         HStack(spacing: 6) {
             GitCollectionSearchField(query: $query, placeholder: placeholder, autofocus: autofocus,
                                      colors: colors, controller: controller, cancel: cancel)
-                .frame(height: 23)
+                .frame(height: 28)
             GitCollectionModePicker(mode: $mode)
         }
     }
@@ -28,6 +28,29 @@ struct GitCollectionSearchField: NSViewRepresentable {
     let cancel: () -> Void
     final class Field: NSSearchField {
         var autofocus = false
+        var colors = GitCollectionColors()
+        private var hovered = false
+        private var focused = false
+        private var tracking: NSTrackingArea?
+        var inputState: GitInputState { !isEnabled ? .disabled : focused ? .focused : hovered ? .hovered : .normal }
+        func setFocused(_ value: Bool) {
+            focused = value
+            (currentEditor() as? NSTextView)?.drawsBackground = false
+            needsDisplay = true
+        }
+        override func becomeFirstResponder() -> Bool {
+            let result = super.becomeFirstResponder()
+            if result { setFocused(true) }
+            return result
+        }
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            if let tracking { removeTrackingArea(tracking) }
+            let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
+            addTrackingArea(area); tracking = area
+        }
+        override func mouseEntered(with event: NSEvent) { hovered = true; needsDisplay = true }
+        override func mouseExited(with event: NSEvent) { hovered = false; needsDisplay = true }
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             guard window != nil, autofocus else { return }
@@ -41,6 +64,9 @@ struct GitCollectionSearchField: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> Field {
         let field = Field()
+        field.cell = GitSearchFieldCell(textCell: "")
+        field.isEditable = true
+        field.isSelectable = true
         field.autofocus = autofocus
         field.controlSize = .small
         field.font = .systemFont(ofSize: 11)
@@ -48,7 +74,7 @@ struct GitCollectionSearchField: NSViewRepresentable {
         // NSSearchField needs its native bezel geometry to inset the field
         // editor past the search icon, including when it is auto-focused.
         field.isBezeled = true
-        field.drawsBackground = true
+        field.drawsBackground = false
         field.sendsSearchStringImmediately = true
         field.sendsWholeSearchString = false
         field.delegate = context.coordinator
@@ -57,9 +83,11 @@ struct GitCollectionSearchField: NSViewRepresentable {
     }
     func updateNSView(_ field: Field, context: Context) {
         context.coordinator.parent = self
+        field.colors = colors
         if field.stringValue != query { field.stringValue = query }
         field.textColor = colors.text
-        field.backgroundColor = colors.background
+        (field.currentEditor() as? NSTextView)?.drawsBackground = false
+        field.needsDisplay = true
         field.placeholderAttributedString = NSAttributedString(string: placeholder,
             attributes: [.foregroundColor: colors.secondary, .font: NSFont.systemFont(ofSize: 11)])
         field.setAccessibilityLabel(placeholder)
@@ -71,6 +99,8 @@ struct GitCollectionSearchField: NSViewRepresentable {
             guard let field = notification.object as? NSSearchField, parent.query != field.stringValue else { return }
             parent.query = field.stringValue
         }
+        func controlTextDidBeginEditing(_ notification: Notification) { (notification.object as? Field)?.setFocused(true) }
+        func controlTextDidEndEditing(_ notification: Notification) { (notification.object as? Field)?.setFocused(false) }
         func control(_ control: NSControl, textView: NSTextView, doCommandBy command: Selector) -> Bool {
             switch NSStringFromSelector(command) {
             case "moveUp:": parent.controller.move(-1)

@@ -33,6 +33,13 @@ struct SettingsStrings: Equatable, Sendable {
     }
 
     var isChinese: Bool { languageCode.hasPrefix("zh") }
+    var copyTitle: String { t("Copy", "复制") }
+    var copiedTitle: String { t("Copied", "已复制") }
+    var selectedTitle: String { t("Selected", "已选中") }
+    func copyTitle(_ label: String) -> String { t("Copy " + label.lowercased(), "复制" + label) }
+    func selectionCopyHint(_ label: String, value: String) -> String {
+        t("Select " + label.lowercased() + " · ⌘C to copy · " + value, "选择" + label + " · ⌘C 复制 · " + value)
+    }
 
     private func t(_ en: String, _ zh: String) -> String {
         isChinese ? zh : en

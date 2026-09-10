@@ -36,17 +36,17 @@ enum GitMutation: Equatable, Sendable {
 
     var title: String {
         switch self {
-        case .createBranch: "Creating branch…"
-        case .applyCommit(let operation, _, _): operation == .cherryPick ? "Cherry-picking…" : "Reverting…"
-        case .addWorktree: "Creating worktree…"
-        case .removeWorktree: "Removing worktree…"
-        case .stage: "Staging files…"
-        case .unstage: "Unstaging files…"
-        case .commit: "Committing…"
-        case .checkout: "Switching branch…"
-        case .create: "Creating branch…"
-        case .push: "Pushing…"
-        case .setUpstream: "Setting upstream…"
+        case .createBranch: return GitL10n.text("Creating branch…")
+        case .applyCommit(let operation, _, _): return operation == .cherryPick ? GitL10n.text("Cherry-picking…") : GitL10n.text("Reverting…")
+        case .addWorktree: return GitL10n.text("Creating worktree…")
+        case .removeWorktree: return GitL10n.text("Removing worktree…")
+        case .stage: return GitL10n.text("Staging files…")
+        case .unstage: return GitL10n.text("Unstaging files…")
+        case .commit: return GitL10n.text("Committing…")
+        case .checkout: return GitL10n.text("Switching branch…")
+        case .create: return GitL10n.text("Creating branch…")
+        case .push: return GitL10n.text("Pushing…")
+        case .setUpstream: return GitL10n.text("Setting upstream…")
         }
     }
 }
@@ -67,10 +67,10 @@ struct GitMutationService: Sendable {
             try await validateCommit(commit, in: repository)
             _ = try await run(["branch", "--", name, commit.rawValue], in: repository)
         case .applyCommit(let operation, let commit, let mainline):
-            guard operation == .cherryPick || operation == .revert else { throw GitDiffServiceError.gitFailed("Invalid commit operation.") }
+            guard operation == .cherryPick || operation == .revert else { throw GitDiffServiceError.gitFailed(GitL10n.text("Invalid commit operation.")) }
             try await validateCommit(commit, in: repository)
             let status = try await run(["status", "--porcelain=v1", "-z"], in: repository)
-            guard status.stdout.isEmpty else { throw GitDiffServiceError.gitFailed("Commit or stash local changes before this operation.") }
+            guard status.stdout.isEmpty else { throw GitDiffServiceError.gitFailed(GitL10n.text("Commit or stash local changes before this operation.")) }
             var arguments = [operation == .cherryPick ? "cherry-pick" : "revert", "--no-edit"]
             if let mainline { arguments += ["--mainline", String(mainline)] }
             _ = try await run(arguments + ["--", commit.rawValue], in: repository)
@@ -83,27 +83,33 @@ struct GitMutationService: Sendable {
             if let branch {
                 try await validateBranch(branch, in: repository)
                 arguments += ["-b", branch]
-            } else if detached { arguments.append("--detach") } else if !start.hasPrefix("refs/heads/") { throw GitDiffServiceError.gitFailed("Select a local branch or create a new branch.") }
+            } else if detached { arguments.append("--detach") } else if !start.hasPrefix("refs/heads/") { throw GitDiffServiceError.gitFailed(GitL10n.text("Select a local branch or create a new branch.")) }
             let revision = branch == nil && !detached ? String(start.dropFirst("refs/heads/".count)) : start
             _ = try await run(arguments + ["--", path, revision], in: repository)
         case .removeWorktree(let path):
             try validateWorktreePath(path)
             let worktrees = try await GitRepositoryService(executor: executor).worktrees(for: repository, includeStatus: true)
             guard let worktree = worktrees.first(where: { $0.path == path }), worktree.canRemove else {
-                throw GitDiffServiceError.gitFailed("Cannot remove this worktree: it is current, main, locked, dirty, unavailable, or its status could not be checked.")
+                throw GitDiffServiceError.gitFailed(GitL10n.text("Cannot remove this worktree: it is current, main, locked, dirty, unavailable, or its status could not be checked."))
             }
             _ = try await run(["worktree", "remove", "--", path], in: repository)
         case .stage(let paths):
             try validate(paths)
-            _ = try await run(["--literal-pathspecs", "add", "--"] + paths, in: repository)
+            if paths.count > 1 {
+                _ = try await run(["--literal-pathspecs", "add", "--pathspec-from-file=-", "--pathspec-file-nul"],
+                    in: repository, stdin: Data((paths.joined(separator: "\0") + "\0").utf8))
+            } else { _ = try await run(["--literal-pathspecs", "add", "--"] + paths, in: repository) }
         case .unstage(let paths):
             try validate(paths)
             // With no explicit revision, path reset also handles an unborn
             // HEAD. Only the selected index entries change; files stay intact.
-            _ = try await run(["--literal-pathspecs", "reset", "--quiet", "--"] + paths, in: repository)
+            if paths.count > 1 {
+                _ = try await run(["--literal-pathspecs", "reset", "--quiet", "--pathspec-from-file=-", "--pathspec-file-nul"],
+                    in: repository, stdin: Data((paths.joined(separator: "\0") + "\0").utf8))
+            } else { _ = try await run(["--literal-pathspecs", "reset", "--quiet", "--"] + paths, in: repository) }
         case .commit(let message):
             guard !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                throw GitDiffServiceError.gitFailed("Enter a commit message.")
+                throw GitDiffServiceError.gitFailed(GitL10n.text("Enter a commit message."))
             }
             _ = try await run(["commit", "--file=-"], in: repository, stdin: Data(message.utf8))
         case .checkout(let name):
@@ -117,7 +123,7 @@ struct GitMutationService: Sendable {
             try await validateBranch(branch, in: repository)
             try await validateBranch(destination, in: repository)
             guard try await remotes(in: repository).contains(remote) else {
-                throw GitDiffServiceError.gitFailed("The selected remote no longer exists.")
+                throw GitDiffServiceError.gitFailed(GitL10n.text("The selected remote no longer exists."))
             }
             _ = try await run(["push", "--porcelain", "--", remote,
                               "refs/heads/\(branch):refs/heads/\(destination)"], in: repository)
@@ -137,24 +143,24 @@ struct GitMutationService: Sendable {
 
     private func validateWorktreePath(_ path: String) throws {
         guard path.hasPrefix("/"), !path.contains("\0") else {
-            throw GitDiffServiceError.gitFailed("Enter an absolute worktree directory.")
+            throw GitDiffServiceError.gitFailed(GitL10n.text("Enter an absolute worktree directory."))
         }
     }
 
     private func validate(_ paths: [String]) throws {
         guard !paths.isEmpty, paths.allSatisfy({
             !$0.isEmpty && !$0.hasPrefix("/") && !$0.contains("\0") && !$0.split(separator: "/").contains("..")
-        }) else { throw GitDiffServiceError.gitFailed("Invalid file selection.") }
+        }) else { throw GitDiffServiceError.gitFailed(GitL10n.text("Invalid file selection.")) }
     }
 
     private func validateRef(_ ref: String) throws {
         guard ref.hasPrefix("refs/heads/") || ref.hasPrefix("refs/remotes/"),
-              !ref.contains("\0") else { throw GitDiffServiceError.gitFailed("Invalid branch reference.") }
+              !ref.contains("\0") else { throw GitDiffServiceError.gitFailed(GitL10n.text("Invalid branch reference.")) }
     }
 
     private func validateBranch(_ name: String, in repository: GitRepositoryIdentity) async throws {
         guard !name.isEmpty, !name.hasPrefix("-"), !name.contains("\0"), !name.contains("@{") else {
-            throw GitDiffServiceError.gitFailed("Invalid branch name.")
+            throw GitDiffServiceError.gitFailed(GitL10n.text("Invalid branch name."))
         }
         _ = try await run(["check-ref-format", "--branch", name], in: repository)
     }

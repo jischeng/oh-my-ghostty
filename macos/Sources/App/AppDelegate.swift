@@ -264,6 +264,7 @@ class AppDelegate: NSObject,
 
     @MainActor
     private func applyMenuLocalization() {
+        GitL10n.configure(language: OhMyGhosttySettings.shared.language)
         SettingsMenuLocalizer.apply(
             to: NSApp.mainMenu,
             strings: SettingsStrings(language: OhMyGhosttySettings.shared.language)

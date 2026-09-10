@@ -26,7 +26,7 @@ struct GitEditorDiffView: View {
     var actions = GitDiffEditorActions()
     let close: () -> Void
     @StateObject private var model: GitEditorDiffModel
-    @AppStorage("git.diff.viewMode") private var mode = "Side by Side"
+    @AppStorage("git.diff.viewMode") private var mode = GitL10n.text("Side by Side")
     @State private var scroll = GitDiffScrollLink()
     @State private var linkedScrolling = true
 
@@ -48,17 +48,17 @@ struct GitEditorDiffView: View {
                     .font(.caption).lineLimit(1).truncationMode(.middle)
                     .help(request.repository.worktreePath)
                 Spacer()
-                Picker("View", selection: $mode) {
-                    Text("Side by Side").tag("Side by Side")
-                    Text("Inline").tag("Inline")
+                Picker(GitL10n.text("View"), selection: $mode) {
+                    Text(GitL10n.text("Side by Side")).tag(GitL10n.text("Side by Side"))
+                    Text(GitL10n.text("Inline")).tag(GitL10n.text("Inline"))
                 }.pickerStyle(.menu).labelsHidden().fixedSize()
-                if mode == "Side by Side" {
+                if mode == GitL10n.text("Side by Side") {
                     Button { linkedScrolling.toggle() } label: {
                         Image(systemName: linkedScrolling ? "link" : "link.slash")
-                    }.help(linkedScrolling ? "Disable linked scrolling" : "Enable linked scrolling")
+                    }.help(linkedScrolling ? GitL10n.text("Disable linked scrolling") : GitL10n.text("Enable linked scrolling"))
                 }
                 Button { model.reload() } label: { Image(systemName: "arrow.clockwise") }
-                    .help("Refresh diff").disabled(model.isLoading)
+                    .help(GitL10n.text("Refresh diff")).disabled(model.isLoading)
                 Button(action: close) { Image(systemName: "xmark") }.buttonStyle(.borderless)
             }.padding(8)
             if !model.files.isEmpty {
@@ -67,7 +67,7 @@ struct GitEditorDiffView: View {
                         Button(file.displayPath) { model.select(file) }
                     }
                 } label: {
-                    Text(model.selected?.displayPath ?? "Select file")
+                    Text(model.selected?.displayPath ?? GitL10n.text("Select file"))
                         .lineLimit(1).truncationMode(.middle).frame(maxWidth: .infinity, alignment: .leading)
                 }.padding(.horizontal, 8)
 
@@ -83,7 +83,7 @@ struct GitEditorDiffView: View {
                     Text(sourceError).foregroundStyle(.secondary).padding()
                     GitDiffTextView(text: document.text)
                 } else if let presentation = content.presentation {
-                    if mode == "Side by Side" {
+                    if mode == GitL10n.text("Side by Side") {
                         HSplitView {
                             sourcePane("Before", text: content.before, path: document.file.oldPath ?? document.file.path,
                                        highlights: presentation.beforeHighlights, side: 0)
@@ -102,7 +102,7 @@ struct GitEditorDiffView: View {
                     }
                 }
             } else if !model.isLoading && model.error == nil {
-                Text("No changed files").foregroundStyle(.secondary).padding()
+                Text(GitL10n.text("No changed files")).foregroundStyle(.secondary).padding()
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)

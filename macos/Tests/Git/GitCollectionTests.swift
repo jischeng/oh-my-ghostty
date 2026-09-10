@@ -133,7 +133,7 @@ struct GitCollectionTests {
         var colors = GitCollectionColors()
         colors.text = .systemMint
         colors.accent = .systemPurple
-        #expect(colors.status(one) == colors.secondary)
+        #expect(colors.status(one).usingColorSpace(.deviceRGB) == colors.secondary.usingColorSpace(.deviceRGB))
         var root = GitCollectionView(source: .changes(staged: [], unstaged: [one, two], stagedError: nil, unstagedError: nil), perform: { _ in })
         let host = NSHostingView(rootView: root.environment(\.gitCollectionColors, colors))
         host.sizingOptions = []
@@ -183,7 +183,7 @@ struct GitCollectionTests {
             let config = Ghostty.Config(at: file.path)
             let colors = GitCollectionColors(config: config, background: NSColor(config.backgroundColor))
             #expect(colors.text == config.editorTheme(background: colors.background).text)
-            #expect(colors.status(unstaged.last!) == colors.secondary)
+            #expect(colors.status(unstaged.last!).usingColorSpace(.deviceRGB) == colors.secondary.usingColorSpace(.deviceRGB))
             for mode in GitCollectionMode.allCases {
                 let content = VStack(spacing: 0) {
                     GitCollectionToolbar(query: .constant(""), mode: .constant(mode), placeholder: "Search files…", controller: GitCollectionController()).padding(10)

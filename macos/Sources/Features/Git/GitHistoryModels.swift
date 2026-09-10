@@ -6,8 +6,8 @@ enum GitHistoryScope: String, CaseIterable, Equatable, Sendable {
 
     var displayName: String {
         switch self {
-        case .currentBranch: "Current branch"
-        case .allBranches: "All branches"
+        case .currentBranch: GitL10n.text("Current branch")
+        case .allBranches: GitL10n.text("All branches")
         }
     }
 }
@@ -18,11 +18,28 @@ enum GitRefDecorationKind: String, Equatable, Sendable {
     case remoteBranch
     case tag
     case head
+    var displayName: String {
+        switch self {
+        case .head: "HEAD"
+        case .currentBranch: GitL10n.text("Current branch")
+        case .localBranch: GitL10n.text("Local branch")
+        case .remoteBranch: GitL10n.text("Remote branch")
+        case .tag: GitL10n.text("Tag")
+        }
+    }
 }
 
 struct GitRefDecoration: Hashable, Equatable, Sendable {
     let name: String
     let kind: GitRefDecorationKind
+    var fullRef: String {
+        switch kind {
+        case .head: name
+        case .currentBranch, .localBranch: "refs/heads/" + name
+        case .remoteBranch: "refs/remotes/" + name
+        case .tag: "refs/tags/" + name
+        }
+    }
 
     static func orderedForDisplay(_ refs: [Self]) -> [Self] {
         func rank(_ ref: Self) -> Int {

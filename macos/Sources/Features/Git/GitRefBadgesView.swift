@@ -16,13 +16,15 @@ final class GitRefBadgesView: NSView {
     private var layoutWidth: CGFloat?
     private var buttons: [NSButton] = []
     private(set) var popover: NSPopover?
+    var colors = GitCollectionColors()
+    private var languageCode = GitL10n.current.languageCode
     override var isFlipped: Bool { true }
 
     static func attributed(_ decoration: GitRefDecoration, inset: Bool = true) -> NSAttributedString {
         let color = tint(for: decoration.kind)
         let symbol = decoration.kind == .head ? nil : symbol(for: decoration.kind)
         let text = NSMutableAttributedString(string: inset ? " " : "")
-        if let symbol, let image = NSImage(systemSymbolName: symbol, accessibilityDescription: decoration.kind.rawValue)?
+        if let symbol, let image = NSImage(systemSymbolName: symbol, accessibilityDescription: decoration.kind.displayName)?
             .withSymbolConfiguration(.init(pointSize: 10, weight: .medium))?
             .withSymbolConfiguration(.init(paletteColors: [color])) {
             let attachment = NSTextAttachment()
@@ -94,9 +96,9 @@ final class GitRefBadgesView: NSView {
         if let result = fit(head + count(branches, kind: .localBranch) + count(remotes, kind: .remoteBranch) + tagBadges) { return result }
         if let result = fit(head + count(branches, kind: .localBranch) + count(remotes, kind: .remoteBranch) + count(tags, kind: .tag)) { return result }
         let others = ordered.filter { $0.kind != .tag }
-        let otherBadge = others.isEmpty ? [] : [Badge(decoration: .init(name: "\(others.count) refs", kind: .head), refs: others, isCount: true)]
+        let otherBadge = others.isEmpty ? [] : [Badge(decoration: .init(name: GitL10n.format("{0} refs", String(describing: others.count)), kind: .head), refs: others, isCount: true)]
         if let result = fit(otherBadge + tagBadges) { return result }
-        return ordered.isEmpty ? [] : [Badge(decoration: .init(name: "\(ordered.count) refs", kind: .head), refs: ordered, isCount: true)]
+        return ordered.isEmpty ? [] : [Badge(decoration: .init(name: GitL10n.format("{0} refs", String(describing: ordered.count)), kind: .head), refs: ordered, isCount: true)]
     }
 
     private static func badgeWidth(_ badge: Badge) -> CGFloat {
@@ -108,7 +110,10 @@ final class GitRefBadgesView: NSView {
     }
 
     func configure(_ refs: [GitRefDecoration]) {
-        guard self.refs != refs else { return }
+        let languageChanged = languageCode != GitL10n.current.languageCode
+        guard self.refs != refs || languageChanged else { return }
+        languageCode = GitL10n.current.languageCode
+        if languageChanged { rendered = [] }
         popover?.close()
         layoutWidth = nil
         self.refs = refs
@@ -147,7 +152,7 @@ final class GitRefBadgesView: NSView {
                 button.action = #selector(showRefs(_:))
                 button.toolTip = badge.refs.map(\.name).joined(separator: "\n")
                 button.setAccessibilityLabel(button.toolTip)
-                button.setAccessibilityHelp("Show complete refs")
+                button.setAccessibilityHelp(GitL10n.text("Show complete refs"))
                 addSubview(button)
                 return button
             }
@@ -164,8 +169,9 @@ final class GitRefBadgesView: NSView {
     @objc private func showRefs(_ sender: NSButton) {
         popover?.close()
         let view = GitRefListView()
+        view.colors = colors
         let selected = buttons.firstIndex(where: { $0 === sender }).flatMap { rendered[$0].refs.first }
-        view.frame = NSRect(x: 0, y: 0, width: 360, height: GitRefListView.height(for: refs, width: 360))
+        view.frame = NSRect(origin: .zero, size: GitRefPopoverStyle.size)
         view.configure(refs, selected: selected)
         let controller = NSViewController()
         controller.view = view

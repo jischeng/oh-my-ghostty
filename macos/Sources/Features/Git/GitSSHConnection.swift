@@ -15,7 +15,7 @@ struct GitSSHConnection: Hashable, Sendable {
               !(workspaceID ?? "").contains("\0"), executablePath.hasPrefix("/"),
               !executablePath.contains("\0"), localWorkingDirectory.hasPrefix("/"),
               !localWorkingDirectory.contains("\0") else {
-            throw GitExecutionError.executionFailed("Invalid SSH connection.")
+            throw GitExecutionError.executionFailed(GitL10n.text("Invalid SSH connection."))
         }
         self.executablePath = executablePath
         self.destination = destination
@@ -28,28 +28,28 @@ struct GitSSHConnection: Hashable, Sendable {
         let ssh: PaneSessionContext.SSH
         switch session.state {
         case .local:
-            throw GitExecutionError.executionFailed("The pane has no SSH connection.")
+            throw GitExecutionError.executionFailed(GitL10n.text("The pane has no SSH connection."))
         case .sshConnecting(let connection), .sshReady(let connection, _):
             ssh = connection
         }
         guard let directory = ssh.replay?.localWorkingDirectory ?? session.local.workingDirectory else {
-            throw GitExecutionError.executionFailed("The original local SSH working directory is unavailable. Reconnect this SSH session.")
+            throw GitExecutionError.executionFailed(GitL10n.text("The original local SSH working directory is unavailable. Reconnect this SSH session."))
         }
         try self.init(session: ssh, localWorkingDirectory: directory)
     }
 
     init(session: PaneSessionContext.SSH, localWorkingDirectory: String = "/") throws {
         guard let replay = session.replay else {
-            throw GitExecutionError.executionFailed("Exact SSH options are unavailable. Reconnect this SSH session to capture its original connection parameters.")
+            throw GitExecutionError.executionFailed(GitL10n.text("Exact SSH options are unavailable. Reconnect this SSH session to capture its original connection parameters."))
         }
         guard replay.version == 1, (replay.ssh as NSString).lastPathComponent == "ssh",
               let parsed = OpenSSHArguments(replay.args),
               parsed.interactiveDestination == session.transferTarget else {
-            throw GitExecutionError.executionFailed("Git requires a replayable OpenSSH connection with recognized options.")
+            throw GitExecutionError.executionFailed(GitL10n.text("Git requires a replayable OpenSSH connection with recognized options."))
         }
         let directory = replay.localWorkingDirectory ?? localWorkingDirectory
         guard let executablePath = SSHProcessArguments.executablePath(for: replay.ssh, workingDirectory: directory) else {
-            throw GitExecutionError.executionFailed("The captured SSH executable was not found on the host application's PATH.")
+            throw GitExecutionError.executionFailed(GitL10n.text("The captured SSH executable was not found on the host application's PATH."))
         }
         let values = "BIPpliFJSbcmo"
         let flags = "46AaCKk"
@@ -85,7 +85,7 @@ struct SSHGitExecutor: GitExecutor {
     func execute(arguments: [String], workingDirectory: String, stdin: Data?, maxOutputBytes: Int?) async throws -> GitExecutionResult {
         guard workingDirectory.hasPrefix("/"), !workingDirectory.contains("\0"),
               arguments.allSatisfy({ !$0.contains("\0") }) else {
-            throw GitExecutionError.executionFailed("Invalid remote Git path or argument.")
+            throw GitExecutionError.executionFailed(GitL10n.text("Invalid remote Git path or argument."))
         }
         let command = "cd " + Self.quote(workingDirectory) + " || exit; " +
             "unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES; " +
@@ -96,7 +96,7 @@ struct SSHGitExecutor: GitExecutor {
 
     func readWorkingFile(at path: String, root: String, limit: Int) async throws -> Data {
         guard path.hasPrefix("/"), root.hasPrefix("/"), !path.contains("\0"), !root.contains("\0") else {
-            throw GitExecutionError.executionFailed("Invalid remote file path.")
+            throw GitExecutionError.executionFailed(GitL10n.text("Invalid remote file path."))
         }
         let script = """
         file=\(Self.quote(path))
@@ -127,10 +127,10 @@ struct SSHGitExecutor: GitExecutor {
             stdin: stdin, maxOutputBytes: limit.map { $0 + 64 * 1024 }
         )
         guard result.exitCode != 255 else {
-            throw GitExecutionError.executionFailed("SSH connection failed. If a write was in progress, refresh before retrying; its outcome may be unknown.\n" + result.stderrString)
+            throw GitExecutionError.executionFailed(GitL10n.text("SSH connection failed. If a write was in progress, refresh before retrying; its outcome may be unknown.\n") + result.stderrString)
         }
         guard let marker = result.stdout.range(of: Self.marker) else {
-            throw GitExecutionError.executionFailed("SSH did not start the Git command.\n" + result.stderrString)
+            throw GitExecutionError.executionFailed(GitL10n.text("SSH did not start the Git command.\n") + result.stderrString)
         }
         let output = Data(result.stdout[marker.upperBound...])
         if let limit, output.count > limit { throw GitExecutionError.outputLimitExceeded(maxBytes: limit) }

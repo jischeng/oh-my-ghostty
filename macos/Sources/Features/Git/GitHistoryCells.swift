@@ -39,25 +39,26 @@ final class GitHistoryCell: NSTableCellView {
     @objc private func toggleCommit() { toggle() }
 
     func configure(commit: GitHistoryCommit, graph: GitGraphRow, graphLayout: GitGraphColumnLayout,
-                   summary: (date: String, refs: [GitRefDecoration]), state: (head: Bool, expanded: Bool), toggle: @escaping () -> Void, contextMenu: (() -> NSMenu?)? = nil) {
+                   summary: (date: String, refs: [GitRefDecoration]), state: (head: Bool, expanded: Bool), toggle: @escaping () -> Void, contextMenu: (() -> NSMenu?)? = nil, colors: GitCollectionColors = .init()) {
         self.toggle = toggle
         graphWidth = graphLayout.width
         contentX = graphLayout.contentX
         self.graph.configure(row: graph, isHead: state.head, layout: graphLayout,
                              section: state.expanded ? .expandedCommit : .commit)
-        subject.stringValue = commit.subject.isEmpty ? "(no subject)" : commit.subject
+        subject.stringValue = commit.subject.isEmpty ? GitL10n.text("(no subject)") : commit.subject
         let doubleClick = toggle
-        authorAndEmail.configure(.init(text: commit.authorName, value: commit.authorName, label: "Author"),
-            second: commit.authorEmail.isEmpty ? nil : .init(text: commit.authorEmail, value: commit.authorEmail, label: "Email"), onDoubleClick: doubleClick)
-        timeAndHash.configure(.init(text: summary.date, value: commit.authoredAt.description, label: "Time"),
-            second: .init(text: commit.id.shortSHA, value: commit.id.rawValue, label: "Commit SHA"), onDoubleClick: doubleClick)
-        subject.copyItems = [("Copy subject", commit.subject)]
+        authorAndEmail.configure(.init(text: commit.authorName, value: commit.authorName, label: GitL10n.text("Author")),
+            second: commit.authorEmail.isEmpty ? nil : .init(text: commit.authorEmail, value: commit.authorEmail, label: GitL10n.text("Email")), onDoubleClick: doubleClick)
+        timeAndHash.configure(.init(text: summary.date, value: commit.authoredAt.description, label: GitL10n.text("Time")),
+            second: .init(text: commit.id.shortSHA, value: commit.id.rawValue, label: GitL10n.text("Commit SHA")), onDoubleClick: doubleClick)
+        subject.copyItems = [(GitL10n.text("Copy subject"), commit.subject)]
         subject.contextMenuProvider = contextMenu
         authorAndEmail.contextMenuProvider = contextMenu
         timeAndHash.contextMenuProvider = contextMenu
+        badges.colors = colors
         badges.configure(summary.refs)
         disclosure.image = NSImage(systemSymbolName: state.expanded ? "chevron.down" : "chevron.right",
-                                   accessibilityDescription: state.expanded ? "Collapse commit" : "Expand commit")?
+                                   accessibilityDescription: state.expanded ? GitL10n.text("Collapse commit") : GitL10n.text("Expand commit"))?
             .withSymbolConfiguration(.init(pointSize: 7, weight: .medium))
         toolTip = "\(commit.subject)\n\(commit.authorName) <\(commit.authorEmail)>\n\(commit.authoredAt)\n\(commit.id.rawValue)"
         needsLayout = true
@@ -155,7 +156,7 @@ final class GitHistoryDetailCell: NSTableCellView {
         self.action = action
         toolTip = nil
         if case .file(let file) = content {
-            toolTip = "Open diff · " + file.kind.label + " · " + file.displayPath
+            toolTip = GitL10n.text("Open diff · ") + file.kind.label + " · " + file.displayPath
             setAccessibilityRole(.button)
         } else { setAccessibilityRole(.group) }
         setAccessibilityLabel(toolTip)
@@ -217,7 +218,7 @@ final class GitHistoryDetailCell: NSTableCellView {
             label.isHidden = !expanded
             button.isHidden = false
             let lines = text.components(separatedBy: "\n").count
-            button.title = "Commit message · \(lines) \(lines == 1 ? "line" : "lines")"
+            button.title = GitL10n.format(lines == 1 ? "Commit message · {0} line" : "Commit message · {0} lines", String(lines))
             button.image = Self.chevron(expanded ? "down" : "right")
             button.frame = NSRect(x: x, y: 4, width: width, height: 20)
             label.frame = NSRect(x: x + 12, y: 30, width: max(1, width - 12), height: max(1, bounds.height - 36))
@@ -228,14 +229,14 @@ final class GitHistoryDetailCell: NSTableCellView {
             .withSymbolConfiguration(.init(pointSize: 8, weight: .semibold))
     }
     private static func filesTitle(count: Int, statistics: GitDiffStatistics?) -> NSAttributedString {
-        let value = NSMutableAttributedString(string: "\(count) \(count == 1 ? "file" : "files") changed", attributes: [
+        let value = NSMutableAttributedString(string: GitL10n.format(count == 1 ? "{0} file changed" : "{0} files changed", String(count)), attributes: [
             .font: NSFont.systemFont(ofSize: 10, weight: .medium), .foregroundColor: NSColor.labelColor,
         ])
         if let statistics {
             value.append(NSAttributedString(string: " · +\(statistics.additions)", attributes: [.foregroundColor: NSColor.systemGreen]))
             value.append(NSAttributedString(string: " −\(statistics.deletions)", attributes: [.foregroundColor: NSColor.systemRed]))
             if statistics.binaryFiles > 0 {
-                value.append(NSAttributedString(string: " · \(statistics.binaryFiles) binary", attributes: [.foregroundColor: NSColor.secondaryLabelColor]))
+                value.append(NSAttributedString(string: GitL10n.format(" · {0} binary", String(describing: statistics.binaryFiles)), attributes: [.foregroundColor: NSColor.secondaryLabelColor]))
             }
         }
         value.addAttribute(.font, value: NSFont.systemFont(ofSize: 10, weight: .medium), range: NSRange(location: 0, length: value.length))

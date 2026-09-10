@@ -26,13 +26,13 @@ enum GitTerminalDispatchFailure: Equatable, Sendable {
     var displayMessage: String {
         switch self {
         case .missingSurfaceID:
-            "Git command could not find the selected terminal surface."
+            GitL10n.text("Git command could not find the selected terminal surface.")
         case .surfaceNotFound:
-            "Git command target is no longer available."
+            GitL10n.text("Git command target is no longer available.")
         case .surfaceModelUnavailable:
-            "Git command target is still starting."
+            GitL10n.text("Git command target is still starting.")
         case .targetContextMismatch:
-            "Git command target does not match this terminal session."
+            GitL10n.text("Git command target does not match this terminal session.")
         }
     }
 }

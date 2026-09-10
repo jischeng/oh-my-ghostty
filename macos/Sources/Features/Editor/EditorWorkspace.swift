@@ -7,6 +7,7 @@ final class EditorWorkspace: ObservableObject {
     @Published private(set) var documents: [EditorDocument] = []
     @Published var selectedID: EditorDocumentID? { didSet { if selectedID != nil { gitDiff = nil } } }
     @Published var gitDiff: GitEditorDiffRequest?
+    @Published private(set) var gitDiffs: [GitEditorDiffRequest] = []
     @Published var isVisible = false
     @Published var isLoading = false
     @Published var errorMessage: String?
@@ -22,6 +23,7 @@ final class EditorWorkspace: ObservableObject {
             document.cancelAutoSave()
         }
         gitDiff = nil
+        gitDiffs.removeAll()
         documents.removeAll()
         selectedID = nil
         isVisible = false
@@ -32,15 +34,12 @@ final class EditorWorkspace: ObservableObject {
     }
 
     func selectAdjacentDocument(offset: Int) {
-        guard !documents.isEmpty else { return }
-        if gitDiff != nil, selectedID == nil {
-            selectedID = offset >= 0 ? documents.first?.id : documents.last?.id
-            isVisible = true
-            return
-        }
-        let current = documents.firstIndex { $0.id == selectedID } ?? 0
-        let index = ((current + offset) % documents.count + documents.count) % documents.count
-        selectedID = documents[index].id
+        let count = documents.count + gitDiffs.count
+        guard count > 0 else { return }
+        let current = gitDiff.flatMap { diff in gitDiffs.firstIndex { $0.id == diff.id }.map { documents.count + $0 } }
+            ?? documents.firstIndex { $0.id == selectedID } ?? 0
+        let index = ((current + offset) % count + count) % count
+        if index < documents.count { selectedID = documents[index].id } else { selectGitDiff(gitDiffs[index - documents.count]) }
         isVisible = true
     }
 
@@ -128,9 +127,26 @@ final class EditorWorkspace: ObservableObject {
         openTask?.cancel()
         isLoading = false
         errorMessage = nil
+        let existing = gitDiffs.first { $0.repository == request.repository && $0.target == request.target && $0.file?.path == request.file?.path }
+        if existing == nil { gitDiffs.append(request) }
+        selectGitDiff(existing ?? request)
+    }
+
+    func selectGitDiff(_ request: GitEditorDiffRequest) {
+        openTask?.cancel()
+        isLoading = false
         selectedID = nil
         gitDiff = request
         isVisible = true
+    }
+
+    func closeGitDiff(_ request: GitEditorDiffRequest) {
+        gitDiffs.removeAll { $0.id == request.id }
+        if gitDiff?.id == request.id {
+            gitDiff = nil
+            if let last = gitDiffs.last { selectGitDiff(last) } else { selectedID = documents.last?.id }
+        }
+        if documents.isEmpty && gitDiffs.isEmpty { isVisible = false }
     }
 
     func save(_ document: EditorDocument) async -> Bool {
@@ -160,6 +176,7 @@ final class EditorWorkspace: ObservableObject {
         }
         openTask?.cancel()
         gitDiff = nil
+        gitDiffs.removeAll()
         isVisible = false
         isLoading = false
         return true
@@ -241,11 +258,12 @@ final class EditorWorkspace: ObservableObject {
         }
     }
 
-    private func remove(_ document: EditorDocument) {
+    func remove(_ document: EditorDocument) {
         document.suspendAutoSave()
         documents.removeAll { $0.id == document.id }
         if selectedID == document.id { selectedID = documents.last?.id }
-        if documents.isEmpty && gitDiff == nil { isVisible = false }
+        if selectedID == nil, gitDiff == nil, let last = gitDiffs.last { selectGitDiff(last) }
+        if documents.isEmpty && gitDiffs.isEmpty { isVisible = false }
     }
 }
 
@@ -268,6 +286,33 @@ final class EditorWorkspaceStore {
                 let path = URL(fileURLWithPath: document.path).resolvingSymlinksInPath().path
                 return path == root || path.hasPrefix(root + "/")
             }
+        }
+    }
+
+    func withGitFileRestore(_ file: GitDiffFile, repository: GitRepositoryIdentity,
+                            operation: () async throws -> Void) async throws {
+        let endpoint: EditorDocumentID.Endpoint = repository.sshConnection.map { .ssh(workspaceID: $0.workspaceID) } ?? .local
+        let paths = [file.path] + (file.kind == .renamed ? file.oldPath.map { [$0] } ?? [] : [])
+        let absolute = paths.map { (repository.worktreePath as NSString).appendingPathComponent($0) }
+        let resolved = Set(absolute.map { endpoint == .local ? URL(fileURLWithPath: $0).resolvingSymlinksInPath().path : $0 })
+        let affected = workspaces.values.flatMap { workspace in
+            workspace.documents.filter { document in
+                guard document.id.endpoint == endpoint else { return false }
+                let path = endpoint == .local ? URL(fileURLWithPath: document.path).resolvingSymlinksInPath().path : document.path
+                return resolved.contains(path)
+            }.map { (workspace, $0) }
+        }
+        guard affected.allSatisfy({ !$0.1.isDirty && !$0.1.isSaving && !$0.1.isReloading && !$0.1.isRestoringFromGit }) else {
+            throw GitDiffServiceError.gitFailed("Save unsaved editor changes before discarding this file's Git changes.")
+        }
+        for (_, document) in affected { document.isRestoringFromGit = true; document.suspendAutoSave() }
+        defer {
+            for (_, document) in affected { document.isRestoringFromGit = false; document.resumeAutoSave() }
+        }
+        try await operation()
+        for (workspace, document) in affected {
+            // A restore may remove an added file or the destination of a rename.
+            if try await document.filesystem.itemType(at: document.path) == nil { workspace.remove(document) } else { try await document.reload() }
         }
     }
 

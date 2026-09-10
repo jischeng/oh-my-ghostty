@@ -48,7 +48,7 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                 .opacity(workspace.isVisible ? 0 : 1)
                 .allowsHitTesting(!workspace.isVisible)
                 .accessibilityHidden(workspace.isVisible)
-            if !workspace.documents.isEmpty || workspace.gitDiff != nil || workspace.isVisible {
+            if !workspace.documents.isEmpty || !workspace.gitDiffs.isEmpty || workspace.isVisible {
                 editor
                     .opacity(workspace.isVisible ? 1 : 0)
                     .allowsHitTesting(workspace.isVisible)
@@ -61,7 +61,7 @@ struct EditorWorkspaceHost<Terminal: View>: View {
             }
         }
         .overlay(alignment: .topTrailing) {
-            if !workspace.isVisible, !workspace.documents.isEmpty || workspace.gitDiff != nil {
+            if !workspace.isVisible, !workspace.documents.isEmpty || !workspace.gitDiffs.isEmpty {
                 Button("Editor") {
                     if controller.focusedSurface !== surfaceView {
                         controller.focusedSurface = surfaceView
@@ -96,7 +96,26 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                                 )
                                 .id(document.id)
                             }
+                            ForEach(workspace.gitDiffs) { request in
+                                HStack(spacing: 6) {
+                                    Button { workspace.selectGitDiff(request) } label: {
+                                        Label(request.tabTitle, systemImage: "arrow.left.arrow.right")
+                                            .lineLimit(1)
+                                    }
+                                    Button { workspace.closeGitDiff(request) } label: {
+                                        Image(systemName: "xmark").font(.caption2)
+                                    }.help("Close Diff")
+                                }
+                                .padding(.horizontal, 8).padding(.vertical, 6)
+                                .background(workspace.gitDiff?.id == request.id ? Color.accentColor.opacity(0.16) : Color.clear,
+                                            in: RoundedRectangle(cornerRadius: 5))
+                                .help(request.repository.worktreePath + " — " + request.tabTitle)
+                                .id(request.id)
+                            }
                         }
+                    }
+                    .onChange(of: workspace.gitDiff?.id) { selected in
+                        if let selected { proxy.scrollTo(selected) }
                     }
                     .onChange(of: workspace.selectedID) { selected in
                         if let selected { proxy.scrollTo(selected) }
@@ -160,9 +179,11 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                         .accessibilityHidden(!selected)
                     }
                 }
-                if let request = workspace.gitDiff {
-                    GitEditorDiffView(request: request, theme: appearanceTheme, isActive: workspace.isVisible,
+                ForEach(workspace.gitDiffs) { request in
+                    let selected = workspace.gitDiff?.id == request.id
+                    GitEditorDiffView(request: request, theme: appearanceTheme, isActive: selected && workspace.isVisible,
                         actions: GitDiffEditorActions(
+                            openFile: { file, directory in openGitFile(file, repository: request.repository, directory: directory) },
                             hide: { workspace.isVisible = false },
                             open: openFile,
                             nextDocument: { workspace.selectAdjacentDocument(offset: 1) },
@@ -171,11 +192,13 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                             focus: { controller.focusedSurface = surfaceView },
                             isSurfaceFocused: { (controller.focusedSurface ?? controller.surfaceTree.first) === surfaceView }
                         )) {
-                        workspace.gitDiff = nil
-                        workspace.selectedID = workspace.documents.last?.id
-                        if workspace.documents.isEmpty { workspace.isVisible = false }
+                        workspace.closeGitDiff(request)
                     }.id(request.id)
-                } else if workspace.documents.isEmpty {
+                        .opacity(selected ? 1 : 0)
+                        .allowsHitTesting(selected)
+                        .accessibilityHidden(!selected)
+                }
+                if workspace.gitDiffs.isEmpty && workspace.documents.isEmpty {
                     VStack(spacing: 12) {
                         Image(systemName: "doc.text").font(.largeTitle)
                         Text("Open a file from Files or choose Open File.")
@@ -190,6 +213,14 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                                    usesWindowBlur: settings.editorSettings.followsOMG))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Code Editor")
+    }
+
+    private func openGitFile(_ file: GitDiffFile, repository: GitRepositoryIdentity, directory: Bool) {
+        guard let session = controller.paneSessionContext(for: surfaceView) else { return }
+        let context = InspectorPaneContext(tabID: controller.tabSessionID, surfaceID: surfaceView.id,
+            title: session.presentationTitle, workingDirectory: repository.worktreePath,
+            workspace: session.workspace, session: session)
+        do { try GitFileActions.open(file, repository: repository, context: context, directory: directory) } catch { workspace.errorMessage = error.localizedDescription }
     }
 
     private func close(_ document: EditorDocument) {
@@ -306,7 +337,7 @@ private struct EditorDocumentView: View {
                 CodeEditorView(
                     text: $document.text,
                     fileURL: URL(fileURLWithPath: document.path),
-                    isEditable: true,
+                    isEditable: !document.isRestoringFromGit,
                     isActive: isActive,
                     isPreview: isMarkdownDocument && isPreviewMode,
                     isSurfaceFocused: isSurfaceFocused,

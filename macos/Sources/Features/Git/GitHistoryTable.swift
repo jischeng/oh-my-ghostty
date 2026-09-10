@@ -15,6 +15,7 @@ struct GitHistoryTable: NSViewRepresentable {
     let onOpen: (GitCommitID) -> Void
     let onShowInTerminal: (GitCommitID) -> Void
     var onOpenFile: (GitCommitID, GitDiffFile) -> Void = { _, _ in }
+    var onGitFileAction: (GitDiffFile, Bool) -> Void = { _, _ in }
     var onLoadMore: () -> Void = {}
     var onCommitAction: (GitCommitOperation, GitCommitID) -> Void = { _, _ in }
     @Environment(\.gitCollectionColors) private var colors
@@ -408,6 +409,16 @@ struct GitHistoryTable: NSViewRepresentable {
             guard rows.indices.contains(index) else { return }
             let commit = content.commits[rows[index].commitIndex]
             menu.autoenablesItems = false
+            if case .file(_, let file) = rows[index] {
+                for (title, directory) in [("Open in Editor", false), ("Open Folder in New Tab", true)] {
+                    let item = NSMenuItem(title: title, action: #selector(fileAction(_:)), keyEquivalent: "")
+                    item.target = self
+                    item.representedObject = FileAction(file: file, directory: directory)
+                    item.isEnabled = directory || file.kind != .deleted
+                    menu.addItem(item)
+                }
+                menu.addItem(.separator())
+            }
             for operation in GitCommitOperation.allCases {
                 if operation == .details || operation == .cherryPick { menu.addItem(.separator()) }
                 let item = NSMenuItem(title: operation.title, action: #selector(commitAction(_:)), keyEquivalent: "")
@@ -429,6 +440,11 @@ struct GitHistoryTable: NSViewRepresentable {
             let extra = NSMenuItem(title: GitL10n.text("Copy More"), action: nil, keyEquivalent: "")
             extra.submenu = InspectorCopyMenu(values: values.filter { !$0.1.isEmpty }, pasteboard: menu.pasteboard)
             menu.addItem(extra)
+        }
+        private struct FileAction { let file: GitDiffFile; let directory: Bool }
+        @objc private func fileAction(_ sender: NSMenuItem) {
+            guard let action = sender.representedObject as? FileAction else { return }
+            content?.onGitFileAction(action.file, action.directory)
         }
         @objc private func commitAction(_ sender: NSMenuItem) {
             guard let raw = sender.identifier?.rawValue, let operation = GitCommitOperation(rawValue: raw),

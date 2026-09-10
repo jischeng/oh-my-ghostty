@@ -949,6 +949,25 @@ implementation, tests, and a stability designation land.
 
 ## Built-in Git editor diff
 
+Editor diff requests have persistent, closable tabs alongside ordinary files.
+Switching files preserves each diff's selected file, scroll state and view mode;
+next/previous editor shortcuts include diff tabs. Reopening the same repository,
+target and initial file selects its existing tab. Closing the pane releases both
+file and diff tabs.
+
+Typed `openGitFile(file, directory:)` actions open the working-tree file in the
+current editor pane or its parent directory in a new terminal tab, using the
+source session's local/SSH destination. Changes, History file rows and the diff
+file-name context menu expose these actions with Files-style names.
+`discardChanges(file, staged:)` requires a file-specific confirmation and a fresh
+Git file-list check. Unstaged tracked files restore from the index; staged files
+restore both index and working tree from HEAD (or the empty tree before the first
+commit). Added/untracked files are removed only within the selected literal
+pathspec; unrelated files and ignored directories are retained. Renames restore
+both paths. Conflicted files are rejected. This operation shares the worktree
+mutation gate, protects unsaved editor documents, suspends editing/autosave for
+open clean documents, and reloads or closes those documents after restoration.
+
 The terminal seeds its initial absolute working directory from its launch
 configuration, including restored agent commands, before shell directory reports
 arrive. Inspector providers consume this shared context rather than waiting for

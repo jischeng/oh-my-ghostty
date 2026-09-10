@@ -7,9 +7,14 @@ struct GitEditorDiffRequest: Identifiable {
     let repository: GitRepositoryIdentity
     let target: GitDiffTarget
     let file: GitDiffFile?
+    var tabTitle: String {
+        let name = file.map { ($0.path as NSString).lastPathComponent } ?? "Git Diff"
+        return name + " · " + target.description
+    }
 }
 
 struct GitDiffEditorActions {
+    var openFile: (GitDiffFile, Bool) -> Void = { _, _ in }
     var hide: () -> Void = {}
     var open: () -> Void = {}
     var nextDocument: () -> Void = {}
@@ -70,6 +75,20 @@ struct GitEditorDiffView: View {
                     Text(model.selected?.displayPath ?? GitL10n.text("Select file"))
                         .lineLimit(1).truncationMode(.middle).frame(maxWidth: .infinity, alignment: .leading)
                 }.padding(.horizontal, 8)
+                    .contextMenu {
+                        if let file = model.selected {
+                            Button("Open in Editor") { actions.openFile(file, false) }
+                                .disabled(file.kind == .deleted)
+                            Button("Open Folder in New Tab") { actions.openFile(file, true) }
+                            Divider()
+                            Button("Copy Path") {
+                                if let path = try? GitFileActions.absolutePath(file, repository: request.repository) {
+                                    InspectorCopyMenu.copy(path, to: .general)
+                                }
+                            }
+                            Button("Copy Relative Path") { InspectorCopyMenu.copy(file.path, to: .general) }
+                        }
+                    }
 
             }
             Divider()

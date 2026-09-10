@@ -77,3 +77,30 @@ enum GitWorktreeActions {
     }
 
 }
+
+/// File actions use the same editor and terminal destinations as Files.
+@MainActor
+enum GitFileActions {
+    static func absolutePath(_ file: GitDiffFile, repository: GitRepositoryIdentity) throws -> String {
+        let components = file.path.split(separator: "/", omittingEmptySubsequences: false)
+        guard !file.path.isEmpty, !file.path.hasPrefix("/"), !file.path.contains("\0"),
+              !components.contains(".."), !components.contains("."), !components.contains("") else {
+            throw GitDiffServiceError.invalidPath(file.path)
+        }
+        return (repository.worktreePath as NSString).appendingPathComponent(file.path)
+    }
+
+    static func open(_ file: GitDiffFile, repository: GitRepositoryIdentity,
+                     context: InspectorPaneContext, directory: Bool) throws {
+        guard repository.matches(context.session) else {
+            throw GitDiffServiceError.gitFailed("The source terminal session is no longer available.")
+        }
+        let path = try absolutePath(file, repository: repository)
+        if directory {
+            try GitWorktreeActions.open(GitWorktreeInfo(path: (path as NSString).deletingLastPathComponent,
+                head: nil, branchRef: nil, isMain: false, isCurrent: false), repository: repository, context: context)
+        } else {
+            EditorWorkspaceStore.shared.open(path: path, context: context, destination: .currentPane)
+        }
+    }
+}

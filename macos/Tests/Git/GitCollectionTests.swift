@@ -32,6 +32,86 @@ struct GitCollectionTests {
         #expect(coordinator.rows[table.selectedRow].id == candidate)
     }
 
+    @Test func fileMenusRouteEditorFolderAndDiscardWithTheCorrectIndexSide() async throws {
+        let file = GitDiffFile(path: "src/file.swift", status: "M")
+        var actions: [InspectorGitAction] = []
+        let root = GitCollectionView(source: .changes(staged: [file], unstaged: [file], stagedError: nil, unstagedError: nil),
+            interaction: .changes, state: GitCollectionState(), stateKey: "menus", perform: { actions.append($0) })
+        let host = NSHostingView(rootView: root)
+        host.sizingOptions = []
+        let win = window(host)
+        defer { win.contentView = nil; win.close() }
+        try await Task.sleep(for: .milliseconds(80))
+        let table = try #require(find(GitCollectionTableView.self, in: host).first)
+        let coordinator = try #require(table.target as? GitCollectionView.Coordinator)
+        for section in [GitChangeSection.staged, .unstaged] {
+            let row = try #require(coordinator.rows.firstIndex { $0.id == section.rowID(path: file.path) })
+            table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            let menu = NSMenu()
+            coordinator.menuNeedsUpdate(menu)
+            for title in ["Open in Editor", "Open Folder in New Tab", GitL10n.text("Discard Changes…")] {
+                let item = try #require(menu.items.first { $0.title == title })
+                #expect(item.isEnabled)
+                #expect(NSApp.sendAction(try #require(item.action), to: item.target, from: item))
+            }
+            #expect(actions.suffix(3) == [.openGitFile(file, directory: false), .openGitFile(file, directory: true),
+                                        .discardChanges(file, staged: section == .staged)])
+        }
+    }
+
+    @Test func gitFileActionsOpenEditableOriginalAndParentInNewTerminalTab() async throws {
+        let app = try #require(NSApp.delegate as? AppDelegate)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = root.appendingPathComponent("nested directory")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fileURL = directory.appendingPathComponent("file.swift")
+        try Data("original file".utf8).write(to: fileURL)
+        var configuration = Ghostty.SurfaceConfiguration()
+        configuration.command = "/bin/sleep 30"
+        configuration.workingDirectory = root.path
+        let controller = TerminalController(app.ghostty, withBaseConfig: configuration, tabLayout: .vertical)
+        controller.showWindow(nil)
+        let surface = try #require(controller.surfaceTree.first)
+        let existingIDs = Set(TerminalController.all.map(\.tabSessionID))
+        defer {
+            for created in TerminalController.all where !existingIDs.contains(created.tabSessionID) {
+                created.window?.delegate = nil; created.window?.close()
+            }
+            EditorWorkspaceStore.shared.remove(tabID: controller.tabSessionID)
+            controller.window?.delegate = nil; controller.window?.close()
+        }
+        let session = try #require(controller.paneSessionContext(for: surface))
+        let context = InspectorPaneContext(tabID: controller.tabSessionID, surfaceID: surface.id,
+            title: session.presentationTitle, workingDirectory: root.path, workspace: session.workspace, session: session)
+        let repo = GitRepositoryIdentity(worktreePath: root.path, gitDirPath: root.path + "/.git", commonGitDirPath: root.path + "/.git")
+        for arguments in [["init", "-b", "main"], ["config", "user.name", "Editor Test"],
+                          ["config", "user.email", "editor@example.com"], ["config", "commit.gpgSign", "false"],
+                          ["config", "core.hooksPath", repo.gitDirPath + "/hooks"], ["add", "."], ["commit", "-m", "base"]] {
+            #expect(try await LocalGitExecutor().execute(arguments: arguments, workingDirectory: root.path).isSuccess)
+        }
+        try Data("original file with changes".utf8).write(to: fileURL)
+        let file = GitDiffFile(path: "nested directory/file.swift", status: "M")
+        let workspace = EditorWorkspaceStore.shared.workspace(for: controller.tabSessionID, surfaceID: surface.id)
+        let request = GitEditorDiffRequest(repository: repo, target: .unstaged, file: file)
+        workspace.openGitDiff(request)
+        try GitFileActions.open(file, repository: repo, context: context, directory: false)
+        for _ in 0..<100 where workspace.isLoading { try await Task.sleep(for: .milliseconds(10)) }
+        let document = try #require(workspace.selectedDocument)
+        #expect(document.path == fileURL.path && document.text == "original file with changes")
+        #expect(workspace.gitDiffs.map(\.id) == [request.id])
+        document.text = "edited original"
+        #expect(await workspace.save(document))
+        #expect(try String(contentsOf: fileURL, encoding: .utf8) == "edited original")
+        workspace.selectGitDiff(request)
+        #expect(workspace.gitDiff?.id == request.id)
+        try GitFileActions.open(file, repository: repo, context: context, directory: true)
+        let created = try #require(TerminalController.all.first { !existingIDs.contains($0.tabSessionID) })
+        #expect(created.paneSessionContext(for: created.surfaceTree.first)?.workingDirectory == directory.path)
+        #expect(!EditorWorkspaceStore.shared.workspace(for: created.tabSessionID,
+            surfaceID: try #require(created.surfaceTree.first?.id)).isVisible)
+    }
+
     private func branch(_ name: String, remote: Bool = false) -> GitBranchInfo {
         .init(name: name, commit: .init("abc1234"), isCurrent: name == "main", isRemote: remote, upstream: "", tracking: "")
     }

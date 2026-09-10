@@ -213,6 +213,31 @@ final class BuiltInGitInspectorProvider {
                     }
                 } catch { self.publishOperationError(error.localizedDescription, repository: repository, context: action.context) }
             }
+        case .openGitFile(let file, let directory):
+            guard let content = lastPublishedContent[action.context.tabID], let repository = content.repository,
+                  (content.workingTree.staged + content.workingTree.unstaged + content.expandedCommits.values.flatMap(\.files)).contains(file) else { return }
+            do { try GitFileActions.open(file, repository: repository, context: action.context, directory: directory) } catch { publishOperationError(error.localizedDescription, repository: repository, context: action.context) }
+        case .discardChanges(let file, let staged):
+            guard let content = lastPublishedContent[action.context.tabID], let repository = content.repository,
+                  (staged ? content.workingTree.stagedError : content.workingTree.unstagedError) == nil,
+                  (staged ? content.workingTree.staged : content.workingTree.unstaged).contains(file),
+                  mutationTasks[repository.stateKey] == nil else { return }
+            let window = NSApp.windows.first { ($0.windowController as? TerminalController)?.tabSessionID == action.context.tabID }
+            Task {
+                let alert = NSAlert()
+                alert.messageText = GitL10n.text("Discard Changes?")
+                let explanation = file.isUntracked || (staged && file.kind == .added)
+                    ? "This deletes the added file. This cannot be undone."
+                    : staged ? "This restores the file to HEAD, discarding both staged and unstaged changes. This cannot be undone."
+                    : "This restores the file to its staged version. Staged changes are kept. This cannot be undone."
+                alert.informativeText = file.displayPath + "\n\n" + GitL10n.text(explanation)
+                alert.addButton(withTitle: GitL10n.text("Discard Changes"))
+                alert.addButton(withTitle: GitL10n.text("Cancel"))
+                let response: NSApplication.ModalResponse
+                if let window { response = await alert.beginSheetModal(for: window) } else { response = alert.runModal() }
+                guard response == .alertFirstButtonReturn else { return }
+                self.mutate(.discard(file, staged: staged), repository: repository, context: action.context)
+            }
         case .setFileStaged(let file, let staged):
             guard let content = lastPublishedContent[action.context.tabID], let repository = content.repository,
                   (staged ? content.workingTree.unstagedError : content.workingTree.stagedError) == nil,
@@ -709,7 +734,13 @@ final class BuiltInGitInspectorProvider {
         }
         mutationTasks[key] = Task {
             do {
-                try await self.mutationService.perform(mutation, in: repository)
+                if case .discard(let file, _) = mutation {
+                    try await EditorWorkspaceStore.shared.withGitFileRestore(file, repository: repository) {
+                        try await self.mutationService.perform(mutation, in: repository)
+                    }
+                } else {
+                    try await self.mutationService.perform(mutation, in: repository)
+                }
                 if openCreatedWorktree, case .addWorktree(let path, _, _, _) = mutation {
                     try GitWorktreeActions.open(GitWorktreeInfo(path: path, head: nil, branchRef: nil, isMain: false, isCurrent: false),
                                                 repository: repository, context: context)

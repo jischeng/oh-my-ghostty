@@ -257,6 +257,7 @@ struct InspectorGitView: View {
                         perform(.gitAction(.sendHistoryToTerminal($0)))
                     },
                     onOpenFile: { commit, file in perform(.gitAction(.openDiff(file, .commit(commit)))) },
+                    onGitFileAction: { file, directory in perform(.gitAction(.openGitFile(file, directory: directory))) },
                     onLoadMore: { perform(.gitAction(.loadMoreHistory)) },
                     onCommitAction: { perform(.gitAction(.commitOperation($0, $1))) }
                 )

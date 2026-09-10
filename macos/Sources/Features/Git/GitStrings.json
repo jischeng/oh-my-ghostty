@@ -1070,5 +1070,33 @@
   "Git command timed out. Refresh before retrying; a write may have completed remotely.": {
     "en": "Git command timed out. Refresh before retrying; a write may have completed remotely.",
     "zh-Hans": "Git 命令超时。请刷新后再重试；远程写入可能已经完成。"
+  },
+  "Discard Changes…": {
+    "en": "Discard Changes…",
+    "zh-Hans": "丢弃更改…"
+  },
+  "Discard Changes?": {
+    "en": "Discard Changes?",
+    "zh-Hans": "丢弃更改？"
+  },
+  "Discard Changes": {
+    "en": "Discard Changes",
+    "zh-Hans": "丢弃更改"
+  },
+  "Discarding changes…": {
+    "en": "Discarding changes…",
+    "zh-Hans": "正在丢弃更改…"
+  },
+  "This deletes the added file. This cannot be undone.": {
+    "en": "This deletes the added file. This cannot be undone.",
+    "zh-Hans": "此操作会删除新增文件，且无法撤销。"
+  },
+  "This restores the file to HEAD, discarding both staged and unstaged changes. This cannot be undone.": {
+    "en": "This restores the file to HEAD, discarding both staged and unstaged changes. This cannot be undone.",
+    "zh-Hans": "此操作会将文件恢复到 HEAD，同时丢弃已暂存和未暂存的更改，且无法撤销。"
+  },
+  "This restores the file to its staged version. Staged changes are kept. This cannot be undone.": {
+    "en": "This restores the file to its staged version. Staged changes are kept. This cannot be undone.",
+    "zh-Hans": "此操作会将文件恢复到暂存区版本，保留已暂存更改，且无法撤销。"
   }
 }

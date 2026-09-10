@@ -102,6 +102,7 @@ final class EditorDocument: ObservableObject {
     @Published private(set) var isDirty: Bool
     @Published private(set) var isSaving = false
     @Published private(set) var isReloading = false
+    @Published var isRestoringFromGit = false
     @Published private(set) var saveErrorMessage: String?
     @Published private(set) var contentGeneration: UInt64 = 0
 
@@ -190,7 +191,7 @@ final class EditorDocument: ObservableObject {
 
     func save() async throws {
         guard !isSaving else { throw EditorDocumentError.saveInProgress }
-        guard !isReloading else { throw EditorDocumentError.reloadInProgress }
+        guard !isReloading, !isRestoringFromGit else { throw EditorDocumentError.reloadInProgress }
         guard isDirty else { return }
         cancelAutoSave()
         let savedRevision = revision

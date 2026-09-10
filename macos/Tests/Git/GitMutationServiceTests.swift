@@ -27,6 +27,64 @@ struct GitMutationServiceTests {
         try Data(text.utf8).write(to: URL(fileURLWithPath: repo.worktreePath).appendingPathComponent(name))
     }
 
+    @Test func discardSeparatesIndexAndWorktreeAndLeavesOtherFilesUntouched() async throws {
+        let repo = try await repository()
+        defer { try? FileManager.default.removeItem(atPath: repo.worktreePath) }
+        let service = GitMutationService()
+        let name = "中文 [literal]\nfile.txt"
+        try write("base", name, repo)
+        try write("other base", "other", repo)
+        try await service.perform(.stage([name, "other"]), in: repo)
+        try await service.perform(.commit("base"), in: repo)
+        try write("staged", name, repo)
+        try await service.perform(.stage([name]), in: repo)
+        try write("unstaged", name, repo)
+        try write("untouched", "other", repo)
+        let unstaged = try await GitDiffService().listFiles(for: repo, target: .unstaged)
+        try await service.perform(.discard(try #require(unstaged.files.first { $0.path == name }), staged: false), in: repo)
+        #expect(try String(contentsOfFile: repo.worktreePath + "/" + name, encoding: .utf8) == "staged")
+        #expect(try await git(["show", ":" + name], repo) == "staged")
+        try write("later edit", name, repo)
+        let staged = try await GitDiffService().listFiles(for: repo, target: .staged)
+        try await service.perform(.discard(try #require(staged.files.first { $0.path == name }), staged: true), in: repo)
+        #expect(try String(contentsOfFile: repo.worktreePath + "/" + name, encoding: .utf8) == "base")
+        #expect(try await git(["diff", "--cached", "--name-only"], repo).isEmpty)
+        #expect(try String(contentsOfFile: repo.worktreePath + "/other", encoding: .utf8) == "untouched")
+    }
+
+    @Test func discardAddedUntrackedDeletedAndRenamedFiles() async throws {
+        let repo = try await repository()
+        defer { try? FileManager.default.removeItem(atPath: repo.worktreePath) }
+        let service = GitMutationService()
+        try write("new", "unborn", repo)
+        try await service.perform(.stage(["unborn"]), in: repo)
+        let unborn = try await GitDiffService().listFiles(for: repo, target: .staged)
+        try await service.perform(.discard(try #require(unborn.files.first), staged: true), in: repo)
+        #expect(!FileManager.default.fileExists(atPath: repo.worktreePath + "/unborn"))
+        try write("base contents", "old", repo)
+        try await service.perform(.stage(["old"]), in: repo)
+        try await service.perform(.commit("base"), in: repo)
+        _ = try await git(["mv", "old", "new"], repo)
+        let renamed = try await GitDiffService().listFiles(for: repo, target: .staged)
+        #expect(renamed.files.first?.kind == .renamed)
+        try await service.perform(.discard(try #require(renamed.files.first), staged: true), in: repo)
+        #expect(try String(contentsOfFile: repo.worktreePath + "/old", encoding: .utf8) == "base contents")
+        #expect(!FileManager.default.fileExists(atPath: repo.worktreePath + "/new"))
+        try FileManager.default.removeItem(atPath: repo.worktreePath + "/old")
+        let deleted = try await GitDiffService().listFiles(for: repo, target: .unstaged)
+        try await service.perform(.discard(try #require(deleted.files.first), staged: false), in: repo)
+        #expect(FileManager.default.fileExists(atPath: repo.worktreePath + "/old"))
+        try write("remove", "[untracked]", repo)
+        try write("keep", "untouched", repo)
+        let untracked = try await GitDiffService().listFiles(for: repo, target: .unstaged)
+        try await service.perform(.discard(try #require(untracked.files.first { $0.path == "[untracked]" }), staged: false), in: repo)
+        #expect(!FileManager.default.fileExists(atPath: repo.worktreePath + "/[untracked]"))
+        #expect(FileManager.default.fileExists(atPath: repo.worktreePath + "/untouched"))
+        await #expect(throws: (any Error).self) {
+            try await service.perform(.discard(GitDiffFile(path: "../outside", status: "M"), staged: false), in: repo)
+        }
+    }
+
     @Test func checkedFilesCommitIndexWithoutUnselectedOrLaterWorkingTreeEdits() async throws {
         let repo = try await repository()
         defer { try? FileManager.default.removeItem(atPath: repo.worktreePath) }

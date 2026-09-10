@@ -51,6 +51,70 @@ struct EditorWorkspaceTests {
         #expect(workspace.selectedDocument === document)
     }
 
+    @Test @MainActor func diffTabsSurviveFileSwitchesDeduplicateAndParticipateInNavigation() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("file.swift")
+        try Data("original".utf8).write(to: file)
+        let workspace = EditorWorkspace()
+        defer { workspace.cancelAndClear() }
+        let repo = GitRepositoryIdentity(worktreePath: root.path, gitDirPath: root.path + "/.git", commonGitDirPath: root.path + "/.git")
+        let first = GitEditorDiffRequest(repository: repo, target: .staged, file: nil)
+        let second = GitEditorDiffRequest(repository: repo, target: .unstaged, file: nil)
+        workspace.openGitDiff(first)
+        workspace.open(path: file.path, filesystem: LocalWorkspaceFilesystem(workingDirectory: root.path))
+        await waitUntil { !workspace.isLoading }
+        let document = try #require(workspace.selectedDocument)
+        #expect(workspace.gitDiffs.map(\.id) == [first.id])
+        workspace.selectAdjacentDocument(offset: 1)
+        #expect(workspace.gitDiff?.id == first.id)
+        workspace.openGitDiff(second)
+        workspace.openGitDiff(GitEditorDiffRequest(repository: repo, target: .staged, file: nil))
+        #expect(workspace.gitDiffs.map(\.id) == [first.id, second.id])
+        #expect(workspace.gitDiff?.id == first.id)
+        workspace.selectAdjacentDocument(offset: -1)
+        #expect(workspace.selectedDocument === document)
+        workspace.closeGitDiff(second)
+        #expect(workspace.selectedDocument === document)
+        await workspace.close(document, window: nil)
+        #expect(workspace.gitDiff?.id == first.id && workspace.isVisible)
+        workspace.closeGitDiff(first)
+        #expect(!workspace.isVisible && workspace.gitDiffs.isEmpty)
+    }
+
+    @Test @MainActor func gitRestoreProtectsUnsavedEditsAndReloadsCleanOpenFiles() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("file.swift")
+        try Data("changed on disk".utf8).write(to: url)
+        let store = EditorWorkspaceStore()
+        let surface = UUID()
+        defer { store.remove(surfaceIDs: [surface]) }
+        let workspace = store.workspace(for: UUID(), surfaceID: surface)
+        workspace.open(path: url.path, filesystem: LocalWorkspaceFilesystem(workingDirectory: root.path))
+        await waitUntil { !workspace.isLoading }
+        let document = try #require(workspace.selectedDocument)
+        document.suspendAutoSave()
+        let repo = GitRepositoryIdentity(worktreePath: root.path, gitDirPath: root.path + "/.git", commonGitDirPath: root.path + "/.git")
+        let file = GitDiffFile(path: "file.swift", status: "M")
+        document.text = "unsaved"
+        var called = false
+        await #expect(throws: (any Error).self) {
+            try await store.withGitFileRestore(file, repository: repo) { called = true }
+        }
+        #expect(!called && document.text == "unsaved")
+        document.text = "changed on disk"
+        try await store.withGitFileRestore(file, repository: repo) {
+            #expect(document.isRestoringFromGit)
+            try Data("restored".utf8).write(to: url)
+        }
+        #expect(document.text == "restored" && !document.isDirty && !document.isRestoringFromGit)
+        try await store.withGitFileRestore(file, repository: repo) { try FileManager.default.removeItem(at: url) }
+        #expect(workspace.documents.isEmpty)
+    }
+
     @Test @MainActor func renameGuardFindsOpenDocumentsThroughLocalSymlinks() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let real = root.appendingPathComponent("real", isDirectory: true)

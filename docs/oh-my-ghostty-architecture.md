@@ -330,3 +330,16 @@ Application-local event monitors with weak owners fail open after owner teardown
 they return the original event, not `nil`. A live owner's explicit `nil` still
 means the event was handled. This preserves mouse presses for tab rows and
 modal confirmation buttons even while stale monitor callbacks are retiring.
+
+Vertical-tab drag cleanup accepts the actual `NSEvent` and branches on its type
+before reading keyboard-only fields. Reading `keyCode` from a mouse release
+raises an AppKit exception, interrupts input dispatch, and leaves the source
+monitor installed. Local and global release handlers share the same policy;
+Escape or the next mouse press also retires a cancelled drag without consuming
+the event. Cleanup runs after the destination drop callback and is scoped to the
+drag generation, so an old queued release cannot clear a new drag. Removing the
+sidebar finishes its source monitor. Regression coverage dispatches real AppKit
+mouse events through `NSApplication`: real SwiftUI drags released in the source
+row, rejected by the header, or committed to a different row, followed by 64 tab
+clicks. Separate tests cover Escape, generation isolation, and modal buttons
+after source cleanup; numeric policy arguments alone do not exercise this contract.

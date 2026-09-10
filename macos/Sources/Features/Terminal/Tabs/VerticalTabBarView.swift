@@ -573,8 +573,14 @@ final class GhosttyTabOrganizationModel: ObservableObject {
 }
 
 enum VerticalTabDragLifecyclePolicy {
-    static func shouldFinish(eventType: NSEvent.EventType, keyCode: UInt16) -> Bool {
-        eventType == .leftMouseUp || (eventType == .keyDown && keyCode == 53)
+    static func shouldFinish(_ event: NSEvent) -> Bool {
+        // NSEvent raises an Objective-C exception if a mouse event is asked
+        // for keyCode. Keep the read inside the keyboard-only branch.
+        switch event.type {
+        case .leftMouseUp, .leftMouseDown: true
+        case .keyDown: event.keyCode == 53
+        default: false
+        }
     }
 }
 
@@ -587,32 +593,39 @@ final class VerticalTabDragLifecycleMonitor: ObservableObject {
     private var localMonitor: Any?
     private var globalMonitor: Any?
     private var cleanup: (() -> Void)?
+    private var generation = 0
 
     func begin(cleanup: @escaping () -> Void) {
         finish()
         self.cleanup = cleanup
+        let generation = self.generation
         localMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.leftMouseUp, .keyDown]
+            matching: [.leftMouseDown, .leftMouseUp, .keyDown]
         ) { [weak self] event in
-            guard VerticalTabDragLifecyclePolicy.shouldFinish(
-                eventType: event.type,
-                keyCode: event.keyCode
-            ) else { return event }
-            DispatchQueue.main.async { self?.finish() }
+            // A native drag loop may consume its final mouse-up. The next
+            // press also retires stale state, without consuming that click.
+            self?.receive(event, generation: generation)
             return event
         }
         globalMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseUp]
         ) { [weak self] event in
-            guard VerticalTabDragLifecyclePolicy.shouldFinish(
-                eventType: event.type,
-                keyCode: event.keyCode
-            ) else { return }
-            DispatchQueue.main.async { self?.finish() }
+            self?.receive(event, generation: generation)
+        }
+    }
+
+    private func receive(_ event: NSEvent, generation: Int) {
+        guard VerticalTabDragLifecyclePolicy.shouldFinish(event) else { return }
+        // Let the destination commit its drop before clearing the source ID.
+        // An old queued completion must never clear a newly started drag.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.generation == generation else { return }
+            self.finish()
         }
     }
 
     func finish() {
+        generation &+= 1
         if let localMonitor {
             NSEvent.removeMonitor(localMonitor)
             self.localMonitor = nil
@@ -738,6 +751,7 @@ struct TerminalTabSidebarView: View {
         .background(backgroundColor.opacity(backgroundOpacity))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Tabs")
+        .onDisappear { tabDragLifecycle.finish() }
         .onReceive(metadataChanges) { _ in
             metadataRevision &+= 1
         }

@@ -24,13 +24,19 @@ struct WeakLocalEventMonitorTests {
         #expect(handler(click) === click)
     }
 
-    @Test func modalButtonsReceiveClicksAfterMonitorOwnerExpires() throws {
+    @Test func modalButtonsReceiveClicksAfterMonitorOwnerExpires() async throws {
         var owner: Owner? = Owner()
         let monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown,
             handler: WeakLocalEventMonitor.handler(for: owner!) { _, event in event })
         defer { if let monitor { NSEvent.removeMonitor(monitor) } }
         owner = nil
+        let dragLifecycle = VerticalTabDragLifecycleMonitor()
+        defer { dragLifecycle.finish() }
         for index in [0, 1] {
+            // Even if the drag loop consumed its release, the first modal
+            // click must pass through and retire the lingering drag monitor.
+            var dragEnded = false
+            dragLifecycle.begin { dragEnded = true }
             let alert = NSAlert()
             alert.messageText = "Mouse event regression"
             alert.addButton(withTitle: "Cancel")
@@ -58,6 +64,8 @@ struct WeakLocalEventMonitorTests {
             click.invalidate(); timeout.invalidate()
             alert.window.close()
             #expect(response == (index == 0 ? .alertFirstButtonReturn : .alertSecondButtonReturn))
+            try await Task.sleep(for: .milliseconds(10))
+            #expect(dragEnded)
         }
     }
 }

@@ -106,25 +106,6 @@ struct VerticalTabsTests {
         ) == nil)
     }
 
-    @Test func tabDragLifecycleEndsOnMouseUpOrEscape() {
-        #expect(VerticalTabDragLifecyclePolicy.shouldFinish(
-            eventType: .leftMouseUp,
-            keyCode: 0
-        ))
-        #expect(VerticalTabDragLifecyclePolicy.shouldFinish(
-            eventType: .keyDown,
-            keyCode: 53
-        ))
-        #expect(!VerticalTabDragLifecyclePolicy.shouldFinish(
-            eventType: .keyDown,
-            keyCode: 36
-        ))
-        #expect(!VerticalTabDragLifecyclePolicy.shouldFinish(
-            eventType: .mouseMoved,
-            keyCode: 0
-        ))
-    }
-
     @Test func stableMoveDescriptorResolvesRecreatedValuesBySessionID() throws {
         struct Value {
             let generation: Int

@@ -268,8 +268,11 @@ class BaseTerminalController: NSWindowController,
         // Listen for local events that we need to know of outside of
         // single surface handlers.
         self.eventMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.flagsChanged]
-        ) { [weak self] event in self?.localEventHandler(event) }
+            matching: [.flagsChanged],
+            handler: WeakLocalEventMonitor.handler(for: self) { controller, event in
+                controller.localEventHandler(event)
+            }
+        )
     }
 
     deinit {

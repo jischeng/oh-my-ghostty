@@ -5,6 +5,7 @@ import Testing
 
 @MainActor
 struct VerticalTabMouseTests {
+    private final class MonitorOwner { var received = 0 }
     @Test func mouseSelectionKeepsWorkingAcrossNativeWindows() async throws {
         let app = try #require(NSApp.delegate as? AppDelegate)
         let settings = OhMyGhosttySettings.shared
@@ -30,6 +31,8 @@ struct VerticalTabMouseTests {
         NSApp.activate(ignoringOtherApps: true)
         try await Task.sleep(for: .milliseconds(250))
         let group = try #require(firstWindow.tabGroup)
+        first.selectVerticalTab(first)
+        try await Task.sleep(for: .milliseconds(50))
         func sidebarScroll(in window: NSWindow) -> NSScrollView? {
             func find(_ view: NSView) -> NSScrollView? {
                 if let scroll = view as? NSScrollView {
@@ -40,7 +43,15 @@ struct VerticalTabMouseTests {
             }
             return window.contentView.flatMap(find)
         }
-        for step in 0..<18 {
+        var owner: MonitorOwner? = MonitorOwner()
+        let monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown,
+            handler: WeakLocalEventMonitor.handler(for: owner!) { owner, event in owner.received += 1; return event })
+        defer { if let monitor { NSEvent.removeMonitor(monitor) } }
+        for step in 0..<64 {
+            if step == 28 {
+                #expect((owner?.received ?? 0) > 0, "Exercise application-level event monitors")
+                owner = nil
+            }
             let target = controllers[step % 3]
             let sourceWindow = try #require(group.selectedWindow)
             let scroll = try #require(sidebarScroll(in: sourceWindow))
@@ -54,8 +65,8 @@ struct VerticalTabMouseTests {
             let up = try #require(NSEvent.mouseEvent(with: .leftMouseUp, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime + 0.01,
                 windowNumber: sourceWindow.windowNumber, context: nil, eventNumber: step * 2 + 1, clickCount: 1, pressure: 0))
             NSApp.postEvent(up, atStart: true)
-            sourceWindow.sendEvent(down)
-            if let queued = NSApp.nextEvent(matching: .leftMouseUp, until: .distantPast, inMode: .default, dequeue: true) { sourceWindow.sendEvent(queued) }
+            NSApp.sendEvent(down)
+            if let queued = NSApp.nextEvent(matching: .leftMouseUp, until: .distantPast, inMode: .default, dequeue: true) { NSApp.sendEvent(queued) }
             try await Task.sleep(for: .milliseconds(35))
             #expect(group.selectedWindow === target.window, "Mouse click \(step) must select its target window")
         }

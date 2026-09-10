@@ -325,3 +325,8 @@ and native tab group. Deferred sidebar controller arrays are presentation data,
 not a gate for accepting a click. Selection explicitly orders the target window
 front, matching keyboard tab selection even when key status or group projection
 has not yet settled.
+
+Application-local event monitors with weak owners fail open after owner teardown:
+they return the original event, not `nil`. A live owner's explicit `nil` still
+means the event was handled. This preserves mouse presses for tab rows and
+modal confirmation buttons even while stale monitor callbacks are retiring.

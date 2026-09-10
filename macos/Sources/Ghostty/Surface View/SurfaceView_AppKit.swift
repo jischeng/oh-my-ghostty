@@ -380,8 +380,11 @@ extension Ghostty {
                     // event and encode the event to the pty which we want to avoid.
                     // (Issue 2595)
                     .leftMouseDown,
-                ]
-            ) { [weak self] event in self?.localEventHandler(event) }
+                ],
+                handler: WeakLocalEventMonitor.handler(for: self) { view, event in
+                    view.localEventHandler(event)
+                }
+            )
 
             // Setup our surface. This will also initialize all the terminal IO.
             let surface_cfg = baseConfig ?? SurfaceConfiguration()

@@ -305,3 +305,13 @@ Vertical Tabs 验证截图：
 - `docs/images/appearance-transparency-vertical.png`：Vertical Sidebar 与 terminal content 在相同 58% Ghostty background alpha 下保持一致。
 - `docs/images/appearance-transparency-horizontal.png`：相同 opacity/blur config 下的 Ghostty 原生 Horizontal 对照。
 - `docs/images/right-inspector-files.png`：Core-owned Right Inspector Host 挂载 owner-scoped `builtin.files` typed content。
+
+### Inactive terminal GPU resources
+
+An occluded Metal terminal keeps its most recent frame for immediate display,
+but releases the other swap-chain frames after in-flight GPU work completes.
+Their textures, cell buffers and render targets are recreated lazily when the
+terminal draws again. This does not discard scrollback, restart the PTY, alter
+terminal dimensions or reduce the visible surface's triple buffering. The
+fork-owned implementation is `src/renderer/omg_memory.zig`; the generic renderer
+only calls it at the existing visibility boundary. OpenGL is unchanged.

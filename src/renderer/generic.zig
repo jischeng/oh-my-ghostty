@@ -1059,6 +1059,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         pub fn setVisible(self: *Self, visible: bool) void {
             self.visible = visible;
             self.syncDisplayLink(null, null);
+            if (comptime GraphicsAPI.swap_chain_count > 1) {
+                if (!visible) @import("omg_memory.zig").trimInactive(self, global.io()) catch |err| {
+                    log.warn("unable to trim inactive GPU resources err={}", .{err});
+                };
+            }
         }
 
         /// Create or update the display link and match it to the current

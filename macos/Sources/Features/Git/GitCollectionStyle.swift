@@ -98,6 +98,7 @@ struct GitToolbarButtonStyle: ButtonStyle {
         var body: some View {
             configuration.label
                 .background(background, in: RoundedRectangle(cornerRadius: 4))
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(border, lineWidth: 0.75))
                 .contentShape(Rectangle())
                 .onHover { hover = $0 }
                 .scaleEffect(configuration.isPressed ? 0.96 : 1)
@@ -108,6 +109,12 @@ struct GitToolbarButtonStyle: ButtonStyle {
                 return Color(colors.accent).opacity(configuration.isPressed ? 0.22 : hover ? 0.18 : 0.13)
             }
             return Color(colors.text).opacity(configuration.isPressed ? 0.12 : hover ? 0.06 : 0)
+        }
+        private var border: Color {
+            if selected {
+                return Color(colors.accent).opacity(configuration.isPressed ? 0.5 : hover ? 0.42 : 0.3)
+            }
+            return Color(colors.text).opacity(configuration.isPressed ? 0.32 : hover ? 0.22 : 0)
         }
     }
 }

@@ -53,11 +53,12 @@ struct GitEditorDiffView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 4) {
-                toolbarButton("chevron.left", help: GitL10n.text("Previous file"), disabled: selectedFileIndex <= 0) {
+                toolbarButton("chevron.left", help: GitL10n.text("Previous file"),
+                              disabled: selectedFileIndex < 0 || model.files.count < 2) {
                     selectAdjacentFile(offset: -1)
                 }
                 toolbarButton("chevron.right", help: GitL10n.text("Next file"),
-                              disabled: selectedFileIndex < 0 || selectedFileIndex >= model.files.count - 1) {
+                              disabled: selectedFileIndex < 0 || model.files.count < 2) {
                     selectAdjacentFile(offset: 1)
                 }
                 Text(fileCounter)
@@ -79,6 +80,17 @@ struct GitEditorDiffView: View {
                     .help(model.selected?.displayPath ?? request.repository.worktreePath)
                     .layoutPriority(1)
                 Spacer()
+                if mode == GitL10n.text("Side by Side") {
+                    toolbarButton("link",
+                                  help: linkedScrolling ? GitL10n.text("Disable linked scrolling") : GitL10n.text("Enable linked scrolling"),
+                                  selected: linkedScrolling,
+                                  accessibilityValue: GitL10n.text(linkedScrolling ? "On" : "Off")) {
+                        clearHint()
+                        linkedScrolling.toggle()
+                    }
+                } else {
+                    Color.clear.frame(width: 28, height: 24).accessibilityHidden(true)
+                }
                 fileMenu
                 HStack(spacing: 0) {
                     toolbarButton("rectangle.split.2x1", help: GitL10n.text("Side-by-side Diff"),
@@ -94,15 +106,9 @@ struct GitEditorDiffView: View {
                         mode = GitL10n.text("Inline")
                     }
                 }
-                if mode == GitL10n.text("Side by Side") {
-                    toolbarButton("link",
-                                  help: linkedScrolling ? GitL10n.text("Disable linked scrolling") : GitL10n.text("Enable linked scrolling"),
-                                  selected: linkedScrolling,
-                                  accessibilityValue: GitL10n.text(linkedScrolling ? "On" : "Off")) {
-                        clearHint()
-                        linkedScrolling.toggle()
-                    }
-                }
+                .padding(2)
+                .background(Color(colors.text).opacity(0.025), in: RoundedRectangle(cornerRadius: 6))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(colors.text).opacity(0.18), lineWidth: 0.75))
                 toolbarButton("pencil", help: GitL10n.text("Open in Editor"),
                               disabled: model.selected == nil || model.selected?.kind == .deleted) {
                     clearHint()
@@ -208,7 +214,7 @@ struct GitEditorDiffView: View {
 
     private func selectChange(_ direction: GitDiffReviewNavigator.Direction) {
         guard let outcome = navigator.move(direction, changeCount: changeAnchors.count,
-                                            fileIndex: selectedFileIndex, fileCount: model.files.count) else { return }
+                                            fileCount: model.files.count) else { return }
         switch outcome {
         case .jump(let index):
             clearHint()
@@ -217,8 +223,14 @@ struct GitEditorDiffView: View {
             showHint(hint)
         case .openFile(let offset, let landing):
             clearHint()
-            pendingLanding = landing
-            model.selectAdjacentFile(offset: offset)
+            if model.files.count == 1 {
+                if let index = navigator.land(landing, changeCount: changeAnchors.count) {
+                    jump(to: changeAnchors[index])
+                }
+            } else {
+                pendingLanding = landing
+                model.selectAdjacentFile(offset: offset)
+            }
         }
     }
 
@@ -237,8 +249,6 @@ struct GitEditorDiffView: View {
         let text = switch hint {
         case .previousFile: GitL10n.text("Reached the first change. Click again to open the previous file.")
         case .nextFile: GitL10n.text("Reached the last change. Click again to open the next file.")
-        case .firstFile: GitL10n.text("This is the first change in the first file.")
-        case .lastFile: GitL10n.text("This is the last change in the last file.")
         }
         navigationHint = text
         hintTask?.cancel()
@@ -306,11 +316,7 @@ struct GitEditorDiffView: View {
                 Button(GitL10n.text("Copy Relative Path")) { InspectorCopyMenu.copy(file.path, to: .general) }
             }
         } label: {
-            Image(systemName: "list.bullet")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(Color(colors.secondary))
-                .frame(width: 28, height: 24)
-                .contentShape(Rectangle())
+            GitToolbarMenuLabel(image: "list.bullet", colors: colors)
         }
         .menuStyle(.borderlessButton)
         .buttonStyle(GitToolbarButtonStyle(colors: colors, selected: false))
@@ -334,6 +340,24 @@ struct GitEditorDiffView: View {
                                 isActive: isActive, theme: theme, link: scroll, side: side, actions: actions, close: close)
                 .id("\(model.selected?.id ?? "")-\(side)")
         }.frame(minWidth: 120)
+    }
+}
+
+private struct GitToolbarMenuLabel: View {
+    let image: String
+    let colors: GitCollectionColors
+    @State private var hovered = false
+
+    var body: some View {
+        Image(systemName: image)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(Color(colors.secondary))
+            .frame(width: 28, height: 24)
+            .background(Color(colors.text).opacity(hovered ? 0.06 : 0), in: RoundedRectangle(cornerRadius: 4))
+            .overlay(RoundedRectangle(cornerRadius: 4)
+                .stroke(Color(colors.text).opacity(hovered ? 0.22 : 0), lineWidth: 0.75))
+            .contentShape(Rectangle())
+            .onHover { hovered = $0 }
     }
 }
 

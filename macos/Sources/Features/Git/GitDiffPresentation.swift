@@ -125,7 +125,7 @@ struct GitDiffPresentation: Equatable {
 struct GitDiffReviewNavigator: Equatable {
     enum Direction: Equatable { case previous, next }
     enum Landing: Equatable { case first, last }
-    enum Hint: Equatable { case previousFile, nextFile, firstFile, lastFile }
+    enum Hint: Equatable { case previousFile, nextFile }
     enum Outcome: Equatable {
         case jump(Int)
         case hint(Hint)
@@ -152,8 +152,8 @@ struct GitDiffReviewNavigator: Equatable {
         return index
     }
 
-    mutating func move(_ direction: Direction, changeCount: Int, fileIndex: Int, fileCount: Int) -> Outcome? {
-        guard changeCount > 0 else { return nil }
+    mutating func move(_ direction: Direction, changeCount: Int, fileCount: Int) -> Outcome? {
+        guard changeCount > 0, fileCount > 0 else { return nil }
         let current = changeIndex
         switch direction {
         case .next:
@@ -163,10 +163,6 @@ struct GitDiffReviewNavigator: Equatable {
                 changeIndex = index
                 armedDirection = nil
                 return .jump(index)
-            }
-            guard fileIndex < fileCount - 1 else {
-                armedDirection = nil
-                return .hint(.lastFile)
             }
             if armedDirection == .next {
                 reset()
@@ -181,10 +177,6 @@ struct GitDiffReviewNavigator: Equatable {
                 changeIndex = index
                 armedDirection = nil
                 return .jump(index)
-            }
-            guard fileIndex > 0 else {
-                armedDirection = nil
-                return .hint(.firstFile)
             }
             if armedDirection == .previous {
                 reset()

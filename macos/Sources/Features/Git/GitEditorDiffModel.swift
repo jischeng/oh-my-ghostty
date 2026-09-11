@@ -60,7 +60,7 @@ final class GitEditorDiffModel: ObservableObject {
     func selectAdjacentFile(offset: Int) -> Task<Void, Never>? {
         guard !files.isEmpty else { return nil }
         let current = selected.flatMap { files.firstIndex(of: $0) } ?? 0
-        let index = max(0, min(files.count - 1, current + offset))
+        let index = ((current + offset) % files.count + files.count) % files.count
         guard index != current else { return nil }
         return select(files[index])
     }

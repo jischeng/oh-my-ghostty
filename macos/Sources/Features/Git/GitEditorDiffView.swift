@@ -95,18 +95,20 @@ struct GitEditorDiffView: View {
                 HStack(spacing: 0) {
                     toolbarButton("rectangle.split.2x1", help: GitL10n.text("Side-by-side Diff"),
                                   selected: mode == GitL10n.text("Side by Side"),
-                                  accessibilityValue: mode == GitL10n.text("Side by Side") ? GitL10n.text("Selected") : "") {
+                                  accessibilityValue: mode == GitL10n.text("Side by Side") ? GitL10n.text("Selected") : "",
+                                  width: 24) {
                         clearHint()
                         mode = GitL10n.text("Side by Side")
                     }
                     toolbarButton("text.alignleft", help: GitL10n.text("Unified / Inline Diff"),
                                   selected: mode == GitL10n.text("Inline"),
-                                  accessibilityValue: mode == GitL10n.text("Inline") ? GitL10n.text("Selected") : "") {
+                                  accessibilityValue: mode == GitL10n.text("Inline") ? GitL10n.text("Selected") : "",
+                                  width: 24) {
                         clearHint()
                         mode = GitL10n.text("Inline")
                     }
                 }
-                .padding(2)
+                .padding(1)
                 .background(Color(colors.text).opacity(0.025), in: RoundedRectangle(cornerRadius: 6))
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(colors.text).opacity(0.18), lineWidth: 0.75))
                 toolbarButton("pencil", help: GitL10n.text("Open in Editor"),
@@ -269,15 +271,15 @@ struct GitEditorDiffView: View {
 
     private func toolbarButton(_ image: String, help: String, disabled: Bool = false, selected: Bool = false,
                                accessibilityValue: String = "",
+                               width: CGFloat = 28,
                                action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: image)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(Color(selected ? colors.accent : colors.secondary))
-                .frame(width: 28, height: 24)
+                .frame(width: width, height: 24)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
         .buttonStyle(GitToolbarButtonStyle(colors: colors, selected: selected))
         .help(help)
         .accessibilityLabel(help)
@@ -353,9 +355,9 @@ private struct GitToolbarMenuLabel: View {
             .font(.system(size: 12, weight: .medium))
             .foregroundStyle(Color(colors.secondary))
             .frame(width: 28, height: 24)
-            .background(Color(colors.text).opacity(hovered ? 0.06 : 0), in: RoundedRectangle(cornerRadius: 4))
+            .background(Color(colors.text).opacity(hovered ? 0.09 : 0), in: RoundedRectangle(cornerRadius: 4))
             .overlay(RoundedRectangle(cornerRadius: 4)
-                .stroke(Color(colors.text).opacity(hovered ? 0.22 : 0), lineWidth: 0.75))
+                .stroke(Color(colors.text).opacity(hovered ? 0.4 : 0), lineWidth: 0.75))
             .contentShape(Rectangle())
             .onHover { hovered = $0 }
     }

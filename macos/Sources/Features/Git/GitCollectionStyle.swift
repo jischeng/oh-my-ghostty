@@ -73,7 +73,6 @@ struct GitCollectionModePicker: View {
                         .frame(width: 32, height: 28)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
                 .buttonStyle(GitToolbarButtonStyle(colors: colors, selected: mode == value))
                 .help(GitL10n.format("{0} view", value.title))
                 .accessibilityLabel(GitL10n.format("{0} view", value.title))
@@ -106,15 +105,15 @@ struct GitToolbarButtonStyle: ButtonStyle {
         }
         private var background: Color {
             if selected {
-                return Color(colors.accent).opacity(configuration.isPressed ? 0.22 : hover ? 0.18 : 0.13)
+                return Color(colors.accent).opacity(configuration.isPressed ? 0.26 : hover ? 0.22 : 0.13)
             }
-            return Color(colors.text).opacity(configuration.isPressed ? 0.12 : hover ? 0.06 : 0)
+            return Color(colors.text).opacity(configuration.isPressed ? 0.16 : hover ? 0.09 : 0)
         }
         private var border: Color {
             if selected {
-                return Color(colors.accent).opacity(configuration.isPressed ? 0.5 : hover ? 0.42 : 0.3)
+                return Color(colors.accent).opacity(configuration.isPressed ? 0.62 : hover ? 0.55 : 0.3)
             }
-            return Color(colors.text).opacity(configuration.isPressed ? 0.32 : hover ? 0.22 : 0)
+            return Color(colors.text).opacity(configuration.isPressed ? 0.52 : hover ? 0.4 : 0)
         }
     }
 }

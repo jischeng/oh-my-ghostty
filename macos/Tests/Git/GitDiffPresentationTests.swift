@@ -14,6 +14,10 @@ struct GitDiffPresentationTests {
         #expect(value.afterToBefore[3] == 2)
         #expect(value.rows[1].beforeLine == 2 && value.rows[1].afterLine == nil)
         #expect(value.rows[3].afterLine == 3 && value.rows[3].beforeLine == nil)
+        #expect(value.changeAnchors.count == 1)
+        #expect(value.changeAnchors[0].before == 1)
+        #expect(value.changeAnchors[0].after == 1)
+        #expect(value.changeAnchors[0].inline == 1)
     }
 
     @Test func zeroContextInsertionAndDeletionMapFollowingLines() {
@@ -30,6 +34,8 @@ struct GitDiffPresentationTests {
         #expect(deletion.beforeToAfter[2] == 1)
         #expect(deletion.beforeHighlights == [1: false])
         #expect(deletion.afterHighlights.isEmpty)
+        #expect(insertion.changeAnchors.count == 1 && insertion.changeAnchors[0].after == 1)
+        #expect(deletion.changeAnchors.count == 1 && deletion.changeAnchors[0].before == 1)
     }
 
     @Test func emptyFileAndCRLFAndStaleSnapshot() {

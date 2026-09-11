@@ -4,6 +4,22 @@ import Testing
 
 @MainActor
 struct GitEditorDiffModelTests {
+    @Test func adjacentFileNavigationStopsAtTheListBoundaries() async throws {
+        let root = try await makeRepository()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("first\n".utf8).write(to: root.appendingPathComponent("a.txt"))
+        try Data("second\n".utf8).write(to: root.appendingPathComponent("b.txt"))
+        let model = makeModel(root: root)
+        defer { model.cancel() }
+
+        await model.reload().value
+        #expect(model.selected?.path == "a.txt")
+        #expect(model.selectAdjacentFile(offset: -1) == nil)
+        await model.selectAdjacentFile(offset: 1)?.value
+        #expect(model.selected?.path == "b.txt")
+        #expect(model.selectAdjacentFile(offset: 1) == nil)
+    }
+
     @Test func refreshResolvesUntrackedAndIndexChangesBeforeLoadingSources() async throws {
         let root = try await makeRepository()
         defer { try? FileManager.default.removeItem(at: root) }

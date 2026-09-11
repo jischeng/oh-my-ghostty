@@ -29,6 +29,25 @@ struct GitDiffPresentation: Equatable {
             return (line - 1, true)
         })
     }
+    var changeAnchors: [(before: Int?, after: Int?, inline: Int)] {
+        var anchors: [(before: Int?, after: Int?, inline: Int)] = []
+        var inChange = false
+        for (index, row) in rows.enumerated() {
+            if row.added != nil {
+                if !inChange {
+                    anchors.append((row.beforeLine.map { $0 - 1 }, row.afterLine.map { $0 - 1 }, index))
+                } else if anchors[anchors.count - 1].before == nil, let line = row.beforeLine {
+                    anchors[anchors.count - 1].before = line - 1
+                } else if anchors[anchors.count - 1].after == nil, let line = row.afterLine {
+                    anchors[anchors.count - 1].after = line - 1
+                }
+                inChange = true
+            } else {
+                inChange = false
+            }
+        }
+        return anchors
+    }
 
     init(before: String, after: String, patch: String) {
         func lines(_ text: String) -> [String] {

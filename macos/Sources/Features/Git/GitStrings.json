@@ -275,6 +275,30 @@
     "en": "Select file",
     "zh-Hans": "选择文件"
   },
+  "Previous file": {
+    "en": "Previous file",
+    "zh-Hans": "上一个文件"
+  },
+  "Next file": {
+    "en": "Next file",
+    "zh-Hans": "下一个文件"
+  },
+  "Previous change": {
+    "en": "Previous change",
+    "zh-Hans": "上一处差异"
+  },
+  "Next change": {
+    "en": "Next change",
+    "zh-Hans": "下一处差异"
+  },
+  "{0} files": {
+    "en": "{0} files",
+    "zh-Hans": "{0} 个文件"
+  },
+  "{0} / {1} files": {
+    "en": "{0} / {1} files",
+    "zh-Hans": "{0} / {1} 个文件"
+  },
   "No changed files": {
     "en": "No changed files",
     "zh-Hans": "没有更改的文件"

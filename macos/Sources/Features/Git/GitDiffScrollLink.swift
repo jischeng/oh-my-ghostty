@@ -59,6 +59,22 @@ final class GitDiffScrollLink {
         targetClip.scroll(to: point)
         targetScroll.reflectScrolledClipView(targetClip)
     }
+
+    func jump(to lines: [Int: Int]) {
+        for (side, index) in lines {
+            guard let endpoint = endpoints[side], let view = endpoint.view,
+                  let scrollView = view.enclosingScrollView,
+                  let line = view.layoutManager.textLineForIndex(index) else { continue }
+            view.layoutManager.ensureLayoutUntil(line.range.location)
+            let resolved = view.layoutManager.textLineForIndex(index) ?? line
+            let clip = scrollView.contentView
+            let point = NSPoint(x: clip.bounds.origin.x,
+                                y: max(0, min(resolved.yPos - 8, view.bounds.height - clip.bounds.height)))
+            endpoint.lastOrigin = point
+            clip.scroll(to: point)
+            scrollView.reflectScrolledClipView(clip)
+        }
+    }
 }
 
 @MainActor

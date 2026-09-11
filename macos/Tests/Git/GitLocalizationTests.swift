@@ -14,6 +14,8 @@ struct GitLocalizationTests {
         #expect(chinese.text("Open in Editor") == "在编辑器中打开")
         #expect(chinese.text("Open Folder in New Tab") == "在新标签页中打开所在文件夹")
         #expect(chinese.text("Linked scrolling") == "同步滚动")
+        #expect(chinese.text("Previous file") == "上一个文件")
+        #expect(chinese.format("{0} / {1} files", ["6", "18"]) == "6 / 18 个文件")
         #expect(GitStrings(language: .english, preferredLanguages: ["zh-Hans"]).text("History") == "History")
         #expect(GitStrings(language: .simplifiedChinese, preferredLanguages: ["en"]).text("History") == "历史")
         for (key, translations) in GitStrings.catalog {

@@ -56,6 +56,15 @@ final class GitEditorDiffModel: ObservableObject {
         return startLoading(.diff) { try await self.load(file) }
     }
 
+    @discardableResult
+    func selectAdjacentFile(offset: Int) -> Task<Void, Never>? {
+        guard !files.isEmpty else { return nil }
+        let current = selected.flatMap { files.firstIndex(of: $0) } ?? 0
+        let index = max(0, min(files.count - 1, current + offset))
+        guard index != current else { return nil }
+        return select(files[index])
+    }
+
     func cancel() {
         task?.cancel()
         task = nil

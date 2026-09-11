@@ -121,3 +121,77 @@ struct GitDiffPresentation: Equatable {
         if oldIndex != old.count || newIndex != new.count { isConsistent = false }
     }
 }
+
+struct GitDiffReviewNavigator: Equatable {
+    enum Direction: Equatable { case previous, next }
+    enum Landing: Equatable { case first, last }
+    enum Hint: Equatable { case previousFile, nextFile, firstFile, lastFile }
+    enum Outcome: Equatable {
+        case jump(Int)
+        case hint(Hint)
+        case openFile(offset: Int, landing: Landing)
+    }
+
+    private(set) var changeIndex: Int?
+    private(set) var armedDirection: Direction?
+
+    mutating func reset() {
+        changeIndex = nil
+        armedDirection = nil
+    }
+
+    mutating func disarm() {
+        armedDirection = nil
+    }
+
+    mutating func land(_ landing: Landing, changeCount: Int) -> Int? {
+        armedDirection = nil
+        guard changeCount > 0 else { changeIndex = nil; return nil }
+        let index = landing == .first ? 0 : changeCount - 1
+        changeIndex = index
+        return index
+    }
+
+    mutating func move(_ direction: Direction, changeCount: Int, fileIndex: Int, fileCount: Int) -> Outcome? {
+        guard changeCount > 0 else { return nil }
+        let current = changeIndex
+        switch direction {
+        case .next:
+            let nextIndex = (current ?? -1) + 1
+            if nextIndex < changeCount {
+                let index = min(changeCount - 1, nextIndex)
+                changeIndex = index
+                armedDirection = nil
+                return .jump(index)
+            }
+            guard fileIndex < fileCount - 1 else {
+                armedDirection = nil
+                return .hint(.lastFile)
+            }
+            if armedDirection == .next {
+                reset()
+                return .openFile(offset: 1, landing: .first)
+            }
+            armedDirection = .next
+            return .hint(.nextFile)
+        case .previous:
+            let previousIndex = (current ?? changeCount) - 1
+            if previousIndex >= 0 {
+                let index = max(0, previousIndex)
+                changeIndex = index
+                armedDirection = nil
+                return .jump(index)
+            }
+            guard fileIndex > 0 else {
+                armedDirection = nil
+                return .hint(.firstFile)
+            }
+            if armedDirection == .previous {
+                reset()
+                return .openFile(offset: -1, landing: .last)
+            }
+            armedDirection = .previous
+            return .hint(.previousFile)
+        }
+    }
+}

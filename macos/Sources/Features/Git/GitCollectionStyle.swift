@@ -72,10 +72,9 @@ struct GitCollectionModePicker: View {
                         .foregroundStyle(Color(mode == value ? colors.text : colors.secondary))
                         .frame(width: 32, height: 28)
                         .contentShape(Rectangle())
-                        .background(Color(colors.text).opacity(mode == value ? 0.08 : 0), in: RoundedRectangle(cornerRadius: 4))
                 }
                 .buttonStyle(.plain)
-                .buttonStyle(GitModeButtonStyle(colors: colors, selected: mode == value))
+                .buttonStyle(GitToolbarButtonStyle(colors: colors, selected: mode == value))
                 .help(GitL10n.format("{0} view", value.title))
                 .accessibilityLabel(GitL10n.format("{0} view", value.title))
                 .accessibilityValue(mode == value ? GitL10n.text("Selected") : "")
@@ -85,7 +84,7 @@ struct GitCollectionModePicker: View {
     }
 }
 
-private struct GitModeButtonStyle: ButtonStyle {
+struct GitToolbarButtonStyle: ButtonStyle {
     let colors: GitCollectionColors
     let selected: Bool
     func makeBody(configuration: Configuration) -> some View {
@@ -98,9 +97,17 @@ private struct GitModeButtonStyle: ButtonStyle {
         @State private var hover = false
         var body: some View {
             configuration.label
-                .background(Color(colors.text).opacity(configuration.isPressed ? 0.12 : hover ? 0.06 : 0), in: RoundedRectangle(cornerRadius: 4))
+                .background(background, in: RoundedRectangle(cornerRadius: 4))
                 .contentShape(Rectangle())
                 .onHover { hover = $0 }
+                .scaleEffect(configuration.isPressed ? 0.96 : 1)
+                .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
+        }
+        private var background: Color {
+            if selected {
+                return Color(colors.accent).opacity(configuration.isPressed ? 0.22 : hover ? 0.18 : 0.13)
+            }
+            return Color(colors.text).opacity(configuration.isPressed ? 0.12 : hover ? 0.06 : 0)
         }
     }
 }

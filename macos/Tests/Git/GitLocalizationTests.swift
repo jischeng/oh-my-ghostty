@@ -16,6 +16,9 @@ struct GitLocalizationTests {
         #expect(chinese.text("Linked scrolling") == "同步滚动")
         #expect(chinese.text("Previous file") == "上一个文件")
         #expect(chinese.format("{0} / {1} files", ["6", "18"]) == "6 / 18 个文件")
+        #expect(chinese.text("Unified / Inline Diff") == "统一 / 行内差异")
+        #expect(chinese.text("Reached the last change. Click again to open the next file.")
+            == "已到当前文件最后一处差异，再次点击跳转到下一个文件。")
         #expect(GitStrings(language: .english, preferredLanguages: ["zh-Hans"]).text("History") == "History")
         #expect(GitStrings(language: .simplifiedChinese, preferredLanguages: ["en"]).text("History") == "历史")
         for (key, translations) in GitStrings.catalog {

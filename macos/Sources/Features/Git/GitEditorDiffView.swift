@@ -25,6 +25,7 @@ struct GitDiffEditorActions {
 }
 
 struct GitEditorDiffView: View {
+    @Environment(\.gitCollectionColors) private var colors
     let request: GitEditorDiffRequest
     let theme: EditorTheme
     var isActive = true
@@ -34,7 +35,10 @@ struct GitEditorDiffView: View {
     @AppStorage("git.diff.viewMode") private var mode = GitL10n.text("Side by Side")
     @State private var scroll = GitDiffScrollLink()
     @State private var linkedScrolling = true
-    @State private var changeIndex = -1
+    @State private var navigator = GitDiffReviewNavigator()
+    @State private var pendingLanding: GitDiffReviewNavigator.Landing?
+    @State private var navigationHint: String?
+    @State private var hintTask: Task<Void, Never>?
 
     init(request: GitEditorDiffRequest, theme: EditorTheme, isActive: Bool = true,
          actions: GitDiffEditorActions = GitDiffEditorActions(), close: @escaping () -> Void) {
@@ -50,11 +54,11 @@ struct GitEditorDiffView: View {
         VStack(spacing: 0) {
             HStack(spacing: 4) {
                 toolbarButton("chevron.left", help: GitL10n.text("Previous file"), disabled: selectedFileIndex <= 0) {
-                    model.selectAdjacentFile(offset: -1)
+                    selectAdjacentFile(offset: -1)
                 }
                 toolbarButton("chevron.right", help: GitL10n.text("Next file"),
                               disabled: selectedFileIndex < 0 || selectedFileIndex >= model.files.count - 1) {
-                    model.selectAdjacentFile(offset: 1)
+                    selectAdjacentFile(offset: 1)
                 }
                 Text(fileCounter)
                     .font(.caption.monospacedDigit())
@@ -62,10 +66,10 @@ struct GitEditorDiffView: View {
                     .fixedSize()
                 toolbarDivider
                 toolbarButton("arrow.up", help: GitL10n.text("Previous change"), disabled: changeAnchors.isEmpty) {
-                    selectChange(offset: -1)
+                    selectChange(.previous)
                 }
                 toolbarButton("arrow.down", help: GitL10n.text("Next change"), disabled: changeAnchors.isEmpty) {
-                    selectChange(offset: 1)
+                    selectChange(.next)
                 }
                 Spacer()
                 Text(model.selected?.displayPath ?? GitL10n.text("Select file"))
@@ -76,26 +80,36 @@ struct GitEditorDiffView: View {
                     .layoutPriority(1)
                 Spacer()
                 fileMenu
-                viewMenu
-                if mode == GitL10n.text("Side by Side") {
-                    Button { linkedScrolling.toggle() } label: {
-                        Image(systemName: linkedScrolling ? "link" : "link.slash")
-                            .frame(width: 22, height: 20)
-                            .foregroundStyle(linkedScrolling ? Color.accentColor : Color.secondary)
-                            .background(linkedScrolling ? Color.accentColor.opacity(0.14) : Color.clear,
-                                        in: RoundedRectangle(cornerRadius: 4))
-                            .contentShape(Rectangle())
+                HStack(spacing: 0) {
+                    toolbarButton("rectangle.split.2x1", help: GitL10n.text("Side-by-side Diff"),
+                                  selected: mode == GitL10n.text("Side by Side"),
+                                  accessibilityValue: mode == GitL10n.text("Side by Side") ? GitL10n.text("Selected") : "") {
+                        clearHint()
+                        mode = GitL10n.text("Side by Side")
                     }
-                    .buttonStyle(.plain)
-                    .help(linkedScrolling ? GitL10n.text("Disable linked scrolling") : GitL10n.text("Enable linked scrolling"))
-                    .accessibilityLabel(GitL10n.text("Linked scrolling"))
-                    .accessibilityValue(GitL10n.text(linkedScrolling ? "On" : "Off"))
+                    toolbarButton("text.alignleft", help: GitL10n.text("Unified / Inline Diff"),
+                                  selected: mode == GitL10n.text("Inline"),
+                                  accessibilityValue: mode == GitL10n.text("Inline") ? GitL10n.text("Selected") : "") {
+                        clearHint()
+                        mode = GitL10n.text("Inline")
+                    }
+                }
+                if mode == GitL10n.text("Side by Side") {
+                    toolbarButton("link",
+                                  help: linkedScrolling ? GitL10n.text("Disable linked scrolling") : GitL10n.text("Enable linked scrolling"),
+                                  selected: linkedScrolling,
+                                  accessibilityValue: GitL10n.text(linkedScrolling ? "On" : "Off")) {
+                        clearHint()
+                        linkedScrolling.toggle()
+                    }
                 }
                 toolbarButton("pencil", help: GitL10n.text("Open in Editor"),
                               disabled: model.selected == nil || model.selected?.kind == .deleted) {
+                    clearHint()
                     if let file = model.selected { actions.openFile(file, false) }
                 }
                 toolbarButton("arrow.clockwise", help: GitL10n.text("Refresh diff"), disabled: model.isLoading) {
+                    clearHint()
                     model.reload()
                 }
             }
@@ -103,7 +117,7 @@ struct GitEditorDiffView: View {
             .controlSize(.small)
             .padding(.horizontal, 8)
             .frame(height: 32)
-            .background(Color(nsColor: .controlBackgroundColor).opacity(0.45))
+            .background(toolbarSurface)
             Divider()
             if model.isLoading { ProgressView().padding() }
             if let error = model.error { Text(error).foregroundStyle(.red).padding() }
@@ -134,16 +148,38 @@ struct GitEditorDiffView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .overlay(alignment: .top) {
+            if let navigationHint {
+                Text(navigationHint)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.1), lineWidth: 0.5))
+                    .padding(.top, 38)
+                    .transition(.opacity)
+                    .allowsHitTesting(false)
+            }
+        }
         .background(GitDiffFallbackCommands(
             isActive: isActive && (model.content?.presentation == nil || model.content?.sourceError != nil),
             actions: actions, close: close
         ))
         .onAppear { model.reload() }
-        .onDisappear { model.cancel() }
+        .onDisappear { model.cancel(); clearHint(); navigator.reset() }
         .onChange(of: linkedScrolling) { scroll.enabled = $0 }
         .onChange(of: model.content?.presentation) {
             scroll.presentation = $0 ?? GitDiffPresentation(before: "", after: "", patch: "")
-            changeIndex = -1
+            guard let presentation = $0 else { return }
+            if let landing = pendingLanding {
+                pendingLanding = nil
+                if let index = navigator.land(landing, changeCount: presentation.changeAnchors.count) {
+                    jump(to: presentation.changeAnchors[index], afterEditorReplacement: true)
+                }
+            } else {
+                navigator.reset()
+            }
         }
     }
 
@@ -161,31 +197,81 @@ struct GitEditorDiffView: View {
         model.content?.presentation?.changeAnchors ?? []
     }
 
-    private func selectChange(offset: Int) {
-        guard !changeAnchors.isEmpty else { return }
-        if changeIndex < 0 {
-            changeIndex = offset > 0 ? 0 : changeAnchors.count - 1
-        } else {
-            changeIndex = ((changeIndex + offset) % changeAnchors.count + changeAnchors.count) % changeAnchors.count
-        }
-        let anchor = changeAnchors[changeIndex]
-        if mode == GitL10n.text("Side by Side") {
-            var lines: [Int: Int] = [:]
-            if let before = anchor.before { lines[0] = before }
-            if let after = anchor.after { lines[1] = after }
-            scroll.jump(to: lines)
-        } else {
-            scroll.jump(to: [2: anchor.inline])
+    private var toolbarSurface: Color { Color.primary.opacity(0.025) }
+
+    private func selectAdjacentFile(offset: Int) {
+        pendingLanding = nil
+        navigator.reset()
+        clearHint()
+        model.selectAdjacentFile(offset: offset)
+    }
+
+    private func selectChange(_ direction: GitDiffReviewNavigator.Direction) {
+        guard let outcome = navigator.move(direction, changeCount: changeAnchors.count,
+                                            fileIndex: selectedFileIndex, fileCount: model.files.count) else { return }
+        switch outcome {
+        case .jump(let index):
+            clearHint()
+            jump(to: changeAnchors[index])
+        case .hint(let hint):
+            showHint(hint)
+        case .openFile(let offset, let landing):
+            clearHint()
+            pendingLanding = landing
+            model.selectAdjacentFile(offset: offset)
         }
     }
 
-    private func toolbarButton(_ image: String, help: String, disabled: Bool = false,
+    private func jump(to anchor: (before: Int?, after: Int?, inline: Int), afterEditorReplacement: Bool = false) {
+        var lines: [Int: Int] = [:]
+        if mode == GitL10n.text("Side by Side") {
+            if let before = anchor.before { lines[0] = before }
+            if let after = anchor.after { lines[1] = after }
+        } else {
+            lines[2] = anchor.inline
+        }
+        if afterEditorReplacement { scroll.queueJump(to: lines) } else { scroll.jump(to: lines) }
+    }
+
+    private func showHint(_ hint: GitDiffReviewNavigator.Hint) {
+        let text = switch hint {
+        case .previousFile: GitL10n.text("Reached the first change. Click again to open the previous file.")
+        case .nextFile: GitL10n.text("Reached the last change. Click again to open the next file.")
+        case .firstFile: GitL10n.text("This is the first change in the first file.")
+        case .lastFile: GitL10n.text("This is the last change in the last file.")
+        }
+        navigationHint = text
+        hintTask?.cancel()
+        hintTask = Task {
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled, navigationHint == text else { return }
+            navigationHint = nil
+            navigator.disarm()
+        }
+    }
+
+    private func clearHint() {
+        hintTask?.cancel()
+        hintTask = nil
+        navigationHint = nil
+        navigator.disarm()
+    }
+
+    private func toolbarButton(_ image: String, help: String, disabled: Bool = false, selected: Bool = false,
+                               accessibilityValue: String = "",
                                action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: image).frame(width: 20, height: 20).contentShape(Rectangle())
+            Image(systemName: image)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Color(selected ? colors.accent : colors.secondary))
+                .frame(width: 28, height: 24)
+                .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .buttonStyle(GitToolbarButtonStyle(colors: colors, selected: selected))
         .help(help)
         .accessibilityLabel(help)
+        .accessibilityValue(accessibilityValue)
         .disabled(disabled)
     }
 
@@ -197,6 +283,9 @@ struct GitEditorDiffView: View {
         Menu {
             ForEach(model.files) { file in
                 Button {
+                    pendingLanding = nil
+                    navigator.reset()
+                    clearHint()
                     model.select(file)
                 } label: {
                     if file == model.selected {
@@ -217,9 +306,14 @@ struct GitEditorDiffView: View {
                 Button(GitL10n.text("Copy Relative Path")) { InspectorCopyMenu.copy(file.path, to: .general) }
             }
         } label: {
-            Image(systemName: "list.bullet").frame(width: 20, height: 20).contentShape(Rectangle())
+            Image(systemName: "list.bullet")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Color(colors.secondary))
+                .frame(width: 28, height: 24)
+                .contentShape(Rectangle())
         }
         .menuStyle(.borderlessButton)
+        .buttonStyle(GitToolbarButtonStyle(colors: colors, selected: false))
         .menuIndicator(.hidden)
         .fixedSize()
         .help(GitL10n.text("Select file"))
@@ -227,30 +321,15 @@ struct GitEditorDiffView: View {
         .disabled(model.files.isEmpty)
     }
 
-    private var viewMenu: some View {
-        Menu {
-            Picker(GitL10n.text("View"), selection: $mode) {
-                Label(GitL10n.text("Side by Side"), systemImage: "rectangle.split.2x1")
-                    .tag(GitL10n.text("Side by Side"))
-                Label(GitL10n.text("Inline"), systemImage: "text.alignleft")
-                    .tag(GitL10n.text("Inline"))
-            }
-        } label: {
-            Image(systemName: mode == GitL10n.text("Side by Side") ? "rectangle.split.2x1" : "text.alignleft")
-                .frame(width: 20, height: 20).contentShape(Rectangle())
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help(GitL10n.text("View"))
-        .accessibilityLabel(GitL10n.text("View"))
-    }
-
     private func sourcePane(_ title: String, text: String, path: String, highlights: [Int: Bool], side: Int) -> some View {
         VStack(spacing: 0) {
-            Text(title).font(.caption).padding(6)
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity)
-                .background(side == 0 ? Color.red.opacity(0.12) : Color.green.opacity(0.12))
+                .frame(height: 24)
+                .background(toolbarSurface)
+                .overlay(alignment: .bottom) { Divider() }
             GitDiffLinkedEditor(text: text, path: path, highlights: highlights,
                                 isActive: isActive, theme: theme, link: scroll, side: side, actions: actions, close: close)
                 .id("\(model.selected?.id ?? "")-\(side)")

@@ -8,6 +8,7 @@ final class GitDiffScrollLink {
     var enabled = true
     var presentation = GitDiffPresentation(before: "", after: "", patch: "")
     private var endpoints: [Int: Endpoint] = [:]
+    private var pendingLines: [Int: Int] = [:]
     private var syncing = false
 
     final class Endpoint {
@@ -28,6 +29,7 @@ final class GitDiffScrollLink {
                                                                   object: clip, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.scrolled(side: side) }
         }
+        applyPendingJump(side: side)
     }
 
     func unregister(_ view: TextView?, side: Int) {
@@ -61,19 +63,27 @@ final class GitDiffScrollLink {
     }
 
     func jump(to lines: [Int: Int]) {
-        for (side, index) in lines {
-            guard let endpoint = endpoints[side], let view = endpoint.view,
-                  let scrollView = view.enclosingScrollView,
-                  let line = view.layoutManager.textLineForIndex(index) else { continue }
-            view.layoutManager.ensureLayoutUntil(line.range.location)
-            let resolved = view.layoutManager.textLineForIndex(index) ?? line
-            let clip = scrollView.contentView
-            let point = NSPoint(x: clip.bounds.origin.x,
-                                y: max(0, min(resolved.yPos - 8, view.bounds.height - clip.bounds.height)))
-            endpoint.lastOrigin = point
-            clip.scroll(to: point)
-            scrollView.reflectScrolledClipView(clip)
-        }
+        pendingLines.merge(lines) { _, new in new }
+        for side in lines.keys { applyPendingJump(side: side) }
+    }
+
+    func queueJump(to lines: [Int: Int]) {
+        pendingLines = lines
+    }
+
+    private func applyPendingJump(side: Int) {
+        guard let index = pendingLines[side], let endpoint = endpoints[side], let view = endpoint.view,
+              let scrollView = view.enclosingScrollView,
+              let line = view.layoutManager.textLineForIndex(index) else { return }
+        view.layoutManager.ensureLayoutUntil(line.range.location)
+        let resolved = view.layoutManager.textLineForIndex(index) ?? line
+        let clip = scrollView.contentView
+        let point = NSPoint(x: clip.bounds.origin.x,
+                            y: max(0, min(resolved.yPos - 8, view.bounds.height - clip.bounds.height)))
+        endpoint.lastOrigin = point
+        clip.scroll(to: point)
+        scrollView.reflectScrolledClipView(clip)
+        pendingLines.removeValue(forKey: side)
     }
 }
 

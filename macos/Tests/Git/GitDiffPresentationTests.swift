@@ -2,6 +2,32 @@ import Testing
 @testable import Ghostty
 
 struct GitDiffPresentationTests {
+    @Test func reviewNavigationRequiresConfirmationBeforeCrossingFiles() {
+        var navigator = GitDiffReviewNavigator()
+        #expect(navigator.move(.next, changeCount: 2, fileIndex: 1, fileCount: 3) == .jump(0))
+        #expect(navigator.move(.next, changeCount: 2, fileIndex: 1, fileCount: 3) == .jump(1))
+        #expect(navigator.move(.next, changeCount: 2, fileIndex: 1, fileCount: 3) == .hint(.nextFile))
+        #expect(navigator.move(.next, changeCount: 2, fileIndex: 1, fileCount: 3)
+            == .openFile(offset: 1, landing: .first))
+        #expect(navigator.land(.first, changeCount: 3) == 0)
+        #expect(navigator.move(.previous, changeCount: 3, fileIndex: 2, fileCount: 3) == .hint(.previousFile))
+        #expect(navigator.move(.previous, changeCount: 3, fileIndex: 2, fileCount: 3)
+            == .openFile(offset: -1, landing: .last))
+        #expect(navigator.land(.last, changeCount: 4) == 3)
+    }
+
+    @Test func reviewNavigationDoesNotWrapAtTheFirstOrLastFile() {
+        var first = GitDiffReviewNavigator()
+        #expect(first.land(.first, changeCount: 1) == 0)
+        #expect(first.move(.previous, changeCount: 1, fileIndex: 0, fileCount: 2) == .hint(.firstFile))
+        #expect(first.changeIndex == 0)
+
+        var last = GitDiffReviewNavigator()
+        #expect(last.land(.last, changeCount: 1) == 0)
+        #expect(last.move(.next, changeCount: 1, fileIndex: 1, fileCount: 2) == .hint(.lastFile))
+        #expect(last.changeIndex == 0)
+    }
+
     @Test func inlineIncludesUnchangedSourceAndBothSidesOfReplacement() {
         let value = GitDiffPresentation(before: "one\nold\nlast\n", after: "one\nnew\nextra\nlast\n",
                                         patch: "@@ -1,3 +1,4 @@\n one\n-old\n+new\n+extra\n last\n")

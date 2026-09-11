@@ -8,7 +8,7 @@ struct GitEditorDiffRequest: Identifiable {
     let target: GitDiffTarget
     let file: GitDiffFile?
     var tabTitle: String {
-        let name = file.map { ($0.path as NSString).lastPathComponent } ?? "Git Diff"
+        let name = file.map { ($0.path as NSString).lastPathComponent } ?? GitL10n.text("Git Diff")
         return name + " · " + target.description
     }
 }
@@ -59,8 +59,16 @@ struct GitEditorDiffView: View {
                 }.pickerStyle(.menu).labelsHidden().fixedSize()
                 if mode == GitL10n.text("Side by Side") {
                     Button { linkedScrolling.toggle() } label: {
-                        Image(systemName: linkedScrolling ? "link" : "link.slash")
-                    }.help(linkedScrolling ? GitL10n.text("Disable linked scrolling") : GitL10n.text("Enable linked scrolling"))
+                        Label(GitL10n.text("Linked scrolling"),
+                              systemImage: linkedScrolling ? "link" : "link.slash")
+                            .font(.caption)
+                            .foregroundStyle(linkedScrolling ? Color.accentColor : Color.secondary)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(linkedScrolling ? GitL10n.text("Disable linked scrolling") : GitL10n.text("Enable linked scrolling"))
+                    .accessibilityLabel(GitL10n.text("Linked scrolling"))
+                    .accessibilityValue(GitL10n.text(linkedScrolling ? "On" : "Off"))
                 }
                 Button { model.reload() } label: { Image(systemName: "arrow.clockwise") }
                     .help(GitL10n.text("Refresh diff")).disabled(model.isLoading)
@@ -77,16 +85,16 @@ struct GitEditorDiffView: View {
                 }.padding(.horizontal, 8)
                     .contextMenu {
                         if let file = model.selected {
-                            Button("Open in Editor") { actions.openFile(file, false) }
+                            Button(GitL10n.text("Open in Editor")) { actions.openFile(file, false) }
                                 .disabled(file.kind == .deleted)
-                            Button("Open Folder in New Tab") { actions.openFile(file, true) }
+                            Button(GitL10n.text("Open Folder in New Tab")) { actions.openFile(file, true) }
                             Divider()
-                            Button("Copy Path") {
+                            Button(GitL10n.text("Copy Path")) {
                                 if let path = try? GitFileActions.absolutePath(file, repository: request.repository) {
                                     InspectorCopyMenu.copy(path, to: .general)
                                 }
                             }
-                            Button("Copy Relative Path") { InspectorCopyMenu.copy(file.path, to: .general) }
+                            Button(GitL10n.text("Copy Relative Path")) { InspectorCopyMenu.copy(file.path, to: .general) }
                         }
                     }
 
@@ -104,9 +112,9 @@ struct GitEditorDiffView: View {
                 } else if let presentation = content.presentation {
                     if mode == GitL10n.text("Side by Side") {
                         HSplitView {
-                            sourcePane("Before", text: content.before, path: document.file.oldPath ?? document.file.path,
+                            sourcePane(GitL10n.text("Before"), text: content.before, path: document.file.oldPath ?? document.file.path,
                                        highlights: presentation.beforeHighlights, side: 0)
-                            sourcePane("After", text: content.after, path: document.file.path,
+                            sourcePane(GitL10n.text("After"), text: content.after, path: document.file.path,
                                        highlights: presentation.afterHighlights, side: 1)
                         }
                     } else {

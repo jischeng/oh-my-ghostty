@@ -303,7 +303,7 @@ final class EditorWorkspaceStore {
             }.map { (workspace, $0) }
         }
         guard affected.allSatisfy({ !$0.1.isDirty && !$0.1.isSaving && !$0.1.isReloading && !$0.1.isRestoringFromGit }) else {
-            throw GitDiffServiceError.gitFailed("Save unsaved editor changes before discarding this file's Git changes.")
+            throw GitDiffServiceError.gitFailed(GitL10n.text("Save unsaved editor changes before discarding this file's Git changes."))
         }
         for (_, document) in affected { document.isRestoringFromGit = true; document.suspendAutoSave() }
         defer {

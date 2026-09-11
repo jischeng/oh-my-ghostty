@@ -86,7 +86,7 @@ struct GitHistoryInteractionTests {
             x: 0, y: 0, width: detailLabel.bounds.width, height: .greatestFiniteMagnitude)).height)
         #expect(detailLabel.bounds.height >= requiredHeight)
         let shortBodyHeader = try #require(find(NSButton.self, in: metadata))
-        #expect(shortBodyHeader.title == "Commit message · 1 line")
+        #expect(shortBodyHeader.title == GitL10n.format("Commit message · {0} line", "1"))
         let headerY = shortBodyHeader.frame.minY
         shortBodyHeader.performClick(nil)
         let closedBody = try #require(table.view(atColumn: 0, row: 3, makeIfNecessary: true))
@@ -132,13 +132,14 @@ struct GitHistoryInteractionTests {
             #expect(try summary() == originalSummary)
             let header = try #require(table.view(atColumn: 0, row: 1, makeIfNecessary: true))
             header.layoutSubtreeIfNeeded()
-            #expect(find(NSButton.self, in: header)?.attributedTitle.string == "6 files changed · +642 −87")
+            #expect(find(NSButton.self, in: header)?.attributedTitle.string ==
+                GitL10n.format("{0} files changed", "6") + " · +642 −87")
             let filesTop = table.rect(ofRow: 2).minY
             let message = try #require(table.view(atColumn: 0, row: 8, makeIfNecessary: true))
             message.layoutSubtreeIfNeeded()
             #expect(table.rect(ofRow: 8).height == 28)
             let toggle = try #require(find(NSButton.self, in: message))
-            #expect(toggle.title == "Commit message · 100 lines")
+            #expect(toggle.title == GitL10n.format("Commit message · {0} lines", "100"))
             let toggleFrame = toggle.frame
             toggle.performClick(nil)
             #expect(table.rect(ofRow: 8).height > 500)
@@ -147,7 +148,7 @@ struct GitHistoryInteractionTests {
             expanded.layoutSubtreeIfNeeded()
             #expect(find(NSTextField.self, in: expanded)?.stringValue.contains("Explanation line 99") == true)
             let less = try #require(find(NSButton.self, in: expanded))
-            #expect(less.title == "Commit message · 100 lines")
+            #expect(less.title == GitL10n.format("Commit message · {0} lines", "100"))
             #expect(less.frame == toggleFrame)
             less.performClick(nil)
             #expect(table.rect(ofRow: 8).height == 28)

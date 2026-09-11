@@ -541,8 +541,8 @@ struct GitCollectionView: NSViewRepresentable {
                     enabled: input.canWrite && item.enabled && file.kind != .unmerged)
                 menu.addItem(.separator())
                 add(GitL10n.text("Open Diff"), .action(.openDiff(file, section.target)))
-                add("Open in Editor", .action(.openGitFile(file, directory: false)), enabled: file.kind != .deleted)
-                add("Open Folder in New Tab", .action(.openGitFile(file, directory: true)))
+                add(GitL10n.text("Open in Editor"), .action(.openGitFile(file, directory: false)), enabled: file.kind != .deleted)
+                add(GitL10n.text("Open Folder in New Tab"), .action(.openGitFile(file, directory: true)))
                 add(GitL10n.text("Copy Path"), .copy(file.path))
             default: break
             }

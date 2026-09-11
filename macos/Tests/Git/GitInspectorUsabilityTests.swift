@@ -74,9 +74,9 @@ struct GitInspectorUsabilityTests {
         let menu = try #require(table.menu as? InspectorCopyMenu)
         (table.target as? GitHistoryTable.Coordinator)?.menuNeedsUpdate(menu)
         menu.pasteboard = board
-        let extra = try #require(menu.items.first { $0.title == "Copy More" }?.submenu as? InspectorCopyMenu)
+        let extra = try #require(menu.items.first { $0.title == GitL10n.text("Copy More") }?.submenu as? InspectorCopyMenu)
         extra.pasteboard = board
-        let index = try #require(extra.items.firstIndex { $0.title == "Copy email" })
+        let index = try #require(extra.items.firstIndex { $0.title == GitL10n.text("Copy email") })
         extra.performActionForItem(at: index)
         #expect(board.string(forType: .string) == commit.authorEmail)
         let cell = try #require(table.view(atColumn: 0, row: 0, makeIfNecessary: true))

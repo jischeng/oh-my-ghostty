@@ -98,9 +98,13 @@ struct GitMutationService: Sendable {
         case .discard(let file, let staged):
             let paths = [file.path] + (file.kind == .renamed ? file.oldPath.map { [$0] } ?? [] : [])
             try validate(paths)
-            guard file.kind != .unmerged else { throw GitDiffServiceError.gitFailed("Resolve merge conflicts before discarding changes.") }
+            guard file.kind != .unmerged else {
+                throw GitDiffServiceError.gitFailed(GitL10n.text("Resolve merge conflicts before discarding changes."))
+            }
             let current = try await GitDiffService(executor: executor).listFiles(for: repository, target: staged ? .staged : .unstaged)
-            guard current.files.contains(file) else { throw GitDiffServiceError.gitFailed("The file changed. Refresh and try again.") }
+            guard current.files.contains(file) else {
+                throw GitDiffServiceError.gitFailed(GitL10n.text("The file changed. Refresh and try again."))
+            }
             if file.isUntracked {
                 // No directory recursion or ignored-file removal. Literal pathspecs keep wildcards inert.
                 _ = try await run(["--literal-pathspecs", "clean", "-f", "--"] + paths, in: repository)

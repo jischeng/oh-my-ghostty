@@ -136,7 +136,7 @@ struct GitHistoryNavigatorTests {
             let filePosition = table.rect(ofRow: 2)
             control.performClick(nil)
             let openControl = try #require(find(NSButton.self, in: try cell(5)))
-            #expect(openControl.title == "Commit message · 18 lines")
+            #expect(openControl.title == GitL10n.format("Commit message · {0} lines", "18"))
             #expect(openControl.frame == controlFrame)
             #expect(table.rect(ofRow: 2) == filePosition)
             try await capture(host, path: "/tmp/omg-git-navigator-message-open-\(Int(width)).png")

@@ -159,7 +159,7 @@ struct GitSidebarV1Tests {
         let menu = try #require(table.menu)
         coordinator.menuNeedsUpdate(menu)
         #expect(menu.items.filter(\.isSeparatorItem).count == 3)
-        #expect(menu.items.contains { $0.title == "Copy Commit Hash" })
+        #expect(menu.items.contains { $0.title == GitL10n.text("Copy Commit Hash") })
         let pick = try #require(menu.items.firstIndex { $0.identifier?.rawValue == GitCommitOperation.cherryPick.rawValue })
         table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
         menu.performActionForItem(at: pick)
@@ -174,7 +174,8 @@ struct GitSidebarV1Tests {
             let fieldMenu = try #require(fieldMenu)
             coordinator.menuNeedsUpdate(fieldMenu)
             #expect(fieldMenu.items.contains { $0.identifier?.rawValue == "createWorktree" })
-            #expect(fieldMenu.items.first { $0.title == "Copy Commit Hash" }?.representedObject as? String == commits[0].id.rawValue)
+            #expect(fieldMenu.items.first { $0.title == GitL10n.text("Copy Commit Hash") }?.representedObject as? String ==
+                commits[0].id.rawValue)
         }
         root.isBusy = true
         coordinator.update(root)

@@ -143,7 +143,7 @@ struct GitDiffServiceTests {
             for: repository,
             target: .commit(GitCommitID(commit))
         )
-        #expect(list.baseDescription == "empty tree")
+        #expect(list.baseDescription == GitL10n.text("empty tree"))
         #expect(list.files.map(\.path) == [path])
         let metadata = try await service.loadCommitMetadata(
             for: GitCommitID(commit),
@@ -190,7 +190,9 @@ struct GitDiffServiceTests {
             target: .staged
         )
         #expect(limitedDocument.isTruncated)
-        #expect(limitedDocument.text.contains("display limit"))
+        #expect(limitedDocument.text == GitL10n.format(
+            "Diff exceeds the {0} display limit and was truncated.\n", "1 KB"
+        ))
 
         let unstaged = try await service.listFiles(for: repository, target: .unstaged)
         #expect(unstaged.files.map(\.path).contains(tracked))

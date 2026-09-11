@@ -104,7 +104,7 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                                     }
                                     Button { workspace.closeGitDiff(request) } label: {
                                         Image(systemName: "xmark").font(.caption2)
-                                    }.help("Close Diff")
+                                    }.help(GitL10n.text("Close Diff"))
                                 }
                                 .padding(.horizontal, 8).padding(.vertical, 6)
                                 .background(workspace.gitDiff?.id == request.id ? Color.accentColor.opacity(0.16) : Color.clear,

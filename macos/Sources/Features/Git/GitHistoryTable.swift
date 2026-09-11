@@ -411,7 +411,7 @@ struct GitHistoryTable: NSViewRepresentable {
             menu.autoenablesItems = false
             if case .file(_, let file) = rows[index] {
                 for (title, directory) in [("Open in Editor", false), ("Open Folder in New Tab", true)] {
-                    let item = NSMenuItem(title: title, action: #selector(fileAction(_:)), keyEquivalent: "")
+                    let item = NSMenuItem(title: GitL10n.text(title), action: #selector(fileAction(_:)), keyEquivalent: "")
                     item.target = self
                     item.representedObject = FileAction(file: file, directory: directory)
                     item.isEnabled = directory || file.kind != .deleted

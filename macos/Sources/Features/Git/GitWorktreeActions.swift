@@ -93,7 +93,7 @@ enum GitFileActions {
     static func open(_ file: GitDiffFile, repository: GitRepositoryIdentity,
                      context: InspectorPaneContext, directory: Bool) throws {
         guard repository.matches(context.session) else {
-            throw GitDiffServiceError.gitFailed("The source terminal session is no longer available.")
+            throw GitDiffServiceError.gitFailed(GitL10n.text("The source terminal session is no longer available."))
         }
         let path = try absolutePath(file, repository: repository)
         if directory {

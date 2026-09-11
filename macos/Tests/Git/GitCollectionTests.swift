@@ -49,7 +49,7 @@ struct GitCollectionTests {
             table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
             let menu = NSMenu()
             coordinator.menuNeedsUpdate(menu)
-            for title in ["Open in Editor", "Open Folder in New Tab", GitL10n.text("Discard Changes…")] {
+            for title in ["Open in Editor", "Open Folder in New Tab", "Discard Changes…"].map(GitL10n.text) {
                 let item = try #require(menu.items.first { $0.title == title })
                 #expect(item.isEnabled)
                 #expect(NSApp.sendAction(try #require(item.action), to: item.target, from: item))
@@ -143,7 +143,7 @@ struct GitCollectionTests {
     @Test func refModesKeepFullRefsAndGroupRemoteBeforeBranchPath() {
         let branches = [branch("main"), branch("feature/query/parser"), branch("origin/feature/foo", remote: true), branch("upstream/main", remote: true)]
         let tree = GitCollectionBuilder.nodes(source: .refs(branches: branches, worktrees: [], scopes: false, branchesError: nil, worktreesError: nil), mode: .tree)
-        #expect(tree.map(\.item.title) == ["Branches", "Remote Branches", "Worktrees"])
+        #expect(tree.map(\.item.title) == ["Branches", "Remote Branches", "Worktrees"].map(GitL10n.text))
         #expect(tree[1].children.map(\.item.title) == ["origin", "upstream"])
         #expect(tree[1].children[0].children[0].item.title == "feature")
         let list = GitCollectionBuilder.nodes(source: .refs(branches: branches, worktrees: [], scopes: false, branchesError: nil, worktreesError: nil), mode: .list)
@@ -162,7 +162,8 @@ struct GitCollectionTests {
         let detached = GitWorktreeInfo(path: "/dev/detached", head: .init("def123456789"), branchRef: nil, isMain: false, isCurrent: false)
         let source = GitCollectionSource.refs(branches: branches, worktrees: [worktree, detached], scopes: true, branchesError: nil, worktreesError: nil)
         let matched = GitCollectionBuilder.rows(GitCollectionBuilder.nodes(source: source, mode: .tree, query: "QUERY"))
-        #expect(matched.filter { $0.item.isCategory }.map(\.item.title) == ["Branches", "Remote Branches", "Worktrees"])
+        #expect(matched.filter { $0.item.isCategory }.map(\.item.title) ==
+            ["Branches", "Remote Branches", "Worktrees"].map(GitL10n.text))
         #expect(matched.contains { $0.id == "refs/heads/feature/Query" })
         #expect(matched.contains { $0.id == "refs/remotes/origin/feature/query" })
         #expect(matched.contains { $0.id == "worktree:" + worktree.path })

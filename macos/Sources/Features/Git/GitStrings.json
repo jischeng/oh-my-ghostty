@@ -1098,5 +1098,57 @@
   "This restores the file to its staged version. Staged changes are kept. This cannot be undone.": {
     "en": "This restores the file to its staged version. Staged changes are kept. This cannot be undone.",
     "zh-Hans": "此操作会将文件恢复到暂存区版本，保留已暂存更改，且无法撤销。"
+  },
+  "Open in Editor": {
+    "en": "Open in Editor",
+    "zh-Hans": "在编辑器中打开"
+  },
+  "Open Folder in New Tab": {
+    "en": "Open Folder in New Tab",
+    "zh-Hans": "在新标签页中打开所在文件夹"
+  },
+  "Copy Relative Path": {
+    "en": "Copy Relative Path",
+    "zh-Hans": "复制相对路径"
+  },
+  "Linked scrolling": {
+    "en": "Linked scrolling",
+    "zh-Hans": "同步滚动"
+  },
+  "On": {
+    "en": "On",
+    "zh-Hans": "已开启"
+  },
+  "Off": {
+    "en": "Off",
+    "zh-Hans": "已关闭"
+  },
+  "Git Diff": {
+    "en": "Git Diff",
+    "zh-Hans": "Git 差异"
+  },
+  "Close Diff": {
+    "en": "Close Diff",
+    "zh-Hans": "关闭差异"
+  },
+  "Before": {
+    "en": "Before",
+    "zh-Hans": "更改前"
+  },
+  "After": {
+    "en": "After",
+    "zh-Hans": "更改后"
+  },
+  "Resolve merge conflicts before discarding changes.": {
+    "en": "Resolve merge conflicts before discarding changes.",
+    "zh-Hans": "请先解决合并冲突，再丢弃更改。"
+  },
+  "The file changed. Refresh and try again.": {
+    "en": "The file changed. Refresh and try again.",
+    "zh-Hans": "文件已发生变化，请刷新后重试。"
+  },
+  "Save unsaved editor changes before discarding this file's Git changes.": {
+    "en": "Save unsaved editor changes before discarding this file's Git changes.",
+    "zh-Hans": "请先保存编辑器中未保存的内容，再丢弃此文件的 Git 更改。"
   }
 }

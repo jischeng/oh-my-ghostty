@@ -5,6 +5,40 @@ import Testing
 
 @MainActor
 struct InspectorPaneDeckTests {
+    private struct MountProbe: NSViewRepresentable {
+        let create: () -> NSView
+        func makeNSView(context: Context) -> NSView { create() }
+        func updateNSView(_ view: NSView, context: Context) {}
+    }
+
+    @Test func sidebarReopeningRetainsItsLazilyMountedNativeContent() async throws {
+        var mounts = 0
+        func root(_ visible: Bool) -> some View {
+            HStack {
+                Spacer()
+                TerminalSidebarTransitionContainer(isVisible: visible, width: 280, edge: .right,
+                    animationsEnabled: true, retainsContent: true, background: .clear) {
+                    MountProbe { mounts += 1; return NSView() }
+                }
+            }
+        }
+        let host = NSHostingView(rootView: root(false))
+        host.sizingOptions = []
+        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 600, height: 300),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderFront(nil)
+        defer { window.contentView = nil; window.close() }
+        try await Task.sleep(for: .milliseconds(60))
+        #expect(mounts == 0)
+        for visible in [true, false, true, false, true] {
+            host.rootView = root(visible)
+            try await Task.sleep(for: .milliseconds(240))
+            host.layoutSubtreeIfNeeded()
+            #expect(mounts == 1)
+        }
+    }
     @Test func switchingVisitedPanesRetainsNativeViewsAndBoundsTheCacheToItsTab() async throws {
         let registry = InspectorRegistry()
         let context = InspectorPaneContext(tabID: UUID(), surfaceID: UUID(), title: "Test", workingDirectory: "/repo")

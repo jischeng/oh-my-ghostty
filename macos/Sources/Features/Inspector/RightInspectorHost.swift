@@ -107,7 +107,7 @@ struct TerminalResizeBoundary: View {
     }
 }
 
-private struct TerminalSidebarTransitionContainer<Content: View>: View {
+struct TerminalSidebarTransitionContainer<Content: View>: View {
     enum Edge {
         case left
         case right
@@ -122,10 +122,12 @@ private struct TerminalSidebarTransitionContainer<Content: View>: View {
     let width: CGFloat
     let edge: Edge
     let animationsEnabled: Bool
+    let retainsContent: Bool
     let background: Color
     let content: Content
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var occupiesSpace: Bool
+    @State private var hasMounted: Bool
     @State private var revealProgress: CGFloat
     @State private var transitionTask: Task<Void, Never>?
 
@@ -134,6 +136,7 @@ private struct TerminalSidebarTransitionContainer<Content: View>: View {
         width: CGFloat,
         edge: Edge,
         animationsEnabled: Bool,
+        retainsContent: Bool = false,
         background: Color,
         @ViewBuilder content: () -> Content
     ) {
@@ -141,22 +144,26 @@ private struct TerminalSidebarTransitionContainer<Content: View>: View {
         self.width = width
         self.edge = edge
         self.animationsEnabled = animationsEnabled
+        self.retainsContent = retainsContent
         self.background = background
         self.content = content()
         self._occupiesSpace = State(initialValue: isVisible)
+        self._hasMounted = State(initialValue: isVisible)
         self._revealProgress = State(initialValue: isVisible ? 1 : 0)
     }
 
     var body: some View {
         ZStack(alignment: edge.alignment) {
-            if occupiesSpace {
+            if occupiesSpace || (retainsContent && hasMounted) {
                 content
+                    .transaction { if retainsContent { $0.animation = nil } }
                     .frame(width: width, alignment: edge.alignment)
                     .offset(
                         x: (1 - revealProgress) * edge.hiddenOffset(for: width)
                     )
-                    .allowsHitTesting(revealProgress == 1)
-                    .accessibilityHidden(revealProgress != 1)
+                    .opacity(occupiesSpace ? 1 : 0)
+                    .allowsHitTesting(isVisible && revealProgress == 1)
+                    .accessibilityHidden(!isVisible || revealProgress != 1)
             }
         }
         .frame(
@@ -173,6 +180,7 @@ private struct TerminalSidebarTransitionContainer<Content: View>: View {
     }
 
     private func transition(to visible: Bool) {
+        if visible { hasMounted = true }
         transitionTask?.cancel()
         transitionTask = nil
         guard !reduceMotion, animationsEnabled else {
@@ -210,6 +218,7 @@ private struct TerminalSidebarTransitionContainer<Content: View>: View {
         transitionTask?.cancel()
         transitionTask = nil
         occupiesSpace = isVisible
+        if isVisible { hasMounted = true }
         revealProgress = isVisible ? 1 : 0
     }
 }
@@ -404,8 +413,6 @@ extension TerminalWindow {
         sizing?.setTitlebarWidth(width)
         inspectorToggleAccessory.view.needsLayout = true
         titlebarContainer?.needsLayout = true
-        titlebarContainer?.layoutSubtreeIfNeeded()
-        inspectorToggleAccessory.view.layoutSubtreeIfNeeded()
         scheduleInspectorAppearanceSync(controller: controller)
     }
 
@@ -621,6 +628,7 @@ struct TerminalShellLayoutContainer<Content: View>: View {
                     width: rightWidth,
                     edge: .right,
                     animationsEnabled: selectedPresentation,
+                    retainsContent: true,
                     background: backgroundColor.opacity(backgroundOpacity)
                 ) {
                     HStack(spacing: 0) {
@@ -638,6 +646,7 @@ struct TerminalShellLayoutContainer<Content: View>: View {
                             controller: controller,
                             layoutState: layoutState,
                             registry: inspectorRegistry,
+                            isPresented: rightVisible,
                             backgroundColor: backgroundColor,
                             backgroundOpacity: 0
                         )
@@ -673,6 +682,7 @@ struct RightInspectorHost: View {
     @ObservedObject var controller: TerminalController
     @ObservedObject var layoutState: VerticalTabWindowLayoutState
     @ObservedObject var registry: InspectorRegistry
+    var isPresented = true
     let backgroundColor: Color
     let backgroundOpacity: Double
     @State private var contextRevision: UInt64 = 0
@@ -713,6 +723,8 @@ struct RightInspectorHost: View {
         return registry.entries.first?.id
     }
 
+    private var presentedPaneID: String? { isPresented ? selectedPaneID : nil }
+
     var body: some View {
         Group {
             if let paneID = selectedPaneID,
@@ -725,23 +737,27 @@ struct RightInspectorHost: View {
                         context: context,
                         dividerColor: controller.sidebarDividerColor,
                         registry: registry
-                    )))
+                    )), updatesEnabled: isPresented)
             }
         }
         .background(backgroundColor.opacity(backgroundOpacity))
         .environment(\.gitCollectionColors, GitCollectionColors(config: controller.ghostty.config, background: NSColor(backgroundColor)))
         .onAppear {
             reconcileSelection()
-            registry.presentationDidChange(to: selectedPaneID, context: context)
+            registry.presentationDidChange(to: presentedPaneID, context: context)
         }
         .onChange(of: registry.entries.map(\.id)) { _ in
             reconcileSelection()
-            registry.presentationDidChange(to: selectedPaneID, context: context)
+            registry.presentationDidChange(to: presentedPaneID, context: context)
         }
         .onChange(of: layoutState.selectedInspectorPaneID) { _ in
-            registry.presentationDidChange(to: selectedPaneID, context: context)
+            registry.presentationDidChange(to: presentedPaneID, context: context)
+        }
+        .onChange(of: isPresented) { _ in
+            registry.presentationDidChange(to: presentedPaneID, context: context)
         }
         .onReceive(contextChanges) { _ in
+            guard isPresented else { return }
             // @Published emits before its property storage is updated. Defer
             // one main-queue turn so the Inspector context reads the committed
             // Surface cwd/title, then notify the provider directly rather than
@@ -749,13 +765,13 @@ struct RightInspectorHost: View {
             DispatchQueue.main.async {
                 contextRevision &+= 1
                 registry.presentationDidChange(
-                    to: selectedPaneID,
+                    to: presentedPaneID,
                     context: context
                 )
             }
         }
         .onChange(of: context) { nextContext in
-            registry.presentationDidChange(to: selectedPaneID, context: nextContext)
+            registry.presentationDidChange(to: presentedPaneID, context: nextContext)
         }
         .onDisappear {
             registry.presentationDidChange(to: nil, context: context)

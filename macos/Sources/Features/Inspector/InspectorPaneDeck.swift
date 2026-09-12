@@ -8,6 +8,7 @@ struct InspectorPaneDeck: NSViewRepresentable {
     let tabID: UUID
     let availableIDs: Set<String>
     let content: AnyView
+    var updatesEnabled = true
 
     final class Container: NSView {
         private(set) var hosts: [String: NSHostingView<AnyView>] = [:]
@@ -39,6 +40,7 @@ struct InspectorPaneDeck: NSViewRepresentable {
     }
     func makeNSView(context: Context) -> Container { Container() }
     func updateNSView(_ view: Container, context: Context) {
+        guard updatesEnabled else { return }
         view.show(AnyView(content
             .environment(\.gitCollectionColors, context.environment.gitCollectionColors)
             .environment(\.colorScheme, context.environment.colorScheme)

@@ -1426,6 +1426,12 @@ not a plugin API or a ProseMirror view.
 
 ### Git collection navigation
 
+Inspector visibility is independent of its native view lifetime. After the
+first opening, the sidebar retains its pane deck until its host is removed.
+Hiding still sends `disappeared` immediately and showing sends `appeared`;
+hidden context updates must not reactivate providers. Slide transitions move
+the fixed-width shell without animating layout inside provider content.
+
 The built-in Git sidebar shares one search and List/Folder toolbar below its
 History, Changes and Branches tabs. Search text is independent per tab; the
 `git.collection.viewMode` preference is shared by all three. History's mode

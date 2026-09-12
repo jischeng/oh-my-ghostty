@@ -108,9 +108,7 @@ struct GitEditorDiffView: View {
                         mode = GitL10n.text("Inline")
                     }
                 }
-                .padding(1)
-                .background(Color(colors.text).opacity(0.025), in: RoundedRectangle(cornerRadius: 6))
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(colors.text).opacity(0.18), lineWidth: 0.75))
+                .modifier(GitToolbarSegmentedStyle(colors: colors))
                 toolbarButton("pencil", help: GitL10n.text("Open in Editor"),
                               disabled: model.selected == nil || model.selected?.kind == .deleted) {
                     clearHint()

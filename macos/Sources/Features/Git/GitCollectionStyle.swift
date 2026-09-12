@@ -68,8 +68,8 @@ struct GitCollectionModePicker: View {
             ForEach(GitCollectionMode.allCases, id: \.self) { value in
                 Button { mode = value } label: {
                     Image(systemName: value.symbol)
-                        .font(.system(size: 11))
-                        .foregroundStyle(Color(mode == value ? colors.text : colors.secondary))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color(mode == value ? colors.accent : colors.secondary))
                         .frame(width: 24, height: 24)
                         .contentShape(Rectangle())
                 }
@@ -79,9 +79,21 @@ struct GitCollectionModePicker: View {
                 .accessibilityValue(mode == value ? GitL10n.text("Selected") : "")
             }
         }
-        .padding(1)
-        .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color(colors.separator), lineWidth: 0.75))
+        .modifier(GitToolbarSegmentedStyle(colors: colors))
         .fixedSize()
+    }
+}
+
+/// Shared by editor diff modes and every Git collection mode picker.
+struct GitToolbarSegmentedStyle: ViewModifier {
+    let colors: GitCollectionColors
+
+    func body(content: Content) -> some View {
+        content
+            .padding(1)
+            .background(Color(colors.text).opacity(0.025), in: RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6)
+                .stroke(Color(colors.text).opacity(0.18), lineWidth: 0.75))
     }
 }
 

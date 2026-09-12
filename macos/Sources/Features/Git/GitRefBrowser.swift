@@ -9,6 +9,11 @@ struct GitRefBrowser: View {
     var branchesError: String?
     var worktreesError: String?
     var isPicker = false
+    var externalQuery: String?
+    var externalMode: GitCollectionMode?
+    var showsToolbar = true
+    var externalController: GitCollectionController?
+    var externalCancel: (() -> Void)?
     var state: GitCollectionState?
     var stateKey = "refs"
     var selectedID: String?
@@ -24,6 +29,7 @@ struct GitRefBrowser: View {
     @AppStorage("git.refs.viewMode") private var mode: GitCollectionMode = .tree
     var body: some View {
         VStack(spacing: 6) {
+            if showsToolbar {
             HStack(spacing: 5) {
                 GitCollectionToolbar(query: $query, mode: $mode, placeholder: decorations == nil ? GitL10n.text("Search branches…") : GitL10n.text("Search references…"), autofocus: isPicker || decorations != nil,
                                      controller: controller, cancel: cancel)
@@ -35,13 +41,14 @@ struct GitRefBrowser: View {
                     .disabled(isBusy || worktreesError != nil)
                 }
             }.padding(.horizontal, 10)
+            }
             GitCollectionView(source: decorations.map(GitCollectionSource.decorations) ?? .refs(branches: branches, worktrees: worktrees, scopes: isPicker,
                                             branchesError: branchesError, worktreesError: worktreesError),
-                mode: mode, query: query, canWrite: !isBusy,
+                mode: externalMode ?? mode, query: externalQuery ?? query, canWrite: !isBusy,
                 interaction: decorations != nil ? .references : isPicker ? .picker : .branches, state: state, stateKey: stateKey,
                 selectedID: selectedID, extraRefs: tags, pasteboard: pasteboard,
                 referenceAction: { ref in copied = ref.name; InspectorCopyMenu.copy(ref.name, to: pasteboard) },
-                controller: controller, cancel: cancel, perform: { action in
+                controller: externalController ?? controller, cancel: cancel, perform: { action in
                     if isPicker { close() }
                     perform(action)
                 })
@@ -51,5 +58,7 @@ struct GitRefBrowser: View {
             }
         }.environment(\.locale, Locale(identifier: SettingsStrings(language: settings.language).languageCode))
     }
-    private func cancel() { if isPicker || decorations != nil { close() } else { query = "" } }
+    private func cancel() {
+        if let externalCancel { externalCancel() } else if isPicker || decorations != nil { close() } else { query = "" }
+    }
 }

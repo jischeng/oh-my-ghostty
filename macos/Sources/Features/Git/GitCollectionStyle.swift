@@ -70,7 +70,7 @@ struct GitCollectionModePicker: View {
                     Image(systemName: value.symbol)
                         .font(.system(size: 11))
                         .foregroundStyle(Color(mode == value ? colors.text : colors.secondary))
-                        .frame(width: 32, height: 28)
+                        .frame(width: 24, height: 24)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(GitToolbarButtonStyle(colors: colors, selected: mode == value))
@@ -79,6 +79,8 @@ struct GitCollectionModePicker: View {
                 .accessibilityValue(mode == value ? GitL10n.text("Selected") : "")
             }
         }
+        .padding(1)
+        .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color(colors.separator), lineWidth: 0.75))
         .fixedSize()
     }
 }

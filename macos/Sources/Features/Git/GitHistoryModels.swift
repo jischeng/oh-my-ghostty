@@ -63,7 +63,8 @@ struct GitHistoryCommit: Identifiable, Hashable, Equatable, Sendable {
     let authorName: String
     let authorEmail: String
     let authoredAt: Date
-    let subject: String
+    var subject: String
+    var message: String = ""
     let refDecorations: [GitRefDecoration]
 
     init(

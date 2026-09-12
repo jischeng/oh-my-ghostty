@@ -1423,3 +1423,15 @@ blocks are edited through their source ranges; this is a source-based live
 preview, not a claim of complete Typora-style rich-text editing. The internal
 `window.omgLiveEditorView()` test hook returns a CodeMirror `EditorView`; it is
 not a plugin API or a ProseMirror view.
+
+### Git collection navigation
+
+The built-in Git sidebar shares one search and List/Folder toolbar below its
+History, Changes and Branches tabs. Search text is independent per tab; the
+`git.collection.viewMode` preference is shared by all three. History's mode
+changes only expanded commit files, using the Git Collection folder builder.
+The internal `searchHistory` action searches subject, full message, author,
+email and hash within the current history scope, including unloaded commits.
+Reads are bounded and cancellable, results are paginated, and filtered commits
+are displayed without implying direct ancestry between search hits. Clearing
+search restores the cached unfiltered history unless its scope was invalidated.

@@ -23,6 +23,8 @@ final class BuiltInGitInspectorProvider {
         var expandedCommits: [GitCommitID: GitCommitExpansion] = [:]
         var selectedCommitID: GitCommitID?
         var historyScope: GitHistoryScope = .allBranches
+        var historyQuery = ""
+        var unfilteredHistory: InspectorGitHistoryContent?
         var history: InspectorGitHistoryContent = InspectorGitHistoryContent()
     }
 
@@ -120,6 +122,7 @@ final class BuiltInGitInspectorProvider {
             let key = currentWorktreeKey(for: action.context)
             var value = state(for: action.context.tabID, worktreeKey: key)
             value.detailCache.removeAll(); value.detailCacheOrder.removeAll()
+            value.unfilteredHistory = nil
             save(value, tabID: action.context.tabID, worktreeKey: key)
             load(context: action.context, force: true)
         case .selectTab(let tab):
@@ -134,10 +137,32 @@ final class BuiltInGitInspectorProvider {
             var state = state(for: action.context.tabID, worktreeKey: key)
             guard state.historyScope != scope || state.browsedBranch != nil || state.browsedWorktree != nil else { return }
             state.browsedBranch = nil
+            state.unfilteredHistory = nil
             state.browsedWorktree = nil
             state.historyScope = scope; state.selectedCommitID = nil; state.history = InspectorGitHistoryContent(scope: scope, isLoading: true); save(state, tabID: action.context.tabID, worktreeKey: key)
             if let current = lastPublishedContent[action.context.tabID] { publish(makeContent(from: current, history: state.history), tabID: action.context.tabID) }
             loadHistory(context: action.context, force: true)
+        case .searchHistory(let query):
+            let key = currentWorktreeKey(for: action.context)
+            var value = state(for: action.context.tabID, worktreeKey: key)
+            guard value.historyQuery != query else { return }
+            if value.historyQuery.isEmpty {
+                value.unfilteredHistory = value.history.isLoading || value.history.snapshot == nil ? nil : value.history
+            }
+            value.historyQuery = query
+            cancelHistoryTask(tabID: action.context.tabID)
+            if query.isEmpty, let cached = value.unfilteredHistory {
+                value.history = cached
+                value.selectedCommitID = cached.selectedCommitID
+                value.unfilteredHistory = nil
+                save(value, tabID: action.context.tabID, worktreeKey: key)
+                if let current = lastPublishedContent[action.context.tabID] {
+                    publish(makeContent(from: current, history: cached), tabID: action.context.tabID)
+                }
+            } else {
+                save(value, tabID: action.context.tabID, worktreeKey: key)
+                loadHistory(context: action.context, force: true)
+            }
         case .loadMoreHistory: loadHistory(context: action.context, force: false)
         case .selectCommit(let commitID):
             let key = currentWorktreeKey(for: action.context)
@@ -175,6 +200,7 @@ final class BuiltInGitInspectorProvider {
             var state = state(for: action.context.tabID, worktreeKey: key)
             state.activeTab = .history
             state.browsedBranch = name
+            state.unfilteredHistory = nil
             state.browsedWorktree = nil
             state.selectedCommitID = nil
             state.history = InspectorGitHistoryContent(scope: state.historyScope)
@@ -189,6 +215,7 @@ final class BuiltInGitInspectorProvider {
             state.activeTab = .history
             state.browsedBranch = nil
             state.browsedWorktree = path
+            state.unfilteredHistory = nil
             state.selectedCommitID = nil
             state.history = InspectorGitHistoryContent(scope: state.historyScope)
             save(state, tabID: action.context.tabID, worktreeKey: repository.stateKey)
@@ -382,7 +409,8 @@ final class BuiltInGitInspectorProvider {
                 var loaded = stateBefore.history
                 if !refreshing || force || snapshot != stateBefore.history.snapshot {
                     let page = try await self.historyService.loadPage(snapshot: snapshot, repository: repository, offset: offset,
-                        pageSize: refreshing ? max(GitHistoryService.pageSize, oldCommits.count) : GitHistoryService.pageSize)
+                        pageSize: refreshing ? max(GitHistoryService.pageSize, oldCommits.count) : GitHistoryService.pageSize,
+                        query: stateBefore.historyQuery)
                     loaded = InspectorGitHistoryContent(scope: stateBefore.historyScope,
                         commits: (refreshing ? [] : oldCommits) + page.commits, hasMore: page.hasMore, snapshot: snapshot)
                 }

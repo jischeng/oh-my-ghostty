@@ -5,6 +5,49 @@ import Testing
 
 @MainActor
 struct GitLocalizationTests {
+    @Test func sidebarHasOneSearchFieldAndRetainsEachTabsQuery() async throws {
+        let repository = GitRepositoryIdentity(worktreePath: "/repo", gitDirPath: "/repo/.git", commonGitDirPath: "/repo/.git")
+        func root(_ tab: InspectorGitContent.ActiveTab) -> some View {
+            InspectorGitView(content: InspectorGitContent(repository: repository, branch: "main",
+                status: .ready(repository: repository, branch: "main", headCommitID: nil), activeTab: tab), perform: { _ in })
+                .background(Color(NSColor.windowBackgroundColor))
+        }
+        let host = NSHostingView(rootView: root(.history))
+        host.sizingOptions = []
+        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 280, height: 500),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderFront(nil)
+        defer { window.contentView = nil; window.close() }
+        func fields(_ view: NSView) -> [NSSearchField] {
+            if let field = view as? NSSearchField { return [field] }
+            return view.subviews.flatMap(fields)
+        }
+        let tabs: [InspectorGitContent.ActiveTab] = [.history, .changes, .branches, .history, .changes, .branches]
+        for (index, tab) in tabs.enumerated() {
+            host.rootView = root(tab)
+            try await Task.sleep(for: .milliseconds(100))
+            host.layoutSubtreeIfNeeded()
+            let matches = fields(host)
+            #expect(matches.count == 1)
+            let field = try #require(matches.first)
+            if index < 3 {
+                #expect(field.stringValue.isEmpty)
+                field.stringValue = tab.rawValue
+                field.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: field))
+                try await Task.sleep(for: .milliseconds(30))
+            } else {
+                #expect(field.stringValue == tab.rawValue)
+            }
+            if FileManager.default.fileExists(atPath: "/tmp/omg-git-render") {
+                let bitmap = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                try #require(bitmap.representation(using: .png, properties: [:]))
+                    .write(to: URL(fileURLWithPath: "/tmp/omg-shared-toolbar-\(tab.rawValue).png"))
+            }
+        }
+    }
     @Test func catalogIsBundledCompleteAndFollowsTheExistingLanguageChoice() {
         #expect(GitStrings.catalog.count >= 250)
         let english = GitStrings(language: .system, preferredLanguages: ["en-US"])

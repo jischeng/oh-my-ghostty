@@ -6,6 +6,42 @@ import CodeEditTextView
 
 @MainActor
 struct GitHistoryInteractionTests {
+    @Test func historyFolderModeGroupsFilesAndOpensOriginalPath() async throws {
+        let item = commit("tree")
+        let file = GitDiffFile(path: "Sources/Feature/a.swift", status: "M")
+        let other = GitDiffFile(path: "Sources/Feature/b.swift", status: "A")
+        let details = GitCommitExpansion(files: [file, other])
+        var opened: GitDiffFile?
+        var root = GitHistoryTable(commits: [item], selectedCommitID: nil,
+            expandedCommits: [item.id: details], fileMode: .tree,
+            onSelect: { _ in }, onOpen: { _ in }, onShowInTerminal: { _ in },
+            onOpenFile: { _, file in opened = file })
+        let window = hostWindow(root)
+        defer { window.contentView = nil; window.close() }
+        try await Task.sleep(for: .milliseconds(150))
+        let table = try #require(find(NSTableView.self, in: window.contentView))
+        let coordinator = try #require(table.delegate as? GitHistoryTable.Coordinator)
+        #expect(table.numberOfRows == 5)
+        coordinator.activateRow(2, doubleClick: false)
+        #expect(table.numberOfRows == 3)
+        coordinator.activateRow(2, doubleClick: false)
+        #expect(table.numberOfRows == 5)
+        coordinator.activateRow(3, doubleClick: false)
+        #expect(opened == file)
+        root.fileMode = .list
+        coordinator.update(root)
+        #expect(table.numberOfRows == 4)
+        if FileManager.default.fileExists(atPath: "/tmp/omg-git-render") {
+            root.fileMode = .tree
+            coordinator.update(root)
+            let host = try #require(window.contentView)
+            host.layoutSubtreeIfNeeded()
+            let bitmap = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            try #require(bitmap.representation(using: .png, properties: [:]))
+                .write(to: URL(fileURLWithPath: "/tmp/omg-history-folders.png"))
+        }
+    }
     private func commit(_ id: String, refs: [GitRefDecoration] = []) -> GitHistoryCommit {
         GitHistoryCommit(id: GitCommitID(id), parentIDs: [], authorName: "Author", authorEmail: "a@example.com",
                          authoredAt: Date(timeIntervalSince1970: 0), subject: "Commit " + id, refDecorations: refs)

@@ -96,6 +96,7 @@ enum InspectorGitAction: Equatable, Sendable {
     case selectTab(InspectorGitContent.ActiveTab)
     case selectHistoryScope(GitHistoryScope)
     case loadMoreHistory
+    case searchHistory(String)
     case selectCommit(GitCommitID)
     case openCommit(GitCommitID)
     case sendHistoryToTerminal(GitCommitID?)

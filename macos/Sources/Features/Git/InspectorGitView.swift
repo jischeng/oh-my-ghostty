@@ -6,8 +6,12 @@ struct InspectorGitView: View {
     @ObservedObject private var settings = OhMyGhosttySettings.shared
     @State private var collectionState = GitCollectionState()
     @State private var changesController = GitCollectionController()
+    @State private var branchesController = GitCollectionController()
+    @State private var historyController = GitCollectionController()
     @State private var changesQuery = ""
-    @AppStorage("git.changes.viewMode") private var changesMode: GitCollectionMode = .list
+    @AppStorage("git.collection.viewMode") private var changesMode: GitCollectionMode = .list
+    @State private var branchesQuery = ""
+    @State private var historyQuery = ""
 
     private var collectionKey: String { content.repository?.stateKey ?? "git" }
 
@@ -168,7 +172,45 @@ struct InspectorGitView: View {
     }
 
     private var tabPickerView: some View {
+        VStack(spacing: 6) {
         GitSidebarNavigation(selected: content.activeTab) { perform(.gitAction(.selectTab($0))) }
+        HStack(spacing: 4) {
+            GitCollectionToolbar(query: activeQuery, mode: $changesMode, placeholder: searchPlaceholder,
+                                 controller: activeController, cancel: { activeQuery.wrappedValue = "" })
+            if content.activeTab == .branches {
+                Button { perform(.gitAction(.createWorktree(nil))) } label: { Image(systemName: "plus") }
+                    .buttonStyle(.borderless).help(GitL10n.text("New Worktree"))
+                    .disabled(content.operation != nil || content.workingTree.worktreesError != nil)
+            }
+        }
+        }
+        .task(id: collectionKey + "\n" + historyQuery) {
+            do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+            perform(.gitAction(.searchHistory(historyQuery.trimmingCharacters(in: .whitespacesAndNewlines))))
+        }
+    }
+
+    private var activeQuery: Binding<String> {
+        switch content.activeTab {
+        case .history: $historyQuery
+        case .changes: $changesQuery
+        case .branches: $branchesQuery
+        }
+    }
+    private var activeController: GitCollectionController {
+        switch content.activeTab {
+        case .history: historyController
+        case .changes: changesController
+        case .branches: branchesController
+        }
+    }
+
+    private var searchPlaceholder: String {
+        switch content.activeTab {
+        case .history: GitL10n.text("Search commits…")
+        case .changes: GitL10n.text("Search files…")
+        case .branches: GitL10n.text("Search branches…")
+        }
     }
 
     @ViewBuilder
@@ -190,9 +232,6 @@ struct InspectorGitView: View {
 
         case .changes:
             VStack(spacing: 0) {
-                GitCollectionToolbar(query: $changesQuery, mode: $changesMode, placeholder: GitL10n.text("Search files…"),
-                                     controller: changesController, cancel: { changesQuery = "" })
-                    .padding(.horizontal, 10).padding(.bottom, 6)
                 GitCollectionView(source: .changes(content.workingTree), mode: changesMode, query: changesQuery,
                     pending: content.pendingIndexPaths, canWrite: content.operation == nil || content.isUpdatingIndex,
                     state: collectionState, stateKey: collectionKey + "/changes", controller: changesController,
@@ -211,9 +250,11 @@ struct InspectorGitView: View {
             GitRefBrowser(branches: content.workingTree.branches, worktrees: content.workingTree.worktrees,
                           isBusy: content.operation != nil, branchesError: content.workingTree.branchesError,
                           worktreesError: content.workingTree.worktreesError,
-                          state: collectionState, stateKey: collectionKey + "/refs/sidebar") {
-                perform(.gitAction($0))
-            }
+                          externalQuery: branchesQuery, externalMode: changesMode, showsToolbar: false,
+                          externalController: branchesController,
+                          externalCancel: { branchesQuery = "" },
+                          state: collectionState, stateKey: collectionKey + "/refs/sidebar",
+                          perform: { perform(.gitAction($0)) })
         }
     }
 
@@ -230,23 +271,15 @@ struct InspectorGitView: View {
             .frame(height: 28)
             .padding(.horizontal, 12)
 
-            if content.history.commits.isEmpty && !content.history.isLoading {
-                VStack(spacing: 8) {
-                    Image(systemName: "clock.arrow.circlepath")
-                        .font(.system(size: 25))
-                        .foregroundStyle(.secondary)
-                    Text(content.history.statusMessage ?? (headCommitID == nil ? GitL10n.text("No commits yet") : GitL10n.text("No history found")))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
+            ZStack {
                 GitHistoryTable(
                     commits: content.history.commits,
                     selectedCommitID: content.history.selectedCommitID,
                     headCommitID: content.history.snapshot?.headCommitID,
                     expandedCommits: content.expandedCommits,
+                    fileMode: changesMode,
+                    isSearching: !historyQuery.isEmpty,
+                    controller: historyController,
                     hasMore: content.history.hasMore,
                     isLoading: content.history.isLoading,
                     automaticLoadingAllowed: content.activeTab == .history && content.history.statusMessage == nil,
@@ -262,6 +295,11 @@ struct InspectorGitView: View {
                     onCommitAction: { perform(.gitAction(.commitOperation($0, $1))) }
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if content.history.commits.isEmpty && !content.history.isLoading {
+                    Text(content.history.statusMessage ?? (headCommitID == nil ? GitL10n.text("No commits yet") : GitL10n.text("No history found")))
+                        .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                        .padding(12)
+                }
             }
 
             if let message = content.history.statusMessage, !content.history.commits.isEmpty {

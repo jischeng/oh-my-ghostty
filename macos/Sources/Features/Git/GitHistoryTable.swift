@@ -6,6 +6,9 @@ struct GitHistoryTable: NSViewRepresentable {
     let selectedCommitID: GitCommitID?
     var headCommitID: GitCommitID?
     var expandedCommits: [GitCommitID: GitCommitExpansion] = [:]
+    var fileMode: GitCollectionMode = .list
+    var isSearching = false
+    var controller: GitCollectionController?
     var hasMore = false
     var isLoading = false
     var automaticLoadingAllowed = true
@@ -61,9 +64,10 @@ struct GitHistoryTable: NSViewRepresentable {
             case message(Int)
             case notice(Int)
             case file(Int, GitDiffFile)
+            case folder(Int, String, String, Int, Bool)
             var commitIndex: Int {
                 switch self {
-                case .commit(let index), .files(let index), .message(let index), .notice(let index), .file(let index, _): index
+                case .commit(let index), .files(let index), .message(let index), .notice(let index), .file(let index, _), .folder(let index, _, _, _, _): index
                 }
             }
             var suffix: String {
@@ -73,6 +77,7 @@ struct GitHistoryTable: NSViewRepresentable {
                 case .message: "message"
                 case .notice: "notice"
                 case .file(_, let file): file.id
+                case .folder(_, let id, _, _, _): id
                 }
             }
         }
@@ -87,6 +92,10 @@ struct GitHistoryTable: NSViewRepresentable {
         private var updating = false
         private var requestedCount: Int?
         private var collapsedFiles = Set<GitCommitID>()
+        private var collapsedFolders: [GitCommitID: Set<String>] = [:]
+        private var unfilteredOrigin: NSPoint?
+        private var unfilteredIDs: [GitCommitID] = []
+        private var fileDepths: [GitCommitID: [String: Int]] = [:]
         private var messageExpansion: [GitCommitID: Bool] = [:]
         private var observers: [NSObjectProtocol] = []
         private let dateFormatter: DateFormatter = {
@@ -115,10 +124,25 @@ struct GitHistoryTable: NSViewRepresentable {
         }
 
         func update(_ new: GitHistoryTable, change: LocalChange? = nil) {
-            let commitsChanged = content?.commits != new.commits
+            new.controller?.move = { [weak self] delta in
+                guard let self, let table = self.tableView else { return }
+                let index = max(0, min(self.rows.count - 1, table.selectedRow + delta))
+                guard self.rows.indices.contains(index) else { return }
+                table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+                table.scrollRowToVisible(index)
+            }
+            new.controller?.activate = { [weak self] in
+                guard let self, let table = self.tableView else { return }
+                self.activateRow(table.selectedRow, doubleClick: true)
+            }
+            if content?.isSearching == false && new.isSearching {
+                unfilteredOrigin = tableView?.enclosingScrollView?.contentView.bounds.origin
+                unfilteredIDs = content?.commits.map(\.id) ?? []
+            }
+            let commitsChanged = content?.commits != new.commits || content?.isSearching != new.isSearching
             let languageChanged = content?.languageCode != new.languageCode
             let footerChanged = content?.hasMore != new.hasMore
-            let changed = footerChanged || commitsChanged || content?.expandedCommits != new.expandedCommits ||
+            let changed = content?.fileMode != new.fileMode || footerChanged || commitsChanged || content?.expandedCommits != new.expandedCommits ||
                 content?.headCommitID != new.headCommitID || change != nil || languageChanged
             if commitsChanged { requestedCount = nil }
             let previous = content
@@ -140,10 +164,14 @@ struct GitHistoryTable: NSViewRepresentable {
                 let oldRows = rows
                 let oldHeights = heights
                 if commitsChanged {
-                    graphRows = GitGraphLayout.rows(for: new.commits)
+                    graphRows = new.isSearching ? new.commits.flatMap {
+                        GitGraphLayout.rows(for: [GitHistoryCommit(id: $0.id, parentIDs: [], authorName: $0.authorName,
+                            authorEmail: $0.authorEmail, authoredAt: $0.authoredAt, subject: $0.subject)])
+                    } : GitGraphLayout.rows(for: new.commits)
                     graphColumns = graphRows.map { GitGraphColumnLayout(row: $0) }
                 }
                 rows = []
+                fileDepths = [:]
                 for (index, commit) in new.commits.enumerated() {
                     rows.append(.commit(index))
                     if let details = new.expandedCommits[commit.id] {
@@ -152,14 +180,29 @@ struct GitHistoryTable: NSViewRepresentable {
                         } else {
                             rows.append(.files(index))
                             if !collapsedFiles.contains(commit.id) {
-                                rows.append(contentsOf: details.files.map { .file(index, $0) })
+                                if new.fileMode == .list {
+                                    rows.append(contentsOf: details.files.map { .file(index, $0) })
+                                } else {
+                                    let nodes = GitCollectionBuilder.nodes(source: .changes(staged: [], unstaged: details.files,
+                                        stagedError: nil, unstagedError: nil), mode: .tree)
+                                    let children = nodes.last?.children ?? []
+                                    for row in GitCollectionBuilder.rows(children, collapsed: collapsedFolders[commit.id] ?? []) {
+                                        switch row.item.kind {
+                                        case .file(let file, _):
+                                            fileDepths[commit.id, default: [:]][file.path] = row.depth
+                                            rows.append(.file(index, file))
+                                        case .folder: rows.append(.folder(index, row.id, row.item.title, row.depth, row.expanded))
+                                        default: break
+                                        }
+                                    }
+                                }
                             }
                             if details.metadata?.body.isEmpty == false { rows.append(.message(index)) }
                         }
                     }
                 }
                 measureRows()
-                if commitsChanged || languageChanged || footerChanged {
+                if commitsChanged || languageChanged || footerChanged || previous?.fileMode != new.fileMode {
                     table.reloadData()
                 } else {
                     updateVisibleRows(previous: previous, oldRows: oldRows, oldHeights: oldHeights, change: change)
@@ -169,6 +212,12 @@ struct GitHistoryTable: NSViewRepresentable {
                 }), let clip = table.enclosingScrollView?.contentView {
                     clip.scroll(to: NSPoint(x: 0, y: max(0, table.rect(ofRow: index).minY + min(offset, max(0, table.rect(ofRow: index).height - 1)))))
                     table.enclosingScrollView?.reflectScrolledClipView(clip)
+                }
+                if !new.isSearching, new.commits.map(\.id) == unfilteredIDs, let origin = unfilteredOrigin,
+                   let scroll = table.enclosingScrollView {
+                    scroll.contentView.scroll(to: origin)
+                    scroll.reflectScrolledClipView(scroll.contentView)
+                    unfilteredOrigin = nil
                 }
             }
             if !changed, new.hasMore, previous?.isLoading != new.isLoading {
@@ -331,7 +380,10 @@ struct GitHistoryTable: NSViewRepresentable {
             switch row {
             case .files:
                 return .files(details?.files.count ?? 0, details?.statistics, collapsedFiles.contains(commit.id))
-            case .file(_, let file): return .file(file)
+            case .file(_, let file):
+                return .file(file, fileDepths[commit.id]?[file.path] ?? 0,
+                             content.fileMode == .tree)
+            case .folder(_, _, let title, let depth, let expanded): return .folder(title, depth, expanded)
             case .message: return .message(details?.metadata?.body ?? "", messageExpansion[commit.id])
             default: return .notice(details?.error ?? GitL10n.text("Loading changed files…"), details?.error != nil)
             }
@@ -341,6 +393,10 @@ struct GitHistoryTable: NSViewRepresentable {
             guard let content, let id = commitID ?? content.commits[safe: row.commitIndex]?.id,
                   let details = content.expandedCommits[id] else { return }
             switch row {
+            case .folder(_, let folderID, _, _, _):
+                if !(collapsedFolders[id, default: []].insert(folderID).inserted) {
+                    collapsedFolders[id]?.remove(folderID)
+                }
             case .files:
                 if !collapsedFiles.insert(id).inserted { collapsedFiles.remove(id) }
             case .message:
@@ -369,6 +425,7 @@ struct GitHistoryTable: NSViewRepresentable {
                 content.onOpen(content.commits[commit].id)
             case .file(let commit, let file) where !doubleClick: content.onOpenFile(content.commits[commit].id, file)
             case .files where !doubleClick: activateChild(rows[index])
+            case .folder where !doubleClick: activateChild(rows[index])
             default: break
             }
         }

@@ -3,6 +3,26 @@ import Testing
 @testable import Ghostty
 
 struct GitHistoryServiceTests {
+    @Test func searchMatchesFullMessageAuthorAndHashAcrossPages() async throws {
+        let directory = createTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try runCommand(["git", "init", "-b", "main"], in: directory.path)
+        for index in 0..<205 {
+            try runCommand(["git", "commit", "--allow-empty", "-m", "subject \(index)", "-m", "hidden needle \(index)"], in: directory.path)
+        }
+        let repository = try await identity(for: directory)
+        let service = GitHistoryService()
+        let snapshot = try await service.captureSnapshot(for: repository, scope: .allBranches)
+        let first = try await service.loadPage(snapshot: snapshot, repository: repository, offset: 0, pageSize: 2, query: "NEEDLE")
+        let second = try await service.loadPage(snapshot: snapshot, repository: repository, offset: 203, pageSize: 2, query: "needle")
+        #expect(first.hasMore && !second.hasMore)
+        #expect(Set((first.commits + second.commits).map(\.id)).count == 4)
+        #expect(first.commits.allSatisfy { !$0.subject.contains("needle") && $0.message.contains("needle") })
+        for query in ["history@example.com", "History Test", "subject", String(first.commits[0].id.rawValue.prefix(8))] {
+            let page = try await service.loadPage(snapshot: snapshot, repository: repository, offset: 0, query: query)
+            #expect(!page.commits.isEmpty)
+        }
+    }
     private func createTempDirectory() -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("git-history-test-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)

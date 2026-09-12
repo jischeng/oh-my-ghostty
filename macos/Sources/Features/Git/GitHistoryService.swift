@@ -150,13 +150,35 @@ struct GitHistoryService: Sendable {
         snapshot: GitHistorySnapshot,
         repository: GitRepositoryIdentity,
         offset: Int,
-        pageSize: Int = GitHistoryService.pageSize
+        pageSize: Int = GitHistoryService.pageSize,
+        query: String = "",
+        includeMessage: Bool = false
     ) async throws -> GitHistoryPage {
         guard offset >= 0, pageSize > 0 else {
             throw GitHistoryError.commandFailed(GitL10n.text("Invalid Git history page range"))
         }
         guard !snapshot.tipCommitIDs.isEmpty else {
             return GitHistoryPage(commits: [], offset: offset, hasMore: false)
+        }
+
+        if !query.isEmpty {
+            var matches: [GitHistoryCommit] = []
+            var scanned = 0
+            var skipped = 0
+            while matches.count <= pageSize {
+                try Task.checkCancellation()
+                let batch = try await loadPage(snapshot: snapshot, repository: repository,
+                    offset: scanned, pageSize: 200, includeMessage: true)
+                for commit in batch.commits {
+                    let text = [commit.subject, commit.message, commit.authorName, commit.authorEmail, commit.id.rawValue]
+                        .joined(separator: "\n")
+                    guard text.localizedCaseInsensitiveContains(query) else { continue }
+                    if skipped < offset { skipped += 1 } else { matches.append(commit) }
+                }
+                scanned += batch.commits.count
+                if !batch.hasMore { break }
+            }
+            return GitHistoryPage(commits: Array(matches.prefix(pageSize)), offset: offset, hasMore: matches.count > pageSize)
         }
 
         let requestedCount = pageSize + 1
@@ -168,7 +190,7 @@ struct GitHistoryService: Sendable {
                 "--no-color",
                 "--no-decorate",
                 "-z",
-                "--format=%H%x00%P%x00%an%x00%ae%x00%aI%x00%s",
+                "--format=%H%x00%P%x00%an%x00%ae%x00%aI%x00%" + (includeMessage ? "B" : "s"),
                 "--skip=\(offset)",
                 "--max-count=\(requestedCount)",
             ] + snapshot.tipCommitIDs.map(\.rawValue),
@@ -194,7 +216,12 @@ struct GitHistoryService: Sendable {
         let recordCount = fields.count / 6
         let hasMore = recordCount > pageSize
         let commits = try (0..<min(pageSize, recordCount)).map { index in
-            try parseCommit(fields: Array(fields[(index * 6)..<(index * 6 + 6)]), snapshot: snapshot)
+            var commit = try parseCommit(fields: Array(fields[(index * 6)..<(index * 6 + 6)]), snapshot: snapshot)
+            if includeMessage {
+                commit.message = commit.subject
+                commit.subject = commit.message.components(separatedBy: "\n").first ?? ""
+            }
+            return commit
         }
         return GitHistoryPage(commits: commits, offset: offset, hasMore: hasMore)
     }

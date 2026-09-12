@@ -82,7 +82,8 @@ final class GitHistoryCell: NSTableCellView {
 final class GitHistoryDetailCell: NSTableCellView {
     enum Content {
         case files(Int, GitDiffStatistics?, Bool)
-        case file(GitDiffFile)
+        case file(GitDiffFile, Int = 0, Bool = false)
+        case folder(String, Int, Bool)
         case message(String, Bool?)
         case notice(String, Bool)
     }
@@ -114,7 +115,7 @@ final class GitHistoryDetailCell: NSTableCellView {
     static func height(for content: Content, width: CGFloat) -> CGFloat {
         switch content {
         case .files: return 28
-        case .file: return 23
+        case .file, .folder: return 26
         case .notice(let text, _): return max(26, textHeight(text, width: width) + 12)
         case .message(let text, let expanded):
             return messageIsExpanded(text, preference: expanded, width: width)
@@ -155,7 +156,7 @@ final class GitHistoryDetailCell: NSTableCellView {
         self.content = content
         self.action = action
         toolTip = nil
-        if case .file(let file) = content {
+        if case .file(let file, _, _) = content {
             toolTip = GitL10n.text("Open diff · ") + file.kind.label + " · " + file.displayPath
             setAccessibilityRole(.button)
         } else { setAccessibilityRole(.group) }
@@ -187,6 +188,13 @@ final class GitHistoryDetailCell: NSTableCellView {
         button.isHidden = true
         openIcon.isHidden = true
         switch content {
+        case .folder(let title, let depth, let expanded):
+            label.isHidden = true
+            button.isHidden = false
+            button.title = title
+            button.image = NSImage(systemSymbolName: expanded ? "folder.fill" : "folder", accessibilityDescription: nil)
+            button.frame = NSRect(x: x + 12 + CGFloat(depth) * 14, y: 3,
+                                  width: max(1, width - 12 - CGFloat(depth) * 14), height: 20)
         case .files(let count, let stats, let collapsed):
             label.isHidden = true
             button.isHidden = false
@@ -194,18 +202,19 @@ final class GitHistoryDetailCell: NSTableCellView {
             button.image = Self.chevron(collapsed ? "right" : "down")
             button.frame = NSRect(x: x, y: 4, width: width, height: 20)
             button.toolTip = button.attributedTitle.string
-        case .file(let file):
+        case .file(let file, let depth, let tree):
             label.isSelectable = false
             label.maximumNumberOfLines = 1
             label.lineBreakMode = .byTruncatingMiddle
             let text = NSMutableAttributedString(string: file.kind.rawValue + "  ", attributes: [
                 .foregroundColor: file.kind.color, .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .semibold),
             ])
-            text.append(NSAttributedString(string: file.displayPath, attributes: [
+            text.append(NSAttributedString(string: tree ? (file.path as NSString).lastPathComponent : file.displayPath, attributes: [
                 .foregroundColor: NSColor.labelColor, .font: NSFont.systemFont(ofSize: 11),
             ]))
             label.attributedStringValue = text
-            label.frame = NSRect(x: x + 12, y: 4, width: max(1, width - 26), height: 15)
+            label.frame = NSRect(x: x + 12 + CGFloat(depth) * 14, y: 4,
+                                 width: max(1, width - 26 - CGFloat(depth) * 14), height: 15)
             openIcon.isHidden = false
             openIcon.frame = NSRect(x: x + width - 10, y: 7, width: 8, height: 8)
         case .notice(let text, let isError):

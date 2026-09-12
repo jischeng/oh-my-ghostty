@@ -8,7 +8,7 @@ import CodeEditTextView
 struct GitHistoryInteractionTests {
     @Test func historyFolderModeGroupsFilesAndOpensOriginalPath() async throws {
         let item = commit("tree")
-        let file = GitDiffFile(path: "Sources/Feature/a.swift", status: "M")
+        let file = GitDiffFile(path: "Sources/Feature/a-long-file-name-for-truncation.swift", status: "M")
         let other = GitDiffFile(path: "Sources/Feature/b.swift", status: "A")
         let details = GitCommitExpansion(files: [file, other])
         var opened: GitDiffFile?
@@ -28,10 +28,18 @@ struct GitHistoryInteractionTests {
         #expect(table.numberOfRows == 5)
         coordinator.activateRow(3, doubleClick: false)
         #expect(opened == file)
+        let commitCell = table.view(atColumn: 0, row: 0, makeIfNecessary: true)
         root.fileMode = .list
         coordinator.update(root)
         #expect(table.numberOfRows == 4)
+        #expect(table.view(atColumn: 0, row: 0, makeIfNecessary: true) === commitCell)
         if FileManager.default.fileExists(atPath: "/tmp/omg-git-render") {
+            let listHost = try #require(window.contentView)
+            listHost.layoutSubtreeIfNeeded()
+            let listBitmap = try #require(listHost.bitmapImageRepForCachingDisplay(in: listHost.bounds))
+            listHost.cacheDisplay(in: listHost.bounds, to: listBitmap)
+            try #require(listBitmap.representation(using: .png, properties: [:]))
+                .write(to: URL(fileURLWithPath: "/tmp/omg-history-list-truncation.png"))
             root.fileMode = .tree
             coordinator.update(root)
             let host = try #require(window.contentView)

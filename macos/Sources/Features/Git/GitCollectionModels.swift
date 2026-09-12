@@ -80,7 +80,8 @@ struct GitCollectionRow: Equatable {
     var height: CGFloat {
         switch item.kind {
         case .category: 30
-        case .file: item.subtitle == nil ? 26 : 38
+        case .file: item.subtitle == nil ? (isTree ? 24 : 26) : 38
+        case .folder: 24
         case .worktree: 40
         default: 26
         }
@@ -96,6 +97,13 @@ final class GitCollectionState {
 }
 
 enum GitCollectionBuilder {
+    /// History files are read-only: no index batching or staging metadata is needed.
+    static func historyFiles(_ files: [GitDiffFile]) -> [GitCollectionNode] {
+        grouped(files.map { file in
+            (file.path, GitCollectionItem(id: "history/file/" + file.path,
+                title: (file.path as NSString).lastPathComponent, kind: .file(file, .unstaged)))
+        }, category: "history", mode: .tree)
+    }
     static func nodes(source: GitCollectionSource, mode: GitCollectionMode, query: String = "",
                       pending: Set<String> = [], canWrite: Bool = true, extraRefs: [GitRefDecoration] = []) -> [GitCollectionNode] {
         switch source {

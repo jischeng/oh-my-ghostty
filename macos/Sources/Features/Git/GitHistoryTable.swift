@@ -96,6 +96,7 @@ struct GitHistoryTable: NSViewRepresentable {
         private var unfilteredOrigin: NSPoint?
         private var unfilteredIDs: [GitCommitID] = []
         private var fileDepths: [GitCommitID: [String: Int]] = [:]
+        private var fileTrees: [GitCommitID: (files: [GitDiffFile], nodes: [GitCollectionNode])] = [:]
         private var messageExpansion: [GitCommitID: Bool] = [:]
         private var observers: [NSObjectProtocol] = []
         private let dateFormatter: DateFormatter = {
@@ -147,6 +148,7 @@ struct GitHistoryTable: NSViewRepresentable {
             if commitsChanged { requestedCount = nil }
             let previous = content
             collapsedFiles.formIntersection(new.expandedCommits.keys)
+            fileTrees = fileTrees.filter { new.expandedCommits[$0.key] != nil }
             messageExpansion = messageExpansion.filter { new.expandedCommits[$0.key] != nil }
             content = new
             guard let table = tableView else { return }
@@ -183,9 +185,10 @@ struct GitHistoryTable: NSViewRepresentable {
                                 if new.fileMode == .list {
                                     rows.append(contentsOf: details.files.map { .file(index, $0) })
                                 } else {
-                                    let nodes = GitCollectionBuilder.nodes(source: .changes(staged: [], unstaged: details.files,
-                                        stagedError: nil, unstagedError: nil), mode: .tree)
-                                    let children = nodes.last?.children ?? []
+                                    if fileTrees[commit.id]?.files != details.files {
+                                        fileTrees[commit.id] = (details.files, GitCollectionBuilder.historyFiles(details.files))
+                                    }
+                                    let children = fileTrees[commit.id]?.nodes ?? []
                                     for row in GitCollectionBuilder.rows(children, collapsed: collapsedFolders[commit.id] ?? []) {
                                         switch row.item.kind {
                                         case .file(let file, _):
@@ -202,7 +205,7 @@ struct GitHistoryTable: NSViewRepresentable {
                     }
                 }
                 measureRows()
-                if commitsChanged || languageChanged || footerChanged || previous?.fileMode != new.fileMode {
+                if commitsChanged || languageChanged || footerChanged {
                     table.reloadData()
                 } else {
                     updateVisibleRows(previous: previous, oldRows: oldRows, oldHeights: oldHeights, change: change)
@@ -259,7 +262,7 @@ struct GitHistoryTable: NSViewRepresentable {
                     if previous?.headCommitID != content.headCommitID ||
                         (previous?.expandedCommits[id] != nil) != (content.expandedCommits[id] != nil) { refresh.insert(index) }
                 default:
-                    if changedCommits.contains(id) { refresh.insert(index) }
+                    if changedCommits.contains(id) || previous?.fileMode != content.fileMode { refresh.insert(index) }
                     switch (change, row) {
                     case (.files(let target), .files), (.message(let target), .message):
                         if target == id { refresh.insert(index) }

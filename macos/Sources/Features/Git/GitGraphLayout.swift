@@ -1,25 +1,45 @@
 import Foundation
 
+/// Commit-graph layout. The lane engine is a streaming pipe state machine
+/// adapted from lazygit's `pkg/gui/presentation/graph/graph.go`
+/// (jesseduffield/lazygit, MIT): every pending edge is a pipe with a kind
+/// (starts / continues / terminates), and per-row spot bookkeeping
+/// (taken / traversed) keeps lanes compact without holes. Two rules come from
+/// vscode-git-graph's semantics (MIT): the first-parent spine is always
+/// promoted to lane 0 and keeps the trunk colour end to end (issue #17), and
+/// every fork takes its own colour from the fork point down, never a stub of
+/// its parent's colour (issue #23). GitUp's graph served as a visual
+/// reference only (GPL, no code copied).
 struct GitGraphLayout: Equatable, Sendable {
-    private(set) var activeLanes: [GitCommitID]
-    private var activeLaneColorIndices: [Int]
-    /// Last row index that used each palette slot (Git Graph's availableColours).
-    private var colorLastUsedRow: [Int: Int]
-    private var rowIndex: Int
-    /// Commits queued as some commit's parent but not yet listed. Only these
-    /// may block lane compaction; dangling lanes get filled from the left.
-    private var pendingParentIDs: Set<GitCommitID>
+
+    enum PipeKind: Int, Equatable, Sendable {
+        case terminates
+        case starts
+        case continues
+    }
+
+    /// A pending edge from one commit down to another, positioned on a lane.
+    struct Pipe: Equatable, Sendable {
+        var fromPos: Int
+        var toPos: Int
+        let fromID: GitCommitID
+        let toID: GitCommitID
+        var kind: PipeKind
+        var colorIndex: Int
+    }
+
+    private(set) var pipes: [Pipe] = []
+    private var colorLastUsedRow: [Int: Int] = [:]
+    private var rowIndex = 0
     private let primaryRanks: [GitCommitID: Int]
 
     init(activeLanes: [GitCommitID] = [], primaryFirstParents: [GitCommitID] = []) {
         // Only real continuations enter from above; the first-parent spine
         // supplies ordering ranks, not an invented incoming edge at the tip.
-        let initial = activeLanes
-        self.activeLanes = initial
-        self.activeLaneColorIndices = initial.indices.map { $0 % GitGraphRow.paletteSize }
-        colorLastUsedRow = [:]
-        rowIndex = 0
-        pendingParentIDs = Set(initial)
+        pipes = activeLanes.enumerated().map {
+            Pipe(fromPos: $0.offset, toPos: $0.offset, fromID: $0.element, toID: $0.element,
+                 kind: .continues, colorIndex: $0.offset == 0 ? Self.spineColorIndex : $0.offset)
+        }
         var ranks: [GitCommitID: Int] = [:]
         for (index, id) in primaryFirstParents.enumerated() where ranks[id] == nil { ranks[id] = index }
         primaryRanks = ranks
@@ -37,53 +57,17 @@ struct GitGraphLayout: Equatable, Sendable {
             primary.append(id)
             current = firstParents[id]
         }
-        let spine = Set(primary)
-        var layout = GitGraphLayout(primaryFirstParents: primary)
         let remoteOnly = Set(commits.filter(\.isRemoteOnly).map(\.id))
-        var rows = commits.map { layout.append(commitID: $0.id, parentIDs: $0.parentIDs, isRemoteOnly: remoteOnly) }
-        recolorForBranchIdentity(&rows, spine: spine)
-        return rows
-    }
-
-    /// Second pass that gives every fork its own colour from the fork point
-    /// down (a lane takes the colour of its topmost node's branch), while the
-    /// first-parent spine keeps the trunk colour end to end. Walking bottom-up
-    /// resolves each lane's colour to the colour of the child that continues
-    /// it, so a branch never shows a stub of its parent's colour.
-    private static func recolorForBranchIdentity(_ rows: inout [GitGraphRow], spine: Set<GitCommitID>) {
-        guard !rows.isEmpty else { return }
-        var laneColour: [GitCommitID: Int] = [:]
-        for index in rows.indices.reversed() {
-            var row = rows[index]
-            let nodeColour = spine.contains(row.commitID)
-                ? GitGraphLayout.spineColorIndex
-                : laneColour[row.commitID] ?? row.nodeColorIndex
-            row.nodeColorIndex = nodeColour
-            for lane in row.bottomLanes.indices {
-                let id = row.bottomLanes[lane]
-                laneColour[id] = spine.contains(id) ? GitGraphLayout.spineColorIndex : (laneColour[id] ?? nodeColour)
-            }
-            row.segments = row.segments.map { segment in
-                var segment = segment
-                switch segment.kind {
-                case .incoming:
-                    segment.colorIndex = nodeColour
-                case .passthrough:
-                    segment.colorIndex = laneColour[segment.commitID] ?? segment.colorIndex
-                case .parent:
-                    if let parentID = segment.parentID, let colour = laneColour[parentID] {
-                        segment.colorIndex = colour
-                    }
-                }
-                return segment
-            }
-            rows[index] = row
-        }
+        var layout = GitGraphLayout(primaryFirstParents: primary)
+        return commits.map { layout.append(commitID: $0.id, parentIDs: $0.parentIDs, isRemoteOnly: remoteOnly) }
     }
 
     var activeCommitIDs: [GitCommitID] {
-        activeLanes
+        pipes.map(\.toID)
     }
+
+    /// Lane 0's first-parent spine always uses this palette slot.
+    static let spineColorIndex = 0
 
     mutating func append(
         commitID: GitCommitID,
@@ -97,170 +81,175 @@ struct GitGraphLayout: Equatable, Sendable {
         parentIDs: [GitCommitID],
         isRemoteOnly: Set<GitCommitID>
     ) -> GitGraphRow {
-        let topLanes = activeLanes
-        let topLaneColorIndices = activeLaneColorIndices
         let uniqueParentIDs = Self.uniqueCommitIDs(parentIDs)
-        let currentLane = topLanes.firstIndex(of: commitID) ?? topLanes.count
-        let wasActive = currentLane < topLanes.count
-        // First pass only needs deterministic placeholder colours; the second
-        // pass (recolorForBranchIdentity) resolves the final branch colours.
-        let currentColorIndex = if wasActive {
-            topLaneColorIndices[currentLane]
-        } else if topLanes.isEmpty {
-            Self.spineColorIndex
-        } else {
-            freeColorIndex(reserved: [])
+        let currentPipes = pipes
+        let topLanes = currentPipes.map(\.toID)
+        let topLaneColorIndices = currentPipes.map(\.colorIndex)
+        let maxPos = currentPipes.map(\.toPos).max()
+
+        // Commit position: right under the first pipe expecting it. Otherwise
+        // it is a fresh tip: lane 0 when nothing is active yet, else tacked
+        // onto the far end (unrelated tip, e.g. `git log --all`).
+        var pos = maxPos.map { $0 + 1 } ?? 0
+        for pipe in currentPipes where pipe.toID == commitID {
+            pos = pipe.toPos
+            break
+        }
+        let wasActive = currentPipes.contains { $0.toID == commitID }
+
+        var takenSpots = Set<Int>()
+        var traversedSpots = Set<Int>()
+        let traversedForContinuing = Set(currentPipes.filter { $0.toID != commitID }.map(\.toPos))
+
+        func traverse(_ from: Int, _ to: Int) {
+            for spot in min(from, to)...max(from, to) { traversedSpots.insert(spot) }
+            takenSpots.insert(to)
         }
 
-        var bottomLanes = topLanes
-        var bottomLaneColorIndices = topLaneColorIndices
-        if wasActive {
-            bottomLanes.remove(at: currentLane)
-            bottomLaneColorIndices.remove(at: currentLane)
+        var nextAvailableForContinuing = 0
+        func nextPosForContinuingPipe() -> Int {
+            while traversedSpots.contains(nextAvailableForContinuing) { nextAvailableForContinuing += 1 }
+            return nextAvailableForContinuing
         }
 
-        var parentLanes: [GitCommitID: Int] = [:]
-        var parentColorIndices: [GitCommitID: Int] = [:]
-        var insertionIndex = min(currentLane, bottomLanes.count)
-        // Colours handed out within this row; octopus merges must not give
-        // two new lanes the same slot before either can retire.
-        var reservedThisRow = Set(bottomLaneColorIndices)
+        func nextPosForNewPipe() -> Int {
+            var spot = 0
+            while takenSpots.contains(spot) || traversedForContinuing.contains(spot) { spot += 1 }
+            return spot
+        }
 
-        for (parentIndex, parentID) in uniqueParentIDs.enumerated() {
-            if let lane = bottomLanes.firstIndex(of: parentID) {
-                parentLanes[parentID] = lane
-                parentColorIndices[parentID] = bottomLaneColorIndices[lane]
-                insertionIndex = max(insertionIndex, lane + 1)
-                continue
+        var newPipes: [Pipe] = []
+        // Existing pipes: terminate at this commit, or continue, compacting
+        // into the nearest free spot on either side of the node.
+        for pipe in currentPipes {
+            if pipe.toID == commitID {
+                newPipes.append(Pipe(fromPos: pipe.toPos, toPos: pos, fromID: pipe.fromID,
+                                     toID: pipe.toID, kind: .terminates, colorIndex: pipe.colorIndex))
+                traverse(pipe.toPos, pos)
+            } else if pipe.toPos < pos {
+                let available = nextPosForContinuingPipe()
+                newPipes.append(Pipe(fromPos: pipe.toPos, toPos: available, fromID: pipe.fromID,
+                                     toID: pipe.toID, kind: .continues, colorIndex: pipe.colorIndex))
+                traverse(pipe.toPos, available)
             }
-
-            // Lanes whose commit was already processed are dangling: they keep
-            // a slot only as a merge target or future node. Pending parents and
-            // spine commits must not be displaced sideways, but any other
-            // dangling lane may be filled from the left, closing visual holes.
-            while insertionIndex < bottomLanes.count,
-                  primaryRanks[bottomLanes[insertionIndex]] == nil,
-                  !pendingParentIDs.contains(bottomLanes[insertionIndex]) {
-                insertionIndex += 1
+        }
+        for pipe in currentPipes where pipe.toID != commitID && pipe.toPos > pos {
+            var last = pipe.toPos
+            var spot = pipe.toPos
+            while spot > pos {
+                if takenSpots.contains(spot) || traversedSpots.contains(spot) { break }
+                last = spot
+                spot -= 1
             }
-
-            let lane = min(insertionIndex, bottomLanes.count)
-            // First parents continue the node's own line; extra parents fork
-            // into a placeholder colour that the second pass may refine.
-            let colorIndex = if parentIndex == 0 {
-                currentColorIndex
-            } else {
-                freeColorIndex(reserved: reservedThisRow)
-            }
-            reservedThisRow.insert(colorIndex)
-            bottomLanes.insert(parentID, at: lane)
-            bottomLaneColorIndices.insert(colorIndex, at: lane)
-            parentLanes[parentID] = lane
-            parentColorIndices[parentID] = colorIndex
-            insertionIndex = lane + 1
+            newPipes.append(Pipe(fromPos: pipe.toPos, toPos: last, fromID: pipe.fromID,
+                                 toID: pipe.toID, kind: .continues, colorIndex: pipe.colorIndex))
+            traverse(pipe.toPos, last)
         }
 
-        // A side branch may have queued a future mainline ancestor to the
-        // right of other pending lanes. Promote the nearest unprocessed spine
-        // commit before emitting edges, keeping boundary coordinates consistent.
-        // The promoted lane keeps the trunk color so lane 0 never changes hue.
-        if let lane = bottomLanes.indices.filter({ primaryRanks[bottomLanes[$0]] != nil }).min(by: {
-            primaryRanks[bottomLanes[$0], default: .max] < primaryRanks[bottomLanes[$1], default: .max]
-        }), lane != 0 {
-            let id = bottomLanes.remove(at: lane)
-            bottomLaneColorIndices.remove(at: lane)
-            bottomLanes.insert(id, at: 0)
-            bottomLaneColorIndices.insert(Self.spineColorIndex, at: 0)
-        }
-        for parentID in uniqueParentIDs { parentLanes[parentID] = bottomLanes.firstIndex(of: parentID) }
+        let nodeColorIndex = wasActive
+            ? (currentPipes.first { $0.toID == commitID }?.colorIndex ?? Self.spineColorIndex)
+            : freeColorIndex(reserved: topLaneColorIndices, spineFallback: primaryRanks[commitID] != nil)
 
         var segments: [GitGraphSegment] = []
         if wasActive {
-            segments.append(
-                GitGraphSegment(
-                    kind: .incoming,
-                    from: .top(lane: currentLane),
-                    to: .node(lane: currentLane),
-                    colorIndex: currentColorIndex,
-                    commitID: commitID,
-                    parentID: nil
-                )
-            )
+            segments.append(GitGraphSegment(kind: .incoming, from: .top(lane: pos), to: .node(lane: pos),
+                                            colorIndex: nodeColorIndex, commitID: commitID, parentID: nil))
+        }
+        for pipe in newPipes where pipe.kind == .continues {
+            segments.append(GitGraphSegment(kind: .passthrough, from: .top(lane: pipe.fromPos),
+                                            to: .bottom(lane: pipe.toPos), colorIndex: pipe.colorIndex,
+                                            commitID: pipe.toID, parentID: nil))
+        }
+        for pipe in newPipes where pipe.kind == .terminates {
+            segments.append(GitGraphSegment(kind: .parent, from: .top(lane: pipe.fromPos), to: .node(lane: pos),
+                                            colorIndex: pipe.colorIndex, commitID: pipe.fromID, parentID: pipe.toID))
         }
 
-        for (lane, laneCommitID) in topLanes.enumerated() where laneCommitID != commitID {
-            guard let bottomLane = bottomLanes.firstIndex(of: laneCommitID) else { continue }
-            segments.append(
-                GitGraphSegment(
-                    kind: .passthrough,
-                    from: .top(lane: lane),
-                    to: .bottom(lane: bottomLane),
-                    colorIndex: topLaneColorIndices[lane],
-                    commitID: laneCommitID,
-                    parentID: nil
-                )
-            )
+        // First parent continues this commit's own line; extra parents fork.
+        // Parent edges are emitted AFTER lane promotion/compaction below, so
+        // their target lane matches bottomLanes exactly.
+        var starts: [Pipe] = []
+        if let firstParent = uniqueParentIDs.first {
+            starts.append(Pipe(fromPos: pos, toPos: pos, fromID: commitID, toID: firstParent,
+                               kind: .starts, colorIndex: nodeColorIndex))
+        }
+        for parentID in uniqueParentIDs.dropFirst() {
+            let available = nextPosForNewPipe()
+            let color = freeColorIndex(reserved: topLaneColorIndices + starts.map(\.colorIndex), spineFallback: false)
+            starts.append(Pipe(fromPos: pos, toPos: available, fromID: commitID, toID: parentID,
+                               kind: .starts, colorIndex: color))
         }
 
-        for parentID in uniqueParentIDs {
-            guard let parentLane = parentLanes[parentID],
-                  let parentColorIndex = parentColorIndices[parentID] else { continue }
-            segments.append(
-                GitGraphSegment(
-                    kind: .parent,
-                    from: .node(lane: currentLane),
-                    to: .bottom(lane: parentLane),
-                    colorIndex: parentColorIndex,
-                    commitID: commitID,
-                    parentID: parentID
-                )
-            )
+        // Downstream: live pipes plus new starts. Sort by lane, promote the
+        // nearest unprocessed spine pipe to lane 0 with the trunk colour, and
+        // compact remaining lanes so no holes appear.
+        var downstream = newPipes.filter { $0.kind != .terminates }
+        downstream.append(contentsOf: starts)
+        downstream.sort { ($0.toPos, $0.kind.rawValue) < ($1.toPos, $1.kind.rawValue) }
+        if let spineIndex = downstream.indices.filter({ primaryRanks[downstream[$0].toID] != nil }).min(by: {
+            primaryRanks[downstream[$0].toID, default: .max] < primaryRanks[downstream[$1].toID, default: .max]
+        }), spineIndex != 0 {
+            let spine = downstream.remove(at: spineIndex)
+            downstream.insert(Pipe(fromPos: spine.toPos, toPos: 0, fromID: spine.fromID, toID: spine.toID,
+                                   kind: spine.kind, colorIndex: Self.spineColorIndex), at: 0)
+        }
+        if !downstream.isEmpty, primaryRanks[downstream[0].toID] != nil {
+            downstream[0].colorIndex = Self.spineColorIndex
+        }
+        for index in downstream.indices where index > 0 && downstream[index].toPos <= downstream[index - 1].toPos {
+            downstream[index].toPos = downstream[index - 1].toPos + 1
         }
 
-        activeLanes = bottomLanes
-        // Colours that left the active set become re-usable one palette cycle
-        // from now (Git Graph's availableColours), which keeps a hue from
-        // repeating within a screenful of rows.
-        for color in Set(activeLaneColorIndices).subtracting(bottomLaneColorIndices) where color != Self.spineColorIndex {
+        // Emit parent edges for this commit using the final lane positions, so
+        // bottomLanes[edge.to.lane] == edge.parentID always holds.
+        for pipe in downstream where pipe.fromID == commitID && pipe.kind == .starts {
+            segments.append(GitGraphSegment(kind: .parent, from: .node(lane: pos), to: .bottom(lane: pipe.toPos),
+                                            colorIndex: pipe.colorIndex, commitID: commitID, parentID: pipe.toID))
+        }
+
+        // Colours that left the active set become reusable one palette cycle
+        // from now (Git Graph's availableColours).
+        let liveColours = Set(downstream.map(\.colorIndex))
+        for color in Set(topLaneColorIndices).subtracting(liveColours) where color != Self.spineColorIndex {
             colorLastUsedRow[color] = rowIndex
         }
-        activeLaneColorIndices = bottomLaneColorIndices
-        pendingParentIDs.formUnion(uniqueParentIDs)
-        pendingParentIDs.remove(commitID)
+        pipes = downstream
         rowIndex += 1
+
+        // bottomLanes is indexed by lane position: bottomLanes[lane] is the
+        // commit occupying that lane below this row, matching the contract the
+        // renderer and tests rely on (and what topLanes provides above).
+        var bottomLanes: [GitCommitID] = []
+        for pipe in downstream {
+            while bottomLanes.count <= pipe.toPos { bottomLanes.append(pipe.toID) }
+            bottomLanes[pipe.toPos] = pipe.toID
+        }
 
         return GitGraphRow(
             commitID: commitID,
             parentIDs: uniqueParentIDs,
             topLanes: topLanes,
             bottomLanes: bottomLanes,
-            nodeLane: currentLane,
-            nodeColorIndex: currentColorIndex,
+            nodeLane: pos,
+            nodeColorIndex: nodeColorIndex,
             segments: segments,
             isRemoteOnly: isRemoteOnly.contains(commitID)
         )
     }
 
-    /// Lane 0's first-parent spine always uses this palette slot.
-    static let spineColorIndex = 0
-
     /// Git Graph's availableColours: prefer the palette slot whose last
-    /// retirement is at least one full palette cycle away, so a hue never
-    /// repeats within a screenful of rows. `reserved` excludes slots already
-    /// handed out to new lanes on the current row. Falls back to the
-    /// least-recently-used slot when more lanes than slots are active.
-    private mutating func freeColorIndex(reserved: Set<Int>) -> Int {
+    /// retirement is at least one full palette cycle away. The trunk slot is
+    /// reserved for the first-parent spine unless `spineFallback` is set.
+    private mutating func freeColorIndex(reserved: [Int], spineFallback: Bool) -> Int {
+        if spineFallback { return Self.spineColorIndex }
         let slots = Array(1..<GitGraphRow.paletteSize)
-        for color in slots where !reserved.contains(color)
+        let reservedSet = Set(reserved)
+        for color in slots where !reservedSet.contains(color)
             && (colorLastUsedRow[color] ?? Int.min) + GitGraphRow.paletteSize <= rowIndex {
             return color
         }
-        if let color = slots.filter({ !reserved.contains($0) && !activeLaneColorIndices.contains($0) }).min() {
-            return color
-        }
-        return slots.min {
-            (colorLastUsedRow[$0] ?? Int.min) < (colorLastUsedRow[$1] ?? Int.min)
-        } ?? ((rowIndex % max(1, GitGraphRow.paletteSize - 1)) + 1)
+        if let color = slots.filter({ !reservedSet.contains($0) }).min() { return color }
+        return slots.min { (colorLastUsedRow[$0] ?? Int.min) < (colorLastUsedRow[$1] ?? Int.min) } ?? 1
     }
 
     private static func uniqueCommitIDs(_ commitIDs: [GitCommitID]) -> [GitCommitID] {
@@ -272,11 +261,11 @@ struct GitGraphLayout: Equatable, Sendable {
         }
         return result
     }
-
 }
 
 struct GitGraphRow: Equatable, Sendable {
     static let paletteSize = 8
+    static let spineColorIndex = GitGraphLayout.spineColorIndex
 
     let commitID: GitCommitID
     let parentIDs: [GitCommitID]

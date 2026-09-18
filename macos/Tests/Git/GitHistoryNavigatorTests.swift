@@ -49,7 +49,10 @@ struct GitHistoryNavigatorTests {
         let merge = engine.append(commitID: .init("merge"), parentIDs: [.init("main"), .init("side")])
         let branch = engine.append(commitID: .init("side"), parentIDs: [.init("main")])
         let root = engine.append(commitID: .init("main"), parentIDs: [])
-        #expect([single, merge, branch, root].map { GitGraphColumnLayout(row: $0).contentX } == [16, 26, 26, 16])
+        // Pipe model: `main` keeps both branch pipes until it terminates them,
+        // so its row still spans the two converging lanes (26), matching
+        // lazygit / Git Graph's two-lines-into-the-node rendering.
+        #expect([single, merge, branch, root].map { GitGraphColumnLayout(row: $0).contentX } == [16, 26, 26, 26])
     }
 
     @Test func firstVisibleNodeHasNoInventedIncomingEdgeButContinuationDoes() {
@@ -174,7 +177,9 @@ struct GitHistoryNavigatorTests {
                 cell.layoutSubtreeIfNeeded()
                 return try #require(cell.subviews.compactMap { $0 as? NSTextField }.first).frame.minX
             }
-            for (row, expected) in [36.0, 36, 36, 26, 26, 16].enumerated() {
+            // Pipe model: lanes stay occupied until the node where their two
+            // lines converge, so the shared-ancestor rows keep the wider graph.
+            for (row, expected) in [36.0, 36, 36, 36, 26, 26].enumerated() {
                 #expect(try x(row) == expected)
             }
             try await capture(view, path: "/tmp/omg-git-mainline-\(Int(width)).png")

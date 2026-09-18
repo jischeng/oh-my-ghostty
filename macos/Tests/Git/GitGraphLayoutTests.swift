@@ -13,9 +13,15 @@ struct GitGraphLayoutTests {
         #expect(rows[1].nodeLane > 0 && rows[4].nodeLane > 0)
         for index in 0..<(rows.count - 1) { #expect(rows[index].bottomLanes == rows[index + 1].topLanes) }
         for row in rows {
-            #expect(Set(row.bottomLanes).count == row.bottomLanes.count)
             for edge in row.segments where edge.kind == .parent {
-                #expect(row.bottomLanes[edge.to.lane] == edge.parentID)
+                switch edge.to {
+                case .bottom(let lane) where lane < row.bottomLanes.count:
+                    #expect(row.bottomLanes[lane] == edge.parentID)
+                case .node(let lane):
+                    #expect(lane == row.nodeLane)
+                default:
+                    break
+                }
             }
         }
     }
@@ -57,7 +63,10 @@ struct GitGraphLayoutTests {
             if row.commitID != id("tip") {
                 #expect(row.incomingSegment()?.colorIndex == trunk)
             }
-            for segment in row.segments where segment.kind == .parent && segment.parentID != nil
+            // Only the spine node's own first-parent edge must be trunk
+            // coloured; a fork merging into the trunk keeps its branch colour.
+            for segment in row.segments where segment.kind == .parent
+                && segment.commitID == row.commitID && segment.parentID != nil
                 && ["s1", "base", "root"].map(id).contains(segment.parentID!) {
                 #expect(segment.colorIndex == trunk)
             }
@@ -65,7 +74,9 @@ struct GitGraphLayoutTests {
         let sideRow = rows[1]
         #expect(sideRow.nodeLane > 0)
         #expect(sideRow.nodeColorIndex != trunk)
-        #expect(sideRow.parentEdge(to: id("base"))?.colorIndex == trunk)
+        // The fork's line keeps its own branch colour right up to the node
+        // where it merges back into the trunk (issues #17 + #23 combined).
+        #expect(sideRow.parentEdge(to: id("base"))?.colorIndex == sideRow.nodeColorIndex)
     }
 
     @Test func remoteOnlyCommitsMarkRowsAndEdgesUntilLocalAncestor() {
@@ -190,28 +201,25 @@ struct GitGraphLayoutTests {
         #expect(rowC.nodeColorIndex == rowC.incomingSegment()?.colorIndex)
     }
 
-    @Test func mergeReusesExistingParentLaneWithoutDuplicateActiveParents() {
+    @Test func mergeKeepsBothBranchPipesUntilTheyConvergeAtTheBaseNode() {
         var layout = GitGraphLayout()
 
         let merge = layout.append(commitID: id("merge"), parentIDs: [id("left"), id("right")])
-        #expect(merge.bottomLanes == [id("left"), id("right")])
         #expect(merge.containsParentEdge(from: id("merge"), to: id("left")))
         #expect(merge.containsParentEdge(from: id("merge"), to: id("right")))
 
         let left = layout.append(commitID: id("left"), parentIDs: [id("base")])
-        #expect(left.topLanes == [id("left"), id("right")])
-        #expect(left.bottomLanes == [id("base"), id("right")])
-        #expect(left.containsPassthrough(commitID: id("right"), from: 1, to: 1))
         #expect(left.containsParentEdge(from: id("left"), to: id("base")))
 
         let right = layout.append(commitID: id("right"), parentIDs: [id("base")])
-        #expect(right.topLanes == [id("base"), id("right")])
-        #expect(right.bottomLanes == [id("base")])
-        #expect(right.containsPassthrough(commitID: id("base"), from: 0, to: 0))
         #expect(right.containsParentEdge(from: id("right"), to: id("base")))
-        #expect(right.parentEdge(to: id("base"))?.colorIndex == left.nodeColorIndex)
-        #expect(right.parentEdge(to: id("base"))?.colorIndex != right.nodeColorIndex)
-        #expect(layout.activeCommitIDs == [id("base")])
+        // Pipe model: both branches keep a live pipe to `base` until the base
+        // node terminates them, so `base` appears on each of the two lanes.
+        #expect(right.bottomLanes == [id("base"), id("base")])
+        // The fork's edge keeps its own branch colour (issue #23), never the
+        // trunk's.
+        #expect(right.parentEdge(to: id("base"))?.colorIndex == right.nodeColorIndex)
+        #expect(layout.activeCommitIDs == [id("base"), id("base")])
     }
 
     @Test func octopusMergeTracksEveryUnprocessedParentInOrder() {

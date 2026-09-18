@@ -212,6 +212,8 @@ struct GitHistoryExpansionProviderTests {
 
     @Test(arguments: [true, false])
     func refreshAndPagingKeepChangesAndLoadedHistory(refreshFirst: Bool) async throws {
+        OhMyGhosttySettings.shared.gitHistoryScope = nil
+        defer { OhMyGhosttySettings.shared.gitHistoryScope = nil }
         let directory = try await repository(commits: 230)
         defer { try? FileManager.default.removeItem(at: directory) }
         try Data("untracked".utf8).write(to: directory.appendingPathComponent("untracked.swift"))
@@ -307,7 +309,7 @@ private actor ExpansionQueryRecorder: GitExecutor {
     var parentReads = 0
     func execute(arguments: [String], workingDirectory: String, stdin: Data?, maxOutputBytes: Int?) async throws -> GitExecutionResult {
         if arguments.contains("--raw") || arguments.contains("--no-patch") { detailReads += 1 }
-        if arguments.first == "rev-list" { parentReads += 1 }
+        if arguments.first == "rev-list" && arguments.contains("--parents") { parentReads += 1 }
         return try await LocalGitExecutor().execute(arguments: arguments, workingDirectory: workingDirectory,
             stdin: stdin, maxOutputBytes: maxOutputBytes)
     }

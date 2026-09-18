@@ -145,14 +145,14 @@ final class BuiltInGitInspectorProvider {
     private func handle(_ action: InspectorPaneAction) {
         guard case .gitAction(let gitAction) = action.kind else { return }
         switch gitAction {
-        case .fetch, .refresh:
+        case .fetch:
             let key = currentWorktreeKey(for: action.context)
             var value = state(for: action.context.tabID, worktreeKey: key)
             value.detailCache.removeAll(); value.detailCacheOrder.removeAll()
             value.unfilteredHistory = nil
             save(value, tabID: action.context.tabID, worktreeKey: key)
             fetchAndRefresh(context: action.context)
-        case .refreshLocal:
+        case .refresh, .refreshLocal:
             let key = currentWorktreeKey(for: action.context)
             var value = state(for: action.context.tabID, worktreeKey: key)
             value.detailCache.removeAll(); value.detailCacheOrder.removeAll()

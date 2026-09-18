@@ -181,7 +181,7 @@ struct GitInspectorLayoutTests {
         let menu = try #require(tree.menu)
         coordinator.menuNeedsUpdate(menu)
         #expect(menu.items.contains { $0.title == GitL10n.text("New Branch from Here…") })
-        #expect(menu.items.contains { $0.title == GitL10n.text("Push…") })
+        #expect(menu.items.contains { $0.title == GitL10n.text("Push to…") })
         #expect(menu.items.contains { $0.title == GitL10n.text("Set Upstream…") })
         #expect(menu.items.first(where: { $0.title == GitL10n.text("Switch Branch") })?.isEnabled == false)
         #expect(coordinator.rows[0].item.isCategory)

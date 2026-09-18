@@ -237,6 +237,55 @@ struct GitHistoryNavigatorTests {
         }
     }
 
+    @Test func graphStrokesReachCellBoundariesWithoutCrossingTheHeadHalo() throws {
+        let id = GitCommitID("node")
+        let parent = GitCommitID("parent")
+        let row = GitGraphRow(commitID: id, parentIDs: [parent], topLanes: [id], bottomLanes: [parent],
+            nodeLane: 0, nodeColorIndex: 0, segments: [
+                .init(kind: .incoming, from: .top(lane: 0), to: .node(lane: 0),
+                      colorIndex: 0, commitID: id, parentID: nil),
+                .init(kind: .parent, from: .node(lane: 0), to: .bottom(lane: 0),
+                      colorIndex: 0, commitID: id, parentID: parent),
+            ])
+        for height in [56, 78, 156] {
+            for head in [false, true] {
+                for remote in [false, true] {
+                    for section in [GitGraphCellView.Section.commit, .expandedCommit, .continuation, .expansionEnd] {
+                        var input = row
+                        input.isRemoteOnly = remote
+                        let view = GitGraphCellView(frame: NSRect(x: 0, y: 0, width: 20, height: height))
+                        view.configure(row: input, isHead: head, section: section)
+                        let bitmap = try #require(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 40,
+                            pixelsHigh: height * 2, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                            isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+                        let context = try #require(NSGraphicsContext(bitmapImageRep: bitmap))
+                        NSGraphicsContext.saveGraphicsState()
+                        NSGraphicsContext.current = context
+                        context.cgContext.translateBy(x: 0, y: CGFloat(height * 2))
+                        context.cgContext.scaleBy(x: 2, y: -2)
+                        view.draw(view.bounds)
+                        NSGraphicsContext.restoreGraphicsState()
+                        func hasLine(at y: Int) -> Bool {
+                            (15...16).contains { x in
+                                guard let c = bitmap.colorAt(x: x, y: y * 2)?.usingColorSpace(.deviceRGB) else { return false }
+                                return c.alphaComponent > 0.2 && c.blueComponent - c.redComponent > 0.2
+                            }
+                        }
+                        // Every pixel row below the node must carry the line,
+                        // including the last pixel row before the next cell.
+                        for y in 22..<height {
+                            #expect(hasLine(at: y), "Missing line at y=\(y), height=\(height), head=\(head), section=\(section)")
+                        }
+                        for y in 0..<4 { #expect(hasLine(at: y)) }
+                        if head && (section == .commit || section == .expandedCommit) {
+                            #expect(!hasLine(at: 8), "The gap inside the HEAD halo must not contain a line stub")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private func find<T: NSView>(_ type: T.Type, in view: NSView?) -> T? {
         if let value = view as? T { return value }
         return view?.subviews.compactMap { find(type, in: $0) }.first

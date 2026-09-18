@@ -103,37 +103,23 @@ final class GitGraphCellView: NSView {
             }
             previous = point
         }
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        if let row, section == .commit || section == .expandedCommit {
+            // Mask only the actual node disk, never move the path endpoints.
+            // Row-boundary endpoints often share the node's x coordinate but
+            // must stay at y=0/height to connect with adjacent cells. This also
+            // masks curves and the entire HEAD halo without leaving line stubs.
+            let center = point(for: .node(lane: row.nodeLane))
+            let radius = Self.nodeDiameter / 2 + (isHead ? 3.3 : 0)
+            let mask = NSBezierPath(rect: bounds.insetBy(dx: -Self.lineWidth, dy: -Self.lineWidth))
+            mask.appendOval(in: NSRect(x: center.x - radius, y: center.y - radius,
+                                      width: radius * 2, height: radius * 2))
+            mask.windingRule = .evenOdd
+            mask.addClip()
+        }
         color(for: colorIndex).setStroke()
         path.stroke()
-    }
-
-    /// Endpoints that land on a node are pulled back to the circle edge so no
-    /// line stub shows through the node (most visible on the HEAD ring).
-    private func clipToNodeEdge(_ points: [NSPoint], radius: CGFloat) -> [NSPoint] {
-        guard points.count >= 2 else { return points }
-        var result = points
-        if let first = result.first, let second = result.dropFirst().first, first == result.first, first.y != second.y {
-            let node = result.first!
-            let next = second
-            if abs(next.x - node.x) < 0.5, let center = nodeCenterNear(node) {
-                let dir: CGFloat = next.y > center.y ? 1 : -1
-                result[0] = NSPoint(x: center.x, y: center.y + dir * radius)
-            }
-        }
-        if let last = result.last, let prev = result.dropLast().last, last.y != prev.y {
-            if abs(prev.x - last.x) < 0.5, let center = nodeCenterNear(last) {
-                let dir: CGFloat = prev.y < center.y ? -1 : 1
-                result[result.count - 1] = NSPoint(x: center.x, y: center.y + dir * radius)
-            }
-        }
-        return result
-    }
-
-    private func nodeCenterNear(_ point: NSPoint) -> NSPoint? {
-        guard let row, let column else { return nil }
-        let center = NSPoint(x: column.middleX(lane: row.nodeLane, row: row),
-                             y: min(GitHistoryRowMetrics.contentAxisY, bounds.midY))
-        return abs(center.x - point.x) < 1.5 ? center : nil
     }
 
     private func draw(_ segment: GitGraphSegment) {
@@ -153,12 +139,7 @@ final class GitGraphCellView: NSView {
             points.append(NSPoint(x: x, y: max(bounds.midY, bounds.height - 12)))
         }
         points.append(end)
-        // Lines ending at a node stop at the circle edge; nothing may cross
-        // the node interior (the HEAD ring makes any stub obvious).
-        let clipped = segment.kind == .passthrough
-            ? points
-            : clipToNodeEdge(points, radius: Self.nodeDiameter / 2)
-        stroke(clipped, colorIndex: segment.colorIndex)
+        stroke(points, colorIndex: segment.colorIndex)
     }
 
     private func drawNode(_ row: GitGraphRow) {

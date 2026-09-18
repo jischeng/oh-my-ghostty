@@ -56,17 +56,19 @@ final class GhosttyMouseStateTests: GhosttyCustomConfigCase {
 
         let textfield = app.textFields.firstMatch
         XCTAssertTrue(textfield.waitForExistence(timeout: 5), "Search field should appear")
-        app.typeText("a")
+        app.typeText("abc")
+        XCTAssertEqual(textfield.stringValue, "abc")
 
-        XCTAssertTrue(textfield.stringValue == "a", "Search text should be `a`")
+        NSPasteboard.general.clearContents()
+        app.typeKey("a", modifierFlags: .command)
+        app.typeKey("c", modifierFlags: .command)
+        XCTAssertEqual(NSPasteboard.general.string(forType: .string), "abc")
 
-        textfield.coordinate(withNormalizedOffset: .zero)
-            .withOffset(.init(dx: textfield.frame.width * 0.5, dy: 0))
-            .click()
+        app.typeKey("x", modifierFlags: .command)
+        XCTAssertEqual(textfield.stringValue, "")
 
-        app.typeText("b")
-
-        XCTAssertTrue(textfield.stringValue == "ab", "Search text should be `ab`")
+        app.typeKey("v", modifierFlags: .command)
+        XCTAssertEqual(textfield.stringValue, "abc")
 
         // resign
         app.typeKey(.escape, modifierFlags: [])

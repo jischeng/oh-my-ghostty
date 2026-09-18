@@ -1358,6 +1358,15 @@ extension Ghostty {
 
         /// Special case handling for some control keys
         override func performKeyEquivalent(with event: NSEvent) -> Bool {
+            // Keep standard text editing commands in the search field. The SwiftUI
+            // field editor is not always exposed as an NSTextView (notably on newer
+            // macOS releases), so checking only `isFieldEditor` is insufficient.
+            if searchState != nil,
+               event.modifierFlags.intersection([.command, .option, .control]) == .command,
+               ["a", "c", "v", "x", "z"].contains(event.charactersIgnoringModifiers?.lowercased() ?? "") {
+                return false
+            }
+
             // Let AppKit's text editing responder handle standard shortcuts when a
             // SwiftUI text field owns focus. Otherwise this terminal view can
             // intercept Cmd+C/X/V before the field editor receives them.

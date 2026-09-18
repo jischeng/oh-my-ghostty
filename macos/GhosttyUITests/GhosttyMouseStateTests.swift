@@ -70,6 +70,13 @@ final class GhosttyMouseStateTests: GhosttyCustomConfigCase {
         app.typeKey("v", modifierFlags: .command)
         XCTAssertEqual(textfield.stringValue, "abc")
 
+        app.typeText("d")
+        XCTAssertEqual(textfield.stringValue, "abcd")
+        app.typeKey("z", modifierFlags: .command)
+        XCTAssertEqual(textfield.stringValue, "abc")
+        app.typeKey("z", modifierFlags: [.command, .shift])
+        XCTAssertEqual(textfield.stringValue, "abcd")
+
         // resign
         app.typeKey(.escape, modifierFlags: [])
 

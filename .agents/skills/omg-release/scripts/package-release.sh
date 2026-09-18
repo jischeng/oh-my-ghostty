@@ -23,7 +23,8 @@ for arch in arm64 x86_64 universal; do
   if [[ "$arch" == x86_64 ]] && ! arch -x86_64 true >/dev/null 2>&1; then
     # Rosetta 2 is not installed; verify architecture and ReleaseFast marker via strings instead
     lipo -archs "$app/Contents/MacOS/omg" | grep -q 'x86_64' || { echo "$arch binary missing x86_64 slice" >&2; exit 1; }
-    /usr/bin/strings "$app/Contents/MacOS/omg" | grep -q 'ReleaseFast' || { echo "$arch binary does not contain ReleaseFast" >&2; exit 1; }
+    _strtmp=$(mktemp); /usr/bin/strings "$app/Contents/MacOS/omg" > "$_strtmp"; grep -q 'ReleaseFast' "$_strtmp"; rm -f "$_strtmp"
+    [[ $? -eq 0 ]] || { echo "$arch binary does not contain ReleaseFast" >&2; exit 1; }
     printf '[%s] signature=valid launch=skipped(no-rosetta) mode=.ReleaseFast\n' "$arch"
   else
     if [[ "$arch" == x86_64 ]]; then
@@ -126,7 +127,8 @@ for arch in arm64 x86_64 universal; do
   bin="$mount_base/mnt/OMG.app/Contents/MacOS/omg"
   if [[ "$arch" == x86_64 ]] && ! arch -x86_64 true >/dev/null 2>&1; then
     lipo -archs "$bin" | grep -q 'x86_64' || { echo "$arch DMG binary missing x86_64 slice" >&2; exit 1; }
-    /usr/bin/strings "$bin" | grep -q 'ReleaseFast' || { echo "$arch DMG binary does not contain ReleaseFast" >&2; exit 1; }
+    _strtmp=$(mktemp); /usr/bin/strings "$bin" > "$_strtmp"; grep -q 'ReleaseFast' "$_strtmp"; rm -f "$_strtmp"
+    [[ $? -eq 0 ]] || { echo "$arch DMG binary does not contain ReleaseFast" >&2; exit 1; }
     printf '[%s] DMG launch=skipped(no-rosetta) mode=.ReleaseFast\n' "$arch"
   else
     if [[ "$arch" == x86_64 ]]; then

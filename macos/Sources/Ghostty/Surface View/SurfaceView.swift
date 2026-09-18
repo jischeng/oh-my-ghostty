@@ -330,26 +330,36 @@ extension Ghostty {
         @State private var corner: Corner = .topRight
         @State private var dragOffset: CGSize = .zero
         @State private var barSize: CGSize = .zero
-        @FocusState private var isSearchFieldFocused: Bool
+        @State private var focusRequest = 0
 
         private let padding: CGFloat = 8
 
         var body: some View {
             GeometryReader { geo in
                 HStack(spacing: 4) {
-                    BackportSelectionTextField(
-                        "Search",
-                        text: $searchState.needle.text,
-                        selection: $searchState.needle.selection
+                    SurfaceSearchField(
+                        needle: $searchState.needle,
+                        focusRequest: focusRequest,
+                        onSubmit: {
+                            _ = surfaceView.navigateSearchToNext()
+                        },
+                        onSubmitShift: {
+                            _ = surfaceView.navigateSearchToPrevious()
+                        },
+                        onCancel: {
+                            if searchState.needle.text.isEmpty {
+                                onClose()
+                            } else {
+                                Ghostty.moveFocus(to: surfaceView)
+                            }
+                        }
                     )
-                    .textFieldStyle(.plain)
                     .frame(width: 180)
                     .padding(.leading, 8)
                     .padding(.trailing, 50)
                     .padding(.vertical, 6)
                     .background(Color.primary.opacity(0.1))
                     .cornerRadius(6)
-                    .focused($isSearchFieldFocused)
                     .overlay(alignment: .trailing) {
                         if let selected = searchState.selected {
                             Text("\(selected + 1)/\(searchState.total, default: "?")")
@@ -376,23 +386,6 @@ extension Ghostty {
                         // When the app becomes active, we want to check for external changes
                         // to our synced needle.
                         searchState.readPasteboardNeedle()
-                    }
-                    .onSubmit {
-                        _ = surfaceView.navigateSearchToNext()
-                    }
-                    .onExitCommand {
-                        if searchState.needle.text.isEmpty {
-                            onClose()
-                        } else {
-                            Ghostty.moveFocus(to: surfaceView)
-                        }
-                    }
-                    .backport.onKeyPress(.return) { modifiers in
-                        if modifiers.contains(.shift) {
-                            _ = surfaceView.navigateSearchToPrevious()
-                            return .handled
-                        }
-                        return .ignored
                     }
 
                     Button(action: {
@@ -421,12 +414,12 @@ extension Ghostty {
                 .clipShape(clipShape)
                 .shadow(radius: 4)
                 .onAppear {
-                    isSearchFieldFocused = true
+                    focusRequest += 1
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .ghosttySearchFocus)) { notification in
                     guard notification.object as? SurfaceView === surfaceView else { return }
                     DispatchQueue.main.async {
-                        isSearchFieldFocused = true
+                        focusRequest += 1
                     }
                 }
                 .background(

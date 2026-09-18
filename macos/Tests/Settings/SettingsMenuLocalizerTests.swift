@@ -18,6 +18,11 @@ struct SettingsMenuLocalizerTests {
             action: nil,
             keyEquivalent: ""
         ))
+        fileMenu.addItem(NSMenuItem(
+            title: "Cut",
+            action: nil,
+            keyEquivalent: "x"
+        ))
         file.submenu = fileMenu
         root.addItem(file)
         let view = NSMenuItem(title: "View", action: nil, keyEquivalent: "")
@@ -37,6 +42,7 @@ struct SettingsMenuLocalizerTests {
         #expect(root.items[0].title == "文件")
         #expect(root.items[0].submenu?.items[0].title == "新建窗口")
         #expect(root.items[0].submenu?.items[1].title == "Dynamic Workspace Name")
+        #expect(root.items[0].submenu?.items[2].title == "剪切")
         #expect(root.items[1].title == "显示")
         #expect(root.items[1].submenu?.items[0].title == "显示或隐藏检查器")
         #expect(root.items[0].submenu?.items[0].keyEquivalent == "n")

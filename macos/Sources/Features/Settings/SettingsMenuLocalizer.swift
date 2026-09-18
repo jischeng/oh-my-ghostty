@@ -32,6 +32,7 @@ enum SettingsMenuLocalizer {
         ("Edit", "编辑"),
         ("Undo", "撤销"),
         ("Redo", "重做"),
+        ("Cut", "剪切"),
         ("Copy", "复制"),
         ("Paste", "粘贴"),
         ("Paste Selection", "粘贴选区"),

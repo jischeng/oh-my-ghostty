@@ -37,9 +37,48 @@ struct GitGraphLayout: Equatable, Sendable {
             primary.append(id)
             current = firstParents[id]
         }
-        let remoteOnly = Set(commits.filter(\.isRemoteOnly).map(\.id))
+        let spine = Set(primary)
         var layout = GitGraphLayout(primaryFirstParents: primary)
-        return commits.map { layout.append(commitID: $0.id, parentIDs: $0.parentIDs, isRemoteOnly: remoteOnly) }
+        let remoteOnly = Set(commits.filter(\.isRemoteOnly).map(\.id))
+        var rows = commits.map { layout.append(commitID: $0.id, parentIDs: $0.parentIDs, isRemoteOnly: remoteOnly) }
+        recolorForBranchIdentity(&rows, spine: spine)
+        return rows
+    }
+
+    /// Second pass that gives every fork its own colour from the fork point
+    /// down (a lane takes the colour of its topmost node's branch), while the
+    /// first-parent spine keeps the trunk colour end to end. Walking bottom-up
+    /// resolves each lane's colour to the colour of the child that continues
+    /// it, so a branch never shows a stub of its parent's colour.
+    private static func recolorForBranchIdentity(_ rows: inout [GitGraphRow], spine: Set<GitCommitID>) {
+        guard !rows.isEmpty else { return }
+        var laneColour: [GitCommitID: Int] = [:]
+        for index in rows.indices.reversed() {
+            var row = rows[index]
+            let nodeColour = spine.contains(row.commitID)
+                ? GitGraphLayout.spineColorIndex
+                : laneColour[row.commitID] ?? row.nodeColorIndex
+            row.nodeColorIndex = nodeColour
+            for lane in row.bottomLanes.indices {
+                let id = row.bottomLanes[lane]
+                laneColour[id] = spine.contains(id) ? GitGraphLayout.spineColorIndex : (laneColour[id] ?? nodeColour)
+            }
+            row.segments = row.segments.map { segment in
+                var segment = segment
+                switch segment.kind {
+                case .incoming:
+                    segment.colorIndex = nodeColour
+                case .passthrough:
+                    segment.colorIndex = laneColour[segment.commitID] ?? segment.colorIndex
+                case .parent:
+                    if let parentID = segment.parentID, let colour = laneColour[parentID] {
+                        segment.colorIndex = colour
+                    }
+                }
+                return segment
+            }
+            rows[index] = row
+        }
     }
 
     var activeCommitIDs: [GitCommitID] {
@@ -63,11 +102,11 @@ struct GitGraphLayout: Equatable, Sendable {
         let uniqueParentIDs = Self.uniqueCommitIDs(parentIDs)
         let currentLane = topLanes.firstIndex(of: commitID) ?? topLanes.count
         let wasActive = currentLane < topLanes.count
-        // A spine tip that never entered the lanes still keeps the trunk
-        // colour; freeColorIndex is only for genuine side tips.
+        // First pass only needs deterministic placeholder colours; the second
+        // pass (recolorForBranchIdentity) resolves the final branch colours.
         let currentColorIndex = if wasActive {
             topLaneColorIndices[currentLane]
-        } else if primaryRanks[commitID] != nil {
+        } else if topLanes.isEmpty {
             Self.spineColorIndex
         } else {
             freeColorIndex(reserved: [])
@@ -106,11 +145,9 @@ struct GitGraphLayout: Equatable, Sendable {
             }
 
             let lane = min(insertionIndex, bottomLanes.count)
-            // Spine commits keep the trunk color even when a side branch queues
-            // them first; otherwise lane 0 would change color at every fork.
-            let colorIndex = if primaryRanks[parentID] != nil {
-                Self.spineColorIndex
-            } else if parentIndex == 0 {
+            // First parents continue the node's own line; extra parents fork
+            // into a placeholder colour that the second pass may refine.
+            let colorIndex = if parentIndex == 0 {
                 currentColorIndex
             } else {
                 freeColorIndex(reserved: reservedThisRow)
@@ -146,8 +183,7 @@ struct GitGraphLayout: Equatable, Sendable {
                     to: .node(lane: currentLane),
                     colorIndex: currentColorIndex,
                     commitID: commitID,
-                    parentID: nil,
-                    isRemoteOnly: isRemoteOnly.contains(commitID)
+                    parentID: nil
                 )
             )
         }
@@ -161,8 +197,7 @@ struct GitGraphLayout: Equatable, Sendable {
                     to: .bottom(lane: bottomLane),
                     colorIndex: topLaneColorIndices[lane],
                     commitID: laneCommitID,
-                    parentID: nil,
-                    isRemoteOnly: isRemoteOnly.contains(laneCommitID)
+                    parentID: nil
                 )
             )
         }
@@ -170,10 +205,6 @@ struct GitGraphLayout: Equatable, Sendable {
         for parentID in uniqueParentIDs {
             guard let parentLane = parentLanes[parentID],
                   let parentColorIndex = parentColorIndices[parentID] else { continue }
-            // The edge belongs to the child commit; an unpulled child keeps the
-            // dashed style until it joins a local (or shared) ancestor.
-            let edgeIsRemoteOnly = isRemoteOnly.contains(commitID)
-                && (!isRemoteOnly.contains(parentID) || parentLanes.count > 1)
             segments.append(
                 GitGraphSegment(
                     kind: .parent,
@@ -181,8 +212,7 @@ struct GitGraphLayout: Equatable, Sendable {
                     to: .bottom(lane: parentLane),
                     colorIndex: parentColorIndex,
                     commitID: commitID,
-                    parentID: parentID,
-                    isRemoteOnly: edgeIsRemoteOnly
+                    parentID: parentID
                 )
             )
         }
@@ -253,8 +283,8 @@ struct GitGraphRow: Equatable, Sendable {
     let topLanes: [GitCommitID]
     let bottomLanes: [GitCommitID]
     let nodeLane: Int
-    let nodeColorIndex: Int
-    let segments: [GitGraphSegment]
+    var nodeColorIndex: Int
+    var segments: [GitGraphSegment]
     var isRemoteOnly = false
 
     var requiredLaneCount: Int {
@@ -272,12 +302,9 @@ struct GitGraphSegment: Equatable, Sendable {
     let kind: Kind
     let from: GitGraphPoint
     let to: GitGraphPoint
-    let colorIndex: Int
+    var colorIndex: Int
     let commitID: GitCommitID
     let parentID: GitCommitID?
-    /// Dashed rendering for commits fetched to a remote ref but not yet
-    /// reachable from any local branch (see GitHistorySnapshot.remoteOnlyCommitIDs).
-    var isRemoteOnly = false
 }
 
 enum GitGraphPoint: Equatable, Sendable {

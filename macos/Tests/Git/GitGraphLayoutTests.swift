@@ -79,11 +79,6 @@ struct GitGraphLayoutTests {
         let rows = GitGraphLayout.rows(for: input)
         #expect(rows[0].isRemoteOnly && rows[1].isRemoteOnly)
         #expect(!rows[2].isRemoteOnly && !rows[3].isRemoteOnly)
-        #expect(rows[0].parentEdge(to: id("remote-mid"))?.isRemoteOnly == false)
-        #expect(rows[1].incomingSegment()?.isRemoteOnly == true)
-        #expect(rows[1].parentEdge(to: id("local"))?.isRemoteOnly == true)
-        #expect(rows[2].segments.allSatisfy { !$0.isRemoteOnly })
-        #expect(rows[3].segments.allSatisfy { !$0.isRemoteOnly })
     }
 
     @Test func lanesCompactWithoutVisualHoles() {

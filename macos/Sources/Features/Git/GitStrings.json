@@ -600,6 +600,7 @@
     "en": "Show Commit Details / Changed Files",
     "zh-Hans": "显示提交详情 / 更改文件"
   },
+"Fetched from remote, not yet merged · {0}": { "en": "Fetched from remote, not yet merged · {0}", "zh-Hans": "已从远端 fetch，尚未合入本地 · {0}" },
   "Compare with HEAD": {
     "en": "Compare with HEAD",
     "zh-Hans": "与 HEAD 比较"

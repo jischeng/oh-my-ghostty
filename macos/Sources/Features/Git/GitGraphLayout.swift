@@ -3,7 +3,12 @@ import Foundation
 struct GitGraphLayout: Equatable, Sendable {
     private(set) var activeLanes: [GitCommitID]
     private var activeLaneColorIndices: [Int]
-    private var nextColorIndex: Int
+    /// Last row index that used each palette slot (Git Graph's availableColours).
+    private var colorLastUsedRow: [Int: Int]
+    private var rowIndex: Int
+    /// Commits queued as some commit's parent but not yet listed. Only these
+    /// may block lane compaction; dangling lanes get filled from the left.
+    private var pendingParentIDs: Set<GitCommitID>
     private let primaryRanks: [GitCommitID: Int]
 
     init(activeLanes: [GitCommitID] = [], primaryFirstParents: [GitCommitID] = []) {
@@ -12,7 +17,9 @@ struct GitGraphLayout: Equatable, Sendable {
         let initial = activeLanes
         self.activeLanes = initial
         self.activeLaneColorIndices = initial.indices.map { $0 % GitGraphRow.paletteSize }
-        self.nextColorIndex = initial.count % GitGraphRow.paletteSize
+        colorLastUsedRow = [:]
+        rowIndex = 0
+        pendingParentIDs = Set(initial)
         var ranks: [GitCommitID: Int] = [:]
         for (index, id) in primaryFirstParents.enumerated() where ranks[id] == nil { ranks[id] = index }
         primaryRanks = ranks
@@ -56,10 +63,14 @@ struct GitGraphLayout: Equatable, Sendable {
         let uniqueParentIDs = Self.uniqueCommitIDs(parentIDs)
         let currentLane = topLanes.firstIndex(of: commitID) ?? topLanes.count
         let wasActive = currentLane < topLanes.count
+        // A spine tip that never entered the lanes still keeps the trunk
+        // colour; freeColorIndex is only for genuine side tips.
         let currentColorIndex = if wasActive {
             topLaneColorIndices[currentLane]
+        } else if primaryRanks[commitID] != nil {
+            Self.spineColorIndex
         } else {
-            allocateColorIndex()
+            freeColorIndex(reserved: [])
         }
 
         var bottomLanes = topLanes
@@ -72,6 +83,9 @@ struct GitGraphLayout: Equatable, Sendable {
         var parentLanes: [GitCommitID: Int] = [:]
         var parentColorIndices: [GitCommitID: Int] = [:]
         var insertionIndex = min(currentLane, bottomLanes.count)
+        // Colours handed out within this row; octopus merges must not give
+        // two new lanes the same slot before either can retire.
+        var reservedThisRow = Set(bottomLaneColorIndices)
 
         for (parentIndex, parentID) in uniqueParentIDs.enumerated() {
             if let lane = bottomLanes.firstIndex(of: parentID) {
@@ -81,16 +95,27 @@ struct GitGraphLayout: Equatable, Sendable {
                 continue
             }
 
+            // Lanes whose commit was already processed are dangling: they keep
+            // a slot only as a merge target or future node. Pending parents and
+            // spine commits must not be displaced sideways, but any other
+            // dangling lane may be filled from the left, closing visual holes.
+            while insertionIndex < bottomLanes.count,
+                  primaryRanks[bottomLanes[insertionIndex]] == nil,
+                  !pendingParentIDs.contains(bottomLanes[insertionIndex]) {
+                insertionIndex += 1
+            }
+
             let lane = min(insertionIndex, bottomLanes.count)
-            // A lane's identity color stays with it; only the spine (already
-            // pinned to the trunk color at insertion) may reuse palette slot 0.
+            // Spine commits keep the trunk color even when a side branch queues
+            // them first; otherwise lane 0 would change color at every fork.
             let colorIndex = if primaryRanks[parentID] != nil {
                 Self.spineColorIndex
             } else if parentIndex == 0 {
                 currentColorIndex
             } else {
-                allocateColorIndex()
+                freeColorIndex(reserved: reservedThisRow)
             }
+            reservedThisRow.insert(colorIndex)
             bottomLanes.insert(parentID, at: lane)
             bottomLaneColorIndices.insert(colorIndex, at: lane)
             parentLanes[parentID] = lane
@@ -163,7 +188,16 @@ struct GitGraphLayout: Equatable, Sendable {
         }
 
         activeLanes = bottomLanes
+        // Colours that left the active set become re-usable one palette cycle
+        // from now (Git Graph's availableColours), which keeps a hue from
+        // repeating within a screenful of rows.
+        for color in Set(activeLaneColorIndices).subtracting(bottomLaneColorIndices) where color != Self.spineColorIndex {
+            colorLastUsedRow[color] = rowIndex
+        }
         activeLaneColorIndices = bottomLaneColorIndices
+        pendingParentIDs.formUnion(uniqueParentIDs)
+        pendingParentIDs.remove(commitID)
+        rowIndex += 1
 
         return GitGraphRow(
             commitID: commitID,
@@ -180,11 +214,23 @@ struct GitGraphLayout: Equatable, Sendable {
     /// Lane 0's first-parent spine always uses this palette slot.
     static let spineColorIndex = 0
 
-    private mutating func allocateColorIndex() -> Int {
-        defer {
-            nextColorIndex = (nextColorIndex + 1) % GitGraphRow.paletteSize
+    /// Git Graph's availableColours: prefer the palette slot whose last
+    /// retirement is at least one full palette cycle away, so a hue never
+    /// repeats within a screenful of rows. `reserved` excludes slots already
+    /// handed out to new lanes on the current row. Falls back to the
+    /// least-recently-used slot when more lanes than slots are active.
+    private mutating func freeColorIndex(reserved: Set<Int>) -> Int {
+        let slots = Array(1..<GitGraphRow.paletteSize)
+        for color in slots where !reserved.contains(color)
+            && (colorLastUsedRow[color] ?? Int.min) + GitGraphRow.paletteSize <= rowIndex {
+            return color
         }
-        return nextColorIndex
+        if let color = slots.filter({ !reserved.contains($0) && !activeLaneColorIndices.contains($0) }).min() {
+            return color
+        }
+        return slots.min {
+            (colorLastUsedRow[$0] ?? Int.min) < (colorLastUsedRow[$1] ?? Int.min)
+        } ?? ((rowIndex % max(1, GitGraphRow.paletteSize - 1)) + 1)
     }
 
     private static func uniqueCommitIDs(_ commitIDs: [GitCommitID]) -> [GitCommitID] {

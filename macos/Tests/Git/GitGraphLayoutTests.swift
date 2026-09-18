@@ -86,6 +86,74 @@ struct GitGraphLayoutTests {
         #expect(rows[3].segments.allSatisfy { !$0.isRemoteOnly })
     }
 
+    @Test func lanesCompactWithoutVisualHoles() {
+        // Screenshot scenario from #22: a feature branch merges back while the
+        // mainline continues below the merge. The branch tip must take the
+        // lane directly right of the trunk; the skipped slot must not leave a
+        // row with a vertical line next to a disconnected parallel line.
+        let history = [
+            commit("fix", ["merge"]),
+            commit("merge", ["dev2", "fix1"]),
+            commit("fix2", ["fix1"]),
+            commit("dev2", ["dev1"]),
+            commit("fix1", ["dev1"]),
+            commit("dev1", []),
+        ]
+        let rows = GitGraphLayout.rows(for: history)
+        let fix2 = rows[2]
+        #expect(fix2.commitID == id("fix2"))
+        for row in rows {
+            // No dangling hole: every lane right of an empty slot carries a line.
+            let lanesWithLines = Set(row.segments.flatMap { [$0.from.lane, $0.to.lane] } + [row.nodeLane])
+            if let rightmost = lanesWithLines.max() {
+                for lane in 0..<rightmost {
+                    #expect(lanesWithLines.contains(lane))
+                }
+            }
+        }
+    }
+
+    @Test func manySimultaneousBranchesSpreadColoursAcrossThePalette() {
+        // Eight side tips plus the trunk exceed the non-trunk palette, so one
+        // colour must repeat; the layout spreads assignments across slots
+        // instead of collapsing onto a single colour.
+        let sides = (0..<8).map { "side-\($0)" }
+        var history = [commit("tip", ["main"] + sides)]
+        history.append(commit("main", ["base"]))
+        history += sides.map { commit($0, ["base"]) }
+        history.append(commit("base", []))
+        let rows = GitGraphLayout.rows(for: history)
+        let tip = rows[0]
+        var colours = Set<Int>()
+        for lane in tip.bottomLanes.indices {
+            if let segment = tip.segments.first(where: {
+                $0.kind == .parent && $0.to == .bottom(lane: lane)
+            }) { colours.insert(segment.colorIndex) }
+        }
+        #expect(colours.count >= 6)
+        // Beyond the palette the layout must not crash; colours simply cycle.
+        let overflow = (0..<20).map { "over-\($0)" }
+        var crowded = [commit("crowd-tip", ["crowd-main"] + overflow)]
+        crowded.append(commit("crowd-main", []))
+        crowded += overflow.map { commit($0, []) }
+        _ = GitGraphLayout.rows(for: crowded)
+    }
+
+    @Test func coloursRotateAcrossSequentialSideBranches() {
+        // Sequential branches on one trunk each take a different colour until
+        // the palette is exhausted, so neighbouring branch segments rarely
+        // share a hue.
+        var history = [commit("tip", ["m1"])]
+        history += [commit("m1", ["m2", "b1"]), commit("b1", ["m2"]),
+                    commit("m2", ["m3", "b2"]), commit("b2", ["m3"]),
+                    commit("m3", ["root"]), commit("root", [])]
+        let rows = GitGraphLayout.rows(for: history)
+        let branchRows = rows.filter { ["b1", "b2"].map(id).contains($0.commitID) }
+        #expect(branchRows.count == 2)
+        #expect(branchRows[0].nodeColorIndex != branchRows[1].nodeColorIndex)
+        #expect(branchRows.allSatisfy { $0.nodeColorIndex != GitGraphLayout.spineColorIndex })
+    }
+
     private func commit(_ value: String, _ parents: [String]) -> GitHistoryCommit {
         GitHistoryCommit(id: id(value), parentIDs: parents.map(id), authorName: "Author", authorEmail: "a@example.com",
             authoredAt: .distantPast, subject: "feat: " + value)

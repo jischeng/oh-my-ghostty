@@ -117,15 +117,9 @@ struct InspectorGitView: View {
                         .scaleEffect(0.7)
                 }
 
-                Button {
-                    perform(.gitAction(.refresh))
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 11))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .help(GitL10n.text("Refresh Git status"))
+                pullPushMenu
+
+                refreshButton
             }
 
             if let repository = content.repository {
@@ -146,6 +140,92 @@ struct InspectorGitView: View {
                     .frame(height: 14)
             }
         }
+    }
+
+    private var pullPushMenu: some View {
+        Menu {
+            Button {
+                perform(.gitAction(.pull))
+            } label: {
+                Label(GitL10n.text("Pull"), systemImage: "arrow.down")
+            }
+            .disabled(content.operation != nil || isDetachedHead || !hasRemote)
+
+            Button {
+                perform(.gitAction(.push))
+            } label: {
+                Label(GitL10n.text("Push"), systemImage: "arrow.up")
+            }
+            .disabled(content.operation != nil || isDetachedHead || !hasRemote)
+
+            Divider()
+
+            Button {
+                perform(.gitAction(.pushTo))
+            } label: {
+                Label(GitL10n.text("Push…"), systemImage: "arrow.up.right")
+            }
+            .disabled(content.operation != nil || isDetachedHead || !hasRemote)
+        } label: {
+            Image(systemName: "arrow.up.arrow.down")
+                .font(.system(size: 11))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .foregroundStyle(.secondary)
+        .help(GitL10n.text("Pull or Push"))
+        .disabled(content.repository == nil || content.operation != nil)
+    }
+
+    private var refreshButton: some View {
+        Button {
+            perform(.gitAction(.refresh))
+        } label: {
+            Image(systemName: "arrow.clockwise")
+                .font(.system(size: 11))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help(GitL10n.text("Fetch and refresh Git status"))
+        .disabled(content.repository == nil)
+        .contextMenu {
+            Button(GitL10n.text("Fetch and Refresh")) {
+                perform(.gitAction(.refresh))
+            }
+            Button(GitL10n.text("Refresh (Local Only)")) {
+                perform(.gitAction(.refreshLocal))
+            }
+            Divider()
+            Menu(GitL10n.text("Auto-Fetch Interval")) {
+                ForEach([0, 1, 2, 5, 10, 15, 30, 60], id: \.self) { minutes in
+                    Button {
+                        settings.gitAutoFetchInterval = minutes
+                    } label: {
+                        if settings.gitAutoFetchInterval == minutes {
+                            Label(settingsStrings.gitAutoFetchIntervalTitle(minutes), systemImage: "checkmark")
+                        } else {
+                            Text(settingsStrings.gitAutoFetchIntervalTitle(minutes))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var settingsStrings: SettingsStrings {
+        SettingsStrings(language: settings.language)
+    }
+
+    private var isDetachedHead: Bool {
+        switch content.status {
+        case .detached: return true
+        default: return false
+        }
+    }
+
+    private var hasRemote: Bool {
+        content.workingTree.remoteURL != nil || !content.workingTree.branches.filter(\.isRemote).isEmpty
     }
 
     private var headerReferences: [GitRefDecoration] {

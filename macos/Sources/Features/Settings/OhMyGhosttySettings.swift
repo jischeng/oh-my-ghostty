@@ -277,6 +277,11 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Show the Vertical Tabs sidebar by default.",
             requiresNewWindow: false, category: "tabs"),
         .init(
+            id: "git.autoFetchInterval", type: .number, defaultValue: "5",
+            allowedValues: nil, minimum: 0, maximum: 1440,
+            description: "Interval in minutes for automatic Git fetch. 0 disables auto-fetch.",
+            requiresNewWindow: false, category: "general"),
+        .init(
             id: "appearance.windowTheme", type: .enumeration, defaultValue: "ghostty-config",
             allowedValues: OhMyGhosttyWindowTheme.allCases.map(\.rawValue), minimum: nil, maximum: nil,
             description: "Optional window appearance override.",
@@ -668,6 +673,18 @@ final class OhMyGhosttySettings: ObservableObject {
     var gitHistoryScope: String? {
         didSet { persistOptional("git.historyScope", gitHistoryScope) }
     }
+    /// Git auto-fetch interval in minutes.
+    /// 0 means disabled. Typical values: 1, 2, 5, 10, 15, 30, 60.
+    @Published var gitAutoFetchInterval: Int = 5 {
+        didSet {
+            let clamped = max(0, min(gitAutoFetchInterval, 1440))
+            if gitAutoFetchInterval != clamped {
+                gitAutoFetchInterval = clamped
+            } else {
+                persist("git.autoFetchInterval", clamped)
+            }
+        }
+    }
     @Published var agentHistoryLimit: Double = 10_000 {
         didSet {
             let clamped = min(max(agentHistoryLimit, 100), 50_000)
@@ -948,6 +965,7 @@ final class OhMyGhosttySettings: ObservableObject {
             editorTabWidth = numberValue("editor.tabWidth", fallback: 4, range: 1...12).rounded()
             editorWordWrap = boolValue("editor.wordWrap", fallback: false)
             gitHistoryScope = optionalStringValue("git.historyScope")
+            gitAutoFetchInterval = Int(numberValue("git.autoFetchInterval", fallback: 5, range: 0...1440).rounded())
             agentHistoryLimit = numberValue(
                 "agents.historyLimit",
                 fallback: 10_000,

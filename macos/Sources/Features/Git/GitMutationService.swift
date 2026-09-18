@@ -20,6 +20,9 @@ enum GitMutation: Equatable, Sendable {
     case checkout(String)
     case create(name: String, start: String)
     case push(branch: String, remote: String, destination: String)
+    case pushCurrent
+    case pull
+    case fetch(remote: String? = nil, prune: Bool = true)
     case setUpstream(branch: String, upstream: String)
 
     var updatesIndexOnly: Bool {
@@ -48,7 +51,9 @@ enum GitMutation: Equatable, Sendable {
         case .commit: return GitL10n.text("Committing…")
         case .checkout: return GitL10n.text("Switching branch…")
         case .create: return GitL10n.text("Creating branch…")
-        case .push: return GitL10n.text("Pushing…")
+        case .push, .pushCurrent: return GitL10n.text("Pushing…")
+        case .pull: return GitL10n.text("Pulling…")
+        case .fetch: return GitL10n.text("Fetching…")
         case .setUpstream: return GitL10n.text("Setting upstream…")
         }
     }
@@ -180,8 +185,34 @@ struct GitMutationService: Sendable {
             guard try await remotes(in: repository).contains(remote) else {
                 throw GitDiffServiceError.gitFailed(GitL10n.text("The selected remote no longer exists."))
             }
-            _ = try await run(["push", "--porcelain", "--", remote,
+            _ = try await run(["push", "--porcelain", "--set-upstream", "--", remote,
                               "refs/heads/\(branch):refs/heads/\(destination)"], in: repository)
+        case .pushCurrent:
+            let remotesList = try await remotes(in: repository)
+            guard !remotesList.isEmpty else {
+                throw GitDiffServiceError.gitFailed(GitL10n.text("Cannot push without a configured remote."))
+            }
+            _ = try await run(["push", "--porcelain"], in: repository)
+        case .pull:
+            let remotesList = try await remotes(in: repository)
+            guard !remotesList.isEmpty else {
+                throw GitDiffServiceError.gitFailed(GitL10n.text("Cannot pull without a configured remote."))
+            }
+            _ = try await run(["pull"], in: repository)
+        case .fetch(let remote, let prune):
+            let remotesList = try await remotes(in: repository)
+            guard !remotesList.isEmpty else { return }
+            var arguments = ["fetch"]
+            if prune { arguments.append("--prune") }
+            if let remote {
+                guard remotesList.contains(remote) else {
+                    throw GitDiffServiceError.gitFailed(GitL10n.text("The selected remote no longer exists."))
+                }
+                arguments.append(remote)
+            } else {
+                arguments.append("--all")
+            }
+            _ = try await run(arguments, in: repository)
         case .setUpstream(let branch, let upstream):
             try await validateBranch(branch, in: repository)
             try validateRef(upstream)

@@ -225,6 +225,16 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                Section(strings.gitSection) {
+                    Picker(strings.gitAutoFetchLabel, selection: $settings.gitAutoFetchInterval) {
+                        ForEach([0, 1, 2, 5, 10, 15, 30, 60], id: \.self) { minutes in
+                            Text(strings.gitAutoFetchIntervalTitle(minutes)).tag(minutes)
+                        }
+                    }
+                    Text(strings.gitAutoFetchCaption)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Section(strings.configurationSection) {
                     LabeledContent(strings.settingsFileLabel, value: OhMyGhosttySettings.fileURL.path)
                     LabeledContent(strings.precedenceLabel, value: strings.precedenceValue)

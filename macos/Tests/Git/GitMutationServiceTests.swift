@@ -302,6 +302,39 @@ struct GitMutationServiceTests {
         #expect(throws: (any Error).self) { try GitWorktreeInfo.parse(Data([0xff]), currentPath: "/") }
     }
 
+    @Test func fetchPullAndPushCurrentMutations() async throws {
+        let repo = try await repository()
+        defer { try? FileManager.default.removeItem(atPath: repo.worktreePath) }
+        let service = GitMutationService()
+        try write("base\n", "file", repo)
+        try await service.perform(.stage(["file"]), in: repo)
+        try await service.perform(.commit("base"), in: repo)
+
+        let remotePath = repo.worktreePath + "/remote.git"
+        _ = try await git(["init", "--bare", remotePath], repo)
+        _ = try await git(["remote", "add", "origin", remotePath], repo)
+
+        // Push current branch to remote with set-upstream
+        try await service.perform(.push(branch: "main", remote: "origin", destination: "main"), in: repo)
+        #expect(try await git(["rev-parse", "refs/remotes/origin/main"], repo) == (try await git(["rev-parse", "HEAD"], repo)))
+
+        // Fetch remote
+        try await service.perform(.fetch(remote: "origin", prune: true), in: repo)
+        try await service.perform(.fetch(remote: nil, prune: true), in: repo)
+
+        // Push current on an already-tracking branch
+        try write("second\n", "file", repo)
+        try await service.perform(.stage(["file"]), in: repo)
+        try await service.perform(.commit("second"), in: repo)
+        let secondCommit = try await git(["rev-parse", "HEAD"], repo)
+        try await service.perform(.pushCurrent, in: repo)
+        #expect(try await git(["rev-parse", "refs/remotes/origin/main"], repo) == secondCommit)
+
+        // Pull on up-to-date branch
+        try await service.perform(.pull, in: repo)
+        #expect(try await git(["rev-parse", "HEAD"], repo) == secondCommit)
+    }
+
     @Test func rejectsPathTraversalAndOptionLikeBranchNames() async throws {
         let repo = try await repository()
         defer { try? FileManager.default.removeItem(atPath: repo.worktreePath) }

@@ -93,6 +93,10 @@ struct InspectorAgentHistoryContent: Equatable, Sendable {
 
 enum InspectorGitAction: Equatable, Sendable {
     case refresh
+    case refreshLocal
+    case pull
+    case push
+    case pushTo
     case selectTab(InspectorGitContent.ActiveTab)
     case selectHistoryScope(GitHistoryScope)
     case loadMoreHistory

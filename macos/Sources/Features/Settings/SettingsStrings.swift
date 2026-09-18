@@ -101,6 +101,32 @@ struct SettingsStrings: Equatable, Sendable {
             "退出时直接终止仍在运行的终端进程，不再弹出确认。"
         )
     }
+
+    // MARK: Git
+
+    var gitSection: String { t("Git", "Git") }
+    var gitAutoFetchLabel: String { t("Auto-Fetch Interval", "定时自动 Fetch 间隔") }
+    var gitAutoFetchCaption: String {
+        t(
+            "Automatically fetches from remotes periodically in the background when repositories are active.",
+            "仓库处于活跃状态时，在后台定期从远端自动 Fetch 更新。"
+        )
+    }
+    func gitAutoFetchIntervalTitle(_ minutes: Int) -> String {
+        switch minutes {
+        case 0: return t("Disabled", "关闭")
+        case 1: return t("Every 1 minute", "每 1 分钟")
+        case 2: return t("Every 2 minutes", "每 2 分钟")
+        case 5: return t("Every 5 minutes", "每 5 分钟")
+        case 10: return t("Every 10 minutes", "每 10 分钟")
+        case 15: return t("Every 15 minutes", "每 15 分钟")
+        case 30: return t("Every 30 minutes", "每 30 分钟")
+        case 60: return t("Every 1 hour", "每 1 小时")
+        default:
+            return isChinese ? "每 \(minutes) 分钟" : "Every \(minutes) minutes"
+        }
+    }
+
     var configurationSection: String { t("Configuration", "配置") }
     var settingsFileLabel: String { t("OMG Settings", "OMG 设置文件") }
     var precedenceLabel: String { t("Precedence", "优先级") }

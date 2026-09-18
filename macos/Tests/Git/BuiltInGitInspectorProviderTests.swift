@@ -290,6 +290,55 @@ struct BuiltInGitInspectorProviderTests {
         registry.presentationDidChange(to: nil, context: context)
 
     }
+
+    @Test func autoFetchAndRefreshFetchRemote() async throws {
+        let dir = createTempDirectory()
+        let remoteDir = createTempDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: dir)
+            try? FileManager.default.removeItem(at: remoteDir)
+        }
+        try runCommand(["git", "init", "--bare"], in: remoteDir.path)
+        try runCommand(["git", "init", "-b", "main"], in: dir.path)
+        try runCommand(["git", "config", "user.email", "test@test.com"], in: dir.path)
+        try runCommand(["git", "config", "user.name", "test"], in: dir.path)
+        try runCommand(["git", "commit", "--allow-empty", "-m", "initial"], in: dir.path)
+        try runCommand(["git", "remote", "add", "origin", remoteDir.path], in: dir.path)
+        try runCommand(["git", "push", "-u", "origin", "main"], in: dir.path)
+
+        let registry = InspectorRegistry()
+        let provider = BuiltInGitInspectorProvider(registry: registry)
+        try provider.register()
+
+        let context = InspectorPaneContext(tabID: UUID(), surfaceID: UUID(), title: "test", workingDirectory: dir.path)
+        registry.presentationDidChange(to: BuiltInGitInspectorProvider.paneID, context: context)
+        defer { registry.presentationDidChange(to: nil, context: context) }
+
+        // Wait until loaded
+        for _ in 0..<30 {
+            if case .git(let content) = registry.content(for: BuiltInGitInspectorProvider.paneID, context: context),
+               case .ready = content.status { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+
+        // Test autoFetch disabled when interval is 0
+        OhMyGhosttySettings.shared.gitAutoFetchInterval = 0
+        provider.pollAutoFetch()
+
+        // Enable autoFetch and test pollAutoFetch
+        OhMyGhosttySettings.shared.gitAutoFetchInterval = 5
+        provider.pollAutoFetch()
+
+        // Test refresh triggers fetchAndRefresh
+        registry.performAction(paneID: BuiltInGitInspectorProvider.paneID,
+                               action: .init(context: context, kind: .gitAction(.refresh)))
+        try await Task.sleep(for: .milliseconds(300))
+
+        // Test refreshLocal
+        registry.performAction(paneID: BuiltInGitInspectorProvider.paneID,
+                               action: .init(context: context, kind: .gitAction(.refreshLocal)))
+        try await Task.sleep(for: .milliseconds(300))
+    }
 }
 
 private struct UnavailableGitExecutor: GitExecutor {

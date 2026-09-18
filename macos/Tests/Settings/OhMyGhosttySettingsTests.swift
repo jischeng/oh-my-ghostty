@@ -72,6 +72,22 @@ struct OhMyGhosttySettingsTests {
         #expect(descriptor?.defaultValue == "onRelease")
     }
 
+    @Test func gitAutoFetchIntervalDefaultsToFiveMinutesAndPersists() {
+        let (settings, url) = temporarySettings()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        #expect(settings.gitAutoFetchInterval == 5)
+        let descriptor = OhMyGhosttySettings.descriptors.first {
+            $0.id == "git.autoFetchInterval"
+        }
+        #expect(descriptor?.defaultValue == "5")
+        #expect(descriptor?.category == "general")
+
+        settings.gitAutoFetchInterval = 10
+        #expect(settings.gitAutoFetchInterval == 10)
+        let disk = OhMyGhosttySettings(fileURL: url)
+        #expect(disk.gitAutoFetchInterval == 10)
+    }
+
     @Test func typedSettingsRoundTripThroughHumanReadableFile() throws {
         let (settings, url) = temporarySettings()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }

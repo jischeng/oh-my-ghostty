@@ -625,6 +625,58 @@
     "en": "Revert…",
     "zh-Hans": "还原提交…"
   },
+  "Pull": {
+    "en": "Pull",
+    "zh-Hans": "拉取"
+  },
+  "Fetching…": {
+    "en": "Fetching…",
+    "zh-Hans": "正在 Fetch…"
+  },
+  "Pulling…": {
+    "en": "Pulling…",
+    "zh-Hans": "正在拉取…"
+  },
+  "Pull or Push": {
+    "en": "Pull or Push",
+    "zh-Hans": "拉取或推送"
+  },
+  "Fetch and refresh Git status": {
+    "en": "Fetch and refresh Git status",
+    "zh-Hans": "Fetch 并刷新 Git 状态"
+  },
+  "Fetch and Refresh": {
+    "en": "Fetch and Refresh",
+    "zh-Hans": "Fetch 并刷新"
+  },
+  "Refresh (Local Only)": {
+    "en": "Refresh (Local Only)",
+    "zh-Hans": "仅刷新本地"
+  },
+  "Auto-Fetch Interval": {
+    "en": "Auto-Fetch Interval",
+    "zh-Hans": "定时自动 Fetch 间隔"
+  },
+  "Cannot pull in detached HEAD state.": {
+    "en": "Cannot pull in detached HEAD state.",
+    "zh-Hans": "处于分离头指针状态，无法拉取。"
+  },
+  "Cannot push in detached HEAD state.": {
+    "en": "Cannot push in detached HEAD state.",
+    "zh-Hans": "处于分离头指针状态，无法推送。"
+  },
+  "Cannot pull without a configured remote.": {
+    "en": "Cannot pull without a configured remote.",
+    "zh-Hans": "未配置远端，无法拉取。"
+  },
+  "Cannot push without a configured remote.": {
+    "en": "Cannot push without a configured remote.",
+    "zh-Hans": "未配置远端，无法推送。"
+  },
+  "Save or discard unsaved editor changes before this operation.": {
+    "en": "Save or discard unsaved editor changes before this operation.",
+    "zh-Hans": "在此操作前请保存或放弃编辑器中的未保存更改。"
+  },
   "Push": {
     "en": "Push",
     "zh-Hans": "推送"

@@ -72,6 +72,8 @@ final class BuiltInGitInspectorProvider {
     private var lastRemotePoll: [UUID: Date] = [:]
     private var resolvedDirectories: [UUID: String] = [:]
     private var localChangeMonitors: [UUID: (repository: GitRepositoryIdentity, monitor: GitRepositoryChangeMonitor)] = [:]
+    private var lastAutoFetch: [String: Date] = [:]
+    private var autoFetchTasks: [String: Task<Void, Never>] = [:]
 
     init(
         registry: InspectorRegistry,
@@ -112,7 +114,11 @@ final class BuiltInGitInspectorProvider {
         lastRemotePoll.removeValue(forKey: tabID)
         generations.removeValue(forKey: tabID)
         historyGenerations.removeValue(forKey: tabID)
-        if presentedContexts.isEmpty { stopPollingTimer() }
+        if presentedContexts.isEmpty {
+            stopPollingTimer()
+            for (_, task) in autoFetchTasks { task.cancel() }
+            autoFetchTasks.removeAll()
+        }
     }
 
     private func handle(_ event: InspectorPaneLifecycleEvent) {
@@ -144,7 +150,82 @@ final class BuiltInGitInspectorProvider {
             value.detailCache.removeAll(); value.detailCacheOrder.removeAll()
             value.unfilteredHistory = nil
             save(value, tabID: action.context.tabID, worktreeKey: key)
+            fetchAndRefresh(context: action.context)
+        case .refreshLocal:
+            let key = currentWorktreeKey(for: action.context)
+            var value = state(for: action.context.tabID, worktreeKey: key)
+            value.detailCache.removeAll(); value.detailCacheOrder.removeAll()
+            value.unfilteredHistory = nil
+            save(value, tabID: action.context.tabID, worktreeKey: key)
             load(context: action.context, force: true)
+        case .pull:
+            guard let content = lastPublishedContent[action.context.tabID], let repository = content.repository else { return }
+            guard mutationTasks[repository.stateKey] == nil else {
+                publishOperationError(GitL10n.text("Another Git operation is running in this worktree."), repository: repository, context: action.context)
+                return
+            }
+            switch content.status {
+            case .detached:
+                publishOperationError(GitL10n.text("Cannot pull in detached HEAD state."), repository: repository, context: action.context)
+                return
+            default: break
+            }
+            guard !EditorWorkspaceStore.shared.hasUnsavedDocuments(
+                in: repository.worktreePath,
+                endpoint: repository.sshConnection.map { .ssh(workspaceID: $0.workspaceID) } ?? .local
+            ) else {
+                publishOperationError(GitL10n.text("Save or discard unsaved editor changes before this operation."), repository: repository, context: action.context)
+                return
+            }
+            mutate(.pull, repository: repository, context: action.context)
+        case .push:
+            guard let content = lastPublishedContent[action.context.tabID], let repository = content.repository else { return }
+            guard mutationTasks[repository.stateKey] == nil else {
+                publishOperationError(GitL10n.text("Another Git operation is running in this worktree."), repository: repository, context: action.context)
+                return
+            }
+            switch content.status {
+            case .detached:
+                publishOperationError(GitL10n.text("Cannot push in detached HEAD state."), repository: repository, context: action.context)
+                return
+            default: break
+            }
+            guard let current = content.workingTree.branches.first(where: { $0.isCurrent }) else {
+                publishOperationError(GitL10n.text("Cannot push in detached HEAD state."), repository: repository, context: action.context)
+                return
+            }
+            if current.upstream.isEmpty {
+                let window = NSApp.windows.first { ($0.windowController as? TerminalController)?.tabSessionID == action.context.tabID }
+                Task {
+                    do {
+                        if let mutation = try await GitBranchDialogs.mutation(for: .push, branch: current,
+                            branches: content.workingTree.branches, repository: repository, window: window) {
+                            self.mutate(mutation, repository: repository, context: action.context)
+                        }
+                    } catch { self.publishOperationError(error.localizedDescription, repository: repository, context: action.context) }
+                }
+            } else {
+                mutate(.pushCurrent, repository: repository, context: action.context)
+            }
+        case .pushTo:
+            guard let content = lastPublishedContent[action.context.tabID], let repository = content.repository else { return }
+            guard mutationTasks[repository.stateKey] == nil else {
+                publishOperationError(GitL10n.text("Another Git operation is running in this worktree."), repository: repository, context: action.context)
+                return
+            }
+            guard let current = content.workingTree.branches.first(where: { $0.isCurrent }) else {
+                publishOperationError(GitL10n.text("Cannot push in detached HEAD state."), repository: repository, context: action.context)
+                return
+            }
+            let window = NSApp.windows.first { ($0.windowController as? TerminalController)?.tabSessionID == action.context.tabID }
+            Task {
+                do {
+                    if let mutation = try await GitBranchDialogs.mutation(for: .push, branch: current,
+                        branches: content.workingTree.branches, repository: repository, window: window) {
+                        self.mutate(mutation, repository: repository, context: action.context)
+                    }
+                } catch { self.publishOperationError(error.localizedDescription, repository: repository, context: action.context) }
+            }
         case .selectTab(let tab):
             let key = currentWorktreeKey(for: action.context)
             var state = state(for: action.context.tabID, worktreeKey: key); state.activeTab = tab; save(state, tabID: action.context.tabID, worktreeKey: key)
@@ -543,6 +624,81 @@ final class BuiltInGitInspectorProvider {
     private func pollActiveTabs() {
         guard NSApp.isActive else { return }
         pollPresentedTabs()
+        pollAutoFetch()
+    }
+
+    func pollAutoFetch() {
+        let intervalMinutes = OhMyGhosttySettings.shared.gitAutoFetchInterval
+        guard intervalMinutes > 0 else { return }
+        let intervalSeconds = Double(intervalMinutes * 60)
+        let now = Date()
+
+        for (tabID, context) in presentedContexts {
+            guard let content = lastPublishedContent[tabID],
+                  let repository = content.repository,
+                  content.workingTree.remoteURL != nil || !content.workingTree.branches.filter(\.isRemote).isEmpty else {
+                continue
+            }
+            if case .sshConnecting = context.session.state { continue }
+            let key = repository.stateKey
+            guard mutationTasks[key] == nil, autoFetchTasks[key] == nil else { continue }
+            let last = lastAutoFetch[key] ?? .distantPast
+            guard now.timeIntervalSince(last) >= intervalSeconds else { continue }
+            lastAutoFetch[key] = now
+
+            autoFetchTasks[key] = Task {
+                defer { self.autoFetchTasks.removeValue(forKey: key) }
+                do {
+                    let remotes = try await self.mutationService.remotes(in: repository)
+                    guard !remotes.isEmpty else { return }
+                    try await self.mutationService.perform(.fetch(remote: nil, prune: true), in: repository)
+                    guard !Task.isCancelled else { return }
+                    if let current = self.presentedContexts[tabID] {
+                        self.load(context: current, force: true)
+                    }
+                } catch {
+                    Self.logger.debug("Background auto-fetch failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    private func fetchAndRefresh(context: InspectorPaneContext) {
+        let key = currentWorktreeKey(for: context)
+        guard let content = lastPublishedContent[context.tabID], let repository = content.repository else {
+            load(context: context, force: true)
+            return
+        }
+        guard mutationTasks[key] == nil else {
+            load(context: context, force: true)
+            return
+        }
+        lastAutoFetch[key] = Date()
+        operationTitles[key] = GitL10n.text("Fetching…")
+        var state = state(for: context.tabID, worktreeKey: key)
+        state.operationError = nil
+        save(state, tabID: context.tabID, worktreeKey: key)
+        for (tabID, c) in lastPublishedContent where c.repository == repository {
+            publish(c, tabID: tabID)
+        }
+        mutationTasks[key] = Task {
+            do {
+                let remotes = try await self.mutationService.remotes(in: repository)
+                if !remotes.isEmpty {
+                    try await self.mutationService.perform(.fetch(remote: nil, prune: true), in: repository)
+                }
+            } catch {
+                self.publishOperationError(error.localizedDescription, repository: repository, context: context)
+            }
+            self.mutationTasks.removeValue(forKey: key)
+            self.operationTitles.removeValue(forKey: key)
+            for (tabID, c) in self.lastPublishedContent where c.repository == repository {
+                self.publish(c, tabID: tabID)
+                if let current = self.presentedContexts[tabID] {
+                    self.load(context: current, force: true)
+                }
+            }
+        }
     }
 
     func pollPresentedTabs() {
@@ -813,12 +969,12 @@ final class BuiltInGitInspectorProvider {
                 publishOperationError(GitL10n.text("Save or discard unsaved editor changes before removing this worktree."), repository: repository, context: context)
                 return
             }
-        case .checkout, .create, .applyCommit:
+        case .checkout, .create, .applyCommit, .pull:
             guard !EditorWorkspaceStore.shared.hasUnsavedDocuments(
                 in: repository.worktreePath,
                 endpoint: repository.sshConnection.map { .ssh(workspaceID: $0.workspaceID) } ?? .local
             ) else {
-                publishOperationError(GitL10n.text("Save or discard unsaved editor changes before switching branches."),
+                publishOperationError(GitL10n.text("Save or discard unsaved editor changes before this operation."),
                                       repository: repository, context: context)
                 return
             }

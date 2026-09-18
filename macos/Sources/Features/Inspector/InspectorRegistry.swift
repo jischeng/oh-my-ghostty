@@ -92,6 +92,7 @@ struct InspectorAgentHistoryContent: Equatable, Sendable {
 }
 
 enum InspectorGitAction: Equatable, Sendable {
+    case fetch
     case refresh
     case refreshLocal
     case pull
@@ -121,6 +122,7 @@ enum InspectorGitAction: Equatable, Sendable {
     case updateCommitDraft(String)
     case commitStaged
     case clearOperationError
+    case clearOperationNotice
 }
 
 struct InspectorGitContent: Equatable, Sendable {
@@ -139,6 +141,7 @@ struct InspectorGitContent: Equatable, Sendable {
     var expandedCommits: [GitCommitID: GitCommitExpansion] = [:]
     var commitDraft = ""
     var operation: String?
+    var operationNotice: String?
     var isUpdatingIndex = false
     var pendingIndexPaths: Set<String> = []
     var operationError: String?

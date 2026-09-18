@@ -8,6 +8,44 @@ struct GitBranchInfo: Equatable, Sendable, Identifiable {
     let upstream: String
     let tracking: String
     var id: String { (isRemote ? "refs/remotes/" : "refs/heads/") + name }
+
+    var aheadCount: Int {
+        guard let match = tracking.range(of: #"ahead\s+\d+"#, options: .regularExpression) else { return 0 }
+        let segment = tracking[match]
+        let numStr = segment.split(separator: " ").last.map(String.init) ?? "0"
+        return Int(numStr) ?? 0
+    }
+
+    var behindCount: Int {
+        guard let match = tracking.range(of: #"behind\s+\d+"#, options: .regularExpression) else { return 0 }
+        let segment = tracking[match]
+        let numStr = segment.split(separator: " ").last.map(String.init) ?? "0"
+        return Int(numStr) ?? 0
+    }
+
+    var isGone: Bool {
+        tracking.contains("gone")
+    }
+
+    var upstreamTrackingDisplay: String {
+        if upstream.isEmpty {
+            return GitL10n.text("No upstream configured")
+        }
+        if isGone {
+            return "\(upstream) · \(GitL10n.text("gone"))"
+        }
+        if aheadCount == 0 && behindCount == 0 {
+            return "\(upstream) · \(GitL10n.text("Up to date"))"
+        }
+        var parts: [String] = []
+        if behindCount > 0 {
+            parts.append("↓ \(behindCount)")
+        }
+        if aheadCount > 0 {
+            parts.append("↑ \(aheadCount)")
+        }
+        return "\(upstream) · \(parts.joined(separator: " "))"
+    }
 }
 
 struct GitWorkingTreeContent: Equatable, Sendable {

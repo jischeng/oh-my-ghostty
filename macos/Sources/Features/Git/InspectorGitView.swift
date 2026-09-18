@@ -12,6 +12,7 @@ struct InspectorGitView: View {
     @AppStorage("git.collection.viewMode") private var changesMode: GitCollectionMode = .list
     @State private var branchesQuery = ""
     @State private var historyQuery = ""
+    @State private var isPullPushOpen = false
 
     private var collectionKey: String { content.repository?.stateKey ?? "git" }
 
@@ -23,6 +24,30 @@ struct InspectorGitView: View {
                 .padding(.bottom, 8)
 
             Divider()
+            if let notice = content.operationNotice {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.green)
+                    Text(notice)
+                        .font(.caption)
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    Button { perform(.gitAction(.clearOperationNotice)) } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help(GitL10n.text("Dismiss message"))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(Color.green.opacity(0.08), in: RoundedRectangle(cornerRadius: 4))
+                .padding(.horizontal, 12)
+                .padding(.top, 4)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
             if let error = content.operationError {
                 HStack(alignment: .top) {
                     ScrollView { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
@@ -117,9 +142,9 @@ struct InspectorGitView: View {
                         .scaleEffect(0.7)
                 }
 
-                pullPushMenu
+                pullPushButton
 
-                refreshButton
+                fetchButton
             }
 
             if let repository = content.repository {
@@ -135,63 +160,124 @@ struct InspectorGitView: View {
             if !headerReferences.isEmpty { GitHeaderReferences(refs: headerReferences) }
             if content.workingTree.branchesError == nil,
                let current = content.workingTree.branches.first(where: { $0.isCurrent }) {
-                InspectorCopyText(text: current.upstream.isEmpty ? GitL10n.text("No upstream configured") :
-                    "\(current.upstream) \(current.tracking.isEmpty ? GitL10n.text("· up to date") : current.tracking)")
+                InspectorCopyText(text: current.upstreamTrackingDisplay)
                     .frame(height: 14)
             }
         }
     }
 
-    private var pullPushMenu: some View {
-        Menu {
-            Button {
-                perform(.gitAction(.pull))
-            } label: {
-                Label(GitL10n.text("Pull"), systemImage: "arrow.down")
-            }
-            .disabled(content.operation != nil || isDetachedHead || !hasRemote)
-
-            Button {
-                perform(.gitAction(.push))
-            } label: {
-                Label(GitL10n.text("Push"), systemImage: "arrow.up")
-            }
-            .disabled(content.operation != nil || isDetachedHead || !hasRemote)
-
-            Divider()
-
-            Button {
-                perform(.gitAction(.pushTo))
-            } label: {
-                Label(GitL10n.text("Push…"), systemImage: "arrow.up.right")
-            }
-            .disabled(content.operation != nil || isDetachedHead || !hasRemote)
+    private var pullPushButton: some View {
+        Button {
+            isPullPushOpen.toggle()
         } label: {
-            Image(systemName: "arrow.up.arrow.down")
-                .font(.system(size: 11))
+            if isPullOrPushLoading {
+                ProgressView().controlSize(.small).scaleEffect(0.55)
+            } else {
+                Image(systemName: "arrow.up.arrow.down")
+                    .font(.system(size: 11, weight: .medium))
+            }
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .foregroundStyle(.secondary)
+        .buttonStyle(GitHeaderActionButtonStyle(selected: isPullPushOpen, isBusy: isPullOrPushLoading))
+        .popover(isPresented: $isPullPushOpen, arrowEdge: .bottom) {
+            pullPushPopoverView
+        }
         .help(GitL10n.text("Pull or Push"))
-        .disabled(content.repository == nil || content.operation != nil)
+        .disabled(content.repository == nil || isNetworkBusy)
     }
 
-    private var refreshButton: some View {
-        Button {
-            perform(.gitAction(.refresh))
-        } label: {
-            Image(systemName: "arrow.clockwise")
-                .font(.system(size: 11))
+    private var pullPushPopoverView: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Button {
+                isPullPushOpen = false
+                perform(.gitAction(.pull))
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.down")
+                        .font(.system(size: 11, weight: .medium))
+                        .frame(width: 14)
+                    Text(GitL10n.text("Pull"))
+                        .font(.system(size: 12))
+                    Spacer(minLength: 4)
+                    if let behind = currentBranch?.behindCount, behind > 0 {
+                        Text("↓ \(behind)")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.secondary.opacity(0.12), in: Capsule())
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(GitMenuRowButtonStyle())
+            .disabled(content.operation != nil || isDetachedHead || !hasRemote)
+
+            Button {
+                isPullPushOpen = false
+                perform(.gitAction(.push))
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 11, weight: .medium))
+                        .frame(width: 14)
+                    Text(GitL10n.text("Push"))
+                        .font(.system(size: 12))
+                    Spacer(minLength: 4)
+                    if let ahead = currentBranch?.aheadCount, ahead > 0 {
+                        Text("↑ \(ahead)")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.tint)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.accentColor.opacity(0.12), in: Capsule())
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(GitMenuRowButtonStyle())
+            .disabled(content.operation != nil || isDetachedHead || !hasRemote || !canPushCurrent)
+
+            Divider()
+                .padding(.vertical, 2)
+
+            Button {
+                isPullPushOpen = false
+                perform(.gitAction(.pushTo))
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 11, weight: .medium))
+                        .frame(width: 14)
+                    Text(GitL10n.text("Push to…"))
+                        .font(.system(size: 12))
+                    Spacer(minLength: 4)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(GitMenuRowButtonStyle())
+            .disabled(content.operation != nil || isDetachedHead || !hasRemote)
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(.secondary)
-        .help(GitL10n.text("Fetch and refresh Git status"))
-        .disabled(content.repository == nil)
+        .padding(5)
+        .frame(width: 148)
+    }
+
+    private var fetchButton: some View {
+        Button {
+            perform(.gitAction(.fetch))
+        } label: {
+            if isFetchLoading {
+                ProgressView().controlSize(.small).scaleEffect(0.55)
+            } else {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 11, weight: .medium))
+            }
+        }
+        .buttonStyle(GitHeaderActionButtonStyle(selected: false, isBusy: isFetchLoading))
+        .help(GitL10n.text("Fetch remote changes"))
+        .disabled(content.repository == nil || isNetworkBusy)
         .contextMenu {
-            Button(GitL10n.text("Fetch and Refresh")) {
-                perform(.gitAction(.refresh))
+            Button(GitL10n.text("Fetch")) {
+                perform(.gitAction(.fetch))
             }
             Button(GitL10n.text("Refresh (Local Only)")) {
                 perform(.gitAction(.refreshLocal))
@@ -211,6 +297,27 @@ struct InspectorGitView: View {
                 }
             }
         }
+    }
+
+    private var currentBranch: GitBranchInfo? {
+        content.workingTree.branches.first(where: { $0.isCurrent })
+    }
+
+    private var canPushCurrent: Bool {
+        guard let current = currentBranch else { return false }
+        return current.aheadCount > 0
+    }
+
+    private var isFetchLoading: Bool {
+        content.operation == GitL10n.text("Fetching…")
+    }
+
+    private var isPullOrPushLoading: Bool {
+        content.operation == GitL10n.text("Pulling…") || content.operation == GitL10n.text("Pushing…")
+    }
+
+    private var isNetworkBusy: Bool {
+        content.operation != nil
     }
 
     private var settingsStrings: SettingsStrings {
@@ -430,5 +537,76 @@ struct InspectorGitView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(24)
+    }
+}
+
+private struct GitHeaderActionButtonStyle: ButtonStyle {
+    var selected: Bool = false
+    var isBusy: Bool = false
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovered = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .frame(width: 24, height: 20)
+            .background(background(isPressed: configuration.isPressed))
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(border(isPressed: configuration.isPressed), lineWidth: 0.75)
+            )
+            .contentShape(Rectangle())
+            .opacity(!isEnabled ? 0.35 : 1.0)
+            .scaleEffect(configuration.isPressed && isEnabled ? 0.95 : 1.0)
+            .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
+            .onHover { isHovered = $0 }
+    }
+
+    private func background(isPressed: Bool) -> Color {
+        guard isEnabled else { return .clear }
+        if selected {
+            return Color.accentColor.opacity(isPressed ? 0.28 : isHovered ? 0.22 : 0.15)
+        }
+        if isPressed {
+            return Color.primary.opacity(0.16)
+        }
+        if isHovered {
+            return Color.primary.opacity(0.08)
+        }
+        return .clear
+    }
+
+    private func border(isPressed: Bool) -> Color {
+        guard isEnabled else { return .clear }
+        if selected {
+            return Color.accentColor.opacity(isPressed ? 0.65 : isHovered ? 0.55 : 0.38)
+        }
+        if isPressed {
+            return Color.primary.opacity(0.35)
+        }
+        if isHovered {
+            return Color.primary.opacity(0.20)
+        }
+        return .clear
+    }
+}
+
+private struct GitMenuRowButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovered = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                isHovered && isEnabled ? Color.accentColor : Color.clear,
+                in: RoundedRectangle(cornerRadius: 4)
+            )
+            .foregroundStyle(
+                !isEnabled ? Color.secondary.opacity(0.4) :
+                isHovered ? Color.white : Color.primary
+            )
+            .onHover { isHovered = $0 }
     }
 }

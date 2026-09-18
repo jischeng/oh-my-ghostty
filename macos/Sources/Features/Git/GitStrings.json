@@ -625,6 +625,46 @@
     "en": "Revert…",
     "zh-Hans": "还原提交…"
   },
+  "Push to…": {
+    "en": "Push to…",
+    "zh-Hans": "推送到…"
+  },
+  "Fetch remote changes": {
+    "en": "Fetch remote changes",
+    "zh-Hans": "Fetch 远端更新"
+  },
+  "Fetch": {
+    "en": "Fetch",
+    "zh-Hans": "Fetch"
+  },
+  "Up to date": {
+    "en": "Up to date",
+    "zh-Hans": "已同步"
+  },
+  "Already up to date": {
+    "en": "Already up to date",
+    "zh-Hans": "已是最新"
+  },
+  "Pull complete": {
+    "en": "Pull complete",
+    "zh-Hans": "拉取成功"
+  },
+  "Push complete": {
+    "en": "Push complete",
+    "zh-Hans": "推送成功"
+  },
+  "Fetch complete": {
+    "en": "Fetch complete",
+    "zh-Hans": "Fetch 完成"
+  },
+  "Dismiss message": {
+    "en": "Dismiss message",
+    "zh-Hans": "关闭提示"
+  },
+  "gone": {
+    "en": "gone",
+    "zh-Hans": "已删除"
+  },
   "Pull": {
     "en": "Pull",
     "zh-Hans": "拉取"
@@ -727,7 +767,7 @@
   },
   "No upstream configured": {
     "en": "No upstream configured",
-    "zh-Hans": "未配置上游分支"
+    "zh-Hans": "未设置上游分支"
   },
   "· up to date": {
     "en": "· up to date",

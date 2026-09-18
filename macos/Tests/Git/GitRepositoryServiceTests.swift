@@ -177,6 +177,68 @@ struct GitRepositoryServiceTests {
         #expect(repository.sshConnection?.destination == "user@host")
 
     }
+
+    @Test func upstreamTrackingDisplayFormatsAccurately() {
+        let branchNoUpstream = GitBranchInfo(
+            name: "feature",
+            commit: GitCommitID("abc"),
+            isCurrent: true,
+            isRemote: false,
+            upstream: "",
+            tracking: ""
+        )
+        #expect(branchNoUpstream.aheadCount == 0)
+        #expect(branchNoUpstream.behindCount == 0)
+        #expect(branchNoUpstream.upstreamTrackingDisplay == GitL10n.text("No upstream configured"))
+
+        let branchInSync = GitBranchInfo(
+            name: "main",
+            commit: GitCommitID("abc"),
+            isCurrent: true,
+            isRemote: false,
+            upstream: "origin/main",
+            tracking: ""
+        )
+        #expect(branchInSync.aheadCount == 0)
+        #expect(branchInSync.behindCount == 0)
+        #expect(branchInSync.upstreamTrackingDisplay == "origin/main · \(GitL10n.text("Up to date"))")
+
+        let branchRemoteAhead = GitBranchInfo(
+            name: "main",
+            commit: GitCommitID("abc"),
+            isCurrent: true,
+            isRemote: false,
+            upstream: "origin/main",
+            tracking: "[behind 3]"
+        )
+        #expect(branchRemoteAhead.aheadCount == 0)
+        #expect(branchRemoteAhead.behindCount == 3)
+        #expect(branchRemoteAhead.upstreamTrackingDisplay == "origin/main · ↓ 3")
+
+        let branchLocalAhead = GitBranchInfo(
+            name: "main",
+            commit: GitCommitID("abc"),
+            isCurrent: true,
+            isRemote: false,
+            upstream: "origin/main",
+            tracking: "[ahead 2]"
+        )
+        #expect(branchLocalAhead.aheadCount == 2)
+        #expect(branchLocalAhead.behindCount == 0)
+        #expect(branchLocalAhead.upstreamTrackingDisplay == "origin/main · ↑ 2")
+
+        let branchDiverged = GitBranchInfo(
+            name: "main",
+            commit: GitCommitID("abc"),
+            isCurrent: true,
+            isRemote: false,
+            upstream: "origin/main",
+            tracking: "[ahead 2, behind 3]"
+        )
+        #expect(branchDiverged.aheadCount == 2)
+        #expect(branchDiverged.behindCount == 3)
+        #expect(branchDiverged.upstreamTrackingDisplay == "origin/main · ↓ 3 ↑ 2")
+    }
 }
 
 private struct RemoteRepositoryProbe: GitExecutor {

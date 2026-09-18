@@ -531,7 +531,7 @@ struct GitCollectionView: NSViewRepresentable {
                     enabled: input.canWrite && item.enabled && !branch.isCurrent && occupied == nil)
                 add(GitL10n.text("New Branch from Here…"), .action(.branchOperation(.create, branch.id)), enabled: input.canWrite && item.enabled)
                 if !branch.isRemote {
-                    add(GitL10n.text("Push…"), .action(.branchOperation(.push, branch.id)), enabled: input.canWrite && item.enabled)
+                    add(GitL10n.text("Push to…"), .action(.branchOperation(.push, branch.id)), enabled: input.canWrite && item.enabled)
                     add(GitL10n.text("Set Upstream…"), .action(.branchOperation(.setUpstream, branch.id)), enabled: input.canWrite && item.enabled)
                 }
                 menu.addItem(.separator())

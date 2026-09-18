@@ -18,6 +18,7 @@ final class BuiltInGitInspectorProvider {
         var browsedWorktree: String?
         var commitDraft: String = ""
         var operationError: String?
+        var operationNotice: String?
         var detailCache: [GitCommitID: GitCommitExpansion] = [:]
         var detailCacheOrder: [GitCommitID] = []
         var expandedCommits: [GitCommitID: GitCommitExpansion] = [:]
@@ -144,7 +145,7 @@ final class BuiltInGitInspectorProvider {
     private func handle(_ action: InspectorPaneAction) {
         guard case .gitAction(let gitAction) = action.kind else { return }
         switch gitAction {
-        case .refresh:
+        case .fetch, .refresh:
             let key = currentWorktreeKey(for: action.context)
             var value = state(for: action.context.tabID, worktreeKey: key)
             value.detailCache.removeAll(); value.detailCacheOrder.removeAll()
@@ -374,6 +375,12 @@ final class BuiltInGitInspectorProvider {
             let key = currentWorktreeKey(for: action.context)
             var state = state(for: action.context.tabID, worktreeKey: key)
             state.operationError = nil
+            save(state, tabID: action.context.tabID, worktreeKey: key)
+            if let content = lastPublishedContent[action.context.tabID] { publish(content, tabID: action.context.tabID) }
+        case .clearOperationNotice:
+            let key = currentWorktreeKey(for: action.context)
+            var state = state(for: action.context.tabID, worktreeKey: key)
+            state.operationNotice = nil
             save(state, tabID: action.context.tabID, worktreeKey: key)
             if let content = lastPublishedContent[action.context.tabID] { publish(content, tabID: action.context.tabID) }
         case .commitStaged:
@@ -677,17 +684,20 @@ final class BuiltInGitInspectorProvider {
         operationTitles[key] = GitL10n.text("Fetching…")
         var state = state(for: context.tabID, worktreeKey: key)
         state.operationError = nil
+        state.operationNotice = nil
         save(state, tabID: context.tabID, worktreeKey: key)
         for (tabID, c) in lastPublishedContent where c.repository == repository {
             publish(c, tabID: tabID)
         }
         mutationTasks[key] = Task {
+            var fetchError: Error?
             do {
                 let remotes = try await self.mutationService.remotes(in: repository)
                 if !remotes.isEmpty {
                     try await self.mutationService.perform(.fetch(remote: nil, prune: true), in: repository)
                 }
             } catch {
+                fetchError = error
                 self.publishOperationError(error.localizedDescription, repository: repository, context: context)
             }
             self.mutationTasks.removeValue(forKey: key)
@@ -696,6 +706,21 @@ final class BuiltInGitInspectorProvider {
                 self.publish(c, tabID: tabID)
                 if let current = self.presentedContexts[tabID] {
                     self.load(context: current, force: true)
+                }
+            }
+            if fetchError == nil {
+                try? await Task.sleep(for: .milliseconds(200))
+                await MainActor.run {
+                    if let updated = self.lastPublishedContent[context.tabID],
+                       let currentBranch = updated.workingTree.branches.first(where: { $0.isCurrent }) {
+                        if currentBranch.aheadCount == 0 && currentBranch.behindCount == 0 {
+                            self.publishOperationNotice(GitL10n.text("Already up to date"), repository: repository, context: context)
+                        } else {
+                            self.publishOperationNotice(GitL10n.text("Fetch complete"), repository: repository, context: context)
+                        }
+                    } else {
+                        self.publishOperationNotice(GitL10n.text("Fetch complete"), repository: repository, context: context)
+                    }
                 }
             }
         }
@@ -743,6 +768,7 @@ final class BuiltInGitInspectorProvider {
             content.expandedCommits = state.expandedCommits
             content.commitDraft = state.commitDraft
             content.operationError = state.operationError
+            content.operationNotice = state.operationNotice
             content.operation = operationTitles[key]
             content.isUpdatingIndex = indexUpdates.contains(key)
             content.pendingIndexPaths = pendingIndexPaths[key] ?? []
@@ -1011,12 +1037,50 @@ final class BuiltInGitInspectorProvider {
                     if state.commitDraft == submitted { state.commitDraft = "" }
                     self.save(state, tabID: context.tabID, worktreeKey: key)
                 }
+                if case .pull = mutation {
+                    try? await Task.sleep(for: .milliseconds(150))
+                    await MainActor.run {
+                        if let updated = self.lastPublishedContent[context.tabID],
+                           let currentBranch = updated.workingTree.branches.first(where: { $0.isCurrent }),
+                           currentBranch.aheadCount == 0 && currentBranch.behindCount == 0 {
+                            self.publishOperationNotice(GitL10n.text("Already up to date"), repository: repository, context: context)
+                        } else {
+                            self.publishOperationNotice(GitL10n.text("Pull complete"), repository: repository, context: context)
+                        }
+                    }
+                } else if case .push = mutation {
+                    self.publishOperationNotice(GitL10n.text("Push complete"), repository: repository, context: context)
+                } else if case .pushCurrent = mutation {
+                    self.publishOperationNotice(GitL10n.text("Push complete"), repository: repository, context: context)
+                }
             } catch { self.publishOperationError(error.localizedDescription, repository: repository, context: context) }
             self.mutationTasks.removeValue(forKey: key)
             self.operationTitles.removeValue(forKey: key)
             for (tabID, content) in self.lastPublishedContent where content.repository == repository {
                 self.publish(content, tabID: tabID)
                 if let current = self.presentedContexts[tabID] { self.load(context: current, force: true) }
+            }
+        }
+    }
+
+    private func publishOperationNotice(_ message: String, repository: GitRepositoryIdentity, context: InspectorPaneContext) {
+        var state = state(for: context.tabID, worktreeKey: repository.stateKey)
+        state.operationNotice = message
+        save(state, tabID: context.tabID, worktreeKey: repository.stateKey)
+        for (tabID, content) in lastPublishedContent where content.repository == repository {
+            publish(content, tabID: tabID)
+        }
+        Task {
+            try? await Task.sleep(for: .seconds(4))
+            await MainActor.run {
+                var current = self.state(for: context.tabID, worktreeKey: repository.stateKey)
+                if current.operationNotice == message {
+                    current.operationNotice = nil
+                    self.save(current, tabID: context.tabID, worktreeKey: repository.stateKey)
+                    for (tabID, content) in self.lastPublishedContent where content.repository == repository {
+                        self.publish(content, tabID: tabID)
+                    }
+                }
             }
         }
     }

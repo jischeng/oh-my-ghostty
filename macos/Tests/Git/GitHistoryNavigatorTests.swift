@@ -286,6 +286,44 @@ struct GitHistoryNavigatorTests {
         }
     }
 
+    @Test func headHaloMatchesTheLaneColour() throws {
+        let id = GitCommitID("node")
+        let parent = GitCommitID("parent")
+        let row = GitGraphRow(commitID: id, parentIDs: [parent], topLanes: [id], bottomLanes: [parent],
+            nodeLane: 0, nodeColorIndex: 1, segments: [
+                .init(kind: .incoming, from: .top(lane: 0), to: .node(lane: 0),
+                      colorIndex: 1, commitID: id, parentID: nil),
+                .init(kind: .parent, from: .node(lane: 0), to: .bottom(lane: 0),
+                      colorIndex: 1, commitID: id, parentID: parent),
+            ])
+        // Lane 0 is x = 8, the node centre is y = 12 and the HEAD halo ring
+        // sits at radius 6, so its leftmost band lands on view point (2, 12).
+        // That spot carries no node or lane line, only the halo.
+        func ringPixel(head: Bool) throws -> NSColor {
+            let view = GitGraphCellView(frame: NSRect(x: 0, y: 0, width: 20, height: 78))
+            view.configure(row: row, isHead: head)
+            let bitmap = try #require(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 40, pixelsHigh: 156,
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+            let context = try #require(NSGraphicsContext(bitmapImageRep: bitmap))
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = context
+            context.cgContext.translateBy(x: 0, y: 156)
+            context.cgContext.scaleBy(x: 2, y: -2)
+            view.draw(view.bounds)
+            NSGraphicsContext.restoreGraphicsState()
+            return try #require(bitmap.colorAt(x: 4, y: 24)?.usingColorSpace(.deviceRGB))
+        }
+        let head = try ringPixel(head: true)
+        #expect(head.alphaComponent > 0.5)
+        // Palette slot 1 is green: the halo must agree with the lane, not with
+        // the fixed accent colour it used to be painted with.
+        #expect(head.greenComponent - head.blueComponent > 0.2)
+        #expect(head.greenComponent - head.redComponent > 0.2)
+        let plain = try ringPixel(head: false)
+        #expect(plain.alphaComponent < 0.2, "Only the HEAD node draws an outer halo")
+    }
+
     private func find<T: NSView>(_ type: T.Type, in view: NSView?) -> T? {
         if let value = view as? T { return value }
         return view?.subviews.compactMap { find(type, in: $0) }.first

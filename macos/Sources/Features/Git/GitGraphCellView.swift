@@ -173,7 +173,9 @@ final class GitGraphCellView: NSView {
         outline.stroke()
         if isHead {
             // A bright ring makes the checked-out commit findable at a glance.
-            NSColor.controlAccentColor.setStroke()
+            // It borrows the lane colour so the HEAD marker never disagrees
+            // with the line running through it.
+            color(for: row.nodeColorIndex).setStroke()
             let ring = NSBezierPath(ovalIn: rect.insetBy(dx: -2.5, dy: -2.5))
             ring.lineWidth = 1.6
             ring.stroke()

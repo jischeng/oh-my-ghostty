@@ -227,6 +227,13 @@ final class OhMyGhosttySettings: ObservableObject {
         fileURL.deletingLastPathComponent().appendingPathComponent("appearance.ghostty")
     }
 
+    /// Reads a persisted value straight from the settings JSON, actor-free.
+    nonisolated static func persistedValue(forKey key: String) -> Any? {
+        guard let data = try? Data(contentsOf: OMGApplicationEnvironment.settingsFileURL()),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return object[key]
+    }
+
     static let descriptors: [OhMyGhosttySettingDescriptor] = [
         .init(
             id: "tabs.layout", type: .enumeration, defaultValue: "ghostty-config",
@@ -656,6 +663,11 @@ final class OhMyGhosttySettings: ObservableObject {
     @Published var editorWordWrap = false {
         didSet { persist("editor.wordWrap", editorWordWrap) }
     }
+    /// Last Git History scope selection ("currentBranch" or "allBranches").
+    /// Restored on launch; a deleted branch falls back to the current branch.
+    var gitHistoryScope: String? {
+        didSet { persistOptional("git.historyScope", gitHistoryScope) }
+    }
     @Published var agentHistoryLimit: Double = 10_000 {
         didSet {
             let clamped = min(max(agentHistoryLimit, 100), 50_000)
@@ -935,6 +947,7 @@ final class OhMyGhosttySettings: ObservableObject {
             editorFontSize = numberValue("editor.fontSize", fallback: 13, range: 8...36)
             editorTabWidth = numberValue("editor.tabWidth", fallback: 4, range: 1...12).rounded()
             editorWordWrap = boolValue("editor.wordWrap", fallback: false)
+            gitHistoryScope = optionalStringValue("git.historyScope")
             agentHistoryLimit = numberValue(
                 "agents.historyLimit",
                 fallback: 10_000,

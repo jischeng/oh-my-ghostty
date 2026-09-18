@@ -26,6 +26,17 @@ final class BuiltInGitInspectorProvider {
         var historyQuery = ""
         var unfilteredHistory: InspectorGitHistoryContent?
         var history: InspectorGitHistoryContent = InspectorGitHistoryContent()
+
+        init() {
+            // Restore the last scope across launches; a branch that no longer
+            // exists falls back to the current branch (HEAD) on snapshot load.
+            // Read the persisted JSON directly to stay actor-free here.
+            if let saved = OhMyGhosttySettings.persistedValue(forKey: "git.historyScope") as? String,
+               let scope = GitHistoryScope(rawValue: saved) {
+                historyScope = scope
+                history = InspectorGitHistoryContent(scope: scope)
+            }
+        }
     }
 
     private let registry: InspectorRegistry
@@ -90,7 +101,11 @@ final class BuiltInGitInspectorProvider {
         // Keep authored drafts for tab restoration without retaining history,
         // file lists or expanded commit details behind a closed window.
         let drafts = tabWorktreeStates[tabID, default: [:]].filter { !$0.value.commitDraft.isEmpty }
-            .mapValues { WorktreeUIState(commitDraft: $0.commitDraft) }
+            .mapValues { draft in
+                var state = WorktreeUIState()
+                state.commitDraft = draft.commitDraft
+                return state
+            }
         if drafts.isEmpty { tabWorktreeStates.removeValue(forKey: tabID) } else { tabWorktreeStates[tabID] = drafts }
         lastPublishedContent.removeValue(forKey: tabID)
         resolvedDirectories.removeValue(forKey: tabID)
@@ -144,7 +159,9 @@ final class BuiltInGitInspectorProvider {
             state.browsedBranch = nil
             state.unfilteredHistory = nil
             state.browsedWorktree = nil
-            state.historyScope = scope; state.selectedCommitID = nil; state.history = InspectorGitHistoryContent(scope: scope, isLoading: true); save(state, tabID: action.context.tabID, worktreeKey: key)
+            state.historyScope = scope; state.selectedCommitID = nil; state.history = InspectorGitHistoryContent(scope: scope, isLoading: true)
+            OhMyGhosttySettings.shared.gitHistoryScope = scope.rawValue
+            save(state, tabID: action.context.tabID, worktreeKey: key)
             if let current = lastPublishedContent[action.context.tabID] { publish(makeContent(from: current, history: state.history), tabID: action.context.tabID) }
             loadHistory(context: action.context, force: true)
         case .searchHistory(let query):

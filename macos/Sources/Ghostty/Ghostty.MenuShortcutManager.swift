@@ -23,10 +23,30 @@ extension Ghostty {
         func syncMenuShortcut(_ config: Ghostty.Config, action: String?, menuItem: NSMenuItem?) {
             guard let menu = menuItem else { return }
 
-            if !updateMenuShortcut(config, action: action, menuItem: menu) {
-                menu.keyEquivalent = ""
-                menu.keyEquivalentModifierMask = []
+            if updateMenuShortcut(config, action: action, menuItem: menu) { return }
+
+            // Standard editing commands must always keep the shortcut every macOS
+            // user expects, and the configuration can't always provide one:
+            //
+            //   * The default Cmd+C and Cmd+V bindings are `performable`, and
+            //     performable bindings are deliberately kept out of the
+            //     action-to-trigger map GUI accelerators are derived from
+            //     (see `Binding.Set.reverse`). The resolved trigger is then the
+            //     physical Copy/Paste key, which macOS cannot express as a menu
+            //     key equivalent.
+            //   * Undo and redo have no default binding at all.
+            //
+            // Clearing the shortcut in those cases removes it from the Edit menu
+            // and breaks the command in every text field of the application, so
+            // fall back to the platform standard instead.
+            if let action, let standard = MenuShortcutKey.standardEditingShortcuts[action] {
+                menu.keyEquivalent = standard.keyEquivalent
+                menu.keyEquivalentModifierMask = standard.modifierFlags
+                return
             }
+
+            menu.keyEquivalent = ""
+            menu.keyEquivalentModifierMask = []
         }
 
         /// Attempts to perform a menu key equivalent only for menu items that represent
@@ -158,4 +178,17 @@ extension Ghostty.MenuShortcutManager {
             )
         }
     }
+}
+
+private extension Ghostty.MenuShortcutManager.MenuShortcutKey {
+    /// Platform-standard shortcuts for the Edit menu commands, used when the
+    /// Ghostty configuration can't express one. Keep in sync with the editing
+    /// items in `MainMenu.xib`.
+    static let standardEditingShortcuts: [String: Self] = [
+        "undo": Self(keyEquivalent: "z", modifiers: .command),
+        "redo": Self(keyEquivalent: "z", modifiers: [.command, .shift]),
+        "copy_to_clipboard": Self(keyEquivalent: "c", modifiers: .command),
+        "paste_from_clipboard": Self(keyEquivalent: "v", modifiers: .command),
+        "select_all": Self(keyEquivalent: "a", modifiers: .command),
+    ].compactMapValues { $0 }
 }

@@ -45,7 +45,8 @@ System Settings → Privacy & Security or right-click → Open to proceed.
 Download the DMG for your architecture:
 
 - `OMG-0.14.0-macos-arm64.dmg` — Apple Silicon
-- `OMG-0.14.0-macos-x86_64.dmg` — Intel (tested under Rosetta 2)
+- `OMG-0.14.0-macos-x86_64.dmg` — Intel (binary architecture verified;
+  launch under Rosetta 2 not tested on the build machine)
 - `OMG-0.14.0-macos-universal.dmg` — universal (used by the built-in
   updater)
 

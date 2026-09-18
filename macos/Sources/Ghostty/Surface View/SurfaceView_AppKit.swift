@@ -1358,6 +1358,13 @@ extension Ghostty {
 
         /// Special case handling for some control keys
         override func performKeyEquivalent(with event: NSEvent) -> Bool {
+            // Let AppKit's text editing responder handle standard shortcuts when a
+            // SwiftUI text field owns focus. Otherwise this terminal view can
+            // intercept Cmd+C/X/V before the field editor receives them.
+            if let responder = window?.firstResponder as? NSTextView, responder.isFieldEditor {
+                return false
+            }
+
             // A visible Markdown editor owns its responder's shortcuts, even if
             // this pane's terminal remains mounted underneath the preview.
             if MarkdownPreviewWebView.ownsResponder(window?.firstResponder) { return false }

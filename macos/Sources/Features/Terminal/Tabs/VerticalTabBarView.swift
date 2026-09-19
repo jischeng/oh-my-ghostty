@@ -1687,14 +1687,26 @@ private struct VerticalTabRow: View {
 
             HStack(spacing: 4) {
                 HStack(spacing: GhosttyTabStyle.contentSpacing) {
-                    AgentTabIconView(
-                        icon: presentation.icon,
-                        color: GhosttyTabStyle.iconColor(
-                            selected: presentation.selected,
-                            hovered: presentation.hovered
-                        ),
-                        activity: presentation.activity
-                    )
+                    if controller.surfaceTree.isSplit {
+                        SplitTabIconView(
+                            controller: controller,
+                            fallbackIcon: presentation.icon,
+                            fallbackActivity: presentation.activity,
+                            iconColor: GhosttyTabStyle.iconColor(
+                                selected: presentation.selected,
+                                hovered: presentation.hovered
+                            )
+                        )
+                    } else {
+                        AgentTabIconView(
+                            icon: presentation.icon,
+                            color: GhosttyTabStyle.iconColor(
+                                selected: presentation.selected,
+                                hovered: presentation.hovered
+                            ),
+                            activity: presentation.activity
+                        )
+                    }
 
                     if let breadcrumb = presentation.remoteBreadcrumb {
                         RemoteTabBreadcrumbView(breadcrumb: breadcrumb)

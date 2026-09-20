@@ -98,15 +98,6 @@ struct SplitTabIconView: View {
         }
         .frame(width: TabIconMetrics.composition, height: TabIconMetrics.composition)
         .frame(width: TabIconMetrics.footprint, height: TabIconMetrics.footprint)
-        .background {
-            if let activity = TabActivityRingStyle.combinedWork(values.compactMap(\.activity)) {
-                let sectors = slots.filter { slot in
-                    slot.views.contains { byID[$0.id]?.activity?.state == .working }
-                }.flatMap { TabActivityRingStyle.sectors(for: $0.rect) }
-                TabActivityRing(activity: activity, sectors: sectors)
-                    .frame(width: TabIconMetrics.ring, height: TabIconMetrics.ring)
-            }
-        }
         .opacity(hovered ? 1 : 0.88)
         .contentShape(Rectangle())
         .onTapGesture(perform: select)

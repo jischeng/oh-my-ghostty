@@ -57,6 +57,9 @@ struct SettingsStrings: Equatable, Sendable {
         case .terminal: t("Terminal", "终端")
         case .editor: t("Editor", "编辑器")
         case .keyboard: t("Keyboard", "键盘")
+        case .git: "Git"
+        case .ssh: "SSH"
+        case .agents: t("Agent Integration", "Agent 集成")
         case .plugins: t("Plugins", "插件")
         case .advanced: t("Advanced", "高级")
         }

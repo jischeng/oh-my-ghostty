@@ -685,6 +685,9 @@ final class OhMyGhosttySettings: ObservableObject {
             }
         }
     }
+    @Published var gitCommitAIRoutes: [GitCommitAIRoute] = [] {
+        didSet { persist("git.commitAI.routes", GitCommitAIRoute.encode(gitCommitAIRoutes)) }
+    }
     @Published var agentHistoryLimit: Double = 10_000 {
         didSet {
             let clamped = min(max(agentHistoryLimit, 100), 50_000)
@@ -964,6 +967,7 @@ final class OhMyGhosttySettings: ObservableObject {
             editorFontSize = numberValue("editor.fontSize", fallback: 13, range: 8...36)
             editorTabWidth = numberValue("editor.tabWidth", fallback: 4, range: 1...12).rounded()
             editorWordWrap = boolValue("editor.wordWrap", fallback: false)
+            gitCommitAIRoutes = GitCommitAIRoute.decode(chosen["git.commitAI.routes"])
             gitHistoryScope = optionalStringValue("git.historyScope")
             gitAutoFetchInterval = Int(numberValue("git.autoFetchInterval", fallback: 5, range: 0...1440).rounded())
             agentHistoryLimit = numberValue(

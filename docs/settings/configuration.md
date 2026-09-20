@@ -50,6 +50,28 @@ The file is a flat, sorted JSON object. Only values explicitly chosen by the use
 
 Reload the file with **Settings > Advanced > Reload** or Ghostty's **Reload Configuration** command. `tabs.layout` applies to newly created windows because changing the NSWindow/titlebar class of an existing terminal would risk rebuilding its presentation hierarchy.
 
+## Git, SSH and Agent Integration
+
+These are separate Settings sidebar entries. SSH manages registered hosts; Agent
+Integration manages CLI/status integration installation and notifications; Plugins
+continues to manage plugin packages.
+
+Under **Git > AI Commit Messages**, add a local Claude Code or Pi Agent and one
+or more model IDs at a time. Pi can load its available model list for multi-select;
+manual IDs are also supported. Drag entries (or use their arrow buttons) to change
+priority. The first entry is the main model and every entry below it is a fallback.
+The list is saved as `git.commitAI.routes`, an array of `{id, agent, model}` objects
+with UUID identities. No API keys are stored in OMG settings.
+
+In Git's Changes tab, **Generate** fills the commit message without committing.
+Only staged changes and recent commit subjects are sent. The CLI runs locally even
+for an SSH repository. Local CLI does not mean local inference: data may be sent
+to any configured model service during fallback. Existing drafts require replacement
+confirmation, and a draft edited while generating is never overwritten. Cancel stops
+further attempts. Patches exceeding 200 KB must be split rather than silently truncated.
+Use a current CLI version; Pi extensions and tools are disabled, so extension-only
+model providers are unavailable in this feature.
+
 ## Ownership And Precedence
 
 | Layer | Owns | Priority |
@@ -94,11 +116,13 @@ Window UI state is intentionally separate: `InspectorPresentationStore` owns las
 | `editor.fontSize` | number | `13` | `8...36` | Settings > Editor | Runtime |
 | `editor.tabWidth` | number | `4` | `1...12` | Settings > Editor | Runtime |
 | `editor.wordWrap` | boolean | `false` | `true`, `false` | Settings > Editor | Runtime |
-| `notifications.taskComplete` | boolean | `true` | `true`, `false` | Settings > Plugins | Runtime policy |
-| `notifications.attention` | boolean | `true` | `true`, `false` | Settings > Plugins | Runtime policy |
-| `notifications.sound` | boolean | `false` | `true`, `false` | Settings > Plugins | Runtime policy |
+| `git.autoFetchInterval` | integer | `5` | `0...1440` minutes, `0` disables | Settings > Git | Runtime |
+| `git.commitAI.routes` | array | `[]` | Ordered `{id, agent, model}` entries | Settings > Git | Next generation |
+| `notifications.taskComplete` | boolean | `true` | `true`, `false` | Settings > Agent Integration | Runtime policy |
+| `notifications.attention` | boolean | `true` | `true`, `false` | Settings > Agent Integration | Runtime policy |
+| `notifications.sound` | boolean | `false` | `true`, `false` | Settings > Agent Integration | Runtime policy |
 | `agents.historyLimit` | number | `10000` | `100...50000` | Settings > General | Runtime Agent History reload |
-| `agents.statusHooks` | boolean | `true` | `true`, `false` | Settings > Plugins | Runtime ingress policy |
+| `agents.statusHooks` | boolean | `true` | `true`, `false` | Settings > Agent Integration | Runtime ingress policy |
 | `agents.openQuickInputOnStart` | boolean | `false` | `true`, `false` | Settings > Keyboard | Next Agent start |
 | `agents.openQuickInputOnComplete` | boolean | `false` | `true`, `false` | Settings > Keyboard | Next Agent completion |
 | `keyboard.quickInput` | string | `shift+command+e` | Modifier combination plus one key | Settings > Keyboard | Runtime |
@@ -117,7 +141,7 @@ Settings > Editor owns the native code editor's local editing behavior. `editor.
 
 Settings > Keyboard > Agent Quick Input records `keyboard.quickInput`; the default is `⌘⇧E`. While the composer is open, it participates in the default `⌥⌘` directional focus navigation: `⌥⌘↓` moves from the lowest terminal split into the composer, `⌥⌘↑` returns to the terminal, and left/right can move from the composer to an adjacent split. `agents.openQuickInputOnStart` optionally expands the composer when a focused Pane first enters an Agent activity context, while `agents.openQuickInputOnComplete` optionally expands it on a new normalized `done` transition. Both default to `false`, apply only to the focused Pane, and never steal terminal keyboard focus. The composer is a real bottom dock: opening or resizing it reduces the terminal presentation height, so rows displaced from the visible grid remain reachable through normal terminal scrollback. Its 8pt drag target and 1pt divider reuse the same resize interaction and renderer-derived divider color as the left and right Sidebars. All three hit targets overlap inward over adjacent content while consuming only the 1pt divider in layout, avoiding a transparent resize gutter; `keyboard.quickInputHeight` remembers the last committed height. For a normal draft, `⌘↩` sends the text plus a real Enter key event, `⌥⌘↩` appends it to the current Pane's in-memory FIFO queue, and Escape closes the composer while preserving the draft. While editing a queued item, `⌘↩` saves it in place without sending, `⌥⌘↩` saves and moves it to the queue end, and Escape keeps the original message. The composer is backed by a native AppKit `NSTextView`, so `⌘A/C/V/X/Z/⇧⌘Z`, selection, undo, and IME marked text use standard macOS behavior. Option+left/right is explicitly mapped to word movement, Option+up/down to paragraph movement, and adding Shift extends the selection. Escape first cancels active Pinyin/IME composition; otherwise the editor consumes it to close the composer without exiting macOS fullscreen. Image-only Command-V reuses OMG's private PNG temporary-file adapter and inserts the generated path, while text/file pasteboards keep native behavior. One queued message is written only when that Pane reports a new normalized `done` Agent transition; `needsAttention` and `idle` do not drain the queue. Queued drafts appear in a dedicated 60pt bottom lane that reduces terminal presentation height instead of covering terminal text. Its 44pt cards flow left-to-right with content-aware 136–420pt widths and horizontal overflow follows the newest item. The left Enter control sends that queued message immediately; Enter, edit, and remove controls use 30×30pt hit targets plus a pointing-hand cursor. Only the central message region opens the complete-message popover after 300ms; hovering any action button never triggers it. Edit/remove actions retain spring insertion/removal transitions. Composer open/close uses an explicit animated height and high-damping spring; Queue lane presence uses the same dock animation while card reorder keeps its own spring, preventing competing layout animations during Option-Command-Enter. Editor text and Placeholder use the active Terminal font family and size, with 3pt additional line spacing; footer hints use a larger 13pt monospace font and 12pt spacing between symbols. The composer and queue lane paint the active Terminal background at its configured opacity instead of forcing an opaque backing, so Control Center thumbnails preserve the same transparency as the Terminal and Sidebars. Placeholder placement is derived from the real AppKit caret geometry rather than `textContainerOrigin` alone. In a real window the editor converts `firstRect(forCharacterRange:)` from screen to local coordinates and draws after `caretRect.maxX + 1 device pixel`; the no-window fallback uses `textContainerOrigin + lineFragmentPadding`. The caret itself is never repositioned. Marked text hides the placeholder immediately, the cursor is clamped to the font size, and the Queue total uses only a static tray icon plus its numeric count. Queue contents move with an in-process Pane move but are cleared when the Pane closes or OMG exits. Every write revalidates the Surface identity, the 1 MiB limit, and Secure Input before writing to the PTY.
 
-Settings > Plugins > Agent Integration installs the versioned, removable JSON/plugin/TOML/script integration declared by each bundled Agent manifest. Detector-only Antigravity, Crush, and Hermes use an explicit Host-owned Install/Update/Remove marker instead of pretending a vendor hook exists; their process/screen fallback is disabled when the marker is removed. `agents.statusHooks` controls both normalized event ingress and the bounded local foreground-PID fallback used when an agent does not emit `SessionStart`. Vertical Tabs use the focused pane's bundled Agent glyph/title/ring and keep other panes' attention/error/done as trailing alerts; idle has no ring. Normal `done` and unexpected-interruption `error` remain visible even on the currently focused pane; Tab selection/focus does not clear them, and only mouse click or keyboard input in the owning focused terminal acknowledges the terminal state. Horizontal Tabs keep Ghostty's native presentation. **Export SSH Installer…** writes an auditable Python 3 script that the user can explicitly transfer and run in a remote account. Remote hooks work through SSH because they write the bounded event to that remote TTY; OMG does not log in or alter remote accounts automatically.
+Settings > Agent Integration installs the versioned, removable JSON/plugin/TOML/script integration declared by each bundled Agent manifest. Detector-only Antigravity, Crush, and Hermes use an explicit Host-owned Install/Update/Remove marker instead of pretending a vendor hook exists; their process/screen fallback is disabled when the marker is removed. `agents.statusHooks` controls both normalized event ingress and the bounded local foreground-PID fallback used when an agent does not emit `SessionStart`. Vertical Tabs use the focused pane's bundled Agent glyph/title/ring and keep other panes' attention/error/done as trailing alerts; idle has no ring. Normal `done` and unexpected-interruption `error` remain visible even on the currently focused pane; Tab selection/focus does not clear them, and only mouse click or keyboard input in the owning focused terminal acknowledges the terminal state. Horizontal Tabs keep Ghostty's native presentation. **Export SSH Installer…** writes an auditable Python 3 script that the user can explicitly transfer and run in a remote account. Remote hooks work through SSH because they write the bounded event to that remote TTY; OMG does not log in or alter remote accounts automatically.
 
 Settings > General > Sessions controls `sessions.restoreOnLaunch`. When enabled, AppKit restores every open window, canonical tab order, split tree, cwd, and typed Agent resume descriptor. Only Agents still running at quit are resumed with an exact validated conversation ID; a tab whose Agent already exited restores as a shell. SSH restore reuses original OpenSSH argv and never stores credentials or an arbitrary remote command.
 

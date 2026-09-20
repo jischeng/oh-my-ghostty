@@ -2,6 +2,30 @@
  "$schema": "https://json-schema.org/draft/2020-12/schema",
  "additionalProperties": true,
  "properties": {
+  "git.autoFetchInterval": {
+   "category": "git",
+   "default": 5,
+   "description": "Git auto-fetch interval in minutes; zero disables it.",
+   "type": "integer",
+   "minimum": 0,
+   "maximum": 1440
+  },
+  "git.commitAI.routes": {
+   "category": "git",
+   "default": [],
+   "description": "Local CLI agent/model routes, attempted in priority order. Drag to reorder in Git settings.",
+   "type": "array",
+   "items": {
+    "type": "object",
+    "required": ["id", "agent", "model"],
+    "properties": {
+     "id": { "type": "string", "format": "uuid" },
+     "agent": { "type": "string", "enum": ["claude", "pi"] },
+     "model": { "type": "string", "minLength": 1, "maxLength": 256 }
+    },
+    "additionalProperties": false
+   }
+  },
   "agents.historyLimit": {
    "category": "general",
    "default": 10000,
@@ -23,7 +47,7 @@
    "type": "boolean"
   },
   "agents.statusHooks": {
-   "category": "plugins",
+   "category": "agents",
    "default": true,
    "description": "Accept normalized activity events from agent adapters.",
    "type": "boolean"
@@ -280,19 +304,19 @@
    "type": "number"
   },
   "notifications.attention": {
-   "category": "plugins",
+   "category": "agents",
    "default": true,
    "description": "Allow attention events to request a notification.",
    "type": "boolean"
   },
   "notifications.sound": {
-   "category": "plugins",
+   "category": "agents",
    "default": false,
    "description": "Play a sound for enabled agent notifications.",
    "type": "boolean"
   },
   "notifications.taskComplete": {
-   "category": "plugins",
+   "category": "agents",
    "default": true,
    "description": "Allow completion events to request a notification.",
    "type": "boolean"

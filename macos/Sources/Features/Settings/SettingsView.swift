@@ -10,6 +10,9 @@ enum OhMyGhosttySettingsTab: String, CaseIterable, Identifiable {
     case terminal
     case editor
     case keyboard
+    case git
+    case ssh
+    case agents
     case plugins
     case advanced
 
@@ -23,6 +26,9 @@ enum OhMyGhosttySettingsTab: String, CaseIterable, Identifiable {
         case .terminal: "terminal"
         case .editor: "curlybraces.square"
         case .keyboard: "keyboard"
+        case .git: "point.3.connected.trianglepath.dotted"
+        case .ssh: "network"
+        case .agents: "sparkles"
         case .plugins: "puzzlepiece.extension"
         case .advanced: "slider.horizontal.3"
         }
@@ -176,6 +182,9 @@ struct SettingsView: View {
             }
         }
         .frame(minWidth: 720, minHeight: 480)
+        .onReceive(NotificationCenter.default.publisher(for: .omgSelectSettingsTab)) { notification in
+            if let tab = notification.object as? OhMyGhosttySettingsTab { selection = tab }
+        }
     }
 
     @ViewBuilder
@@ -222,16 +231,6 @@ struct SettingsView: View {
                         isOn: $settings.quitWithoutConfirmation
                     )
                     Text(strings.quitWithoutConfirmationCaption)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Section(strings.gitSection) {
-                    Picker(strings.gitAutoFetchLabel, selection: $settings.gitAutoFetchInterval) {
-                        ForEach([0, 1, 2, 5, 10, 15, 30, 60], id: \.self) { minutes in
-                            Text(strings.gitAutoFetchIntervalTitle(minutes)).tag(minutes)
-                        }
-                    }
-                    Text(strings.gitAutoFetchCaption)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -481,6 +480,32 @@ struct SettingsView: View {
                 }
             }
 
+        case .git:
+            Form {
+                Section(strings.gitSection) {
+                    Picker(strings.gitAutoFetchLabel, selection: $settings.gitAutoFetchInterval) {
+                        ForEach([0, 1, 2, 5, 10, 15, 30, 60], id: \.self) { minutes in
+                            Text(strings.gitAutoFetchIntervalTitle(minutes)).tag(minutes)
+                        }
+                    }
+                    Text(strings.gitAutoFetchCaption).font(.caption).foregroundStyle(.secondary)
+                }
+                GitCommitAISettingsView(settings: settings)
+            }
+        case .ssh:
+            Form { SSHRegistrationSettingsView(strings: strings) }
+        case .agents:
+            Form {
+                AgentIntegrationSettingsView(
+                    strings: strings, settings: settings,
+                    exportInstaller: exportRemoteAgentInstaller, exportError: agentHookError
+                )
+                Section(strings.notificationsSection) {
+                    Toggle(strings.notifyTaskCompleteLabel, isOn: $settings.notifyTaskComplete)
+                    Toggle(strings.notifyAttentionLabel, isOn: $settings.notifyAttention)
+                    Toggle(strings.notificationSoundLabel, isOn: $settings.notificationSound)
+                }
+            }
         case .plugins:
             pluginsForm
 
@@ -528,9 +553,6 @@ struct SettingsView: View {
                         toggle: { togglePlugin(manifest) },
                         uninstall: { uninstall(manifest) }
                     )
-                    if manifest.id == SSHPlugin.pluginID {
-                        SSHRegistrationSettingsView(strings: strings)
-                    }
                 }
                 Text(strings.officialPluginsCaption)
                     .font(.caption)
@@ -558,15 +580,6 @@ struct SettingsView: View {
                 }
             }
 
-            AgentIntegrationSettingsView(
-                strings: strings, settings: settings,
-                exportInstaller: exportRemoteAgentInstaller, exportError: agentHookError
-            )
-            Section(strings.notificationsSection) {
-                Toggle(strings.notifyTaskCompleteLabel, isOn: $settings.notifyTaskComplete)
-                Toggle(strings.notifyAttentionLabel, isOn: $settings.notifyAttention)
-                Toggle(strings.notificationSoundLabel, isOn: $settings.notificationSound)
-            }
         }
     }
 

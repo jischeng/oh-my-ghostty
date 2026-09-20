@@ -31,6 +31,44 @@ Contributor checklist:
 [ ] Are Experimental/Internal/Planned labels still accurate?
 ```
 
+## Git AI commit messages and settings navigation
+
+Settings has independent **Git**, **SSH**, and **Agent Integration** sidebar entries.
+Git auto-fetch and AI commit-message configuration live under Git; registered SSH
+hosts live under SSH; Agent installation/update/hooks and notifications live under
+Agent Integration. Plugin installation remains under Plugins.
+
+The built-in Git changes composer has a single Generate button before Commit.
+`git.commitAI.routes` stores an ordered array of `{id, agent, model}` entries;
+`id` is a UUID, `agent` is currently `claude` or `pi`, and `model` is a CLI model
+ID (Pi accepts `provider/model`). Users can batch-add several models for one
+Agent, remove entries, and drag or use arrow buttons to reorder them. Duplicates
+are ignored. The first successful route wins; each failed route is attempted once
+with a 90-second deadline. Cancellation never advances to the next route.
+
+Generation reads only the staged patch and up to five recent subjects through
+the repository executor, including SSH when applicable. Inference always runs
+locally using the user's CLI authentication in a temporary non-repository cwd.
+Claude uses bare mode, no tools/MCP, and no session persistence. Pi disables
+tools, extensions, skills, templates, themes, context files and session persistence.
+Extension-only Pi providers are intentionally unavailable. These CLI restrictions
+are not an OS sandbox; the installed CLI and user shell remain trusted. No
+third-party plugin is launched and no plugin capability is added by this feature.
+Pi model discovery uses its tool/extension-disabled `--list-models`; Claude accepts
+explicit IDs/aliases rather than promising a stale hard-coded model catalog.
+
+The settings disclosure covers sending staged source (including SSH source) to
+all configured model services during fallback. Patches over 200,000 bytes are
+rejected, not silently truncated; binary files use Git's summary. Output is
+bounded and only successful final structured responses are accepted. Raw CLI
+errors, prompts and credentials are not exposed in fallback diagnostics. Repository
+read errors do not trigger inference fallback. Index entries and patch are checked
+again after generation; a changed staging snapshot is rejected. Changing repository,
+leaving the composer, or cancelling discards the result. A draft edited during
+generation is not overwritten; replacing an existing draft requires confirmation,
+and a generated replacement can be undone. Generation does not stage, commit,
+resume an interactive Agent, or send text to a terminal pane.
+
 ## Terminal title updates
 
 The built-in Git Inspector follows pane, directory and connection changes.

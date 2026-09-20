@@ -428,9 +428,9 @@ struct InspectorGitView: View {
                 Divider()
                 GitCommitComposer(message: Binding(get: { content.commitDraft }, set: { perform(.gitAction(.updateCommitDraft($0))) }),
                     stagedCount: content.workingTree.staged.count, isBusy: content.operation != nil,
-                    canCommit: content.workingTree.stagedError == nil, isUpdatingIndex: content.isUpdatingIndex) {
-                    perform(.gitAction(.commitStaged))
-                }
+                    canCommit: content.workingTree.stagedError == nil, isUpdatingIndex: content.isUpdatingIndex,
+                    commit: { perform(.gitAction(.commitStaged)) }, repository: content.repository)
+                .id(collectionKey)
                 .padding(10)
             }
         case .branches:

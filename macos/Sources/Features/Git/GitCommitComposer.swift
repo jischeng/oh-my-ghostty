@@ -8,6 +8,15 @@ struct GitCommitComposer: View {
     let canCommit: Bool
     let isUpdatingIndex: Bool
     let commit: () -> Void
+    var repository: GitRepositoryIdentity?
+    @ObservedObject private var settings = OhMyGhosttySettings.shared
+    @State private var generation: Task<Void, Never>?
+    @State private var generationID: UUID?
+    @State private var draftRevision = 0
+    @State private var notice: String?
+    @State private var confirmReplace = false
+    @State private var previousDraft: String?
+    @State private var generatedDraft: String?
     @State private var editorHeight: CGFloat = 44
     @State private var focused = false
 
@@ -26,9 +35,80 @@ struct GitCommitComposer: View {
                 Text(GitL10n.format("{0} staged", String(describing: stagedCount))).font(.system(size: 10)).foregroundStyle(.secondary)
                 ProgressView().controlSize(.mini).frame(width: 12, height: 12).opacity(isUpdatingIndex ? 1 : 0)
                 Spacer(minLength: 4)
+                if generationID != nil {
+                    ProgressView().controlSize(.mini)
+                    Button(GitL10n.text("Cancel")) { cancelGeneration() }.controlSize(.small)
+                } else {
+                    Button { requestGeneration() } label: {
+                        Label(GitL10n.text("Generate"), systemImage: "sparkles")
+                    }
+                    .controlSize(.small)
+                    .disabled(isBusy || isUpdatingIndex || !canCommit || stagedCount == 0 || repository == nil)
+                    .help(GitL10n.text("Generate a commit message using your configured agents"))
+                }
                 Button(GitL10n.text("Commit"), action: commit)
                     .controlSize(.small)
-                    .disabled(isBusy || !canCommit || stagedCount == 0 || message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(generationID != nil || isBusy || !canCommit || stagedCount == 0 || message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            if let notice {
+                Text(notice).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+            if let previousDraft, generatedDraft == message {
+                Button(GitL10n.text("Undo generated message")) {
+                    message = previousDraft
+                    self.previousDraft = nil
+                    generatedDraft = nil
+                }.buttonStyle(.link).font(.caption)
+            }
+        }
+        .confirmationDialog(GitL10n.text("Replace the existing commit message?"), isPresented: $confirmReplace) {
+            Button(GitL10n.text("Generate and Replace")) { startGeneration() }
+            Button(GitL10n.text("Cancel"), role: .cancel) {}
+        }
+        .onChange(of: message) { _ in draftRevision += 1 }
+        .onChange(of: repository) { _ in cancelGeneration(); notice = nil }
+        .onDisappear { cancelGeneration() }
+    }
+
+    private func requestGeneration() {
+        guard !settings.gitCommitAIRoutes.isEmpty else { SettingsNavigation.open(.git); return }
+        if message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { startGeneration() } else { confirmReplace = true }
+    }
+
+    private func cancelGeneration() {
+        generation?.cancel()
+        generation = nil
+        generationID = nil
+    }
+
+    private func startGeneration() {
+        guard let repository, generationID == nil, !isBusy, !isUpdatingIndex, canCommit, stagedCount > 0 else { return }
+        let id = UUID()
+        let revision = draftRevision
+        let original = message
+        let routes = settings.gitCommitAIRoutes
+        generationID = id
+        notice = nil
+        generation = Task { @MainActor in
+            defer {
+                if generationID == id { generationID = nil; generation = nil }
+            }
+            do {
+                let result = try await GitCommitAIService().generate(repository: repository, routes: routes)
+                guard !Task.isCancelled, generationID == id else { return }
+                guard draftRevision == revision else {
+                    notice = GitL10n.text("Your draft changed during generation. It was not replaced; generate again.")
+                    return
+                }
+                previousDraft = original
+                generatedDraft = result.message
+                message = result.message
+                notice = (result.attempt > 1 ? GitL10n.text("Generated using fallback: ") : GitL10n.text("Generated using: ")) + result.route.title
+            } catch {
+                guard !Task.isCancelled, generationID == id else { return }
+                if case GitExecutionError.outputLimitExceeded = error {
+                    notice = GitL10n.text("Staged changes are too large for AI generation (200 KB patch limit). Split the commit and try again.")
+                } else { notice = error.localizedDescription }
             }
         }
     }

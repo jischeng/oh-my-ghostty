@@ -17,15 +17,17 @@ class RemoteAgentWrappersTests(unittest.TestCase):
         cls.temp = tempfile.TemporaryDirectory(prefix="omg-agent-wrappers-")
         cls.addClassCleanup(cls.temp.cleanup)
         cls.directory = Path(cls.temp.name)
+        cls.bin = cls.directory / "bin"
+        cls.bin.mkdir()
         source = (ROOT / "src/cli/ssh.zig").read_text()
         agent = source.split("const RemoteAgent = enum {", 1)[1].split("\n};", 1)[0]
-        wrapper = source.split("fn writeRemoteAgentWrappers(", 1)[1].split("\nfn writeRemoteAgentInvocation", 1)[0]
+        wrapper = source.split("fn remoteShellCommand(", 1)[1].split("\nfn writeSessionStart", 1)[0]
         driver = cls.directory / "wrappers.zig"
         driver.write_text(
             'const std = @import("std");\n'
-            'const RemoteQuoteStyle = enum { fish, shell };\n'
+            'const Allocator = std.mem.Allocator;\n'
             'const RemoteAgent = enum {' + agent + '\n};\n'
-            'fn writeRemoteAgentWrappers(' + wrapper + '\n'
+            'fn remoteShellCommand(' + wrapper + '\n'
             'extern "c" fn write(c_int, [*]const u8, usize) isize;\n'
             'pub fn main() !void {\n'
             '  inline for (.{RemoteQuoteStyle.fish, RemoteQuoteStyle.shell}) |style| {\n'
@@ -34,28 +36,53 @@ class RemoteAgentWrappersTests(unittest.TestCase):
             '    try writeRemoteAgentWrappers(&output.writer, style);\n'
             '    _ = write(1, output.written().ptr, output.written().len);\n'
             '    _ = write(1, "\\x00", 1);\n'
-            '  }\n}\n'
+            '  }\n'
+            '  const command = remoteShellCommand(std.heap.page_allocator, "cloud", "omg-ssh-test", null, .antigravity, null).?;\n'
+            '  _ = write(1, command.ptr, command.len);\n'
+            '  _ = write(1, "\\x00", 1);\n'
+            '}\n'
         )
         compiled = subprocess.run(
             ["mise", "exec", "zig@0.16.0", "--", "zig", "run", "-lc", str(driver)],
             cwd=ROOT, capture_output=True, check=True, timeout=120,
         )
-        fish, shell, _ = compiled.stdout.decode().split("\0")
+        fish, shell, cls.bootstrap, _ = compiled.stdout.decode().split("\0")
         cls.scripts = {"fish": fish.lstrip("; "), "bash": shell, "zsh": shell}
         for name in ("agy", "codex"):
-            executable = cls.directory / name
+            executable = cls.bin / name
             executable.write_text('#!/bin/sh\nprintf "ARG:<%s>\\n" "$@"\nexit 7\n')
             executable.chmod(0o700)
+
+    def test_full_bootstrap_through_each_login_shell(self):
+        real_fish = shutil.which("fish")
+        if not real_fish:
+            self.skipTest("fish not installed")
+        # Preserve the actual generated -C argument, but disable interactive
+        # startup files and terminate after the restored test agent returns.
+        shim = self.bin / "fish"
+        shim.write_text('#!/bin/sh\nexec ' + real_fish + ' --no-config -c "$3"\n')
+        shim.chmod(0o700)
+        try:
+            for shell in ("fish", "bash", "zsh"):
+                with self.subTest(login_shell=shell):
+                    result = self.run_shell(shell, self.bootstrap)
+                    self.assertEqual(result.returncode, 7, result.stderr)
+                    self.assertIn("omg_agent=antigravity;omg_scope=remote;omg_state=idle", result.stdout)
+                    self.assertIn("start=omg-ssh-test;type=remote", result.stdout)
+                    self.assertNotIn("Unsupported use", result.stderr)
+        finally:
+            shim.unlink()
 
     def run_shell(self, shell, script):
         executable = shutil.which(shell)
         if not executable:
             self.skipTest(f"{shell} not installed")
         env = {
-            "PATH": f"{self.directory}:/usr/bin:/bin:/opt/homebrew/bin",
+            "PATH": f"{self.bin}:/usr/bin:/bin:/opt/homebrew/bin",
             "HOME": str(self.directory),
             "ZDOTDIR": str(self.directory),
             "XDG_CONFIG_HOME": str(self.directory),
+            "SHELL": shutil.which("fish") or "/bin/sh",
         }
         flags = ["--no-config"] if shell == "fish" else ["-f"] if shell == "zsh" else ["--noprofile", "--norc"]
         return subprocess.run([executable, *flags, "-c", script], env=env,

@@ -783,7 +783,7 @@ fn remoteShellCommand(
     var command: std.Io.Writer.Allocating = .init(alloc);
     defer command.deinit();
     command.writer.writeAll("exec /bin/sh -c ") catch return null;
-    writeShellSingleQuoted(&command.writer, script.written()) catch return null;
+    writeLoginShellQuoted(&command.writer, script.written()) catch return null;
     return command.toOwnedSlice() catch null;
 }
 
@@ -1027,6 +1027,22 @@ fn writeFishSingleQuoted(writer: *std.Io.Writer, value: []const u8) !void {
     for (value) |byte| {
         if (byte == '\\' or byte == '\'') try writer.writeByte('\\');
         try writer.writeByte(byte);
+    }
+    try writer.writeByte('\'');
+}
+
+/// OpenSSH passes its command through the user's login shell, which may be
+/// Fish. Unlike POSIX sh, Fish interprets backslashes inside single quotes.
+/// Emit both quotes and backslashes outside quoted segments so every shell
+/// delivers the exact same script bytes to /bin/sh -c.
+fn writeLoginShellQuoted(writer: *std.Io.Writer, value: []const u8) !void {
+    try writer.writeByte('\'');
+    for (value) |byte| {
+        switch (byte) {
+            '\'' => try writer.writeAll("'\\''"),
+            '\\' => try writer.writeAll("'\\\\'"),
+            else => try writer.writeByte(byte),
+        }
     }
     try writer.writeByte('\'');
 }

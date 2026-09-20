@@ -488,7 +488,12 @@ The transient `+ssh` Fish/bash/zsh startup installs identity-only wrappers for
 `agy` and `codex` unless a user function or alias already owns that name. Normal
 command-name invocation (including restored sessions) emits remote idle identity;
 returning to the shell clears remote contexts while preserving command exit status.
-Native hooks supply task progress and completion. Absolute executable paths,
+Native hooks supply task progress and completion. The outer OpenSSH command
+quotes both apostrophes and backslashes outside single-quoted segments so Fish,
+bash, and zsh login shells deliver identical bootstrap bytes to `/bin/sh -c`.
+Regression coverage executes the complete generated bootstrap through all three
+login shells, in addition to testing the inner Agent wrappers.
+Absolute executable paths,
 `command codex`/`command agy`, existing user wrappers, and plain OpenSSH sessions
 bypass this fallback and require native integration. No remote dotfiles are changed.
 Pi starts idle; an empty background snapshot cannot announce completion. A real

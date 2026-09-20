@@ -139,6 +139,12 @@ struct AgentIntegrationSettingsView: View {
                 }
             }
             cliSummary(agent).padding(.leading, 36)
+            if agent.definition.hook.kind == .none {
+                Text(strings.agentDetectorUpdateExplanation)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 36)
+            }
         }
     }
 

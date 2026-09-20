@@ -517,6 +517,10 @@ struct SettingsStrings: Equatable, Sendable {
     var agentCLIMissing: String { t("Not Found in PATH", "未在 PATH 中找到") }
     var agentVersionUnknown: String { t("Version Unknown", "版本未知") }
     var agentExternalUpdater: String { t("CLI: use its original installer; status extensions can still be updated here.", "CLI 请使用原安装方式更新；状态扩展仍可在此更新。") }
+    var agentDetectorUpdateExplanation: String {
+        t("No separate status Hook. Detection improvements ship with OMG; reinstalling the detector only enables detection.",
+          "无独立状态 Hook，检测逻辑随 OMG 更新；重装检测器仅启用检测功能。")
+    }
     var agentHostDetectorOnly: String { t("Detector is managed on this Mac", "检测器由本机管理") }
     var agentUpdateScopeCaption: String {
         t("After an OMG upgrade, enabled automatic checks inspect installed status extensions immediately, regardless of the interval. Automatic extension updates are off by default. Only existing integrations are updated; CLI updates have separate settings.",

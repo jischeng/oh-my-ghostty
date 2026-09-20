@@ -441,7 +441,9 @@ Install action therefore creates a Host-owned, versioned detector marker under
 0700 and each exact allowlisted marker is mode 0600. The host enables process and
 bounded screen detection for these agents only while the current marker exists.
 Screen activity requires manifest status patterns: arbitrary redraws or quiet
-periods never imply task start/completion. Agents without patterns retain idle
+periods never imply task start/completion. Settings explicitly identifies these
+agents as having no separate status Hook: detection fixes ship with the OMG app,
+while reinstalling a detector only enables its local marker. Agents without patterns retain idle
 identity until their process exits.
 Remove deletes only a regular marker whose owner/agent fields match OMG, and
 Update replaces stale marker content. A one-time global sentinel migrates the

@@ -19,30 +19,23 @@ enum TabActivityRingStyle {
     }
 
     static func color(_ activity: TabActivity, scheme: ColorScheme = .dark) -> Color {
-        let dark = scheme == .dark
         switch activity.state {
         case .idle: return .clear
-        case .working: return focusColor(scheme: scheme)
-        case .done: return dark ? Color(red: 0.48, green: 0.78, blue: 0.60)
-            : Color(red: 0.22, green: 0.56, blue: 0.35)
-        case .needsAttention: return dark ? Color(red: 0.91, green: 0.77, blue: 0.54)
-            : Color(red: 0.64, green: 0.45, blue: 0.22)
-        case .error: return dark ? Color(red: 0.91, green: 0.64, blue: 0.62)
-            : Color(red: 0.70, green: 0.35, blue: 0.34)
+        case .working: return activity.phase == .background ? .purple : .accentColor
+        case .done: return .green
+        case .needsAttention: return .orange
+        case .error: return .red
         }
     }
 
     static func focusColor(scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(red: 0.53, green: 0.73, blue: 0.95)
-            : Color(red: 0.25, green: 0.48, blue: 0.73)
+        .accentColor
     }
 
     static func tintStrength(state: TabActivityState?, focused: Bool) -> Double {
         switch state {
-        case .done: return 0.72
-        case .working: return 0.68
-        case .needsAttention, .error: return 0.60
-        case .idle, nil: return focused ? 0.68 : 0
+        case .done, .working, .needsAttention, .error: return 1
+        case .idle, nil: return focused ? 1 : 0
         }
     }
 

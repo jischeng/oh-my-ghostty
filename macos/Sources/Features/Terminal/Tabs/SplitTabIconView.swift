@@ -54,6 +54,7 @@ struct SplitTabPane: Identifiable {
 
 struct SplitTabIconView: View {
     @ObservedObject var controller: TerminalController
+    let selected: Bool
     let hovered: Bool
     let select: () -> Void
     @State private var iconHovered = false
@@ -77,8 +78,15 @@ struct SplitTabIconView: View {
             }
             return .init(id: surface.id, icon: icon, activity: activity,
                          title: agent?.displayName ?? surface.title,
-                         focused: surface.id == (controller.focusedSurface ?? controller.surfaceTree.first)?.id)
+                         focused: Self.isPaneFocused(
+                            selected: selected,
+                            surfaceID: surface.id,
+                            focusedID: (controller.focusedSurface ?? controller.surfaceTree.first)?.id))
         }
+    }
+
+    static func isPaneFocused(selected: Bool, surfaceID: UUID, focusedID: UUID?) -> Bool {
+        selected && surfaceID == focusedID
     }
 
     var body: some View {

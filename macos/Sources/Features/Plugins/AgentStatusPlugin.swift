@@ -1184,6 +1184,7 @@ export default function (pi: any) {
   let currentContext: any;
   let closing = false;
   let requestSequence = 0;
+  let completionPending = false;
   const subagentRuns = new Set<string>();
   const backgroundTasks = new Set<string>();
   const backgroundToolNames = new Set([
@@ -1195,8 +1196,13 @@ export default function (pi: any) {
   const updateSettledStatus = (context = currentContext) => {
     currentContext = context ?? currentContext;
     if (closing || !currentContext?.isIdle?.()) return;
-    report(activeBackgroundCount() > 0 ? "working" : "done", false, currentContext,
-      undefined, activeBackgroundCount() > 0 ? "background" : undefined);
+    if (activeBackgroundCount() > 0) {
+      completionPending = true;
+      report("working", false, currentContext, undefined, "background");
+    } else if (completionPending) {
+      completionPending = false;
+      report("done", false, currentContext);
+    }
   };
   const validID = (value: any) => typeof value === "string" && value.length > 0 && value.length <= 256;
   const refreshBackgroundTasks = () => {
@@ -1259,15 +1265,18 @@ export default function (pi: any) {
 
   pi.on("session_start", async (_event: any, context: any) => {
     closing = false;
+    completionPending = false;
     currentContext = context;
     report("idle", false, context);
     refreshBackgroundTasks();
   });
   pi.on("before_agent_start", async (_event: any, context: any) => {
+    completionPending = true;
     currentContext = context;
     report("working", false, context);
   });
   pi.on("agent_start", async (_event: any, context: any) => {
+    completionPending = true;
     currentContext = context;
     report("working", false, context);
   });
@@ -1685,7 +1694,8 @@ struct AgentContextSignalReducer: Sendable {
     ) -> AgentActivityUpdate? {
         guard signal.action == .start,
               signal.id.hasPrefix("omg-ssh-"),
-              Self.metadata(signal.metadata)["cwd"] != nil else { return nil }
+              Self.metadata(signal.metadata)["cwd"] != nil ||
+                Self.metadata(signal.metadata)["cwdhex"] != nil else { return nil }
         return clearRemoteActivities()
     }
 
@@ -1715,16 +1725,7 @@ struct AgentContextSignalReducer: Sendable {
             return markUnexpectedInterruption(record: current)
         }
         if current.activity.state == .done {
-            if current.terminated { return nil }
-            activities[index] = Record(
-                id: current.id,
-                activity: current.activity,
-                scope: current.scope,
-                liveness: nil,
-                updatedAt: Date(),
-                terminated: true
-            )
-            return .set(current.activity)
+            return remove(id)
         }
         if current.activity.state == .error,
            current.terminated {

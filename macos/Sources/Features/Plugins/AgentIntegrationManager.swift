@@ -9,6 +9,11 @@ struct AgentIntegrationPolicy: Codable, Equatable {
     var intervalHours = 24
     var lastAttempt: Date?
     var lastSuccess: Date?
+    var checkedIntegrationRevision: String?
+
+    func needsIntegrationCheck(revision: String) -> Bool {
+        checkAutomatically && checkedIntegrationRevision != revision
+    }
 
     func isDue(at date: Date) -> Bool {
         checkAutomatically && date.timeIntervalSince(lastAttempt ?? .distantPast) >=
@@ -44,6 +49,7 @@ struct AgentIntegrationSnapshot: Codable, Sendable {
     var hooks: [SupportedAgent: AgentHookInstallationState] = [:]
     var cli: [SupportedAgent: AgentCLIInstallation] = [:]
     var error: String?
+    var hooksChanged: Bool?
 }
 
 /// App-owned maintenance survives closing Settings. Each operation captures a
@@ -67,14 +73,23 @@ final class AgentIntegrationManager: ObservableObject {
     private var automaticTasks: [String: Task<Void, Never>] = [:]
     private var automaticTargets: Set<String> = []
     private let storageKey = "OMG.AgentIntegration.Policies.v1"
+    let integrationRevision: String
+
+    static var bundledIntegrationRevision: String {
+        let info = Bundle.main.infoDictionary ?? [:]
+        return "\(info["CFBundleShortVersionString"] ?? "development")/" +
+            "\(info["CFBundleVersion"] ?? "0")/hooks-\(AgentHookInstaller.hookVersion)"
+    }
 
     init(
         defaults: UserDefaults = .standard,
         homeURL: URL = FileManager.default.homeDirectoryForCurrentUser,
         snapshots: [String: AgentIntegrationSnapshot] = [:],
         connectionTargets: @escaping @MainActor () -> Set<String> = AgentIntegrationManager.liveConnectionTargets,
-        registry: SSHHostRegistry? = nil
+        registry: SSHHostRegistry? = nil,
+        integrationRevision: String? = nil
     ) {
+        self.integrationRevision = integrationRevision ?? Self.bundledIntegrationRevision
         let registry = registry ?? SSHHostRegistry(defaults: defaults)
         self.registry = registry
         self.defaults = defaults
@@ -122,15 +137,22 @@ final class AgentIntegrationManager: ObservableObject {
         for (target, task) in automaticTasks where !allowsAutomaticWork(target) {
             task.cancel()
         }
-        let targets = Set(policies.keys).union([Self.localID])
-        for target in targets where policy(for: target).isDue(at: date) && !busy.contains(target)
-            && automaticTasks[target] == nil && allowsAutomaticWork(target) {
+        let targets = Set(policies.keys).union([Self.localID]).union(registry.hosts.map(\.id))
+        for target in targets where shouldCheck(target, at: date) && !busy.contains(target)
+            && automaticTasks[target] == nil {
+            let hooksOnly = !policy(for: target).isDue(at: date)
             automaticTasks[target] = Task { [weak self] in
                 guard let self else { return }
-                await refresh(target: target, automatic: true)
+                await refresh(target: target, automatic: true, hooksOnly: hooksOnly)
                 automaticTasks[target] = nil
             }
         }
+    }
+
+    func shouldCheck(_ target: String, at date: Date) -> Bool {
+        let policy = policy(for: target)
+        return allowsAutomaticWork(target) &&
+            (policy.isDue(at: date) || policy.needsIntegrationCheck(revision: integrationRevision))
     }
 
     static func liveConnectionTargets() -> Set<String> {
@@ -154,7 +176,7 @@ final class AgentIntegrationManager: ObservableObject {
         if let data = try? JSONEncoder().encode(policies) { defaults.set(data, forKey: storageKey) }
     }
 
-    func refresh(target: String, automatic: Bool = false) async {
+    func refresh(target: String, automatic: Bool = false, hooksOnly: Bool = false) async {
         guard !busy.contains(target), !registry.isCollecting(target) else { return }
         guard !automatic || policy(for: target).checkAutomatically else { return }
         guard !automatic || allowsAutomaticWork(target), !Task.isCancelled else { return }
@@ -165,7 +187,7 @@ final class AgentIntegrationManager: ObservableObject {
             automaticTargets.remove(target)
         }
         var policy = policy(for: target)
-        policy.lastAttempt = Date()
+        if !hooksOnly { policy.lastAttempt = Date() }
         setPolicy(policy, for: target)
         var snapshot = snapshots[target] ?? registry.host(target)?.snapshot ?? AgentIntegrationSnapshot()
         snapshot.error = nil
@@ -177,12 +199,16 @@ final class AgentIntegrationManager: ObservableObject {
                 for agent in SupportedAgent.allCases where snapshot.hooks[agent] == .updateAvailable {
                     guard !Task.isCancelled, allowsAutomaticWork(target), self.policy(for: target).checkAutomatically,
                           self.policy(for: target).updateHooksAutomatically else { break }
-                    do { try await changeHook(agent, target: target, remove: false) } catch { snapshot.error = error.localizedDescription }
+                    do {
+                        try await changeHook(agent, target: target, remove: false)
+                        snapshot.hooksChanged = true
+                    } catch { snapshot.error = error.localizedDescription }
                 }
                 snapshot.hooks = try await readHooks(target: target)
             }
             var current = self.policy(for: target)
             current.lastSuccess = Date()
+            current.checkedIntegrationRevision = integrationRevision
             setPolicy(current, for: target)
         } catch {
             if Task.isCancelled || (automatic && !allowsAutomaticWork(target)) { return }
@@ -190,6 +216,7 @@ final class AgentIntegrationManager: ObservableObject {
         }
         snapshots[target] = snapshot
         if captured { registry.storeSnapshot(snapshot, target: target) }
+        if hooksOnly { return }
         if automatic && self.policy(for: target).automaticallyUpdatedAgents.isEmpty { return }
         // CLI discovery/network failures must not prevent Hook maintenance.
         do {
@@ -220,7 +247,12 @@ final class AgentIntegrationManager: ObservableObject {
         snapshots[target, default: .init()].error = nil
         var captured = false
         do {
-            if cli { try await installCLI(agent, target: target) } else { try await changeHook(agent, target: target, remove: remove) }
+            if cli {
+                try await installCLI(agent, target: target)
+            } else {
+                try await changeHook(agent, target: target, remove: remove)
+                snapshots[target, default: .init()].hooksChanged = true
+            }
             snapshots[target, default: .init()].hooks = try await readHooks(target: target)
             captured = true
             if cli { snapshots[target, default: .init()].cli = try await readCLI(target: target) }

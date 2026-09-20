@@ -806,8 +806,9 @@ fn remoteFishCommand(
         "function __omg_report_pwd --on-event fish_prompt; set -l __omg_cwd (string escape --style=url \"$PWD\"); printf \"\\e]3008;start={s};type=remote;targethost={s};serverid=%s;cwd=%s\\a\\e]7;file://localhost%s\\a\" \"$OMG_SSH_SERVER_ID\" \"$__omg_cwd\" \"$__omg_cwd\"; end",
         .{ context_id, label },
     ) catch return null;
+    writeRemoteAgentWrappers(&fish_command.writer, .fish) catch return null;
     if (remote_agent) |agent| {
-        fish_command.writer.writeAll("; __omg_report_pwd; command ") catch return null;
+        fish_command.writer.writeAll("; __omg_report_pwd; ") catch return null;
         writeRemoteAgentInvocation(
             &fish_command.writer,
             agent,
@@ -824,6 +825,34 @@ fn remoteFishCommand(
 }
 
 const RemoteQuoteStyle = enum { fish, shell };
+
+/// Transient identity fallback for agents without reliable remote startup hooks.
+/// Do not replace user aliases/functions. Native hooks remain authoritative for
+/// task state; returning to the shell clears all remote agent contexts.
+fn writeRemoteAgentWrappers(writer: *std.Io.Writer, style: RemoteQuoteStyle) !void {
+    inline for (.{ RemoteAgent.antigravity, RemoteAgent.codex }) |agent| {
+        const name = agent.commandName();
+        const id = @tagName(agent);
+        switch (style) {
+            .fish => {
+                try writer.print("; if not functions -q {s}; function {s}; ", .{ name, name });
+                try writer.print(
+                    "printf '\\e]3008;start=omg-agent-{s}-%s;type=app;omg_agent={s};omg_scope=remote;omg_state=idle\\a' $fish_pid; ",
+                    .{ id, id },
+                );
+                try writer.print("command {s} $argv; set -l __omg_result $status; __omg_report_pwd; return $__omg_result; end; end", .{name});
+            },
+            .shell => {
+                try writer.print("if ! typeset -f {s} >/dev/null 2>&1 && ! alias {s} >/dev/null 2>&1; then\nfunction {s} {{\n", .{ name, name, name });
+                try writer.print(
+                    "  printf '\\033]3008;start=omg-agent-{s}-%s;type=app;omg_agent={s};omg_scope=remote;omg_state=idle\\007' \"$$\"\n",
+                    .{ id, id },
+                );
+                try writer.print("  local __omg_result=0\n  command {s} \"$@\" || __omg_result=$?\n  __omg_report_pwd\n  return \"$__omg_result\"\n}}\nfi\n", .{name});
+            },
+        }
+    }
+}
 
 fn writeRemoteAgentInvocation(
     writer: *std.Io.Writer,
@@ -948,8 +977,9 @@ fn remoteStartupFileCommand(
             \\
         ) catch return null;
     }
+    writeRemoteAgentWrappers(&startup.writer, .shell) catch return null;
     if (remote_agent) |agent| {
-        startup.writer.writeAll("__omg_report_pwd\ncommand ") catch return null;
+        startup.writer.writeAll("__omg_report_pwd\n") catch return null;
         writeRemoteAgentInvocation(
             &startup.writer,
             agent,
@@ -1062,6 +1092,23 @@ test interactiveSSHDestination {
     try testing.expect(interactiveSSHDestination(&.{ "-T", "cloud" }) == null);
 }
 
+test "remoteAgentWrappers" {
+    const testing = std.testing;
+    inline for (.{ RemoteQuoteStyle.fish, RemoteQuoteStyle.shell }) |style| {
+        var output: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer output.deinit();
+        try writeRemoteAgentWrappers(&output.writer, style);
+        const script = output.written();
+        try testing.expect(std.mem.indexOf(u8, script, "omg_agent=antigravity;omg_scope=remote;omg_state=idle") != null);
+        try testing.expect(std.mem.indexOf(u8, script, "omg_agent=codex;omg_scope=remote;omg_state=idle") != null);
+        try testing.expect(std.mem.indexOf(u8, script, "command agy") != null);
+        try testing.expect(std.mem.indexOf(u8, script, "command codex") != null);
+        try testing.expect(std.mem.indexOf(u8, script, "__omg_report_pwd") != null);
+        try testing.expect(std.mem.indexOf(u8, script, "return ") != null);
+        try testing.expect(std.mem.indexOf(u8, script, "omg_state=done") == null);
+    }
+}
+
 test remoteShellCommand {
     const testing = std.testing;
     try testing.expect(sshDestinationLabel("user@cloud").?.len == "cloud".len);
@@ -1081,7 +1128,7 @@ test remoteShellCommand {
     try testing.expect(std.mem.indexOf(u8, bash_command, "cwdhex=%s") != null);
     try testing.expect(std.mem.indexOf(u8, bash_command, "serverid=%s") != null);
     try testing.expect(std.mem.indexOf(u8, bash_command, "targethost=vps-jump") != null);
-    try testing.expect(std.mem.indexOf(u8, bash_command, "command codex resume") != null);
+    try testing.expect(std.mem.indexOf(u8, bash_command, "codex resume") != null);
     try testing.expect(std.mem.indexOf(u8, bash_command, "project'\\''s code") != null);
 
     const zsh_command = remoteStartupFileCommand(
@@ -1130,7 +1177,7 @@ test remoteShellCommand {
     defer testing.allocator.free(cwd_command);
     try testing.expect(std.mem.indexOf(u8, cwd_command, "cd --") != null);
     try testing.expect(std.mem.indexOf(u8, cwd_command, "project") != null);
-    try testing.expect(std.mem.indexOf(u8, cwd_command, "__omg_report_pwd; command codex resume") != null);
+    try testing.expect(std.mem.indexOf(u8, cwd_command, "__omg_report_pwd; codex resume") != null);
     try testing.expect(std.mem.indexOf(u8, cwd_command, "019f-session_1") != null);
     try testing.expect(validAgentSessionID("019f-session_1"));
     try testing.expect(!validAgentSessionID("bad session"));

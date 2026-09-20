@@ -481,16 +481,29 @@ struct SettingsStrings: Equatable, Sendable {
     var agentCheckOnly: String { t("Check for updates", "检查更新") }
     var agentWaitingForConnection: String { t("Automatic updates pause until connected in OMG", "未在 OMG 中连接，自动更新已暂停") }
     var agentActions: String { t("Agent actions", "Agent 操作") }
-    var agentInstallHook: String { t("Install Hook", "安装 Hook") }
-    var agentUpdateHook: String { t("Update Hook", "更新 Hook") }
-    var agentReinstallHook: String { t("Reinstall Hook", "重新安装 Hook") }
+    var agentCLIOptions: String { t("CLI Settings", "CLI 设置") }
+    var agentIntegrationExplanation: String {
+        t("OMG status extensions (Hooks) control tab icons and task status. CLI updates upgrade the Agent itself; their update methods are independent.",
+          "OMG 状态扩展（Hook）负责 Tab 图标和任务状态；CLI 更新升级 Agent 本体，两者独立管理。")
+    }
+    var agentIntegrationUpdateAvailable: String {
+        t("Installed status extensions differ from this OMG version. Update them using the extension buttons.",
+          "已安装的状态扩展与当前 OMG 内置版本不同，请使用扩展按钮更新。")
+    }
+    var agentIntegrationReload: String {
+        t("Status extensions changed. Restart the affected Agent sessions, or use /reload in Pi. Existing sessions may still use the previous extension.",
+          "状态扩展已变更。请重启对应 Agent 会话，或在 Pi 中执行 /reload；已有会话可能仍使用旧扩展。")
+    }
+    var agentInstallHook: String { t("Install Extension", "安装状态扩展") }
+    var agentUpdateHook: String { t("Update Extension", "更新状态扩展") }
+    var agentReinstallHook: String { t("Reinstall Extension", "重装状态扩展") }
     var agentInstallDetector: String { t("Install Detector", "安装检测器") }
     var agentUpdateDetector: String { t("Update Detector", "更新检测器") }
     var agentReinstallDetector: String { t("Reinstall Detector", "重新安装检测器") }
     var agentHostLabel: String { t("Host", "主机") }
     var agentLocalHost: String { t("This Mac", "本机") }
     var agentAutomaticCheck: String { t("Check for Updates Automatically", "自动检测更新") }
-    var agentAutomaticHooks: String { t("Automatically Update Installed Hooks", "自动更新已安装的 Hooks") }
+    var agentAutomaticHooks: String { t("Automatically Update Installed Status Extensions", "自动更新已安装的状态扩展") }
     var agentAutomaticCLI: String { t("Auto-update CLI", "自动更新 CLI") }
     var agentCheckInterval: String { t("Check Interval", "检查频率") }
     var agentEveryHour: String { t("Every Hour", "每小时") }
@@ -503,11 +516,15 @@ struct SettingsStrings: Equatable, Sendable {
     var agentNotChecked: String { t("Not Checked", "尚未检查") }
     var agentCLIMissing: String { t("Not Found in PATH", "未在 PATH 中找到") }
     var agentVersionUnknown: String { t("Version Unknown", "版本未知") }
-    var agentExternalUpdater: String { t("Update with Original Installer", "请使用原安装方式更新") }
+    var agentExternalUpdater: String { t("CLI: use its original installer; status extensions can still be updated here.", "CLI 请使用原安装方式更新；状态扩展仍可在此更新。") }
+    var agentDetectorUpdateExplanation: String {
+        t("No separate status Hook. Detection improvements ship with OMG; reinstalling the detector only enables detection.",
+          "无独立状态 Hook，检测逻辑随 OMG 更新；重装检测器仅启用检测功能。")
+    }
     var agentHostDetectorOnly: String { t("Detector is managed on this Mac", "检测器由本机管理") }
     var agentUpdateScopeCaption: String {
-        t("Checks run while OMG is open. Automatic installation is off by default and only updates existing installations. CLI updates use verified npm installations or supported native update commands.",
-          "OMG 运行期间定时检查。自动安装默认关闭，只更新已安装的项目。CLI 使用已核实的 npm 安装来源或受支持的原生更新命令。")
+        t("After an OMG upgrade, enabled automatic checks inspect installed status extensions immediately, regardless of the interval. Automatic extension updates are off by default. Only existing integrations are updated; CLI updates have separate settings.",
+          "OMG 升级后，已启用的自动检查会立即检查状态扩展，不受检查周期限制。扩展自动更新默认关闭，仅更新已有集成；CLI 更新独立设置。")
     }
     var agentLocalScopeCaption: String { t("These update settings apply to this Mac only.", "以上更新设置仅适用于本机。") }
     var agentSSHScopeCaption: String {

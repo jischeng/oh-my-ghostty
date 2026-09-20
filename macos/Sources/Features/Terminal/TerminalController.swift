@@ -1284,30 +1284,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     ) {
         let definition = detected.agent.definition
         guard definition.hook.kind == .none else { return }
-        let screen = surface.cachedScreenContents.get()
-        let signature = screen.hashValue
-        let previous = agentScreenSignatures[surface.id]
-        agentScreenSignatures[surface.id] = signature
-        guard let previous else { return }
-
-        let classified = AgentScreenStatusDetector.detect(
+        // Screen redraws and quiet periods do not prove a task started or
+        // completed. Only agent-specific status markers may drive activity.
+        guard let nextState = AgentScreenStatusDetector.detect(
             definition: definition,
-            screen: screen
-        )
-        let nextState: TabActivityState
-        if let classified, classified != .idle {
-            nextState = classified
-            agentScreenStableTicks[surface.id] = 0
-        } else if signature != previous {
-            nextState = .working
-            agentScreenStableTicks[surface.id] = 0
-        } else {
-            let ticks = (agentScreenStableTicks[surface.id] ?? 0) + 1
-            agentScreenStableTicks[surface.id] = ticks
-            guard ticks >= 2,
-                  agentActivities[surface.id]?.state == .working else { return }
-            nextState = .done
-        }
+            screen: surface.cachedScreenContents.get()
+        ) else { return }
         guard agentActivities[surface.id]?.state != nextState else { return }
         let attention = nextState == .needsAttention
             ? ";omg_attention=permission"
@@ -1558,7 +1540,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
         if signal.id.hasPrefix("omg-ssh-"),
            signal.metadata.contains("type=remote"),
-           signal.metadata.contains("cwd="),
+           signal.metadata.contains("cwd=") || signal.metadata.contains("cwdhex="),
            agentResumeDescriptors[surfaceID]?.scope == .remote {
             clearAgentResumeDescriptor(for: surfaceID)
             return
@@ -1645,7 +1627,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     func acknowledgeTerminalAgentStateFromUserInput(
         on surface: Ghostty.SurfaceView
     ) {
-        guard focusedSurface === surface else { return }
+        guard surfaceTree.contains(where: { $0 === surface }) else { return }
         acknowledgeTerminalAgentState(for: surface)
     }
 

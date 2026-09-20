@@ -5,6 +5,54 @@ import Testing
 
 @MainActor
 struct AgentIntegrationManagerTests {
+    @Test func appUpgradeChecksHooksImmediatelyAndPreservesCLIDeadline() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let suite = "AgentIntegrationTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: home)
+        }
+        let installer = AgentHookInstaller(homeURL: home)
+        try installer.install(.pi)
+        let path = home.appendingPathComponent(".pi/agent/extensions/omg-agent-status.ts")
+        try "// marker: _omg_agent_status\n// old adapter\n".write(to: path, atomically: true, encoding: .utf8)
+        let now = Date()
+        let manager = AgentIntegrationManager(defaults: defaults, homeURL: home, integrationRevision: "new-app")
+        var policy = manager.policy(for: "local")
+        policy.lastAttempt = now
+        policy.checkedIntegrationRevision = "old-app"
+        manager.setPolicy(policy, for: "local")
+        #expect(!policy.isDue(at: now))
+        #expect(manager.shouldCheck("local", at: now))
+        await manager.refresh(target: "local", automatic: true, hooksOnly: true)
+        #expect(installer.installationState(.pi) == .updateAvailable)
+        #expect(manager.snapshots["local"]?.hooks[.pi] == .updateAvailable)
+        #expect(manager.snapshots["local"]?.cli.isEmpty == true)
+        #expect(manager.policy(for: "local").lastAttempt == now)
+        #expect(!manager.shouldCheck("local", at: now))
+        let reopened = AgentIntegrationManager(defaults: defaults, homeURL: home, integrationRevision: "new-app")
+        #expect(!reopened.shouldCheck("local", at: now))
+        let upgraded = AgentIntegrationManager(defaults: defaults, homeURL: home, integrationRevision: "next-app")
+        #expect(upgraded.shouldCheck("local", at: now))
+        policy.updateHooksAutomatically = true
+        upgraded.setPolicy(policy, for: "local")
+        await upgraded.refresh(target: "local", automatic: true, hooksOnly: true)
+        #expect(installer.installationState(.pi) == .current)
+        #expect(installer.installationState(.claude) == .missing)
+        #expect(upgraded.snapshots["local"]?.hooksChanged == true)
+        policy.checkAutomatically = false
+        upgraded.setPolicy(policy, for: "local")
+        #expect(!upgraded.shouldCheck("local", at: now))
+        #expect(!upgraded.shouldCheck("ssh:offline", at: now))
+    }
+
+    @Test func legacyPoliciesDecodeWithoutUpgradeRevision() throws {
+        let policy = try JSONDecoder().decode(AgentIntegrationPolicy.self, from: Data(#"{"checkAutomatically":true,"updateHooksAutomatically":false,"automaticallyUpdatedAgents":[],"intervalHours":24}"#.utf8))
+        #expect(policy.checkedIntegrationRevision == nil)
+        #expect(policy.needsIntegrationCheck(revision: "new-app"))
+    }
+
     @Test func standaloneCodexUsesItsNativeUpdaterWithoutNpm() async throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)

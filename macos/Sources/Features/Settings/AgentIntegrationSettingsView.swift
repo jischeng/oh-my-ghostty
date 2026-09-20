@@ -23,6 +23,15 @@ struct AgentIntegrationSettingsView: View {
                 VStack(alignment: .leading, spacing: 10) { scheduleSummary; toolbarActions }
             }
             .padding(.vertical, 4)
+            Text(strings.agentIntegrationExplanation)
+                .font(.caption).foregroundStyle(.secondary)
+            if snapshot.hooks.values.contains(.updateAvailable) {
+                Label(strings.agentIntegrationUpdateAvailable, systemImage: "arrow.down.circle")
+                    .font(.callout).foregroundStyle(.orange)
+            }
+            if snapshot.hooksChanged == true {
+                Text(strings.agentIntegrationReload).font(.caption).foregroundStyle(.secondary)
+            }
             if let error = snapshot.error ?? exportError {
                 Label(error, systemImage: "exclamationmark.triangle")
                     .font(.callout).foregroundStyle(.red).textSelection(.enabled)
@@ -117,16 +126,24 @@ struct AgentIntegrationSettingsView: View {
     }
 
     private func row(_ agent: SupportedAgent) -> some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 20) {
-                identity(agent).frame(minWidth: 190, alignment: .leading)
-                Spacer(minLength: 12)
-                cliSummary(agent).frame(width: 200, alignment: .leading)
-                actions(agent).frame(width: 180, alignment: .trailing)
+        VStack(alignment: .leading, spacing: 10) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 20) {
+                    identity(agent)
+                    Spacer(minLength: 12)
+                    actions(agent)
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    identity(agent)
+                    actions(agent).padding(.leading, 36)
+                }
             }
-            VStack(alignment: .leading, spacing: 8) {
-                HStack { identity(agent); Spacer(minLength: 12); actions(agent) }
-                cliSummary(agent).padding(.leading, 36)
+            cliSummary(agent).padding(.leading, 36)
+            if agent.definition.hook.kind == .none {
+                Text(strings.agentDetectorUpdateExplanation)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 36)
             }
         }
     }
@@ -145,39 +162,44 @@ struct AgentIntegrationSettingsView: View {
     }
 
     private func cliSummary(_ agent: SupportedAgent) -> some View {
-        HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: 6) {
             Text(cliStatus(snapshot.cli[agent])).font(.caption).foregroundStyle(.secondary)
                 .lineLimit(1).truncationMode(.middle)
-            if let cli = snapshot.cli[agent], cli.path != nil, !cli.canAutomaticallyUpdate {
-                Image(systemName: "info.circle").foregroundStyle(.tertiary)
-                    .help(strings.agentExternalUpdater).accessibilityLabel(strings.agentExternalUpdater)
+            HStack(spacing: 6) {
+                if snapshot.cli[agent]?.needsUpdateCheck == true {
+                    Button(snapshot.cli[agent]?.updater == "native" ? strings.agentCheckAndUpdateCLI : strings.agentUpdateCLI) {
+                        perform(agent, cli: true)
+                    }
+                }
+                Menu {
+                    Toggle(strings.agentAutomaticCLI, isOn: automaticCLIBinding(agent))
+                        .disabled(snapshot.cli[agent]?.canAutomaticallyUpdate != true &&
+                            !manager.policy(for: target).automaticallyUpdatedAgents.contains(agent))
+                    if snapshot.cli[agent]?.path != nil && snapshot.cli[agent]?.canAutomaticallyUpdate != true {
+                        Text(strings.agentExternalUpdater)
+                    }
+                } label: { Label(strings.agentCLIOptions, systemImage: "gearshape") }
+                .menuStyle(.borderlessButton).fixedSize()
             }
-            if manager.policy(for: target).automaticallyUpdatedAgents.contains(agent) {
-                Image(systemName: "arrow.triangle.2.circlepath").foregroundStyle(.secondary).help(strings.agentAutomaticCLI)
+            .controlSize(.small).disabled(busy)
+            if let cli = snapshot.cli[agent], cli.path != nil, !cli.canAutomaticallyUpdate {
+                Text(strings.agentExternalUpdater).font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .frame(maxWidth: 220, alignment: .leading)
     }
 
     private func actions(_ agent: SupportedAgent) -> some View {
         let hook = snapshot.hooks[agent]
         let supportsHooks = local || agent.definition.hook.kind != .none
         return HStack(spacing: 10) {
-            if supportsHooks, let hook, hook != .current {
+            if supportsHooks, let hook {
                 Button(agent.definition.hook.kind == .none
-                       ? (hook.isInstalled ? strings.agentUpdateDetector : strings.agentInstallDetector)
-                       : (hook.isInstalled ? strings.agentUpdateHook : strings.agentInstallHook)) { perform(agent) }
-            }
-            if snapshot.cli[agent]?.needsUpdateCheck == true {
-                Button(snapshot.cli[agent]?.updater == "native" ? strings.agentCheckAndUpdateCLI : strings.agentUpdateCLI) { perform(agent, cli: true) }
+                       ? (hook == .current ? strings.agentReinstallDetector : hook.isInstalled ? strings.agentUpdateDetector : strings.agentInstallDetector)
+                       : (hook == .current ? strings.agentReinstallHook : hook.isInstalled ? strings.agentUpdateHook : strings.agentInstallHook)) { perform(agent) }
             }
             Menu {
-                Toggle(strings.agentAutomaticCLI, isOn: automaticCLIBinding(agent))
-                    .disabled(snapshot.cli[agent]?.canAutomaticallyUpdate != true && !manager.policy(for: target).automaticallyUpdatedAgents.contains(agent))
-                if snapshot.cli[agent]?.path != nil && snapshot.cli[agent]?.canAutomaticallyUpdate != true { Text(strings.agentExternalUpdater) }
                 if supportsHooks, hook?.isInstalled == true {
-                    Divider()
-                    Button(agent.definition.hook.kind == .none ? strings.agentReinstallDetector : strings.agentReinstallHook) { perform(agent) }
                     Button(strings.agentRemoveButton, role: .destructive) { perform(agent, remove: true) }
                 }
             } label: { Image(systemName: "ellipsis").frame(width: 18, height: 18) }

@@ -118,20 +118,7 @@ struct SplitTabIconView: View {
         .popover(isPresented: $previewVisible, arrowEdge: .trailing) {
             VStack(alignment: .leading, spacing: 12) {
                 Text("\(values.count) Panes").font(.headline)
-                // Unlike the compact icon, the preview exposes all folded leaves.
-                let spatial = controller.surfaceTree.root?.spatial(within: CGSize(width: 180, height: 120))
-                ZStack(alignment: .topLeading) {
-                    ForEach(values) { pane in
-                        if let bounds = spatial?.slots.first(where: {
-                            if case .leaf(let surface) = $0.node { return surface.id == pane.id }
-                            return false
-                        })?.bounds {
-                            PaneLogoMark(pane: pane, size: 20)
-                                .position(x: bounds.midX, y: bounds.midY)
-                        }
-                    }
-                }
-                .frame(width: 180, height: 120)
+                TabSplitPreview(tree: controller.surfaceTree, panes: values)
                 ForEach(values) { pane in
                     HStack(spacing: 10) {
                         PaneLogoMark(pane: pane, size: 18)

@@ -53,6 +53,22 @@ struct SplitTabPresentationTests {
         }
     }
 
+    @Test func previewDividersRespectNestedRatiosAndBounds() {
+        let a = MockView(), b = MockView(), c = MockView()
+        let tree = SplitTree<MockView>(root: .split(.init(
+            direction: .horizontal, ratio: 0.4, left: .leaf(view: a),
+            right: .split(.init(direction: .vertical, ratio: 0.25,
+                                left: .leaf(view: b), right: .leaf(view: c)))
+        )), zoomed: nil)
+        let dividers = TabSplitPreviewLayout.dividers(tree: tree, size: CGSize(width: 200, height: 120))
+        #expect(dividers == [
+            .init(start: CGPoint(x: 80, y: 0), end: CGPoint(x: 80, y: 120)),
+            .init(start: CGPoint(x: 80, y: 30), end: CGPoint(x: 200, y: 30))
+        ])
+        #expect(TabSplitPreviewLayout.dividers(tree: SplitTree<MockView>(), size: .zero).isEmpty)
+        #expect(TabSplitPreviewLayout.dividers(tree: SplitTree(view: a), size: CGSize(width: 200, height: 120)).isEmpty)
+    }
+
     @Test func renderActualSizeComposition() throws {
         let positions: [[CGPoint]] = [
             [CGPoint(x: 0.25, y: 0.5), CGPoint(x: 0.75, y: 0.25), CGPoint(x: 0.75, y: 0.75)],

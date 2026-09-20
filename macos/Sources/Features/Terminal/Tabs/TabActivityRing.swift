@@ -3,9 +3,9 @@ import SwiftUI
 /// Both presentations share the same outer footprint. The compact square fits
 /// inside the ring's inner edge even at its corners (including status dots).
 enum TabIconMetrics {
-    static let footprint: CGFloat = 28
-    static let ring: CGFloat = 27
-    static let composition: CGFloat = 17
+    static let footprint: CGFloat = 30
+    static let ring: CGFloat = 30
+    static let composition: CGFloat = 19
     static let pane: CGFloat = composition / 2
     static func singleLogo(_ preferred: CGFloat) -> CGFloat { min(18, max(17, preferred)) }
 }

@@ -18,15 +18,27 @@ enum TabActivityRingStyle {
         }
     }
 
-    static func color(_ activity: TabActivity) -> Color {
+    static func color(_ activity: TabActivity, scheme: ColorScheme = .dark) -> Color {
+        let dark = scheme == .dark
         switch activity.state {
-        case .idle: .clear
-        case .working: activity.phase == .background ? .purple : .accentColor
-        case .done: .green
-        case .needsAttention: .orange
-        case .error: .red
+        case .idle: return .clear
+        case .working: return dark ? Color(red: 0.65, green: 0.79, blue: 0.94)
+            : Color(red: 0.28, green: 0.48, blue: 0.67)
+        case .done: return dark ? Color(red: 0.73, green: 0.82, blue: 0.77)
+            : Color(red: 0.40, green: 0.54, blue: 0.47)
+        case .needsAttention: return dark ? Color(red: 0.91, green: 0.77, blue: 0.54)
+            : Color(red: 0.64, green: 0.45, blue: 0.22)
+        case .error: return dark ? Color(red: 0.91, green: 0.64, blue: 0.62)
+            : Color(red: 0.70, green: 0.35, blue: 0.34)
         }
     }
+
+    /// A perceptible 2.4s brightness breath, not just a tiny change in tint opacity.
+    static func breath(at time: TimeInterval, reduceMotion: Bool) -> Double {
+        reduceMotion ? 1 : (1 - cos(time * 2 * .pi / 2.4)) / 2
+    }
+
+    static func logoOpacity(breath: Double) -> Double { 0.55 + 0.45 * breath }
 
     /// Clockwise fractions starting at twelve o'clock, for masking a single rotating arc.
     static func sectors(for rect: CGRect) -> [ClosedRange<Double>] {
@@ -48,10 +60,11 @@ enum TabActivityRingStyle {
     }
 }
 
-/// One continuous working arc, masked by pane ownership; no segmented tracks.
+/// A faint continuous arc brightens in working regions. No stationary track or segment breaks.
 struct TabActivityRing: View {
     let activity: TabActivity
     var sectors: [ClosedRange<Double>] = [0...1]
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var spinning: Bool {
@@ -64,11 +77,14 @@ struct TabActivityRing: View {
                 .truncatingRemainder(dividingBy: 0.9) / 0.9 : 0
             if activity.state == .working {
                 Circle().trim(from: 0, to: reduceMotion ? 1 : 0.25)
-                    .stroke(Color.blue, style: .init(lineWidth: 1.5, lineCap: .round))
+                    .stroke(TabActivityRingStyle.color(activity, scheme: colorScheme),
+                            style: .init(lineWidth: 1.5, lineCap: .round))
                     .rotationEffect(.degrees(phase * 360 - 90))
                     .mask {
                         GeometryReader { geometry in
-                            Path { path in
+                            ZStack {
+                                Rectangle().fill(.white.opacity(0.24))
+                                Path { path in
                                 let center = CGPoint(x: geometry.size.width / 2, y: geometry.size.height / 2)
                                 for sector in sectors {
                                     path.move(to: center)
@@ -77,7 +93,8 @@ struct TabActivityRing: View {
                                                 endAngle: .degrees(sector.upperBound * 360 - 90), clockwise: false)
                                     path.closeSubpath()
                                 }
-                            }.fill(.white).blur(radius: 0.7)
+                                }.fill(.white).blur(radius: 1.2)
+                            }
                         }
                     }
             }
@@ -90,20 +107,26 @@ struct TabActivityRing: View {
 /// Shared by the single logo, compact panes and hover preview.
 struct AgentLogoStatus: ViewModifier {
     let activity: TabActivity?
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func body(content: Content) -> some View {
         let working = activity?.state == .working
         TimelineView(.animation(minimumInterval: 1.0 / 20, paused: !working || reduceMotion)) { timeline in
+            let breath = TabActivityRingStyle.breath(
+                at: timeline.date.timeIntervalSinceReferenceDate, reduceMotion: reduceMotion
+            )
             content.overlay {
                 if let activity, activity.state != .idle {
-                    let pulse = working && !reduceMotion
-                        ? 0.08 * sin(timeline.date.timeIntervalSinceReferenceDate * .pi) : 0
-                    let color: Color = working ? .blue : TabActivityRingStyle.color(activity)
-                    color.opacity((activity.state == .done ? 0.50 : 0.78) + pulse)
+                    TabActivityRingStyle.color(activity, scheme: colorScheme)
+                        .opacity(activity.state == .done ? 0.14 : 0.60)
                         .mask(content)
                 }
             }
+            .opacity(working ? TabActivityRingStyle.logoOpacity(breath: breath) : 1)
+            .shadow(color: working
+                    ? TabActivityRingStyle.color(activity!, scheme: colorScheme).opacity(0.28 * breath)
+                    : .clear, radius: working ? 1 + 1.5 * breath : 0)
         }
     }
 }

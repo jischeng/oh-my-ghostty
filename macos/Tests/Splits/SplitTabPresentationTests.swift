@@ -77,6 +77,16 @@ struct SplitTabPresentationTests {
         #expect(TabActivityRingStyle.sectors(for: CGRect(x: 0, y: 0, width: 1, height: 1)) == [0...1])
     }
 
+    @Test func workingBreathHasVisibleRangeAndHonorsReducedMotion() {
+        let low = TabActivityRingStyle.breath(at: 0, reduceMotion: false)
+        let high = TabActivityRingStyle.breath(at: 1.2, reduceMotion: false)
+        #expect(abs(low) < 0.001)
+        #expect(abs(high - 1) < 0.001)
+        #expect(TabActivityRingStyle.logoOpacity(breath: high) - TabActivityRingStyle.logoOpacity(breath: low) > 0.4)
+        #expect(TabActivityRingStyle.breath(at: 0, reduceMotion: true) == 1)
+        #expect(TabActivityRingStyle.breath(at: 1.2, reduceMotion: true) == 1)
+    }
+
     @Test func renderAgentTintSamples() throws {
         let agents: [SupportedAgent] = [.codex, .pi, .antigravity]
         let states: [TabActivityState] = [.idle, .working, .needsAttention, .error, .done]
@@ -91,7 +101,9 @@ struct SplitTabPresentationTests {
                     }
                 }
             }
-        }.padding(20).background(Color(nsColor: .windowBackgroundColor))
+        }.padding(20)
+            .background(Color(red: 0.14, green: 0.14, blue: 0.19))
+            .environment(\.colorScheme, .dark)
         let renderer = ImageRenderer(content: content)
         renderer.scale = 3
         let image = try #require(renderer.nsImage)

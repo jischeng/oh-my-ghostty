@@ -25,17 +25,16 @@ struct SplitTabPresentationTests {
         #expect(history.representative(in: [], focused: c) == nil)
     }
 
-    @Test func ringIntervalsFollowPanePositions() {
-        #expect(TabActivityRingStyle.interval(for: CGRect(x: 0, y: 0, width: 0.5, height: 1)) == 0.5...1)
-        #expect(TabActivityRingStyle.interval(for: CGRect(x: 0.5, y: 0, width: 0.5, height: 1)) == 0...0.5)
-        #expect(TabActivityRingStyle.interval(for: CGRect(x: 0, y: 0, width: 1, height: 0.5)) == 0.75...1.25)
-        #expect(TabActivityRingStyle.wrapped(0.75...1.25) == [0.75...1, 0...0.25])
-        let quarters = [(0.5, 0.0), (0.5, 0.5), (0.0, 0.5), (0.0, 0.0)]
-        for (index, point) in quarters.enumerated() {
-            let rect = CGRect(x: point.0, y: point.1, width: 0.5, height: 0.5)
-            let start = Double(index) / 4
-            #expect(TabActivityRingStyle.interval(for: rect) == start...(start + 0.25))
-        }
+    @Test func wholeTabWorkIncludesHiddenPanesAndStopsWhenAllStop() {
+        #expect(TabActivityRingStyle.combinedWork([]) == nil)
+        #expect(TabActivityRingStyle.combinedWork([pane(.done).activity!, pane(.idle).activity!]) == nil)
+        let work = TabActivityRingStyle.combinedWork([pane(.idle).activity!, pane(.working).activity!])
+        #expect(work?.state == .working)
+        #expect(work?.progress == nil)
+        let background = TabActivity(source: "pi", state: .working, phase: .background,
+                                     label: nil, message: nil, detail: nil, progress: 0.6, icon: nil)
+        #expect(TabActivityRingStyle.combinedWork([background])?.phase == .background)
+        #expect(TabActivityRingStyle.combinedWork([background, pane(.working).activity!])?.phase == nil)
     }
 
     @Test func sharedRingPreservesReleaseStateSemantics() {
@@ -46,26 +45,40 @@ struct SplitTabPresentationTests {
         }
     }
 
+    @Test func compositionCornersAndDotsStayInsideRing() {
+        let innerRadius = TabIconMetrics.ring / 2 - 0.75
+        #expect(TabIconMetrics.composition / 2 * sqrt(2) < innerRadius)
+        for preferred in [CGFloat(12), 16, 20] {
+            #expect(TabIconMetrics.singleLogo(preferred) / 2 * sqrt(2) < innerRadius)
+        }
+    }
+
     @Test func renderActualSizeComposition() throws {
-        let a = pane(focused: true)
-        let b = pane(.working)
-        let c = pane(.needsAttention)
-        let icon = ZStack {
-            PaneLogoMark(pane: a, size: 12, showsActivity: false).position(x: 6, y: 6)
-            PaneLogoMark(pane: b, size: 12, showsActivity: false).position(x: 18, y: 6)
-            PaneLogoMark(pane: c, size: 12, showsActivity: false).position(x: 6, y: 18)
-            TabActivityRing(activity: b.activity!, interval: 0...0.25, segmented: true)
-                .frame(width: 29, height: 29)
-                .frame(width: 24, height: 24)
-            TabActivityRing(activity: c.activity!, interval: 0.5...0.75, segmented: true)
-                .frame(width: 29, height: 29)
-                .frame(width: 24, height: 24)
-            PaneLogoMark(pane: pane(), size: 12, showsActivity: false).position(x: 18, y: 18)
-        }.frame(width: 24, height: 24)
-        let renderer = ImageRenderer(content: icon.padding(16).background(Color(nsColor: .windowBackgroundColor)))
+        let positions: [[CGPoint]] = [
+            [CGPoint(x: 0.25, y: 0.5), CGPoint(x: 0.75, y: 0.25), CGPoint(x: 0.75, y: 0.75)],
+            [CGPoint(x: 0.25, y: 0.25), CGPoint(x: 0.75, y: 0.25),
+             CGPoint(x: 0.25, y: 0.75), CGPoint(x: 0.75, y: 0.75)]
+        ]
+        let preview = HStack(spacing: 16) {
+            ForEach(positions.indices, id: \.self) { layout in
+                ZStack {
+                    ForEach(positions[layout].indices, id: \.self) { index in
+                        PaneLogoMark(pane: pane(index == 0 ? .working : .idle), size: TabIconMetrics.pane)
+                            .position(x: positions[layout][index].x * TabIconMetrics.composition,
+                                      y: positions[layout][index].y * TabIconMetrics.composition)
+                    }
+                }
+                .frame(width: TabIconMetrics.composition, height: TabIconMetrics.composition)
+                .frame(width: TabIconMetrics.footprint, height: TabIconMetrics.footprint)
+                .overlay {
+                    TabActivityRing(activity: pane(.working).activity!)
+                        .frame(width: TabIconMetrics.ring, height: TabIconMetrics.ring)
+                }
+            }
+        }
+        let renderer = ImageRenderer(content: preview.padding(16).background(Color(nsColor: .windowBackgroundColor)))
         renderer.scale = 4
         let image = try #require(renderer.nsImage)
-        #expect(image.size == CGSize(width: 56, height: 56))
         let bitmap = try #require(image.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:)))
         let png = try #require(bitmap.representation(using: .png, properties: [:]))
         try png.write(to: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("omg-pane-icons-preview.png"))

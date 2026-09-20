@@ -1,6 +1,15 @@
 import SwiftUI
 
-/// Shared single-pane and split-pane activity semantics. Fractions start at twelve o'clock.
+/// Both presentations share the same outer footprint. The compact square fits
+/// inside the ring's inner edge even at its corners (including status dots).
+enum TabIconMetrics {
+    static let footprint: CGFloat = 28
+    static let ring: CGFloat = 27
+    static let composition: CGFloat = 17
+    static let pane: CGFloat = composition / 2
+    static func singleLogo(_ preferred: CGFloat) -> CGFloat { min(18, max(17, preferred)) }
+}
+
 enum TabActivityRingStyle {
     static func progress(_ activity: TabActivity) -> Double {
         switch activity.state {
@@ -20,27 +29,21 @@ enum TabActivityRingStyle {
         }
     }
 
-    /// A contiguous perimeter interval for each normalized half or quadrant.
-    /// Intervals may cross 1.0 (top half), preserving one continuous animation.
-    static func interval(for rect: CGRect) -> ClosedRange<Double> {
-        if rect.width == 1 && rect.height == 1 { return 0...1 }
-        if rect.width == 1 { return rect.minY == 0 ? 0.75...1.25 : 0.25...0.75 }
-        if rect.height == 1 { return rect.minX == 0 ? 0.5...1 : 0...0.5 }
-        let start: Double = rect.minX == 0 ? (rect.minY == 0 ? 0.75 : 0.5) : (rect.minY == 0 ? 0 : 0.25)
-        return start...(start + 0.25)
-    }
-
-    static func wrapped(_ range: ClosedRange<Double>) -> [ClosedRange<Double>] {
-        let start = range.lowerBound.truncatingRemainder(dividingBy: 1)
-        let end = start + range.upperBound - range.lowerBound
-        return end <= 1 ? [start...end] : [start...1, 0...(end - 1)]
+    /// A tab spinner reports work, never an average progress across unrelated jobs.
+    /// Includes hidden panes; foreground work wins over background-only work.
+    static func combinedWork(_ activities: [TabActivity]) -> TabActivity? {
+        let working = activities.filter { $0.state == .working }
+        guard let first = working.first else { return nil }
+        return .init(source: first.source, state: .working,
+                     phase: working.allSatisfy { $0.phase == .background } ? .background : nil,
+                     label: nil, message: nil, detail: nil, progress: nil, icon: nil)
     }
 }
 
+/// The release spinner: one quarter arc, continuously rotating at a 0.9s period.
+/// Single-pane determinate progress and terminal states retain their original semantics.
 struct TabActivityRing: View {
     let activity: TabActivity
-    var interval: ClosedRange<Double> = 0...1
-    var segmented = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var spinning: Bool {
@@ -51,32 +54,23 @@ struct TabActivityRing: View {
         TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !spinning)) { timeline in
             let phase = spinning ? timeline.date.timeIntervalSinceReferenceDate
                 .truncatingRemainder(dividingBy: 0.9) / 0.9 : 0
-            let gap = segmented ? 0.012 : 0
-            let start = interval.lowerBound + gap
-            let length = interval.upperBound - interval.lowerBound - gap * 2
-            let progress = TabActivityRingStyle.progress(activity)
-            let head = phase * length
-            let end = head + length * progress
-            let localRanges: [ClosedRange<Double>] = end <= length
-                ? [(start + head)...(start + end)]
-                : [(start + head)...(start + length), start...(start + end - length)]
-            ZStack {
-                // A quiet working track makes the pane's ownership visible even at 12pt logos.
-                if segmented && activity.state == .working {
-                    arcs(TabActivityRingStyle.wrapped(start...(start + length)))
-                        .opacity(0.20)
-                }
-                arcs(localRanges.flatMap { TabActivityRingStyle.wrapped($0) })
-            }
+            Circle().trim(from: 0, to: TabActivityRingStyle.progress(activity))
+                .stroke(TabActivityRingStyle.color(activity), style: .init(lineWidth: 1.5, lineCap: .round))
+                .rotationEffect(.degrees(phase * 360 - 90))
         }
         .accessibilityHidden(true)
     }
+}
 
-    private func arcs(_ ranges: [ClosedRange<Double>]) -> some View {
-        ForEach(Array(ranges.enumerated()), id: \.offset) { _, range in
-            Circle().trim(from: range.lowerBound, to: range.upperBound)
-                .stroke(TabActivityRingStyle.color(activity), style: .init(lineWidth: 1.5, lineCap: .round))
-                .rotationEffect(.degrees(-90))
+struct TabActivityDot: View {
+    let activity: TabActivity
+
+    var body: some View {
+        if activity.state != .idle {
+            Circle().fill(TabActivityRingStyle.color(activity))
+                .overlay(Circle().strokeBorder(Color(nsColor: .windowBackgroundColor), lineWidth: 0.5))
+                .frame(width: 3, height: 3)
+                .accessibilityHidden(true)
         }
     }
 }

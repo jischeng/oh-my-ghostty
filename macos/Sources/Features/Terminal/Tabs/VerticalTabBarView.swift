@@ -1702,7 +1702,7 @@ private struct VerticalTabRow: View {
                             ),
                             activity: presentation.activity
                         )
-                        .frame(width: 24, height: 24)
+                        .frame(width: TabIconMetrics.footprint, height: TabIconMetrics.footprint)
                         .allowsHitTesting(false)
                     }
 
@@ -1868,14 +1868,14 @@ private struct AgentTabIconView: View {
         ZStack {
             if agent != nil, let activity, activity.state != .idle {
                 TabActivityRing(activity: activity)
-                    .frame(width: settings.tabIconSize + 3, height: settings.tabIconSize + 3)
+                    .frame(width: TabIconMetrics.ring, height: TabIconMetrics.ring)
             }
-            GhosttyTabIconView(icon: icon, color: color)
-                .scaleEffect(agent?.definition.iconScale ?? 1)
+            GhosttyTabIconView(icon: icon, color: color,
+                              size: TabIconMetrics.singleLogo(settings.tabIconSize))
         }
         .frame(
-            width: settings.tabIconSize,
-            height: settings.tabIconSize + 3
+            width: TabIconMetrics.footprint,
+            height: TabIconMetrics.footprint
         )
         .help(activity.map {
             $0.message ?? $0.label ?? $0.state.rawValue
@@ -1888,13 +1888,15 @@ private struct GhosttyTabIconView: View {
     @ObservedObject private var settings = OhMyGhosttySettings.shared
     let icon: GhosttyTabIcon
     let color: Color
+    var size: CGFloat?
 
     var body: some View {
         Group {
             switch icon {
             case .systemSymbol(let name):
                 Image(systemName: name)
-                    .font(.system(size: settings.tabIconSize))
+                    .resizable()
+                    .scaledToFit()
             case .asset(let name):
                 Image(name)
                     .resizable()
@@ -1906,7 +1908,7 @@ private struct GhosttyTabIconView: View {
             }
         }
         .foregroundStyle(color)
-        .frame(width: settings.tabIconSize, height: settings.tabIconSize)
+        .frame(width: size ?? settings.tabIconSize, height: size ?? settings.tabIconSize)
     }
 }
 

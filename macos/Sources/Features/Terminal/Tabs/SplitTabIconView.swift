@@ -90,18 +90,20 @@ struct SplitTabIconView: View {
                 if let id = controller.tabPaneFocusHistory.representative(
                     in: slot.views.map(\.id), focused: controller.focusedSurface?.id
                 ), let pane = byID[id] {
-                    PaneLogoMark(pane: pane, size: 12, showsActivity: false)
-                        .position(x: slot.rect.midX * 24, y: slot.rect.midY * 24)
-                    if let activity = pane.activity, activity.state != .idle {
-                        TabActivityRing(activity: activity,
-                                        interval: TabActivityRingStyle.interval(for: slot.rect), segmented: true)
-                            .frame(width: 29, height: 29)
-                            .frame(width: 24, height: 24)
-                    }
+                    PaneLogoMark(pane: pane, size: TabIconMetrics.pane)
+                        .position(x: slot.rect.midX * TabIconMetrics.composition,
+                                  y: slot.rect.midY * TabIconMetrics.composition)
                 }
             }
         }
-        .frame(width: 24, height: 24)
+        .frame(width: TabIconMetrics.composition, height: TabIconMetrics.composition)
+        .frame(width: TabIconMetrics.footprint, height: TabIconMetrics.footprint)
+        .overlay {
+            if let activity = TabActivityRingStyle.combinedWork(values.compactMap(\.activity)) {
+                TabActivityRing(activity: activity)
+                    .frame(width: TabIconMetrics.ring, height: TabIconMetrics.ring)
+            }
+        }
         .opacity(hovered ? 1 : 0.88)
         .contentShape(Rectangle())
         .onTapGesture(perform: select)
@@ -167,8 +169,8 @@ struct PaneLogoMark: View {
                     .padding(0.5)
                     .frame(width: size, height: size)
                 if showsActivity, let activity = pane.activity, activity.state != .idle {
-                    TabActivityRing(activity: activity)
-                        .frame(width: size + 3, height: size + 3)
+                    TabActivityDot(activity: activity)
+                        .offset(x: (size - 3) / 2, y: (size - 3) / 2)
                 }
             }
         .frame(width: size, height: size)

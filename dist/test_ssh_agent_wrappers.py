@@ -2,6 +2,8 @@
 Run: python3 dist/test_ssh_agent_wrappers.py
 """
 from pathlib import Path
+import json
+import os
 import re
 import shutil
 import subprocess
@@ -47,6 +49,22 @@ class RemoteAgentWrappersTests(unittest.TestCase):
             cwd=ROOT, capture_output=True, check=True, timeout=120,
         )
         fish, shell, cls.bootstrap, _ = compiled.stdout.decode().split("\0")
+        cls.binary_bootstrap = None
+        if binary := os.environ.get("OMG_TEST_BINARY"):
+            for required in ("fish", "bash", "zsh"):
+                if not shutil.which(required):
+                    raise RuntimeError(f"Binary acceptance requires {required}")
+            capture = cls.bin / "capture-ssh"
+            output = cls.directory / "ssh-argv.json"
+            capture.write_text('#!/usr/bin/python3\nimport os,json,sys\nopen(os.environ["OMG_CAPTURE"], "w").write(json.dumps(sys.argv[1:]))\n')
+            capture.chmod(0o700)
+            subprocess.run([binary, "+ssh", "--terminfo=false", "--forward-env=false", "--cache=false",
+                            "--ssh=" + str(capture), "--remote-agent=antigravity", "--", "cloud"],
+                           env=dict(os.environ, OMG_CAPTURE=str(output)), capture_output=True, check=True, timeout=30)
+            cls.binary_bootstrap = json.loads(output.read_text())[-1]
+            normalized = re.sub(r"omg-ssh-[0-9]+", "omg-ssh-test", cls.binary_bootstrap)
+            if normalized != cls.bootstrap:
+                raise AssertionError("App binary emits a different SSH bootstrap than current source; rebuild GhosttyKit before linking the app")
         cls.scripts = {"fish": fish.lstrip("; "), "bash": shell, "zsh": shell}
         for name in ("agy", "codex"):
             executable = cls.bin / name
@@ -65,10 +83,10 @@ class RemoteAgentWrappersTests(unittest.TestCase):
         try:
             for shell in ("fish", "bash", "zsh"):
                 with self.subTest(login_shell=shell):
-                    result = self.run_shell(shell, self.bootstrap)
+                    result = self.run_shell(shell, self.binary_bootstrap or self.bootstrap)
                     self.assertEqual(result.returncode, 7, result.stderr)
                     self.assertIn("omg_agent=antigravity;omg_scope=remote;omg_state=idle", result.stdout)
-                    self.assertIn("start=omg-ssh-test;type=remote", result.stdout)
+                    self.assertRegex(result.stdout, r"start=omg-ssh-(?:test|[0-9]+);type=remote")
                     self.assertNotIn("Unsupported use", result.stderr)
         finally:
             shim.unlink()

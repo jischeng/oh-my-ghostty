@@ -70,6 +70,15 @@ fi
 }
 
 if [[ "$skip_build" != true ]]; then
+  ghostty_version=$(plutil -extract GhosttyBaseVersion raw macos/Ghostty-Info.plist)
+  env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+    -u ALL_PROXY -u all_proxy \
+    mise exec zig@0.16.0 -- zig build \
+      -Doptimize=ReleaseFast \
+      -Demit-xcframework=true \
+      -Dxcframework-target=native \
+      -Demit-macos-app=false \
+      -Dversion-string="$ghostty_version"
   macos/build.nu \
     --scheme Ghostty \
     --configuration Debug \
@@ -117,6 +126,8 @@ build_mode=$(awk '/build mode/{print $NF}' <<<"$version_output")
   echo "refusing routine Dev install with GhosttyKit build mode $build_mode" >&2
   exit 1
 }
+
+OMG_TEST_BINARY="$source_bin" python3 dist/test_ssh_agent_wrappers.py
 
 if pgrep -f '/Applications/OMG Dev.app/Contents/MacOS/omg' >/dev/null; then
   osascript -e 'tell application id "com.jischeng.omg.debug" to quit' >/dev/null 2>&1 || true

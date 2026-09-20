@@ -215,6 +215,14 @@ installer instead of the raw build command:
 .agents/skills/omg-release/scripts/install-dev.sh
 ```
 
+The Dev installer always rebuilds the native ReleaseFast GhosttyKit before
+building the Swift app (unless `--skip-build` is explicitly supplied). Xcode
+alone can reuse an old core while stamping a new app version. Before replacing
+OMG Dev, the signed executable's `+ssh` command is captured with a fake SSH
+transport, compared byte-for-byte against current source (except session IDs),
+and exercised through Fish/bash/zsh. This offline artifact gate also applies to
+`--skip-build`; a version label and `.ReleaseFast` mode alone are insufficient.
+
 The Dev installer requires a persistent code-signing identity so macOS TCC can
 recognize replacement builds and retain previously granted folder permissions.
 It selects the first valid code-signing identity from the login keychain by

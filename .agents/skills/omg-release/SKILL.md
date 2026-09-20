@@ -52,8 +52,8 @@ Do not bypass this rule by stashing, discarding, or silently including unrelated
 The script requires that clean committed worktree so the installed binary maps to one commit. It then:
 
 1. reads the release `MARKETING_VERSION` and derives the short version `<release>-dev.<8-char-commit>`;
-2. builds with `macos/build.nu --configuration Debug --action build --marketing-version <dev-version>`;
-3. requires bundle ID `com.jischeng.omg.debug`, the derived version, and a `.ReleaseFast` GhosttyKit core;
+2. rebuilds native ReleaseFast GhosttyKit, then builds with `macos/build.nu --configuration Debug --action build --marketing-version <dev-version>`;
+3. requires bundle ID `com.jischeng.omg.debug`, the derived version, and a `.ReleaseFast` GhosttyKit core; after signing, compares the executable's generated SSH bootstrap against current source and runs the cross-shell regression gate (also with `--skip-build`);
 4. quits only the debug bundle;
 5. replaces only `/Applications/OMG Dev.app` using `ditto`;
 6. verifies the signature and binary hash;

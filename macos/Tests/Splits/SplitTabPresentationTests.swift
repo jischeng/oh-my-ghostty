@@ -12,6 +12,17 @@ struct SplitTabPresentationTests {
               title: "Terminal", focused: focused)
     }
 
+    @Test func switchingTabsClearsPaneFocusTintWithoutDiscardingFocusHistory() {
+        let remembered = UUID(), other = UUID()
+        #expect(SplitTabIconView.isPaneFocused(selected: true, surfaceID: remembered, focusedID: remembered))
+        #expect(!SplitTabIconView.isPaneFocused(selected: true, surfaceID: other, focusedID: remembered))
+        let inactive = SplitTabIconView.isPaneFocused(selected: false, surfaceID: remembered, focusedID: remembered)
+        #expect(!inactive)
+        #expect(AgentLogoStyle.tintStrength(state: .idle, focused: inactive) == 0)
+        #expect(AgentLogoStyle.tintStrength(state: nil, focused: inactive) == 0)
+        #expect(SplitTabIconView.isPaneFocused(selected: true, surfaceID: remembered, focusedID: remembered))
+    }
+
     @Test func regionRetainsLastFocusWhenFocusMovesElsewhere() {
         let a = UUID(), b = UUID(), c = UUID()
         var history = TabPaneFocusHistory()

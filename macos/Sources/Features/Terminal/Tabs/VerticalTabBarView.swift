@@ -1690,6 +1690,7 @@ private struct VerticalTabRow: View {
                     if controller.surfaceTree.isSplit {
                         SplitTabIconView(
                             controller: controller,
+                            selected: presentation.selected,
                             hovered: presentation.hovered,
                             select: select
                         )

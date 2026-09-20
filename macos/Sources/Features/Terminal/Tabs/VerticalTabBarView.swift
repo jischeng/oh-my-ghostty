@@ -1700,7 +1700,8 @@ private struct VerticalTabRow: View {
                                 selected: presentation.selected,
                                 hovered: presentation.hovered
                             ),
-                            activity: presentation.activity
+                            activity: presentation.activity,
+                            focused: presentation.selected
                         )
                         .frame(width: TabIconMetrics.footprint, height: TabIconMetrics.footprint)
                         .allowsHitTesting(false)
@@ -1859,6 +1860,7 @@ private struct AgentTabIconView: View {
     let icon: GhosttyTabIcon
     let color: Color
     let activity: TabActivity?
+    let focused: Bool
 
     private var agent: SupportedAgent? {
         activity.flatMap { SupportedAgent(rawValue: $0.source) }
@@ -1872,7 +1874,7 @@ private struct AgentTabIconView: View {
             }
             GhosttyTabIconView(icon: icon, color: color,
                               size: TabIconMetrics.singleLogo(settings.tabIconSize))
-                .modifier(AgentLogoStatus(activity: agent != nil ? activity : nil))
+                .modifier(AgentLogoStatus(activity: agent != nil ? activity : nil, focused: focused))
         }
         .frame(
             width: TabIconMetrics.footprint,

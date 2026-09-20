@@ -78,13 +78,24 @@ struct SplitTabPresentationTests {
     }
 
     @Test func workingBreathHasVisibleRangeAndHonorsReducedMotion() {
-        let low = TabActivityRingStyle.breath(at: 0, reduceMotion: false)
-        let high = TabActivityRingStyle.breath(at: 1.2, reduceMotion: false)
+        let low = TabActivityRingStyle.breath(at: 1.2, reduceMotion: false)
+        let high = TabActivityRingStyle.breath(at: 0, reduceMotion: false)
         #expect(abs(low) < 0.001)
         #expect(abs(high - 1) < 0.001)
         #expect(TabActivityRingStyle.logoOpacity(breath: high) - TabActivityRingStyle.logoOpacity(breath: low) > 0.4)
         #expect(TabActivityRingStyle.breath(at: 0, reduceMotion: true) == 1)
         #expect(TabActivityRingStyle.breath(at: 1.2, reduceMotion: true) == 1)
+    }
+
+    @Test func focusAndWorkUseSameTintStrengthWhileDoneRemainsVisible() {
+        #expect(TabActivityRingStyle.tintStrength(state: .idle, focused: true) ==
+                TabActivityRingStyle.tintStrength(state: .working, focused: true))
+        #expect(TabActivityRingStyle.tintStrength(state: .idle, focused: false) == 0)
+        #expect(TabActivityRingStyle.tintStrength(state: .done, focused: true) ==
+                TabActivityRingStyle.tintStrength(state: .done, focused: false))
+        #expect(TabActivityRingStyle.tintStrength(state: .done, focused: true) >= 0.7)
+        #expect(TabActivityRingStyle.logoOpacity(breath: 0) == 0.48)
+        #expect(TabActivityRingStyle.logoOpacity(breath: 1) == 1)
     }
 
     @Test func renderAgentTintSamples() throws {

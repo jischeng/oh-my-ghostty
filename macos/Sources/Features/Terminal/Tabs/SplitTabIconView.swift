@@ -150,15 +150,10 @@ struct PaneLogoMark: View {
 
     var body: some View {
             ZStack {
-                if pane.focused {
-                    Circle().fill(Color.accentColor.opacity(0.20))
-                        .blur(radius: 2)
-                        .frame(width: size, height: size)
-                }
                 logo
                     .padding(0.5)
                     .frame(width: size, height: size)
-                    .modifier(AgentLogoStatus(activity: showsActivity ? pane.activity : nil))
+                    .modifier(AgentLogoStatus(activity: showsActivity ? pane.activity : nil, focused: pane.focused))
             }
         .frame(width: size, height: size)
     }

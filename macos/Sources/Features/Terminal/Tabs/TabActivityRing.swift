@@ -22,10 +22,9 @@ enum TabActivityRingStyle {
         let dark = scheme == .dark
         switch activity.state {
         case .idle: return .clear
-        case .working: return dark ? Color(red: 0.65, green: 0.79, blue: 0.94)
-            : Color(red: 0.28, green: 0.48, blue: 0.67)
-        case .done: return dark ? Color(red: 0.73, green: 0.82, blue: 0.77)
-            : Color(red: 0.40, green: 0.54, blue: 0.47)
+        case .working: return focusColor(scheme: scheme)
+        case .done: return dark ? Color(red: 0.48, green: 0.78, blue: 0.60)
+            : Color(red: 0.22, green: 0.56, blue: 0.35)
         case .needsAttention: return dark ? Color(red: 0.91, green: 0.77, blue: 0.54)
             : Color(red: 0.64, green: 0.45, blue: 0.22)
         case .error: return dark ? Color(red: 0.91, green: 0.64, blue: 0.62)
@@ -33,12 +32,26 @@ enum TabActivityRingStyle {
         }
     }
 
-    /// A perceptible 2.4s brightness breath, not just a tiny change in tint opacity.
-    static func breath(at time: TimeInterval, reduceMotion: Bool) -> Double {
-        reduceMotion ? 1 : (1 - cos(time * 2 * .pi / 2.4)) / 2
+    static func focusColor(scheme: ColorScheme) -> Color {
+        scheme == .dark ? Color(red: 0.53, green: 0.73, blue: 0.95)
+            : Color(red: 0.25, green: 0.48, blue: 0.73)
     }
 
-    static func logoOpacity(breath: Double) -> Double { 0.55 + 0.45 * breath }
+    static func tintStrength(state: TabActivityState?, focused: Bool) -> Double {
+        switch state {
+        case .done: return 0.72
+        case .working: return 0.68
+        case .needsAttention, .error: return 0.60
+        case .idle, nil: return focused ? 0.68 : 0
+        }
+    }
+
+    /// Starts at full brightness, avoiding a random phase jump on entering work.
+    static func breath(at time: TimeInterval, reduceMotion: Bool) -> Double {
+        reduceMotion ? 1 : (1 + cos(max(0, time) * 2 * .pi / 2.4)) / 2
+    }
+
+    static func logoOpacity(breath: Double) -> Double { 0.48 + 0.52 * breath }
 
     /// Clockwise fractions starting at twelve o'clock, for masking a single rotating arc.
     static func sectors(for rect: CGRect) -> [ClosedRange<Double>] {
@@ -107,6 +120,8 @@ struct TabActivityRing: View {
 /// Shared by the single logo, compact panes and hover preview.
 struct AgentLogoStatus: ViewModifier {
     let activity: TabActivity?
+    var focused = false
+    @State private var workStarted = Date()
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -114,20 +129,24 @@ struct AgentLogoStatus: ViewModifier {
         let working = activity?.state == .working
         TimelineView(.animation(minimumInterval: 1.0 / 20, paused: !working || reduceMotion)) { timeline in
             let breath = TabActivityRingStyle.breath(
-                at: timeline.date.timeIntervalSinceReferenceDate, reduceMotion: reduceMotion
+                at: timeline.date.timeIntervalSince(workStarted), reduceMotion: reduceMotion
             )
             content.overlay {
-                if let activity, activity.state != .idle {
-                    TabActivityRingStyle.color(activity, scheme: colorScheme)
-                        .opacity(activity.state == .done ? 0.14 : 0.60)
-                        .mask(content)
-                }
+                let tint = activity.flatMap { $0.state == .idle ? nil : $0 }
+                    .map { TabActivityRingStyle.color($0, scheme: colorScheme) }
+                    ?? TabActivityRingStyle.focusColor(scheme: colorScheme)
+                tint.opacity(TabActivityRingStyle.tintStrength(state: activity?.state, focused: focused))
+                    .mask(content)
+                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: activity?.state)
+                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: focused)
             }
             .opacity(working ? TabActivityRingStyle.logoOpacity(breath: breath) : 1)
-            .shadow(color: working
-                    ? TabActivityRingStyle.color(activity!, scheme: colorScheme).opacity(0.28 * breath)
-                    : .clear, radius: working ? 1 + 1.5 * breath : 0)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: working)
         }
+        .onChange(of: working) { isWorking in
+            if isWorking { workStarted = Date() }
+        }
+        .onAppear { workStarted = Date() }
     }
 }
 

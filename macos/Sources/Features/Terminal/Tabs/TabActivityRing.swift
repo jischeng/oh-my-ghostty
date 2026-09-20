@@ -2,8 +2,11 @@ import SwiftUI
 
 /// Logos approach the ring; the working arc is drawn behind them.
 enum TabIconMetrics {
-    static let footprint: CGFloat = 30
-    static let ring: CGFloat = 30
+    // Fit the smallest supported row (28pt), including the centered stroke.
+    // Keep the same footprint in both densities so titles never shift.
+    static let footprint: CGFloat = 26
+    static let ring: CGFloat = 24
+    static let ringLineWidth: CGFloat = 1.5
     static let composition: CGFloat = 22
     static let pane: CGFloat = composition / 2
     static func singleLogo(_ preferred: CGFloat) -> CGFloat { min(18, max(17, preferred)) }
@@ -22,7 +25,7 @@ enum TabActivityRingStyle {
         switch activity.state {
         case .idle: return .clear
         case .working: return activity.phase == .background ? .purple : .accentColor
-        case .done: return .green
+        case .done: return Color(nsColor: NSColor.systemGreen.blended(withFraction: 0.15, of: .black) ?? .systemGreen)
         case .needsAttention: return .orange
         case .error: return .red
         }
@@ -41,10 +44,10 @@ enum TabActivityRingStyle {
 
     /// Starts at full brightness, avoiding a random phase jump on entering work.
     static func breath(at time: TimeInterval, reduceMotion: Bool) -> Double {
-        reduceMotion ? 1 : (1 + cos(max(0, time) * 2 * .pi / 2.4)) / 2
+        reduceMotion ? 1 : (1 + cos(max(0, time) * 2 * .pi / 1.8)) / 2
     }
 
-    static func logoOpacity(breath: Double) -> Double { 0.48 + 0.52 * breath }
+    static func logoOpacity(breath: Double) -> Double { 0.30 + 0.70 * breath }
 
     /// Clockwise fractions starting at twelve o'clock, for masking a single rotating arc.
     static func sectors(for rect: CGRect) -> [ClosedRange<Double>] {
@@ -84,7 +87,7 @@ struct TabActivityRing: View {
             if activity.state == .working {
                 Circle().trim(from: 0, to: reduceMotion ? 1 : 0.25)
                     .stroke(TabActivityRingStyle.color(activity, scheme: colorScheme),
-                            style: .init(lineWidth: 1.5, lineCap: .round))
+                            style: .init(lineWidth: TabIconMetrics.ringLineWidth, lineCap: .round))
                     .rotationEffect(.degrees(phase * 360 - 90))
                     .mask {
                         GeometryReader { geometry in
@@ -139,7 +142,6 @@ struct AgentLogoStatus: ViewModifier {
         .onChange(of: working) { isWorking in
             if isWorking { workStarted = Date() }
         }
-        .onAppear { workStarted = Date() }
     }
 }
 

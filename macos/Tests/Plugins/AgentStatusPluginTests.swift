@@ -649,29 +649,26 @@ struct AgentStatusPluginTests {
         #expect(reducer.acknowledgeTerminalState() == .clear)
     }
 
-    @Test func completedAgentEndStaysDoneUntilInputAcknowledgement() throws {
+    @Test func completedAgentEndClearsIdentity() throws {
         var reducer = AgentContextSignalReducer()
         _ = reducer.consume(signal(
             agent: .pi,
             state: "done",
             instance: 303
         ))
-        guard case .set(let done) = reducer.consume(.init(
+        #expect(reducer.consume(.init(
             action: .end,
             id: "omg-agent-pi-303",
             metadata: "type=app;omg_agent=pi;omg_scope=local"
-        )) else {
-            Issue.record("Expected terminated completion to remain visible")
-            return
-        }
-        #expect(done.state == .done)
+        )) == .clear)
+        #expect(reducer.trackedContextCount == 0)
         #expect(!reducer.requiresForegroundValidation)
         #expect(reducer.consume(.init(
             action: .end,
             id: "omg-agent-pi-303",
             metadata: "type=app;omg_agent=pi;omg_scope=local"
         )) == nil)
-        #expect(reducer.acknowledgeTerminalState() == .clear)
+        #expect(reducer.acknowledgeTerminalState() == nil)
     }
 
     @Test func acknowledgingCompletionRestoresIdleIdentity() throws {
@@ -687,7 +684,8 @@ struct AgentStatusPluginTests {
         #expect(reducer.acknowledgeTerminalState() == nil)
     }
 
-    @Test func remotePromptClearsOrphanedAgent() throws {
+    @Test(arguments: ["cwd=%2Ftmp", "cwdhex=2f746d70"])
+    func remotePromptClearsOrphanedAgent(directory: String) throws {
         var reducer = AgentContextSignalReducer()
         _ = reducer.consume(signal(
             agent: .claude,
@@ -698,7 +696,7 @@ struct AgentStatusPluginTests {
         let update = reducer.consumeRemotePrompt(.init(
             action: .start,
             id: "omg-ssh-remote-test",
-            metadata: "type=remote;targethost=cloud;cwd=%2Ftmp"
+            metadata: "type=remote;targethost=cloud;\(directory)"
         ))
         #expect(update == .clear)
         #expect(!reducer.hasRemoteActivity)

@@ -401,9 +401,7 @@ struct VerticalTabsIntegrationTests {
             for: inspectorSurface
         )?.conversationID?.rawValue == "019f-rotated")
 
-        let completionInputs = try terminalCompletionInputs()
-        try terminalScrollInput()(inspectorSurface)
-        #expect(eighth.agentActivity(for: inspectorSurface)?.state == .done)
+        let completionInputs = try terminalCompletionInputs() + [terminalScrollInput()]
         for input in completionInputs {
             input(inspectorSurface)
             #expect(eighth.agentActivity(for: inspectorSurface)?.state == .idle)

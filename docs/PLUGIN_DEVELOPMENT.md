@@ -429,6 +429,9 @@ Install action therefore creates a Host-owned, versioned detector marker under
 `~/.config/oh-my-ghostty/agent-detectors/<agent>.json`; the directory is mode
 0700 and each exact allowlisted marker is mode 0600. The host enables process and
 bounded screen detection for these agents only while the current marker exists.
+Screen activity requires manifest status patterns: arbitrary redraws or quiet
+periods never imply task start/completion. Agents without patterns retain idle
+identity until their process exits.
 Remove deletes only a regular marker whose owner/agent fields match OMG, and
 Update replaces stale marker content. A one-time global sentinel migrates the
 three previously implicit detectors to Installed; after that, a user removal is
@@ -467,18 +470,30 @@ remote Agent `omg_cwd` can complete its remote workspace, and a foreground
 process-group transition back to the local shell atomically clears all remote
 Agent presentation and resume state. A matching typed `omg +ssh` end performs
 the same cleanup; the next authenticated remote Fish/bash/zsh prompt remains an
-additional orphan-recovery signal.
+additional orphan-recovery signal (`cwd` and bash/zsh `cwdhex` are both accepted).
+The transient `+ssh` Fish/bash/zsh startup installs identity-only wrappers for
+`agy` and `codex` unless a user function or alias already owns that name. Normal
+command-name invocation (including restored sessions) emits remote idle identity;
+returning to the shell clears remote contexts while preserving command exit status.
+Native hooks supply task progress and completion. Absolute executable paths,
+`command codex`/`command agy`, existing user wrappers, and plain OpenSSH sessions
+bypass this fallback and require native integration. No remote dotfiles are changed.
+Pi starts idle; an empty background snapshot cannot announce completion. A real
+foreground turn or observed running background task arms a single completion,
+which repeated empty snapshots cannot re-emit after user acknowledgement.
 Unique instance IDs prevent an old `end` from clearing a newer same-agent
 session. Each Surface keeps one ordered, 32-context reducer; exceeding the bound
 evicts the oldest identity while preserving the newest presentation, and later
 signals for an evicted identity are ignored. An `end` or failed local liveness
 check while the current state is
 `working`/`needsAttention` becomes a terminal `error` rather than silently
-clearing; normal completion remains `done`. Pi `session_shutdown` first returns
+clearing; an `end` after normal completion clears the Agent identity and restores
+the underlying shell icon. Pi `session_shutdown` first returns
 the context to `idle` and then ends it, so Ctrl-D and session replacement clear
-identity instead of leaving a false completion badge. Tab selection and pane focus do not
-acknowledge either state. Only mouse click or keyboard input delivered to the
-owning focused terminal clears `done`/`error`. These events can change
+identity instead of leaving a false completion badge. Programmatic tab selection
+and pane focus do not acknowledge either state. Mouse clicks (including a click
+that transfers focus), scrolling, or keyboard input delivered to the owning
+terminal clear `done`/`error`, without clearing another Pane's state. These events can change
 only host-owned tab presentation; they do not authorize terminal input,
 filesystem, network, or plugin execution. A process can spoof its own tab badge,
 but cannot use this channel to gain capabilities.

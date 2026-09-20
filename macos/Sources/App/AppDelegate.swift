@@ -421,12 +421,14 @@ class AppDelegate: NSObject,
         center.delegate = self
 
         // Observe our appearance so we can report the correct value to libghostty.
+        let colorSchemeTracker = OMGColorSchemeTracker()
         self.appearanceObserver = NSApplication.shared.observe(
             \.effectiveAppearance,
              options: [.new, .initial]
         ) { _, change in
             guard let appearance = change.newValue else { return }
             guard let app = self.ghostty.app else { return }
+            guard colorSchemeTracker.consume(isDark: appearance.isDark) else { return }
             let scheme: ghostty_color_scheme_e
             if appearance.isDark {
                 scheme = GHOSTTY_COLOR_SCHEME_DARK
@@ -908,35 +910,10 @@ class AppDelegate: NSObject,
 
     @MainActor
     private func applyOhMyGhosttyWindowTheme(using config: Ghostty.Config) {
-        let settings = OhMyGhosttySettings.shared
-        let appearance: NSAppearance?
-        let shouldOverrideEveryWindow: Bool
-        switch settings.windowThemeOverride {
-        case .light:
-            appearance = NSAppearance(named: .aqua)
-            shouldOverrideEveryWindow = true
-        case .dark:
-            appearance = NSAppearance(named: .darkAqua)
-            shouldOverrideEveryWindow = true
-        case .system:
-            appearance = nil
-            shouldOverrideEveryWindow = true
-        case nil:
-            appearance = NSAppearance(ghosttyConfig: config)
-            shouldOverrideEveryWindow = false
-        }
-
-        let appAppearance = settings.windowThemeOverride == .light ||
-            settings.windowThemeOverride == .dark ? appearance : nil
-        if NSApp.appearance?.name != appAppearance?.name {
-            NSApp.appearance = appAppearance
-        }
-        for candidate in NSApp.windows where
-            shouldOverrideEveryWindow || candidate.windowController is BaseTerminalController {
-            if candidate.appearance?.name != appearance?.name {
-                candidate.appearance = appearance
-            }
-        }
+        OMGAppearancePolicy(
+            override: OhMyGhosttySettings.shared.windowThemeOverride,
+            configured: NSAppearance(ghosttyConfig: config)
+        ).apply(to: NSApp)
     }
 
     private func ghosttyConfigDidChange(config: Ghostty.Config) {
@@ -948,9 +925,6 @@ class AppDelegate: NSObject,
 
         // Update the config we need to store
         self.derivedConfig = DerivedConfig(config)
-        MainActor.assumeIsolated {
-            applyOhMyGhosttyWindowTheme(using: config)
-        }
 
         // Depending on the "window-save-state" setting we have to set the NSQuitAlwaysKeepsWindows
         // configuration. This is the only way to carefully control whether macOS invokes the
@@ -997,7 +971,8 @@ class AppDelegate: NSObject,
         // Config could change window appearance. We wrap this in an async queue because when
         // this is called as part of application launch it can deadlock with an internal
         // AppKit mutex on the appearance.
-        DispatchQueue.main.async { self.syncAppearance(config: config) }
+        // Read the latest config when this runs, not a stale captured theme.
+        DispatchQueue.main.async { self.syncAppearance(config: self.ghostty.config) }
 
         // Decide whether to hide/unhide app from dock and app switcher
         switch config.macosHidden {
@@ -1041,7 +1016,9 @@ class AppDelegate: NSObject,
 
     /// Sync the appearance of our app with the theme specified in the config.
     private func syncAppearance(config: Ghostty.Config) {
-        NSApplication.shared.appearance = .init(ghosttyConfig: config)
+        MainActor.assumeIsolated {
+            applyOhMyGhosttyWindowTheme(using: config)
+        }
     }
 
     private func updateAppIcon(from config: Ghostty.Config) {

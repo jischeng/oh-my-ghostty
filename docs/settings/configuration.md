@@ -72,6 +72,17 @@ further attempts. Patches exceeding 200 KB must be split rather than silently tr
 Use a current CLI version; Pi extensions and tools are disabled, so extension-only
 model providers are unavailable in this feature.
 
+## Appearance synchronization
+
+Application and window appearance share one policy: an explicit light/dark/system
+OMG override wins; without an override, the Ghostty-configured appearance applies.
+Appearance writes are skipped when the appearance name is unchanged. Config-change
+callbacks defer appearance application to the main queue and read the latest config,
+not a previously captured theme. Duplicate effective light/dark notifications are
+filtered before reporting to libghostty, including synchronous reentrant callbacks.
+This prevents appearance changes and conditional-theme config reloads from feeding
+back into each other and saturating the main thread when opening Settings.
+
 ## Ownership And Precedence
 
 | Layer | Owns | Priority |

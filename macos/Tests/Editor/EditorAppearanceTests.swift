@@ -218,4 +218,54 @@ struct EditorAppearanceTests {
             window.close()
         }
     }
+
+    @Test func editorScrollingMaintainsVisibleContent() async throws {
+        OhMyGhosttySettings.shared.editorWordWrap = true
+        defer { OhMyGhosttySettings.shared.editorWordWrap = false }
+        let lines = (0..<400).map { i in
+            "  \"model_\(i)\": { \"name\": \"Model Number \(i) with some extra long description to test wrapping behaviour in the editor view\", \"id\": \"model-\(i)\" },"
+        }
+        let text = "{\n" + lines.joined(separator: "\n") + "\n}"
+        let host = NSHostingView(rootView: CodeEditorView(
+            text: .constant(text),
+            fileURL: URL(fileURLWithPath: "/models.json"),
+            isEditable: true,
+            isActive: true,
+            terminalTheme: .oneDark
+        ))
+        host.sizingOptions = []
+        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 600, height: 500), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.contentView = nil; window.close() }
+
+        func find(_ view: NSView) -> TextView? { (view as? TextView) ?? view.subviews.lazy.compactMap(find).first }
+        try await Task.sleep(for: .milliseconds(150))
+        let editor = try #require(find(host))
+        let clip = try #require(editor.enclosingScrollView?.contentView)
+
+        for y in stride(from: CGFloat(0), through: CGFloat(4000), by: CGFloat(150)) {
+            clip.scroll(to: .init(x: 0, y: y))
+            editor.enclosingScrollView?.reflectScrolledClipView(clip)
+            try await Task.sleep(for: .milliseconds(20))
+            let visible = editor.subviews.filter { editor.visibleRect.intersects($0.frame) }
+            #expect(!visible.isEmpty, "Editor must show content while scrolling down at y=\(y)")
+        }
+
+        #expect(editor.frame.height >= editor.layoutManager.estimatedHeight())
+
+        for y in stride(from: CGFloat(4000), through: CGFloat(0), by: CGFloat(-150)) {
+            clip.scroll(to: .init(x: 0, y: y))
+            editor.enclosingScrollView?.reflectScrolledClipView(clip)
+            try await Task.sleep(for: .milliseconds(20))
+            let visible = editor.subviews.filter { editor.visibleRect.intersects($0.frame) }
+            #expect(!visible.isEmpty, "Editor must show content while scrolling back up at y=\(y)")
+        }
+
+        try await Task.sleep(for: .milliseconds(50))
+        let visibleFragments = editor.subviews.filter { editor.visibleRect.intersects($0.frame) }
+        #expect(!visibleFragments.isEmpty, "Editor content area must not become empty after scrolling")
+    }
 }
+

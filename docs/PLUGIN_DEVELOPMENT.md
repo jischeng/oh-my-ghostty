@@ -345,6 +345,17 @@ record. Unregister removes the local record/cache and suppresses automatic
 re-registration until explicitly registered again; it does not remove remote Hooks.
 
 Settings → Plugins → Agent Integration selects **This Mac** or a registered host.
+Each Agent separates OMG status-extension actions from CLI version/update controls.
+Installed extensions always expose a reinstall action, even when CLI updates require
+an external installer. Extension changes show an Agent restart / Pi `/reload` notice.
+Automatic checks record the successfully inspected OMG app version/build and Hook
+revision per host. An app upgrade bypasses the normal check interval for extensions;
+when the regular check is not due, this performs no CLI discovery/update and does not
+advance the CLI deadline. Remote checks still require a registered connected host
+and enabled automatic checks. Updates respect each host's automatic-Hook preference
+(default off), affect only existing integrations, and never reinstall removed ones.
+Failed inspections leave the revision pending for retry. Manual checks also record
+the inspected revision; disabling automatic checks suppresses upgrade checks too.
 Switching remote hosts only reads persisted inventory; it never starts SSH or waits
 for version discovery. The capture time and connection state remain visible.
 Manual Check Now is the explicit remote refresh path. Legacy alias-only update

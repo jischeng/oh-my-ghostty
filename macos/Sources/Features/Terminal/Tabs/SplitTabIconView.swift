@@ -98,9 +98,12 @@ struct SplitTabIconView: View {
         }
         .frame(width: TabIconMetrics.composition, height: TabIconMetrics.composition)
         .frame(width: TabIconMetrics.footprint, height: TabIconMetrics.footprint)
-        .overlay {
+        .background {
             if let activity = TabActivityRingStyle.combinedWork(values.compactMap(\.activity)) {
-                TabActivityRing(activity: activity)
+                let sectors = slots.filter { slot in
+                    slot.views.contains { byID[$0.id]?.activity?.state == .working }
+                }.flatMap { TabActivityRingStyle.sectors(for: $0.rect) }
+                TabActivityRing(activity: activity, sectors: sectors)
                     .frame(width: TabIconMetrics.ring, height: TabIconMetrics.ring)
             }
         }
@@ -155,10 +158,7 @@ struct PaneLogoMark: View {
                 logo
                     .padding(0.5)
                     .frame(width: size, height: size)
-                if showsActivity, let activity = pane.activity, activity.state != .idle {
-                    TabActivityDot(activity: activity)
-                        .offset(x: (size - 3) / 2, y: (size - 3) / 2)
-                }
+                    .modifier(AgentLogoStatus(activity: showsActivity ? pane.activity : nil))
             }
         .frame(width: size, height: size)
     }

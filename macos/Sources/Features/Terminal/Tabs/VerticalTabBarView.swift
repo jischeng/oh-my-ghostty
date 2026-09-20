@@ -1866,12 +1866,13 @@ private struct AgentTabIconView: View {
 
     var body: some View {
         ZStack {
-            if agent != nil, let activity, activity.state != .idle {
+            if agent != nil, let activity, activity.state == .working {
                 TabActivityRing(activity: activity)
                     .frame(width: TabIconMetrics.ring, height: TabIconMetrics.ring)
             }
             GhosttyTabIconView(icon: icon, color: color,
                               size: TabIconMetrics.singleLogo(settings.tabIconSize))
+                .modifier(AgentLogoStatus(activity: agent != nil ? activity : nil))
         }
         .frame(
             width: TabIconMetrics.footprint,

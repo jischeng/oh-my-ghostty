@@ -1,11 +1,10 @@
 import SwiftUI
 
-/// Both presentations share the same outer footprint. The compact square fits
-/// inside the ring's inner edge even at its corners (including status dots).
+/// Logos approach the ring; the working arc is drawn behind them.
 enum TabIconMetrics {
     static let footprint: CGFloat = 30
     static let ring: CGFloat = 30
-    static let composition: CGFloat = 19
+    static let composition: CGFloat = 22
     static let pane: CGFloat = composition / 2
     static func singleLogo(_ preferred: CGFloat) -> CGFloat { min(18, max(17, preferred)) }
 }
@@ -29,6 +28,15 @@ enum TabActivityRingStyle {
         }
     }
 
+    /// Clockwise fractions starting at twelve o'clock, for masking a single rotating arc.
+    static func sectors(for rect: CGRect) -> [ClosedRange<Double>] {
+        if rect.width == 1 && rect.height == 1 { return [0...1] }
+        if rect.width == 1 { return rect.minY == 0 ? [0...0.25, 0.75...1] : [0.25...0.75] }
+        if rect.height == 1 { return rect.minX == 0 ? [0.5...1] : [0...0.5] }
+        let start: Double = rect.minX == 0 ? (rect.minY == 0 ? 0.75 : 0.5) : (rect.minY == 0 ? 0 : 0.25)
+        return [start...(start + 0.25)]
+    }
+
     /// A tab spinner reports work, never an average progress across unrelated jobs.
     /// Includes hidden panes; foreground work wins over background-only work.
     static func combinedWork(_ activities: [TabActivity]) -> TabActivity? {
@@ -40,37 +48,62 @@ enum TabActivityRingStyle {
     }
 }
 
-/// The release spinner: one quarter arc, continuously rotating at a 0.9s period.
-/// Single-pane determinate progress and terminal states retain their original semantics.
+/// One continuous working arc, masked by pane ownership; no segmented tracks.
 struct TabActivityRing: View {
     let activity: TabActivity
+    var sectors: [ClosedRange<Double>] = [0...1]
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var spinning: Bool {
-        activity.state == .working && activity.progress == nil && !reduceMotion
+        activity.state == .working && !reduceMotion
     }
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !spinning)) { timeline in
             let phase = spinning ? timeline.date.timeIntervalSinceReferenceDate
                 .truncatingRemainder(dividingBy: 0.9) / 0.9 : 0
-            Circle().trim(from: 0, to: TabActivityRingStyle.progress(activity))
-                .stroke(TabActivityRingStyle.color(activity), style: .init(lineWidth: 1.5, lineCap: .round))
-                .rotationEffect(.degrees(phase * 360 - 90))
+            if activity.state == .working {
+                Circle().trim(from: 0, to: reduceMotion ? 1 : 0.25)
+                    .stroke(Color.blue, style: .init(lineWidth: 1.5, lineCap: .round))
+                    .rotationEffect(.degrees(phase * 360 - 90))
+                    .mask {
+                        GeometryReader { geometry in
+                            Path { path in
+                                let center = CGPoint(x: geometry.size.width / 2, y: geometry.size.height / 2)
+                                for sector in sectors {
+                                    path.move(to: center)
+                                    path.addArc(center: center, radius: max(geometry.size.width, geometry.size.height),
+                                                startAngle: .degrees(sector.lowerBound * 360 - 90),
+                                                endAngle: .degrees(sector.upperBound * 360 - 90), clockwise: false)
+                                    path.closeSubpath()
+                                }
+                            }.fill(.white).blur(radius: 0.7)
+                        }
+                    }
+            }
         }
         .accessibilityHidden(true)
     }
 }
 
-struct TabActivityDot: View {
-    let activity: TabActivity
+/// Alpha-masked tint preserves transparent silhouettes and underlying image detail.
+/// Shared by the single logo, compact panes and hover preview.
+struct AgentLogoStatus: ViewModifier {
+    let activity: TabActivity?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    var body: some View {
-        if activity.state != .idle {
-            Circle().fill(TabActivityRingStyle.color(activity))
-                .overlay(Circle().strokeBorder(Color(nsColor: .windowBackgroundColor), lineWidth: 0.5))
-                .frame(width: 3, height: 3)
-                .accessibilityHidden(true)
+    func body(content: Content) -> some View {
+        let working = activity?.state == .working
+        TimelineView(.animation(minimumInterval: 1.0 / 20, paused: !working || reduceMotion)) { timeline in
+            content.overlay {
+                if let activity, activity.state != .idle {
+                    let pulse = working && !reduceMotion
+                        ? 0.08 * sin(timeline.date.timeIntervalSinceReferenceDate * .pi) : 0
+                    let color: Color = working ? .blue : TabActivityRingStyle.color(activity)
+                    color.opacity((activity.state == .done ? 0.50 : 0.78) + pulse)
+                        .mask(content)
+                }
+            }
         }
     }
 }

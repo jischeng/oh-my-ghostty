@@ -45,9 +45,10 @@ struct SplitTabPresentationTests {
         }
     }
 
-    @Test func compositionCornersAndDotsStayInsideRing() {
+    @Test func enlargedCompositionFitsFootprintWithArcBehind() {
         let innerRadius = TabIconMetrics.ring / 2 - 0.75
-        #expect(TabIconMetrics.composition / 2 * sqrt(2) < innerRadius)
+        #expect(TabIconMetrics.composition == 22)
+        #expect(TabIconMetrics.composition < TabIconMetrics.footprint)
         for preferred in [CGFloat(12), 16, 20] {
             #expect(TabIconMetrics.singleLogo(preferred) / 2 * sqrt(2) < innerRadius)
         }
@@ -69,6 +70,36 @@ struct SplitTabPresentationTests {
         #expect(TabSplitPreviewLayout.dividers(tree: SplitTree(view: a), size: CGSize(width: 200, height: 120)).isEmpty)
     }
 
+    @Test func workingSectorMatchesPaneOwnership() {
+        #expect(TabActivityRingStyle.sectors(for: CGRect(x: 0.5, y: 0.5, width: 0.5, height: 0.5)) == [0.25...0.5])
+        #expect(TabActivityRingStyle.sectors(for: CGRect(x: 0, y: 0, width: 1, height: 0.5)) == [0...0.25, 0.75...1])
+        #expect(TabActivityRingStyle.sectors(for: CGRect(x: 0, y: 0, width: 0.5, height: 1)) == [0.5...1])
+        #expect(TabActivityRingStyle.sectors(for: CGRect(x: 0, y: 0, width: 1, height: 1)) == [0...1])
+    }
+
+    @Test func renderAgentTintSamples() throws {
+        let agents: [SupportedAgent] = [.codex, .pi, .antigravity]
+        let states: [TabActivityState] = [.idle, .working, .needsAttention, .error, .done]
+        let content = VStack(spacing: 16) {
+            ForEach(agents, id: \.rawValue) { agent in
+                HStack(spacing: 18) {
+                    ForEach(states.indices, id: \.self) { index in
+                        let sample = SplitTabPane(id: UUID(), icon: .asset(agent.assetName),
+                                                  activity: pane(states[index]).activity,
+                                                  title: agent.displayName, focused: false)
+                        PaneLogoMark(pane: sample, size: 22)
+                    }
+                }
+            }
+        }.padding(20).background(Color(nsColor: .windowBackgroundColor))
+        let renderer = ImageRenderer(content: content)
+        renderer.scale = 3
+        let image = try #require(renderer.nsImage)
+        let bitmap = try #require(image.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:)))
+        let png = try #require(bitmap.representation(using: .png, properties: [:]))
+        try png.write(to: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("omg-agent-tint-preview.png"))
+    }
+
     @Test func renderActualSizeComposition() throws {
         let positions: [[CGPoint]] = [
             [CGPoint(x: 0.25, y: 0.5), CGPoint(x: 0.75, y: 0.25), CGPoint(x: 0.75, y: 0.75)],
@@ -79,15 +110,15 @@ struct SplitTabPresentationTests {
             ForEach(positions.indices, id: \.self) { layout in
                 ZStack {
                     ForEach(positions[layout].indices, id: \.self) { index in
-                        PaneLogoMark(pane: pane(index == 0 ? .working : .idle), size: TabIconMetrics.pane)
+                        PaneLogoMark(pane: pane(index == positions[layout].count - 1 ? .working : .idle), size: TabIconMetrics.pane)
                             .position(x: positions[layout][index].x * TabIconMetrics.composition,
                                       y: positions[layout][index].y * TabIconMetrics.composition)
                     }
                 }
                 .frame(width: TabIconMetrics.composition, height: TabIconMetrics.composition)
                 .frame(width: TabIconMetrics.footprint, height: TabIconMetrics.footprint)
-                .overlay {
-                    TabActivityRing(activity: pane(.working).activity!)
+                .background {
+                    TabActivityRing(activity: pane(.working).activity!, sectors: [0.25...0.5])
                         .frame(width: TabIconMetrics.ring, height: TabIconMetrics.ring)
                 }
             }

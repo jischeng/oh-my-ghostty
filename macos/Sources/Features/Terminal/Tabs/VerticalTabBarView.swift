@@ -1864,35 +1864,14 @@ private struct AgentTabIconView: View {
         activity.flatMap { SupportedAgent(rawValue: $0.source) }
     }
 
-    private var isSpinning: Bool {
-        activity?.state == .working && activity?.progress == nil
-    }
-
     var body: some View {
-        TimelineView(.animation(
-            minimumInterval: 1.0 / 30.0,
-            paused: !isSpinning
-        )) { timeline in
-            ZStack {
-                if agent != nil, let activity, activity.state != .idle {
-                    Circle()
-                        .trim(from: 0, to: ringProgress(activity))
-                        .stroke(
-                            ringColor(activity),
-                            style: .init(lineWidth: 1.5, lineCap: .round)
-                        )
-                        .rotationEffect(.degrees(
-                            isSpinning ? rotation(at: timeline.date) : -90
-                        ))
-                        .frame(
-                            width: settings.tabIconSize + 3,
-                            height: settings.tabIconSize + 3
-                        )
-                }
-
-                GhosttyTabIconView(icon: icon, color: color)
-                    .scaleEffect(agent?.definition.iconScale ?? 1)
+        ZStack {
+            if agent != nil, let activity, activity.state != .idle {
+                TabActivityRing(activity: activity)
+                    .frame(width: settings.tabIconSize + 3, height: settings.tabIconSize + 3)
             }
+            GhosttyTabIconView(icon: icon, color: color)
+                .scaleEffect(agent?.definition.iconScale ?? 1)
         }
         .frame(
             width: settings.tabIconSize,
@@ -1903,31 +1882,6 @@ private struct AgentTabIconView: View {
         } ?? "Terminal")
     }
 
-    private func rotation(at date: Date) -> Double {
-        let period = 0.9
-        let phase = date.timeIntervalSinceReferenceDate
-            .truncatingRemainder(dividingBy: period) / period
-        return phase * 360 - 90
-    }
-
-    private func ringProgress(_ activity: TabActivity) -> Double {
-        switch activity.state {
-        case .idle: 0
-        case .working: activity.progress.map { max(0.05, $0) } ?? 0.25
-        case .done, .needsAttention, .error: 1
-        }
-    }
-
-    private func ringColor(_ activity: TabActivity) -> Color {
-        switch activity.state {
-        case .idle: .clear
-        case .working:
-            activity.phase == .background ? .purple : .accentColor
-        case .done: .green
-        case .needsAttention: .orange
-        case .error: .red
-        }
-    }
 }
 
 private struct GhosttyTabIconView: View {

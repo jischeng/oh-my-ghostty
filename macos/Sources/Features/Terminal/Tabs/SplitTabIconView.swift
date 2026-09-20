@@ -50,21 +50,6 @@ struct SplitTabPane: Identifiable {
     let title: String
     let focused: Bool
 
-    var priority: Int {
-        if focused { return 4 }
-        switch activity?.state {
-        case .error, .needsAttention: return 3
-        case .working: return 2
-        default: return 0
-        }
-    }
-
-    static func front(in panes: [Self]) -> Self? {
-        panes.enumerated().max {
-            $0.element.priority == $1.element.priority
-                ? $0.offset > $1.offset : $0.element.priority < $1.element.priority
-        }?.element
-    }
 }
 
 struct SplitTabIconView: View {
@@ -102,8 +87,18 @@ struct SplitTabIconView: View {
         let slots = SplitTabIconLayout.layout(tree: controller.surfaceTree)
         ZStack {
             ForEach(slots) { slot in
-                SplitTabLogoStack(panes: slot.views.compactMap { byID[$0.id] })
-                    .position(x: slot.rect.midX * 24, y: slot.rect.midY * 24)
+                if let id = controller.tabPaneFocusHistory.representative(
+                    in: slot.views.map(\.id), focused: controller.focusedSurface?.id
+                ), let pane = byID[id] {
+                    PaneLogoMark(pane: pane, size: 12, showsActivity: false)
+                        .position(x: slot.rect.midX * 24, y: slot.rect.midY * 24)
+                    if let activity = pane.activity, activity.state != .idle {
+                        TabActivityRing(activity: activity,
+                                        interval: TabActivityRingStyle.interval(for: slot.rect), segmented: true)
+                            .frame(width: 29, height: 29)
+                            .frame(width: 24, height: 24)
+                    }
+                }
             }
         }
         .frame(width: 24, height: 24)
@@ -155,43 +150,13 @@ struct SplitTabIconView: View {
     }
 }
 
-/// Logo size never changes on folding. Two quiet exposed edges communicate depth.
-struct SplitTabLogoStack: View {
-    let panes: [SplitTabPane]
-
-    var body: some View {
-        if let front = SplitTabPane.front(in: panes) {
-            let hidden = panes.filter { $0.id != front.id }
-            ZStack {
-                ForEach(0..<min(hidden.count, 2), id: \.self) { index in
-                    RoundedRectangle(cornerRadius: 2.5)
-                        .trim(from: 0.25, to: 0.75)
-                        .stroke(Color.primary.opacity(index == 0 ? 0.28 : 0.14), lineWidth: 0.65)
-                        .frame(width: 10, height: 10)
-                        .offset(x: CGFloat(index + 1), y: CGFloat(index + 1))
-                }
-                PaneLogoMark(pane: front, size: 12)
-                if let background = SplitTabPane.front(in: hidden), background.priority > 0 {
-                    Circle()
-                        .fill(background.activity?.state == .working ? Color.accentColor : .orange)
-                        .frame(width: 2.5, height: 2.5)
-                        .offset(x: 5, y: 5)
-                }
-            }
-            .frame(width: 12, height: 12)
-        }
-    }
-}
-
 /// Shared by the compact composition and the larger hover inspector.
 struct PaneLogoMark: View {
     let pane: SplitTabPane
     let size: CGFloat
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var showsActivity = true
 
     var body: some View {
-        let working = pane.activity?.state == .working
-        TimelineView(.animation(minimumInterval: 1 / 30, paused: !working || reduceMotion)) { timeline in
             ZStack {
                 if pane.focused {
                     Circle().fill(Color.accentColor.opacity(0.20))
@@ -201,20 +166,11 @@ struct PaneLogoMark: View {
                 logo
                     .padding(0.5)
                     .frame(width: size, height: size)
-                if working {
-                    Circle().trim(from: 0, to: 0.23)
-                        .stroke(pane.activity?.phase == .background ? Color.purple : .accentColor,
-                                style: StrokeStyle(lineWidth: 0.8, lineCap: .round))
-                        .frame(width: size, height: size)
-                        .rotationEffect(.degrees(reduceMotion ? -90 :
-                            timeline.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.2) * 300))
-                } else if pane.activity?.state == .needsAttention || pane.activity?.state == .error {
-                    Circle().fill(pane.activity?.state == .error ? Color.red : .orange)
-                        .frame(width: 3, height: 3)
-                        .offset(x: size / 2 - 1, y: size / 2 - 1)
+                if showsActivity, let activity = pane.activity, activity.state != .idle {
+                    TabActivityRing(activity: activity)
+                        .frame(width: size + 3, height: size + 3)
                 }
             }
-        }
         .frame(width: size, height: size)
     }
 

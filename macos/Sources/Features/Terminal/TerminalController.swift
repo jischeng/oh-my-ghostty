@@ -309,6 +309,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
     }
     @Published private(set) var agentActivities: [UUID: TabActivity] = [:]
+    @Published private(set) var tabPaneFocusHistory = TabPaneFocusHistory()
     @Published private(set) var agentResumeDescriptors: [UUID: AgentResumeDescriptor] = [:]
     let quickInputModel = AgentQuickInputModel()
     private var quickInputEventMonitor: Any?
@@ -4045,6 +4046,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     override func focusedSurfaceDidChange(to: Ghostty.SurfaceView?) {
         super.focusedSurfaceDidChange(to: to)
+        tabPaneFocusHistory.record(to?.id, liveIDs: Set(surfaceTree.map(\.id)))
 
         // We always cancel our event listener
         surfaceAppearanceCancellables.removeAll()

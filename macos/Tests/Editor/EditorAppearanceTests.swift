@@ -187,9 +187,14 @@ struct EditorAppearanceTests {
         try await Task.sleep(for: .milliseconds(100))
         let bitmap = try #require(host.view.bitmapImageRepForCachingDisplay(in: host.view.bounds))
         host.view.cacheDisplay(in: host.view.bounds, to: bitmap)
-        let pixel = try #require(bitmap.colorAt(x: bitmap.pixelsWide - 10, y: bitmap.pixelsHigh / 2)?.usingColorSpace(.deviceRGB))
-        #expect(abs(pixel.redComponent - color.redComponent) < 0.04)
-        #expect(abs(pixel.blueComponent - color.blueComponent) < 0.04)
+        // cacheDisplay can produce Display P3 pixels, while colorAt labels its
+        // components NSCalibratedRGB. Converting that mislabeled color to deviceRGB
+        // changes valid P3 values a second time. Compare in the bitmap's actual ICC space.
+        let pixel = try #require(bitmap.colorAt(x: bitmap.pixelsWide - 10, y: bitmap.pixelsHigh / 2))
+        let expected = try #require(color.usingColorSpace(bitmap.colorSpace))
+        #expect(abs(pixel.redComponent - expected.redComponent) < 0.04)
+        #expect(abs(pixel.greenComponent - expected.greenComponent) < 0.04)
+        #expect(abs(pixel.blueComponent - expected.blueComponent) < 0.04)
         let png = try #require(bitmap.representation(using: .png, properties: [:]))
         try png.write(to: URL(fileURLWithPath: "/tmp/omg-editor-theme.png"))
         coordinator.destroy()

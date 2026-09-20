@@ -1,5 +1,9 @@
 {
   "The staged patch is not UTF-8. Write the commit message manually.": { "en": "The staged patch is not UTF-8. Write the commit message manually.", "zh-Hans": "暂存补丁不是 UTF-8 编码，请手动填写提交消息。" },
+  "Custom commit prompt": { "en": "Custom commit prompt", "zh-Hans": "自定义提交 Prompt" },
+  "Specify language, format and commit style. Applied to all models, including fallbacks. Leave empty to follow recent commits.": { "en": "Specify language, format and commit style. Applied to all models, including fallbacks. Leave empty to follow recent commits.", "zh-Hans": "指定语言、格式和提交风格。对所有模型（包括备用模型）生效；留空则参考近期提交。" },
+  "Supports current Claude Code, Pi, Codex and OpenCode CLIs. Codex/OpenCode reuse login but ignore user config for safety; custom providers and plugin-only models may be unavailable. OpenCode may retain local session history.": { "en": "Supports current Claude Code, Pi, Codex and OpenCode CLIs. Codex/OpenCode reuse login but ignore user config for safety; custom providers and plugin-only models may be unavailable. OpenCode may retain local session history.", "zh-Hans": "支持较新版本的 Claude Code、Pi、Codex 和 OpenCode。Codex/OpenCode 复用登录但出于安全考虑忽略用户配置，因此自定义 Provider 和仅插件提供的模型可能不可用。OpenCode 可能保留本地会话记录。" },
+  "Enter Codex model IDs, one per line. Use IDs supported by your current CLI login.": { "en": "Enter Codex model IDs, one per line. Use IDs supported by your current CLI login.", "zh-Hans": "输入当前 CLI 登录支持的 Codex 模型 ID，每行一个。" },
   "Add": { "en": "Add", "zh-Hans": "添加" },
   "Reload": { "en": "Reload", "zh-Hans": "重新加载" },
   "AI Commit Messages": { "en": "AI Commit Messages", "zh-Hans": "AI 提交消息" },

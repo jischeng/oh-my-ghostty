@@ -10,6 +10,12 @@
    "minimum": 0,
    "maximum": 1440
   },
+  "git.commitAI.prompt": {
+   "category": "git",
+   "default": "",
+   "description": "User instructions for commit language, format and style. Applied to every route; empty follows recent subjects.",
+   "type": "string"
+  },
   "git.commitAI.routes": {
    "category": "git",
    "default": [],
@@ -20,7 +26,7 @@
     "required": ["id", "agent", "model"],
     "properties": {
      "id": { "type": "string", "format": "uuid" },
-     "agent": { "type": "string", "enum": ["claude", "pi"] },
+     "agent": { "type": "string", "enum": ["claude", "pi", "codex", "opencode"] },
      "model": { "type": "string", "minLength": 1, "maxLength": 256 }
     },
     "additionalProperties": false

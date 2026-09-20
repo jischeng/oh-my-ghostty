@@ -39,9 +39,15 @@ struct GitCommitAISettingsView: View {
                 }
             }
             Button(GitL10n.text("Add Agent Models…")) { showingAdd = true }
+            Text(GitL10n.text("Custom commit prompt"))
+            TextEditor(text: $settings.gitCommitAIPrompt)
+                .font(.system(.body, design: .monospaced)).frame(minHeight: 90, maxHeight: 150)
+                .accessibilityLabel(GitL10n.text("Custom commit prompt"))
+            Text(GitL10n.text("Specify language, format and commit style. Applied to all models, including fallbacks. Leave empty to follow recent commits."))
+                .font(.caption).foregroundStyle(.secondary)
             Text(GitL10n.text("Uses your local CLI login. Staged changes and recent commit subjects may be sent to every configured model service on fallback, including changes read over SSH. Nothing is committed automatically."))
                 .font(.caption).foregroundStyle(.secondary)
-            Text(GitL10n.text("Requires a current Claude Code or Pi CLI. Tools and extensions are disabled; extension-only Pi providers are not available."))
+            Text(GitL10n.text("Supports current Claude Code, Pi, Codex and OpenCode CLIs. Codex/OpenCode reuse login but ignore user config for safety; custom providers and plugin-only models may be unavailable. OpenCode may retain local session history."))
                 .font(.caption).foregroundStyle(.secondary)
         }
         .sheet(isPresented: $showingAdd) {
@@ -80,7 +86,7 @@ private struct GitCommitAIAddModels: View {
             Picker("Agent", selection: $agent) {
                 ForEach(GitCommitAgent.allCases) { Text($0.title).tag($0) }
             }
-            if agent == .pi {
+            if agent.canDiscoverModels {
                 HStack {
                     Text(GitL10n.text("Available models"))
                     Spacer()
@@ -96,8 +102,9 @@ private struct GitCommitAIAddModels: View {
             Text(GitL10n.text("Model IDs (one per line)"))
             TextEditor(text: $manualModels).font(.system(.body, design: .monospaced))
                 .frame(height: 90).border(Color.secondary.opacity(0.3))
-            Text(agent == .pi ? GitL10n.text("Use provider/model IDs. Select multiple models above or enter them here.")
-                 : GitL10n.text("Enter CLI model IDs or aliases, such as sonnet, opus or haiku. One line adds one priority entry."))
+            Text(agent.canDiscoverModels ? GitL10n.text("Use provider/model IDs. Select multiple models above or enter them here.")
+                 : agent == .claude ? GitL10n.text("Enter CLI model IDs or aliases, such as sonnet, opus or haiku. One line adds one priority entry.")
+                 : GitL10n.text("Enter Codex model IDs, one per line. Use IDs supported by your current CLI login."))
                 .font(.caption).foregroundStyle(.secondary)
             if let error { Text(error).font(.caption).foregroundStyle(.red) }
             HStack {
@@ -114,7 +121,7 @@ private struct GitCommitAIAddModels: View {
         }
         .task(id: reloadID) {
             let requestedAgent = agent
-            guard requestedAgent == .pi else { loading = false; return }
+            guard requestedAgent.canDiscoverModels else { loading = false; return }
             loading = true
             defer { loading = false }
             do {

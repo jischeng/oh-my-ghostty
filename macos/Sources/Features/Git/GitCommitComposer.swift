@@ -14,6 +14,8 @@ struct GitCommitComposer: View {
     @State private var generationID: UUID?
     @State private var draftRevision = 0
     @State private var notice: String?
+    @State private var noticeID = UUID()
+    @State private var noticeExpires = false
     @State private var confirmReplace = false
     @State private var previousDraft: String?
     @State private var generatedDraft: String?
@@ -22,6 +24,14 @@ struct GitCommitComposer: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
+            if let notice {
+                HStack(alignment: .top) {
+                    Text(notice).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    Spacer(minLength: 0)
+                    Button { self.notice = nil } label: { Image(systemName: "xmark") }
+                        .buttonStyle(.plain).help(GitL10n.text("Dismiss message"))
+                }
+            }
             GitCommitMessageEditor(text: $message, height: $editorHeight, focusChanged: { focused = $0 })
                 .frame(height: editorHeight)
                 .overlay(alignment: .topLeading) {
@@ -50,9 +60,6 @@ struct GitCommitComposer: View {
                     .controlSize(.small)
                     .disabled(generationID != nil || isBusy || !canCommit || stagedCount == 0 || message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
-            if let notice {
-                Text(notice).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-            }
             if let previousDraft, generatedDraft == message {
                 Button(GitL10n.text("Undo generated message")) {
                     message = previousDraft
@@ -68,6 +75,12 @@ struct GitCommitComposer: View {
         .onChange(of: message) { _ in draftRevision += 1 }
         .onChange(of: repository) { _ in cancelGeneration(); notice = nil }
         .onDisappear { cancelGeneration() }
+        .task(id: noticeID) {
+            guard noticeExpires else { return }
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            guard !Task.isCancelled else { return }
+            notice = nil
+        }
     }
 
     private func requestGeneration() {
@@ -89,12 +102,15 @@ struct GitCommitComposer: View {
         let routes = settings.gitCommitAIRoutes
         generationID = id
         notice = nil
+        noticeExpires = false
+        noticeID = UUID()
+        let customPrompt = settings.gitCommitAIPrompt
         generation = Task { @MainActor in
             defer {
                 if generationID == id { generationID = nil; generation = nil }
             }
             do {
-                let result = try await GitCommitAIService().generate(repository: repository, routes: routes)
+                let result = try await GitCommitAIService().generate(repository: repository, routes: routes, customPrompt: customPrompt)
                 guard !Task.isCancelled, generationID == id else { return }
                 guard draftRevision == revision else {
                     notice = GitL10n.text("Your draft changed during generation. It was not replaced; generate again.")
@@ -104,6 +120,8 @@ struct GitCommitComposer: View {
                 generatedDraft = result.message
                 message = result.message
                 notice = (result.attempt > 1 ? GitL10n.text("Generated using fallback: ") : GitL10n.text("Generated using: ")) + result.route.title
+                noticeExpires = true
+                noticeID = UUID()
             } catch {
                 guard !Task.isCancelled, generationID == id else { return }
                 if case GitExecutionError.outputLimitExceeded = error {

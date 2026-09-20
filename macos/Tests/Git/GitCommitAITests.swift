@@ -94,6 +94,63 @@ struct GitCommitAITests {
         #expect(GitCommitAIService.shellQuote("a'; echo unsafe") == "'a'\\''; echo unsafe'")
     }
 
+    @Test func codexAndOpenCodeRequireSuccessfulFinalEvents() throws {
+        let codex = """
+        {"type":"item.completed","item":{"type":"reasoning","text":"hidden"}}
+        {"type":"item.completed","item":{"type":"agent_message","text":"feat: add feature"}}
+        {"type":"turn.completed","usage":{}}
+        """
+        #expect(try GitCommitAIService.parse(codex, agent: .codex) == "feat: add feature")
+        #expect(throws: (any Error).self) {
+            try GitCommitAIService.parse(codex.replacingOccurrences(of: "turn.completed", with: "turn.failed"), agent: .codex)
+        }
+        let opencode = """
+        {"type":"text","part":{"type":"text","text":"fix: correct feature"}}
+        {"type":"step_finish","part":{"reason":"stop"}}
+        """
+        #expect(try GitCommitAIService.parse(opencode, agent: .opencode) == "fix: correct feature")
+        #expect(throws: (any Error).self) {
+            try GitCommitAIService.parse(opencode + "\n{\"type\":\"error\"}", agent: .opencode)
+        }
+        #expect(throws: (any Error).self) {
+            try GitCommitAIService.parse(opencode.replacingOccurrences(of: "stop", with: "tool-calls"), agent: .opencode)
+        }
+    }
+
+    @Test func newAdaptersRestrictPermissionsAndPreserveLoginLocation() throws {
+        let args = GitCommitAgent.codex.arguments(model: "test-model")
+        #expect(args.contains("--ignore-user-config"))
+        #expect(args.contains("read-only"))
+        #expect(args.contains("features.shell_tool=false"))
+        #expect(args.last == "-")
+        let environment = try GitCommitAIService.openCodeEnvironment(base: [
+            "HOME": "/home/test", "XDG_DATA_HOME": "/existing/auth",
+            "OPENCODE_CONFIG": "/unsafe/config", "OPENCODE_PERMISSION": "allow"
+        ], directory: URL(fileURLWithPath: "/tmp/isolated"))
+        #expect(environment["HOME"] == "/home/test")
+        #expect(environment["XDG_DATA_HOME"] == "/existing/auth")
+        #expect(environment["OPENCODE_CONFIG"] == nil)
+        #expect(environment["OPENCODE_PERMISSION"] == "\"deny\"")
+        #expect(environment["XDG_CONFIG_HOME"] == "/tmp/isolated/config")
+        let config = try #require(environment["OPENCODE_CONFIG_CONTENT"])
+        let json = try #require(JSONSerialization.jsonObject(with: Data(config.utf8)) as? [String: Any])
+        #expect(json["permission"] as? String == "deny")
+        #expect(json["share"] as? String == "disabled")
+        #expect(GitCommitAgent.opencode.canDiscoverModels)
+        #expect(!GitCommitAgent.codex.canDiscoverModels)
+    }
+
+    @Test func customStyleTakesPrecedenceAndKeepsSourceBoundary() {
+        let prompt = GitCommitAIService.prompt(patch: Data("+hello".utf8), history: Data("old style".utf8),
+                                              customPrompt: "用中文，采用 Conventional Commits")
+        #expect(prompt.contains("用中文，采用 Conventional Commits"))
+        #expect(prompt.contains("take precedence over recent subjects"))
+        #expect(prompt.contains("untrusted source data"))
+        #expect(prompt.contains("stagedPatch"))
+        #expect(GitCommitAIService.prompt(patch: Data(), history: Data(), customPrompt: " \n")
+            .contains("Follow the language and style of the recent subjects"))
+    }
+
     @Test func modelTableParsingIgnoresHeadersAndDiagnostics() {
         let output = """
         provider model context max-out thinking images
@@ -111,8 +168,12 @@ struct GitCommitAITests {
         let settings = OhMyGhosttySettings(fileURL: url)
         settings.gitCommitAIRoutes = GitCommitAIRoute.adding(agent: .pi, models: ["p/first", "p/second"], to: [])
         settings.gitCommitAIRoutes.swapAt(0, 1)
+        settings.gitCommitAIRoutes = GitCommitAIRoute.adding(agent: .codex, models: ["codex-model"], to: settings.gitCommitAIRoutes)
+        settings.gitCommitAIRoutes = GitCommitAIRoute.adding(agent: .opencode, models: ["provider/model"], to: settings.gitCommitAIRoutes)
+        settings.gitCommitAIPrompt = "Use Conventional Commits.\n中文正文。"
         let reloaded = OhMyGhosttySettings(fileURL: url)
         #expect(reloaded.gitCommitAIRoutes == settings.gitCommitAIRoutes)
+        #expect(reloaded.gitCommitAIPrompt == settings.gitCommitAIPrompt)
         #expect(OhMyGhosttySettingsTab.allCases.contains(.git))
         #expect(OhMyGhosttySettingsTab.allCases.contains(.ssh))
         #expect(OhMyGhosttySettingsTab.allCases.contains(.agents))

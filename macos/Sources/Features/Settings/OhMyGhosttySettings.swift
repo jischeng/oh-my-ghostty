@@ -685,6 +685,9 @@ final class OhMyGhosttySettings: ObservableObject {
             }
         }
     }
+    @Published var gitCommitAIPrompt = "" {
+        didSet { persist("git.commitAI.prompt", gitCommitAIPrompt) }
+    }
     @Published var gitCommitAIRoutes: [GitCommitAIRoute] = [] {
         didSet { persist("git.commitAI.routes", GitCommitAIRoute.encode(gitCommitAIRoutes)) }
     }
@@ -967,6 +970,7 @@ final class OhMyGhosttySettings: ObservableObject {
             editorFontSize = numberValue("editor.fontSize", fallback: 13, range: 8...36)
             editorTabWidth = numberValue("editor.tabWidth", fallback: 4, range: 1...12).rounded()
             editorWordWrap = boolValue("editor.wordWrap", fallback: false)
+            gitCommitAIPrompt = chosen["git.commitAI.prompt"] as? String ?? ""
             gitCommitAIRoutes = GitCommitAIRoute.decode(chosen["git.commitAI.routes"])
             gitHistoryScope = optionalStringValue("git.historyScope")
             gitAutoFetchInterval = Int(numberValue("git.autoFetchInterval", fallback: 5, range: 0...1440).rounded())

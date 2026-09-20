@@ -1,10 +1,18 @@
 import Foundation
 
-/// Only adapters with an explicit tool-free, non-interactive invocation belong here.
+/// Non-interactive adapters with explicit restrictions; never run in the repository.
 enum GitCommitAgent: String, Codable, CaseIterable, Identifiable, Sendable {
-    case claude, pi
+    case claude, pi, codex, opencode
     var id: String { rawValue }
-    var title: String { self == .claude ? "Claude Code" : "Pi" }
+    var title: String {
+        switch self {
+        case .claude: "Claude Code"
+        case .pi: "Pi"
+        case .codex: "Codex"
+        case .opencode: "OpenCode"
+        }
+    }
+    var canDiscoverModels: Bool { self == .pi || self == .opencode }
 
     var isolationArguments: [String] {
         switch self {
@@ -14,13 +22,25 @@ enum GitCommitAgent: String, Codable, CaseIterable, Identifiable, Sendable {
         case .pi:
             ["--no-tools", "--no-extensions", "--no-skills", "--no-prompt-templates",
              "--no-themes", "--no-context-files", "--no-session", "--no-approve"]
+        case .codex:
+            ["exec", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check",
+             "--sandbox", "read-only", "-c", "approval_policy=\"never\"",
+             "-c", "features.shell_tool=false", "-c", "features.unified_exec=false",
+             "-c", "features.apply_patch_freeform=false", "-c", "features.multi_agent=false",
+             "-c", "features.apps=false", "-c", "features.skills=false",
+             "-c", "web_search=\"disabled\"", "-c", "project_doc_max_bytes=0"]
+        case .opencode:
+            ["run", "--agent", "omg-commit", "--format", "json", "--title", "OMG commit message"]
         }
     }
 
     func arguments(model: String) -> [String] {
-        isolationArguments + (self == .claude
-            ? ["--print", "--output-format", "json", "--model", model]
-            : ["--print", "--mode", "json", "--model", model])
+        switch self {
+        case .claude: isolationArguments + ["--print", "--output-format", "json", "--model", model]
+        case .pi: isolationArguments + ["--print", "--mode", "json", "--model", model]
+        case .codex: isolationArguments + ["--json", "--color", "never", "--model", model, "-"]
+        case .opencode: isolationArguments + ["--model", model]
+        }
     }
 }
 

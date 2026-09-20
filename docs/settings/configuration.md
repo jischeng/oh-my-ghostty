@@ -56,12 +56,17 @@ These are separate Settings sidebar entries. SSH manages registered hosts; Agent
 Integration manages CLI/status integration installation and notifications; Plugins
 continues to manage plugin packages.
 
-Under **Git > AI Commit Messages**, add a local Claude Code or Pi Agent and one
-or more model IDs at a time. Pi can load its available model list for multi-select;
+Under **Git > AI Commit Messages**, add a local Claude Code, Pi, Codex or OpenCode Agent and one
+or more model IDs at a time. Pi and OpenCode can load their available model lists for multi-select;
 manual IDs are also supported. Drag entries (or use their arrow buttons) to change
 priority. The first entry is the main model and every entry below it is a fallback.
 The list is saved as `git.commitAI.routes`, an array of `{id, agent, model}` objects
 with UUID identities. No API keys are stored in OMG settings.
+The **Custom commit prompt** field (`git.commitAI.prompt`) controls language, format
+and style for all models and fallbacks. Leave it blank to follow recent commits.
+For example: “Use Conventional Commits, an English subject under 72 characters,
+and Chinese body bullets.” Success/model notices appear above the commit editor
+and disappear after five seconds; error notices can be dismissed manually.
 
 In Git's Changes tab, **Generate** fills the commit message without committing.
 Only staged changes and recent commit subjects are sent. The CLI runs locally even
@@ -70,7 +75,10 @@ to any configured model service during fallback. Existing drafts require replace
 confirmation, and a draft edited while generating is never overwritten. Cancel stops
 further attempts. Patches exceeding 200 KB must be split rather than silently truncated.
 Use a current CLI version; Pi extensions and tools are disabled, so extension-only
-model providers are unavailable in this feature.
+model providers are unavailable in this feature. Codex runs ephemeral/read-only
+and ignores user config; OpenCode uses an isolated deny-all configuration while
+retaining its existing login data. Custom providers relying on ignored config may
+be unavailable. OpenCode may save a local session; auto-sharing is disabled.
 
 ## Appearance synchronization
 
@@ -128,6 +136,7 @@ Window UI state is intentionally separate: `InspectorPresentationStore` owns las
 | `editor.tabWidth` | number | `4` | `1...12` | Settings > Editor | Runtime |
 | `editor.wordWrap` | boolean | `false` | `true`, `false` | Settings > Editor | Runtime |
 | `git.autoFetchInterval` | integer | `5` | `0...1440` minutes, `0` disables | Settings > Git | Runtime |
+| `git.commitAI.prompt` | string | `""` | User-defined language, format and style | Settings > Git | Next generation |
 | `git.commitAI.routes` | array | `[]` | Ordered `{id, agent, model}` entries | Settings > Git | Next generation |
 | `notifications.taskComplete` | boolean | `true` | `true`, `false` | Settings > Agent Integration | Runtime policy |
 | `notifications.attention` | boolean | `true` | `true`, `false` | Settings > Agent Integration | Runtime policy |

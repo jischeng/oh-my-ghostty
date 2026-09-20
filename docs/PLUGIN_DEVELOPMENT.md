@@ -40,22 +40,36 @@ Agent Integration. Plugin installation remains under Plugins.
 
 The built-in Git changes composer has a single Generate button before Commit.
 `git.commitAI.routes` stores an ordered array of `{id, agent, model}` entries;
-`id` is a UUID, `agent` is currently `claude` or `pi`, and `model` is a CLI model
-ID (Pi accepts `provider/model`). Users can batch-add several models for one
+`id` is a UUID, `agent` is `claude`, `pi`, `codex` or `opencode`, and `model` is a CLI model
+ID (Pi and OpenCode accept `provider/model`). Users can batch-add several models for one
 Agent, remove entries, and drag or use arrow buttons to reorder them. Duplicates
 are ignored. The first successful route wins; each failed route is attempted once
 with a 90-second deadline. Cancellation never advances to the next route.
+`git.commitAI.prompt` is an optional user-defined language/format/style instruction
+shared by every route, taking precedence over recent subjects. Source patches remain
+untrusted data. Success/model notices appear above the message editor and expire
+after five seconds; failures remain dismissible for diagnosis.
 
 Generation reads only the staged patch and up to five recent subjects through
 the repository executor, including SSH when applicable. Inference always runs
 locally using the user's CLI authentication in a temporary non-repository cwd.
 Claude uses bare mode, no tools/MCP, and no session persistence. Pi disables
 tools, extensions, skills, templates, themes, context files and session persistence.
-Extension-only Pi providers are intentionally unavailable. These CLI restrictions
-are not an OS sandbox; the installed CLI and user shell remain trusted. No
-third-party plugin is launched and no plugin capability is added by this feature.
-Pi model discovery uses its tool/extension-disabled `--list-models`; Claude accepts
-explicit IDs/aliases rather than promising a stale hard-coded model catalog.
+Extension-only Pi providers are intentionally unavailable. Codex uses ephemeral
+`exec --json`, read-only sandboxing, no approval, disabled shell/exec/app/skill/
+multi-agent/web-search features and ignores user config/rules; its existing login
+is retained. This requires a current CLI supporting these flags (older CLIs fail
+and move to the next configured route). OpenCode uses `run --format json` with a
+dedicated deny-all agent, isolated config directory, disabled default plugins and
+sharing, but retains the normal data/auth directory. It may retain local sessions.
+Custom providers requiring ignored user config may be unavailable in both adapters.
+The installed CLIs, shell startup and administrator-managed policies remain trusted;
+these restrictions are not a general OS security boundary or a plugin capability.
+Pi discovery uses tool/extension-disabled `--list-models`; OpenCode uses `models`
+under the same restricted configuration. Claude and Codex accept explicit model
+IDs/aliases rather than promising a stale hard-coded model catalog. Parsers require
+successful final responses (`turn.completed` for Codex, `step_finish/stop` for
+OpenCode) and reject error events even if partial text was emitted.
 
 The settings disclosure covers sending staged source (including SSH source) to
 all configured model services during fallback. Patches over 200,000 bytes are

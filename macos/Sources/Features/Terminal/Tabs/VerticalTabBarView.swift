@@ -1690,12 +1690,8 @@ private struct VerticalTabRow: View {
                     if controller.surfaceTree.isSplit {
                         SplitTabIconView(
                             controller: controller,
-                            fallbackIcon: presentation.icon,
-                            fallbackActivity: presentation.activity,
-                            iconColor: GhosttyTabStyle.iconColor(
-                                selected: presentation.selected,
-                                hovered: presentation.hovered
-                            )
+                            hovered: presentation.hovered,
+                            select: select
                         )
                     } else {
                         AgentTabIconView(
@@ -1706,20 +1702,23 @@ private struct VerticalTabRow: View {
                             ),
                             activity: presentation.activity
                         )
+                        .frame(width: 24, height: 24)
+                        .allowsHitTesting(false)
                     }
 
                     if let breadcrumb = presentation.remoteBreadcrumb {
                         RemoteTabBreadcrumbView(breadcrumb: breadcrumb)
+                            .allowsHitTesting(false)
                     } else {
                         Text(presentation.title)
                             .font(.system(size: 12.5))
                             .lineLimit(1)
                             .truncationMode(.middle)
+                            .allowsHitTesting(false)
                     }
 
                     Spacer(minLength: 4)
                 }
-                .allowsHitTesting(false)
 
                 if let statusActivity,
                    statusActivity.state != .idle,

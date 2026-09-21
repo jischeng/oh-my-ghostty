@@ -9,6 +9,7 @@ enum GitBranchOperation: String, Equatable, Sendable {
 
 enum GitMutation: Equatable, Sendable {
     case integrate(GitIntegrationPlan)
+    case createTag(name: String, message: String, commit: GitCommitID)
     case createBranch(name: String, commit: GitCommitID)
     case applyCommit(GitCommitOperation, GitCommitID, mainline: Int?)
     case addWorktree(path: String, start: String, branch: String?, detached: Bool)
@@ -43,6 +44,7 @@ enum GitMutation: Equatable, Sendable {
     var title: String {
         switch self {
         case .integrate(let plan): return plan.kind.title
+        case .createTag: return GitL10n.text("Creating tag…")
         case .createBranch: return GitL10n.text("Creating branch…")
         case .applyCommit(let operation, _, _): return operation == .cherryPick ? GitL10n.text("Cherry-picking…") : GitL10n.text("Reverting…")
         case .addWorktree: return GitL10n.text("Creating worktree…")
@@ -95,6 +97,15 @@ struct GitMutationService: Sendable {
         switch mutation {
         case .integrate(let plan):
             try await GitIntegrationService(repository: repository).execute(plan)
+        case .createTag(let name, let message, let commit):
+            try GitTagService.validate(name)
+            try await validateCommit(commit, in: repository)
+            let existing = try await run(["tag", "--list", "--", name], in: repository)
+            guard existing.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw GitDiffServiceError.gitFailed(GitL10n.text("A tag with this name already exists."))
+            }
+            _ = try await run(["tag", "-a", "-F", "-", name, "--", commit.rawValue],
+                              in: repository, stdin: Data(message.utf8))
         case .createBranch(let name, let commit):
             try await validateBranch(name, in: repository)
             try await validateCommit(commit, in: repository)
@@ -189,14 +200,14 @@ struct GitMutationService: Sendable {
             guard try await remotes(in: repository).contains(remote) else {
                 throw GitDiffServiceError.gitFailed(GitL10n.text("The selected remote no longer exists."))
             }
-            _ = try await run(["push", "--porcelain", "--set-upstream", "--", remote,
+            _ = try await run(["push", "--porcelain", "--follow-tags", "--set-upstream", "--", remote,
                               "refs/heads/\(branch):refs/heads/\(destination)"], in: repository)
         case .pushCurrent:
             let remotesList = try await remotes(in: repository)
             guard !remotesList.isEmpty else {
                 throw GitDiffServiceError.gitFailed(GitL10n.text("Cannot push without a configured remote."))
             }
-            _ = try await run(["push", "--porcelain"], in: repository)
+            _ = try await run(["push", "--porcelain", "--follow-tags"], in: repository)
         case .pull:
             let remotesList = try await remotes(in: repository)
             guard !remotesList.isEmpty else {

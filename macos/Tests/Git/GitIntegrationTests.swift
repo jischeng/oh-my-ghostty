@@ -81,6 +81,34 @@ struct GitIntegrationTests {
         #expect(try await service.run(["status", "--porcelain"]).isEmpty)
     }
 
+    @Test func tagSuggestionBumpsMinorAndResetsPatch() {
+        #expect(GitTagService.suggestNextMinor(tags: ["v1.6.124", "v1.5.0"]) == "v1.7.0")
+        #expect(GitTagService.suggestNextMinor(tags: ["v2.0.1", "v1.9.9"]) == "v2.1.0")
+        #expect(GitTagService.suggestNextMinor(tags: ["1.6"]) == "1.7.0")
+        #expect(GitTagService.suggestNextMinor(tags: ["v1.6.124-rc1"]) == "v1.7.0")
+        #expect(GitTagService.suggestNextMinor(tags: ["feature-x", "release"]) == nil)
+        #expect(GitTagService.suggestNextMinor(tags: []) == nil)
+        #expect((try? GitTagService.validate("v1.7.0")) != nil)
+        #expect((try? GitTagService.validate("bad name")) == nil)
+        #expect((try? GitTagService.validate("-v1")) == nil)
+        #expect((try? GitTagService.validate("a..b")) == nil)
+        #expect((try? GitTagService.validate("a@{1}")) == nil)
+        #expect((try? GitTagService.validate(" a")) == nil)
+    }
+
+    @Test func createTagViaMutationUsesAnnotatedTagAndRejectsDuplicate() async throws {
+        let (root, service) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = GitRepositoryIdentity(worktreePath: root.path, gitDirPath: root.path + "/.git", commonGitDirPath: root.path + "/.git")
+        let head = GitCommitID(try await service.resolve("HEAD"))
+        try await GitMutationService().perform(.createTag(name: "v1.0.0", message: "release", commit: head), in: repo)
+        #expect(try await service.run(["tag", "--list", "v1.0.0"]) == "v1.0.0")
+        #expect(try await service.run(["for-each-ref", "--format=%(objecttype)", "refs/tags/v1.0.0"]) == "tag")
+        await #expect(throws: (any Error).self) {
+            try await GitMutationService().perform(.createTag(name: "v1.0.0", message: "x", commit: head), in: repo)
+        }
+    }
+
     @Test func reviewRejectsUnpushedBranchesWithoutInvokingCLI() async throws {
         let (root, service) = try await fixture()
         defer { try? FileManager.default.removeItem(at: root) }

@@ -470,6 +470,7 @@ struct GitHistoryTable: NSViewRepresentable {
             guard rows.indices.contains(index) else { return }
             let commit = content.commits[rows[index].commitIndex]
             menu.autoenablesItems = false
+            // Group 1: open/view actions. The same set appears for commit and file rows.
             if case .file(_, let file) = rows[index] {
                 for (title, directory) in [("Open in Editor", false), ("Open Folder in New Tab", true)] {
                     let item = NSMenuItem(title: GitL10n.text(title), action: #selector(fileAction(_:)), keyEquivalent: "")
@@ -478,7 +479,6 @@ struct GitHistoryTable: NSViewRepresentable {
                     item.isEnabled = directory || file.kind != .deleted
                     menu.addItem(item)
                 }
-                menu.addItem(.separator())
             }
             let browser = NSMenuItem(title: GitL10n.text("Open in Browser"), action: #selector(openBrowser(_:)), keyEquivalent: "")
             browser.target = self
@@ -487,7 +487,9 @@ struct GitHistoryTable: NSViewRepresentable {
             browser.representedObject = GitForge(origin: content.origin)?.commit(commit.id.rawValue, file: file, parent: commit.parentIDs.first?.rawValue)
             browser.isEnabled = browser.representedObject != nil
             menu.addItem(browser)
+            menu.addItem(.separator())
             for operation in GitCommitOperation.allCases {
+                // Group 2: create (branch/worktree/tag); Group 3: inspect; Group 4: apply.
                 if operation == .details || operation == .cherryPick { menu.addItem(.separator()) }
                 let item = NSMenuItem(title: operation.title, action: #selector(commitAction(_:)), keyEquivalent: "")
                 item.target = self

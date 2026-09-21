@@ -7,7 +7,7 @@ enum GitIntegrationKind: String, CaseIterable, Sendable {
         case .merge: GitL10n.text("Merge…")
         case .rebase: GitL10n.text("Rebase…")
         case .cherryPick: GitL10n.text("Cherry-pick…")
-        case .review: GitL10n.text("Merge into… (PR/MR)")
+        case .review: GitL10n.text("Merge into…")
         }
     }
 }
@@ -35,7 +35,7 @@ struct GitIntegrationService: Sendable {
     }
 
     func resolve(_ ref: String) async throws -> String {
-        guard ref.hasPrefix("refs/heads/") || ref.hasPrefix("refs/remotes/") ||
+        guard ref == "HEAD" || ref.hasPrefix("refs/heads/") || ref.hasPrefix("refs/remotes/") ||
                 (ref.count >= 7 && ref.allSatisfy(\.isHexDigit)) else {
             throw GitCommitAIError("Select a valid branch or commit.")
         }
@@ -114,14 +114,22 @@ struct GitIntegrationService: Sendable {
               let forge = GitForge(origin: try await run(["config", "--get", "remote.origin.url"])) else {
             throw GitCommitAIError("A GitHub or GitLab origin is required.")
         }
-        // A review must describe the exact pushed source and target, not stale tracking refs.
+        // Target must exist on origin (it is the base of the request). Source is
+        // pushed (with tags) when out of date, like an IDE GitHub plugin; the
+        // user confirmed this in the dialog. We never push the target.
         let refs = try await run(["ls-remote", "--heads", "origin", plan.source, plan.target])
-        let advertised = Dictionary(refs.split(separator: "\n").compactMap { line -> (String, String)? in
+        var advertised = Dictionary(refs.split(separator: "\n").compactMap { line -> (String, String)? in
             let parts = line.split(whereSeparator: \.isWhitespace)
             return parts.count == 2 ? (String(parts[1]), String(parts[0])) : nil
         }, uniquingKeysWith: { first, _ in first })
-        guard advertised[plan.source] == plan.sourceSHA, advertised[plan.target] == plan.targetSHA else {
-            throw GitCommitAIError("Push the source branch and synchronize the target with origin before creating a PR/MR. Nothing was pushed automatically.")
+        guard advertised[plan.target] != nil else {
+            throw GitCommitAIError("The target branch does not exist on origin. Push or create it first.")
+        }
+        if advertised[plan.source] != plan.sourceSHA {
+            let source = String(plan.source.dropFirst(11))
+            _ = try await run(["push", "--porcelain", "--follow-tags", "--set-upstream", "origin",
+                               "refs/heads/\(source):refs/heads/\(source)"], limit: 64_000)
+            advertised[plan.source] = plan.sourceSHA
         }
         let lines = plan.message.components(separatedBy: "\n")
         let title = lines.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

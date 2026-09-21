@@ -802,6 +802,16 @@ final class BuiltInGitInspectorProvider {
             handleIntegration(.cherryPick, source: nil, commit: commit, context: context)
             return
         }
+        if operation == .createTag {
+            guard mutationTasks[repository.stateKey] == nil else { return }
+            let window = NSApp.windows.first { ($0.windowController as? TerminalController)?.tabSessionID == context.tabID }
+            Task { @MainActor in
+                if let mutation = await GitTagDialog.present(repository: repository, commit: commit, window: window) {
+                    self.mutate(mutation, repository: repository, context: context)
+                }
+            }
+            return
+        }
         if operation == .details {
             if content.expandedCommits[id] == nil { toggleCommit(id, context: context) }
             return
@@ -824,7 +834,7 @@ final class BuiltInGitInspectorProvider {
                     if let mutation = await GitCommitActions.mutation(operation, commit: commit, window: window) {
                         self.mutate(mutation, repository: repository, context: context)
                     }
-                case .details: break
+                case .details, .createTag: break
                 }
             } catch { self.publishOperationError(error.localizedDescription, repository: repository, context: context) }
         }
@@ -1112,6 +1122,20 @@ final class BuiltInGitInspectorProvider {
         save(state, tabID: context.tabID, worktreeKey: repository.stateKey)
         if let content = lastPublishedContent[context.tabID], content.repository == repository {
             publish(content, tabID: context.tabID)
+        }
+        // Errors share the success bubble style and auto-dismiss the same way.
+        Task {
+            try? await Task.sleep(for: .seconds(6))
+            await MainActor.run {
+                var current = self.state(for: context.tabID, worktreeKey: repository.stateKey)
+                if current.operationError == message {
+                    current.operationError = nil
+                    self.save(current, tabID: context.tabID, worktreeKey: repository.stateKey)
+                    for (tabID, content) in self.lastPublishedContent where content.repository == repository {
+                        self.publish(content, tabID: tabID)
+                    }
+                }
+            }
         }
     }
 

@@ -1,12 +1,13 @@
 import AppKit
 
 enum GitCommitOperation: String, CaseIterable, Equatable, Sendable {
-    case createBranch, createWorktree, detachedWorktree, details, compareWithHead, cherryPick, revert
+    case createBranch, createWorktree, detachedWorktree, createTag, details, compareWithHead, cherryPick, revert
     var title: String {
         switch self {
         case .createBranch: GitL10n.text("Create Branch from This Commit…")
         case .createWorktree: GitL10n.text("Create Branch + Worktree…")
         case .detachedWorktree: GitL10n.text("Create Detached Worktree…")
+        case .createTag: GitL10n.text("New Tag…")
         case .details: GitL10n.text("Show Commit Details / Changed Files")
         case .compareWithHead: GitL10n.text("Compare with HEAD")
         case .cherryPick: GitL10n.text("Cherry-pick…")

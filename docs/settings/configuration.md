@@ -112,12 +112,20 @@ Plans revalidate branch tips and the original branch, require a clean worktree, 
 not stash/reset/force-push, and leave conflicts for terminal resolution. Target stays
 checked out after success or failure.
 
-**Merge into… (PR/MR)** in the pull/push menu opens an in-app source/target and title/
-description editor. ACP can generate the title/description. Creation uses local,
-already-authenticated `gh pr create` or `glab mr create`; it requires both tips to
-match `origin`, never pushes automatically, and reports missing tools/login or stale
-refs. A remote request may have been created if a timeout occurs, so retry guidance
-asks users to check existing requests.
+**Merge into…** in the pull/push menu opens an in-app source/target and title/
+description editor; the target branch is remembered per repository. ACP can generate
+the title/description. Creation uses local, already-authenticated `gh pr create` or
+`glab mr create`; the target must exist on `origin`, and the source branch is pushed
+(with tags via `--follow-tags`) when needed after the user's confirmation. It never
+pushes the target and reports missing tools/login or a missing remote target. A remote
+request may have been created if a timeout occurs, so retry guidance asks users to
+check existing requests.
+
+Commit context menus add **New Tag…**: an annotated-tag dialog whose Generate reads
+the branch's merged tag history and suggests the next minor version via ACP (with a
+deterministic fallback). Duplicate/invalid names are rejected before writing. Tags are
+included in pushes via `--follow-tags`. Operation failures use the same auto-dismissing
+bubble style as success notices, and the Git dialogs/settings window follow OMG's theme.
 
 ## Appearance synchronization
 

@@ -37,7 +37,7 @@ enum OhMyGhosttySettingsTab: String, CaseIterable, Identifiable {
 
 @MainActor
 final class OhMyGhosttySettingsWindowController: NSWindowController {
-    private var appearanceCancellable: AnyCancellable?
+    private var appearanceCancellables: Set<AnyCancellable> = []
 
     init(
         settings: OhMyGhosttySettings,
@@ -55,12 +55,18 @@ final class OhMyGhosttySettingsWindowController: NSWindowController {
         super.init(window: window)
 
         applyAppearance(settings)
-        appearanceCancellable = settings.objectWillChange.sink { [weak self, weak settings] _ in
+        settings.objectWillChange.sink { [weak self, weak settings] _ in
             DispatchQueue.main.async {
                 guard let self, let settings else { return }
                 self.applyAppearance(settings)
             }
-        }
+        }.store(in: &appearanceCancellables)
+        // Re-apply when the app appearance changes (theme/config switches), so a
+        // settings window opened before the change follows the new OMG theme.
+        NSApp.publisher(for: \.effectiveAppearance).sink { [weak self, weak settings] _ in
+            guard let self, let settings else { return }
+            self.applyAppearance(settings)
+        }.store(in: &appearanceCancellables)
     }
 
     @available(*, unavailable)
@@ -106,8 +112,9 @@ final class OhMyGhosttySettingsWindowController: NSWindowController {
         case .system:
             appearance = nil
         case nil:
-            let config = (NSApp.delegate as? AppDelegate)?.ghostty.config
-            appearance = config.flatMap(NSAppearance.init(ghosttyConfig:))
+            // Follow the same effective appearance as terminal windows so the
+            // settings window tracks OMG's theme, including automatic switches.
+            appearance = NSApp.effectiveAppearance
         }
         if window.appearance?.name != appearance?.name {
             window.appearance = appearance

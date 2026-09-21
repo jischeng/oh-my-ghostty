@@ -136,16 +136,32 @@ Rebase is non-interactive and preserves original messages; it has no new message
 field to generate. Merge and Cherry-pick support ACP generation from the exact
 operation diff, with draft/ref-change protection and the configured style.
 
-The pull/push menu adds Merge into (PR/MR). Users select local source/target branches
-and edit a title (first line) plus description, optionally generated via ACP from
-the merge-base diff. Final confirmation calls local gh/glab even for SSH repositories.
-Both local branch tips must equal origin's ls-remote tips; no push occurs automatically.
-GitHub uses gh pr create with an explicit head and a body file. GitLab uses glab mr
-create with explicit source/target/title/description and --yes, without --fill/--push.
-Missing login/CLI, stale refs and unpushed branches report errors. Creation is a remote
-write and occurs only after the user's dialog confirmation, never during generation.
-A timeout may leave a created remote request; errors ask the user to check existing
-requests before retrying. Tests never create real PRs/MRs or push user branches.
+The pull/push menu adds **Merge into…**. Users select local source/target branches and
+edit a title (first line) plus description, optionally generated via ACP from the
+merge-base diff. The target branch is remembered per repository. Final confirmation
+calls local gh/glab even for SSH repositories. The target must exist on origin; the
+source branch is pushed (with tags via `--follow-tags`) when out of date, like an IDE
+GitHub plugin — this push only happens after the user's explicit dialog confirmation,
+never during generation. The target is never pushed. GitHub uses `gh pr create` with an
+explicit head and a body file. GitLab uses `glab mr create` with explicit source/target/
+title/description and `--yes`, without `--fill`/`--push`. Missing login/CLI and a missing
+remote target report errors. Creation is a remote write that may succeed before a client
+timeout; errors ask the user to check existing requests before retrying. Tests never
+create real PRs/MRs or push user branches.
+
+Commit context menus add **New Tag…**. A dialog edits the annotated tag name and optional
+message at the selected commit; Generate reads the branch's merged tag history and asks
+the configured ACP routes for the next minor version (e.g. `v1.6.124` → `v1.7.0`),
+falling back to a deterministic minor bump. Tag names are validated and duplicates
+rejected before any write. Tags are created as annotated tags and are included in
+pushes via `--follow-tags` (push, push-to and PR/MR source pushes).
+
+Operation failures use the same floating bubble style as the fetch success notice
+(red tint, icon, dismiss) and auto-dismiss after six seconds. The Git operation dialogs
+and the settings window follow OMG's appearance: the integration panel inherits the
+invoking terminal window's appearance, and the settings window follows
+`NSApp.effectiveAppearance` when no explicit light/dark/system override is set, so it
+tracks OMG's theme (including automatic switches) while open.
 
 ## Terminal title updates
 

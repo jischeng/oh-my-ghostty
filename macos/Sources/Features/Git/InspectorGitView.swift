@@ -49,12 +49,28 @@ struct InspectorGitView: View {
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
             if let error = content.operationError {
-                HStack(alignment: .top) {
-                    ScrollView { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
-                        .frame(maxHeight: 90)
-                    Button { perform(.gitAction(.clearOperationError)) } label: { Image(systemName: "xmark") }
-                        .buttonStyle(.plain).help(GitL10n.text("Dismiss Git error"))
-                }.padding(8)
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.red)
+                    ScrollView {
+                        Text(error).font(.caption).foregroundStyle(.primary).textSelection(.enabled)
+                    }
+                    .frame(maxHeight: 64)
+                    Spacer(minLength: 0)
+                    Button { perform(.gitAction(.clearOperationError)) } label: {
+                        Image(systemName: "xmark").font(.system(size: 10))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help(GitL10n.text("Dismiss Git error"))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 4))
+                .padding(.horizontal, 12)
+                .padding(.top, 4)
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
             if let operation = content.operation, !content.isUpdatingIndex {
                 HStack { ProgressView().controlSize(.small); Text(operation).font(.caption) }.padding(6)
@@ -260,7 +276,7 @@ struct InspectorGitView: View {
                 isPullPushOpen = false
                 perform(.gitAction(.integration(.review, nil)))
             } label: {
-                Label(GitL10n.text("Merge into… (PR/MR)"), systemImage: "arrow.triangle.pull")
+                Label(GitL10n.text("Merge into…"), systemImage: "arrow.triangle.pull")
                     .font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(GitMenuRowButtonStyle())

@@ -530,6 +530,8 @@ struct GitCollectionView: NSViewRepresentable {
                 add(branch.isRemote ? GitL10n.text("Checkout Tracking Branch…") : GitL10n.text("Switch Branch"), .action(.branchOperation(.checkout, branch.id)),
                     enabled: input.canWrite && item.enabled && !branch.isCurrent && occupied == nil)
                 add(GitL10n.text("New Branch from Here…"), .action(.branchOperation(.create, branch.id)), enabled: input.canWrite && item.enabled)
+                add(GitL10n.text("Merge…"), .action(.integration(.merge, branch.id)), enabled: input.canWrite && item.enabled)
+                add(GitL10n.text("Rebase…"), .action(.integration(.rebase, branch.id)), enabled: input.canWrite && item.enabled)
                 if !branch.isRemote {
                     add(GitL10n.text("Push to…"), .action(.branchOperation(.push, branch.id)), enabled: input.canWrite && item.enabled)
                     add(GitL10n.text("Set Upstream…"), .action(.branchOperation(.setUpstream, branch.id)), enabled: input.canWrite && item.enabled)

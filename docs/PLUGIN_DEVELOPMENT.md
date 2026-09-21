@@ -109,6 +109,44 @@ generation is not overwritten; replacing an existing draft requires confirmation
 There is no dedicated undo-generation control. Generation does not stage, commit,
 resume an interactive Agent, or send text to a terminal pane.
 
+## Git branch integration and forge links
+
+The AI settings footer groups Add Models and Commit Style in one compact row.
+Add Models contains a searchable multi-select ACP catalog, no manual ID editor;
+brief privacy/session help is collapsed by default.
+
+Commit and expanded commit-file context menus expose Open in Browser, disabled
+without a parseable origin URL. HTTPS, ssh:// and SCP-style origins are normalized
+without embedding credentials. github hosts use /commit and /blob; other supported
+enterprise hosts are treated as GitLab and use /-/commit and /-/blob. Deleted files
+link to the first parent. This is URL construction, not a remote existence check;
+unpushed commits may return a host 404 and unknown non-GitLab hosts may need future
+provider configuration.
+
+Branch toolbar/context menus expose Merge and Rebase; commit Cherry-pick now opens
+a target-branch picker (merge commits also require a mainline parent). Merge means
+source into local target; Rebase means replay the selected local target onto the
+base/source. The target stays checked out, including after a failure. Plans capture
+source/target SHAs and the initial branch, revalidate before mutation, require clean
+worktrees and use normal Git worktree protections. No auto-stash, reset, force-push
+or automatic conflict resolution occurs. Merge creates a merge commit even when a
+fast-forward is possible; Cherry-pick applies without committing then commits the
+editable message. Conflict/sequencer state remains for terminal resolution/abort.
+Rebase is non-interactive and preserves original messages; it has no new message
+field to generate. Merge and Cherry-pick support ACP generation from the exact
+operation diff, with draft/ref-change protection and the configured style.
+
+The pull/push menu adds Merge into (PR/MR). Users select local source/target branches
+and edit a title (first line) plus description, optionally generated via ACP from
+the merge-base diff. Final confirmation calls local gh/glab even for SSH repositories.
+Both local branch tips must equal origin's ls-remote tips; no push occurs automatically.
+GitHub uses gh pr create with an explicit head and a body file. GitLab uses glab mr
+create with explicit source/target/title/description and --yes, without --fill/--push.
+Missing login/CLI, stale refs and unpushed branches report errors. Creation is a remote
+write and occurs only after the user's dialog confirmation, never during generation.
+A timeout may leave a created remote request; errors ask the user to check existing
+requests before retrying. Tests never create real PRs/MRs or push user branches.
+
 ## Terminal title updates
 
 The built-in Git Inspector follows pane, directory and connection changes.

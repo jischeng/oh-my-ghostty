@@ -39,10 +39,15 @@ struct GitCommitAISettingsView: View {
                     return true
                 }
             }
-            Button(GitL10n.text("Add Agent Models…")) { showingAdd = true }
-            Button { showingPrompt = true } label: {
-                Label(GitL10n.text("Edit commit prompt…"), systemImage: "square.and.pencil")
-            }
+            HStack {
+                Button { showingAdd = true } label: {
+                    Label(GitL10n.text("Add models…"), systemImage: "plus")
+                }
+                Spacer()
+                Button { showingPrompt = true } label: {
+                    Label(GitL10n.text("Commit style…"), systemImage: "slider.horizontal.3")
+                }
+            }.controlSize(.small).buttonStyle(.borderless)
         }
         .sheet(isPresented: $showingPrompt) {
             GitCommitPromptEditor(prompt: settings.gitCommitAIPrompt) { settings.gitCommitAIPrompt = $0 }
@@ -91,7 +96,8 @@ private struct GitCommitAIAddModels: View {
     let add: (GitCommitAgent, [String]) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var agent: GitCommitAgent = .claude
-    @State private var manualModels = ""
+    @State private var query = ""
+    @State private var showingHelp = false
     @State private var models: [String] = []
     @State private var selected: Set<String> = []
     @State private var loading = false
@@ -100,8 +106,7 @@ private struct GitCommitAIAddModels: View {
     @State private var reloadID = UUID()
 
     private var chosenModels: [String] {
-        models.filter { selected.contains($0) } + manualModels.components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        models.filter { selected.contains($0) }
     }
 
     var body: some View {
@@ -117,23 +122,17 @@ private struct GitCommitAIAddModels: View {
                     if loading { ProgressView().controlSize(.small) }
                     Button(GitL10n.text("Reload")) { reloadID = UUID() }.disabled(loading)
                 }
-                List(models, id: \.self) { model in
+                TextField(GitL10n.text("Search models…"), text: $query).textFieldStyle(.roundedBorder)
+                List(models.filter { query.isEmpty || $0.localizedCaseInsensitiveContains(query) }, id: \.self) { model in
                     Toggle(model, isOn: Binding(get: { selected.contains(model) }, set: {
                         if $0 { selected.insert(model) } else { selected.remove(model) }
                     }))
-                }.frame(height: 180)
+                }.frame(height: 260)
             }
-            Text(GitL10n.text("Model IDs (one per line)"))
-            TextEditor(text: $manualModels).font(.system(.body, design: .monospaced))
-                .frame(height: 90).border(Color.secondary.opacity(0.3))
-            Text(GitL10n.text("ACP adapters: pi-acp, claude-agent-acp, codex-acp; OpenCode uses opencode acp. Install and log in locally before loading models."))
-                .font(.caption).foregroundStyle(.secondary)
-            Text(GitL10n.text("Select models advertised by the ACP session. Previously saved CLI IDs may need to be added again."))
-                .font(.caption).foregroundStyle(.secondary)
-            Text(GitL10n.text("Uses your local CLI login. Staged changes and recent commit subjects may be sent to every configured model service on fallback, including changes read over SSH. Nothing is committed automatically."))
-                .font(.caption).foregroundStyle(.secondary)
-            Text(GitL10n.text("All agents connect over local ACP. Remote hosts do not need an agent. Sessions are stored outside repositories and expire after 30 days."))
-                .font(.caption).foregroundStyle(.secondary)
+            DisclosureGroup(GitL10n.text("About AI generation"), isExpanded: $showingHelp) {
+                Text(GitL10n.text("Models run through local ACP, including for SSH repositories. Selected services receive the changes. Sessions expire after 30 days."))
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             if let error { Text(error).font(.caption).foregroundStyle(.red) }
             HStack {
                 Spacer()
@@ -145,7 +144,7 @@ private struct GitCommitAIAddModels: View {
         }
         .padding(20).frame(width: 480)
         .onChange(of: agent) { _ in
-            selected = []; models = []; manualModels = ""; error = nil; reloadID = UUID()
+            selected = []; models = []; query = ""; error = nil; reloadID = UUID()
         }
         .task(id: reloadID) {
             let requestedAgent = agent
@@ -158,7 +157,7 @@ private struct GitCommitAIAddModels: View {
                 let result = try await GitCommitAIService.models(agent: requestedAgent)
                 guard !Task.isCancelled, agent == requestedAgent else { return }
                 models = result
-                if result.isEmpty { error = GitL10n.text("No models found. Enter model IDs manually or check CLI login.") }
+                if result.isEmpty { error = GitL10n.text("No models found. Check the local ACP adapter and login.") }
             } catch {
                 guard !Task.isCancelled else { return }
                 self.error = error.localizedDescription

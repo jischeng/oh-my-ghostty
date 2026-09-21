@@ -112,6 +112,7 @@ enum InspectorGitAction: Equatable, Sendable {
     case browseBranch(String)
     case browseRef(String)
     case browseWorktree(String)
+    case integration(GitIntegrationKind, String?)
     case branchOperation(GitBranchOperation, String)
     case commitOperation(GitCommitOperation, GitCommitID)
     case createWorktree(String?)

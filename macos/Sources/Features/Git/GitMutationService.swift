@@ -8,6 +8,7 @@ enum GitBranchOperation: String, Equatable, Sendable {
 }
 
 enum GitMutation: Equatable, Sendable {
+    case integrate(GitIntegrationPlan)
     case createBranch(name: String, commit: GitCommitID)
     case applyCommit(GitCommitOperation, GitCommitID, mainline: Int?)
     case addWorktree(path: String, start: String, branch: String?, detached: Bool)
@@ -41,6 +42,7 @@ enum GitMutation: Equatable, Sendable {
 
     var title: String {
         switch self {
+        case .integrate(let plan): return plan.kind.title
         case .createBranch: return GitL10n.text("Creating branch…")
         case .applyCommit(let operation, _, _): return operation == .cherryPick ? GitL10n.text("Cherry-picking…") : GitL10n.text("Reverting…")
         case .addWorktree: return GitL10n.text("Creating worktree…")
@@ -91,6 +93,8 @@ struct GitMutationService: Sendable {
 
     func perform(_ mutation: GitMutation, in repository: GitRepositoryIdentity) async throws {
         switch mutation {
+        case .integrate(let plan):
+            try await GitIntegrationService(repository: repository).execute(plan)
         case .createBranch(let name, let commit):
             try await validateBranch(name, in: repository)
             try await validateCommit(commit, in: repository)

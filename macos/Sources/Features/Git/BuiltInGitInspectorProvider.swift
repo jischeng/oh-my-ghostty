@@ -329,6 +329,8 @@ final class BuiltInGitInspectorProvider {
             handleCommit(operation, id: commit, context: action.context)
         case .createWorktree, .openWorktree, .removeWorktree:
             handleWorktree(gitAction, context: action.context)
+        case .integration(let kind, let source):
+            handleIntegration(kind, source: source, commit: nil, context: action.context)
         case .branchOperation(let operation, let ref):
             guard let content = lastPublishedContent[action.context.tabID], let repository = content.repository,
                   content.workingTree.branchesError == nil,
@@ -781,9 +783,25 @@ final class BuiltInGitInspectorProvider {
         } catch { Self.logger.error("Git state publish failed: \(error.localizedDescription, privacy: .public)") }
     }
 
+    private func handleIntegration(_ kind: GitIntegrationKind, source: String?, commit: GitHistoryCommit?, context: InspectorPaneContext) {
+        guard let content = lastPublishedContent[context.tabID], let repository = content.repository,
+              content.workingTree.branchesError == nil, mutationTasks[repository.stateKey] == nil else { return }
+        let window = NSApp.windows.first { ($0.windowController as? TerminalController)?.tabSessionID == context.tabID }
+        Task { @MainActor in
+            if let plan = await GitIntegrationDialog.present(kind: kind, repository: repository,
+                branches: content.workingTree.branches, source: source, commit: commit, window: window) {
+                self.mutate(.integrate(plan), repository: repository, context: context)
+            }
+        }
+    }
+
     private func handleCommit(_ operation: GitCommitOperation, id: GitCommitID, context: InspectorPaneContext) {
         guard let content = lastPublishedContent[context.tabID], let repository = content.repository,
               let commit = content.history.commits.first(where: { $0.id == id }) else { return }
+        if operation == .cherryPick {
+            handleIntegration(.cherryPick, source: nil, commit: commit, context: context)
+            return
+        }
         if operation == .details {
             if content.expandedCommits[id] == nil { toggleCommit(id, context: context) }
             return
@@ -995,7 +1013,7 @@ final class BuiltInGitInspectorProvider {
                 publishOperationError(GitL10n.text("Save or discard unsaved editor changes before removing this worktree."), repository: repository, context: context)
                 return
             }
-        case .checkout, .create, .applyCommit, .pull:
+        case .checkout, .create, .applyCommit, .pull, .integrate:
             guard !EditorWorkspaceStore.shared.hasUnsavedDocuments(
                 in: repository.worktreePath,
                 endpoint: repository.sshConnection.map { .ssh(workspaceID: $0.workspaceID) } ?? .local
@@ -1036,6 +1054,9 @@ final class BuiltInGitInspectorProvider {
                     var state = self.state(for: context.tabID, worktreeKey: key)
                     if state.commitDraft == submitted { state.commitDraft = "" }
                     self.save(state, tabID: context.tabID, worktreeKey: key)
+                }
+                if case .integrate(let plan) = mutation {
+                    self.publishOperationNotice(GitL10n.text(plan.kind == .review ? "PR/MR created" : "Git operation complete"), repository: repository, context: context)
                 }
                 if case .pull = mutation {
                     try? await Task.sleep(for: .milliseconds(150))

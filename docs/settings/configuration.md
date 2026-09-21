@@ -91,6 +91,34 @@ reuse stops after five minutes idle, eight turns or 400 KB of input. Reuse can h
 provider caching but does not guarantee token savings. Pi extensions/tools remain
 disabled, so extension-only providers are not included.
 
+## Git branch operations and browser links
+
+The AI settings page uses a compact action row: **Add models…** opens a searchable
+ACP model multi-select with collapsed help; **Commit style…** opens the styled
+Save/Cancel prompt editor. There is no inline model-ID TextEditor and no persistent
+three-paragraph disclosure in the settings page.
+
+Commit/file context menus expose **Open in Browser** when `remote.origin.url` is a
+parseable GitHub/GitLab-compatible origin; otherwise the item is disabled. SSH and
+SCP origins are normalized to HTTPS, credentials are removed, and deleted files use
+the first parent commit. GitHub and GitLab URL layouts are selected by host family.
+
+Branches add Merge and Rebase. Commit Cherry-pick opens the same target-branch
+flow and supports a mainline parent for merge commits. Merge source → target creates
+a merge commit; Rebase target onto source preserves existing messages; Cherry-pick
+source → target lets the user edit the new commit message. Each dialog can generate
+its operation message through the configured ACP routes from the exact operation diff.
+Plans revalidate branch tips and the original branch, require a clean worktree, do
+not stash/reset/force-push, and leave conflicts for terminal resolution. Target stays
+checked out after success or failure.
+
+**Merge into… (PR/MR)** in the pull/push menu opens an in-app source/target and title/
+description editor. ACP can generate the title/description. Creation uses local,
+already-authenticated `gh pr create` or `glab mr create`; it requires both tips to
+match `origin`, never pushes automatically, and reports missing tools/login or stale
+refs. A remote request may have been created if a timeout occurs, so retry guidance
+asks users to check existing requests.
+
 ## Appearance synchronization
 
 Application and window appearance share one policy: an explicit light/dark/system

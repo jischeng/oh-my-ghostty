@@ -256,9 +256,18 @@ struct InspectorGitView: View {
             }
             .buttonStyle(GitMenuRowButtonStyle())
             .disabled(content.operation != nil || isDetachedHead || !hasRemote)
+            Button {
+                isPullPushOpen = false
+                perform(.gitAction(.integration(.review, nil)))
+            } label: {
+                Label(GitL10n.text("Merge into… (PR/MR)"), systemImage: "arrow.triangle.pull")
+                    .font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(GitMenuRowButtonStyle())
+            .disabled(content.operation != nil || isDetachedHead || GitForge(origin: content.workingTree.remoteURL) == nil)
         }
         .padding(5)
-        .frame(width: 148)
+        .frame(width: 200)
     }
 
     private var fetchButton: some View {
@@ -365,6 +374,12 @@ struct InspectorGitView: View {
             GitCollectionToolbar(query: activeQuery, mode: $changesMode, placeholder: searchPlaceholder,
                                  controller: activeController, cancel: { activeQuery.wrappedValue = "" })
             if content.activeTab == .branches {
+                Button { perform(.gitAction(.integration(.merge, nil))) } label: { Image(systemName: "arrow.triangle.merge") }
+                    .buttonStyle(.borderless).help(GitL10n.text("Merge…"))
+                    .disabled(content.operation != nil || content.workingTree.branchesError != nil)
+                Button { perform(.gitAction(.integration(.rebase, nil))) } label: { Image(systemName: "arrow.triangle.branch") }
+                    .buttonStyle(.borderless).help(GitL10n.text("Rebase…"))
+                    .disabled(content.operation != nil || content.workingTree.branchesError != nil)
                 Button { perform(.gitAction(.createWorktree(nil))) } label: { Image(systemName: "plus") }
                     .buttonStyle(.borderless).help(GitL10n.text("New Worktree"))
                     .disabled(content.operation != nil || content.workingTree.worktreesError != nil)
@@ -471,6 +486,7 @@ struct InspectorGitView: View {
                     isLoading: content.history.isLoading,
                     automaticLoadingAllowed: content.activeTab == .history && content.history.statusMessage == nil,
                     isBusy: content.operation != nil,
+                    origin: content.workingTree.remoteURL,
                     onSelect: { perform(.gitAction(.selectCommit($0))) },
                     onOpen: { perform(.gitAction(.openCommit($0))) },
                     onShowInTerminal: {

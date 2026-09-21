@@ -13,6 +13,7 @@ struct GitHistoryTable: NSViewRepresentable {
     var isLoading = false
     var automaticLoadingAllowed = true
     var isBusy = false
+    var origin: String?
     var languageCode = GitL10n.current.languageCode
     let onSelect: (GitCommitID) -> Void
     let onOpen: (GitCommitID) -> Void
@@ -479,6 +480,13 @@ struct GitHistoryTable: NSViewRepresentable {
                 }
                 menu.addItem(.separator())
             }
+            let browser = NSMenuItem(title: GitL10n.text("Open in Browser"), action: #selector(openBrowser(_:)), keyEquivalent: "")
+            browser.target = self
+            let file: GitDiffFile?
+            if case .file(_, let value) = rows[index] { file = value } else { file = nil }
+            browser.representedObject = GitForge(origin: content.origin)?.commit(commit.id.rawValue, file: file, parent: commit.parentIDs.first?.rawValue)
+            browser.isEnabled = browser.representedObject != nil
+            menu.addItem(browser)
             for operation in GitCommitOperation.allCases {
                 if operation == .details || operation == .cherryPick { menu.addItem(.separator()) }
                 let item = NSMenuItem(title: operation.title, action: #selector(commitAction(_:)), keyEquivalent: "")
@@ -500,6 +508,9 @@ struct GitHistoryTable: NSViewRepresentable {
             let extra = NSMenuItem(title: GitL10n.text("Copy More"), action: nil, keyEquivalent: "")
             extra.submenu = InspectorCopyMenu(values: values.filter { !$0.1.isEmpty }, pasteboard: menu.pasteboard)
             menu.addItem(extra)
+        }
+        @objc private func openBrowser(_ sender: NSMenuItem) {
+            if let url = sender.representedObject as? URL { NSWorkspace.shared.open(url) }
         }
         private struct FileAction { let file: GitDiffFile; let directory: Bool }
         @objc private func fileAction(_ sender: NSMenuItem) {

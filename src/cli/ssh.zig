@@ -748,6 +748,11 @@ fn remoteShellCommand(
 
     var script: std.Io.Writer.Allocating = .init(alloc);
     defer script.deinit();
+    if (remote_working_directory) |cwd| {
+        script.writer.writeAll("OMG_REMOTE_CWD=") catch return null;
+        writeShellSingleQuoted(&script.writer, cwd) catch return null;
+        script.writer.writeAll("\nexport OMG_REMOTE_CWD\n") catch return null;
+    }
     script.writer.writeAll(
         \\__omg_server_id=''
         \\if command -v ssh-keygen >/dev/null 2>&1 && command -v awk >/dev/null 2>&1; then
@@ -777,7 +782,10 @@ fn remoteShellCommand(
     script.writer.writeAll("\n;;\nzsh) ") catch return null;
     script.writer.writeAll(zsh) catch return null;
     script.writer.writeAll(
-        "\n;;\n*) exec \"${SHELL:-/bin/sh}\" -l ;;\nesac",
+        \\
+        \\;;
+        \\*) if [ -n "${OMG_REMOTE_CWD-}" ]; then cd -- "$OMG_REMOTE_CWD" 2>/dev/null || true; unset OMG_REMOTE_CWD; fi; exec "${SHELL:-/bin/sh}" -l ;;
+        \\esac
     ) catch return null;
 
     var command: std.Io.Writer.Allocating = .init(alloc);
@@ -797,10 +805,10 @@ fn remoteFishCommand(
 ) ?[]const u8 {
     var fish_command: std.Io.Writer.Allocating = .init(alloc);
     defer fish_command.deinit();
-    if (remote_working_directory) |cwd| {
-        fish_command.writer.writeAll("cd -- ") catch return null;
-        writeFishSingleQuoted(&fish_command.writer, cwd) catch return null;
-        fish_command.writer.writeAll("; ") catch return null;
+    if (remote_working_directory != null) {
+        fish_command.writer.writeAll(
+            "test -n \"$OMG_REMOTE_CWD\"; and cd -- \"$OMG_REMOTE_CWD\" 2>/dev/null; set -e OMG_REMOTE_CWD; ",
+        ) catch return null;
     }
     fish_command.writer.print(
         "function __omg_report_pwd --on-event fish_prompt; set -l __omg_cwd (string escape --style=url \"$PWD\"); printf \"\\e]3008;start={s};type=remote;targethost={s};serverid=%s;cwd=%s\\a\\e]7;file://localhost%s\\a\" \"$OMG_SSH_SERVER_ID\" \"$__omg_cwd\" \"$__omg_cwd\"; end",
@@ -837,7 +845,7 @@ fn writeRemoteAgentWrappers(writer: *std.Io.Writer, style: RemoteQuoteStyle) !vo
             .fish => {
                 try writer.print("; if not functions -q {s}; function {s}; ", .{ name, name });
                 try writer.print(
-                    "printf '\\e]3008;start=omg-agent-{s}-%s;type=app;omg_agent={s};omg_scope=remote;omg_state=idle\\a' $fish_pid; ",
+                    "printf \"\\e]3008;start=omg-agent-{s}-%s;type=app;omg_agent={s};omg_scope=remote;omg_state=idle\\a\" $fish_pid; ",
                     .{ id, id },
                 );
                 try writer.print("command {s} $argv; set -l __omg_result $status; __omg_report_pwd; return $__omg_result; end; end", .{name});
@@ -874,7 +882,7 @@ fn writeRemoteAgentInvocation(
             .amp, .antigravity, .cline, .copilot, .crush, .cursor, .droid, .hermes, .kimi => return error.UnsupportedAgentResume,
         }
         switch (quote_style) {
-            .fish => try writeFishSingleQuoted(writer, session),
+            .fish => try writer.print("\"{s}\"", .{session}),
             .shell => try writeShellSingleQuoted(writer, session),
         }
     }
@@ -1192,12 +1200,25 @@ test remoteShellCommand {
     ).?;
     defer testing.allocator.free(cwd_command);
     try testing.expect(std.mem.indexOf(u8, cwd_command, "cd --") != null);
-    try testing.expect(std.mem.indexOf(u8, cwd_command, "project") != null);
+    try testing.expect(std.mem.indexOf(u8, cwd_command, "OMG_REMOTE_CWD") != null);
     try testing.expect(std.mem.indexOf(u8, cwd_command, "__omg_report_pwd; codex resume") != null);
     try testing.expect(std.mem.indexOf(u8, cwd_command, "019f-session_1") != null);
     try testing.expect(validAgentSessionID("019f-session_1"));
     try testing.expect(!validAgentSessionID("bad session"));
     try testing.expect(!validAgentSessionID("../escape"));
+
+    const full_cwd_command = remoteShellCommand(
+        testing.allocator,
+        "cloud",
+        "omg-ssh-cwd",
+        "/home/user/project's code",
+        null,
+        null,
+    ).?;
+    defer testing.allocator.free(full_cwd_command);
+    try testing.expect(std.mem.indexOf(u8, full_cwd_command, "OMG_REMOTE_CWD=") != null);
+    try testing.expect(std.mem.indexOf(u8, full_cwd_command, "project") != null);
+    try testing.expect(std.mem.indexOf(u8, full_cwd_command, "export OMG_REMOTE_CWD") != null);
 
     var fish_buffer: [128]u8 = undefined;
     var fish_writer: std.Io.Writer = .fixed(&fish_buffer);

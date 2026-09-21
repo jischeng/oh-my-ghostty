@@ -3,6 +3,7 @@ import SwiftUI
 struct GitCommitAISettingsView: View {
     @ObservedObject var settings: OhMyGhosttySettings
     @State private var showingAdd = false
+    @State private var showingPrompt = false
 
     var body: some View {
         Section(GitL10n.text("AI Commit Messages")) {
@@ -39,16 +40,12 @@ struct GitCommitAISettingsView: View {
                 }
             }
             Button(GitL10n.text("Add Agent Models…")) { showingAdd = true }
-            Text(GitL10n.text("Custom commit prompt"))
-            TextEditor(text: $settings.gitCommitAIPrompt)
-                .font(.system(.body, design: .monospaced)).frame(minHeight: 90, maxHeight: 150)
-                .accessibilityLabel(GitL10n.text("Custom commit prompt"))
-            Text(GitL10n.text("Specify language, format and commit style. Applied to all models, including fallbacks. Leave empty to follow recent commits."))
-                .font(.caption).foregroundStyle(.secondary)
-            Text(GitL10n.text("Uses your local CLI login. Staged changes and recent commit subjects may be sent to every configured model service on fallback, including changes read over SSH. Nothing is committed automatically."))
-                .font(.caption).foregroundStyle(.secondary)
-            Text(GitL10n.text("Supports current Claude Code, Pi, Codex and OpenCode CLIs. Codex/OpenCode reuse login but ignore user config for safety; custom providers and plugin-only models may be unavailable. OpenCode may retain local session history."))
-                .font(.caption).foregroundStyle(.secondary)
+            Button { showingPrompt = true } label: {
+                Label(GitL10n.text("Edit commit prompt…"), systemImage: "square.and.pencil")
+            }
+        }
+        .sheet(isPresented: $showingPrompt) {
+            GitCommitPromptEditor(prompt: settings.gitCommitAIPrompt) { settings.gitCommitAIPrompt = $0 }
         }
         .sheet(isPresented: $showingAdd) {
             GitCommitAIAddModels { agent, models in
@@ -64,6 +61,32 @@ struct GitCommitAISettingsView: View {
     }
 }
 
+private struct GitCommitPromptEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    @State var prompt: String
+    let save: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(GitL10n.text("Custom commit prompt")).font(.headline)
+            TextEditor(text: $prompt)
+                .font(.system(.body, design: .monospaced))
+                .padding(8)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(.secondary.opacity(0.3)))
+                .frame(height: 250)
+                .accessibilityLabel(GitL10n.text("Custom commit prompt"))
+            Text(GitL10n.text("Specify language, format and commit style. Applied to all models, including fallbacks. Leave empty to follow recent commits."))
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button(GitL10n.text("Cancel")) { dismiss() }.keyboardShortcut(.cancelAction)
+                Button(GitL10n.text("Save")) { save(prompt); dismiss() }.keyboardShortcut(.defaultAction)
+            }
+        }.padding(20).frame(width: 540)
+    }
+}
+
 private struct GitCommitAIAddModels: View {
     let add: (GitCommitAgent, [String]) -> Void
     @Environment(\.dismiss) private var dismiss
@@ -72,6 +95,7 @@ private struct GitCommitAIAddModels: View {
     @State private var models: [String] = []
     @State private var selected: Set<String> = []
     @State private var loading = false
+    @State private var loadingID: UUID?
     @State private var error: String?
     @State private var reloadID = UUID()
 
@@ -102,9 +126,13 @@ private struct GitCommitAIAddModels: View {
             Text(GitL10n.text("Model IDs (one per line)"))
             TextEditor(text: $manualModels).font(.system(.body, design: .monospaced))
                 .frame(height: 90).border(Color.secondary.opacity(0.3))
-            Text(agent.canDiscoverModels ? GitL10n.text("Use provider/model IDs. Select multiple models above or enter them here.")
-                 : agent == .claude ? GitL10n.text("Enter CLI model IDs or aliases, such as sonnet, opus or haiku. One line adds one priority entry.")
-                 : GitL10n.text("Enter Codex model IDs, one per line. Use IDs supported by your current CLI login."))
+            Text(GitL10n.text("ACP adapters: pi-acp, claude-agent-acp, codex-acp; OpenCode uses opencode acp. Install and log in locally before loading models."))
+                .font(.caption).foregroundStyle(.secondary)
+            Text(GitL10n.text("Select models advertised by the ACP session. Previously saved CLI IDs may need to be added again."))
+                .font(.caption).foregroundStyle(.secondary)
+            Text(GitL10n.text("Uses your local CLI login. Staged changes and recent commit subjects may be sent to every configured model service on fallback, including changes read over SSH. Nothing is committed automatically."))
+                .font(.caption).foregroundStyle(.secondary)
+            Text(GitL10n.text("All agents connect over local ACP. Remote hosts do not need an agent. Sessions are stored outside repositories and expire after 30 days."))
                 .font(.caption).foregroundStyle(.secondary)
             if let error { Text(error).font(.caption).foregroundStyle(.red) }
             HStack {
@@ -121,9 +149,11 @@ private struct GitCommitAIAddModels: View {
         }
         .task(id: reloadID) {
             let requestedAgent = agent
-            guard requestedAgent.canDiscoverModels else { loading = false; return }
+            let requestID = reloadID
+            loadingID = requestID
+            error = nil
             loading = true
-            defer { loading = false }
+            defer { if loadingID == requestID { loading = false } }
             do {
                 let result = try await GitCommitAIService.models(agent: requestedAgent)
                 guard !Task.isCancelled, agent == requestedAgent else { return }
@@ -131,7 +161,7 @@ private struct GitCommitAIAddModels: View {
                 if result.isEmpty { error = GitL10n.text("No models found. Enter model IDs manually or check CLI login.") }
             } catch {
                 guard !Task.isCancelled else { return }
-                self.error = GitL10n.text("Could not load models. Check the CLI or enter model IDs manually.")
+                self.error = error.localizedDescription
             }
         }
     }

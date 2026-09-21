@@ -57,12 +57,12 @@ Integration manages CLI/status integration installation and notifications; Plugi
 continues to manage plugin packages.
 
 Under **Git > AI Commit Messages**, add a local Claude Code, Pi, Codex or OpenCode Agent and one
-or more model IDs at a time. Pi and OpenCode can load their available model lists for multi-select;
-manual IDs are also supported. Drag entries (or use their arrow buttons) to change
+or more model IDs at a time. All four load available models from ACP sessions for multi-select;
+manual IDs must also match the adapter's advertised catalog. Drag entries (or use their arrow buttons) to change
 priority. The first entry is the main model and every entry below it is a fallback.
 The list is saved as `git.commitAI.routes`, an array of `{id, agent, model}` objects
 with UUID identities. No API keys are stored in OMG settings.
-The **Custom commit prompt** field (`git.commitAI.prompt`) controls language, format
+The **Edit commit prompt** button opens a Save/Cancel editor (`git.commitAI.prompt`) for language, format
 and style for all models and fallbacks. Leave it blank to follow recent commits.
 For example: “Use Conventional Commits, an English subject under 72 characters,
 and Chinese body bullets.” Success/model notices appear above the commit editor
@@ -74,11 +74,22 @@ for an SSH repository. Local CLI does not mean local inference: data may be sent
 to any configured model service during fallback. Existing drafts require replacement
 confirmation, and a draft edited while generating is never overwritten. Cancel stops
 further attempts. Patches exceeding 200 KB must be split rather than silently truncated.
-Use a current CLI version; Pi extensions and tools are disabled, so extension-only
-model providers are unavailable in this feature. Codex runs ephemeral/read-only
-and ignores user config; OpenCode uses an isolated deny-all configuration while
-retaining its existing login data. Custom providers relying on ignored config may
-be unavailable. OpenCode may save a local session; auto-sharing is disabled.
+Install local ACP adapters `pi-acp`, `@agentclientprotocol/claude-agent-acp` and
+`@agentclientprotocol/codex-acp` as needed; OpenCode provides `opencode acp` itself.
+There is no one-shot CLI fallback. An SSH host/new pod does not need any Agent:
+only Git reads run remotely, and model calls always use the Mac's ACP adapter.
+The model and privacy notes live inside Add Models; prompt guidance lives inside
+the prompt editor. There is no dedicated undo-generated-message control.
+
+Session homes and records are under OMG's channel-specific Application Support
+`CommitAI/Sessions`, with private directories and 30-day creation-based expiry.
+Native auth/provider files are linked to reuse local login; global Agent history
+is never swept. External plugins or explicit absolute paths in user config are
+outside this cleanup boundary. Cleanup runs on use and while the service is active.
+Live contexts are isolated by repository/SSH identity, agent, model and prompt;
+reuse stops after five minutes idle, eight turns or 400 KB of input. Reuse can help
+provider caching but does not guarantee token savings. Pi extensions/tools remain
+disabled, so extension-only providers are not included.
 
 ## Appearance synchronization
 

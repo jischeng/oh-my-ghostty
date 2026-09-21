@@ -1,6 +1,6 @@
 import Foundation
 
-/// Non-interactive adapters with explicit restrictions; never run in the repository.
+/// All four agents use the same ACP transport; adapters must already be installed.
 enum GitCommitAgent: String, Codable, CaseIterable, Identifiable, Sendable {
     case claude, pi, codex, opencode
     var id: String { rawValue }
@@ -12,34 +12,13 @@ enum GitCommitAgent: String, Codable, CaseIterable, Identifiable, Sendable {
         case .opencode: "OpenCode"
         }
     }
-    var canDiscoverModels: Bool { self == .pi || self == .opencode }
-
-    var isolationArguments: [String] {
+    var canDiscoverModels: Bool { true }
+    var acpCommand: [String] {
         switch self {
-        case .claude:
-            ["--bare", "--tools", "", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}",
-             "--no-session-persistence"]
-        case .pi:
-            ["--no-tools", "--no-extensions", "--no-skills", "--no-prompt-templates",
-             "--no-themes", "--no-context-files", "--no-session", "--no-approve"]
-        case .codex:
-            ["exec", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check",
-             "--sandbox", "read-only", "-c", "approval_policy=\"never\"",
-             "-c", "features.shell_tool=false", "-c", "features.unified_exec=false",
-             "-c", "features.apply_patch_freeform=false", "-c", "features.multi_agent=false",
-             "-c", "features.apps=false", "-c", "features.skills=false",
-             "-c", "web_search=\"disabled\"", "-c", "project_doc_max_bytes=0"]
-        case .opencode:
-            ["run", "--agent", "omg-commit", "--format", "json", "--title", "OMG commit message"]
-        }
-    }
-
-    func arguments(model: String) -> [String] {
-        switch self {
-        case .claude: isolationArguments + ["--print", "--output-format", "json", "--model", model]
-        case .pi: isolationArguments + ["--print", "--mode", "json", "--model", model]
-        case .codex: isolationArguments + ["--json", "--color", "never", "--model", model, "-"]
-        case .opencode: isolationArguments + ["--model", model]
+        case .claude: ["claude-agent-acp"]
+        case .pi: ["pi-acp"]
+        case .codex: ["codex-acp"]
+        case .opencode: ["opencode", "acp"]
         }
     }
 }
@@ -66,7 +45,6 @@ struct GitCommitAIRoute: Codable, Equatable, Identifiable, Sendable {
         guard let value, JSONSerialization.isValidJSONObject(value),
               let data = try? JSONSerialization.data(withJSONObject: value),
               let routes = try? JSONDecoder().decode([Self].self, from: data) else { return [] }
-        // Normalize hand-edited settings and regenerate duplicate identities.
         return routes.reduce(into: []) { result, route in
             let added = adding(agent: route.agent, models: [route.model], to: result)
             if added.count > result.count {

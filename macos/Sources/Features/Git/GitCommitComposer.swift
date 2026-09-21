@@ -17,8 +17,6 @@ struct GitCommitComposer: View {
     @State private var noticeID = UUID()
     @State private var noticeExpires = false
     @State private var confirmReplace = false
-    @State private var previousDraft: String?
-    @State private var generatedDraft: String?
     @State private var editorHeight: CGFloat = 44
     @State private var focused = false
 
@@ -60,13 +58,6 @@ struct GitCommitComposer: View {
                     .controlSize(.small)
                     .disabled(generationID != nil || isBusy || !canCommit || stagedCount == 0 || message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
-            if let previousDraft, generatedDraft == message {
-                Button(GitL10n.text("Undo generated message")) {
-                    message = previousDraft
-                    self.previousDraft = nil
-                    generatedDraft = nil
-                }.buttonStyle(.link).font(.caption)
-            }
         }
         .confirmationDialog(GitL10n.text("Replace the existing commit message?"), isPresented: $confirmReplace) {
             Button(GitL10n.text("Generate and Replace")) { startGeneration() }
@@ -98,7 +89,6 @@ struct GitCommitComposer: View {
         guard let repository, generationID == nil, !isBusy, !isUpdatingIndex, canCommit, stagedCount > 0 else { return }
         let id = UUID()
         let revision = draftRevision
-        let original = message
         let routes = settings.gitCommitAIRoutes
         generationID = id
         notice = nil
@@ -116,8 +106,6 @@ struct GitCommitComposer: View {
                     notice = GitL10n.text("Your draft changed during generation. It was not replaced; generate again.")
                     return
                 }
-                previousDraft = original
-                generatedDraft = result.message
                 message = result.message
                 notice = (result.attempt > 1 ? GitL10n.text("Generated using fallback: ") : GitL10n.text("Generated using: ")) + result.route.title
                 noticeExpires = true

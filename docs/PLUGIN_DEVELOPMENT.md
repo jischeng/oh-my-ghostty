@@ -40,36 +40,62 @@ Agent Integration. Plugin installation remains under Plugins.
 
 The built-in Git changes composer has a single Generate button before Commit.
 `git.commitAI.routes` stores an ordered array of `{id, agent, model}` entries;
-`id` is a UUID, `agent` is `claude`, `pi`, `codex` or `opencode`, and `model` is a CLI model
-ID (Pi and OpenCode accept `provider/model`). Users can batch-add several models for one
+`id` is a UUID, `agent` is `claude`, `pi`, `codex` or `opencode`, and `model` is an
+opaque model ID advertised by that agent's ACP session. Previously configured CLI
+IDs may need re-selection if the adapter uses different IDs. Users can batch-add several models for one
 Agent, remove entries, and drag or use arrow buttons to reorder them. Duplicates
 are ignored. The first successful route wins; each failed route is attempted once
 with a 90-second deadline. Cancellation never advances to the next route.
 `git.commitAI.prompt` is an optional user-defined language/format/style instruction
-shared by every route, taking precedence over recent subjects. Source patches remain
-untrusted data. Success/model notices appear above the message editor and expire
+shared by every route, taking precedence over recent subjects. It is edited in a
+Save/Cancel sheet with a local draft, not an inline autosaving editor. Prompt help
+lives in that sheet; model installation/privacy help lives in the Add Models sheet.
+Source patches remain untrusted data. Success/model notices appear above the message editor and expire
 after five seconds; failures remain dismissible for diagnosis.
 
 Generation reads only the staged patch and up to five recent subjects through
 the repository executor, including SSH when applicable. Inference always runs
-locally using the user's CLI authentication in a temporary non-repository cwd.
-Claude uses bare mode, no tools/MCP, and no session persistence. Pi disables
-tools, extensions, skills, templates, themes, context files and session persistence.
-Extension-only Pi providers are intentionally unavailable. Codex uses ephemeral
-`exec --json`, read-only sandboxing, no approval, disabled shell/exec/app/skill/
-multi-agent/web-search features and ignores user config/rules; its existing login
-is retained. This requires a current CLI supporting these flags (older CLIs fail
-and move to the next configured route). OpenCode uses `run --format json` with a
-dedicated deny-all agent, isolated config directory, disabled default plugins and
-sharing, but retains the normal data/auth directory. It may retain local sessions.
-Custom providers requiring ignored user config may be unavailable in both adapters.
-The installed CLIs, shell startup and administrator-managed policies remain trusted;
-these restrictions are not a general OS security boundary or a plugin capability.
-Pi discovery uses tool/extension-disabled `--list-models`; OpenCode uses `models`
-under the same restricted configuration. Claude and Codex accept explicit model
-IDs/aliases rather than promising a stale hard-coded model catalog. Parsers require
-successful final responses (`turn.completed` for Codex, `step_finish/stop` for
-OpenCode) and reject error events even if partial text was emitted.
+locally over ACP JSON-RPC 2.0 (LF-delimited stdio). All four adapters follow the same
+initialize/session-new/model-select/session-prompt lifecycle. Claude requires
+`claude-agent-acp`, Pi requires `pi-acp`, Codex requires `codex-acp`, and OpenCode
+uses `opencode acp`. OMG does not auto-install adapters or fall back to non-ACP CLI
+commands. Model discovery supports ACP category=model config options, including
+groups, and the older availableModels/set-model variant. Missing adapters, login,
+unsupported models and protocol errors fail the route; no default-model substitution
+is performed. The client advertises no filesystem or terminal capabilities, rejects
+all permission requests, excludes thinking/tool output from the draft and accepts
+only end_turn responses. Agent-owned built-in tools are not a client capability;
+installed adapters, shell startup and user/admin configuration remain trusted.
+Pi runs through a wrapper that disables tools/extensions/context files. Codex starts
+read-only with shell/exec/multi-agent features disabled. OpenCode receives deny-all
+permissions and reuses auth without importing user config/plugins (avoids fresh-home
+plugin dependency installation on each connection). OpenCode custom providers defined
+only in user config are therefore not currently included. Claude permissions are rejected at the ACP client boundary.
+
+Remote repository reads use the existing SSH Git executor; the ACP process always
+runs on the Mac. No remote Agent installation, ACP server, npm install or inference
+command is issued to the SSH host, so a new host/pod needs only a usable Git/SSH
+transport. There is currently no automatic remote-ACP preference or remote fallback.
+
+Sessions and generated-message records live in the channel-specific application
+support directory `CommitAI/Sessions/<UUID>`, never the repository. Agent home,
+XDG data/config/cache/state and native session directories are redirected there;
+known credential/provider configuration files are linked from the original home.
+OMG never deletes the user's global Agent history. User configurations with explicit
+absolute log/session paths and external plugins remain outside this retention boundary.
+Owned UUID directories expire 30 days after creation; cleanup runs on use and during
+active-service maintenance. No raw ACP/stderr logs or patch copies are written by
+OMG. Native Agent transcripts may contain patches and are covered by this directory
+policy unless user configuration redirects them elsewhere.
+
+Live sessions are keyed by a hash of repository identity (including SSH endpoint),
+Agent, model and custom prompt. Up to four idle/live entries are cached; busy entries
+are not shared between concurrent requests. Sessions expire after five minutes idle,
+eight turns or 400 KB of input. Each request sends a fresh staged snapshot and says
+that earlier snapshots are obsolete. This preserves an opportunity for provider
+prefix caching without assuming ACP guarantees token caching or reporting invented
+cache savings. Restarting the app starts new ACP sessions rather than replaying old
+commit context. Failed/cancelled sessions are closed and removed from the live cache.
 
 The settings disclosure covers sending staged source (including SSH source) to
 all configured model services during fallback. Patches over 200,000 bytes are
@@ -79,8 +105,8 @@ errors, prompts and credentials are not exposed in fallback diagnostics. Reposit
 read errors do not trigger inference fallback. Index entries and patch are checked
 again after generation; a changed staging snapshot is rejected. Changing repository,
 leaving the composer, or cancelling discards the result. A draft edited during
-generation is not overwritten; replacing an existing draft requires confirmation,
-and a generated replacement can be undone. Generation does not stage, commit,
+generation is not overwritten; replacing an existing draft requires confirmation.
+There is no dedicated undo-generation control. Generation does not stage, commit,
 resume an interactive Agent, or send text to a terminal pane.
 
 ## Terminal title updates

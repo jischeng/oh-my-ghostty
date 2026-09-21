@@ -14,7 +14,9 @@ enum GitIntegrationDialog {
             // invoking terminal window (its appearance/background track the
             // configured theme/override), falling back to the live theme.
             panel.appearance = window?.appearance ?? NSApp.effectiveAppearance
-            panel.backgroundColor = (window as? TerminalWindow)?.backgroundColor ?? OMGThemeBackground.windowBackground()
+            // Opaque quantized theme background — never the terminal window's
+            // near-transparent blur backing.
+            panel.backgroundColor = OMGThemeBackground.windowBackground()
             var finished = false
             let finish: (GitIntegrationPlan?) -> Void = { plan in
                 guard !finished else { return }

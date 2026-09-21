@@ -158,10 +158,20 @@ pushes via `--follow-tags` (push, push-to and PR/MR source pushes).
 
 Operation failures use the same floating bubble style as the fetch success notice
 (red tint, icon, dismiss) and auto-dismiss after six seconds. The Git operation dialogs
-and the settings window follow OMG's appearance: the integration panel inherits the
-invoking terminal window's appearance, and the settings window follows
-`NSApp.effectiveAppearance` when no explicit light/dark/system override is set, so it
-tracks OMG's theme (including automatic switches) while open.
+and the settings window follow OMG's appearance and theme color: the settings window
+follows `NSApp.effectiveAppearance` (plus explicit light/dark/system override), and
+settings/dialogs paint the OPAQUE Display-P3-quantized theme background from the
+Ghostty config (e.g. Atom One Dark), so they render the theme color rather than the
+default aqua. That color is derived from the config background, never from
+`TerminalWindow.backgroundColor`, which on translucent windows is a nearly invisible
+white blur backing (using it made settings/dialogs transparent and theme-less).
+
+Terminal chrome (tab sidebar, Inspector, QuickInput) matches the Zig surface
+bit-for-bit: opaque windows paint the P3-quantized theme background; translucent
+windows paint the P3-quantized color WITH the configured alpha so both stacks
+composite over the same blurred backing identically. Using the raw sRGB color for
+translucent chrome drifted by one code value (e.g. 73,76,81 vs 73,75,80). Chrome
+colors follow the focused surface's background (per-surface/OSC dynamic colors).
 
 ## Terminal title updates
 

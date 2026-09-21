@@ -176,7 +176,7 @@ struct SettingsView: View {
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
             .frame(width: 190)
-            .background(Color(OMGThemeBackground.windowBackground()).opacity(0.5))
+            .background(Color(OMGThemeBackground.sidebarBackground()))
 
             Divider()
 

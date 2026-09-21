@@ -11,7 +11,7 @@ enum GitTagDialog {
             panel.title = GitL10n.text("New Tag…")
             panel.isReleasedWhenClosed = false
             panel.appearance = window?.appearance ?? NSApp.effectiveAppearance
-            panel.backgroundColor = (window as? TerminalWindow)?.backgroundColor ?? OMGThemeBackground.windowBackground()
+            panel.backgroundColor = OMGThemeBackground.windowBackground()
             var finished = false
             let finish: (GitMutation?) -> Void = { mutation in
                 guard !finished else { return }

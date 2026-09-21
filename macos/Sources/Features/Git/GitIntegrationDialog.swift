@@ -10,9 +10,11 @@ enum GitIntegrationDialog {
                                 styleMask: [.titled], backing: .buffered, defer: false)
             panel.title = kind.title
             panel.isReleasedWhenClosed = false
-            // Follow OMG's appearance: inherit from the invoking terminal window
-            // (its appearance tracks the configured theme/override).
+            // Follow OMG's appearance and theme background: inherit from the
+            // invoking terminal window (its appearance/background track the
+            // configured theme/override), falling back to the live theme.
             panel.appearance = window?.appearance ?? NSApp.effectiveAppearance
+            panel.backgroundColor = (window as? TerminalWindow)?.backgroundColor ?? OMGThemeBackground.windowBackground()
             var finished = false
             let finish: (GitIntegrationPlan?) -> Void = { plan in
                 guard !finished else { return }

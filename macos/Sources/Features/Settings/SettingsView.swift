@@ -116,6 +116,9 @@ final class OhMyGhosttySettingsWindowController: NSWindowController {
             // settings window tracks OMG's theme, including automatic switches.
             appearance = NSApp.effectiveAppearance
         }
+        // Follow the OMG/terminal theme background color (e.g. Atom One Dark),
+        // not the default aqua/darkAqua window background.
+        window.backgroundColor = OMGThemeBackground.windowBackground()
         if window.appearance?.name != appearance?.name {
             window.appearance = appearance
         }
@@ -173,7 +176,7 @@ struct SettingsView: View {
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
             .frame(width: 190)
-            .background(Color(nsColor: .controlBackgroundColor))
+            .background(Color(OMGThemeBackground.windowBackground()).opacity(0.55))
 
             Divider()
 

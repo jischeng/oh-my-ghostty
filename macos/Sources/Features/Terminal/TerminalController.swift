@@ -3181,12 +3181,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         windowIsOpaque: Bool,
         colorspaceIsDisplayP3: Bool = false
     ) -> Color {
-        if windowIsOpaque || opacity >= 1 {
-            return TerminalRenderColorQuantizer
-                .matchingRenderedColor(color, colorspaceIsDisplayP3: colorspaceIsDisplayP3)
-                .opacity(1)
-        }
-        return color.opacity(max(0, min(1, opacity)))
+        OMGThemeBackground.matchingChrome(
+            color: color,
+            opacity: opacity,
+            windowIsOpaque: windowIsOpaque,
+            colorspaceIsDisplayP3: colorspaceIsDisplayP3
+        )
     }
 
     /// Adjusts the given frame for the configured window position.

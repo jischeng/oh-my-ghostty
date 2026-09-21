@@ -22,6 +22,43 @@ struct GitIntegrationTests {
         return (root, service)
     }
 
+    @Test func largeIntegrationContextFallsBackWithoutChangingRepository() async throws {
+        let (root, service) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = try await service.run(["switch", "feature"])
+        let large = String(repeating: "large change with enough bytes to exceed the patch budget\n", count: 8_000)
+        try Data(large.utf8).write(to: root.appendingPathComponent("large.txt"))
+        _ = try await service.run(["add", "large.txt"])
+        _ = try await service.run(["commit", "-m", "large change"])
+        _ = try await service.run(["switch", "main"])
+        let source = try await service.resolve("refs/heads/feature")
+        for kind in [GitIntegrationKind.merge, .review, .cherryPick] {
+            let plan = try await service.prepare(kind: kind,
+                source: kind == .cherryPick ? source : "refs/heads/feature",
+                target: "refs/heads/main", message: "", mainline: nil)
+            let context = try await service.context(plan)
+            #expect(context.contains("full patch exceeded"))
+            #expect(context.contains("large.txt"))
+            #expect(context.utf8.count < 33_000)
+        }
+        #expect(try await service.run(["symbolic-ref", "HEAD"]) == "refs/heads/main")
+        #expect(try await service.run(["status", "--porcelain"]).isEmpty)
+    }
+
+    @Test func smallContextKeepsPatchAndGitErrorsPropagate() async throws {
+        let (root, service) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let plan = try await service.prepare(kind: .merge, source: "refs/heads/feature",
+                                             target: "refs/heads/main", message: "", mainline: nil)
+        let context = try await service.context(plan)
+        #expect(context.contains("+feature"))
+        #expect(!context.contains("full patch exceeded"))
+        let invalid = GitIntegrationPlan(kind: .merge, source: plan.source, target: plan.target,
+            sourceSHA: String(repeating: "0", count: 40), targetSHA: plan.targetSHA,
+            originalBranch: plan.originalBranch, message: "")
+        await #expect(throws: (any Error).self) { try await service.context(invalid) }
+    }
+
     @Test func mergeUsesChosenDirectionAndMessage() async throws {
         let (root, service) = try await fixture()
         defer { try? FileManager.default.removeItem(at: root) }

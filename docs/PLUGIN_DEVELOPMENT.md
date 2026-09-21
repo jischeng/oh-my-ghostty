@@ -123,7 +123,9 @@ link to the first parent. This is URL construction, not a remote existence check
 unpushed commits may return a host 404 and unknown non-GitLab hosts may need future
 provider configuration.
 
-Branch toolbar/context menus expose Merge and Rebase; commit Cherry-pick now opens
+The upper operation menu and branch context menus expose Merge and Rebase; the
+branch search row only retains New Worktree, without duplicate Merge/Rebase icons.
+Commit Cherry-pick opens
 a target-branch picker (merge commits also require a mainline parent). Merge means
 source into local target; Rebase means replay the selected local target onto the
 base/source. The target stays checked out, including after a failure. Plans capture
@@ -134,7 +136,11 @@ fast-forward is possible; Cherry-pick applies without committing then commits th
 editable message. Conflict/sequencer state remains for terminal resolution/abort.
 Rebase is non-interactive and preserves original messages; it has no new message
 field to generate. Merge and Cherry-pick support ACP generation from the exact
-operation diff, with draft/ref-change protection and the configured style.
+operation diff, with draft/ref-change protection and the configured style. If the
+patch exceeds the 200,000-byte context budget, generation retries with Git's
+bounded diffstat (up to 100 file entries), then shortstat if necessary. The context
+explicitly identifies omitted patch content; other Git errors still propagate.
+This applies to Merge, Cherry-pick and PR/MR generation on local and SSH repositories.
 
 The pull/push menu adds **Merge into…**. Users select local source/target branches and
 edit a title (first line) plus description, optionally generated via ACP from the

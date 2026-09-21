@@ -390,12 +390,6 @@ struct InspectorGitView: View {
             GitCollectionToolbar(query: activeQuery, mode: $changesMode, placeholder: searchPlaceholder,
                                  controller: activeController, cancel: { activeQuery.wrappedValue = "" })
             if content.activeTab == .branches {
-                Button { perform(.gitAction(.integration(.merge, nil))) } label: { Image(systemName: "arrow.triangle.merge") }
-                    .buttonStyle(.borderless).help(GitL10n.text("Merge…"))
-                    .disabled(content.operation != nil || content.workingTree.branchesError != nil)
-                Button { perform(.gitAction(.integration(.rebase, nil))) } label: { Image(systemName: "arrow.triangle.branch") }
-                    .buttonStyle(.borderless).help(GitL10n.text("Rebase…"))
-                    .disabled(content.operation != nil || content.workingTree.branchesError != nil)
                 Button { perform(.gitAction(.createWorktree(nil))) } label: { Image(systemName: "plus") }
                     .buttonStyle(.borderless).help(GitL10n.text("New Worktree"))
                     .disabled(content.operation != nil || content.workingTree.worktreesError != nil)

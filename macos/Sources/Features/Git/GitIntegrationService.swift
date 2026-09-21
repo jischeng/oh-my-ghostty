@@ -52,15 +52,38 @@ struct GitIntegrationService: Sendable {
     }
 
     func context(_ plan: GitIntegrationPlan) async throws -> String {
+        let arguments: [String]
         if plan.kind == .cherryPick {
             let parents = try await run(["rev-list", "--parents", "-n", "1", plan.sourceSHA]).split(separator: " ").dropFirst()
             if let mainline = plan.mainline {
                 guard mainline > 0, mainline <= parents.count else { throw GitCommitAIError("Choose a valid merge parent.") }
-                return try await run(["diff", "--no-ext-diff", "--no-textconv", String(Array(parents)[mainline - 1]), plan.sourceSHA, "--"])
+                arguments = ["diff", String(Array(parents)[mainline - 1]), plan.sourceSHA]
+            } else {
+                arguments = ["show", "--format=", plan.sourceSHA]
             }
-            return try await run(["show", "--format=full", "--no-ext-diff", "--no-textconv", plan.sourceSHA, "--"])
+        } else {
+            arguments = ["diff", plan.targetSHA + "..." + plan.sourceSHA]
         }
-        return try await run(["diff", "--no-ext-diff", "--no-textconv", plan.targetSHA + "..." + plan.sourceSHA, "--"])
+        let options = ["--no-ext-diff", "--no-textconv", "--no-color", "--submodule=short"]
+        do {
+            return try await run(arguments + options + ["--patch", "--unified=3", "--"])
+        } catch GitExecutionError.outputLimitExceeded {
+            // Keep the executor's memory/output guard for local and SSH reads.
+            // Ask Git itself for bounded summary output instead of retrying an
+            // arbitrarily large patch or silently presenting a partial patch.
+            let summary: String
+            do {
+                summary = try await run(arguments + options + ["--stat=120,80,100", "--"], limit: 32_000)
+            } catch GitExecutionError.outputLimitExceeded {
+                summary = try await run(arguments + options + ["--shortstat", "--"], limit: 8_000)
+            }
+            return """
+            The full patch exceeded the context budget and is omitted. This is a Git diff summary only;
+            file entries may be abbreviated or omitted. Describe only what this summary supports.
+            Do not infer implementation details or tests from file names or line counts.
+            \(summary)
+            """
+        }
     }
 
     func execute(_ plan: GitIntegrationPlan) async throws {

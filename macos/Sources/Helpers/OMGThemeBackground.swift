@@ -69,8 +69,11 @@ private struct OMGThemedSurface: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .foregroundStyle(Color(palette.foreground))
-            .tint(Color(palette.foreground))
+            // Native semantic text keeps primary/secondary/disabled contrast.
+            // A terminal foreground used as a hierarchical style compounds
+            // dimming, and using it as tint makes enabled controls look disabled.
+            .foregroundStyle(.primary)
+            .tint(Color.accentColor)
             .background(Color(palette.background))
             .preferredColorScheme(palette.colorScheme)
             .onReceive(NotificationCenter.default.publisher(for: .ghosttyConfigDidChange)) { notification in
@@ -145,7 +148,7 @@ enum OMGThemeDialog {
 
     private static func themeControls(_ view: NSView, palette: OMGThemePalette) {
         if let field = view as? NSTextField {
-            field.textColor = palette.foreground
+            field.textColor = .labelColor
             if field.drawsBackground { field.backgroundColor = palette.sidebar }
         }
         view.subviews.forEach { themeControls($0, palette: palette) }

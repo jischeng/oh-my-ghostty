@@ -1525,6 +1525,7 @@ struct AgentContextSignalReducer: Sendable {
     private var activities: [Record] = []
 
     var trackedContextCount: Int { activities.count }
+    var currentContextID: String? { currentRecord?.id }
     var hasRemoteActivity: Bool { activities.contains { $0.scope == .remote } }
 
     var validationIdentity: AgentLivenessIdentity? {

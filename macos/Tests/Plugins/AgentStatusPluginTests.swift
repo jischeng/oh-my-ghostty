@@ -544,6 +544,41 @@ struct AgentStatusPluginTests {
         #expect(done.state == .done)
     }
 
+    @Test func newlyDetectedAgentSupersedesTerminatedPreviousAgent() throws {
+        var reducer = AgentContextSignalReducer()
+        _ = reducer.consume(signal(
+            agent: .pi,
+            state: "working",
+            instance: 100,
+            liveness: "pgid"
+        ))
+        guard case .set(let interrupted) = reducer.consume(.init(
+            action: .end,
+            id: "omg-agent-pi-100",
+            metadata: "type=app;omg_agent=pi;omg_scope=local"
+        )) else {
+            Issue.record("Expected terminated Pi activity")
+            return
+        }
+        #expect(interrupted.state == .error)
+        #expect(reducer.currentContextID == "omg-agent-pi-100")
+
+        let nextID = "omg-agent-antigravity-200"
+        #expect(reducer.currentContextID != nextID)
+        guard case .set(let detected) = reducer.consume(signal(
+            agent: .antigravity,
+            state: "idle",
+            instance: 200,
+            liveness: "pgid"
+        )) else {
+            Issue.record("Expected Antigravity to replace terminated Pi")
+            return
+        }
+        #expect(detected.source == "antigravity")
+        #expect(detected.state == .idle)
+        #expect(reducer.currentContextID == nextID)
+    }
+
     @Test func staleSameAgentEndDoesNotClearNewInstance() throws {
         var reducer = AgentContextSignalReducer()
         _ = reducer.consume(signal(

@@ -1269,7 +1269,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             processGroupID: processGroupID,
             launchedAt: launchedAt
         )
-        guard agentActivities[surfaceID] == nil else { return }
+        // A previous Agent can terminate between foreground samples and leave
+        // an error activity behind. Only suppress the synthesized idle event
+        // when this exact context is already current; a newly detected process
+        // group must supersede any older Agent context.
+        guard agentReducers[surfaceID]?.currentContextID != id else { return }
         updateAgentActivity(.init(
             action: .start,
             id: id,

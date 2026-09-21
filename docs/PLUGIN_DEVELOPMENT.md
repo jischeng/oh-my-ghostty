@@ -602,8 +602,11 @@ retains the historical meaning based on the manifest hook kind. Because some
 agent versions defer or omit `SessionStart`, the macOS host samples Ghostty's
 foreground process-group PID once per second; only when that PID changes does a
 utility-queue `ps` lookup apply manifest process markers and synthesize `idle`
-for an enabled integration. Local startup then gets a four-second foreground
-handoff grace, after which validation keeps the identity while its declared PID
+for an enabled integration. A newly detected process-group context supersedes
+an older terminated Agent activity, including an interruption retained between
+samples; only an already-current matching context suppresses synthesis.
+Local startup then gets a four-second foreground handoff grace, after which
+validation keeps the identity while its declared PID
 or process group exists and clears it when that identity exits. A Plugin PID is
 not compared directly with the foreground process-group ID, so wrappers and
 child tool execution cannot create a false `error` while the Agent is alive. In

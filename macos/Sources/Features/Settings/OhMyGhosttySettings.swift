@@ -368,6 +368,30 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Shortcut that toggles the Agent Quick Input composer.",
             requiresNewWindow: false, category: "keyboard"),
         .init(
+            id: "keyboard.inspectorPanel1", type: .string,
+            defaultValue: OMGKeyboardShortcut.defaultInspectorPanel(slot: 1).storageValue,
+            allowedValues: nil, minimum: nil, maximum: nil,
+            description: "Shortcut to switch to or hide right sidebar panel 1.",
+            requiresNewWindow: false, category: "keyboard"),
+        .init(
+            id: "keyboard.inspectorPanel2", type: .string,
+            defaultValue: OMGKeyboardShortcut.defaultInspectorPanel(slot: 2).storageValue,
+            allowedValues: nil, minimum: nil, maximum: nil,
+            description: "Shortcut to switch to or hide right sidebar panel 2.",
+            requiresNewWindow: false, category: "keyboard"),
+        .init(
+            id: "keyboard.inspectorPanel3", type: .string,
+            defaultValue: OMGKeyboardShortcut.defaultInspectorPanel(slot: 3).storageValue,
+            allowedValues: nil, minimum: nil, maximum: nil,
+            description: "Shortcut to switch to or hide right sidebar panel 3.",
+            requiresNewWindow: false, category: "keyboard"),
+        .init(
+            id: "keyboard.inspectorPanel4", type: .string,
+            defaultValue: OMGKeyboardShortcut.defaultInspectorPanel(slot: 4).storageValue,
+            allowedValues: nil, minimum: nil, maximum: nil,
+            description: "Shortcut to switch to or hide right sidebar panel 4.",
+            requiresNewWindow: false, category: "keyboard"),
+        .init(
             id: "keyboard.quickInputHeight", type: .number, defaultValue: "252",
             allowedValues: nil, minimum: 140, maximum: 480,
             description: "Last committed Agent Quick Input dock height in points.",
@@ -600,6 +624,70 @@ final class OhMyGhosttySettings: ObservableObject {
             } else {
                 persist("keyboard.quickInput", normalized)
             }
+        }
+    }
+    @Published var inspectorPanel1Shortcut = OMGKeyboardShortcut.defaultInspectorPanel(slot: 1).storageValue {
+        didSet {
+            let normalized = OMGKeyboardShortcut(storageValue: inspectorPanel1Shortcut)?.storageValue
+                ?? OMGKeyboardShortcut.defaultInspectorPanel(slot: 1).storageValue
+            if inspectorPanel1Shortcut != normalized {
+                inspectorPanel1Shortcut = normalized
+            } else {
+                persist("keyboard.inspectorPanel1", normalized)
+            }
+        }
+    }
+    @Published var inspectorPanel2Shortcut = OMGKeyboardShortcut.defaultInspectorPanel(slot: 2).storageValue {
+        didSet {
+            let normalized = OMGKeyboardShortcut(storageValue: inspectorPanel2Shortcut)?.storageValue
+                ?? OMGKeyboardShortcut.defaultInspectorPanel(slot: 2).storageValue
+            if inspectorPanel2Shortcut != normalized {
+                inspectorPanel2Shortcut = normalized
+            } else {
+                persist("keyboard.inspectorPanel2", normalized)
+            }
+        }
+    }
+    @Published var inspectorPanel3Shortcut = OMGKeyboardShortcut.defaultInspectorPanel(slot: 3).storageValue {
+        didSet {
+            let normalized = OMGKeyboardShortcut(storageValue: inspectorPanel3Shortcut)?.storageValue
+                ?? OMGKeyboardShortcut.defaultInspectorPanel(slot: 3).storageValue
+            if inspectorPanel3Shortcut != normalized {
+                inspectorPanel3Shortcut = normalized
+            } else {
+                persist("keyboard.inspectorPanel3", normalized)
+            }
+        }
+    }
+    @Published var inspectorPanel4Shortcut = OMGKeyboardShortcut.defaultInspectorPanel(slot: 4).storageValue {
+        didSet {
+            let normalized = OMGKeyboardShortcut(storageValue: inspectorPanel4Shortcut)?.storageValue
+                ?? OMGKeyboardShortcut.defaultInspectorPanel(slot: 4).storageValue
+            if inspectorPanel4Shortcut != normalized {
+                inspectorPanel4Shortcut = normalized
+            } else {
+                persist("keyboard.inspectorPanel4", normalized)
+            }
+        }
+    }
+
+    func inspectorPanelShortcut(slot: Int) -> String {
+        switch slot {
+        case 1: inspectorPanel1Shortcut
+        case 2: inspectorPanel2Shortcut
+        case 3: inspectorPanel3Shortcut
+        case 4: inspectorPanel4Shortcut
+        default: OMGKeyboardShortcut.defaultInspectorPanel(slot: slot).storageValue
+        }
+    }
+
+    func setInspectorPanelShortcut(slot: Int, value: String) {
+        switch slot {
+        case 1: inspectorPanel1Shortcut = value
+        case 2: inspectorPanel2Shortcut = value
+        case 3: inspectorPanel3Shortcut = value
+        case 4: inspectorPanel4Shortcut = value
+        default: break
         }
     }
     @Published var quickInputHeight = Double(AgentQuickInputMetrics.defaultHeight) {
@@ -947,6 +1035,22 @@ final class OhMyGhosttySettings: ObservableObject {
             quickInputShortcut = validatedShortcutValue(
                 "keyboard.quickInput",
                 fallback: OMGKeyboardShortcut.defaultQuickInput.storageValue
+            )
+            inspectorPanel1Shortcut = validatedShortcutValue(
+                "keyboard.inspectorPanel1",
+                fallback: OMGKeyboardShortcut.defaultInspectorPanel(slot: 1).storageValue
+            )
+            inspectorPanel2Shortcut = validatedShortcutValue(
+                "keyboard.inspectorPanel2",
+                fallback: OMGKeyboardShortcut.defaultInspectorPanel(slot: 2).storageValue
+            )
+            inspectorPanel3Shortcut = validatedShortcutValue(
+                "keyboard.inspectorPanel3",
+                fallback: OMGKeyboardShortcut.defaultInspectorPanel(slot: 3).storageValue
+            )
+            inspectorPanel4Shortcut = validatedShortcutValue(
+                "keyboard.inspectorPanel4",
+                fallback: OMGKeyboardShortcut.defaultInspectorPanel(slot: 4).storageValue
             )
             quickInputHeight = numberValue(
                 "keyboard.quickInputHeight",

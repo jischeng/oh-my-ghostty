@@ -406,6 +406,16 @@ struct SettingsStrings: Equatable, Sendable {
         )
     }
     var resetShortcutButton: String { t("Reset", "重置") }
+    var rightSidebarShortcutsSection: String { t("Right Sidebar Shortcuts", "右侧边栏快捷键") }
+    var rightSidebarShortcutsCaption: String {
+        t(
+            "Shortcuts to open, switch between, or toggle right sidebar panels by position. Pressing the active panel's shortcut again hides the sidebar.",
+            "按展示位置快速打开、切换或隐藏右侧边栏面板。再次按下当前激活面板的快捷键可将其隐藏。"
+        )
+    }
+    func inspectorPanelSlotLabel(slot: Int) -> String {
+        t("Panel \(slot)", "面板 \(slot)")
+    }
     func shortcutConflictCaption(_ title: String) -> String {
         t(
             "This shortcut is also used by “\(title)”. Quick Input takes precedence in terminal windows.",

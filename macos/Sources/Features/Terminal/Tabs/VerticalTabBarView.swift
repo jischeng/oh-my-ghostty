@@ -145,6 +145,26 @@ final class VerticalTabWindowLayoutState: ObservableObject {
         inspectorPresentation.selectPane(paneID)
     }
 
+    func toggleInspectorPane(atSlot slot: Int, registry: InspectorRegistry) {
+        guard slot >= 1, !registry.entries.isEmpty else { return }
+        let index = slot - 1
+        guard index < registry.entries.count else { return }
+        let targetID = registry.entries[index].id
+
+        let currentSelectedID = selectedInspectorPaneID ?? registry.entries.first?.id
+
+        if isInspectorVisible {
+            if currentSelectedID == targetID {
+                setInspectorVisible(false)
+            } else {
+                selectInspectorPane(targetID)
+            }
+        } else {
+            selectInspectorPane(targetID)
+            setInspectorVisible(true)
+        }
+    }
+
     func setGroupingMode(_ mode: GhosttyTabGroupingMode) {
         guard groupingMode != mode else { return }
         groupingMode = mode

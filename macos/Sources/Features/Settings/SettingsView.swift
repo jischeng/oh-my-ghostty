@@ -510,6 +510,40 @@ struct SettingsView: View {
                         .foregroundStyle(.orange)
                     }
                 }
+                OMGSettingsSection(strings.rightSidebarShortcutsSection) {
+                    Text(strings.rightSidebarShortcutsCaption)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    ForEach(1...4, id: \.self) { slot in
+                        LabeledContent(strings.inspectorPanelSlotLabel(slot: slot)) {
+                            HStack(spacing: 8) {
+                                OMGShortcutRecorder(
+                                    storageValue: Binding(
+                                        get: { settings.inspectorPanelShortcut(slot: slot) },
+                                        set: { settings.setInspectorPanelShortcut(slot: slot, value: $0) }
+                                    )
+                                )
+                                .frame(width: 112, height: 24)
+                                Button(strings.resetShortcutButton) {
+                                    settings.setInspectorPanelShortcut(
+                                        slot: slot,
+                                        value: OMGKeyboardShortcut.defaultInspectorPanel(slot: slot).storageValue
+                                    )
+                                }
+                            }
+                        }
+                        if let shortcut = OMGKeyboardShortcut(
+                            storageValue: settings.inspectorPanelShortcut(slot: slot)
+                        ), let conflict = shortcut.conflictingMenuItemTitle() {
+                            Label(
+                                strings.shortcutConflictCaption(conflict),
+                                systemImage: "exclamationmark.triangle"
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                        }
+                    }
+                }
                 OMGSettingsSection(strings.keybindingsSection) {
                     Text(strings.keybindingsCaption)
                         .foregroundStyle(.secondary)

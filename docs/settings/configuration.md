@@ -140,12 +140,12 @@ back into each other and saturating the main thread when opening Settings.
 
 ## Ownership And Precedence
 
-| Layer | Owns | Priority |
-| --- | --- | --- |
-| Runtime/window state | Current tab Sidebar visibility/live width, Inspector visibility/width/active pane, collapsed groups, selected tab | Highest |
-| OMG settings | Optional application and Appearance overrides listed below | Second |
-| Ghostty config | Inherited baseline, including `macos-tab-layout`, theme, font, opacity, blur, and cursor | Third |
-| Built-in defaults | Safe values for unset settings | Lowest |
+| Layer                | Owns                                                                                                              | Priority |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------- | -------- |
+| Runtime/window state | Current tab Sidebar visibility/live width, Inspector visibility/width/active pane, collapsed groups, selected tab | Highest  |
+| OMG settings         | Optional application and Appearance overrides listed below                                                        | Second   |
+| Ghostty config       | Inherited baseline, including `macos-tab-layout`, theme, font, opacity, blur, and cursor                          | Third    |
+| Built-in defaults    | Safe values for unset settings                                                                                    | Lowest   |
 
 The fork settings model is the single writer for `settings.json`. Settings UI controls bind directly to that typed model. Runtime code observes the same model; it does not mirror these preferences into a second UserDefaults domain.
 
@@ -153,50 +153,54 @@ Window UI state is intentionally separate: `InspectorPresentationStore` owns las
 
 ## Settings
 
-| Key | Type | Default | Values / Range | GUI | Apply |
-| --- | --- | --- | --- | --- | --- |
-| `tabs.layout` | enum | Ghostty `macos-tab-layout` | `horizontal`, `vertical` | Settings > Tabs | New windows |
-| `tabs.sidebarWidth` | number | `240` | `176...480` | Settings > Tabs | Next committed/default width |
-| `tabs.grouping` | enum | `none` | `none`, `project`, `date` | Settings > Tabs | Runtime |
-| `tabs.ordering` | enum | `manual` | `manual`, `created`, `recentlyUsed` | Settings > Tabs | Runtime |
-| `tabs.pathDisplay` | enum | `folderName` | `fullPath`, `folderName` | Settings > Tabs | Runtime |
-| `tabs.showShortcutLabels` | boolean | `true` | `true`, `false` | Settings > Tabs | Runtime |
-| `tabs.rememberSidebarWidth` | boolean | `true` | `true`, `false` | Settings > Tabs | Runtime |
-| `tabs.sidebarVisible` | boolean | `true` | `true`, `false` | Settings > Tabs | Runtime and new windows |
-| `appearance.windowTheme` | enum | Ghostty config | `system`, `light`, `dark` | Settings > Appearance | Live |
-| `appearance.lightTheme` | string | Ghostty config | Ghostty theme name | Settings > Appearance | Live |
-| `appearance.darkTheme` | string | Ghostty config | Ghostty theme name | Settings > Appearance | Live |
-| `appearance.fontFamily` | string | Ghostty config | Installed font family | Settings > Appearance | Live |
-| `appearance.fontSize` | number | Ghostty config | `6...72` | Settings > Appearance | Live |
-| `appearance.backgroundOpacity` | number | Ghostty config | `0.05...1` | Settings > Appearance | Live |
-| `appearance.backgroundBlur` | enum | Ghostty config | `disabled`, `enabled`, `macosGlassRegular`, `macosGlassClear` | Settings > Appearance | Live |
-| `appearance.cursorStyle` | enum | Ghostty config | `block`, `bar`, `underline`, `block_hollow` | Settings > Appearance | Live |
-| `appearance.tabRowDensity` | enum | `compact` | `compact`, `comfortable` | Settings > Appearance | Runtime |
-| `appearance.tabIconSize` | number | `16` | `12...20` | Settings > Appearance | Runtime |
-| `editor.keymapPreset` | enum | `idea` | `idea`, `vscode` | Settings > Editor | Runtime |
-| `editor.fileOpenDestination` | enum | `currentPane` | `currentPane`, `newTab`, `splitRight`, `splitDown`, `splitLeft`, `splitUp` | Settings > Editor | Runtime |
-| `editor.directoryOpenDestination` | enum | `currentPane` | `currentPane`, `newTab`, `splitRight`, `splitDown`, `splitLeft`, `splitUp` | Settings > Editor | Runtime |
-| `editor.backgroundMode` | enum | `followTerminal` | `followTerminal`, `system` | Legacy configuration | Retained, no visual effect |
-| `editor.syntaxTheme` | enum | `followTerminal` | `oneDark`, `oneLight`, `dracula`, `githubDark`, `nord`, `monokai`, `catppuccinMocha`, `followTerminal` | Settings > Editor | Runtime |
-| `editor.fontFamily` | enum | `jetbrainsMono` | `jetbrainsMono`, `sfMono`, `menlo`, `firaCode`, `system` | Settings > Editor | Runtime |
-| `editor.fontSize` | number | `13` | `8...36` | Settings > Editor | Runtime |
-| `editor.tabWidth` | number | `4` | `1...12` | Settings > Editor | Runtime |
-| `editor.wordWrap` | boolean | `false` | `true`, `false` | Settings > Editor | Runtime |
-| `git.autoFetchInterval` | integer | `5` | `0...1440` minutes, `0` disables | Settings > Git | Runtime |
-| `git.commitAI.prompt` | string | `""` | User-defined language, format and style | Settings > Git | Next generation |
-| `git.commitAI.routes` | array | `[]` | Ordered `{id, agent, model}` entries | Settings > Git | Next generation |
-| `notifications.taskComplete` | boolean | `true` | `true`, `false` | Settings > Agent Integration | Runtime policy |
-| `notifications.attention` | boolean | `true` | `true`, `false` | Settings > Agent Integration | Runtime policy |
-| `notifications.sound` | boolean | `false` | `true`, `false` | Settings > Agent Integration | Runtime policy |
-| `agents.historyLimit` | number | `10000` | `100...50000` | Settings > General | Runtime Agent History reload |
-| `agents.statusHooks` | boolean | `true` | `true`, `false` | Settings > Agent Integration | Runtime ingress policy |
-| `agents.openQuickInputOnStart` | boolean | `false` | `true`, `false` | Settings > Keyboard | Next Agent start |
-| `agents.openQuickInputOnComplete` | boolean | `false` | `true`, `false` | Settings > Keyboard | Next Agent completion |
-| `keyboard.quickInput` | string | `shift+command+e` | Modifier combination plus one key | Settings > Keyboard | Runtime |
-| `keyboard.quickInputHeight` | number | `252` | `140...480` | Settings > Keyboard / drag divider | Runtime |
-| `sessions.restoreOnLaunch` | boolean | `true` | `true`, `false` | Settings > General | Next launch |
-| `general.language` | enum | `system` | `system`, `en`, `zh-Hans` | Settings > General | Live (Settings UI) |
-| `general.quitWithoutConfirmation` | boolean | Release: `false`; Dev: `true` | `true`, `false` | Settings > General | Next app quit |
+| Key                               | Type    | Default                       | Values / Range                                                                                         | GUI                                | Apply                        |
+| --------------------------------- | ------- | ----------------------------- | ------------------------------------------------------------------------------------------------------ | ---------------------------------- | ---------------------------- |
+| `tabs.layout`                     | enum    | Ghostty `macos-tab-layout`    | `horizontal`, `vertical`                                                                               | Settings > Tabs                    | New windows                  |
+| `tabs.sidebarWidth`               | number  | `240`                         | `176...480`                                                                                            | Settings > Tabs                    | Next committed/default width |
+| `tabs.grouping`                   | enum    | `none`                        | `none`, `project`, `date`                                                                              | Settings > Tabs                    | Runtime                      |
+| `tabs.ordering`                   | enum    | `manual`                      | `manual`, `created`, `recentlyUsed`                                                                    | Settings > Tabs                    | Runtime                      |
+| `tabs.pathDisplay`                | enum    | `folderName`                  | `fullPath`, `folderName`                                                                               | Settings > Tabs                    | Runtime                      |
+| `tabs.showShortcutLabels`         | boolean | `true`                        | `true`, `false`                                                                                        | Settings > Tabs                    | Runtime                      |
+| `tabs.rememberSidebarWidth`       | boolean | `true`                        | `true`, `false`                                                                                        | Settings > Tabs                    | Runtime                      |
+| `tabs.sidebarVisible`             | boolean | `true`                        | `true`, `false`                                                                                        | Settings > Tabs                    | Runtime and new windows      |
+| `appearance.windowTheme`          | enum    | Ghostty config                | `system`, `light`, `dark`                                                                              | Settings > Appearance              | Live                         |
+| `appearance.lightTheme`           | string  | Ghostty config                | Ghostty theme name                                                                                     | Settings > Appearance              | Live                         |
+| `appearance.darkTheme`            | string  | Ghostty config                | Ghostty theme name                                                                                     | Settings > Appearance              | Live                         |
+| `appearance.fontFamily`           | string  | Ghostty config                | Installed font family                                                                                  | Settings > Appearance              | Live                         |
+| `appearance.fontSize`             | number  | Ghostty config                | `6...72`                                                                                               | Settings > Appearance              | Live                         |
+| `appearance.backgroundOpacity`    | number  | Ghostty config                | `0.05...1`                                                                                             | Settings > Appearance              | Live                         |
+| `appearance.backgroundBlur`       | enum    | Ghostty config                | `disabled`, `enabled`, `macosGlassRegular`, `macosGlassClear`                                          | Settings > Appearance              | Live                         |
+| `appearance.cursorStyle`          | enum    | Ghostty config                | `block`, `bar`, `underline`, `block_hollow`                                                            | Settings > Appearance              | Live                         |
+| `appearance.tabRowDensity`        | enum    | `compact`                     | `compact`, `comfortable`                                                                               | Settings > Appearance              | Runtime                      |
+| `appearance.tabIconSize`          | number  | `16`                          | `12...20`                                                                                              | Settings > Appearance              | Runtime                      |
+| `editor.keymapPreset`             | enum    | `idea`                        | `idea`, `vscode`                                                                                       | Settings > Editor                  | Runtime                      |
+| `editor.fileOpenDestination`      | enum    | `currentPane`                 | `currentPane`, `newTab`, `splitRight`, `splitDown`, `splitLeft`, `splitUp`                             | Settings > Editor                  | Runtime                      |
+| `editor.directoryOpenDestination` | enum    | `currentPane`                 | `currentPane`, `newTab`, `splitRight`, `splitDown`, `splitLeft`, `splitUp`                             | Settings > Editor                  | Runtime                      |
+| `editor.backgroundMode`           | enum    | `followTerminal`              | `followTerminal`, `system`                                                                             | Legacy configuration               | Retained, no visual effect   |
+| `editor.syntaxTheme`              | enum    | `followTerminal`              | `oneDark`, `oneLight`, `dracula`, `githubDark`, `nord`, `monokai`, `catppuccinMocha`, `followTerminal` | Settings > Editor                  | Runtime                      |
+| `editor.fontFamily`               | enum    | `jetbrainsMono`               | `jetbrainsMono`, `sfMono`, `menlo`, `firaCode`, `system`                                               | Settings > Editor                  | Runtime                      |
+| `editor.fontSize`                 | number  | `13`                          | `8...36`                                                                                               | Settings > Editor                  | Runtime                      |
+| `editor.tabWidth`                 | number  | `4`                           | `1...12`                                                                                               | Settings > Editor                  | Runtime                      |
+| `editor.wordWrap`                 | boolean | `false`                       | `true`, `false`                                                                                        | Settings > Editor                  | Runtime                      |
+| `git.autoFetchInterval`           | integer | `5`                           | `0...1440` minutes, `0` disables                                                                       | Settings > Git                     | Runtime                      |
+| `git.commitAI.prompt`             | string  | `""`                          | User-defined language, format and style                                                                | Settings > Git                     | Next generation              |
+| `git.commitAI.routes`             | array   | `[]`                          | Ordered `{id, agent, model}` entries                                                                   | Settings > Git                     | Next generation              |
+| `notifications.taskComplete`      | boolean | `true`                        | `true`, `false`                                                                                        | Settings > Agent Integration       | Runtime policy               |
+| `notifications.attention`         | boolean | `true`                        | `true`, `false`                                                                                        | Settings > Agent Integration       | Runtime policy               |
+| `notifications.sound`             | boolean | `false`                       | `true`, `false`                                                                                        | Settings > Agent Integration       | Runtime policy               |
+| `agents.historyLimit`             | number  | `10000`                       | `100...50000`                                                                                          | Settings > General                 | Runtime Agent History reload |
+| `agents.statusHooks`              | boolean | `true`                        | `true`, `false`                                                                                        | Settings > Agent Integration       | Runtime ingress policy       |
+| `agents.openQuickInputOnStart`    | boolean | `false`                       | `true`, `false`                                                                                        | Settings > Keyboard                | Next Agent start             |
+| `agents.openQuickInputOnComplete` | boolean | `false`                       | `true`, `false`                                                                                        | Settings > Keyboard                | Next Agent completion        |
+| `keyboard.inspectorPanel1`        | string  | `option+1`                    | Modifier combination plus one key                                                                      | Settings > Keyboard                | Runtime                      |
+| `keyboard.inspectorPanel2`        | string  | `option+2`                    | Modifier combination plus one key                                                                      | Settings > Keyboard                | Runtime                      |
+| `keyboard.inspectorPanel3`        | string  | `option+3`                    | Modifier combination plus one key                                                                      | Settings > Keyboard                | Runtime                      |
+| `keyboard.inspectorPanel4`        | string  | `option+4`                    | Modifier combination plus one key                                                                      | Settings > Keyboard                | Runtime                      |
+| `keyboard.quickInput`             | string  | `shift+command+e`             | Modifier combination plus one key                                                                      | Settings > Keyboard                | Runtime                      |
+| `keyboard.quickInputHeight`       | number  | `252`                         | `140...480`                                                                                            | Settings > Keyboard / drag divider | Runtime                      |
+| `sessions.restoreOnLaunch`        | boolean | `true`                        | `true`, `false`                                                                                        | Settings > General                 | Next launch                  |
+| `general.language`                | enum    | `system`                      | `system`, `en`, `zh-Hans`                                                                              | Settings > General                 | Live (Settings UI)           |
+| `general.quitWithoutConfirmation` | boolean | Release: `false`; Dev: `true` | `true`, `false`                                                                                        | Settings > General                 | Next app quit                |
 
 Appearance controls resolve each value as `OMG override > Ghostty config > built-in default`. The UI reports the effective value and source, and **Reset to Ghostty** removes only OMG Appearance keys. The app writes a generated `appearance.ghostty` overlay beside `settings.json`; it never edits the user's Ghostty config. The overlay is loaded last and applied with Ghostty's existing live config update API, so current surfaces keep their PTY, shell, and scrollback.
 

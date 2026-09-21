@@ -11,6 +11,33 @@ struct OMGKeyboardShortcut: Equatable {
         modifiers: [.command, .shift]
     )
 
+    static let defaultInspectorPanel1 = OMGKeyboardShortcut(
+        key: "1",
+        modifiers: [.option]
+    )
+    static let defaultInspectorPanel2 = OMGKeyboardShortcut(
+        key: "2",
+        modifiers: [.option]
+    )
+    static let defaultInspectorPanel3 = OMGKeyboardShortcut(
+        key: "3",
+        modifiers: [.option]
+    )
+    static let defaultInspectorPanel4 = OMGKeyboardShortcut(
+        key: "4",
+        modifiers: [.option]
+    )
+
+    static func defaultInspectorPanel(slot: Int) -> OMGKeyboardShortcut {
+        switch slot {
+        case 1: defaultInspectorPanel1
+        case 2: defaultInspectorPanel2
+        case 3: defaultInspectorPanel3
+        case 4: defaultInspectorPanel4
+        default: OMGKeyboardShortcut(key: "\(slot)", modifiers: [.option])
+        }
+    }
+
     let key: String
     let modifiers: NSEvent.ModifierFlags
 

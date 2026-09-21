@@ -102,6 +102,10 @@ struct OhMyGhosttySettingsTests {
         settings.openQuickInputOnAgentStart = true
         settings.openQuickInputOnAgentComplete = true
         settings.quickInputShortcut = "control+option+q"
+        settings.inspectorPanel1Shortcut = "option+command+1"
+        settings.inspectorPanel2Shortcut = "option+command+2"
+        settings.inspectorPanel3Shortcut = "option+command+3"
+        settings.inspectorPanel4Shortcut = "option+command+4"
         settings.quickInputHeight = 318
         settings.terminalResizeRendering = .onRelease
         settings.editorKeymapPreset = .vscode
@@ -128,6 +132,10 @@ struct OhMyGhosttySettingsTests {
         #expect(object["agents.openQuickInputOnStart"] as? Bool == true)
         #expect(object["agents.openQuickInputOnComplete"] as? Bool == true)
         #expect(object["keyboard.quickInput"] as? String == "control+option+q")
+        #expect(object["keyboard.inspectorPanel1"] as? String == "option+command+1")
+        #expect(object["keyboard.inspectorPanel2"] as? String == "option+command+2")
+        #expect(object["keyboard.inspectorPanel3"] as? String == "option+command+3")
+        #expect(object["keyboard.inspectorPanel4"] as? String == "option+command+4")
         #expect((object["keyboard.quickInputHeight"] as? NSNumber)?.doubleValue == 318)
         #expect(object["terminal.resizeRendering"] as? String == "onRelease")
         #expect(object["editor.keymapPreset"] as? String == "vscode")
@@ -151,6 +159,14 @@ struct OhMyGhosttySettingsTests {
         #expect(restored.openQuickInputOnAgentStart)
         #expect(restored.openQuickInputOnAgentComplete)
         #expect(restored.quickInputShortcut == "control+option+q")
+        #expect(restored.inspectorPanel1Shortcut == "option+command+1")
+        #expect(restored.inspectorPanel2Shortcut == "option+command+2")
+        #expect(restored.inspectorPanel3Shortcut == "option+command+3")
+        #expect(restored.inspectorPanel4Shortcut == "option+command+4")
+        #expect(restored.inspectorPanelShortcut(slot: 1) == "option+command+1")
+        #expect(restored.inspectorPanelShortcut(slot: 2) == "option+command+2")
+        #expect(restored.inspectorPanelShortcut(slot: 3) == "option+command+3")
+        #expect(restored.inspectorPanelShortcut(slot: 4) == "option+command+4")
         #expect(restored.quickInputHeight == 318)
         #expect(restored.terminalResizeRendering == .onRelease)
         #expect(restored.editorSettings.keymapPreset == .vscode)

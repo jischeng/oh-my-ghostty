@@ -499,8 +499,17 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return event
         }
 
+        let settings = OhMyGhosttySettings.shared
+        for slot in 1...4 {
+            let storage = settings.inspectorPanelShortcut(slot: slot)
+            if let shortcut = OMGKeyboardShortcut(storageValue: storage), shortcut.matches(event) {
+                toggleInspectorPane(atSlot: slot)
+                return nil
+            }
+        }
+
         let shortcut = OMGKeyboardShortcut(
-            storageValue: OhMyGhosttySettings.shared.quickInputShortcut
+            storageValue: settings.quickInputShortcut
         ) ?? .defaultQuickInput
         if shortcut.matches(event) {
             toggleQuickInput()
@@ -2547,6 +2556,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     func toggleInspectorPane() {
         tabLayoutState.toggleInspector()
+    }
+
+    func toggleInspectorPane(atSlot slot: Int, registry: InspectorRegistry? = nil) {
+        guard let reg = registry ?? (NSApp.delegate as? AppDelegate)?.inspectorRegistry else { return }
+        tabLayoutState.toggleInspectorPane(atSlot: slot, registry: reg)
     }
 
     func closeVerticalTab(_ controller: TerminalController) {

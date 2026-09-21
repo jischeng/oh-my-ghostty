@@ -11,7 +11,10 @@ enum GitTagDialog {
             panel.title = GitL10n.text("New Tag…")
             panel.isReleasedWhenClosed = false
             panel.appearance = window?.appearance ?? NSApp.effectiveAppearance
-            panel.backgroundColor = OMGThemeBackground.windowBackground()
+            let palette = OMGThemeBackground.palette(for: window)
+            panel.backgroundColor = palette.background
+            panel.titlebarAppearsTransparent = true
+            panel.isOpaque = true
             var finished = false
             let finish: (GitMutation?) -> Void = { mutation in
                 guard !finished else { return }
@@ -22,7 +25,8 @@ enum GitTagDialog {
                 continuation.resume(returning: mutation)
             }
             panel.contentViewController = NSHostingController(rootView: GitTagForm(
-                repository: repository, commit: commit, finish: finish))
+                repository: repository, commit: commit, finish: finish)
+                .omgThemedSurface(palette: palette))
             if let window { window.beginSheet(panel) } else { panel.makeKeyAndOrderFront(nil) }
         }
     }
@@ -47,7 +51,9 @@ private struct GitTagForm: View {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(GitL10n.text("Tag name")).font(.callout).foregroundStyle(.secondary)
                     .frame(width: 76, alignment: .trailing)
-                TextField("v1.2.0", text: $name).textFieldStyle(.roundedBorder)
+                TextField("v1.2.0", text: $name).textFieldStyle(.plain)
+                    .padding(6)
+                    .background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 5))
                 if busy { ProgressView().controlSize(.small) }
                 Button { suggest() } label: { Label(GitL10n.text("Generate"), systemImage: "sparkles") }
                     .disabled(busy)
@@ -56,7 +62,9 @@ private struct GitTagForm: View {
                 Text(GitL10n.text("Message")).font(.callout).foregroundStyle(.secondary)
                     .frame(width: 76, alignment: .trailing)
                 TextField(GitL10n.text("Optional tag message"), text: $message)
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(.plain)
+                    .padding(6)
+                    .background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 5))
             }
             Text(GitL10n.text("Create suggests the next minor version from the branch's tag history. The tag is pushed with the next push (--follow-tags)."))
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)

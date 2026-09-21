@@ -16,7 +16,10 @@ enum GitIntegrationDialog {
             panel.appearance = window?.appearance ?? NSApp.effectiveAppearance
             // Opaque quantized theme background — never the terminal window's
             // near-transparent blur backing.
-            panel.backgroundColor = OMGThemeBackground.windowBackground()
+            let palette = OMGThemeBackground.palette(for: window)
+            panel.backgroundColor = palette.background
+            panel.titlebarAppearsTransparent = true
+            panel.isOpaque = true
             var finished = false
             let finish: (GitIntegrationPlan?) -> Void = { plan in
                 guard !finished else { return }
@@ -27,7 +30,8 @@ enum GitIntegrationDialog {
                 continuation.resume(returning: plan)
             }
             panel.contentViewController = NSHostingController(rootView: GitIntegrationForm(
-                kind: kind, repository: repository, branches: branches, initialSource: source, commit: commit, finish: finish))
+                kind: kind, repository: repository, branches: branches, initialSource: source, commit: commit, finish: finish)
+                .omgThemedSurface(palette: palette))
             if let window { window.beginSheet(panel) } else { panel.makeKeyAndOrderFront(nil) }
         }
     }
@@ -92,7 +96,9 @@ private struct GitIntegrationForm: View {
                     .disabled(!valid || busy)
                 }
                 TextEditor(text: $message).font(.system(.body, design: .monospaced))
+                    .scrollContentBackground(.hidden)
                     .padding(6).frame(height: 150)
+                    .background(.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(.secondary.opacity(0.3)))
             }
             Text(GitL10n.text(kind == .review

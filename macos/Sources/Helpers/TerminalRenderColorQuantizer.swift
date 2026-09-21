@@ -61,6 +61,28 @@ enum TerminalRenderColorQuantizer {
         return NSColor(displayP3Red: CGFloat(p3.r), green: CGFloat(p3.g), blue: CGFloat(p3.b), alpha: a)
     }
 
+    /// Match the gamma-blended IOSurface's *premultiplied* bytes. Quantizing
+    /// an opaque color and then applying opacity reverses the shader's order.
+    /// SwiftUI expects straight components, so undo premultiplication only
+    /// after rounding the stored RGB and alpha values.
+    static func matchingTranslucentColor(
+        _ color: Color, opacity: Double, colorspaceIsDisplayP3: Bool
+    ) -> Color {
+        guard let rgb = NSColor(color).usingColorSpace(.sRGB) else { return color.opacity(opacity) }
+        let alpha = quantize8(max(0, min(1, opacity)))
+        guard alpha > 0 else { return .clear }
+        let converted = colorspaceIsDisplayP3
+            ? (r: Double(rgb.redComponent), g: Double(rgb.greenComponent), b: Double(rgb.blueComponent))
+            : unquantizedP3(srgbR: Double(rgb.redComponent), g: Double(rgb.greenComponent), b: Double(rgb.blueComponent))
+        return Color(
+            .displayP3,
+            red: quantize8(converted.r * alpha) / alpha,
+            green: quantize8(converted.g * alpha) / alpha,
+            blue: quantize8(converted.b * alpha) / alpha,
+            opacity: alpha
+        )
+    }
+
     // MARK: - Shader math
 
     /// Converts an sRGB color to the 8-bit Display P3 code values the
@@ -72,6 +94,11 @@ enum TerminalRenderColorQuantizer {
     /// the linearized color, then unlinearizes with the sRGB transfer
     /// function (Display P3 shares it) before the GPU rounds to 8 bits.
     static func renderedP3(srgbR r: Double, g: Double, b: Double) -> (r: Double, g: Double, b: Double) {
+        let converted = unquantizedP3(srgbR: r, g: g, b: b)
+        return (r: quantize8(converted.r), g: quantize8(converted.g), b: quantize8(converted.b))
+    }
+
+    private static func unquantizedP3(srgbR r: Double, g: Double, b: Double) -> (r: Double, g: Double, b: Double) {
         let lr = linearize(r)
         let lg = linearize(g)
         let lb = linearize(b)
@@ -82,9 +109,9 @@ enum TerminalRenderColorQuantizer {
         let p3b = m[2][0] * lr + m[2][1] * lg + m[2][2] * lb
 
         return (
-            r: quantize8(unlinearize(p3r)),
-            g: quantize8(unlinearize(p3g)),
-            b: quantize8(unlinearize(p3b))
+            r: unlinearize(p3r),
+            g: unlinearize(p3g),
+            b: unlinearize(p3b)
         )
     }
 

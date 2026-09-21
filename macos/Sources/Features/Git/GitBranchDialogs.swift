@@ -56,8 +56,7 @@ enum GitBranchDialogs {
             alert.addButton(withTitle: GitL10n.text("Set Upstream"))
         }
         alert.addButton(withTitle: GitL10n.text("Cancel"))
-        let response: NSApplication.ModalResponse
-        if let window { response = await alert.beginSheetModal(for: window) } else { response = alert.runModal() }
+        let response = await OMGThemeDialog.present(alert, for: window)
         guard response == .alertFirstButtonReturn else { return nil }
         switch operation {
         case .checkout, .create:

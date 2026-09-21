@@ -45,8 +45,7 @@ enum GitWorktreeActions {
     }
 
     private static func response(_ alert: NSAlert, window: NSWindow?) async -> NSApplication.ModalResponse {
-        if let window { return await alert.beginSheetModal(for: window) }
-        return alert.runModal()
+        await OMGThemeDialog.present(alert, for: window)
     }
 
     static func open(_ worktree: GitWorktreeInfo, repository: GitRepositoryIdentity, context: InspectorPaneContext) throws {

@@ -70,6 +70,45 @@ struct SettingsLayoutTests {
         try capture(host, name: "appearance-wide")
     }
 
+    @Test func themedSettingsRenderLightAndDarkWithoutSystemCanvas() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let settings = OhMyGhosttySettings(fileURL: home.appendingPathComponent("settings.json"))
+        settings.language = .simplifiedChinese
+        let palettes: [(String, OMGThemePalette)] = [
+            ("dark", OMGThemePalette(background: NSColor(srgbRed: 40 / 255, green: 44 / 255, blue: 52 / 255, alpha: 1),
+                                     foreground: NSColor(srgbRed: 0.8, green: 0.82, blue: 0.85, alpha: 1))),
+            ("light", OMGThemePalette(background: NSColor(srgbRed: 0.95, green: 0.94, blue: 0.90, alpha: 1),
+                                      foreground: NSColor(srgbRed: 0.16, green: 0.18, blue: 0.22, alpha: 1)))
+        ]
+        for (name, palette) in palettes {
+            let host = NSHostingView(rootView: SettingsView(settings: settings, initialSelection: .terminal, palette: palette))
+            let window = makeWindow(host, width: 820)
+            defer { window.close() }
+            try await Task.sleep(for: .milliseconds(150))
+            host.layoutSubtreeIfNeeded()
+            try capture(host, name: "terminal-" + name)
+            let bitmap = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            // Sample empty content well away from text, controls and dividers.
+            let pixel = try #require(bitmap.colorAt(x: bitmap.pixelsWide - 30, y: bitmap.pixelsHigh - 30)?.usingColorSpace(.sRGB))
+            // Bitmap caching uses the window/display profile. Render a solid
+            // reference through the same path rather than interpreting those
+            // bytes as unconverted config RGB (which fails on wide-gamut displays).
+            let reference = NSHostingView(rootView: Color(palette.background))
+            let referenceWindow = makeWindow(reference, width: 100)
+            defer { referenceWindow.close() }
+            reference.layoutSubtreeIfNeeded()
+            let referenceBitmap = try #require(reference.bitmapImageRepForCachingDisplay(in: reference.bounds))
+            reference.cacheDisplay(in: reference.bounds, to: referenceBitmap)
+            let expected = try #require(referenceBitmap.colorAt(x: 30, y: 30)?.usingColorSpace(.sRGB))
+            #expect(pixel.alphaComponent == 1)
+            #expect(abs(pixel.redComponent - expected.redComponent) < 0.005)
+            #expect(abs(pixel.greenComponent - expected.greenComponent) < 0.005)
+            #expect(abs(pixel.blueComponent - expected.blueComponent) < 0.005)
+        }
+    }
+
     private func makeWindow(_ content: NSView, width: CGFloat) -> NSWindow {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 850),
                               styleMask: [.borderless], backing: .buffered, defer: false)

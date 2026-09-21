@@ -49,6 +49,8 @@ final class OhMyGhosttySettingsWindowController: NSWindowController {
         window.title = SettingsStrings(language: settings.language).windowTitle
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.toolbarStyle = .unified
+        window.titlebarAppearsTransparent = true
+        window.isOpaque = true
         window.setContentSize(NSSize(width: 820, height: 560))
         window.minSize = NSSize(width: 720, height: 480)
         window.setFrameAutosaveName("OhMyGhosttySettingsWindow")
@@ -67,6 +69,15 @@ final class OhMyGhosttySettingsWindowController: NSWindowController {
             guard let self, let settings else { return }
             self.applyAppearance(settings)
         }.store(in: &appearanceCancellables)
+        NotificationCenter.default.publisher(for: .ghosttyConfigDidChange)
+            .filter { $0.object == nil }
+            .sink { [weak self, weak settings] _ in
+                // The notification precedes replacement of the app's config.
+                DispatchQueue.main.async {
+                    guard let self, let settings else { return }
+                    self.applyAppearance(settings)
+                }
+            }.store(in: &appearanceCancellables)
     }
 
     @available(*, unavailable)
@@ -146,22 +157,18 @@ struct SettingsView: View {
     @State private var pluginOperation: String?
     @State private var pluginError: String?
     @State private var agentHookError: String?
+    @State private var palette: OMGThemePalette
 
     private var strings: SettingsStrings {
         SettingsStrings(language: settings.language)
     }
 
-    private var sidebarSelection: Binding<OhMyGhosttySettingsTab?> {
-        Binding(
-            get: { selection },
-            set: { if let selection = $0 { self.selection = selection } }
-        )
-    }
-
     init(
         settings: OhMyGhosttySettings,
-        initialSelection: OhMyGhosttySettingsTab = .tabs
+        initialSelection: OhMyGhosttySettingsTab = .tabs,
+        palette: OMGThemePalette? = nil
     ) {
+        self._palette = State(initialValue: palette ?? OMGThemeBackground.palette())
         self.settings = settings
         self._pluginManager = StateObject(wrappedValue: .shared)
         self._selection = State(initialValue: initialSelection)
@@ -169,14 +176,30 @@ struct SettingsView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            List(OhMyGhosttySettingsTab.allCases, selection: sidebarSelection) { tab in
-                Label(strings.tabTitle(tab), systemImage: tab.systemImage)
-                    .tag(tab)
+            ScrollView {
+                VStack(spacing: 4) {
+                    ForEach(OhMyGhosttySettingsTab.allCases) { tab in
+                        Button { selection = tab } label: {
+                            Label(strings.tabTitle(tab), systemImage: tab.systemImage)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 9)
+                                .background {
+                                    if selection == tab {
+                                        RoundedRectangle(cornerRadius: 7)
+                                            .fill(Color(palette.foreground).opacity(0.14))
+                                    }
+                                }
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(selection == tab ? .isSelected : [])
+                    }
+                }
+                .padding(10)
             }
-            .listStyle(.sidebar)
-            .scrollContentBackground(.hidden)
             .frame(width: 190)
-            .background(Color(OMGThemeBackground.sidebarBackground()))
+            .background(Color(palette.sidebar).opacity(0.5))
 
             Divider()
 
@@ -187,14 +210,19 @@ struct SettingsView: View {
                     .frame(height: 52)
                 Divider()
                 detail
-                    .formStyle(.grouped)
+                    .formStyle(OMGSettingsFormStyle())
                     .frame(maxWidth: .infinity, alignment: .topLeading)
             }
         }
         .frame(minWidth: 720, minHeight: 480)
         // Opaque theme background so the whole settings window renders the
         // theme color (e.g. Atom One Dark), not the content behind it.
-        .background(Color(OMGThemeBackground.windowBackground()))
+        .omgThemedSurface(palette: palette)
+        .onReceive(NotificationCenter.default.publisher(for: .ghosttyConfigDidChange)) { notification in
+            guard notification.object == nil,
+                  let config = notification.userInfo?[Notification.Name.GhosttyConfigChangeKey] as? Ghostty.Config else { return }
+            palette = OMGThemeBackground.palette(config: config)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .omgSelectSettingsTab)) { notification in
             if let tab = notification.object as? OhMyGhosttySettingsTab { selection = tab }
         }
@@ -205,7 +233,7 @@ struct SettingsView: View {
         switch selection {
         case .general:
             Form {
-                Section(strings.languageSection) {
+                OMGSettingsSection(strings.languageSection) {
                     Picker(strings.languageLabel, selection: $settings.language) {
                         Text(strings.languageSystem).tag(OhMyGhosttyLanguage.system)
                         Text("English").tag(OhMyGhosttyLanguage.english)
@@ -215,7 +243,7 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Section(strings.sessionsSection) {
+                OMGSettingsSection(strings.sessionsSection) {
                     HStack {
                         Text(strings.agentHistoryLimitLabel)
                         Slider(
@@ -238,7 +266,7 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Section(strings.quitSection) {
+                OMGSettingsSection(strings.quitSection) {
                     Toggle(
                         strings.quitWithoutConfirmationLabel,
                         isOn: $settings.quitWithoutConfirmation
@@ -247,7 +275,7 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Section(strings.configurationSection) {
+                OMGSettingsSection(strings.configurationSection) {
                     LabeledContent(strings.settingsFileLabel, value: OhMyGhosttySettings.fileURL.path)
                     LabeledContent(strings.precedenceLabel, value: strings.precedenceValue)
                     Text(strings.configurationCaption)
@@ -261,7 +289,7 @@ struct SettingsView: View {
 
         case .tabs:
             Form {
-                Section(strings.layoutSection) {
+                OMGSettingsSection(strings.layoutSection) {
                     Picker(strings.tabLayoutLabel, selection: $settings.tabLayout) {
                         Text(strings.horizontalOption).tag(Ghostty.Config.MacOSTabLayout.horizontal)
                         Text(strings.verticalOption).tag(Ghostty.Config.MacOSTabLayout.vertical)
@@ -280,7 +308,7 @@ struct SettingsView: View {
                     }
                     Toggle(strings.rememberSidebarWidthLabel, isOn: $settings.rememberSidebarWidth)
                 }
-                Section(strings.organizationSection) {
+                OMGSettingsSection(strings.organizationSection) {
                     Picker(strings.groupingLabel, selection: $settings.groupingMode) {
                         ForEach(GhosttyTabGroupingMode.allCases, id: \.self) { mode in
                             Text(strings.groupingTitle(mode)).tag(mode)
@@ -308,7 +336,7 @@ struct SettingsView: View {
 
         case .terminal:
             Form {
-                Section(strings.resizeRenderingSection) {
+                OMGSettingsSection(strings.resizeRenderingSection) {
                     Picker(
                         strings.terminalResizeRenderingLabel,
                         selection: $settings.terminalResizeRendering
@@ -322,7 +350,7 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Section(strings.ghosttySection) {
+                OMGSettingsSection(strings.ghosttySection) {
                     Button(strings.openGhosttyConfigButton) {
                         (NSApp.delegate as? AppDelegate)?.ghostty.openConfig()
                     }
@@ -331,7 +359,7 @@ struct SettingsView: View {
 
         case .editor:
             Form {
-                Section(strings.editorOpeningSection) {
+                OMGSettingsSection(strings.editorOpeningSection) {
                     Picker(strings.editorFileOpenDestinationLabel, selection: $settings.editorFileOpenDestination) {
                         ForEach(EditorOpenDestination.allCases, id: \.self) { destination in
                             Text(strings.editorOpenDestinationTitle(destination)).tag(destination)
@@ -344,7 +372,7 @@ struct SettingsView: View {
                     }
                     Text(strings.editorOpeningCaption).font(.caption).foregroundStyle(.secondary)
                 }
-                Section(strings.editorBehaviorSection) {
+                OMGSettingsSection(strings.editorBehaviorSection) {
                     Picker(strings.editorKeymapPresetLabel, selection: $settings.editorKeymapPreset) {
                         ForEach(EditorKeymapPreset.allCases) { preset in
                             Text(strings.editorKeymapPresetTitle(preset)).tag(preset)
@@ -357,7 +385,7 @@ struct SettingsView: View {
                     Toggle(strings.editorWordWrapLabel, isOn: $settings.editorWordWrap)
                     Toggle(strings.editorAutoClosePairsLabel, isOn: $settings.editorAutoClosePairs)
                 }
-                Section(strings.editorThemeSection) {
+                OMGSettingsSection(strings.editorThemeSection) {
                     Picker(strings.editorSyntaxThemeLabel, selection: editorThemeSelection) {
                         Text(strings.editorSyntaxThemeTitle(.followTerminal)).tag("follow")
                         ForEach(themeNames, id: \.self) { name in Text(name).tag("catalog:" + name) }
@@ -383,7 +411,7 @@ struct SettingsView: View {
                         Text(strings.editorThemeInheritedCaption).font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                Section(strings.editorTypographySection) {
+                OMGSettingsSection(strings.editorTypographySection) {
                     Picker(strings.editorFontFamilyLabel, selection: $settings.editorFontFamily) {
                         ForEach(EditorFontFamily.allCases) { family in
                             Text(strings.editorFontFamilyTitle(family)).tag(family)
@@ -429,7 +457,7 @@ struct SettingsView: View {
 
         case .keyboard:
             Form {
-                Section(strings.quickInputSection) {
+                OMGSettingsSection(strings.quickInputSection) {
                     Toggle(
                         strings.openQuickInputOnAgentStartLabel,
                         isOn: $settings.openQuickInputOnAgentStart
@@ -484,7 +512,7 @@ struct SettingsView: View {
                         .foregroundStyle(.orange)
                     }
                 }
-                Section(strings.keybindingsSection) {
+                OMGSettingsSection(strings.keybindingsSection) {
                     Text(strings.keybindingsCaption)
                         .foregroundStyle(.secondary)
                     Button(strings.openGhosttyConfigButton) {
@@ -495,7 +523,7 @@ struct SettingsView: View {
 
         case .git:
             Form {
-                Section(strings.gitSection) {
+                OMGSettingsSection(strings.gitSection) {
                     Picker(strings.gitAutoFetchLabel, selection: $settings.gitAutoFetchInterval) {
                         ForEach([0, 1, 2, 5, 10, 15, 30, 60], id: \.self) { minutes in
                             Text(strings.gitAutoFetchIntervalTitle(minutes)).tag(minutes)
@@ -513,7 +541,7 @@ struct SettingsView: View {
                     strings: strings, settings: settings,
                     exportInstaller: exportRemoteAgentInstaller, exportError: agentHookError
                 )
-                Section(strings.notificationsSection) {
+                OMGSettingsSection(strings.notificationsSection) {
                     Toggle(strings.notifyTaskCompleteLabel, isOn: $settings.notifyTaskComplete)
                     Toggle(strings.notifyAttentionLabel, isOn: $settings.notifyAttention)
                     Toggle(strings.notificationSoundLabel, isOn: $settings.notificationSound)
@@ -524,7 +552,7 @@ struct SettingsView: View {
 
         case .advanced:
             Form {
-                Section(strings.forkSettingsSection) {
+                OMGSettingsSection(strings.forkSettingsSection) {
                     LabeledContent(strings.fileLabel, value: OhMyGhosttySettings.fileURL.path)
                     HStack {
                         Button(strings.openFileButton) {
@@ -553,7 +581,7 @@ struct SettingsView: View {
 
     private var pluginsForm: some View {
         Form {
-            Section(strings.officialPluginsSection) {
+            OMGSettingsSection(strings.officialPluginsSection) {
                 ForEach(PluginInstallationManager.officialPlugins, id: \.id) { manifest in
                     PluginManagementRow(
                         strings: strings,
@@ -572,7 +600,7 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section(strings.installFromGitHubSection) {
+            OMGSettingsSection(strings.installFromGitHubSection) {
                 TextField("https://github.com/owner/omg-plugin", text: $githubRepository)
                     .textFieldStyle(.roundedBorder)
                 HStack {
@@ -702,7 +730,7 @@ struct SettingsView: View {
     private var appearanceForm: some View {
         let appearance = settings.effectiveAppearance(using: inheritedGhosttyConfig)
         return Form {
-            Section(strings.terminalThemeSection) {
+            OMGSettingsSection(strings.terminalThemeSection) {
                 Toggle(strings.followSystemThemeLabel, isOn: followsSystemTheme)
                 if followsSystemTheme.wrappedValue {
                     GhosttyThemeField(strings: strings, title: strings.lightThemeLabel,
@@ -740,7 +768,7 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section(strings.fontSection) {
+            OMGSettingsSection(strings.fontSection) {
                 Picker(strings.fontFamilyLabel, selection: optionalStringBinding(\.fontFamilyOverride)) {
                     Text(strings.inheritGhosttyPlaceholder).tag("")
                     ForEach(NSFontManager.shared.availableFontFamilies.sorted(), id: \.self) { family in
@@ -758,7 +786,7 @@ struct SettingsView: View {
                 resolutionRow(appearance.fontFamily)
             }
 
-            Section(strings.transparencySection) {
+            OMGSettingsSection(strings.transparencySection) {
                 optionalSlider(
                     strings.backgroundOpacityLabel,
                     value: $settings.backgroundOpacityOverride,
@@ -778,7 +806,7 @@ struct SettingsView: View {
                 resolutionRow(appearance.backgroundBlur)
             }
 
-            Section(strings.cursorSection) {
+            OMGSettingsSection(strings.cursorSection) {
                 Picker(strings.cursorStyleLabel, selection: $settings.cursorStyleOverride) {
                     Text(strings.ghosttyConfigOption).tag(OhMyGhosttyCursorStyle?.none)
                     ForEach(OhMyGhosttyCursorStyle.allCases) { cursor in
@@ -788,7 +816,7 @@ struct SettingsView: View {
                 resolutionRow(appearance.cursorStyle)
             }
 
-            Section(strings.appearanceTabsSection) {
+            OMGSettingsSection(strings.appearanceTabsSection) {
                 Picker(strings.rowDensityLabel, selection: $settings.tabRowDensity) {
                     ForEach(OhMyGhosttyTabRowDensity.allCases) { density in
                         Text(strings.densityTitle(density)).tag(density)

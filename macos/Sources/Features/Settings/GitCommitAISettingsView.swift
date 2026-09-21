@@ -6,7 +6,7 @@ struct GitCommitAISettingsView: View {
     @State private var showingPrompt = false
 
     var body: some View {
-        Section(GitL10n.text("AI Commit Messages")) {
+        OMGSettingsSection(GitL10n.text("AI Commit Messages")) {
             Text(GitL10n.text("Try models from top to bottom. Drag rows to change priority. The first successful response is used."))
                 .font(.caption).foregroundStyle(.secondary)
             if settings.gitCommitAIRoutes.isEmpty {
@@ -51,11 +51,13 @@ struct GitCommitAISettingsView: View {
         }
         .sheet(isPresented: $showingPrompt) {
             GitCommitPromptEditor(prompt: settings.gitCommitAIPrompt) { settings.gitCommitAIPrompt = $0 }
+                .omgThemedSurface(palette: OMGThemeBackground.palette())
         }
         .sheet(isPresented: $showingAdd) {
             GitCommitAIAddModels { agent, models in
                 settings.gitCommitAIRoutes = GitCommitAIRoute.adding(agent: agent, models: models, to: settings.gitCommitAIRoutes)
             }
+            .omgThemedSurface(palette: OMGThemeBackground.palette())
         }
     }
 
@@ -76,8 +78,9 @@ private struct GitCommitPromptEditor: View {
             Text(GitL10n.text("Custom commit prompt")).font(.headline)
             TextEditor(text: $prompt)
                 .font(.system(.body, design: .monospaced))
+                .scrollContentBackground(.hidden)
                 .padding(8)
-                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+                .background(.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(.secondary.opacity(0.3)))
                 .frame(height: 250)
                 .accessibilityLabel(GitL10n.text("Custom commit prompt"))
@@ -128,6 +131,7 @@ private struct GitCommitAIAddModels: View {
                         if $0 { selected.insert(model) } else { selected.remove(model) }
                     }))
                 }.frame(height: 260)
+                    .scrollContentBackground(.hidden)
             }
             DisclosureGroup(GitL10n.text("About AI generation"), isExpanded: $showingHelp) {
                 Text(GitL10n.text("Models run through local ACP, including for SSH repositories. Selected services receive the changes. Sessions expire after 30 days."))

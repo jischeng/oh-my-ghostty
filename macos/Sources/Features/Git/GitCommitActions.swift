@@ -45,8 +45,7 @@ enum GitCommitActions {
         default: return nil
         }
         alert.addButton(withTitle: GitL10n.text("Cancel"))
-        let response: NSApplication.ModalResponse
-        if let window { response = await alert.beginSheetModal(for: window) } else { response = alert.runModal() }
+        let response = await OMGThemeDialog.present(alert, for: window)
         guard response == .alertFirstButtonReturn else { return nil }
         if operation == .createBranch { return .createBranch(name: field.stringValue, commit: commit.id) }
         return .applyCommit(operation, commit.id, mainline: commit.parentIDs.count > 1 ? parent.indexOfSelectedItem + 1 : nil)

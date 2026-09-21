@@ -33,3 +33,6 @@ vgcore.*
 
 /sprite_face_test*
 default.profraw
+
+# JetBrains IDE local configuration
+.idea/

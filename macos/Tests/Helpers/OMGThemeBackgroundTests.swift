@@ -14,34 +14,14 @@ struct OMGThemeBackgroundTests {
                 Int((c.blueComponent * 255).rounded()))
     }
 
-    @Test func translucentChromeMatchesPremultipliedBytes() throws {
-        let bg = Color(.sRGB, red: 40 / 255, green: 44 / 255, blue: 52 / 255)
+    @Test func translucentChromeStaysTranslucent() {
+        // The sidebar/QuickInput chrome keeps the theme color at the configured
+        // opacity (translucent, preserving blur), NOT an opaque blend.
+        let bg = NSColor(red: 0x21 / 255, green: 0x25 / 255, blue: 0x2b / 255, alpha: 1)
         let chrome = OMGThemeBackground.matchingChrome(
-            color: bg, opacity: 0.73, windowIsOpaque: false, colorspaceIsDisplayP3: false)
-        let rgb = try #require(NSColor(chrome).usingColorSpace(.displayP3))
-        // Shader reference: round(alpha * 255), convert to P3, multiply,
-        // then round the RGB written to bgra8unorm (not the reverse order).
-        #expect(abs(rgb.alphaComponent * 255 - 186) < 0.001)
-        #expect(abs(rgb.redComponent * rgb.alphaComponent * 255 - 30) < 0.001)
-        #expect(abs(rgb.greenComponent * rgb.alphaComponent * 255 - 32) < 0.001)
-        #expect(abs(rgb.blueComponent * rgb.alphaComponent * 255 - 37) < 0.001)
-    }
-
-    @Test func zeroOpacityIsTransparent() {
-        let chrome = OMGThemeBackground.matchingChrome(
-            color: .red, opacity: 0, windowIsOpaque: false, colorspaceIsDisplayP3: false)
-        #expect(NSColor(chrome).alphaComponent == 0)
-    }
-
-    @Test func displayP3PremultiplicationUsesQuantizedAlpha() throws {
-        let chrome = OMGThemeBackground.matchingChrome(
-            color: Color(.sRGB, red: 40 / 255, green: 44 / 255, blue: 52 / 255),
-            opacity: 0.5, windowIsOpaque: false, colorspaceIsDisplayP3: true)
-        let rgb = try #require(NSColor(chrome).usingColorSpace(.displayP3))
-        #expect(abs(rgb.alphaComponent * 255 - 128) < 0.001)
-        #expect(abs(rgb.redComponent * rgb.alphaComponent * 255 - 20) < 0.001)
-        #expect(abs(rgb.greenComponent * rgb.alphaComponent * 255 - 22) < 0.001)
-        #expect(abs(rgb.blueComponent * rgb.alphaComponent * 255 - 26) < 0.001)
+            color: Color(bg), opacity: 0.85, windowIsOpaque: false, colorspaceIsDisplayP3: false)
+        #expect(abs(NSColor(chrome).alphaComponent - 0.85) < 0.001)
+        #expect(components(chrome) == components(Color(bg)))
     }
 
     @Test func auxiliaryPaletteRetainsThemeHueAndAppearance() {

@@ -15,9 +15,7 @@ enum OMGThemeBackground {
                 color, colorspaceIsDisplayP3: colorspaceIsDisplayP3
             ).opacity(1)
         }
-        return TerminalRenderColorQuantizer.matchingTranslucentColor(
-            color, opacity: opacity, colorspaceIsDisplayP3: colorspaceIsDisplayP3
-        )
+        return color.opacity(max(0, min(1, opacity)))
     }
 
     @MainActor
@@ -75,7 +73,12 @@ private struct OMGThemedSurface: ViewModifier {
             .foregroundStyle(.primary)
             .tint(Color.accentColor)
             .background(Color(palette.background))
-            .preferredColorScheme(palette.colorScheme)
+            // Drive the subtree's semantic colors from the theme palette without
+            // taking over the window appearance: preferredColorScheme pushes onto
+            // the hosting NSWindow and would override an explicit window-theme
+            // setting, while the environment key is what AppKit-backed controls
+            // read when resolving primary/secondary colors.
+            .environment(\.colorScheme, palette.colorScheme)
             .onReceive(NotificationCenter.default.publisher(for: .ghosttyConfigDidChange)) { notification in
                 guard notification.object == nil,
                       let config = notification.userInfo?[Notification.Name.GhosttyConfigChangeKey] as? Ghostty.Config else { return }

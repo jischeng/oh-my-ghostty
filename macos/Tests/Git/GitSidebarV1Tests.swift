@@ -158,7 +158,7 @@ struct GitSidebarV1Tests {
         table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         let menu = try #require(table.menu)
         coordinator.menuNeedsUpdate(menu)
-        #expect(menu.items.filter(\.isSeparatorItem).count == 3)
+        #expect(menu.items.filter(\.isSeparatorItem).count == 4)
         #expect(menu.items.contains { $0.title == GitL10n.text("Copy Commit Hash") })
         let pick = try #require(menu.items.firstIndex { $0.identifier?.rawValue == GitCommitOperation.cherryPick.rawValue })
         table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)

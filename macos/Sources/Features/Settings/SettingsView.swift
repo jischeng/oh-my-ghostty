@@ -130,9 +130,7 @@ final class OhMyGhosttySettingsWindowController: NSWindowController {
         // Follow the OMG/terminal theme background color (e.g. Atom One Dark),
         // not the default aqua/darkAqua window background.
         window.backgroundColor = OMGThemeBackground.windowBackground()
-        if window.appearance?.name != appearance?.name {
-            window.appearance = appearance
-        }
+        window.appearance = appearance
     }
 }
 

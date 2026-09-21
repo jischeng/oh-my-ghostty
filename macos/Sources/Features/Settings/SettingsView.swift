@@ -176,7 +176,7 @@ struct SettingsView: View {
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
             .frame(width: 190)
-            .background(Color(OMGThemeBackground.windowBackground()).opacity(0.55))
+            .background(Color(OMGThemeBackground.windowBackground()).opacity(0.5))
 
             Divider()
 
@@ -192,6 +192,9 @@ struct SettingsView: View {
             }
         }
         .frame(minWidth: 720, minHeight: 480)
+        // Opaque theme background so the whole settings window renders the
+        // theme color (e.g. Atom One Dark), not the content behind it.
+        .background(Color(OMGThemeBackground.windowBackground()))
         .onReceive(NotificationCenter.default.publisher(for: .omgSelectSettingsTab)) { notification in
             if let tab = notification.object as? OhMyGhosttySettingsTab { selection = tab }
         }

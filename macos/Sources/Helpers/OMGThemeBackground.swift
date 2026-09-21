@@ -18,34 +18,23 @@ enum OMGThemeBackground {
     private static let translucentBacking = NSColor.white.withAlphaComponent(0.001)
 
     /// Chrome color for the given theme background/opacity and window opacity.
-    /// When the window is opaque (or opacity >= 1) this is the P3-quantized
-    /// background. Otherwise it is the P3-quantized background blended with
-    /// the translucent backing at `opacity`, matching the terminal's output.
+    /// Opaque windows paint the P3-quantized background (matching the terminal
+    /// surface bit-for-bit). Translucent windows keep the theme color at the
+    /// configured opacity as a translucent fill, preserving blur through the
+    /// window — this is the same compositing path the terminal surface uses, so
+    /// sidebar/QuickInput stay translucent and match instead of becoming opaque.
     static func matchingChrome(
         color: Color,
         opacity: Double,
         windowIsOpaque: Bool,
         colorspaceIsDisplayP3: Bool
     ) -> Color {
-        let quantized = TerminalRenderColorQuantizer.matchingRenderedColor(
-            color, colorspaceIsDisplayP3: colorspaceIsDisplayP3
-        )
         if windowIsOpaque || opacity >= 1 {
-            return quantized.opacity(1)
+            return TerminalRenderColorQuantizer.matchingRenderedColor(
+                color, colorspaceIsDisplayP3: colorspaceIsDisplayP3
+            ).opacity(1)
         }
-        let alpha = max(0, min(1, opacity))
-        guard let backing = translucentBacking.usingColorSpace(.deviceRGB),
-              let fill = NSColor(quantized).usingColorSpace(.deviceRGB) else {
-            return quantized.opacity(alpha)
-        }
-        let blended = fill.blended(withFraction: alpha, of: backing) ?? fill
-        // Re-quantize so Core Animation emits the exact code values the
-        // terminal surface produced after its own blend.
-        return Color(.displayP3,
-                     red: TerminalRenderColorQuantizer.quantize8(Double(blended.redComponent)),
-                     green: TerminalRenderColorQuantizer.quantize8(Double(blended.greenComponent)),
-                     blue: TerminalRenderColorQuantizer.quantize8(Double(blended.blueComponent)),
-                     opacity: 1)
+        return color.opacity(max(0, min(1, opacity)))
     }
 
     /// The effective terminal window background color for settings/dialogs:
@@ -64,13 +53,10 @@ enum OMGThemeBackground {
         }
         let config = delegate?.ghostty.config
         let color = config.map { NSColor($0.backgroundColor) } ?? .windowBackgroundColor
-        let opacity = config?.backgroundOpacity ?? 1
-        if opacity >= 1 {
-            return TerminalRenderColorQuantizer.matchingRenderedNSColor(
-                color, colorspaceIsDisplayP3: config?.windowColorspaceIsDisplayP3 ?? false
-            ).withAlphaComponent(1)
-        }
-        return NSColor(matchingChrome(color: Color(color), opacity: opacity,
-            windowIsOpaque: false, colorspaceIsDisplayP3: config?.windowColorspaceIsDisplayP3 ?? false))
+        // Settings/dialogs use an OPAQUE theme background (never translucent),
+        // so they render as the theme color instead of showing content behind.
+        return TerminalRenderColorQuantizer.matchingRenderedNSColor(
+            color, colorspaceIsDisplayP3: config?.windowColorspaceIsDisplayP3 ?? false
+        ).withAlphaComponent(1)
     }
 }

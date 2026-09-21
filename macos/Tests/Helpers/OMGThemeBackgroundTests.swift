@@ -4,20 +4,8 @@ import Testing
 @testable import Ghostty
 
 struct OMGThemeBackgroundTests {
-    /// Replicates the terminal renderer's translucent output: P3-quantize the
-    /// theme background, then source-over blend against the near-white backing.
-    private func terminalCodeValues(_ bg: NSColor, opacity: Double) -> (Int, Int, Int) {
-        let quantized = TerminalRenderColorQuantizer.matchingRenderedNSColor(bg, colorspaceIsDisplayP3: false)
-        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0
-        quantized.usingColorSpace(.deviceRGB)!.getRed(&r, green: &g, blue: &b, alpha: nil)
-        let p: [CGFloat] = [r, g, b]
-        let back = NSColor.white.withAlphaComponent(0.001).usingColorSpace(.deviceRGB)!
-        let blended = NSColor(deviceRed: p[0], green: p[1], blue: p[2], alpha: 1)
-            .blended(withFraction: opacity, of: back)!
-        return (Int((blended.redComponent * 255).rounded()),
-                Int((blended.greenComponent * 255).rounded()),
-                Int((blended.blueComponent * 255).rounded()))
-    }
+    /// The translucent chrome must stay a translucent fill (preserving blur),
+    /// not an opaque pre-blended color. Settings/dialogs use the opaque variant.
 
     private func components(_ color: Color) -> (Int, Int, Int) {
         let c = NSColor(color).usingColorSpace(.deviceRGB)!
@@ -26,17 +14,14 @@ struct OMGThemeBackgroundTests {
                 Int((c.blueComponent * 255).rounded()))
     }
 
-    @Test func translucentChromeMatchesTerminalBlend() {
-        // Atom One Dark #21252b at 0.85 opacity.
+    @Test func translucentChromeStaysTranslucent() {
+        // The sidebar/QuickInput chrome keeps the theme color at the configured
+        // opacity (translucent, preserving blur), NOT an opaque blend.
         let bg = NSColor(red: 0x21 / 255, green: 0x25 / 255, blue: 0x2b / 255, alpha: 1)
-        let expected = terminalCodeValues(bg, opacity: 0.85)
         let chrome = OMGThemeBackground.matchingChrome(
             color: Color(bg), opacity: 0.85, windowIsOpaque: false, colorspaceIsDisplayP3: false)
-        let actual = components(chrome)
-        #expect(actual == expected)
-        // Translucent windows paint an opaque blended chrome (no further alpha
-        // blending by Core Animation), so opacity must be forced to 1.
-        #expect(abs(NSColor(chrome).alphaComponent - 1) < 0.001)
+        #expect(abs(NSColor(chrome).alphaComponent - 0.85) < 0.001)
+        #expect(components(chrome) == components(Color(bg)))
     }
 
     @Test func opaqueChromeIsQuantizedBackground() {

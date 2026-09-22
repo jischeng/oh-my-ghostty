@@ -4,16 +4,20 @@ import Testing
 
 @MainActor
 struct TerminalHistoryServiceTests {
-    @Test func recordsAndDeduplicatesRecentCommands() {
+    @Test func recordsRepeatedCommandsAsDistinctExecutions() {
         let service = TerminalHistoryService()
         let surfaceID = UUID()
 
         service.recordCommand(text: "git status", surfaceID: surfaceID)
-        service.recordCommand(text: "git status", surfaceID: surfaceID) // 紧邻重复命令应去重
+        service.recordCommand(text: "git status", surfaceID: surfaceID) // A separate execution, not a replacement.
         service.recordCommand(text: "cargo test", surfaceID: surfaceID)
 
         let history = service.loadShellHistory(surfaceID: surfaceID, limit: 10)
-        #expect(history.count >= 2)
+        #expect(history.count == 3)
+        #expect(history[1].id != history[2].id)
+        #expect(history[2].text == "git status")
+        #expect(service.loadShellHistory(surfaceID: UUID()).isEmpty)
+        #expect(service.loadShellHistory(surfaceID: surfaceID, limit: 0).isEmpty)
         #expect(history[0].text == "cargo test")
         #expect(history[1].text == "git status")
         #expect(history[0].kind == .command)

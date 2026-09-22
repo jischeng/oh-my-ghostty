@@ -2116,6 +2116,8 @@ pub fn semanticPrompt(
         },
 
         .end_prompt_start_input => {
+            const screen = self.screens.active;
+            try screen.omg_command_history.begin(&screen.pages, screen.cursor.page_pin.*);
             // End of prompt and start of user input, terminated by a OSC
             // "133;C" or another prompt (OSC "133;P").
             self.screens.active.cursorSetSemanticContent(.{
@@ -2124,6 +2126,8 @@ pub fn semanticPrompt(
         },
 
         .end_prompt_start_input_terminate_eol => {
+            const screen = self.screens.active;
+            try screen.omg_command_history.begin(&screen.pages, screen.cursor.page_pin.*);
             // End of prompt and start of user input, terminated by end-of-line.
             self.screens.active.cursorSetSemanticContent(.{
                 .input = .clear_eol,
@@ -2131,6 +2135,8 @@ pub fn semanticPrompt(
         },
 
         .end_input_start_output => {
+            const screen = self.screens.active;
+            try screen.omg_command_history.finish(screen.alloc, &screen.pages, screen.cursor.page_pin.*, std.Io.Clock.real.now(self.io()).toSeconds());
             // "End of input, and start of output."
             self.screens.active.cursorSetSemanticContent(.output);
 

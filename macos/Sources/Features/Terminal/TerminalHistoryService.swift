@@ -30,21 +30,17 @@ final class TerminalHistoryService {
         guard !trimmed.isEmpty else { return }
 
         var list = recordedCommandsBySurface[surfaceID] ?? []
-        // 避免紧邻的完全相同重复命令连续刷屏
-        if list.first?.text != trimmed {
-            let item = InspectorHistoryItem(
-                id: UUID().uuidString,
-                kind: .command,
-                text: trimmed,
-                timestamp: Date(),
-                exitCode: exitCode
-            )
-            list.insert(item, at: 0)
-            if list.count > 50 {
-                list.removeLast()
-            }
-            recordedCommandsBySurface[surfaceID] = list
-        }
+        // Each execution is distinct, including adjacent identical commands.
+        let item = InspectorHistoryItem(
+            id: UUID().uuidString,
+            kind: .command,
+            text: trimmed,
+            timestamp: Date(),
+            exitCode: exitCode
+        )
+        list.insert(item, at: 0)
+        if list.count > 50 { list.removeLast() }
+        recordedCommandsBySurface[surfaceID] = list
     }
 
     /// 清除指定 Surface 的记录
@@ -62,13 +58,7 @@ final class TerminalHistoryService {
         guard let surfaceID, let recorded = recordedCommandsBySurface[surfaceID] else {
             return []
         }
-        var results: [InspectorHistoryItem] = []
-        var seenTexts = Set<String>()
-        for item in recorded where seenTexts.insert(item.text).inserted {
-            results.append(item)
-            if results.count >= limit { break }
-        }
-        return results
+        return Array(recorded.prefix(max(0, limit)))
     }
 
     /// 从磁盘读取用户常见 Shell 的历史文件
@@ -152,10 +142,40 @@ final class TerminalHistoryService {
         return items
     }
 
+    private final class CommandSnapshot {
+        var items: [InspectorHistoryItem] = []
+        let surfaceID: UUID
+        init(surfaceID: UUID) { self.surfaceID = surfaceID }
+    }
+
+    func commands(in view: Ghostty.SurfaceView) -> [InspectorHistoryItem] {
+        guard let surface = view.surface else { return [] }
+        let snapshot = CommandSnapshot(surfaceID: view.id)
+        ghostty_surface_omg_commands(surface, Unmanaged.passUnretained(snapshot).toOpaque()) { context, id, text, timestamp in
+            guard let context, let text else { return }
+            let snapshot = Unmanaged<CommandSnapshot>.fromOpaque(context).takeUnretainedValue()
+            snapshot.items.append(.init(
+                id: "command:\(snapshot.surfaceID.uuidString):\(id)",
+                kind: .command,
+                text: String(cString: text),
+                timestamp: Date(timeIntervalSince1970: TimeInterval(timestamp))
+            ))
+        }
+        return snapshot.items.reversed()
+    }
+
     /// 执行终端跳转到历史项（Shell 命令或 Agent Prompt）所在位置
     @discardableResult
     func jump(to item: InspectorHistoryItem, in surfaceView: Ghostty.SurfaceView) -> Bool {
         guard let surface = surfaceView.surface else { return false }
+        if item.kind == .command {
+            let prefix = "command:\(surfaceView.id.uuidString):"
+            guard item.id.hasPrefix(prefix),
+                  let id = UInt64(item.id.dropFirst(prefix.count)) else { return false }
+            let result = ghostty_surface_omg_jump_command(surface, id)
+            if result { Ghostty.moveFocus(to: surfaceView, from: nil) }
+            return result
+        }
 
         // 提取搜索关键文本：取第一行非空文本，最多 40 字符，去除多余字符
         let firstLine = item.text

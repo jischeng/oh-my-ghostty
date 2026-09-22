@@ -46,6 +46,7 @@ pages: PageList,
 
 /// OMG output cwd anchors; read-only screen clones deliberately omit these.
 omg_cwd_history: @import("omg_cwd_history.zig") = .{},
+omg_command_history: @import("omg_command_history.zig") = .{},
 
 /// Special-case where we want no scrollback whatsoever. We have to flag
 /// this because max_size 0 in PageList gets rounded up to two pages so
@@ -350,6 +351,7 @@ pub fn init(
 }
 
 pub fn deinit(self: *Screen) void {
+    self.omg_command_history.deinit(self.alloc, &self.pages);
     self.omg_cwd_history.deinit(self.alloc, &self.pages);
     if (comptime build_options.kitty_graphics) {
         self.kitty_images.deinit(self.alloc, self);
@@ -397,6 +399,7 @@ pub fn assertIntegrity(self: *const Screen) void {
 /// - Disables protection mode
 ///
 pub fn reset(self: *Screen) void {
+    self.omg_command_history.deinit(self.alloc, &self.pages);
     self.omg_cwd_history.deinit(self.alloc, &self.pages);
     // Reset our pages
     self.pages.reset();

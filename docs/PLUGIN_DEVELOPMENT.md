@@ -888,13 +888,31 @@ with fast jump-to-position actions, plus the SSH port-forwarding section. The fo
 antenna/radio-tower symbol and reports its active port count. For an active pane
 associated with an Agent session, Info presents the list of user-submitted prompts
 with an Agent badge. History timestamps include date and time. Single click selects
-an entry; Cmd+C copies its complete command or prompt. Double click or the row's
-jump button starts terminal search and navigates after matches arrive. This is
-text-based navigation, not an exact execution anchor: repeated text can match
-another occurrence, and text no longer in the buffer cannot be located.
+an entry; Cmd+C copies its complete command or prompt. The native table sizes its
+scrolling document to the inspector width and computes row heights from wrapped
+text. Prompts show up to four preview lines; the +/− control expands or collapses
+that row without changing the copied text. Text and date occupy separate bounded
+frames so long prompts cannot paint into neighboring rows. Double click or the row's
+jump button uses the command's tracked input anchor for shell records. Agent
+prompts still use text-based search navigation, not exact execution anchors:
+repeated prompt text can match another occurrence, and text no longer in the
+buffer cannot be located.
 For SSH panes the port-forwarding section stays above history, including its
 add-port control when no forwards exist. History belongs to the current Surface;
 it must not be populated from another pane's global shell history.
+Keyboard interception is not a supported command source. The temporary typed-input
+collector has been removed: it could capture password/TUI input and caused duplicate
+PTY dispatch. Shell commands are captured at OSC 133 B/C boundaries in a bounded per-screen
+store (100 records, 16 KiB capture budget). Every execution has its own ID, even
+when its text repeats. The host copies a snapshot through the internal
+`ghostty_surface_omg_commands` API and navigates with
+`ghostty_surface_omg_jump_command`; callbacks must not reenter terminal APIs.
+Tracked input pins follow reflow; pruned pins and alternate-screen navigation
+are rejected. Reset drops records without reusing IDs. Command timestamps use host wall-clock seconds recorded at OSC 133 C, not
+snapshot refresh time (also for SSH panes). Anchors whose input cell has been
+overwritten as output are rejected as well as garbage/pruned pins. Shells without semantic input
+markers show no command records rather than reading global history.
+AppKit's insertText accumulator must return before the direct committed-text path.
 
 For an `sshReady` Pane, users can enter either a port (shorthand for
 `127.0.0.1:<port>` on the SSH server) or an explicit `host:port` reachable from

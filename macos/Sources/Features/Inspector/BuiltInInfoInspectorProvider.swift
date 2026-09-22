@@ -642,6 +642,7 @@ final class BuiltInInfoInspectorProvider {
                     }
                     return (cached, true, agentName)
                 }
+                return (historyService.commands(in: surfaceView), false, nil)
             }
         }
 

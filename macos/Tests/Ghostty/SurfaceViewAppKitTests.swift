@@ -1,7 +1,20 @@
 @testable import Ghostty
 import Testing
+import Foundation
 
 struct SurfaceViewAppKitTests {
+    @Test func accumulatedInsertTextReturnsBeforeDirectDispatch() throws {
+        // Protect the AppKit input adapter: the accumulator is dispatched by
+        // keyDown, so falling through here sends the same key twice.
+        let macos = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(contentsOf: macos.appendingPathComponent(
+            "Sources/Ghostty/Surface View/SurfaceView_AppKit.swift"
+        ), encoding: .utf8)
+        #expect(source.contains("keyTextAccumulator = acc\n            return"))
+        #expect(!source.contains("typedCommandBuffer"))
+    }
+
     @Test(arguments: [
         ("\u{0008}", true),
         ("\u{001F}", true),

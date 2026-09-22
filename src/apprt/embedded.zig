@@ -1676,6 +1676,39 @@ pub const CAPI = struct {
         return readTextLocked(surface, core_sel, result);
     }
 
+    // OMG host-only command navigation. Callback text is borrowed for this call.
+    export fn ghostty_surface_omg_commands(
+        surface: *Surface,
+        userdata: ?*anyopaque,
+        callback: *const fn (?*anyopaque, u64, [*:0]const u8, i64) callconv(.c) void,
+    ) void {
+        const core = &surface.core_surface;
+        core.renderer_state.mutex.lockUncancelable(global.io());
+        defer core.renderer_state.mutex.unlock(global.io());
+        if (core.renderer_state.terminal.screens.active_key != .primary) return;
+        const screen = core.renderer_state.terminal.screens.active;
+        for (screen.omg_command_history.entries.items) |entry| {
+            if (entry.isValid()) callback(userdata, entry.id, entry.text.ptr, entry.timestamp);
+        }
+    }
+
+    export fn ghostty_surface_omg_jump_command(surface: *Surface, id: u64) bool {
+        const core = &surface.core_surface;
+        {
+            core.renderer_state.mutex.lockUncancelable(global.io());
+            defer core.renderer_state.mutex.unlock(global.io());
+            if (core.renderer_state.terminal.screens.active_key != .primary) return false;
+            const screen = core.renderer_state.terminal.screens.active;
+            for (screen.omg_command_history.entries.items) |entry| {
+                if (entry.id != id or !entry.isValid()) continue;
+                screen.scroll(.{ .pin = entry.pin.* });
+                break;
+            } else return false;
+        }
+        surface.refresh();
+        return true;
+    }
+
     fn readTextLocked(
         surface: *Surface,
         core_sel: terminal.Selection,

@@ -8,7 +8,21 @@ final class TerminalHistoryService {
 
     private var recordedCommandsBySurface: [UUID: [InspectorHistoryItem]] = [:]
 
+    private var pendingJumps: [UUID: Date] = [:]
+
     init() {}
+
+    /// Search completion is asynchronous; navigate only once a match exists.
+    func searchResultsChanged(in surfaceView: Ghostty.SurfaceView, total: UInt?) {
+        guard let deadline = pendingJumps[surfaceView.id] else { return }
+        guard deadline > Date() else {
+            pendingJumps.removeValue(forKey: surfaceView.id)
+            return
+        }
+        guard let total, total > 0 else { return }
+        pendingJumps.removeValue(forKey: surfaceView.id)
+        _ = surfaceView.navigateSearchToPrevious()
+    }
 
     /// 记录某一个 Surface 执行过的命令
     func recordCommand(text: String, surfaceID: UUID, exitCode: Int16? = nil) {
@@ -162,13 +176,16 @@ final class TerminalHistoryService {
         // 确保该 Surface 聚焦
         Ghostty.moveFocus(to: surfaceView, from: nil)
 
-        // 执行终端 action 搜索定位
+        // Restart even an unchanged needle so a fresh result callback arrives.
+        _ = ghostty_surface_binding_action(surface, "search:", 7)
+        pendingJumps[surfaceView.id] = Date().addingTimeInterval(10)
         let action = "search:\(needle)"
         let success = ghostty_surface_binding_action(
             surface,
             action,
             UInt(action.lengthOfBytes(using: .utf8))
         )
+        if !success { pendingJumps.removeValue(forKey: surfaceView.id) }
         return success
     }
 }

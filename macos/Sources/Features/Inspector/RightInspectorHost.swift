@@ -1729,33 +1729,19 @@ private struct InspectorInfoView: View {
                     .frame(height: TerminalShellStyle.dividerWidth)
             }
 
-            if !info.historyItems.isEmpty || info.isAgentSession {
-                InspectorTerminalHistoryListView(
-                    items: info.historyItems,
-                    isAgent: info.isAgentSession,
-                    agentName: info.agentName,
-                    perform: perform
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-
-                if !info.portForwards.items.isEmpty {
-                    Rectangle()
-                        .fill(dividerColor)
-                        .frame(height: TerminalShellStyle.dividerWidth)
-
-                    InspectorPortForwardListView(
-                        forwards: info.portForwards,
-                        perform: perform
-                    )
-                    .frame(maxHeight: 220)
-                }
-            } else {
-                InspectorPortForwardListView(
-                    forwards: info.portForwards,
-                    perform: perform
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            if !info.portForwards.hostAlias.isEmpty {
+                InspectorPortForwardListView(forwards: info.portForwards, perform: perform)
+                    .frame(height: 220)
+                Rectangle().fill(dividerColor).frame(height: TerminalShellStyle.dividerWidth)
             }
+
+            InspectorTerminalHistoryListView(
+                items: info.historyItems,
+                isAgent: info.isAgentSession,
+                agentName: info.agentName,
+                perform: perform
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
@@ -1814,65 +1800,7 @@ private struct InspectorTerminalHistoryListView: View {
                 .padding(24)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 2) {
-                        ForEach(items) { item in
-                            Button {
-                                perform(.jumpToHistoryItem(item))
-                            } label: {
-                                HStack(spacing: 8) {
-                                    Image(systemName: item.kind == .agentPrompt ? "bubble.left" : "chevron.right")
-                                        .font(.caption.weight(.semibold))
-                                        .foregroundStyle(item.kind == .agentPrompt ? Color.accentColor : Color.secondary)
-                                        .frame(width: 14)
-
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(item.text)
-                                            .font(.system(.subheadline, design: item.kind == .command ? .monospaced : .default))
-                                            .lineLimit(2)
-                                            .truncationMode(.tail)
-                                            .foregroundStyle(.primary)
-
-                                        if let time = item.timestamp {
-                                            Text(Self.timeFormatter.string(from: time))
-                                                .font(.caption2)
-                                                .foregroundStyle(.secondary)
-                                        }
-                                    }
-
-                                    Spacer(minLength: 4)
-
-                                    Image(systemName: "arrow.up.right.square")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .opacity(hoveredID == item.id ? 1.0 : 0.3)
-                                }
-                                .padding(.horizontal, InspectorContentMetrics.leadingInset)
-                                .padding(.vertical, 6)
-                                .contentShape(Rectangle())
-                                .background(
-                                    hoveredID == item.id
-                                        ? Color.secondary.opacity(0.12)
-                                        : Color.clear
-                                )
-                                .cornerRadius(4)
-                            }
-                            .buttonStyle(.plain)
-                            .onHover { isHovered in
-                                if isHovered {
-                                    hoveredID = item.id
-                                    NSCursor.pointingHand.set()
-                                } else if hoveredID == item.id {
-                                    hoveredID = nil
-                                    NSCursor.arrow.set()
-                                }
-                            }
-                            .help(strings.clickToJump)
-                        }
-                    }
-                    .padding(.horizontal, 4)
-                    .padding(.bottom, 8)
-                }
+                TerminalHistoryTable(items: items) { perform(.jumpToHistoryItem($0)) }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)

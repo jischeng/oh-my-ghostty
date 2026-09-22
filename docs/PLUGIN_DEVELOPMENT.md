@@ -887,10 +887,14 @@ hidden), the session timeline displaying command history and Agent user prompts
 with fast jump-to-position actions, plus the SSH port-forwarding section. The forwarding header uses the
 antenna/radio-tower symbol and reports its active port count. For an active pane
 associated with an Agent session, Info presents the list of user-submitted prompts
-with an Agent badge; clicking an entry smoothly scrolls the terminal view to
-the exact prompt position via search-based positioning. For regular shell sessions,
-Info presents recent shell commands and clicking an entry jumps the terminal viewport
-to that command's location.
+with an Agent badge. History timestamps include date and time. Single click selects
+an entry; Cmd+C copies its complete command or prompt. Double click or the row's
+jump button starts terminal search and navigates after matches arrive. This is
+text-based navigation, not an exact execution anchor: repeated text can match
+another occurrence, and text no longer in the buffer cannot be located.
+For SSH panes the port-forwarding section stays above history, including its
+add-port control when no forwards exist. History belongs to the current Surface;
+it must not be populated from another pane's global shell history.
 
 For an `sshReady` Pane, users can enter either a port (shorthand for
 `127.0.0.1:<port>` on the SSH server) or an explicit `host:port` reachable from

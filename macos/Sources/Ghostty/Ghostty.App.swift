@@ -2248,6 +2248,7 @@ extension Ghostty {
                 let total: UInt? = v.total >= 0 ? UInt(v.total) : nil
                 DispatchQueue.main.async {
                     surfaceView.searchState?.total = total
+                    TerminalHistoryService.shared.searchResultsChanged(in: surfaceView, total: total)
                 }
 
             default:

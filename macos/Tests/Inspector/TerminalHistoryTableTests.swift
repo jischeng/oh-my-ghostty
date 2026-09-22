@@ -5,23 +5,22 @@ import Testing
 
 @MainActor
 struct TerminalHistoryTableTests {
-    @Test func longPromptRowsExpandAndWrapWithWidth() {
+    @Test func compactRowsHaveBoundedHeightAndRequireAnchors() {
         let coordinator = TerminalHistoryTable.Coordinator()
-        coordinator.items = [.init(id: "prompt", kind: .agentPrompt,
-                                   text: String(repeating: "这是一个需要换行的长 Prompt。", count: 50))]
+        let item = InspectorHistoryItem(id: "prompt", kind: .agentPrompt,
+                                       text: String(repeating: "Long prompt 中文 ", count: 50))
+        coordinator.items = [item]
         let table = NSTableView()
         coordinator.table = table
         coordinator.updateWidth(320)
-        let collapsed = coordinator.tableView(table, heightOfRow: 0)
-        coordinator.expanded.insert("prompt")
-        let expanded = coordinator.tableView(table, heightOfRow: 0)
-        #expect(collapsed <= 116)
-        #expect(expanded > collapsed)
-        coordinator.updateWidth(200)
-        #expect(coordinator.tableView(table, heightOfRow: 0) > expanded)
+        #expect(coordinator.tableView(table, heightOfRow: 0) <= 98)
+        #expect(!TerminalHistoryTable.Coordinator.canJump(item))
+        #expect(TerminalHistoryTable.Coordinator.canJump(.init(
+            id: "command:surface:1", kind: .command, text: "ll"
+        )))
     }
 
-    @Test func hostedHistoryScrollsAndExpandsWithoutOverlapping() async throws {
+    @Test func hostedHistoryScrollsAndCopiesWithoutOverlapping() async throws {
         let items = (0..<40).map { index in
             InspectorHistoryItem(id: "row-\(index)", kind: .agentPrompt,
                                  text: String(repeating: "Prompt \(index) 中文 long text. ", count: 30))
@@ -44,22 +43,15 @@ struct TerminalHistoryTableTests {
         table.scrollRowToVisible(39)
         #expect(scroll.contentView.bounds.minY > 0)
         table.scrollRowToVisible(0)
-        let before = table.rect(ofRow: 0).height
-        let cell = try #require(table.view(atColumn: 0, row: 0, makeIfNecessary: true)
-            as? TerminalHistoryTable.HistoryCell)
-        cell.expand.performClick(nil)
-        host.layoutSubtreeIfNeeded()
-        #expect(table.rect(ofRow: 0).height > before)
         #expect(table.rect(ofRow: 1).minY >= table.rect(ofRow: 0).maxY)
         table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         #expect(table.copyText?() == items[0].text)
         let expanded = try #require(table.view(atColumn: 0, row: 0, makeIfNecessary: true)
             as? TerminalHistoryTable.HistoryCell)
+        #expect(!expanded.jump.isEnabled)
         expanded.jump.performClick(nil)
-        #expect(jumped == [items[0].id])
-        expanded.expand.performClick(nil)
-        host.layoutSubtreeIfNeeded()
-        #expect(table.rect(ofRow: 0).height == before)
+        #expect(jumped.isEmpty)
+        #expect(expanded.subviews.count == 3)
     }
 
     private func findScroll(in view: NSView) -> NSScrollView? {

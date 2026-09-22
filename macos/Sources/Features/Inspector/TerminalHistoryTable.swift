@@ -17,7 +17,7 @@ struct TerminalHistoryTable: NSViewRepresentable {
         let table = HistoryTable()
         table.headerView = nil
         table.backgroundColor = .clear
-        table.intercellSpacing = NSSize(width: 0, height: 6)
+        table.intercellSpacing = NSSize(width: 0, height: 2)
         table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         table.autoresizingMask = [.width]
         let column = NSTableColumn(identifier: .init("history"))
@@ -52,7 +52,6 @@ struct TerminalHistoryTable: NSViewRepresentable {
                 ? coordinator.items[table.selectedRow].id : nil
         }
         coordinator.items = items
-        coordinator.expanded.formIntersection(Set(items.map(\.id)))
         coordinator.table?.reloadData()
         if let selected, let index = items.firstIndex(where: { $0.id == selected }) {
             coordinator.table?.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
@@ -101,7 +100,6 @@ struct TerminalHistoryTable: NSViewRepresentable {
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         var items: [InspectorHistoryItem] = []
         var jump: ((InspectorHistoryItem) -> Void)?
-        var expanded = Set<String>()
         weak var table: NSTableView?
         private var width: CGFloat = 300
         private let formatter: DateFormatter = {
@@ -116,42 +114,34 @@ struct TerminalHistoryTable: NSViewRepresentable {
             table?.noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: items.indices))
             table?.reloadData()
         }
+        static func canJump(_ item: InspectorHistoryItem) -> Bool {
+            item.kind == .command && item.id.hasPrefix("command:")
+        }
         func numberOfRows(in tableView: NSTableView) -> Int { items.count }
         func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-            let height = Metrics.textHeight(items[row].text, width: width - 24)
-            return (expanded.contains(items[row].id) ? height : min(height, Metrics.previewHeight)) + 44
+            let height = Metrics.textHeight(items[row].text, width: width - 12)
+            return min(height, Metrics.previewHeight) + 26
         }
         @objc func activate() {
             guard let table, items.indices.contains(table.clickedRow) else { return }
+            guard Self.canJump(items[table.clickedRow]) else { return }
             jump?(items[table.clickedRow])
         }
         @objc func jumpButton(_ sender: NSButton) {
             guard items.indices.contains(sender.tag) else { return }
+            guard Self.canJump(items[sender.tag]) else { return }
             jump?(items[sender.tag])
-        }
-        @objc func toggle(_ sender: NSButton) {
-            guard items.indices.contains(sender.tag), let table else { return }
-            let id = items[sender.tag].id
-            if !expanded.insert(id).inserted { expanded.remove(id) }
-            table.noteHeightOfRows(withIndexesChanged: IndexSet(integer: sender.tag))
-            table.reloadData(forRowIndexes: IndexSet(integer: sender.tag), columnIndexes: IndexSet(integer: 0))
         }
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
             let item = items[row]
-            let fullHeight = Metrics.textHeight(item.text, width: width - 24)
-            let isExpanded = expanded.contains(item.id)
             let cell = HistoryCell()
             cell.wantsLayer = true
             cell.layer?.masksToBounds = true
             cell.text.stringValue = item.text
-            cell.text.maximumNumberOfLines = isExpanded ? 0 : 4
+            cell.text.maximumNumberOfLines = 4
             cell.date.stringValue = item.timestamp.map(formatter.string(from:)) ?? ""
-            cell.expand.isHidden = fullHeight <= Metrics.previewHeight
-            cell.expand.title = isExpanded ? "−" : "+"
-            cell.expand.toolTip = isExpanded ? "Collapse / 收起" : "Expand / 展开"
-            cell.expand.target = self
-            cell.expand.action = #selector(toggle(_:))
-            cell.expand.tag = row
+            cell.jump.isEnabled = Self.canJump(item)
+            cell.jump.toolTip = Self.canJump(item) ? "Jump / 跳转" : "No terminal anchor / 无终端位置锚点"
             cell.jump.target = self
             cell.jump.action = #selector(jumpButton(_:))
             cell.jump.tag = row
@@ -162,28 +152,25 @@ struct TerminalHistoryTable: NSViewRepresentable {
     final class HistoryCell: NSTableCellView {
         let text = NSTextField(wrappingLabelWithString: "")
         let date = NSTextField(labelWithString: "")
-        let expand = NSButton(title: "+", target: nil, action: nil)
         let jump = NSButton(title: "↗", target: nil, action: nil)
         override init(frame: NSRect) {
             super.init(frame: frame)
             text.font = Metrics.font
-            text.lineBreakMode = .byTruncatingTail
+            text.lineBreakMode = .byWordWrapping
             date.font = .systemFont(ofSize: 10)
             date.textColor = .secondaryLabelColor
             date.lineBreakMode = .byTruncatingTail
-            expand.isBordered = false
             jump.isBordered = false
             jump.toolTip = "Jump / 跳转"
-            for view in [text, date, expand, jump] { addSubview(view) }
+            for view in [text, date, jump] { addSubview(view) }
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
         override func layout() {
             super.layout()
             // Explicit bounded frames prevent a long label from painting across rows.
-            text.frame = NSRect(x: 12, y: 32, width: max(20, bounds.width - 24), height: max(18, bounds.height - 44))
-            date.frame = NSRect(x: 12, y: 8, width: max(20, bounds.width - 84), height: 16)
-            expand.frame = NSRect(x: bounds.width - 64, y: 4, width: 24, height: 24)
-            jump.frame = NSRect(x: bounds.width - 36, y: 4, width: 24, height: 24)
+            text.frame = NSRect(x: 6, y: 22, width: max(20, bounds.width - 12), height: max(18, bounds.height - 26))
+            date.frame = NSRect(x: 6, y: 4, width: max(20, bounds.width - 42), height: 16)
+            jump.frame = NSRect(x: bounds.width - 30, y: 0, width: 24, height: 24)
         }
     }
 }

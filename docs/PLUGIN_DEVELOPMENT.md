@@ -890,13 +890,15 @@ associated with an Agent session, Info presents the list of user-submitted promp
 with an Agent badge. History timestamps include date and time. Single click selects
 an entry; Cmd+C copies its complete command or prompt. The native table sizes its
 scrolling document to the inspector width and computes row heights from wrapped
-text. Prompts show up to four preview lines; the +/− control expands or collapses
-that row without changing the copied text. Text and date occupy separate bounded
+text. Prompts show up to four preview lines without expand/collapse controls.
+Horizontal padding is six points and row spacing is two points; copying always
+returns the full text. Text and date occupy separate bounded
 frames so long prompts cannot paint into neighboring rows. Double click or the row's
 jump button uses the command's tracked input anchor for shell records. Agent
-prompts still use text-based search navigation, not exact execution anchors:
-repeated prompt text can match another occurrence, and text no longer in the
-buffer cannot be located.
+prompts currently have no terminal-position anchors. Their jump buttons are
+disabled with an explanatory tooltip; double-click does not start a text search.
+Transcript-only messages remain selectable and copyable. Exact Agent prompt
+navigation is not implemented and must not be advertised as available.
 For SSH panes the port-forwarding section stays above history, including its
 add-port control when no forwards exist. History belongs to the current Surface;
 it must not be populated from another pane's global shell history.

@@ -8,21 +8,7 @@ final class TerminalHistoryService {
 
     private var recordedCommandsBySurface: [UUID: [InspectorHistoryItem]] = [:]
 
-    private var pendingJumps: [UUID: Date] = [:]
-
     init() {}
-
-    /// Search completion is asynchronous; navigate only once a match exists.
-    func searchResultsChanged(in surfaceView: Ghostty.SurfaceView, total: UInt?) {
-        guard let deadline = pendingJumps[surfaceView.id] else { return }
-        guard deadline > Date() else {
-            pendingJumps.removeValue(forKey: surfaceView.id)
-            return
-        }
-        guard let total, total > 0 else { return }
-        pendingJumps.removeValue(forKey: surfaceView.id)
-        _ = surfaceView.navigateSearchToPrevious()
-    }
 
     /// 记录某一个 Surface 执行过的命令
     func recordCommand(text: String, surfaceID: UUID, exitCode: Int16? = nil) {
@@ -177,35 +163,8 @@ final class TerminalHistoryService {
             return result
         }
 
-        // 提取搜索关键文本：取第一行非空文本，最多 40 字符，去除多余字符
-        let firstLine = item.text
-            .components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .first { !$0.isEmpty } ?? item.text
-
-        // 去掉可能的 prompt 符号前缀（如 '> ', '● ', '$ ' 等）
-        var needle = firstLine
-        for prefix in ["> ", "● ", "$ ", "# ", "% ", "➜ "] where needle.hasPrefix(prefix) {
-            needle = String(needle.dropFirst(prefix.count))
-            break
-        }
-        needle = String(needle.trimmingCharacters(in: .whitespacesAndNewlines).prefix(40))
-
-        guard !needle.isEmpty else { return false }
-
-        // 确保该 Surface 聚焦
-        Ghostty.moveFocus(to: surfaceView, from: nil)
-
-        // Restart even an unchanged needle so a fresh result callback arrives.
-        _ = ghostty_surface_binding_action(surface, "search:", 7)
-        pendingJumps[surfaceView.id] = Date().addingTimeInterval(10)
-        let action = "search:\(needle)"
-        let success = ghostty_surface_binding_action(
-            surface,
-            action,
-            UInt(action.lengthOfBytes(using: .utf8))
-        )
-        if !success { pendingJumps.removeValue(forKey: surfaceView.id) }
-        return success
+        // A transcript message is not a terminal coordinate. Never substitute
+        // a text search for an execution anchor (especially repeated prompts).
+        return false
     }
 }

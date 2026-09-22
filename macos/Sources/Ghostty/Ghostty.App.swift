@@ -1528,6 +1528,11 @@ extension Ghostty {
                 guard let surface = target.target.surface else { return }
                 guard let surfaceView = self.surfaceView(from: surface) else { return }
 
+                // History refresh is independent of desktop notification preferences.
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(name: .terminalHistoryDidChange, object: surfaceView.id)
+                }
+
                 // Determine if we even care about command finish notifications
                 guard let config = (NSApplication.shared.delegate as? AppDelegate)?.ghostty.config else { return }
                 switch config.notifyOnCommandFinish {

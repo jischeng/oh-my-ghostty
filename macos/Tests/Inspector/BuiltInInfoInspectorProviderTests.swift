@@ -393,6 +393,20 @@ struct BuiltInInfoInspectorProviderTests {
         #expect(!info.historyItems.isEmpty)
         #expect(info.historyItems.first?.text == "git status")
 
+        historyService.recordCommand(text: "new command", surfaceID: surfaceID)
+        NotificationCenter.default.post(name: .terminalHistoryDidChange, object: UUID())
+        await Task.yield()
+        if case .info(let unchanged) = registry.content(for: BuiltInInfoInspectorProvider.paneID, context: context) {
+            #expect(unchanged.historyItems.first?.text == "git status")
+        }
+        NotificationCenter.default.post(name: .terminalHistoryDidChange, object: surfaceID)
+        for _ in 0..<10 { await Task.yield() }
+        if case .info(let refreshed) = registry.content(for: BuiltInInfoInspectorProvider.paneID, context: context) {
+            #expect(refreshed.historyItems.first?.text == "new command")
+        } else {
+            Issue.record("Expected history content after completion notification")
+        }
+
         let targetItem = info.historyItems.first!
         registry.performAction(
             paneID: BuiltInInfoInspectorProvider.paneID,

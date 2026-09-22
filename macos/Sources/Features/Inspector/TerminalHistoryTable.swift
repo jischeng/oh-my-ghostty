@@ -119,7 +119,7 @@ struct TerminalHistoryTable: NSViewRepresentable {
         }
         func numberOfRows(in tableView: NSTableView) -> Int { items.count }
         func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-            let height = Metrics.textHeight(items[row].text, width: width - 12)
+            let height = Metrics.textHeight(items[row].text, width: width - 8)
             return min(height, Metrics.previewHeight) + 26
         }
         @objc func activate() {
@@ -140,7 +140,9 @@ struct TerminalHistoryTable: NSViewRepresentable {
             cell.text.stringValue = item.text
             cell.text.maximumNumberOfLines = 4
             cell.date.stringValue = item.timestamp.map(formatter.string(from:)) ?? ""
+            cell.jump.title = Self.canJump(item) ? "↗" : "—"
             cell.jump.isEnabled = Self.canJump(item)
+            cell.jump.setAccessibilityLabel(Self.canJump(item) ? "跳转到输入位置" : "暂无终端位置锚点")
             cell.jump.toolTip = Self.canJump(item) ? "Jump / 跳转" : "No terminal anchor / 无终端位置锚点"
             cell.jump.target = self
             cell.jump.action = #selector(jumpButton(_:))
@@ -165,11 +167,16 @@ struct TerminalHistoryTable: NSViewRepresentable {
             for view in [text, date, jump] { addSubview(view) }
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+        override func draw(_ dirtyRect: NSRect) {
+            super.draw(dirtyRect)
+            NSColor.separatorColor.withAlphaComponent(0.25).setFill()
+            NSRect(x: 4, y: 0, width: max(0, bounds.width - 8), height: 0.5).fill()
+        }
         override func layout() {
             super.layout()
             // Explicit bounded frames prevent a long label from painting across rows.
-            text.frame = NSRect(x: 6, y: 22, width: max(20, bounds.width - 12), height: max(18, bounds.height - 26))
-            date.frame = NSRect(x: 6, y: 4, width: max(20, bounds.width - 42), height: 16)
+            text.frame = NSRect(x: 4, y: 22, width: max(20, bounds.width - 8), height: max(18, bounds.height - 26))
+            date.frame = NSRect(x: 4, y: 4, width: max(20, bounds.width - 40), height: 16)
             jump.frame = NSRect(x: bounds.width - 30, y: 0, width: 24, height: 24)
         }
     }

@@ -4,6 +4,7 @@ import Foundation
 import OSLog
 
 extension Notification.Name {
+    static let terminalHistoryDidChange = Notification.Name("com.oh-my-ghostty.terminal-history-did-change")
     static let terminalPaneSessionContextsDidChange = Notification.Name(
         "com.oh-my-ghostty.terminal-pane-session-contexts-did-change"
     )
@@ -229,6 +230,18 @@ final class BuiltInInfoInspectorProvider {
         self.copyAddress = copyAddress
         self.desiredForwards = Self.loadDesiredForwards(from: resolvedPersistenceURL)
         self.historyService = historyService ?? .shared
+
+        notificationObservers.append(NotificationCenter.default.addObserver(
+            forName: .terminalHistoryDidChange, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let surfaceID = notification.object as? UUID else { return }
+            Task { @MainActor [weak self] in
+                guard let self, self.isRegistered else { return }
+                for context in self.presentedContexts.values where context.surfaceID == surfaceID {
+                    self.publish(context)
+                }
+            }
+        })
 
         notificationObservers.append(NotificationCenter.default.addObserver(
             forName: .terminalPaneSessionContextsDidChange,

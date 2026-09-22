@@ -891,14 +891,18 @@ with an Agent badge. History timestamps include date and time. Single click sele
 an entry; Cmd+C copies its complete command or prompt. The native table sizes its
 scrolling document to the inspector width and computes row heights from wrapped
 text. Prompts show up to four preview lines without expand/collapse controls.
-Horizontal padding is four points with a faint row separator; row spacing is two points. Copying always
+The table explicitly uses AppKit's plain style to avoid automatic sidebar insets.
+Horizontal padding is four points with a faint row separator; row spacing is two points.
+Preview height is measured using the same wrapping NSTextField cell and four-line
+limit as rendering, plus 22 points for date and spacing; short prompts do not
+reserve the maximum preview height. Copying always
 returns the full text. Text and date occupy separate bounded
 frames so long prompts cannot paint into neighboring rows. Double click or the row's
 jump button uses the command's tracked input anchor for shell records. Agent
 prompts currently have no terminal-position anchors. Their jump buttons are
 disabled with an explanatory tooltip; double-click does not start a text search.
-Transcript-only messages remain selectable and copyable; a disabled dash replaces
-the jump arrow to distinguish unavailable navigation from an actionable control. Exact Agent prompt
+Transcript-only messages remain selectable and copyable; the jump arrow keeps its SF Symbol appearance but is disabled, with a tooltip
+explaining that a terminal anchor is unavailable. Exact Agent prompt
 navigation is not implemented and must not be advertised as available.
 For SSH panes the port-forwarding section stays above history, including its
 add-port control when no forwards exist. History belongs to the current Surface;
@@ -916,9 +920,13 @@ snapshot refresh time (also for SSH panes). Anchors whose input cell has been
 overwritten as output are rejected as well as garbage/pruned pins. Shells without semantic input
 markers show no command records rather than reading global history.
 AppKit's insertText accumulator must return before the direct committed-text path.
-Command-finished callbacks refresh visible Info content for that Surface immediately,
-independently of desktop notification preferences. The three-second timer remains a
-fallback for running commands and Agent transcript updates.
+After OSC 133 C commits the command record, the core sends the internal
+`command_history_changed` host action through the existing Surface mailbox.
+macOS maps it to a Surface-scoped history notification; visible Info refreshes
+without waiting for OSC 133 D, process exit, or a timer. Command-finished callbacks
+also refresh independently of desktop notification preferences. The three-second
+timer refreshes only Agent transcripts, never ordinary Shell history. Hosts that
+do not implement OMG history may ignore the payload-free action.
 
 For an `sshReady` Pane, users can enter either a port (shorthand for
 `127.0.0.1:<port>` on the SSH server) or an explicit `host:port` reachable from

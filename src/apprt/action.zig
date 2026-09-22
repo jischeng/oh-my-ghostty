@@ -360,6 +360,9 @@ pub const Action = union(Key) {
     /// A typed OSC 3008 context started, changed, or ended.
     context_signal: ContextSignal,
 
+    /// OMG: semantic command record was committed; host may refresh its snapshot.
+    command_history_changed: void,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -432,6 +435,7 @@ pub const Action = union(Key) {
         copy_title_to_clipboard,
         move_tab_to_new_window,
         context_signal,
+        command_history_changed,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");

@@ -16,6 +16,7 @@ struct TerminalHistoryTable: NSViewRepresentable {
         scroll.drawsBackground = false
         let table = HistoryTable()
         table.headerView = nil
+        table.style = .plain
         table.backgroundColor = .clear
         table.intercellSpacing = NSSize(width: 0, height: 2)
         table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
@@ -87,13 +88,14 @@ struct TerminalHistoryTable: NSViewRepresentable {
         static let font = NSFont.systemFont(ofSize: 12)
         static let previewHeight: CGFloat = 72
         static func textHeight(_ text: String, width: CGFloat) -> CGFloat {
-            let style = NSMutableParagraphStyle()
-            style.lineBreakMode = .byWordWrapping
-            return max(18, ceil((text as NSString).boundingRect(
-                with: NSSize(width: max(20, width), height: .greatestFiniteMagnitude),
-                options: [.usesLineFragmentOrigin, .usesFontLeading],
-                attributes: [.font: font, .paragraphStyle: style]
-            ).height) + 4)
+            // Measure with the very same AppKit cell used to display the preview.
+            let label = NSTextField(wrappingLabelWithString: text)
+            label.font = font
+            label.lineBreakMode = .byWordWrapping
+            label.maximumNumberOfLines = 4
+            return min(previewHeight, ceil(label.cell?.cellSize(forBounds: NSRect(
+                x: 0, y: 0, width: max(20, width), height: 10000
+            )).height ?? font.boundingRectForFont.height))
         }
     }
 
@@ -120,7 +122,7 @@ struct TerminalHistoryTable: NSViewRepresentable {
         func numberOfRows(in tableView: NSTableView) -> Int { items.count }
         func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
             let height = Metrics.textHeight(items[row].text, width: width - 8)
-            return min(height, Metrics.previewHeight) + 26
+            return min(height, Metrics.previewHeight) + 22
         }
         @objc func activate() {
             guard let table, items.indices.contains(table.clickedRow) else { return }
@@ -140,7 +142,6 @@ struct TerminalHistoryTable: NSViewRepresentable {
             cell.text.stringValue = item.text
             cell.text.maximumNumberOfLines = 4
             cell.date.stringValue = item.timestamp.map(formatter.string(from:)) ?? ""
-            cell.jump.title = Self.canJump(item) ? "↗" : "—"
             cell.jump.isEnabled = Self.canJump(item)
             cell.jump.setAccessibilityLabel(Self.canJump(item) ? "跳转到输入位置" : "暂无终端位置锚点")
             cell.jump.toolTip = Self.canJump(item) ? "Jump / 跳转" : "No terminal anchor / 无终端位置锚点"
@@ -162,6 +163,8 @@ struct TerminalHistoryTable: NSViewRepresentable {
             date.font = .systemFont(ofSize: 10)
             date.textColor = .secondaryLabelColor
             date.lineBreakMode = .byTruncatingTail
+            jump.image = NSImage(systemSymbolName: "arrow.up.right.square", accessibilityDescription: "跳转")
+            jump.imagePosition = .imageOnly
             jump.isBordered = false
             jump.toolTip = "Jump / 跳转"
             for view in [text, date, jump] { addSubview(view) }
@@ -175,8 +178,8 @@ struct TerminalHistoryTable: NSViewRepresentable {
         override func layout() {
             super.layout()
             // Explicit bounded frames prevent a long label from painting across rows.
-            text.frame = NSRect(x: 4, y: 22, width: max(20, bounds.width - 8), height: max(18, bounds.height - 26))
-            date.frame = NSRect(x: 4, y: 4, width: max(20, bounds.width - 40), height: 16)
+            text.frame = NSRect(x: 4, y: 20, width: max(20, bounds.width - 8), height: max(0, bounds.height - 22))
+            date.frame = NSRect(x: 4, y: 2, width: max(20, bounds.width - 40), height: 16)
             jump.frame = NSRect(x: bounds.width - 30, y: 0, width: 24, height: 24)
         }
     }

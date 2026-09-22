@@ -681,6 +681,14 @@ extension Ghostty {
             case GHOSTTY_ACTION_SEARCH_SELECTED:
                 searchSelected(app, target: target, v: action.action.search_selected)
 
+            case GHOSTTY_ACTION_COMMAND_HISTORY_CHANGED:
+                guard target.tag == GHOSTTY_TARGET_SURFACE,
+                      let surface = target.target.surface,
+                      let view = self.surfaceView(from: surface) else { return false }
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(name: .terminalHistoryDidChange, object: view.id)
+                }
+
             case GHOSTTY_ACTION_COMMAND_FINISHED:
                 commandFinished(app, target: target, v: action.action.command_finished)
 

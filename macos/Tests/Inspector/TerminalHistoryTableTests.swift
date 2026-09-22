@@ -13,7 +13,11 @@ struct TerminalHistoryTableTests {
         let table = NSTableView()
         coordinator.table = table
         coordinator.updateWidth(320)
-        #expect(coordinator.tableView(table, heightOfRow: 0) <= 98)
+        let longHeight = coordinator.tableView(table, heightOfRow: 0)
+        #expect(longHeight <= 94)
+        coordinator.items = [.init(id: "short", kind: .agentPrompt, text: "resume")]
+        #expect(coordinator.tableView(table, heightOfRow: 0) < longHeight)
+        #expect(coordinator.tableView(table, heightOfRow: 0) < 48)
         #expect(!TerminalHistoryTable.Coordinator.canJump(item))
         #expect(TerminalHistoryTable.Coordinator.canJump(.init(
             id: "command:surface:1", kind: .command, text: "ll"
@@ -49,6 +53,8 @@ struct TerminalHistoryTableTests {
         let expanded = try #require(table.view(atColumn: 0, row: 0, makeIfNecessary: true)
             as? TerminalHistoryTable.HistoryCell)
         #expect(!expanded.jump.isEnabled)
+        #expect(expanded.jump.image != nil)
+        #expect(table.style == .plain)
         expanded.jump.performClick(nil)
         #expect(jumped.isEmpty)
         #expect(expanded.subviews.count == 3)

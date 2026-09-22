@@ -385,7 +385,7 @@ final class BuiltInInfoInspectorProvider {
             presentedContexts[context.tabID] = context
             if historyRefreshTimer == nil {
                 historyRefreshTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
-                    Task { @MainActor [weak self] in self?.publishPresentedContexts() }
+                    Task { @MainActor [weak self] in self?.refreshPresentedAgentHistory() }
                 }
             }
             publish(context)
@@ -587,6 +587,18 @@ final class BuiltInInfoInspectorProvider {
         ))
         runtimeForwards[id] = runtime
         publishPresentedContexts()
+    }
+
+    private func refreshPresentedAgentHistory() {
+        guard isRegistered else { return }
+        for context in presentedContexts.values {
+            guard let surfaceID = context.surfaceID else { continue }
+            let hasAgent = TerminalController.all.contains { controller in
+                guard let surface = controller.surfaceTree.first(where: { $0.id == surfaceID }) else { return false }
+                return controller.agentResumeDescriptor(for: surface) != nil
+            }
+            if hasAgent { publish(context) }
+        }
     }
 
     private func publishPresentedContexts() {

@@ -995,7 +995,10 @@ pub const StreamHandler = struct {
     ) !void {
         switch (cmd.action) {
             .end_input_start_output => {
+                // Commit the semantic record before notifying the UI thread.
+                try self.terminal.semanticPrompt(cmd);
                 self.surfaceMessageWriter(.start_command);
+                return;
             },
 
             .end_command => {

@@ -1163,6 +1163,11 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
 
         .start_command => {
             self.command_timer = .now(global.io(), .awake);
+            _ = try self.rt_app.performAction(
+                .{ .surface = self },
+                .command_history_changed,
+                {},
+            );
         },
 
         .stop_command => |v| timer: {

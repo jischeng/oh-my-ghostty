@@ -883,8 +883,14 @@ not plugin storage or a public plugin API.
 The installed/enabled official SSH entry registers `builtin.info` beside Files
 in the Right Inspector. Info is an extensible host-rendered surface with
 optional machine-status and typed machine/session sections (both currently
-hidden) plus the SSH port-forwarding section. The forwarding header uses the
-antenna/radio-tower symbol and reports its active port count.
+hidden), the session timeline displaying command history and Agent user prompts
+with fast jump-to-position actions, plus the SSH port-forwarding section. The forwarding header uses the
+antenna/radio-tower symbol and reports its active port count. For an active pane
+associated with an Agent session, Info presents the list of user-submitted prompts
+with an Agent badge; clicking an entry smoothly scrolls the terminal view to
+the exact prompt position via search-based positioning. For regular shell sessions,
+Info presents recent shell commands and clicking an entry jumps the terminal viewport
+to that command's location.
 
 For an `sshReady` Pane, users can enter either a port (shorthand for
 `127.0.0.1:<port>` on the SSH server) or an explicit `host:port` reachable from

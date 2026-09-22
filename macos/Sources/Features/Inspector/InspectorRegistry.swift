@@ -188,7 +188,41 @@ enum InspectorPaneActionKind: Equatable, Sendable {
     case clearAgentHistorySelection
     case resumeAgentHistorySession(id: String)
     case forkAgentHistorySession(id: String)
+    case jumpToHistoryItem(InspectorHistoryItem)
     case gitAction(InspectorGitAction)
+}
+
+enum InspectorHistoryItemKind: String, Codable, Equatable, Sendable {
+    case command
+    case agentPrompt
+}
+
+struct InspectorHistoryItem: Identifiable, Equatable, Sendable {
+    let id: String
+    let kind: InspectorHistoryItemKind
+    let text: String
+    let timestamp: Date?
+    let exitCode: Int16?
+    let duration: UInt64?
+    let promptIndex: Int?
+
+    init(
+        id: String = UUID().uuidString,
+        kind: InspectorHistoryItemKind,
+        text: String,
+        timestamp: Date? = nil,
+        exitCode: Int16? = nil,
+        duration: UInt64? = nil,
+        promptIndex: Int? = nil
+    ) {
+        self.id = id
+        self.kind = kind
+        self.text = text
+        self.timestamp = timestamp
+        self.exitCode = exitCode
+        self.duration = duration
+        self.promptIndex = promptIndex
+    }
 }
 
 struct InspectorPaneAction: Equatable, Sendable {

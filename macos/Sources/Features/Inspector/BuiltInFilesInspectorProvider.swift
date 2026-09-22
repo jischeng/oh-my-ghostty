@@ -205,6 +205,7 @@ final class BuiltInFilesInspectorProvider {
              .removePortForward, .refreshAgentHistory,
              .selectAgentHistorySession, .clearAgentHistorySelection,
              .resumeAgentHistorySession, .forkAgentHistorySession,
+             .jumpToHistoryItem,
              .gitAction:
             break
         }

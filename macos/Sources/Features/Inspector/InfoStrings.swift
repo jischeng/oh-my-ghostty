@@ -119,4 +119,18 @@ struct InfoStrings: Equatable, Sendable {
             "SSH 端口转发已退出，状态码为 \(status)。"
         )
     }
+
+    var historyTitle: String { t("Command History", "历史命令") }
+    var agentPromptsTitle: String { t("Agent Prompts", "提问历史") }
+    var noHistory: String { t("No History Recorded", "暂无历史命令") }
+    var noHistoryMessage: String {
+        t("Commands executed in this pane will appear here.", "在当前窗格执行的命令将显示在此处。")
+    }
+    var noAgentPrompts: String { t("No Prompts Recorded", "暂无提问记录") }
+    var noAgentPromptsMessage: String {
+        t("Prompts sent to this agent will appear here.", "发送给该 Agent 的 Prompt 将显示在此处。")
+    }
+    var clickToJump: String {
+        t("Click to jump to this position in terminal", "点击快速跳转到终端对应位置")
+    }
 }

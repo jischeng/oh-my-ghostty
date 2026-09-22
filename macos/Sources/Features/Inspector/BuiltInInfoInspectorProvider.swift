@@ -88,6 +88,25 @@ struct InspectorInfoContent: Equatable, Sendable {
     let status: InspectorField?
     let fields: [InspectorField]
     let portForwards: InspectorPortForwardList
+    let historyItems: [InspectorHistoryItem]
+    let isAgentSession: Bool
+    let agentName: String?
+
+    init(
+        status: InspectorField? = nil,
+        fields: [InspectorField] = [],
+        portForwards: InspectorPortForwardList = .init(hostAlias: "", items: []),
+        historyItems: [InspectorHistoryItem] = [],
+        isAgentSession: Bool = false,
+        agentName: String? = nil
+    ) {
+        self.status = status
+        self.fields = fields
+        self.portForwards = portForwards
+        self.historyItems = historyItems
+        self.isAgentSession = isAgentSession
+        self.agentName = agentName
+    }
 }
 
 @MainActor
@@ -180,6 +199,9 @@ final class BuiltInInfoInspectorProvider {
     private var servers = ConnectionServers()
     private var isRegistered = false
     private var notificationObservers: [NSObjectProtocol] = []
+    private let historyService: TerminalHistoryService
+    private var agentPromptsCache: [String: [InspectorHistoryItem]] = [:]
+    private var loadingAgentConversations: Set<String> = []
 
     init(
         registry: InspectorRegistry,
@@ -189,7 +211,8 @@ final class BuiltInInfoInspectorProvider {
         forwardReadiness: @escaping ForwardReadiness = BuiltInInfoInspectorProvider.waitUntilForwardReady,
         remoteProcessResolver: @escaping RemoteProcessResolver = BuiltInInfoInspectorProvider.resolveRemoteProcess,
         openURL: @escaping URLOpener = { NSWorkspace.shared.open($0) },
-        copyAddress: @escaping AddressCopier = BuiltInInfoInspectorProvider.copyToPasteboard
+        copyAddress: @escaping AddressCopier = BuiltInInfoInspectorProvider.copyToPasteboard,
+        historyService: TerminalHistoryService? = nil
     ) {
         let resolvedPersistenceURL = persistenceURL ?? PluginInstallationManager.shared
             .dataURL(for: SSHPlugin.pluginID)
@@ -203,6 +226,7 @@ final class BuiltInInfoInspectorProvider {
         self.openURL = openURL
         self.copyAddress = copyAddress
         self.desiredForwards = Self.loadDesiredForwards(from: resolvedPersistenceURL)
+        self.historyService = historyService ?? .shared
 
         notificationObservers.append(NotificationCenter.default.addObserver(
             forName: .terminalPaneSessionContextsDidChange,
@@ -380,6 +404,15 @@ final class BuiltInInfoInspectorProvider {
             persistDesiredForwards()
             publishPresentedContexts()
 
+        case .jumpToHistoryItem(let item):
+            guard let surfaceID = action.context.surfaceID else { return }
+            for controller in TerminalController.all {
+                if let surfaceView = controller.surfaceTree.first(where: { $0.id == surfaceID }) {
+                    historyService.jump(to: item, in: surfaceView)
+                    return
+                }
+            }
+
         default:
             break
         }
@@ -535,15 +568,84 @@ final class BuiltInInfoInspectorProvider {
         for context in presentedContexts.values { publish(context) }
     }
 
+    private func currentHistory(for context: InspectorPaneContext) -> (items: [InspectorHistoryItem], isAgent: Bool, agentName: String?) {
+        guard let surfaceID = context.surfaceID else {
+            return (historyService.loadShellHistory(), false, nil)
+        }
+
+        for controller in TerminalController.all {
+            if let surfaceView = controller.surfaceTree.first(where: { $0.id == surfaceID }) {
+                if let descriptor = controller.agentResumeDescriptor(for: surfaceView) {
+                    let agentName = descriptor.agent.displayName
+
+                    guard let conversationID = descriptor.conversationID else {
+                        return ([], true, agentName)
+                    }
+
+                    let convID = conversationID.rawValue
+                    if let cached = agentPromptsCache[convID] {
+                        return (cached, true, agentName)
+                    }
+
+                    if !loadingAgentConversations.contains(convID) {
+                        loadingAgentConversations.insert(convID)
+                        Task { [weak self] in
+                            let session = AgentHistorySession(
+                                agent: descriptor.agent,
+                                conversationID: conversationID,
+                                title: "",
+                                workingDirectory: context.workingDirectory,
+                                updatedAt: Date(),
+                                sourcePath: "",
+                                remoteHost: descriptor.scope == .remote ? descriptor.sshReplay?.transferTarget : nil,
+                                isActive: true
+                            )
+                            let transcript = await AgentHistoryStore.transcript(for: session)
+                            let prompts = transcript.messages
+                                .filter { $0.role == .user }
+                                .map { msg in
+                                    InspectorHistoryItem(
+                                        id: msg.id,
+                                        kind: .agentPrompt,
+                                        text: msg.text,
+                                        timestamp: msg.timestamp
+                                    )
+                                }
+                            self?.agentPromptsCache[convID] = prompts
+                            self?.loadingAgentConversations.remove(convID)
+                            self?.publishPresentedContexts()
+                        }
+                    }
+                    return ([], true, agentName)
+                }
+            }
+        }
+
+        return (historyService.loadShellHistory(surfaceID: surfaceID), false, nil)
+    }
+
     private func publish(_ context: InspectorPaneContext) {
         let strings = InfoStrings.current
+        let historyInfo = currentHistory(for: context)
         let content: InspectorPaneContent
+
         switch context.session.state {
         case .local:
-            content = .empty(
-                title: strings.infoTitle,
-                message: strings.connectPrompt()
-            )
+            if !historyInfo.items.isEmpty || historyInfo.isAgent {
+                content = .info(.init(
+                    status: nil,
+                    fields: [],
+                    portForwards: .init(hostAlias: "", items: []),
+                    historyItems: historyInfo.items,
+                    isAgentSession: historyInfo.isAgent,
+                    agentName: historyInfo.agentName
+                ))
+            } else {
+                content = .empty(
+                    title: strings.infoTitle,
+                    message: strings.noHistoryMessage
+                )
+            }
         case .sshConnecting(let ssh):
             content = .empty(
                 title: strings.infoTitle,
@@ -557,7 +659,19 @@ final class BuiltInInfoInspectorProvider {
                     portForwards: self.content(
                         for: serverID,
                         alias: ssh.alias
-                    )
+                    ),
+                    historyItems: historyInfo.items,
+                    isAgentSession: historyInfo.isAgent,
+                    agentName: historyInfo.agentName
+                ))
+            } else if !historyInfo.items.isEmpty || historyInfo.isAgent {
+                content = .info(.init(
+                    status: nil,
+                    fields: [],
+                    portForwards: .init(hostAlias: ssh.alias, items: []),
+                    historyItems: historyInfo.items,
+                    isAgentSession: historyInfo.isAgent,
+                    agentName: historyInfo.agentName
                 ))
             } else {
                 content = .empty(

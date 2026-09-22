@@ -349,6 +349,60 @@ struct BuiltInInfoInspectorProviderTests {
         #expect(english.targetPlaceholder == "Port or host:port")
         #expect(chinese.targetPlaceholder == "端口或 host:port")
         #expect(chinese.localPortInUse(5_175) == "本地端口 5175 已被占用。")
+        #expect(english.historyTitle == "Command History")
+        #expect(chinese.historyTitle == "历史命令")
+        #expect(english.agentPromptsTitle == "Agent Prompts")
+        #expect(chinese.agentPromptsTitle == "提问历史")
+        #expect(chinese.clickToJump == "点击快速跳转到终端对应位置")
+    }
+
+    @Test func publishesHistoryItemsAndHandlesJumpAction() async throws {
+        let registry = InspectorRegistry()
+        let historyService = TerminalHistoryService()
+        let surfaceID = UUID()
+
+        historyService.recordCommand(text: "swift build", surfaceID: surfaceID)
+        historyService.recordCommand(text: "git status", surfaceID: surfaceID)
+
+        let provider = BuiltInInfoInspectorProvider(
+            registry: registry,
+            historyService: historyService
+        )
+        try provider.setEnabled(true)
+
+        let context = InspectorPaneContext(
+            tabID: UUID(),
+            surfaceID: surfaceID,
+            title: "terminal",
+            workingDirectory: "/Users/test/code"
+        )
+
+        registry.presentationDidChange(
+            to: BuiltInInfoInspectorProvider.paneID,
+            context: context
+        )
+
+        guard case .info(let info) = registry.content(
+            for: BuiltInInfoInspectorProvider.paneID,
+            context: context
+        ) else {
+            Issue.record("Expected typed Info content with history")
+            return
+        }
+
+        #expect(!info.historyItems.isEmpty)
+        #expect(info.historyItems.first?.text == "git status")
+
+        let targetItem = info.historyItems.first!
+        registry.performAction(
+            paneID: BuiltInInfoInspectorProvider.paneID,
+            action: .init(
+                context: context,
+                kind: .jumpToHistoryItem(targetItem)
+            )
+        )
+
+        provider.shutdown()
     }
 
     private func sshContext(

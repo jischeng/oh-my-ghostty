@@ -43,28 +43,18 @@ final class TerminalHistoryService {
         recordedCommandsBySurface[surfaceID] ?? []
     }
 
-    /// 获取普通 Shell 的历史命令（包含实时记录 + 降级读取系统的 Shell 历史文件）
+    /// 获取普通 Shell 的历史命令（严格限定当前 Surface，隔离各 Pane）
     func loadShellHistory(surfaceID: UUID? = nil, limit: Int = 30) -> [InspectorHistoryItem] {
+        guard let surfaceID, let recorded = recordedCommandsBySurface[surfaceID] else {
+            return []
+        }
         var results: [InspectorHistoryItem] = []
         var seenTexts = Set<String>()
-
-        // 1. 先加入运行时记录的该 Surface 命令
-        if let surfaceID, let recorded = recordedCommandsBySurface[surfaceID] {
-            for item in recorded where seenTexts.insert(item.text).inserted {
-                results.append(item)
-            }
+        for item in recorded where seenTexts.insert(item.text).inserted {
+            results.append(item)
+            if results.count >= limit { break }
         }
-
-        // 2. 如果不足，补充读取本地 Shell 历史文件
-        if results.count < limit {
-            let fileHistory = loadRecentCommandsFromDisk(limit: limit)
-            for item in fileHistory where seenTexts.insert(item.text).inserted {
-                results.append(item)
-                if results.count >= limit { break }
-            }
-        }
-
-        return Array(results.prefix(limit))
+        return results
     }
 
     /// 从磁盘读取用户常见 Shell 的历史文件
@@ -161,13 +151,16 @@ final class TerminalHistoryService {
 
         // 去掉可能的 prompt 符号前缀（如 '> ', '● ', '$ ' 等）
         var needle = firstLine
-        for prefix in ["> ", "● ", "$ ", "# ", "% "] where needle.hasPrefix(prefix) {
+        for prefix in ["> ", "● ", "$ ", "# ", "% ", "➜ "] where needle.hasPrefix(prefix) {
             needle = String(needle.dropFirst(prefix.count))
             break
         }
         needle = String(needle.trimmingCharacters(in: .whitespacesAndNewlines).prefix(40))
 
         guard !needle.isEmpty else { return false }
+
+        // 确保该 Surface 聚焦
+        Ghostty.moveFocus(to: surfaceView, from: nil)
 
         // 执行终端 action 搜索定位
         let action = "search:\(needle)"
@@ -176,9 +169,6 @@ final class TerminalHistoryService {
             action,
             UInt(action.lengthOfBytes(using: .utf8))
         )
-
-        // 确保该 Surface 聚焦
-        Ghostty.moveFocus(to: surfaceView, from: nil)
         return success
     }
 }

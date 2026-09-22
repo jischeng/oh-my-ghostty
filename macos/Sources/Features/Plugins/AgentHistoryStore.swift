@@ -150,6 +150,26 @@ enum AgentHistoryStore {
         )
     }
 
+    static func session(
+        agent: SupportedAgent,
+        conversationID: AgentConversationID,
+        remoteHost: String? = nil,
+        maximumSessions: Int = AgentHistoryStore.maximumSessions
+    ) async -> AgentHistorySession? {
+        if let remoteHost {
+            let access = AgentHistoryRemoteAccess(alias: remoteHost)
+            return await loadRemote(
+                access: access,
+                agents: [agent],
+                maximumSessions: maximumSessions
+            ).first(where: { $0.conversationID == conversationID })
+        }
+        return await load(
+            agents: [agent],
+            maximumSessions: maximumSessions
+        ).first(where: { $0.conversationID == conversationID })
+    }
+
     static func transcript(
         for session: AgentHistorySession,
         remoteAccess: AgentHistoryRemoteAccess? = nil

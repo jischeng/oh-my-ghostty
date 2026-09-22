@@ -1364,6 +1364,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 surfaceTree.first(where: { $0.id == surfaceID })?
                     .agentResumeDescriptor = descriptor
                 invalidateRestorableState()
+                NotificationCenter.default.post(
+                    name: .terminalPaneSessionContextsDidChange,
+                    object: self
+                )
             }
         }
     }
@@ -1602,6 +1606,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         agentResumeDescriptors[surfaceID] = descriptor
         surfaceTree.first(where: { $0.id == surfaceID })?
             .agentResumeDescriptor = descriptor
+        NotificationCenter.default.post(
+            name: .terminalPaneSessionContextsDidChange,
+            object: self
+        )
         if descriptor.scope == .local,
            descriptor.conversationID == nil,
            let detected = detectedAgentInstances[surfaceID],
@@ -1635,6 +1643,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         surfaceTree.first(where: { $0.id == surfaceID })?
             .agentResumeDescriptor = nil
         invalidateRestorableState()
+        NotificationCenter.default.post(
+            name: .terminalPaneSessionContextsDidChange,
+            object: self
+        )
     }
 
     func acknowledgeTerminalAgentStateFromUserInput(

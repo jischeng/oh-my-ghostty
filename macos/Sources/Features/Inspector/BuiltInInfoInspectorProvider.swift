@@ -202,6 +202,8 @@ final class BuiltInInfoInspectorProvider {
     private let historyService: TerminalHistoryService
     private var agentPromptsCache: [String: [InspectorHistoryItem]] = [:]
     private var loadingAgentConversations: Set<String> = []
+    private var agentRefreshDates: [String: Date] = [:]
+    private var historyRefreshTimer: Timer?
 
     init(
         registry: InspectorRegistry,
@@ -309,6 +311,8 @@ final class BuiltInInfoInspectorProvider {
     }
 
     func shutdown() {
+        historyRefreshTimer?.invalidate()
+        historyRefreshTimer = nil
         let running = runtimeForwards.values
         runtimeForwards.removeAll()
         for task in processRefreshTasks.values { task.cancel() }
@@ -366,9 +370,18 @@ final class BuiltInInfoInspectorProvider {
         switch event {
         case .appeared(let context):
             presentedContexts[context.tabID] = context
+            if historyRefreshTimer == nil {
+                historyRefreshTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+                    Task { @MainActor [weak self] in self?.publishPresentedContexts() }
+                }
+            }
             publish(context)
         case .disappeared(let context):
             presentedContexts.removeValue(forKey: context.tabID)
+            if presentedContexts.isEmpty {
+                historyRefreshTimer?.invalidate()
+                historyRefreshTimer = nil
+            }
         }
     }
 
@@ -582,24 +595,34 @@ final class BuiltInInfoInspectorProvider {
                         return ([], true, agentName)
                     }
 
-                    let convID = conversationID.rawValue
-                    if let cached = agentPromptsCache[convID] {
+                    let remoteHost: String?
+                    if descriptor.scope == .remote {
+                        guard let host = descriptor.sshReplay?.transferTarget else {
+                            return ([], true, agentName)
+                        }
+                        remoteHost = host
+                    } else {
+                        remoteHost = nil
+                    }
+                    let convID = "\(remoteHost ?? "local")|\(descriptor.agent.rawValue)|\(conversationID.rawValue)"
+                    let cached = agentPromptsCache[convID] ?? []
+                    if let refreshed = agentRefreshDates[convID], Date().timeIntervalSince(refreshed) < 3 {
                         return (cached, true, agentName)
                     }
 
                     if !loadingAgentConversations.contains(convID) {
                         loadingAgentConversations.insert(convID)
+                        agentRefreshDates[convID] = Date()
                         Task { [weak self] in
-                            let session = AgentHistorySession(
+                            guard let session = await AgentHistoryStore.session(
                                 agent: descriptor.agent,
                                 conversationID: conversationID,
-                                title: "",
-                                workingDirectory: context.workingDirectory,
-                                updatedAt: Date(),
-                                sourcePath: "",
-                                remoteHost: descriptor.scope == .remote ? descriptor.sshReplay?.transferTarget : nil,
-                                isActive: true
-                            )
+                                remoteHost: remoteHost
+                            ) else {
+                                self?.agentRefreshDates[convID] = Date()
+                                self?.loadingAgentConversations.remove(convID)
+                                return
+                            }
                             let transcript = await AgentHistoryStore.transcript(for: session)
                             let prompts = transcript.messages
                                 .filter { $0.role == .user }
@@ -611,12 +634,13 @@ final class BuiltInInfoInspectorProvider {
                                         timestamp: msg.timestamp
                                     )
                                 }
+                            self?.agentRefreshDates[convID] = Date()
                             self?.agentPromptsCache[convID] = prompts
                             self?.loadingAgentConversations.remove(convID)
                             self?.publishPresentedContexts()
                         }
                     }
-                    return ([], true, agentName)
+                    return (cached, true, agentName)
                 }
             }
         }

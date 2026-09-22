@@ -198,6 +198,19 @@ extension Ghostty {
 
         // This is set to non-null during keyDown to accumulate insertText contents
         private var keyTextAccumulator: [String]?
+        private var typedCommandBuffer = ""
+
+        private func recordSubmittedCommand() {
+            let command = typedCommandBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+            typedCommandBuffer.removeAll(keepingCapacity: true)
+            guard !command.isEmpty else { return }
+            TerminalHistoryService.shared.recordCommand(text: command, surfaceID: id)
+            NotificationCenter.default.post(
+                name: .terminalPaneSessionContextsDidChange,
+                object: nil
+            )
+        }
+
         /// Temporary lead surrogate that's waiting for the trail
         private var leadSurrogate: LeadSurrogate?
 
@@ -1156,6 +1169,13 @@ extension Ghostty {
 
         override func keyDown(with event: NSEvent) {
             acknowledgeAgentCompletionFromUserInput()
+            if event.keyCode == 36,
+               !event.modifierFlags.contains(.command),
+               !event.modifierFlags.contains(.control) {
+                recordSubmittedCommand()
+            } else if event.keyCode == 51, !typedCommandBuffer.isEmpty {
+                typedCommandBuffer.removeLast()
+            }
             guard let surface = self.surface else {
                 self.interpretKeyEvents([event])
                 return
@@ -2233,8 +2253,8 @@ extension Ghostty.SurfaceView: NSTextInputClient {
         if var acc = keyTextAccumulator {
             acc.append(chars)
             keyTextAccumulator = acc
-            return
         }
+        typedCommandBuffer.append(chars)
 
         // All committed text (IME, dictation, etc.) must be sent as key
         // events so programs treat it as typed input, never as a paste.

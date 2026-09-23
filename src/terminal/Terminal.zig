@@ -2136,7 +2136,22 @@ pub fn semanticPrompt(
 
         .end_input_start_output => {
             const screen = self.screens.active;
-            try screen.omg_command_history.finish(screen.alloc, &screen.pages, screen.cursor.page_pin.*, screen.cursor.pending_wrap, std.Io.Clock.real.now(self.io()).toSeconds());
+            var decoded: std.Io.Writer.Allocating = .init(screen.alloc);
+            defer decoded.deinit();
+            const reported: ?[]const u8 = reported: {
+                const encoded = cmd.readOption(.cmdline_url) orelse break :reported null;
+                if (encoded.len > 65_536) break :reported null;
+                cmd.writeCommandLine(&decoded.writer) catch break :reported null;
+                break :reported decoded.written();
+            };
+            try screen.omg_command_history.finish(
+                screen.alloc,
+                &screen.pages,
+                screen.cursor.page_pin.*,
+                screen.cursor.pending_wrap,
+                reported,
+                std.Io.Clock.real.now(self.io()).toSeconds(),
+            );
             // "End of input, and start of output."
             self.screens.active.cursorSetSemanticContent(.output);
 

@@ -51,7 +51,7 @@ pub fn begin(self: *Self, pages: *PageList, cursor: PageList.Pin) !void {
     self.input = try pages.trackPin(cursor);
 }
 
-pub fn finish(self: *Self, alloc: Allocator, pages: *PageList, cursor: PageList.Pin, pending_wrap: bool, timestamp: i64) !void {
+pub fn finish(self: *Self, alloc: Allocator, pages: *PageList, cursor: PageList.Pin, pending_wrap: bool, reported_text: ?[]const u8, timestamp: i64) !void {
     const start = self.input orelse return;
     self.input = null;
     defer pages.untrackPin(start);
@@ -66,17 +66,31 @@ pub fn finish(self: *Self, alloc: Allocator, pages: *PageList, cursor: PageList.
     }
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(alloc);
+    const reported = if (reported_text) |value| reported: {
+        const cleaned = std.mem.trim(u8, value, " \t\r\n");
+        if (cleaned.len == 0 or cleaned.len > 16384 or
+            !std.unicode.utf8ValidateSlice(cleaned) or
+            std.mem.indexOfScalar(u8, cleaned, 0) != null) break :reported null;
+        break :reported cleaned;
+    } else null;
+    var positions: std.ArrayList(PageList.Pin) = .empty;
+    defer positions.deinit(alloc);
     var it = start.cellIterator(.right_down, cursor);
     var count: usize = 0;
+    var overflow = false;
     while (it.next()) |pin| {
         // With delayed wrapping, the cursor is still on the last printed cell.
         if (pin.eql(cursor) and !pending_wrap) break;
         count += 1;
-        // Do not publish truncated commands as exact records.
-        if (count > 16384 or text.items.len > 16384) return;
+        if (count > 16384 or text.items.len > 16384) {
+            if (reported == null) return; // Never publish truncated input as exact text.
+            overflow = true;
+            break;
+        }
         const rac = pin.rowAndCell();
         if (pin.x == 0 and !pin.eql(start.*) and !rac.row.wrap_continuation) {
             try text.append(alloc, '\n');
+            try positions.append(alloc, pin);
         }
         if (rac.cell.semantic_content != .input) continue;
         switch (rac.cell.wide) {
@@ -87,17 +101,40 @@ pub fn finish(self: *Self, alloc: Allocator, pages: *PageList, cursor: PageList.
         const cp = rac.cell.codepoint();
         const len = std.unicode.utf8Encode(if (cp == 0) ' ' else cp, &bytes) catch continue;
         try text.appendSlice(alloc, bytes[0..len]);
+        try positions.appendNTimes(alloc, pin, len);
         if (pin.grapheme(rac.cell)) |extra| for (extra) |value| {
             const n = std.unicode.utf8Encode(value, &bytes) catch continue;
             try text.appendSlice(alloc, bytes[0..n]);
+            try positions.appendNTimes(alloc, pin, n);
         };
-        if (text.items.len > 16384) return;
+        if (text.items.len > 16384) {
+            if (reported == null) return;
+            overflow = true;
+            break;
+        }
     }
-    const trimmed = std.mem.trim(u8, text.items, " \t\r\n");
+    const trimmed = reported orelse std.mem.trim(u8, text.items, " \t\r\n");
     if (trimmed.len == 0) return;
     const copy = try alloc.dupeZ(u8, trimmed);
     errdefer alloc.free(copy);
-    const anchor = try pages.trackPin(start.*);
+    // Fish's submitted command identifies a suffix of this single OSC 133
+    // input region, even when Starship redrew prompt decoration after B.
+    // This is bounded to this execution; it never searches the scrollback.
+    const position = position: {
+        if (reported) |command| {
+            if (!overflow and std.mem.endsWith(u8, text.items, command)) {
+                const index = text.items.len - command.len;
+                if (index < positions.items.len) {
+                    const candidate = positions.items[index];
+                    if (candidate.rowAndCell().cell.semantic_content == .input) {
+                        break :position candidate;
+                    }
+                }
+            }
+        }
+        break :position start.*;
+    };
+    const anchor = try pages.trackPin(position);
     errdefer pages.untrackPin(anchor);
     const end_anchor = try pages.trackPin(cursor);
     errdefer pages.untrackPin(end_anchor);
@@ -148,6 +185,57 @@ test "OMG command history preserves repeated executions and resets IDs" {
     screen.reset();
     try std.testing.expectEqual(@as(usize, 0), screen.omg_command_history.entries.items.len);
     try std.testing.expectEqual(next, screen.omg_command_history.next_id);
+}
+
+test "OMG command history trusts a bounded Fish command line over a late prompt redraw" {
+    const Terminal = @import("Terminal.zig");
+    const alloc = std.testing.allocator;
+    var t = try Terminal.init(std.testing.io, alloc, .{ .cols = 80, .rows = 12 });
+    defer t.deinit(alloc);
+    for (0..4) |index| {
+        try t.semanticPrompt(.init(.fresh_line_new_prompt));
+        try t.printString("$ ");
+        try t.semanticPrompt(.init(.end_prompt_start_input));
+        if (index == 0) try t.printString("starship ~/very/long/path main 19:50 > ");
+        try t.printString("ll");
+        var output: @import("osc/parsers/semantic_prompt.zig").Command = .init(.end_input_start_output);
+        output.options_unvalidated = "cmdline_url=ll";
+        try t.semanticPrompt(output);
+        try t.linefeed();
+        t.carriageReturn();
+    }
+    const entries = t.screens.active.omg_command_history.entries.items;
+    try std.testing.expectEqual(@as(usize, 4), entries.len);
+    for (entries, 0..) |entry, index| {
+        try std.testing.expectEqualStrings("ll", entry.text);
+        try std.testing.expectEqual(@as(u64, @intCast(index + 1)), entry.id);
+        try std.testing.expect(entry.isValid());
+    }
+    // The first B happened before Starship redrew the prompt. The Shell's
+    // reported command places the anchor at the actual input, not `$ `.
+    try std.testing.expect(entries[0].pin.x > 2);
+}
+
+test "OMG command history parses four Fish OSC 133 executions with late Starship redraw" {
+    const Terminal = @import("Terminal.zig");
+    const alloc = std.testing.allocator;
+    var t = try Terminal.init(std.testing.io, alloc, .{ .cols = 80, .rows = 12 });
+    defer t.deinit(alloc);
+    var stream = t.vtStream();
+    defer stream.deinit();
+    for (0..4) |index| {
+        const prompt = if (index == 0) "starship ~/work main 19:50 > " else "";
+        stream.nextSlice("\x1b]133;A\x07$ \x1b]133;B\x07");
+        stream.nextSlice(prompt);
+        stream.nextSlice("ll\x1b]133;C;cmdline_url=ll\x07\r\n");
+    }
+    const entries = t.screens.active.omg_command_history.entries.items;
+    try std.testing.expectEqual(@as(usize, 4), entries.len);
+    for (entries) |entry| {
+        try std.testing.expectEqualStrings("ll", entry.text);
+        try std.testing.expect(entry.isValid());
+    }
+    try std.testing.expect(entries[0].pin.x > 2);
 }
 
 test "OMG command history handles wrapping Unicode and missing integration" {

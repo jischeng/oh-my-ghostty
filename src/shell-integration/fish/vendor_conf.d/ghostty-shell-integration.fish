@@ -162,6 +162,16 @@ function __ghostty_setup --on-event fish_prompt -d "Setup ghostty integration"
 
     function __ghostty_mark_output_start --on-event fish_preexec
         set --global __ghostty_prompt_state pre-exec
+        # Pass the submitted line from Fish itself, not a keyboard interceptor.
+        # Fish/Starship may redraw the prompt after OSC 133 B, causing its
+        # decoration to otherwise be mistaken for user input.
+        if set -q argv[1]
+            set -l encoded (string escape --style=url -- "$argv[1]")
+            if test (string length -- "$encoded") -le 16384
+                echo -en "\e]133;C;cmdline_url=$encoded\a"
+                return
+            end
+        end
         echo -en "\e]133;C\a"
     end
 

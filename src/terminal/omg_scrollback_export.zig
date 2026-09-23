@@ -4,6 +4,7 @@ const std = @import("std");
 const Terminal = @import("Terminal.zig");
 const Selection = @import("Selection.zig");
 const fmt = @import("formatter.zig");
+const string_encoding = @import("../os/string_encoding.zig");
 
 pub fn capture(alloc: std.mem.Allocator, t: *const Terminal, max_bytes: usize) !?[]u8 {
     if (t.screens.active_key != .primary) return null;
@@ -56,7 +57,9 @@ pub fn capture(alloc: std.mem.Allocator, t: *const Terminal, max_bytes: usize) !
         output.writeAll(bytes[copied..first]) catch return null;
         output.writeAll("\x1b]133;B\x07") catch return null;
         output.writeAll(bytes[first..last]) catch return null;
-        output.writeAll("\x1b]133;C\x07") catch return null;
+        output.writeAll("\x1b]133;C;cmdline_url=") catch return null;
+        string_encoding.urlPercentEncode(&output, entry.text) catch return null;
+        output.writeAll("\x07") catch return null;
         copied = last;
     }
     output.writeAll(bytes[copied..]) catch return null;
@@ -115,6 +118,31 @@ test "OMG scrollback VT replay keeps repeated command occurrences distinct" {
     restored.screens.active.scroll(.{ .pin = first_pin });
     const location = restored.screens.active.pages.pointFromPin(.viewport, first_pin).?;
     try std.testing.expect(location.viewport.y < restored.screens.active.pages.rows);
+}
+
+test "OMG scrollback VT replay keeps Fish command metadata after a prompt redraw" {
+    const alloc = std.testing.allocator;
+    var source = try Terminal.init(std.testing.io, alloc, .{ .cols = 80, .rows = 8 });
+    defer source.deinit(alloc);
+    try source.semanticPrompt(.init(.fresh_line_new_prompt));
+    try source.printString("$ ");
+    try source.semanticPrompt(.init(.end_prompt_start_input));
+    try source.printString("starship ~/work main 19:50 > ll");
+    var output: @import("osc/parsers/semantic_prompt.zig").Command = .init(.end_input_start_output);
+    output.options_unvalidated = "cmdline_url=ll";
+    try source.semanticPrompt(output);
+    const bytes = (try capture(alloc, &source, 64 * 1024)).?;
+    defer alloc.free(bytes);
+    var restored = try Terminal.init(std.testing.io, alloc, .{ .cols = 80, .rows = 8 });
+    defer restored.deinit(alloc);
+    var stream = restored.vtStream();
+    defer stream.deinit();
+    stream.nextSlice(bytes);
+    const entries = restored.screens.active.omg_command_history.entries.items;
+    try std.testing.expectEqual(@as(usize, 1), entries.len);
+    try std.testing.expectEqualStrings("ll", entries[0].text);
+    try std.testing.expect(entries[0].isValid());
+    try std.testing.expect(entries[0].pin.x > 2);
 }
 
 test "OMG scrollback VT replay preserves a wrapped Unicode command" {

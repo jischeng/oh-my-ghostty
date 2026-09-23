@@ -932,7 +932,16 @@ Keyboard interception is not a supported command source. The temporary typed-inp
 collector has been removed: it could capture password/TUI input and caused duplicate
 PTY dispatch. Shell commands are captured at OSC 133 B/C boundaries in a bounded per-screen
 store (100 records, 16 KiB capture budget). Every execution has its own ID, even
-when its text repeats. The host copies a snapshot through the internal
+when its text repeats. Fish sends its submitted command via the standard
+`OSC 133;C;cmdline_url=` option from `fish_preexec` (URL-percent-encoded and
+bounded), so Starship's late prompt redraw cannot pollute the recorded command
+text. No keyboard event interception is involved. Within the *current OSC 133
+execution only*, the core verifies the reported command as a suffix of the
+rendered input cells and anchors its actual first cell rather than Starship's
+late prompt decoration. It never searches the scrollback or matches another
+execution. If the option is absent, invalid or not verifiable against cells,
+the core falls back to the semantic B/C input region; each execution retains
+its own tracked Pin. The host copies a snapshot through the internal
 `ghostty_surface_omg_commands` API and navigates with
 `ghostty_surface_omg_jump_command`; callbacks must not reenter terminal APIs.
 Successful jumps also return the anchored viewport row and grid top padding;
@@ -975,7 +984,9 @@ retains its separate existing behavior. Alternate-screen content is not saved.
 A crash before the normal termination capture has no new scrollback snapshot.
 
 The export uses tracked start and end pins to insert OSC 133 B/C around each
-surviving Shell command as it reconstructs display output. On replay these
+surviving Shell command as it reconstructs display output. Its C marker
+also carries the already-recorded command in `cmdline_url`, so replay cannot
+turn an early Fish B/Starship redraw into a bogus combined command. On replay these
 create *new*, Surface-owned command IDs and exact tracked anchors; Info matches
 the ordered command text against a versioned owner-only sidecar **only to
 restore original timestamps**, not to find terminal coordinates. If count or

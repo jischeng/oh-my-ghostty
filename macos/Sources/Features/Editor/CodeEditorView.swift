@@ -396,6 +396,8 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
     private var editDepth = 0
     private var groupsMultipleCarets = false
     private var startedUndoGroup = false
+    private var needsViewportReconciliation = false
+    private var viewportReconciliationPending = false
     private var columnDragStart: CGPoint?
     private var fileURL: URL?
     private var cachedLanguage: CodeLanguage?
@@ -713,12 +715,39 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
                     self.startedUndoGroup = false
                 }
                 self.groupsMultipleCarets = false
+                if self.needsViewportReconciliation {
+                    self.needsViewportReconciliation = false
+                    self.reconcileViewportAfterEdit(controller: controller)
+                }
                 self.updateCompletion(controller: controller)
             }
         }
     }
 
+    private func reconcileViewportAfterEdit(controller: TextViewController) {
+        guard !viewportReconciliationPending else { return }
+        viewportReconciliationPending = true
+        // CodeEdit lays out during endTransaction, before selection scrolling and
+        // SwiftUI's text binding have settled. A multi-line paste can leave its
+        // fragment cache describing the old viewport, particularly when the
+        // clip view moved without posting a bounds notification during layout.
+        DispatchQueue.main.async { [weak self, weak controller] in
+            guard let self else { return }
+            self.viewportReconciliationPending = false
+            guard let controller, self.controller === controller,
+                  let textView = controller.textView,
+                  let scrollView = textView.enclosingScrollView else { return }
+            textView.layoutManager.setNeedsLayout()
+            textView.updatedViewport(scrollView.documentVisibleRect)
+            textView.needsLayout = true
+            textView.needsDisplay = true
+        }
+    }
+
     func textView(_ textView: TextView, didReplaceContentsIn range: NSRange, with string: String) {
+        if string.contains("\n") || string.contains("\r") {
+            needsViewportReconciliation = true
+        }
         // Begin after the first mutation has entered its own undo group, so
         // the other carets join it without absorbing the preceding user action.
         if groupsMultipleCarets, !startedUndoGroup, textView._undoManager?.isGrouping == false {
@@ -920,6 +949,8 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
         textWillChangeObserver = nil
         if startedUndoGroup { controller?.textView._undoManager?.endGrouping() }
         startedUndoGroup = false
+        needsViewportReconciliation = false
+        viewportReconciliationPending = false
         if let mouseMonitor {
             NSEvent.removeMonitor(mouseMonitor)
             self.mouseMonitor = nil

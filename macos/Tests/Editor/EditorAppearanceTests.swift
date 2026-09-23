@@ -224,6 +224,46 @@ struct EditorAppearanceTests {
         }
     }
 
+    private struct PasteEditorHost: View {
+        @State var text: String
+
+        var body: some View {
+            CodeEditorView(text: $text, fileURL: URL(fileURLWithPath: "/models.json"), terminalTheme: .oneDark)
+        }
+    }
+
+    @Test func multilinePasteRecoversViewportAfterSuppressedScrollNotification() async throws {
+        let lines = (0..<400).map { "  \"model_\($0)\": { \"contextWindow\": 1050000 }," }
+        let host = NSHostingView(rootView: PasteEditorHost(text: "{\n" + lines.joined(separator: "\n") + "\n}"))
+        host.sizingOptions = []
+        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 600, height: 500),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.contentView = nil; window.close() }
+
+        func find(_ view: NSView) -> TextView? { (view as? TextView) ?? view.subviews.lazy.compactMap(find).first }
+        try await Task.sleep(for: .milliseconds(150))
+        let editor = try #require(find(host))
+        let clip = try #require(editor.enclosingScrollView?.contentView)
+        let selection = (editor.string as NSString).range(of: "model_28")
+        editor.selectionManager.setSelectedRange(NSRange(location: selection.location, length: 0))
+        // CodeEdit's paste(_:) forwards clipboard text to insertText(_:replacementRange:).
+        editor.insertText("\"copied\": 1,\n\"pasted\": 2,\n", replacementRange: NSRange(location: NSNotFound, length: 0))
+        let oldPosts = clip.postsBoundsChangedNotifications
+        clip.postsBoundsChangedNotifications = false
+        clip.scroll(to: .init(x: 0, y: 4000))
+        editor.enclosingScrollView?.reflectScrolledClipView(clip)
+        clip.postsBoundsChangedNotifications = oldPosts
+        try await Task.sleep(for: .milliseconds(80))
+
+        #expect(editor.string.contains("\"pasted\": 2"))
+        #expect(editor.layoutManager.textLineForOffset(editor.textStorage.length - 1) != nil)
+        #expect(!editor.subviews.filter { String(describing: type(of: $0)) == "LineFragmentView" && editor.visibleRect.intersects($0.frame) }.isEmpty,
+                "A paste must reconcile visible line fragments after a suppressed clip-view scroll")
+    }
+
     @Test func editorScrollingMaintainsVisibleContent() async throws {
         OhMyGhosttySettings.shared.editorWordWrap = true
         defer { OhMyGhosttySettings.shared.editorWordWrap = false }

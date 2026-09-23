@@ -353,16 +353,19 @@ struct BuiltInInfoInspectorProviderTests {
         #expect(chinese.historyTitle == "历史命令")
         #expect(english.agentPromptsTitle == "Agent Prompts")
         #expect(chinese.agentPromptsTitle == "提问历史")
-        #expect(chinese.clickToJump == "点击快速跳转到终端对应位置")
+        #expect(chinese.clickToJump == "跳转到这次输入的位置")
+        #expect(!chinese.noTerminalAnchor.isEmpty)
+        #expect(!english.historyLimited.isEmpty)
     }
 
     @Test func publishesHistoryItemsAndHandlesJumpAction() async throws {
         let registry = InspectorRegistry()
-        let historyService = TerminalHistoryService()
         let surfaceID = UUID()
-
-        historyService.recordCommand(text: "swift build", surfaceID: surfaceID)
-        historyService.recordCommand(text: "git status", surfaceID: surfaceID)
+        var records: [InspectorHistoryItem] = [
+            .init(kind: .command, text: "git status"),
+            .init(kind: .command, text: "swift build"),
+        ]
+        let historyService = TerminalHistoryService { $0 == surfaceID ? records : [] }
 
         let provider = BuiltInInfoInspectorProvider(
             registry: registry,
@@ -393,7 +396,7 @@ struct BuiltInInfoInspectorProviderTests {
         #expect(!info.historyItems.isEmpty)
         #expect(info.historyItems.first?.text == "git status")
 
-        historyService.recordCommand(text: "new command", surfaceID: surfaceID)
+        records.insert(.init(kind: .command, text: "new command"), at: 0)
         NotificationCenter.default.post(name: .terminalHistoryDidChange, object: UUID())
         await Task.yield()
         if case .info(let unchanged) = registry.content(for: BuiltInInfoInspectorProvider.paneID, context: context) {

@@ -131,6 +131,20 @@ struct InfoStrings: Equatable, Sendable {
         t("Prompts sent to this agent will appear here.", "发送给该 Agent 的 Prompt 将显示在此处。")
     }
     var clickToJump: String {
-        t("Click to jump to this position in terminal", "点击快速跳转到终端对应位置")
+        t("Jump to this input in the terminal", "跳转到这次输入的位置")
+    }
+    var historyRowHelp: String {
+        t("Select to copy with ⌘C. Double-click to jump.", "单击选中后按 ⌘C 复制，双击跳转。")
+    }
+    var noTerminalAnchor: String {
+        t("Copy available. This transcript has no verified terminal positions.", "可复制；此会话尚无可靠的终端位置映射。")
+    }
+    var unknownHistoryDate: String { t("Date unavailable", "日期未知") }
+    var historyLoading: String { t("Loading prompts…", "正在读取提问…") }
+    var historyUnavailable: String {
+        t("Session history unavailable. Retrying automatically…", "暂时无法读取会话记录，正在自动重试…")
+    }
+    var historyLimited: String {
+        t("Showing recent prompts. Older or oversized records may be omitted.", "仅显示近期提问，较早或超大记录可能未收录。")
     }
 }

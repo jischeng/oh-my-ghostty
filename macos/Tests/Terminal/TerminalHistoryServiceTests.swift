@@ -4,59 +4,50 @@ import Testing
 
 @MainActor
 struct TerminalHistoryServiceTests {
-    @Test func recordsRepeatedCommandsAsDistinctExecutions() {
+    @Test func connectionEpochsRejectOldAndForeignAnchors() {
         let service = TerminalHistoryService()
-        let surfaceID = UUID()
-
-        service.recordCommand(text: "git status", surfaceID: surfaceID)
-        service.recordCommand(text: "git status", surfaceID: surfaceID) // A separate execution, not a replacement.
-        service.recordCommand(text: "cargo test", surfaceID: surfaceID)
-
-        let history = service.loadShellHistory(surfaceID: surfaceID, limit: 10)
-        #expect(history.count == 3)
-        #expect(history[1].id != history[2].id)
-        #expect(history[2].text == "git status")
-        #expect(service.loadShellHistory(surfaceID: UUID()).isEmpty)
-        #expect(service.loadShellHistory(surfaceID: surfaceID, limit: 0).isEmpty)
-        #expect(history[0].text == "cargo test")
-        #expect(history[1].text == "git status")
-        #expect(history[0].kind == .command)
-
-        service.removeSurface(surfaceID)
-        let afterRemoval = service.loadShellHistory(surfaceID: surfaceID, limit: 10)
-        #expect(!afterRemoval.contains(where: { $0.text == "cargo test" }))
+        let pane = UUID()
+        var cleared = 0
+        let local = service.synchronizeSession(surfaceID: pane, connectionID: nil) { cleared += 1 }
+        #expect(cleared == 0)
+        let anchor = HistoryLocation.command(surfaceID: pane, executionID: 1, epoch: local)
+        #expect(service.validate(anchor, surfaceID: pane) == nil)
+        #expect(service.validate(anchor, surfaceID: UUID()) == .wrongSession)
+        let remote = service.synchronizeSession(surfaceID: pane, connectionID: "ssh-A") { cleared += 1 }
+        #expect(cleared == 1)
+        #expect(remote != local)
+        #expect(service.validate(anchor, surfaceID: pane) == .wrongSession)
+        #expect(service.synchronizeSession(surfaceID: pane, connectionID: "ssh-A") { cleared += 1 } == remote)
+        #expect(cleared == 1) // CWD and connecting -> ready do not change the connection ID.
+        service.synchronizeSession(surfaceID: pane, connectionID: "ssh-B") { cleared += 1 }
+        service.synchronizeSession(surfaceID: pane, connectionID: nil) { cleared += 1 }
+        #expect(cleared == 3)
+        #expect(service.validate(anchor, surfaceID: pane) == .wrongSession)
+        #expect(service.validate(.unavailable(.transcriptOnly), surfaceID: pane) == .unavailable)
+        service.removeSurface(pane)
+        #expect(service.validate(anchor, surfaceID: pane) == .wrongSession)
     }
 
-    @Test func limitsRecordedCommandsToMaximumBound() {
+    @Test func firstRemoteObservationDoesNotInheritUnknownHistory() {
         let service = TerminalHistoryService()
-        let surfaceID = UUID()
-
-        for i in 0..<60 {
-            service.recordCommand(text: "cmd-\(i)", surfaceID: surfaceID)
-        }
-
-        let recorded = service.recordedCommands(for: surfaceID)
-        #expect(recorded.count == 50)
-        #expect(recorded.first?.text == "cmd-59")
+        var cleared = false
+        service.synchronizeSession(surfaceID: UUID(), connectionID: "ssh-A") { cleared = true }
+        #expect(cleared)
     }
 
-    @Test func modelInitializersHoldExpectedValues() {
-        let now = Date()
-        let item = InspectorHistoryItem(
-            id: "test-id",
-            kind: .agentPrompt,
-            text: "Explain this code",
-            timestamp: now,
-            exitCode: 0,
-            duration: 1_000_000,
-            promptIndex: 2
-        )
-        #expect(item.id == "test-id")
-        #expect(item.kind == .agentPrompt)
-        #expect(item.text == "Explain this code")
-        #expect(item.timestamp == now)
-        #expect(item.exitCode == 0)
-        #expect(item.duration == 1_000_000)
-        #expect(item.promptIndex == 2)
+    @Test func usesOneInjectedSnapshotSourceWithoutDeduplicating() {
+        let pane = UUID()
+        let items = (0..<2).map { InspectorHistoryItem(id: "execution-\($0)", kind: .command, text: "ll") }
+        let service = TerminalHistoryService { $0 == pane ? items : [] }
+        #expect(service.commands(for: pane) == items)
+        #expect(service.commands(for: UUID()).isEmpty)
+    }
+
+    @Test func previewNeverChangesCopyText() {
+        let text = "  " + String(repeating: "完整 Prompt\n", count: 3_000) + "  "
+        let item = InspectorHistoryItem(kind: .agentPrompt, text: text)
+        #expect(item.preview.count <= 2_001)
+        #expect(item.text == text)
+        #expect(!item.location.isAvailable)
     }
 }

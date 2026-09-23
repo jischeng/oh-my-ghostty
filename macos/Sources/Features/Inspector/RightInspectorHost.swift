@@ -1687,7 +1687,7 @@ private struct AgentHistoryEmptyView: View {
     }
 }
 
-private struct InspectorInfoView: View {
+struct InspectorInfoView: View {
     let info: InspectorInfoContent
     let dividerColor: Color
     let perform: (InspectorPaneActionKind) -> Void
@@ -1731,7 +1731,7 @@ private struct InspectorInfoView: View {
 
             if !info.portForwards.hostAlias.isEmpty {
                 InspectorPortForwardListView(forwards: info.portForwards, perform: perform)
-                    .frame(height: 220)
+                    .frame(height: InfoHistoryLayout.portHeight(count: info.portForwards.items.count))
                 Rectangle().fill(dividerColor).frame(height: TerminalShellStyle.dividerWidth)
             }
 
@@ -1739,6 +1739,7 @@ private struct InspectorInfoView: View {
                 items: info.historyItems,
                 isAgent: info.isAgentSession,
                 agentName: info.agentName,
+                state: info.historyState,
                 perform: perform
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -1747,63 +1748,70 @@ private struct InspectorInfoView: View {
     }
 }
 
+enum InfoHistoryLayout {
+    static func portHeight(count: Int) -> CGFloat {
+        count == 0 ? 64 : min(180, 54 + CGFloat(count) * 38)
+    }
+}
+
 private struct InspectorTerminalHistoryListView: View {
     let items: [InspectorHistoryItem]
     let isAgent: Bool
     let agentName: String?
+    let state: PaneAgentHistoryService.State
     let perform: (InspectorPaneActionKind) -> Void
-
     @ObservedObject private var settings = OhMyGhosttySettings.shared
-    @State private var hoveredID: String?
 
-    private var strings: InfoStrings {
-        .init(language: settings.language)
+    private var strings: InfoStrings { .init(language: settings.language) }
+    private var statusMessage: String? {
+        switch state {
+        case .loading: strings.historyLoading
+        case .unavailable: strings.historyUnavailable
+        case .limited: strings.historyLimited
+        case .ready: nil
+        }
     }
 
-    private static let timeFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm"
-        return formatter
-    }()
-
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 7) {
-                Image(systemName: isAgent ? "sparkles" : "terminal")
-                    .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: isAgent ? "sparkles" : "terminal").foregroundStyle(.secondary)
                 Text(isAgent ? (agentName ?? strings.agentPromptsTitle) : strings.historyTitle)
-                    .font(.headline)
+                    .font(.system(size: 12, weight: .medium))
                     .lineLimit(1)
-                Text(String(items.count))
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(.secondary.opacity(0.18), in: Capsule())
-                Spacer(minLength: 8)
+                Spacer(minLength: 4)
+                Text(String(items.count)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
-            .padding(.horizontal, InspectorContentMetrics.leadingInset)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
 
+            if isAgent && !items.isEmpty {
+                Text(strings.noTerminalAnchor)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 6)
+            }
+            if let statusMessage {
+                Text(statusMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 6)
+            }
             if items.isEmpty {
-                VStack(spacing: 8) {
-                    Image(systemName: isAgent ? "bubble.left.and.bubble.right" : "terminal")
-                        .font(.system(size: 24))
-                        .foregroundStyle(.secondary)
-                    Text(isAgent ? strings.noAgentPrompts : strings.noHistory)
-                        .font(.headline)
+                if state == .ready {
                     Text(isAgent ? strings.noAgentPromptsMessage : strings.noHistoryMessage)
                         .font(.callout)
                         .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
+                        .padding(8)
                 }
-                .padding(24)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                Spacer(minLength: 0)
             } else {
                 TerminalHistoryTable(items: items) { perform(.jumpToHistoryItem($0)) }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
 
@@ -1827,15 +1835,13 @@ private struct InspectorPortForwardListView: View {
             HStack(spacing: 7) {
                 Image(systemName: "antenna.radiowaves.left.and.right")
                     .foregroundStyle(.secondary)
-                Text(forwards.hostAlias)
-                    .font(.headline)
+                Text(strings.portsTitle)
+                    .font(.system(size: 12, weight: .medium))
                     .lineLimit(1)
+                    .help(forwards.hostAlias)
                 Text(String(forwardedCount))
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(.secondary.opacity(0.18), in: Capsule())
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
                 Spacer(minLength: 8)
                 Button {
                     targetValue = ""
@@ -1847,11 +1853,12 @@ private struct InspectorPortForwardListView: View {
                 .onHover { inside in
                     (inside ? NSCursor.pointingHand : NSCursor.arrow).set()
                 }
-                .help(strings.forwardAPort)
+                .disabled(!forwards.canCreate)
+                .help(forwards.canCreate ? strings.forwardAPort : strings.identityUnavailable())
                 .accessibilityLabel(strings.forwardAPort)
             }
-            .padding(.horizontal, InspectorContentMetrics.leadingInset)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
 
             if !forwards.items.isEmpty {
                 HStack(spacing: 8) {
@@ -1869,19 +1876,11 @@ private struct InspectorPortForwardListView: View {
             }
 
             if forwards.items.isEmpty {
-                VStack(spacing: 8) {
-                    Image(systemName: "antenna.radiowaves.left.and.right")
-                        .font(.system(size: 25))
-                        .foregroundStyle(.secondary)
-                    Text(strings.noForwardedPorts)
-                        .font(.headline)
-                    Text(strings.noForwardedPortsMessage)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                .padding(24)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                Text(strings.noForwardedPorts)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {

@@ -1768,6 +1768,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let locationChanged = paneSessionContexts[surfaceID].map {
             !context.hasSameLocation(as: $0)
         } ?? true
+        if let view = surfaceTree.first(where: { $0.id == surfaceID }) {
+            TerminalHistoryService.shared.synchronizeSession(context, in: view)
+        }
         var next = paneSessionContexts
         next[surfaceID] = context
         paneSessionContexts = next

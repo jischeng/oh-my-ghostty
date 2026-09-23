@@ -9,9 +9,10 @@ pub const Entry = struct {
     pin: *PageList.Pin,
     text: [:0]const u8,
     timestamp: i64,
+    superseded: bool = false,
 
     pub fn isValid(self: Entry) bool {
-        if (self.pin.garbage) return false;
+        if (self.superseded or self.pin.garbage) return false;
         // A clear/overwrite can erase cells without pruning their page.
         return self.pin.rowAndCell().cell.semantic_content == .input;
     }
@@ -32,6 +33,11 @@ pub fn deinit(self: *Self, alloc: Allocator, pages: *PageList) void {
 }
 
 pub fn begin(self: *Self, pages: *PageList, cursor: PageList.Pin) !void {
+    // A new input at a reused coordinate is a new occurrence, even if it has
+    // identical text and the cells are once again marked as `.input`.
+    for (self.entries.items) |*entry| {
+        if (entry.pin.eql(cursor)) entry.superseded = true;
+    }
     // A continuation prompt may send another B; retain the original input start.
     if (self.input) |pin| {
         if (!pin.garbage and pin.before(cursor) and
@@ -42,17 +48,26 @@ pub fn begin(self: *Self, pages: *PageList, cursor: PageList.Pin) !void {
     self.input = try pages.trackPin(cursor);
 }
 
-pub fn finish(self: *Self, alloc: Allocator, pages: *PageList, cursor: PageList.Pin, timestamp: i64) !void {
+pub fn finish(self: *Self, alloc: Allocator, pages: *PageList, cursor: PageList.Pin, pending_wrap: bool, timestamp: i64) !void {
     const start = self.input orelse return;
     self.input = null;
     defer pages.untrackPin(start);
-    if (start.garbage or !start.before(cursor)) return;
+    if (start.garbage or !(start.before(cursor) or (pending_wrap and start.eql(cursor)))) return;
+    for (self.entries.items) |*entry| {
+        if (!entry.pin.garbage and
+            (entry.pin.eql(start.*) or start.before(entry.pin.*)) and
+            (entry.pin.before(cursor) or (pending_wrap and entry.pin.eql(cursor))))
+        {
+            entry.superseded = true;
+        }
+    }
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(alloc);
     var it = start.cellIterator(.right_down, cursor);
     var count: usize = 0;
     while (it.next()) |pin| {
-        if (pin.eql(cursor)) break;
+        // With delayed wrapping, the cursor is still on the last printed cell.
+        if (pin.eql(cursor) and !pending_wrap) break;
         count += 1;
         // Do not publish truncated commands as exact records.
         if (count > 16384 or text.items.len > 16384) return;
@@ -172,4 +187,35 @@ test "OMG command history bounds repeated records" {
     try std.testing.expectEqual(@as(usize, 100), entries.len);
     try std.testing.expectEqual(@as(u64, 11), entries[0].id);
     try std.testing.expectEqual(@as(u64, 110), entries[99].id);
+}
+
+test "OMG command history rejects reused input coordinates" {
+    const Terminal = @import("Terminal.zig");
+    const alloc = std.testing.allocator;
+    var t = try Terminal.init(std.testing.io, alloc, .{ .cols = 40, .rows = 8 });
+    defer t.deinit(alloc);
+    try t.semanticPrompt(.init(.end_prompt_start_input));
+    try t.printString("ll");
+    try t.semanticPrompt(.init(.end_input_start_output));
+    t.carriageReturn();
+    try t.semanticPrompt(.init(.end_prompt_start_input));
+    try t.printString("ll");
+    try t.semanticPrompt(.init(.end_input_start_output));
+    const entries = t.screens.active.omg_command_history.entries.items;
+    try std.testing.expectEqual(@as(usize, 2), entries.len);
+    try std.testing.expect(!entries[0].isValid());
+    try std.testing.expect(entries[1].isValid());
+    try std.testing.expect(entries[0].id != entries[1].id);
+}
+
+test "OMG command history includes the final cell before delayed wrap" {
+    const Terminal = @import("Terminal.zig");
+    const alloc = std.testing.allocator;
+    var t = try Terminal.init(std.testing.io, alloc, .{ .cols = 4, .rows = 8 });
+    defer t.deinit(alloc);
+    try t.semanticPrompt(.init(.end_prompt_start_input));
+    try t.printString("abcd");
+    try std.testing.expect(t.screens.active.cursor.pending_wrap);
+    try t.semanticPrompt(.init(.end_input_start_output));
+    try std.testing.expectEqualStrings("abcd", t.screens.active.omg_command_history.entries.items[0].text);
 }

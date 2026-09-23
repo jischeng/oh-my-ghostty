@@ -6,165 +6,102 @@ import GhosttyKit
 final class TerminalHistoryService {
     static let shared = TerminalHistoryService()
 
-    private var recordedCommandsBySurface: [UUID: [InspectorHistoryItem]] = [:]
-
-    init() {}
-
-    /// 记录某一个 Surface 执行过的命令
-    func recordCommand(text: String, surfaceID: UUID, exitCode: Int16? = nil) {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-
-        var list = recordedCommandsBySurface[surfaceID] ?? []
-        // Each execution is distinct, including adjacent identical commands.
-        let item = InspectorHistoryItem(
-            id: UUID().uuidString,
-            kind: .command,
-            text: trimmed,
-            timestamp: Date(),
-            exitCode: exitCode
-        )
-        list.insert(item, at: 0)
-        if list.count > 50 { list.removeLast() }
-        recordedCommandsBySurface[surfaceID] = list
+    enum JumpResult: Equatable {
+        case jumped
+        case unavailable
+        case wrongSession
+        case expired
     }
 
-    /// 清除指定 Surface 的记录
-    func removeSurface(_ surfaceID: UUID) {
-        recordedCommandsBySurface.removeValue(forKey: surfaceID)
+    private struct Session {
+        let connectionID: String?
+        let epoch: UUID
+    }
+    private var sessions: [UUID: Session] = [:]
+    private let commandSource: ((UUID) -> [InspectorHistoryItem])?
+
+    /// The injected source is also the test seam; there is no second history store.
+    init(commandSource: ((UUID) -> [InspectorHistoryItem])? = nil) {
+        self.commandSource = commandSource
     }
 
-    /// 获取指定 Surface 内存中记录的命令
-    func recordedCommands(for surfaceID: UUID) -> [InspectorHistoryItem] {
-        recordedCommandsBySurface[surfaceID] ?? []
-    }
-
-    /// 获取普通 Shell 的历史命令（严格限定当前 Surface，隔离各 Pane）
-    func loadShellHistory(surfaceID: UUID? = nil, limit: Int = 30) -> [InspectorHistoryItem] {
-        guard let surfaceID, let recorded = recordedCommandsBySurface[surfaceID] else {
-            return []
+    static func connectionID(_ context: PaneSessionContext) -> String? {
+        switch context.state {
+        case .local: nil
+        case .sshConnecting(let ssh), .sshReady(let ssh, _): ssh.connectionID
         }
-        return Array(recorded.prefix(max(0, limit)))
     }
 
-    /// 从磁盘读取用户常见 Shell 的历史文件
-    private func loadRecentCommandsFromDisk(limit: Int) -> [InspectorHistoryItem] {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let zshHistoryURL = home.appendingPathComponent(".zsh_history")
-        let bashHistoryURL = home.appendingPathComponent(".bash_history")
-
-        if FileManager.default.fileExists(atPath: zshHistoryURL.path) {
-            return parseZshHistory(at: zshHistoryURL, limit: limit)
-        } else if FileManager.default.fileExists(atPath: bashHistoryURL.path) {
-            return parseBashHistory(at: bashHistoryURL, limit: limit)
+    /// Called on canonical session transitions, including when Info is hidden.
+    /// A new remote connection (or return to local) starts a new navigation epoch.
+    func synchronizeSession(_ context: PaneSessionContext, in view: Ghostty.SurfaceView) {
+        synchronizeSession(surfaceID: view.id, connectionID: Self.connectionID(context)) {
+            guard let surface = view.surface else { return }
+            ghostty_surface_omg_clear_commands(surface)
         }
-        return []
     }
 
-    private func parseZshHistory(at url: URL, limit: Int) -> [InspectorHistoryItem] {
-        guard let data = try? Data(contentsOf: url),
-              let content = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) else {
-            return []
-        }
-        let lines = content.components(separatedBy: .newlines)
-        var items: [InspectorHistoryItem] = []
-
-        // 从后往前读取最新历史
-        for rawLine in lines.reversed() {
-            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !line.isEmpty else { continue }
-
-            var cmdText = line
-            var date: Date?
-
-            // zsh 扩展格式: ": 1711234567:0;command"
-            if line.hasPrefix(": ") {
-                let parts = line.dropFirst(2).split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true)
-                if parts.count == 2 {
-                    cmdText = String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines)
-                    let timeParts = parts[0].split(separator: ":")
-                    if let first = timeParts.first, let timestamp = TimeInterval(first) {
-                        date = Date(timeIntervalSince1970: timestamp)
-                    }
-                }
-            }
-
-            guard !cmdText.isEmpty else { continue }
-            items.append(InspectorHistoryItem(
-                id: UUID().uuidString,
-                kind: .command,
-                text: cmdText,
-                timestamp: date
-            ))
-
-            if items.count >= limit {
-                break
-            }
-        }
-        return items
+    @discardableResult
+    func synchronizeSession(surfaceID: UUID, connectionID: String?, clear: () -> Void) -> UUID {
+        if let session = sessions[surfaceID], session.connectionID == connectionID { return session.epoch }
+        // First observation of a local pane can retain commands already captured.
+        // First observation of a remote pane must not inherit an unknown host's rows.
+        if sessions[surfaceID] != nil || connectionID != nil { clear() }
+        let epoch = UUID()
+        sessions[surfaceID] = .init(connectionID: connectionID, epoch: epoch)
+        return epoch
     }
 
-    private func parseBashHistory(at url: URL, limit: Int) -> [InspectorHistoryItem] {
-        guard let data = try? Data(contentsOf: url),
-              let content = String(data: data, encoding: .utf8) else {
-            return []
-        }
-        let lines = content.components(separatedBy: .newlines)
-        var items: [InspectorHistoryItem] = []
-
-        for rawLine in lines.reversed() {
-            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !line.isEmpty else { continue }
-            items.append(InspectorHistoryItem(
-                id: UUID().uuidString,
-                kind: .command,
-                text: line,
-                timestamp: nil
-            ))
-            if items.count >= limit {
-                break
-            }
-        }
-        return items
-    }
+    func removeSurface(_ surfaceID: UUID) { sessions.removeValue(forKey: surfaceID) }
 
     private final class CommandSnapshot {
         var items: [InspectorHistoryItem] = []
         let surfaceID: UUID
-        init(surfaceID: UUID) { self.surfaceID = surfaceID }
-    }
-
-    func commands(in view: Ghostty.SurfaceView) -> [InspectorHistoryItem] {
-        guard let surface = view.surface else { return [] }
-        let snapshot = CommandSnapshot(surfaceID: view.id)
-        ghostty_surface_omg_commands(surface, Unmanaged.passUnretained(snapshot).toOpaque()) { context, id, text, timestamp in
-            guard let context, let text else { return }
-            let snapshot = Unmanaged<CommandSnapshot>.fromOpaque(context).takeUnretainedValue()
-            snapshot.items.append(.init(
-                id: "command:\(snapshot.surfaceID.uuidString):\(id)",
-                kind: .command,
-                text: String(cString: text),
-                timestamp: Date(timeIntervalSince1970: TimeInterval(timestamp))
-            ))
+        let epoch: UUID
+        init(surfaceID: UUID, epoch: UUID) {
+            self.surfaceID = surfaceID
+            self.epoch = epoch
         }
-        return snapshot.items.reversed()
     }
 
-    /// 执行终端跳转到历史项（Shell 命令或 Agent Prompt）所在位置
+    func commands(for surfaceID: UUID) -> [InspectorHistoryItem] {
+        if let commandSource { return commandSource(surfaceID) }
+        for controller in TerminalController.all {
+            guard let view = controller.surfaceTree.first(where: { $0.id == surfaceID }),
+                  let surface = view.surface else { continue }
+            if let context = controller.paneSessionContext(for: view) {
+                synchronizeSession(context, in: view)
+            }
+            guard let epoch = sessions[surfaceID]?.epoch else { return [] }
+            let snapshot = CommandSnapshot(surfaceID: surfaceID, epoch: epoch)
+            ghostty_surface_omg_commands(surface, Unmanaged.passUnretained(snapshot).toOpaque()) { context, id, text, timestamp in
+                guard let context, let text else { return }
+                let snapshot = Unmanaged<CommandSnapshot>.fromOpaque(context).takeUnretainedValue()
+                snapshot.items.append(.init(
+                    id: "command:\(snapshot.surfaceID):\(snapshot.epoch):\(id)",
+                    kind: .command, text: String(cString: text),
+                    timestamp: Date(timeIntervalSince1970: TimeInterval(timestamp)),
+                    location: .command(surfaceID: snapshot.surfaceID, executionID: id, epoch: snapshot.epoch)
+                ))
+            }
+            return snapshot.items.reversed()
+        }
+        return []
+    }
+
+    func validate(_ location: HistoryLocation, surfaceID: UUID) -> JumpResult? {
+        guard case .command(let owner, _, let epoch) = location else { return .unavailable }
+        guard owner == surfaceID, sessions[surfaceID]?.epoch == epoch else { return .wrongSession }
+        return nil
+    }
+
     @discardableResult
-    func jump(to item: InspectorHistoryItem, in surfaceView: Ghostty.SurfaceView) -> Bool {
-        guard let surface = surfaceView.surface else { return false }
-        if item.kind == .command {
-            let prefix = "command:\(surfaceView.id.uuidString):"
-            guard item.id.hasPrefix(prefix),
-                  let id = UInt64(item.id.dropFirst(prefix.count)) else { return false }
-            let result = ghostty_surface_omg_jump_command(surface, id)
-            if result { Ghostty.moveFocus(to: surfaceView, from: nil) }
-            return result
-        }
-
-        // A transcript message is not a terminal coordinate. Never substitute
-        // a text search for an execution anchor (especially repeated prompts).
-        return false
+    func jump(to item: InspectorHistoryItem, in view: Ghostty.SurfaceView) -> JumpResult {
+        if let result = validate(item.location, surfaceID: view.id) { return result }
+        guard case .command(_, let id, _) = item.location,
+              let surface = view.surface else { return .expired }
+        guard ghostty_surface_omg_jump_command(surface, id) else { return .expired }
+        Ghostty.moveFocus(to: view, from: nil)
+        return .jumped
     }
 }

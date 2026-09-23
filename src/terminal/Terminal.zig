@@ -2136,7 +2136,7 @@ pub fn semanticPrompt(
 
         .end_input_start_output => {
             const screen = self.screens.active;
-            try screen.omg_command_history.finish(screen.alloc, &screen.pages, screen.cursor.page_pin.*, std.Io.Clock.real.now(self.io()).toSeconds());
+            try screen.omg_command_history.finish(screen.alloc, &screen.pages, screen.cursor.page_pin.*, screen.cursor.pending_wrap, std.Io.Clock.real.now(self.io()).toSeconds());
             // "End of input, and start of output."
             self.screens.active.cursorSetSemanticContent(.output);
 

@@ -1692,6 +1692,19 @@ pub const CAPI = struct {
         }
     }
 
+    // Host-observed connection changes invalidate only OMG navigation records,
+    // never terminal contents or input. IDs remain monotonic across epochs.
+    export fn ghostty_surface_omg_clear_commands(surface: *Surface) void {
+        const core = &surface.core_surface;
+        core.renderer_state.mutex.lockUncancelable(global.io());
+        defer core.renderer_state.mutex.unlock(global.io());
+        for ([_]terminal.ScreenSet.Key{ .primary, .alternate }) |key| {
+            if (core.renderer_state.terminal.screens.get(key)) |screen| {
+                screen.omg_command_history.deinit(screen.alloc, &screen.pages);
+            }
+        }
+    }
+
     export fn ghostty_surface_omg_jump_command(surface: *Surface, id: u64) bool {
         const core = &surface.core_surface;
         {

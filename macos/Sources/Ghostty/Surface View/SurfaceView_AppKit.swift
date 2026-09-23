@@ -414,6 +414,9 @@ extension Ghostty {
         }
 
         deinit {
+            let historySurfaceID = id
+            Task { @MainActor in TerminalHistoryService.shared.removeSurface(historySurfaceID) }
+
             // Resolve clipboard callback state while surfaceModel is still
             // alive. The request's weak SurfaceView reference is already nil
             // during deinit, so didSet passes this instance explicitly.

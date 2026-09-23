@@ -197,6 +197,21 @@ enum InspectorHistoryItemKind: String, Codable, Equatable, Sendable {
     case agentPrompt
 }
 
+enum HistoryLocation: Equatable, Sendable {
+    case command(surfaceID: UUID, executionID: UInt64, epoch: UUID)
+    case unavailable(HistoryLocationUnavailable)
+
+    var isAvailable: Bool {
+        if case .command = self { return true }
+        return false
+    }
+}
+
+enum HistoryLocationUnavailable: Equatable, Sendable {
+    case transcriptOnly
+    case expired
+}
+
 struct InspectorHistoryItem: Identifiable, Equatable, Sendable {
     let id: String
     let kind: InspectorHistoryItemKind
@@ -205,6 +220,12 @@ struct InspectorHistoryItem: Identifiable, Equatable, Sendable {
     let exitCode: Int16?
     let duration: UInt64?
     let promptIndex: Int?
+    let location: HistoryLocation
+    /// Display-only bounded text. Copy always uses the original `text`.
+    var preview: String {
+        let prefix = text.prefix(2_001)
+        return prefix.count > 2_000 ? String(prefix.prefix(2_000)) + "…" : String(prefix)
+    }
 
     init(
         id: String = UUID().uuidString,
@@ -213,7 +234,8 @@ struct InspectorHistoryItem: Identifiable, Equatable, Sendable {
         timestamp: Date? = nil,
         exitCode: Int16? = nil,
         duration: UInt64? = nil,
-        promptIndex: Int? = nil
+        promptIndex: Int? = nil,
+        location: HistoryLocation = .unavailable(.transcriptOnly)
     ) {
         self.id = id
         self.kind = kind
@@ -222,6 +244,7 @@ struct InspectorHistoryItem: Identifiable, Equatable, Sendable {
         self.exitCode = exitCode
         self.duration = duration
         self.promptIndex = promptIndex
+        self.location = location
     }
 }
 

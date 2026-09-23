@@ -892,21 +892,37 @@ an entry; Cmd+C copies its complete command or prompt. The native table sizes it
 scrolling document to the inspector width and computes row heights from wrapped
 text. Prompts show up to four preview lines without expand/collapse controls.
 The table explicitly uses AppKit's plain style to avoid automatic sidebar insets.
-Horizontal padding is four points with a faint row separator; row spacing is two points.
-Preview height is measured using the same wrapping NSTextField cell and four-line
-limit as rendering, plus 22 points for date and spacing; short prompts do not
-reserve the maximum preview height. Copying always
-returns the full text. Text and date occupy separate bounded
-frames so long prompts cannot paint into neighboring rows. Double click or the row's
-jump button uses the command's tracked input anchor for shell records. Agent
-prompts currently have no terminal-position anchors. Their jump buttons are
-disabled with an explanatory tooltip; double-click does not start a text search.
-Transcript-only messages remain selectable and copyable; the jump arrow keeps its SF Symbol appearance but is disabled, with a tooltip
-explaining that a terminal anchor is unavailable. Exact Agent prompt
-navigation is not implemented and must not be advertised as available.
-For SSH panes the port-forwarding section stays above history, including its
-add-port control when no forwards exist. History belongs to the current Surface;
-it must not be populated from another pane's global shell history.
+Horizontal padding is eight points with a faint row separator. Shell rows use a
+monospaced font; prompts use the system font. Preview height is measured using
+the same wrapping NSTextField cell and four-line limit as rendering, plus 26
+points for metadata and spacing; short prompts do not reserve the maximum height.
+Display previews are additionally bounded to 2,000 characters, but Cmd+C copies
+the retained original text, preserving whitespace and literal markup. Reusable
+cells and cached heights avoid repeated measurement on unchanged snapshots.
+On append, selection follows occurrence identity and a scrolled list retains its
+reading position; removal of the selected occurrence clears selection rather
+than selecting another row at the same index. Text, timestamp and the jump
+button occupy separate bounded frames so long prompts cannot paint across rows.
+Double click or the row's jump button uses the command's tracked input anchor.
+Navigation is represented by typed `HistoryLocation`, never inferred from an ID
+prefix. Available jump buttons appear on hover/selection. Transcript-only rows
+remain selectable and copyable; the Agent section explicitly explains that no
+verified terminal mapping exists and does not show misleading active arrows.
+Exact Agent prompt navigation is not implemented and must not be advertised as
+available. A submission/status hook's cursor is not a verified render position.
+For SSH panes the port-forwarding section stays above history. Empty ports occupy
+64 points rather than a fixed 220-point panel; populated ports grow to a maximum
+of 180 points, with their own scroll area. The add-port control remains in the
+header, disabled with an identity explanation when the SSH server is unresolved.
+History belongs to the current Surface and connection epoch, never global shell
+history. On a host-observed connection-ID change (including return to local),
+`ghostty_surface_omg_clear_commands` drops navigation records on both screens,
+not terminal contents. IDs are not reused; stale epoch references cannot jump.
+Connecting-to-ready or CWD changes within one connection do not clear records.
+The transition is conservative: records captured before the host identifies a
+new connection may be discarded rather than attributed to the wrong host.
+Only host-observed SSH transitions are covered; unrecognized nested transports
+cannot be reliably attributed using OSC 133 alone.
 Keyboard interception is not a supported command source. The temporary typed-input
 collector has been removed: it could capture password/TUI input and caused duplicate
 PTY dispatch. Shell commands are captured at OSC 133 B/C boundaries in a bounded per-screen
@@ -917,16 +933,38 @@ when its text repeats. The host copies a snapshot through the internal
 Tracked input pins follow reflow; pruned pins and alternate-screen navigation
 are rejected. Reset drops records without reusing IDs. Command timestamps use host wall-clock seconds recorded at OSC 133 C, not
 snapshot refresh time (also for SSH panes). Anchors whose input cell has been
-overwritten as output are rejected as well as garbage/pruned pins. Shells without semantic input
+overwritten as output are rejected as well as garbage/pruned pins. Starting a new
+semantic input at an existing record's coordinate permanently supersedes that
+record, even when the replacement input is identical. Shells without semantic input
 markers show no command records rather than reading global history.
 AppKit's insertText accumulator must return before the direct committed-text path.
 After OSC 133 C commits the command record, the core sends the internal
 `command_history_changed` host action through the existing Surface mailbox.
 macOS maps it to a Surface-scoped history notification; visible Info refreshes
 without waiting for OSC 133 D, process exit, or a timer. Command-finished callbacks
-also refresh independently of desktop notification preferences. The three-second
-timer refreshes only Agent transcripts, never ordinary Shell history. Hosts that
-do not implement OMG history may ignore the payload-free action.
+also refresh independently of desktop notification preferences. Hosts that do
+not implement OMG history may ignore the payload-free action.
+
+Live Agent history is owned by `PaneAgentHistoryService`, not the SSH forwarding
+provider. Subscriptions are keyed by Surface and a binding containing agent,
+conversation, remote target and connection ID. Changing binding, hiding the pane
+or disabling the provider cancels its task; token checks reject late results.
+Discovery resolves a session file once per subscription (unresolved bindings retry).
+Every three seconds only that file is checked, never a global store rescan after
+resolution. Local JSONL reads are incremental; replacement/truncation resets the
+reader. SSH checks a file revision and transfers a bounded recent tail only when
+it changed. The dedicated `PanePromptReader` does not reuse the transcript-preview
+reader's 500-message/16,000-character truncation or semantic text cleaning.
+It retains the latest 100 user messages (up to 8 MiB of text), ignores assistants
+and typed tool-result blocks, and preserves complete text for each retained row.
+A single user text over 1 MiB or JSONL record over 8 MiB is skipped, never offered
+as silently truncated copy text. Initial/backlogged reads inspect at most the
+latest 8 MiB; an incomplete leading record is discarded. Incomplete trailing
+JSONL records wait for their newline. A visible limited-history notice explains
+omitted older/oversized records. Loading and read failures have distinct states;
+failed refreshes retain already-loaded text and retry. Source-generation plus
+byte-offset IDs distinguish repeated prompts and file replacement. Reading a
+conversation transcript does not imply its messages were rendered in this pane.
 
 For an `sshReady` Pane, users can enter either a port (shorthand for
 `127.0.0.1:<port>` on the SSH server) or an explicit `host:port` reachable from

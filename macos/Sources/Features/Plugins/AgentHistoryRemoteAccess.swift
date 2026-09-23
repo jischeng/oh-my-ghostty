@@ -105,6 +105,45 @@ struct AgentHistoryRemoteAccess: Sendable {
         return Data(output.utf8)
     }
 
+    struct PromptTail: Sendable {
+        let revision: String
+        let offset: UInt64
+        let data: Data?
+    }
+
+    /// A bounded snapshot of one already-resolved JSONL file. Base64 preserves
+    /// UTF-8 split across the byte boundary; the parser discards that first line.
+    func promptTail(path: String, previousRevision: String?, maximumBytes: Int) async throws -> PromptTail {
+        guard Self.validRemotePath(path), maximumBytes > 0, maximumBytes <= 8 * 1_024 * 1_024 else {
+            throw AgentHistoryRemoteError.invalidPath
+        }
+        let command = """
+        file=\(Self.shellQuote(path))
+        [ -f "$file" ] && [ ! -L "$file" ] || exit 1
+        revision=$(stat -c '%i:%s:%y:%z' "$file" 2>/dev/null) || revision=$(stat -f '%i:%z:%m:%c' "$file") || exit 1
+        if [ "$revision" = \(Self.shellQuote(previousRevision ?? "")) ]; then
+          printf 'UNCHANGED\\n'
+          exit 0
+        fi
+        size=$(wc -c < "$file" | tr -d ' ')
+        start=0
+        [ "$size" -le \(maximumBytes) ] || start=$((size - \(maximumBytes)))
+        printf '%s\\n%s\\n' "$revision" "$start"
+        tail -c +$((start + 1)) "$file" | head -c $((size - start)) | base64
+        """
+        let output = try await runCommand(command)
+        if output.trimmingCharacters(in: .whitespacesAndNewlines) == "UNCHANGED", let previousRevision {
+            return .init(revision: previousRevision, offset: 0, data: nil)
+        }
+        let parts = output.split(separator: "\n", maxSplits: 2, omittingEmptySubsequences: false)
+        guard parts.count >= 2, let offset = UInt64(parts[1]),
+              let data = Data(base64Encoded: parts.count == 3 ? String(parts[2]) : "",
+                              options: .ignoreUnknownCharacters), data.count <= maximumBytes else {
+            throw AgentHistoryRemoteError.unavailable
+        }
+        return .init(revision: String(parts[0]), offset: offset, data: data)
+    }
+
     static func parseBatchStream(_ output: String) -> [AgentHistoryRemoteChunk] {
         var results: [AgentHistoryRemoteChunk] = []
         let parts = output.components(separatedBy: "===OMG_FILE===")

@@ -28,6 +28,7 @@ struct InspectorPortForwardItem: Identifiable, Equatable, Sendable {
 struct InspectorPortForwardList: Equatable, Sendable {
     let hostAlias: String
     let items: [InspectorPortForwardItem]
+    var canCreate = true
 }
 
 struct PortForwardTarget: Equatable, Sendable {
@@ -92,6 +93,7 @@ struct InspectorInfoContent: Equatable, Sendable {
     let historyItems: [InspectorHistoryItem]
     let isAgentSession: Bool
     let agentName: String?
+    let historyState: PaneAgentHistoryService.State
 
     init(
         status: InspectorField? = nil,
@@ -99,7 +101,8 @@ struct InspectorInfoContent: Equatable, Sendable {
         portForwards: InspectorPortForwardList = .init(hostAlias: "", items: []),
         historyItems: [InspectorHistoryItem] = [],
         isAgentSession: Bool = false,
-        agentName: String? = nil
+        agentName: String? = nil,
+        historyState: PaneAgentHistoryService.State = .ready
     ) {
         self.status = status
         self.fields = fields
@@ -107,6 +110,7 @@ struct InspectorInfoContent: Equatable, Sendable {
         self.historyItems = historyItems
         self.isAgentSession = isAgentSession
         self.agentName = agentName
+        self.historyState = historyState
     }
 }
 
@@ -201,10 +205,7 @@ final class BuiltInInfoInspectorProvider {
     private var isRegistered = false
     private var notificationObservers: [NSObjectProtocol] = []
     private let historyService: TerminalHistoryService
-    private var agentPromptsCache: [String: [InspectorHistoryItem]] = [:]
-    private var loadingAgentConversations: Set<String> = []
-    private var agentRefreshDates: [String: Date] = [:]
-    private var historyRefreshTimer: Timer?
+    private let agentHistory = PaneAgentHistoryService()
 
     init(
         registry: InspectorRegistry,
@@ -324,8 +325,7 @@ final class BuiltInInfoInspectorProvider {
     }
 
     func shutdown() {
-        historyRefreshTimer?.invalidate()
-        historyRefreshTimer = nil
+        agentHistory.shutdown()
         let running = runtimeForwards.values
         runtimeForwards.removeAll()
         for task in processRefreshTasks.values { task.cancel() }
@@ -383,18 +383,11 @@ final class BuiltInInfoInspectorProvider {
         switch event {
         case .appeared(let context):
             presentedContexts[context.tabID] = context
-            if historyRefreshTimer == nil {
-                historyRefreshTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
-                    Task { @MainActor [weak self] in self?.refreshPresentedAgentHistory() }
-                }
-            }
+            agentHistory.retain(surfaces: Set(presentedContexts.values.compactMap(\.surfaceID)))
             publish(context)
         case .disappeared(let context):
             presentedContexts.removeValue(forKey: context.tabID)
-            if presentedContexts.isEmpty {
-                historyRefreshTimer?.invalidate()
-                historyRefreshTimer = nil
-            }
+            agentHistory.retain(surfaces: Set(presentedContexts.values.compactMap(\.surfaceID)))
         }
     }
 
@@ -434,7 +427,10 @@ final class BuiltInInfoInspectorProvider {
             guard let surfaceID = action.context.surfaceID else { return }
             for controller in TerminalController.all {
                 if let surfaceView = controller.surfaceTree.first(where: { $0.id == surfaceID }) {
-                    historyService.jump(to: item, in: surfaceView)
+                    if historyService.jump(to: item, in: surfaceView) != .jumped {
+                        NSSound.beep()
+                        publish(action.context)
+                    }
                     return
                 }
             }
@@ -589,89 +585,36 @@ final class BuiltInInfoInspectorProvider {
         publishPresentedContexts()
     }
 
-    private func refreshPresentedAgentHistory() {
-        guard isRegistered else { return }
-        for context in presentedContexts.values {
-            guard let surfaceID = context.surfaceID else { continue }
-            let hasAgent = TerminalController.all.contains { controller in
-                guard let surface = controller.surfaceTree.first(where: { $0.id == surfaceID }) else { return false }
-                return controller.agentResumeDescriptor(for: surface) != nil
-            }
-            if hasAgent { publish(context) }
-        }
-    }
-
     private func publishPresentedContexts() {
         guard isRegistered else { return }
         for context in presentedContexts.values { publish(context) }
     }
 
-    private func currentHistory(for context: InspectorPaneContext) -> (items: [InspectorHistoryItem], isAgent: Bool, agentName: String?) {
-        guard let surfaceID = context.surfaceID else {
-            return (historyService.loadShellHistory(), false, nil)
-        }
+    private struct History {
+        var items: [InspectorHistoryItem] = []
+        var isAgent = false
+        var agentName: String?
+        var state: PaneAgentHistoryService.State = .ready
+    }
 
+    private func currentHistory(for context: InspectorPaneContext) -> History {
+        guard let surfaceID = context.surfaceID else { return .init() }
         for controller in TerminalController.all {
-            if let surfaceView = controller.surfaceTree.first(where: { $0.id == surfaceID }) {
-                if let descriptor = controller.agentResumeDescriptor(for: surfaceView) {
-                    let agentName = descriptor.agent.displayName
-
-                    guard let conversationID = descriptor.conversationID else {
-                        return ([], true, agentName)
-                    }
-
-                    let remoteHost: String?
-                    if descriptor.scope == .remote {
-                        guard let host = descriptor.sshReplay?.transferTarget else {
-                            return ([], true, agentName)
-                        }
-                        remoteHost = host
-                    } else {
-                        remoteHost = nil
-                    }
-                    let convID = "\(remoteHost ?? "local")|\(descriptor.agent.rawValue)|\(conversationID.rawValue)"
-                    let cached = agentPromptsCache[convID] ?? []
-                    if let refreshed = agentRefreshDates[convID], Date().timeIntervalSince(refreshed) < 3 {
-                        return (cached, true, agentName)
-                    }
-
-                    if !loadingAgentConversations.contains(convID) {
-                        loadingAgentConversations.insert(convID)
-                        agentRefreshDates[convID] = Date()
-                        Task { [weak self] in
-                            guard let session = await AgentHistoryStore.session(
-                                agent: descriptor.agent,
-                                conversationID: conversationID,
-                                remoteHost: remoteHost
-                            ) else {
-                                self?.agentRefreshDates[convID] = Date()
-                                self?.loadingAgentConversations.remove(convID)
-                                return
-                            }
-                            let transcript = await AgentHistoryStore.transcript(for: session)
-                            let prompts = transcript.messages
-                                .filter { $0.role == .user }
-                                .map { msg in
-                                    InspectorHistoryItem(
-                                        id: msg.id,
-                                        kind: .agentPrompt,
-                                        text: msg.text,
-                                        timestamp: msg.timestamp
-                                    )
-                                }
-                            self?.agentRefreshDates[convID] = Date()
-                            self?.agentPromptsCache[convID] = prompts
-                            self?.loadingAgentConversations.remove(convID)
-                            self?.publishPresentedContexts()
-                        }
-                    }
-                    return (cached, true, agentName)
-                }
-                return (historyService.commands(in: surfaceView), false, nil)
+            guard let view = controller.surfaceTree.first(where: { $0.id == surfaceID }),
+                  let descriptor = controller.agentResumeDescriptor(for: view) else { continue }
+            let session = controller.paneSessionContext(for: view) ?? context.session
+            guard let binding = PaneAgentHistoryService.Binding.current(descriptor: descriptor, session: session) else {
+                agentHistory.remove(surfaceID)
+                return .init(isAgent: true, agentName: descriptor.agent.displayName, state: .unavailable)
             }
+            let snapshot = agentHistory.observe(surfaceID: surfaceID, binding: binding) { [weak self] in
+                self?.publishPresentedContexts()
+            }
+            return .init(items: snapshot.items, isAgent: true, agentName: descriptor.agent.displayName,
+                         state: snapshot.state)
         }
-
-        return (historyService.loadShellHistory(surfaceID: surfaceID), false, nil)
+        agentHistory.remove(surfaceID)
+        return .init(items: historyService.commands(for: surfaceID))
     }
 
     private func publish(_ context: InspectorPaneContext) {
@@ -681,54 +624,16 @@ final class BuiltInInfoInspectorProvider {
 
         switch context.session.state {
         case .local:
-            if !historyInfo.items.isEmpty || historyInfo.isAgent {
-                content = .info(.init(
-                    status: nil,
-                    fields: [],
-                    portForwards: .init(hostAlias: "", items: []),
-                    historyItems: historyInfo.items,
-                    isAgentSession: historyInfo.isAgent,
-                    agentName: historyInfo.agentName
-                ))
-            } else {
-                content = .empty(
-                    title: strings.infoTitle,
-                    message: strings.noHistoryMessage
-                )
-            }
+            content = .info(.init(historyItems: historyInfo.items, isAgentSession: historyInfo.isAgent,
+                                 agentName: historyInfo.agentName, historyState: historyInfo.state))
         case .sshConnecting(let ssh):
-            content = .empty(
-                title: strings.infoTitle,
-                message: strings.waitingForHost(ssh.alias)
-            )
+            content = .empty(title: strings.infoTitle, message: strings.waitingForHost(ssh.alias))
         case .sshReady(let ssh, _):
-            if let serverID = ssh.serverID {
-                content = .info(.init(
-                    status: nil,
-                    fields: [],
-                    portForwards: self.content(
-                        for: serverID,
-                        alias: ssh.alias
-                    ),
-                    historyItems: historyInfo.items,
-                    isAgentSession: historyInfo.isAgent,
-                    agentName: historyInfo.agentName
-                ))
-            } else if !historyInfo.items.isEmpty || historyInfo.isAgent {
-                content = .info(.init(
-                    status: nil,
-                    fields: [],
-                    portForwards: .init(hostAlias: ssh.alias, items: []),
-                    historyItems: historyInfo.items,
-                    isAgentSession: historyInfo.isAgent,
-                    agentName: historyInfo.agentName
-                ))
-            } else {
-                content = .empty(
-                    title: strings.infoTitle,
-                    message: strings.identityUnavailable()
-                )
-            }
+            let forwards = ssh.serverID.map { self.content(for: $0, alias: ssh.alias) }
+                ?? .init(hostAlias: ssh.alias, items: [], canCreate: false)
+            content = .info(.init(portForwards: forwards, historyItems: historyInfo.items,
+                                 isAgentSession: historyInfo.isAgent, agentName: historyInfo.agentName,
+                                 historyState: historyInfo.state))
         }
         do {
             try registry.updatePluginContent(

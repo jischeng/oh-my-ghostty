@@ -1,10 +1,11 @@
 import AppKit
 import SwiftUI
 
-/// One vertically scrolling document; row geometry and text use the same width.
+/// One scrolling document, reusable cells and a shared display/measurement font.
 struct TerminalHistoryTable: NSViewRepresentable {
     let items: [InspectorHistoryItem]
     let jump: (InspectorHistoryItem) -> Void
+    @ObservedObject private var settings = OhMyGhosttySettings.shared
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -18,7 +19,7 @@ struct TerminalHistoryTable: NSViewRepresentable {
         table.headerView = nil
         table.style = .plain
         table.backgroundColor = .clear
-        table.intercellSpacing = NSSize(width: 0, height: 2)
+        table.intercellSpacing = .zero
         table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         table.autoresizingMask = [.width]
         let column = NSTableColumn(identifier: .init("history"))
@@ -47,16 +48,7 @@ struct TerminalHistoryTable: NSViewRepresentable {
         let coordinator = context.coordinator
         coordinator.jump = jump
         coordinator.updateWidth(scroll.contentSize.width)
-        guard coordinator.items != items else { return }
-        let selected = coordinator.table.flatMap { table in
-            coordinator.items.indices.contains(table.selectedRow)
-                ? coordinator.items[table.selectedRow].id : nil
-        }
-        coordinator.items = items
-        coordinator.table?.reloadData()
-        if let selected, let index = items.firstIndex(where: { $0.id == selected }) {
-            coordinator.table?.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
-        }
+        coordinator.update(items: items, strings: .init(language: settings.language))
     }
 
     final class HistoryScrollView: NSScrollView {
@@ -75,7 +67,9 @@ struct TerminalHistoryTable: NSViewRepresentable {
             NSPasteboard.general.setString(text, forType: .string)
         }
         override func performKeyEquivalent(with event: NSEvent) -> Bool {
-            if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+            if let responder = window?.firstResponder as? NSView,
+               responder === self || responder.isDescendant(of: self),
+               event.modifierFlags.intersection([.command, .control, .option, .shift]) == .command,
                event.charactersIgnoringModifiers?.lowercased() == "c", copyText?() != nil {
                 copy(nil)
                 return true
@@ -85,17 +79,19 @@ struct TerminalHistoryTable: NSViewRepresentable {
     }
 
     enum Metrics {
-        static let font = NSFont.systemFont(ofSize: 12)
+        static let inset: CGFloat = 8
         static let previewHeight: CGFloat = 72
-        static func textHeight(_ text: String, width: CGFloat) -> CGFloat {
-            // Measure with the very same AppKit cell used to display the preview.
-            let label = NSTextField(wrappingLabelWithString: text)
-            label.font = font
+        static func font(for kind: InspectorHistoryItemKind) -> NSFont {
+            kind == .command ? .monospacedSystemFont(ofSize: 12, weight: .regular) : .systemFont(ofSize: 12)
+        }
+        static func textHeight(_ item: InspectorHistoryItem, width: CGFloat) -> CGFloat {
+            let label = NSTextField(wrappingLabelWithString: item.preview)
+            label.font = font(for: item.kind)
             label.lineBreakMode = .byWordWrapping
             label.maximumNumberOfLines = 4
             return min(previewHeight, ceil(label.cell?.cellSize(forBounds: NSRect(
                 x: 0, y: 0, width: max(20, width), height: 10000
-            )).height ?? font.boundingRectForFont.height))
+            )).height ?? 15))
         }
     }
 
@@ -104,50 +100,81 @@ struct TerminalHistoryTable: NSViewRepresentable {
         var jump: ((InspectorHistoryItem) -> Void)?
         weak var table: NSTableView?
         private var width: CGFloat = 300
+        private var heights: [String: CGFloat] = [:]
+        private var strings = InfoStrings()
         private let formatter: DateFormatter = {
             let value = DateFormatter()
             value.dateFormat = "yyyy-MM-dd HH:mm:ss"
             return value
         }()
+
+        func update(items next: [InspectorHistoryItem], strings nextStrings: InfoStrings) {
+            guard items != next || strings != nextStrings, let table else { return }
+            let selected = items.indices.contains(table.selectedRow) ? items[table.selectedRow].id : nil
+            let origin = table.enclosingScrollView?.contentView.bounds.origin ?? .zero
+            let topRow = table.row(at: NSPoint(x: 0, y: origin.y))
+            let topID = items.indices.contains(topRow) ? items[topRow].id : nil
+            let delta = topID == nil ? 0 : origin.y - table.rect(ofRow: topRow).minY
+            items = next
+            strings = nextStrings
+            heights.removeAll(keepingCapacity: true)
+            table.reloadData()
+            // Never silently select a different occurrence at the same row index.
+            table.deselectAll(nil)
+            if let selected, let index = items.firstIndex(where: { $0.id == selected }) {
+                table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+            }
+            // At the top, follow newly prepended records; otherwise keep the
+            // user's reading position rather than jumping when prompts arrive.
+            if origin.y > 1, let topID, let index = items.firstIndex(where: { $0.id == topID }),
+               let scroll = table.enclosingScrollView {
+                scroll.contentView.scroll(to: NSPoint(x: 0, y: table.rect(ofRow: index).minY + delta))
+                scroll.reflectScrolledClipView(scroll.contentView)
+            }
+        }
+
         func updateWidth(_ value: CGFloat) {
             guard value > 0, abs(width - value) > 0.5 else { return }
             width = value
+            heights.removeAll(keepingCapacity: true)
             table?.tableColumns.first?.width = value
             table?.noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: items.indices))
-            table?.reloadData()
         }
-        static func canJump(_ item: InspectorHistoryItem) -> Bool {
-            item.kind == .command && item.id.hasPrefix("command:")
-        }
+        static func canJump(_ item: InspectorHistoryItem) -> Bool { item.location.isAvailable }
         func numberOfRows(in tableView: NSTableView) -> Int { items.count }
         func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-            let height = Metrics.textHeight(items[row].text, width: width - 8)
-            return min(height, Metrics.previewHeight) + 22
+            let item = items[row]
+            if let height = heights[item.id] { return height }
+            let height = Metrics.textHeight(item, width: width - 2 * Metrics.inset) + 26
+            heights[item.id] = height
+            return height
         }
         @objc func activate() {
-            guard let table, items.indices.contains(table.clickedRow) else { return }
-            guard Self.canJump(items[table.clickedRow]) else { return }
+            guard let table, items.indices.contains(table.clickedRow),
+                  Self.canJump(items[table.clickedRow]) else { return }
             jump?(items[table.clickedRow])
         }
         @objc func jumpButton(_ sender: NSButton) {
-            guard items.indices.contains(sender.tag) else { return }
-            guard Self.canJump(items[sender.tag]) else { return }
+            guard items.indices.contains(sender.tag), Self.canJump(items[sender.tag]) else { return }
             jump?(items[sender.tag])
         }
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
             let item = items[row]
-            let cell = HistoryCell()
-            cell.wantsLayer = true
-            cell.layer?.masksToBounds = true
-            cell.text.stringValue = item.text
-            cell.text.maximumNumberOfLines = 4
-            cell.date.stringValue = item.timestamp.map(formatter.string(from:)) ?? ""
+            let identifier = NSUserInterfaceItemIdentifier("history-cell")
+            let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? HistoryCell ?? HistoryCell()
+            cell.identifier = identifier
+            cell.text.stringValue = item.preview
+            cell.text.font = Metrics.font(for: item.kind)
+            cell.date.stringValue = item.timestamp.map(formatter.string(from:)) ?? strings.unknownHistoryDate
             cell.jump.isEnabled = Self.canJump(item)
-            cell.jump.setAccessibilityLabel(Self.canJump(item) ? "跳转到输入位置" : "暂无终端位置锚点")
-            cell.jump.toolTip = Self.canJump(item) ? "Jump / 跳转" : "No terminal anchor / 无终端位置锚点"
+            let help = Self.canJump(item) ? strings.clickToJump : strings.noTerminalAnchor
+            cell.jump.setAccessibilityLabel(help)
+            cell.jump.toolTip = help
+            cell.toolTip = Self.canJump(item) ? strings.historyRowHelp : strings.noTerminalAnchor
             cell.jump.target = self
             cell.jump.action = #selector(jumpButton(_:))
             cell.jump.tag = row
+            cell.updateActionVisibility()
             return cell
         }
     }
@@ -155,32 +182,54 @@ struct TerminalHistoryTable: NSViewRepresentable {
     final class HistoryCell: NSTableCellView {
         let text = NSTextField(wrappingLabelWithString: "")
         let date = NSTextField(labelWithString: "")
-        let jump = NSButton(title: "↗", target: nil, action: nil)
+        let jump = NSButton(title: "", target: nil, action: nil)
+        private var hovered = false
+        private var tracking: NSTrackingArea?
+        override var isFlipped: Bool { true }
+        override var backgroundStyle: NSView.BackgroundStyle {
+            didSet { updateActionVisibility() }
+        }
         override init(frame: NSRect) {
             super.init(frame: frame)
-            text.font = Metrics.font
+            wantsLayer = true
+            layer?.masksToBounds = true
+            text.font = Metrics.font(for: .agentPrompt)
             text.lineBreakMode = .byWordWrapping
-            date.font = .systemFont(ofSize: 10)
+            text.maximumNumberOfLines = 4
+            date.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
             date.textColor = .secondaryLabelColor
             date.lineBreakMode = .byTruncatingTail
-            jump.image = NSImage(systemSymbolName: "arrow.up.right.square", accessibilityDescription: "跳转")
+            jump.image = NSImage(systemSymbolName: "arrow.up.right", accessibilityDescription: nil)
             jump.imagePosition = .imageOnly
             jump.isBordered = false
-            jump.toolTip = "Jump / 跳转"
             for view in [text, date, jump] { addSubview(view) }
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            if let tracking { removeTrackingArea(tracking) }
+            let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                                      owner: self, userInfo: nil)
+            addTrackingArea(area)
+            tracking = area
+        }
+        override func mouseEntered(with event: NSEvent) { hovered = true; updateActionVisibility() }
+        override func mouseExited(with event: NSEvent) { hovered = false; updateActionVisibility() }
+        func updateActionVisibility() {
+            jump.isHidden = !jump.isEnabled || (!hovered && backgroundStyle != .emphasized)
+        }
         override func draw(_ dirtyRect: NSRect) {
             super.draw(dirtyRect)
             NSColor.separatorColor.withAlphaComponent(0.25).setFill()
-            NSRect(x: 4, y: 0, width: max(0, bounds.width - 8), height: 0.5).fill()
+            NSRect(x: Metrics.inset, y: bounds.height - 0.5,
+                   width: max(0, bounds.width - 2 * Metrics.inset), height: 0.5).fill()
         }
         override func layout() {
             super.layout()
-            // Explicit bounded frames prevent a long label from painting across rows.
-            text.frame = NSRect(x: 4, y: 20, width: max(20, bounds.width - 8), height: max(0, bounds.height - 22))
-            date.frame = NSRect(x: 4, y: 2, width: max(20, bounds.width - 40), height: 16)
-            jump.frame = NSRect(x: bounds.width - 30, y: 0, width: 24, height: 24)
+            date.frame = NSRect(x: Metrics.inset, y: 4, width: max(20, bounds.width - 44), height: 14)
+            jump.frame = NSRect(x: bounds.width - 30, y: 0, width: 24, height: 20)
+            text.frame = NSRect(x: Metrics.inset, y: 22,
+                                width: max(20, bounds.width - 2 * Metrics.inset), height: max(0, bounds.height - 26))
         }
     }
 }

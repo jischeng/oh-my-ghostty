@@ -1735,16 +1735,14 @@ struct InspectorInfoView: View {
                 Rectangle().fill(dividerColor).frame(height: TerminalShellStyle.dividerWidth)
             }
 
-            if !info.isAgentSession {
-                InspectorTerminalHistoryListView(
-                    items: info.historyItems,
-                    isAgent: false,
-                    agentName: nil,
-                    state: info.historyState,
-                    perform: perform
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            }
+            InspectorTerminalHistoryListView(
+                items: info.historyItems.filter { $0.kind == .command },
+                isAgent: false,
+                agentName: nil,
+                state: .ready,
+                perform: perform
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }

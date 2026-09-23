@@ -99,13 +99,24 @@ struct TerminalHistoryTableTests {
         }
     }
 
-    @Test func agentPaneHidesInfoHistoryEvenIfTranscriptRowsAreCached() async throws {
+    @Test func agentPaneShowsOnlyShellExecutionsAndKeepsJumpActions() async throws {
+        let surfaceID = UUID()
+        let epoch = UUID()
+        let commands = (1...2).map { execution in
+            InspectorHistoryItem(
+                id: "command-\(execution)", kind: .command, text: "ll",
+                location: .command(surfaceID: surfaceID, executionID: UInt64(execution), epoch: epoch)
+            )
+        }
         let info = InspectorInfoContent(
             portForwards: .init(hostAlias: "dev-server", items: []),
-            historyItems: [.init(kind: .agentPrompt, text: "prompt")],
+            historyItems: [commands[0], .init(kind: .agentPrompt, text: "ll"), commands[1]],
             isAgentSession: true, agentName: "Pi"
         )
-        let host = NSHostingView(rootView: InspectorInfoView(info: info, dividerColor: .gray, perform: { _ in }))
+        var jumped: [String] = []
+        let host = NSHostingView(rootView: InspectorInfoView(info: info, dividerColor: .gray) { action in
+            if case .jumpToHistoryItem(let item) = action { jumped.append(item.id) }
+        })
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 400),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
@@ -115,7 +126,16 @@ struct TerminalHistoryTableTests {
         host.layoutSubtreeIfNeeded()
         try await Task.sleep(for: .milliseconds(100))
         host.layoutSubtreeIfNeeded()
-        #expect(findScroll(in: host) == nil)
+        let scroll = try #require(findScroll(in: host))
+        let table = try #require(scroll.documentView as? TerminalHistoryTable.HistoryTable)
+        #expect(table.numberOfRows == 2)
+        table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+        #expect(table.copyText?() == "ll")
+        let cell = try #require(table.view(atColumn: 0, row: 1, makeIfNecessary: true)
+            as? TerminalHistoryTable.HistoryCell)
+        #expect(cell.jump.isEnabled)
+        cell.jump.performClick(nil)
+        #expect(jumped == [commands[1].id])
     }
 
     private func findScroll(in view: NSView) -> NSScrollView? {

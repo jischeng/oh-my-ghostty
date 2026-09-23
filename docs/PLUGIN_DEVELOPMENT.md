@@ -885,10 +885,12 @@ in the Right Inspector. Info is an extensible host-rendered surface with
 optional machine-status and typed machine/session sections (both currently
 hidden), a Shell-only command timeline with exact jump-to-position actions, and
 the SSH port-forwarding section. The forwarding header uses the antenna/radio-tower
-symbol and reports its active port count. For a pane with an Agent descriptor
-or activity (including `done`/`error` status while still running), Info hides
-the history section altogether; any SSH port-forwarding controls remain visible. It does not poll the Agent transcript in Info or present
-unanchored prompts as navigable entries. The separate Agent History Inspector,
+symbol and reports its active port count. A pane with an Agent descriptor or
+activity (including `done`/`error`) continues to show that Surface's Shell
+command history in Info; only Agent Prompt rows are suppressed. Its Shell jump
+anchors remain available, and SSH port-forwarding controls remain visible.
+Info does not poll the Agent transcript or present unanchored prompts as
+navigable entries. The separate Agent History Inspector,
 Agent status, and resume actions are unaffected. Shell history timestamps
 include date and time. Single click selects an entry; Cmd+C copies its full command. The native table sizes its
 scrolling document to the inspector width and computes row heights from wrapped

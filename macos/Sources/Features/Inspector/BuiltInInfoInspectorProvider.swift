@@ -616,7 +616,7 @@ final class BuiltInInfoInspectorProvider {
                Self.hidesAgentHistory(descriptorPresent: descriptor != nil,
                                       activity: controller.agentActivity(for: view)) {
                 agentHistory.remove(surfaceID)
-                return .init(isAgent: true)
+                return .init(items: historyService.commands(for: surfaceID), isAgent: true)
             }
             guard let descriptor else { continue }
             let session = controller.paneSessionContext(for: view) ?? context.session

@@ -25,7 +25,8 @@ struct ShellScrollbackRestoreStoreTests {
         ))
         let content = try String(contentsOf: saved, encoding: .utf8)
         #expect(content.contains(sample))
-        #expect(content.contains("─  Session ended · "))
+        #expect(content.contains("──────  Session ended · "))
+        #expect(content.contains("  ──────\u{001B}[0m"))
         #expect(!content.contains("---"))
         #expect(ShellScrollbackRestoreStore.replayFile(for: UUID(), baseURL: root, restoreEnabled: true) == nil)
         #expect(ShellScrollbackRestoreStore.replayFile(for: surfaceID, baseURL: root,
@@ -40,6 +41,48 @@ struct ShellScrollbackRestoreStoreTests {
         #expect(ShellScrollbackRestoreStore.savedCommands(for: surfaceID, baseURL: root) == [
             .init(text: "ll", timestamp: oldDate),
         ])
+    }
+
+    @Test func sshReplayKeepsLocalAndRemoteMetadataAndConsumesSnapshotBeforeTransport() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-ssh-history-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let id = UUID()
+        let now = Date()
+        let commands: [InspectorHistoryItem] = [
+            .init(kind: .command, text: "remote ll", timestamp: now,
+                  location: .unavailable(.expired), sourceLabel: "SSH · cloud"),
+            .init(kind: .command, text: "local pwd", timestamp: now.addingTimeInterval(-60),
+                  location: .unavailable(.expired), sourceLabel: "Local"),
+        ]
+        #expect(ShellScrollbackRestoreStore.save(surfaceID: id, baseURL: root, commands: commands,
+                                                 allowsAnchorReconciliation: false) { file in
+            (try? Data("old pane output\r\n".utf8).write(to: file)) != nil &&
+            (try? FileManager.default.setAttributes([.posixPermissions: 0o600],
+                ofItemAtPath: file.path)) != nil
+        })
+        let snapshot = try #require(ShellScrollbackRestoreStore.replayFile(
+            for: id, baseURL: root, restoreEnabled: true
+        ))
+        let script = ShellScrollbackRestoreStore.sshReplayCommand("printf 'remote ready\\n'", snapshot: snapshot)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", script]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        let text = try #require(String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8))
+        #expect(process.terminationStatus == 0)
+        #expect(text.range(of: "old pane output")!.lowerBound < text.range(of: "remote ready")!.lowerBound)
+        #expect(!FileManager.default.fileExists(atPath: snapshot.path))
+        #expect(ShellScrollbackRestoreStore.savedCommands(for: id, baseURL: root) == [
+            .init(text: "remote ll", timestamp: now, sourceLabel: "SSH · cloud"),
+            .init(text: "local pwd", timestamp: now.addingTimeInterval(-60), sourceLabel: "Local"),
+        ])
+        #expect(!ShellScrollbackRestoreStore.allowsAnchorReconciliation(for: id))
+        #expect(ShellScrollbackRestoreStore.sshReplayCommand("printf ok", snapshot: nil) == "printf ok")
     }
 
     @Test func failedCaptureInvalidatesPreviousSnapshotAndRejectsUnsafeFiles() throws {
@@ -98,7 +141,8 @@ struct ShellScrollbackRestoreStoreTests {
         let text = try #require(String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8))
         #expect(process.terminationStatus == 0)
         #expect(text.contains("old shell output"))
-        #expect(text.contains("─  Session restored · "))
+        #expect(text.contains("──────  Session restored · "))
+        #expect(text.contains("  ──────\u{001B}[0m"))
         #expect(!text.contains("---"))
         #expect(text.contains("new shell ready"))
         #expect(!FileManager.default.fileExists(atPath: file.path))

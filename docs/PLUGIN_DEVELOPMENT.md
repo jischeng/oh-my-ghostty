@@ -920,9 +920,16 @@ For SSH panes the port-forwarding section stays above history. Empty ports occup
 of 180 points, with their own scroll area. The add-port control remains in the
 header, disabled with an identity explanation when the SSH server is unresolved.
 History belongs to the current Surface and connection epoch, never global shell
-history. On a host-observed connection-ID change (including return to local),
-`ghostty_surface_omg_clear_commands` drops navigation records on both screens,
-not terminal contents. IDs are not reused; stale epoch references cannot jump.
+history. The local epoch is initialized when each Surface registers, even if
+Info has never opened; moving that Surface between controllers does not reset
+its existing epoch. On a host-observed connection-ID change (including return to local),
+Info archives the previous epoch as read-only entries with its `Local` or
+`SSH · alias` origin (plus a short authenticated server-ID suffix once ready)
+before `ghostty_surface_omg_clear_commands` drops that
+epoch's navigation records on both screens (not terminal contents). The list
+interleaves these and the live epoch by timestamp; archived entries never
+inherit another host's active anchor. IDs are not reused; stale epoch
+references cannot jump.
 Connecting-to-ready or CWD changes within one connection do not clear records.
 The transition is conservative: records captured before the host identifies a
 new connection may be discarded rather than attributed to the wrong host.
@@ -966,9 +973,23 @@ not implement OMG history may ignore the payload-free action.
 For a normal app quit with `sessions.restoreOnLaunch` enabled, OMG saves a
 bounded VT rendering of each restorable, local, non-Agent/non-SSH Shell Surface
 in its channel-specific Application Support `shell-scrollback` directory.
+Plain ready SSH panes with an exact `SSHResumeDescriptor` (without an active
+Agent) are marked restorable even if launched with a custom `+ssh` command,
+and capture their current Surface's VT output plus both archived local
+and remote command records. Connecting or non-replayable remote panes are
+skipped rather than reopening a local Shell with misleading remote output. On app restore,
+the validated local replay wrapper consumes the snapshot **before** restarting
+the SSH transport; the snapshot path is never sent to the remote process.
+SSH snapshots explicitly disable old-command anchor reconciliation: old
+local/remote records remain read-only, while new remote commands obtain new
+per-connection anchors. A prior run that discarded the local epoch cannot
+reconstruct those already-lost records retroactively.
 The host-only `ghostty_surface_omg_export_scrollback_vt` API writes an exclusive
 mode-0600 file without occupying the clipboard; its formatter avoids baking
-old default colors into a new theme. Export is capped at 2 MiB per pane and
+old default colors into a new theme. Snapshot-only formatting drops styled,
+textless cells at the end of non-wrapped rows (including Starship/powerline
+redraw fill) so replay does not paint stray colored rectangles; live terminal
+rendering and valid command anchor coordinates are unchanged. Export is capped at 2 MiB per pane and
 fails closed when it cannot represent all retained valid command anchors.
 The directory is mode 0700; snapshots older than seven days, symlinks,
 non-owner files and oversized files are not replayed. A failed fresh capture
@@ -977,14 +998,14 @@ output after the next restart. The snapshot contains
 old terminal output, which may include secrets, and is not a recording of a
 live PTY. The newly restored local Shell is a new process. Its one-shot shell
 integration replays the saved VT file before the first prompt, removes that
-file, and prints a small dim `─  Session ended/restored · date` timeline
-boundary rather than ASCII dash banners. zsh, bash and fish have
+file, and prints a dim `──────  Session ended/restored · date  ──────`
+timeline boundary rather than ASCII dash banners. zsh, bash and fish have
 small adapters to a fork-owned restore script. SSH/Agent session restoration
 retains its separate existing behavior. Alternate-screen content is not saved.
 A crash before the normal termination capture has no new scrollback snapshot.
 
 The export uses tracked start and end pins to insert OSC 133 B/C around each
-surviving Shell command as it reconstructs display output. Its C marker
+surviving current-epoch Shell command as it reconstructs display output. Its C marker
 also carries the already-recorded command in `cmdline_url`, so replay cannot
 turn an early Fish B/Starship redraw into a bogus combined command. On replay these
 create *new*, Surface-owned command IDs and exact tracked anchors; Info matches

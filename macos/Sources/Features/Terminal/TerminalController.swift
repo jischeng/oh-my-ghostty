@@ -363,7 +363,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         guard descriptor.isValid, surfaceTree.contains(surface) else { return }
         agentResumeDescriptors[surface.id] = descriptor
         surface.agentResumeDescriptor = descriptor
-        enableRestorationForAgentSession()
+        enableRestorationForResumableSession()
         invalidateRestorableState()
     }
 
@@ -994,6 +994,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 workingDirectory: surface.pwd,
                 terminalTitle: surface.title
             )
+            // Establish the local epoch before any SSH transition, even if
+            // Info has never been opened and no title/PWD event was emitted.
+            if let context = paneSessionContexts[surface.id] {
+                TerminalHistoryService.shared.initializeSession(context, in: surface)
+            }
             if let descriptor = surface.agentResumeDescriptor,
                descriptor.isValid {
                 agentResumeDescriptors[surface.id] = descriptor
@@ -1543,6 +1548,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
         guard surface.sshResumeDescriptor != next else { return }
         surface.sshResumeDescriptor = next
+        if next != nil { enableRestorationForResumableSession() }
         invalidateRestorableState()
     }
 
@@ -1621,11 +1627,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 launchedAt: detected.launchedAt
             )
         }
-        enableRestorationForAgentSession()
+        enableRestorationForResumableSession()
         invalidateRestorableState()
     }
 
-    private func enableRestorationForAgentSession() {
+    private func enableRestorationForResumableSession() {
         guard !restorable else { return }
         restorable = true
         guard let window else { return }

@@ -371,6 +371,33 @@ struct BuiltInInfoInspectorProviderTests {
         }
     }
 
+    @Test func connectingSSHStillShowsPaneHistoryWhilePortActionWaits() throws {
+        let pane = UUID()
+        let registry = InspectorRegistry()
+        let service = TerminalHistoryService { $0 == pane ? [
+            .init(id: "saved-local", kind: .command, text: "pwd",
+                  location: .unavailable(.expired), sourceLabel: "Local")
+        ] : [] }
+        let provider = BuiltInInfoInspectorProvider(registry: registry, historyService: service)
+        try provider.setEnabled(true)
+        var session = PaneSessionContext(workingDirectory: "/tmp", terminalTitle: "shell")
+        session.apply(.init(action: .start, id: "omg-ssh-42",
+                            metadata: "type=remote;targethost=cloud"),
+                      currentWorkingDirectory: "/tmp", currentTerminalTitle: "shell")
+        let context = InspectorPaneContext(tabID: UUID(), surfaceID: pane, title: "cloud",
+                                           workingDirectory: nil, workspace: nil, session: session)
+        registry.presentationDidChange(to: BuiltInInfoInspectorProvider.paneID, context: context)
+        guard case .info(let info) = registry.content(for: BuiltInInfoInspectorProvider.paneID,
+                                                       context: context) else {
+            Issue.record("Expected Info content during SSH connection")
+            return
+        }
+        #expect(info.historyItems.map(\.text) == ["pwd"])
+        #expect(info.portForwards.hostAlias == "cloud")
+        #expect(!info.portForwards.canCreate)
+        provider.shutdown()
+    }
+
     @Test func publishesHistoryItemsAndHandlesJumpAction() async throws {
         let registry = InspectorRegistry()
         let surfaceID = UUID()

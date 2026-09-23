@@ -1981,9 +1981,13 @@ extension Ghostty {
                 SSHResumeDescriptor.self,
                 forKey: .sshResumeDescriptor
             )
-            if resume == nil, sshResume == nil, let uuid,
-               let file = ShellScrollbackRestoreStore.replayFile(for: uuid) {
-                config.environmentVariables[ShellScrollbackRestoreStore.environmentKey] = file.path
+            let shellSnapshot: URL? = if resume == nil, let uuid {
+                ShellScrollbackRestoreStore.replayFile(for: uuid)
+            } else {
+                nil
+            }
+            if sshResume == nil, let shellSnapshot {
+                config.environmentVariables[ShellScrollbackRestoreStore.environmentKey] = shellSnapshot.path
             }
             if let executablePath = Bundle.main.executablePath {
                 if let resume, resume.isValid,
@@ -1997,7 +2001,10 @@ extension Ghostty {
                 } else if let sshResume,
                    let command = sshResume.command(executablePath: executablePath) {
                     config.workingDirectory = sshResume.localWorkingDirectory
-                    config.command = TerminalController.replaySurvivalCommand(command)
+                    let replay = ShellScrollbackRestoreStore.sshReplayCommand(
+                        command, snapshot: shellSnapshot
+                    )
+                    config.command = TerminalController.replaySurvivalCommand(replay)
                 }
             }
             let savedTitle = try container.decodeIfPresent(String.self, forKey: .title)

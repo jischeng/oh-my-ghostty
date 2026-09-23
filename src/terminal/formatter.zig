@@ -96,6 +96,11 @@ pub const Options = struct {
     /// is currently only space characters (0x20).
     trim: bool = true,
 
+    /// OMG VT snapshot export only: omit styled blank cells after the last
+    /// visible character on a non-wrapped row. Full-screen prompt redraws can
+    /// leave background-only cells that would replay as colored rectangles.
+    trim_styled_row_tail: bool = false,
+
     /// Replace matching Unicode codepoints with some other values.
     /// This will use the last matching range found in the list.
     codepoint_map: ?std.MultiArrayList(CodepointMap) = .{},
@@ -1209,7 +1214,16 @@ pub const PageFormatter = struct {
                     };
                 } else 0;
 
-                const subset = cells[row_start_x..row_end_x];
+                var effective_end = row_end_x;
+                if (self.opts.trim_styled_row_tail and !row.wrap and !self.rectangle) {
+                    while (effective_end > row_start_x) {
+                        const cell = cells[effective_end - 1];
+                        const cp = cell.codepoint();
+                        if (cp != 0 and cp != ' ') break;
+                        effective_end -= 1;
+                    }
+                }
+                const subset = cells[row_start_x..effective_end];
                 break :cells_subset .{ subset, row_start_x };
             };
 

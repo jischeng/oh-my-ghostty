@@ -11,17 +11,25 @@ enum ShellScrollbackRestoreStore {
     static let maximumBytes = 2 * 1_024 * 1_024
     private static let lifetime: TimeInterval = 7 * 24 * 60 * 60
     private static var restoredSurfaceIDs = Set<UUID>()
-    private static var savedCommandCache: [UUID: [SavedCommand]] = [:]
+    private static var savedCommandCache: [UUID: CommandArchive] = [:]
 
     struct SavedCommand: Codable, Equatable {
         let text: String
         let timestamp: Date?
+        let sourceLabel: String?
+
+        init(text: String, timestamp: Date?, sourceLabel: String? = nil) {
+            self.text = text
+            self.timestamp = timestamp
+            self.sourceLabel = sourceLabel
+        }
     }
 
     private struct CommandArchive: Codable {
         let version: Int
         let surfaceID: UUID
         let commands: [SavedCommand]
+        let allowsAnchorReconciliation: Bool?
     }
     private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "oh-my-ghostty",
                                        category: "shell-scrollback-restore")
@@ -41,13 +49,19 @@ enum ShellScrollbackRestoreStore {
 
         for controller in controllers where controller.window?.isRestorable == true {
             for view in controller.surfaceTree {
-                guard view.agentResumeDescriptor == nil, view.sshResumeDescriptor == nil,
+                guard view.agentResumeDescriptor == nil,
                       controller.agentActivity(for: view) == nil,
                       let context = controller.paneSessionContext(for: view),
-                      case .local = context.state,
                       let surface = view.surface else { continue }
+                // A plain SSH transport can be restored only when it has an
+                // exact replay descriptor. Otherwise the pane would reopen as
+                // a local Shell while displaying remote output as live state.
+                if case .sshConnecting = context.state { continue }
+                if case .sshReady = context.state, view.sshResumeDescriptor == nil { continue }
                 let commands = TerminalHistoryService.shared.commands(for: view.id)
-                if !save(surfaceID: view.id, baseURL: baseURL, commands: commands, export: { temporary in
+                let local: Bool = if case .local = context.state { true } else { false }
+                if !save(surfaceID: view.id, baseURL: baseURL, commands: commands,
+                         allowsAnchorReconciliation: local, export: { temporary in
                     temporary.path.withCString {
                         ghostty_surface_omg_export_scrollback_vt(surface, $0, maximumBytes - 256)
                     }
@@ -63,6 +77,7 @@ enum ShellScrollbackRestoreStore {
         surfaceID: UUID,
         baseURL: URL,
         commands: [InspectorHistoryItem] = [],
+        allowsAnchorReconciliation: Bool = true,
         export: (URL) -> Bool
     ) -> Bool {
         let root = directory(baseURL: baseURL)
@@ -85,9 +100,9 @@ enum ShellScrollbackRestoreStore {
             invalidateOldCapture()
             return false
         }
-        let archive = CommandArchive(version: 1, surfaceID: surfaceID, commands: commands.map {
-            .init(text: $0.text, timestamp: $0.timestamp)
-        })
+        let archive = CommandArchive(version: 2, surfaceID: surfaceID, commands: commands.prefix(100).map {
+            .init(text: $0.text, timestamp: $0.timestamp, sourceLabel: $0.sourceLabel)
+        }, allowsAnchorReconciliation: allowsAnchorReconciliation)
         guard let data = try? JSONEncoder().encode(archive),
               data.count <= maximumBytes,
               FileManager.default.createFile(atPath: metadata.path, contents: data,
@@ -104,6 +119,15 @@ enum ShellScrollbackRestoreStore {
             return false
         }
         return true
+    }
+
+    static func sshReplayCommand(_ command: String, snapshot: URL?) -> String {
+        guard let snapshot else { return command }
+        let path = Ghostty.Shell.quote(snapshot.path)
+        // Replay through the owning local PTY before starting the new SSH
+        // transport. Never pass this path to the remote process/environment.
+        return "if [ -f \(path) ]; then /bin/cat -- \(path); " +
+            "/bin/rm -f -- \(path); fi; \(command)"
     }
 
     /// A restored Surface UUID is the only key. Do not accept a caller-supplied
@@ -131,7 +155,7 @@ enum ShellScrollbackRestoreStore {
         baseURL: URL = OMGApplicationEnvironment.applicationSupportURL()
     ) -> [SavedCommand]? {
         guard restoredSurfaceIDs.contains(surfaceID) else { return nil }
-        if let cached = savedCommandCache[surfaceID] { return cached }
+        if let cached = savedCommandCache[surfaceID] { return cached.commands }
         let root = directory(baseURL: baseURL)
         // The shell removes the VT file only after replay. A missing shell
         // integration must never make later, coincidentally equal commands
@@ -141,11 +165,15 @@ enum ShellScrollbackRestoreStore {
         let file = root.appendingPathComponent("\(surfaceID.uuidString).json")
         guard validFile(file), let data = try? Data(contentsOf: file),
               let archive = try? JSONDecoder().decode(CommandArchive.self, from: data),
-              archive.version == 1, archive.surfaceID == surfaceID,
+              (1...2).contains(archive.version), archive.surfaceID == surfaceID,
               archive.commands.count <= 100,
               archive.commands.allSatisfy({ $0.text.utf8.count <= 16_384 }) else { return nil }
-        savedCommandCache[surfaceID] = archive.commands
+        savedCommandCache[surfaceID] = archive
         return archive.commands
+    }
+
+    static func allowsAnchorReconciliation(for surfaceID: UUID) -> Bool {
+        savedCommandCache[surfaceID]?.allowsAnchorReconciliation ?? true
     }
 
     private static func appendQuitMarker(to file: URL) -> Bool {
@@ -155,7 +183,7 @@ enum ShellScrollbackRestoreStore {
             try handle.seekToEnd()
             let formatter = DateFormatter()
             formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
-            let marker = "\u{001B}]8;;\u{001B}\\\u{001B}[0;2m\r\n  ─  Session ended · \(formatter.string(from: Date()))\u{001B}[0m\r\n"
+            let marker = "\u{001B}]8;;\u{001B}\\\u{001B}[0;2m\r\n  ──────  Session ended · \(formatter.string(from: Date()))  ──────\u{001B}[0m\r\n"
             try handle.write(contentsOf: Data(marker.utf8))
             return true
         } catch {

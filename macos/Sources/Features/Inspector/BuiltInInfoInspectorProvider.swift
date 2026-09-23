@@ -635,16 +635,25 @@ final class BuiltInInfoInspectorProvider {
     }
 
     private func publish(_ context: InspectorPaneContext) {
-        let strings = InfoStrings.current
         let historyInfo = currentHistory(for: context)
+        let session = context.surfaceID.flatMap { surfaceID in
+            TerminalController.all.lazy.compactMap { controller -> PaneSessionContext? in
+                guard let view = controller.surfaceTree.first(where: { $0.id == surfaceID }) else { return nil }
+                return controller.paneSessionContext(for: view)
+            }.first
+        } ?? context.session
         let content: InspectorPaneContent
 
-        switch context.session.state {
+        switch session.state {
         case .local:
             content = .info(.init(historyItems: historyInfo.items, isAgentSession: historyInfo.isAgent,
                                  agentName: historyInfo.agentName, historyState: historyInfo.state))
         case .sshConnecting(let ssh):
-            content = .empty(title: strings.infoTitle, message: strings.waitingForHost(ssh.alias))
+            content = .info(.init(
+                portForwards: .init(hostAlias: ssh.alias, items: [], canCreate: false),
+                historyItems: historyInfo.items, isAgentSession: historyInfo.isAgent,
+                agentName: historyInfo.agentName, historyState: historyInfo.state
+            ))
         case .sshReady(let ssh, _):
             let forwards = ssh.serverID.map { self.content(for: $0, alias: ssh.alias) }
                 ?? .init(hostAlias: ssh.alias, items: [], canCreate: false)

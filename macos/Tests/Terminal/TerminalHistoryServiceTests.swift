@@ -28,6 +28,42 @@ struct TerminalHistoryServiceTests {
         #expect(service.validate(anchor, surfaceID: pane) == .wrongSession)
     }
 
+    @Test func transitionsArchivePreviousLocalAndSSHExecutionsWithoutSharingAnchors() {
+        let service = TerminalHistoryService()
+        let id = UUID()
+        let date = Date()
+        let localEpoch = service.synchronizeSession(surfaceID: id, connectionID: nil) {}
+        let local = InspectorHistoryItem(id: "local-ll", kind: .command, text: "ll", timestamp: date,
+            location: .command(surfaceID: id, executionID: 1, epoch: localEpoch), sourceLabel: "Local")
+        var clearCount = 0
+        let remoteEpoch = service.synchronizeSession(surfaceID: id, connectionID: "ssh-A",
+            sourceLabel: "SSH · cloud", captured: { [local] }, clear: { clearCount += 1 })
+        #expect(clearCount == 1)
+        #expect(service.archivedCommands(for: id).map(\.text) == ["ll"])
+        #expect(service.archivedCommands(for: id)[0].location == .unavailable(.expired))
+        #expect(service.archivedCommands(for: id)[0].sourceLabel == "Local")
+        let remote = InspectorHistoryItem(id: "remote-ll", kind: .command, text: "ll", timestamp: date,
+            location: .command(surfaceID: id, executionID: 2, epoch: remoteEpoch),
+            sourceLabel: "SSH · cloud")
+        service.synchronizeSession(surfaceID: id, connectionID: "ssh-B",
+            sourceLabel: "SSH · other", captured: { [remote] }, clear: { clearCount += 1 })
+        #expect(clearCount == 2)
+        #expect(service.archivedCommands(for: id).map(\.sourceLabel) == ["Local", "SSH · cloud"])
+        #expect(service.archivedCommands(for: id).count == 2) // repeated ll survives
+        #expect(service.validate(remote.location, surfaceID: id) == .wrongSession)
+    }
+
+    @Test func readySSHHostIdentityUpdatesLabelWithoutStartingAnotherEpoch() {
+        let service = TerminalHistoryService()
+        let id = UUID()
+        let first = service.synchronizeSession(surfaceID: id, connectionID: "ssh-A",
+                                               sourceLabel: "SSH · cloud") {}
+        let next = service.synchronizeSession(surfaceID: id, connectionID: "ssh-A",
+                                              sourceLabel: "SSH · cloud · A1B2C3D4") {}
+        #expect(first == next)
+        #expect(service.archivedCommands(for: id).isEmpty)
+    }
+
     @Test func firstRemoteObservationDoesNotInheritUnknownHistory() {
         let service = TerminalHistoryService()
         var cleared = false
@@ -86,6 +122,62 @@ struct TerminalHistoryServiceTests {
         #expect(verified.count == 1)
         #expect(verified[0].location == matched.location)
         #expect(verified[0].timestamp == oldDate)
+    }
+
+    @Test func sshSnapshotNeverMatchesAnIdenticalLocalCommandAsTheOldRemoteExecution() {
+        let id = UUID()
+        let old = Date(timeIntervalSince1970: 1_000)
+        let remote = ShellScrollbackRestoreStore.SavedCommand(text: "ll", timestamp: old,
+                                                                sourceLabel: "SSH · cloud")
+        let local = ShellScrollbackRestoreStore.SavedCommand(text: "pwd", timestamp: old,
+                                                               sourceLabel: "Local")
+        let live = InspectorHistoryItem(id: "current", kind: .command, text: "ll", timestamp: Date(),
+            location: .command(surfaceID: id, executionID: 1, epoch: UUID()),
+            sourceLabel: "SSH · cloud")
+        let items = TerminalHistoryService.presentingHistory(
+            in: [live], from: [remote, local], surfaceID: id, allowReconciliation: false
+        )
+        #expect(items.count == 3)
+        #expect(items[0].location == live.location)
+        #expect(items[1].sourceLabel == "SSH · cloud")
+        #expect(items[1].location == .unavailable(.expired))
+        #expect(items[2].sourceLabel == "Local")
+        #expect(items[2].location == .unavailable(.expired))
+        let wrongHost = TerminalHistoryService.presentingHistory(
+            in: [live], from: [
+                .init(text: "ll", timestamp: old, sourceLabel: "SSH · other")
+            ], surfaceID: id
+        )
+        #expect(wrongHost.count == 2)
+        #expect(wrongHost[1].location == .unavailable(.expired))
+    }
+
+    @Test func localToSSHArchivesOnlyNewCommandsAfterAnExactReplaySuffix() {
+        let id = UUID()
+        let epoch = UUID()
+        let date = Date(timeIntervalSince1970: 1_000)
+        let saved: [ShellScrollbackRestoreStore.SavedCommand] = [
+            .init(text: "ll", timestamp: date, sourceLabel: "Local"),
+            .init(text: "ll", timestamp: date, sourceLabel: "Local"),
+        ]
+        let commands = ["pwd", "ll", "ll"].enumerated().map { index, text in
+            InspectorHistoryItem(id: "item-\(index)", kind: .command, text: text,
+                timestamp: date, location: .command(surfaceID: id, executionID: UInt64(index), epoch: epoch),
+                sourceLabel: "Local")
+        }
+        #expect(TerminalHistoryService.excludingRestoredSuffix(commands, saved: saved,
+                                                                  canReconcile: true).map(\.text) == ["pwd"])
+        #expect(TerminalHistoryService.excludingRestoredSuffix(commands, saved: saved,
+                                                                  canReconcile: false) == commands)
+        #expect(TerminalHistoryService.excludingRestoredSuffix(commands, saved: [
+            .init(text: "ll", timestamp: date, sourceLabel: "SSH · other"), saved[1]
+        ], canReconcile: true) == commands)
+        let archived = commands.map { InspectorHistoryItem(id: $0.id, kind: .command,
+            text: $0.text, timestamp: $0.timestamp, location: .unavailable(.expired),
+            sourceLabel: $0.sourceLabel) }
+        let mixed = TerminalHistoryService.presentingHistory(in: archived, from: saved,
+            surfaceID: id, allowReconciliation: false)
+        #expect(mixed.count == 5) // Identical text/time is not proof of the same occurrence.
     }
 
     @Test func previewNeverChangesCopyText() {

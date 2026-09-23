@@ -86,6 +86,29 @@ struct TerminalHistoryTableTests {
         #expect(!jumped)
     }
 
+    @Test func mixedHostRowsShowOriginWithoutEnablingArchivedJump() {
+        let coordinator = TerminalHistoryTable.Coordinator()
+        let table = TerminalHistoryTable.HistoryTable(frame: NSRect(x: 0, y: 0, width: 320, height: 180))
+        table.addTableColumn(NSTableColumn(identifier: .init("history")))
+        table.dataSource = coordinator
+        table.delegate = coordinator
+        coordinator.table = table
+        coordinator.update(items: [
+            .init(id: "remote", kind: .command, text: "ll", timestamp: Date(),
+                  location: .unavailable(.expired), sourceLabel: "SSH · cloud"),
+            .init(id: "local", kind: .command, text: "ll", timestamp: Date(),
+                  location: .unavailable(.expired), sourceLabel: "Local"),
+        ], strings: .init(language: .english))
+        let remote = coordinator.tableView(table, viewFor: table.tableColumns.first, row: 0)
+            as? TerminalHistoryTable.HistoryCell
+        let local = coordinator.tableView(table, viewFor: table.tableColumns.first, row: 1)
+            as? TerminalHistoryTable.HistoryCell
+        #expect(remote?.date.stringValue.contains("SSH · cloud") == true)
+        #expect(local?.date.stringValue.contains("Local") == true)
+        #expect(remote?.jump.isEnabled == false)
+        #expect(local?.jump.isEnabled == false)
+    }
+
     @Test func compactInfoHostsPortsAndShellHistoryTogether() async throws {
         let texts = [
             "看看这个模块的实现，重点检查多轮对话的定位和不同 pane 之间的隔离。",

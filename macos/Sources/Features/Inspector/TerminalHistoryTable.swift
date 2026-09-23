@@ -172,7 +172,10 @@ struct TerminalHistoryTable: NSViewRepresentable {
             let archived: Bool
             if case .unavailable(.expired) = item.location { archived = true } else { archived = false }
             let date = item.timestamp.map(formatter.string(from:)) ?? strings.unknownHistoryDate
-            cell.date.stringValue = archived ? "\(date)  ·  \(strings.archivedCommandLabel)" : date
+            let origin = item.sourceLabel.map { "  ·  \($0)" } ?? ""
+            cell.date.stringValue = "\(date)\(origin)" +
+                (archived ? "  ·  \(strings.archivedCommandLabel)" : "")
+            cell.date.toolTip = cell.date.stringValue
             cell.jump.isEnabled = Self.canJump(item)
             let help = archived ? strings.archivedCommandHelp
                 : (Self.canJump(item) ? strings.clickToJump : strings.noTerminalAnchor)

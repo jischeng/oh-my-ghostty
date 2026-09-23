@@ -22,6 +22,7 @@ pub fn capture(alloc: std.mem.Allocator, t: *const Terminal, max_bytes: usize) !
         .emit = .vt,
         .unwrap = true,
         .trim = false,
+        .trim_styled_row_tail = true,
         // Do not bake OSC 10/11 or the old palette into a restored theme.
     });
     formatter.content = .{ .selection = Selection.init(top, bottom, false) };
@@ -82,6 +83,29 @@ test "OMG scrollback VT export retains output without baking theme colors" {
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "second line") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\x1b]10;") == null);
     try std.testing.expect((try capture(alloc, &t, 1)) == null);
+}
+
+test "OMG scrollback VT export drops styled blank prompt tails but keeps command anchors" {
+    const alloc = std.testing.allocator;
+    var source = try Terminal.init(std.testing.io, alloc, .{ .cols = 30, .rows = 5 });
+    defer source.deinit(alloc);
+    var input = source.vtStream();
+    defer input.deinit();
+    input.nextSlice("\x1b]133;A\x07$ \x1b]133;B\x07ll\x1b]133;C\x07");
+    // Simulate a powerline prompt redraw leaving a colored region past ll.
+    input.nextSlice("\x1b[45m          \x1b[0m\r\n\x1b[45m      \x1b[0m");
+    const bytes = (try capture(alloc, &source, 64 * 1024)).?;
+    defer alloc.free(bytes);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "          ") == null);
+    var restored = try Terminal.init(std.testing.io, alloc, .{ .cols = 30, .rows = 5 });
+    defer restored.deinit(alloc);
+    var stream = restored.vtStream();
+    defer stream.deinit();
+    stream.nextSlice(bytes);
+    const entries = restored.screens.active.omg_command_history.entries.items;
+    try std.testing.expectEqual(@as(usize, 1), entries.len);
+    try std.testing.expectEqualStrings("ll", entries[0].text);
+    try std.testing.expect(entries[0].isValid());
 }
 
 test "OMG scrollback VT replay keeps repeated command occurrences distinct" {

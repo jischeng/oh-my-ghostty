@@ -221,6 +221,7 @@ struct InspectorHistoryItem: Identifiable, Equatable, Sendable {
     let duration: UInt64?
     let promptIndex: Int?
     let location: HistoryLocation
+    let sourceLabel: String?
     /// Display-only bounded text. Copy always uses the original `text`.
     var preview: String {
         let prefix = text.prefix(2_001)
@@ -235,7 +236,8 @@ struct InspectorHistoryItem: Identifiable, Equatable, Sendable {
         exitCode: Int16? = nil,
         duration: UInt64? = nil,
         promptIndex: Int? = nil,
-        location: HistoryLocation = .unavailable(.transcriptOnly)
+        location: HistoryLocation = .unavailable(.transcriptOnly),
+        sourceLabel: String? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -245,6 +247,7 @@ struct InspectorHistoryItem: Identifiable, Equatable, Sendable {
         self.duration = duration
         self.promptIndex = promptIndex
         self.location = location
+        self.sourceLabel = sourceLabel
     }
 }
 

@@ -68,6 +68,26 @@ struct TerminalHistoryServiceTests {
         #expect(TerminalHistoryService.restoringTimestamps(in: replayed, from: nil) == replayed)
     }
 
+    @Test func displaysSavedCommandsWithoutInventingExpiredAnchors() {
+        let pane = UUID()
+        let oldDate = Date(timeIntervalSince1970: 1_000)
+        let saved = [ShellScrollbackRestoreStore.SavedCommand(text: "ll", timestamp: oldDate)]
+        let archived = TerminalHistoryService.presentingHistory(in: [], from: saved, surfaceID: pane)
+        #expect(archived.count == 1)
+        #expect(archived[0].text == "ll")
+        #expect(archived[0].timestamp == oldDate)
+        #expect(archived[0].location == .unavailable(.expired))
+        let newItem = InspectorHistoryItem(id: "live", kind: .command, text: "pwd")
+        #expect(TerminalHistoryService.presentingHistory(in: [newItem], from: saved, surfaceID: pane)
+            == [newItem, archived[0]])
+        let matched = InspectorHistoryItem(id: "anchor", kind: .command, text: "ll",
+            location: .command(surfaceID: pane, executionID: 1, epoch: UUID()))
+        let verified = TerminalHistoryService.presentingHistory(in: [matched], from: saved, surfaceID: pane)
+        #expect(verified.count == 1)
+        #expect(verified[0].location == matched.location)
+        #expect(verified[0].timestamp == oldDate)
+    }
+
     @Test func previewNeverChangesCopyText() {
         let text = "  " + String(repeating: "完整 Prompt\n", count: 3_000) + "  "
         let item = InspectorHistoryItem(kind: .agentPrompt, text: text)

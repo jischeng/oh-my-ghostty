@@ -169,12 +169,16 @@ struct TerminalHistoryTable: NSViewRepresentable {
             cell.identifier = identifier
             cell.text.stringValue = item.preview
             cell.text.font = Metrics.font(for: item.kind)
-            cell.date.stringValue = item.timestamp.map(formatter.string(from:)) ?? strings.unknownHistoryDate
+            let archived: Bool
+            if case .unavailable(.expired) = item.location { archived = true } else { archived = false }
+            let date = item.timestamp.map(formatter.string(from:)) ?? strings.unknownHistoryDate
+            cell.date.stringValue = archived ? "\(date)  ·  \(strings.archivedCommandLabel)" : date
             cell.jump.isEnabled = Self.canJump(item)
-            let help = Self.canJump(item) ? strings.clickToJump : strings.noTerminalAnchor
+            let help = archived ? strings.archivedCommandHelp
+                : (Self.canJump(item) ? strings.clickToJump : strings.noTerminalAnchor)
             cell.jump.setAccessibilityLabel(help)
             cell.jump.toolTip = help
-            cell.toolTip = Self.canJump(item) ? strings.historyRowHelp : strings.noTerminalAnchor
+            cell.toolTip = Self.canJump(item) ? strings.historyRowHelp : help
             cell.jump.target = self
             cell.jump.action = #selector(jumpButton(_:))
             cell.jump.tag = row

@@ -25,7 +25,8 @@ struct ShellScrollbackRestoreStoreTests {
         ))
         let content = try String(contentsOf: saved, encoding: .utf8)
         #expect(content.contains(sample))
-        #expect(content.contains("--- Quitted at "))
+        #expect(content.contains("─  Session ended · "))
+        #expect(!content.contains("---"))
         #expect(ShellScrollbackRestoreStore.replayFile(for: UUID(), baseURL: root, restoreEnabled: true) == nil)
         #expect(ShellScrollbackRestoreStore.replayFile(for: surfaceID, baseURL: root,
                                                       restoreEnabled: false) == nil)
@@ -97,7 +98,8 @@ struct ShellScrollbackRestoreStoreTests {
         let text = try #require(String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8))
         #expect(process.terminationStatus == 0)
         #expect(text.contains("old shell output"))
-        #expect(text.contains("--- Restored at "))
+        #expect(text.contains("─  Session restored · "))
+        #expect(!text.contains("---"))
         #expect(text.contains("new shell ready"))
         #expect(!FileManager.default.fileExists(atPath: file.path))
     }

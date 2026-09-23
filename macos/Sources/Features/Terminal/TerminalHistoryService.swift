@@ -85,12 +85,35 @@ final class TerminalHistoryService {
                 ))
             }
             let items = Array(snapshot.items.reversed())
-            return Self.restoringTimestamps(
+            return Self.presentingHistory(
                 in: items,
-                from: ShellScrollbackRestoreStore.savedCommands(for: surfaceID)
+                from: ShellScrollbackRestoreStore.savedCommands(for: surfaceID),
+                surfaceID: surfaceID
             )
         }
         return []
+    }
+
+    /// Replay is best-effort: keep archived commands visible when the Shell
+    /// redrew or pruned their pins, but never claim an unverified jump target.
+    static func presentingHistory(
+        in items: [InspectorHistoryItem],
+        from saved: [ShellScrollbackRestoreStore.SavedCommand]?,
+        surfaceID: UUID
+    ) -> [InspectorHistoryItem] {
+        guard let saved, !saved.isEmpty else { return items }
+        if items.count >= saved.count,
+           zip(items.suffix(saved.count), saved).allSatisfy({ $0.text == $1.text }) {
+            return restoringTimestamps(in: items, from: saved)
+        }
+        let archived = saved.enumerated().map { index, command in
+            InspectorHistoryItem(
+                id: "archived:\(surfaceID.uuidString):\(index)", kind: .command,
+                text: command.text, timestamp: command.timestamp,
+                location: .unavailable(.expired)
+            )
+        }
+        return items + archived
     }
 
     static func restoringTimestamps(
@@ -124,8 +147,11 @@ final class TerminalHistoryService {
         if let result = validate(item.location, surfaceID: view.id) { return result }
         guard case .command(_, let id, _) = item.location,
               let surface = view.surface else { return .expired }
-        guard ghostty_surface_omg_jump_command(surface, id) else { return .expired }
+        var row = UInt32.max
+        var topPadding = 0.0
+        guard ghostty_surface_omg_jump_command(surface, id, &row, &topPadding) else { return .expired }
         Ghostty.moveFocus(to: view, from: nil)
+        if row != .max { view.flashHistoryRow(row, topPadding: CGFloat(topPadding)) }
         return .jumped
     }
 }

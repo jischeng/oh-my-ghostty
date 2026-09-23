@@ -139,6 +139,11 @@ struct InfoStrings: Equatable, Sendable {
     var noTerminalAnchor: String {
         t("Copy available. This transcript has no verified terminal positions.", "可复制；此会话尚无可靠的终端位置映射。")
     }
+    var archivedCommandLabel: String { t("saved · read-only", "已保存 · 仅查看") }
+    var archivedCommandHelp: String {
+        t("Saved command; its terminal anchor is no longer available. Select and copy with ⌘C.",
+          "已保存的命令，终端锚点已不可用。单击选中后按 ⌘C 复制。")
+    }
     var unknownHistoryDate: String { t("Date unavailable", "日期未知") }
     var historyLoading: String { t("Loading prompts…", "正在读取提问…") }
     var historyUnavailable: String {

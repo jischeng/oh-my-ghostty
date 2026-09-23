@@ -935,7 +935,11 @@ store (100 records, 16 KiB capture budget). Every execution has its own ID, even
 when its text repeats. The host copies a snapshot through the internal
 `ghostty_surface_omg_commands` API and navigates with
 `ghostty_surface_omg_jump_command`; callbacks must not reenter terminal APIs.
-Tracked input pins follow reflow; pruned pins and alternate-screen navigation
+Successful jumps also return the anchored viewport row and grid top padding;
+AppKit overlays a non-interactive translucent highlight that pulses twice over
+that specific row, without modifying selection, terminal cells, or invoking
+Cmd+F. Failed/expired jumps do not flash. Tracked input pins follow reflow;
+pruned pins and alternate-screen navigation
 are rejected. Reset drops records without reusing IDs. Command timestamps use host wall-clock seconds recorded at OSC 133 C, not
 snapshot refresh time (also for SSH panes). Anchors whose input cell has been
 overwritten as output are rejected as well as garbage/pruned pins. Starting a new
@@ -964,7 +968,8 @@ output after the next restart. The snapshot contains
 old terminal output, which may include secrets, and is not a recording of a
 live PTY. The newly restored local Shell is a new process. Its one-shot shell
 integration replays the saved VT file before the first prompt, removes that
-file, and prints a visible restored-session boundary. zsh, bash and fish have
+file, and prints a small dim `─  Session ended/restored · date` timeline
+boundary rather than ASCII dash banners. zsh, bash and fish have
 small adapters to a fork-owned restore script. SSH/Agent session restoration
 retains its separate existing behavior. Alternate-screen content is not saved.
 A crash before the normal termination capture has no new scrollback snapshot.
@@ -974,8 +979,12 @@ surviving Shell command as it reconstructs display output. On replay these
 create *new*, Surface-owned command IDs and exact tracked anchors; Info matches
 the ordered command text against a versioned owner-only sidecar **only to
 restore original timestamps**, not to find terminal coordinates. If count or
-text differs, timestamps are not reattached. A missing shell integration does
-not consume the snapshot file and therefore cannot label later coincidental
+text differs or no valid tracked records survive, Info still lists the saved
+commands as distinct **read-only** entries with their original times. Their
+jump controls are disabled with an explicit expired-anchor explanation; new
+commands remain navigable. This avoids silently dropping visible history or
+pretending that old text is a precise coordinate. A missing shell integration
+does not consume the snapshot file and therefore cannot label later coincidental
 commands as restored. Executions repeated verbatim remain distinct records;
 pruned, overwritten, or oversized records are never represented as exact
 anchors. The command history remains bounded to 100 entries after replay and

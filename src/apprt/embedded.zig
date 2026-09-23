@@ -1736,8 +1736,15 @@ pub const CAPI = struct {
         }
     }
 
-    export fn ghostty_surface_omg_jump_command(surface: *Surface, id: u64) bool {
+    export fn ghostty_surface_omg_jump_command(
+        surface: *Surface,
+        id: u64,
+        out_row: *u32,
+        out_top_padding_points: *f64,
+    ) bool {
         const core = &surface.core_surface;
+        out_row.* = std.math.maxInt(u32);
+        out_top_padding_points.* = 0;
         {
             core.renderer_state.mutex.lockUncancelable(global.io());
             defer core.renderer_state.mutex.unlock(global.io());
@@ -1746,6 +1753,13 @@ pub const CAPI = struct {
             for (screen.omg_command_history.entries.items) |entry| {
                 if (entry.id != id or !entry.isValid()) continue;
                 screen.scroll(.{ .pin = entry.pin.* });
+                if (screen.pages.pointFromPin(.viewport, entry.pin.*)) |point| {
+                    out_row.* = point.viewport.y;
+                    if (surface.content_scale.y > 0) {
+                        out_top_padding_points.* = @as(f64, @floatFromInt(core.size.padding.top)) /
+                            @as(f64, surface.content_scale.y);
+                    }
+                }
                 break;
             } else return false;
         }

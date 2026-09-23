@@ -101,6 +101,8 @@ test "OMG scrollback VT replay keeps repeated command occurrences distinct" {
     var stream = restored.vtStream();
     defer stream.deinit();
     stream.nextSlice(bytes);
+    // Shell integration replays a divider and draws a fresh prompt after cat.
+    stream.nextSlice("\x1b[0m\r\n--- Restored ---\r\n\x1b]133;A\x07$ \x1b]133;B\x07");
     const entries = restored.screens.active.omg_command_history.entries.items;
     try std.testing.expectEqual(@as(usize, 2), entries.len);
     try std.testing.expectEqualStrings("ll", entries[0].text);
@@ -109,6 +111,10 @@ test "OMG scrollback VT replay keeps repeated command occurrences distinct" {
     try std.testing.expect(!entries[0].pin.eql(entries[1].pin.*));
     try std.testing.expect(entries[0].isValid());
     try std.testing.expect(entries[1].isValid());
+    const first_pin = entries[0].pin.*;
+    restored.screens.active.scroll(.{ .pin = first_pin });
+    const location = restored.screens.active.pages.pointFromPin(.viewport, first_pin).?;
+    try std.testing.expect(location.viewport.y < restored.screens.active.pages.rows);
 }
 
 test "OMG scrollback VT replay preserves a wrapped Unicode command" {

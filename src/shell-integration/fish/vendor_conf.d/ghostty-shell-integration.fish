@@ -49,7 +49,7 @@ if set -q OH_MY_GHOSTTY_RESTORE_SCROLLBACK_FILE
     set -e OH_MY_GHOSTTY_RESTORE_SCROLLBACK_FILE
     if test -f "$omg_restore_file" -a -r "$omg_restore_file"
         /bin/cat -- "$omg_restore_file" 2>/dev/null
-        /usr/bin/printf '\033[0m\r\n--- Restored at %s ---\r\n' (/bin/date '+%Y-%m-%d %H:%M:%S')
+        /usr/bin/printf '\033[0;2m\r\n  ─  Session restored · %s\033[0m\r\n' (/bin/date '+%Y-%m-%d %H:%M:%S')
         /bin/rm -f -- "$omg_restore_file" 2>/dev/null
     end
 end

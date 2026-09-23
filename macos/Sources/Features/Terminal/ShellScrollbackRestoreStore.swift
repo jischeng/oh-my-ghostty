@@ -155,7 +155,7 @@ enum ShellScrollbackRestoreStore {
             try handle.seekToEnd()
             let formatter = DateFormatter()
             formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
-            let marker = "\u{001B}]8;;\u{001B}\\\u{001B}[0m\r\n--- Quitted at \(formatter.string(from: Date())) ---\r\n"
+            let marker = "\u{001B}]8;;\u{001B}\\\u{001B}[0;2m\r\n  ─  Session ended · \(formatter.string(from: Date()))\u{001B}[0m\r\n"
             try handle.write(contentsOf: Data(marker.utf8))
             return true
         } catch {

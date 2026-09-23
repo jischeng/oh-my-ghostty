@@ -61,6 +61,31 @@ struct TerminalHistoryTableTests {
         #expect(expanded.subviews.count == 3)
     }
 
+    @Test func archivedShellRowCopiesButNeverOffersFalseJump() async throws {
+        let item = InspectorHistoryItem(kind: .command, text: "ll",
+                                        timestamp: Date(), location: .unavailable(.expired))
+        var jumped = false
+        let host = NSHostingView(rootView: TerminalHistoryTable(items: [item]) { _ in jumped = true })
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 140),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.contentView = host
+        host.frame = window.contentView?.bounds ?? .zero
+        host.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(100))
+        host.layoutSubtreeIfNeeded()
+        let table = try #require(findScroll(in: host)?.documentView as? TerminalHistoryTable.HistoryTable)
+        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        #expect(table.copyText?() == "ll")
+        let row = try #require(table.view(atColumn: 0, row: 0, makeIfNecessary: true)
+            as? TerminalHistoryTable.HistoryCell)
+        #expect(row.date.stringValue.contains(InfoStrings.current.archivedCommandLabel))
+        #expect(!row.jump.isEnabled)
+        row.jump.performClick(nil)
+        #expect(!jumped)
+    }
+
     @Test func compactInfoHostsPortsAndShellHistoryTogether() async throws {
         let texts = [
             "看看这个模块的实现，重点检查多轮对话的定位和不同 pane 之间的隔离。",

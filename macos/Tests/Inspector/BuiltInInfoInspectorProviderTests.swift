@@ -358,6 +358,19 @@ struct BuiltInInfoInspectorProviderTests {
         #expect(!english.historyLimited.isEmpty)
     }
 
+    @Test func agentInfoHistoryIsHiddenWhileShellCanStillNavigate() {
+        func activity(_ state: TabActivityState) -> TabActivity {
+            .init(source: "agent", state: state, label: nil, message: nil,
+                  detail: nil, progress: nil, icon: nil)
+        }
+        #expect(!BuiltInInfoInspectorProvider.hidesAgentHistory(descriptorPresent: false, activity: nil))
+        #expect(BuiltInInfoInspectorProvider.hidesAgentHistory(descriptorPresent: true, activity: nil))
+        for state in TabActivityState.allCases {
+            #expect(BuiltInInfoInspectorProvider.hidesAgentHistory(descriptorPresent: false,
+                                                                    activity: activity(state)))
+        }
+    }
+
     @Test func publishesHistoryItemsAndHandlesJumpAction() async throws {
         let registry = InspectorRegistry()
         let surfaceID = UUID()

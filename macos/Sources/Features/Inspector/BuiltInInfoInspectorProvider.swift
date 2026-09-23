@@ -205,7 +205,10 @@ final class BuiltInInfoInspectorProvider {
     private var isRegistered = false
     private var notificationObservers: [NSObjectProtocol] = []
     private let historyService: TerminalHistoryService
+    // Keep the Agent reader for future verified message anchors, but do not
+    // subscribe or publish transcript-only rows in the Info navigation UI.
     private let agentHistory = PaneAgentHistoryService()
+    private static let agentHistoryNavigationEnabled = false
 
     init(
         registry: InspectorRegistry,
@@ -597,11 +600,25 @@ final class BuiltInInfoInspectorProvider {
         var state: PaneAgentHistoryService.State = .ready
     }
 
+    static func hidesAgentHistory(descriptorPresent: Bool, activity: TabActivity?) -> Bool {
+        // A status may remain at `done` or `error` while the Agent is still
+        // running. Do not mistake that pane for a plain Shell when discovery
+        // has not yet attached a resume descriptor.
+        descriptorPresent || activity != nil
+    }
+
     private func currentHistory(for context: InspectorPaneContext) -> History {
         guard let surfaceID = context.surfaceID else { return .init() }
         for controller in TerminalController.all {
-            guard let view = controller.surfaceTree.first(where: { $0.id == surfaceID }),
-                  let descriptor = controller.agentResumeDescriptor(for: view) else { continue }
+            guard let view = controller.surfaceTree.first(where: { $0.id == surfaceID }) else { continue }
+            let descriptor = controller.agentResumeDescriptor(for: view)
+            if !Self.agentHistoryNavigationEnabled,
+               Self.hidesAgentHistory(descriptorPresent: descriptor != nil,
+                                      activity: controller.agentActivity(for: view)) {
+                agentHistory.remove(surfaceID)
+                return .init(isAgent: true)
+            }
+            guard let descriptor else { continue }
             let session = controller.paneSessionContext(for: view) ?? context.session
             guard let binding = PaneAgentHistoryService.Binding.current(descriptor: descriptor, session: session) else {
                 agentHistory.remove(surfaceID)

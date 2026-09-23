@@ -883,12 +883,14 @@ not plugin storage or a public plugin API.
 The installed/enabled official SSH entry registers `builtin.info` beside Files
 in the Right Inspector. Info is an extensible host-rendered surface with
 optional machine-status and typed machine/session sections (both currently
-hidden), the session timeline displaying command history and Agent user prompts
-with fast jump-to-position actions, plus the SSH port-forwarding section. The forwarding header uses the
-antenna/radio-tower symbol and reports its active port count. For an active pane
-associated with an Agent session, Info presents the list of user-submitted prompts
-with an Agent badge. History timestamps include date and time. Single click selects
-an entry; Cmd+C copies its complete command or prompt. The native table sizes its
+hidden), a Shell-only command timeline with exact jump-to-position actions, and
+the SSH port-forwarding section. The forwarding header uses the antenna/radio-tower
+symbol and reports its active port count. For a pane with an Agent descriptor
+or activity (including `done`/`error` status while still running), Info hides
+the history section altogether; any SSH port-forwarding controls remain visible. It does not poll the Agent transcript in Info or present
+unanchored prompts as navigable entries. The separate Agent History Inspector,
+Agent status, and resume actions are unaffected. Shell history timestamps
+include date and time. Single click selects an entry; Cmd+C copies its full command. The native table sizes its
 scrolling document to the inspector width and computes row heights from wrapped
 text. Prompts show up to four preview lines without expand/collapse controls.
 The table explicitly uses AppKit's plain style to avoid automatic sidebar insets.
@@ -907,11 +909,10 @@ than selecting another row at the same index. Text, timestamp and the jump
 button occupy separate bounded frames so long prompts cannot paint across rows.
 Double click or the row's jump button uses the command's tracked input anchor.
 Navigation is represented by typed `HistoryLocation`, never inferred from an ID
-prefix. Available jump buttons appear on hover/selection. Transcript-only rows
-remain selectable and copyable; the Agent section explicitly explains that no
-verified terminal mapping exists and does not show misleading active arrows.
-Exact Agent prompt navigation is not implemented and must not be advertised as
-available. A submission/status hook's cursor is not a verified render position.
+prefix. Available jump buttons appear on hover/selection. The retained Agent
+history table/model code is dormant in Info until message identities can be
+bound to verified terminal anchors; no text search or ordinal marker matching
+is exposed as a jump. A submission/status hook's cursor is not a verified render position.
 For SSH panes the port-forwarding section stays above history. Empty ports occupy
 64 points rather than a fixed 220-point panel; populated ports grow to a maximum
 of 180 points, with their own scroll area. The add-port control remains in the
@@ -947,9 +948,12 @@ without waiting for OSC 133 D, process exit, or a timer. Command-finished callba
 also refresh independently of desktop notification preferences. Hosts that do
 not implement OMG history may ignore the payload-free action.
 
-Live Agent history is owned by `PaneAgentHistoryService`, not the SSH forwarding
-provider. Subscriptions are keyed by Surface and a binding containing agent,
-conversation, remote target and connection ID. Changing binding, hiding the pane
+The retained (currently disabled in Info) Agent history reader is owned by
+`PaneAgentHistoryService`, not the SSH forwarding provider. While disabled,
+Info creates no Agent transcript subscriptions and never starts its polling or
+remote reads. If re-enabled after reliable anchor support, subscriptions are
+keyed by Surface and a binding containing agent, conversation, remote target
+and connection ID. Changing binding, hiding the pane
 or disabling the provider cancels its task; token checks reject late results.
 Discovery resolves a session file once per subscription (unresolved bindings retry).
 Every three seconds only that file is checked, never a global store rescan after
@@ -962,7 +966,7 @@ and typed tool-result blocks, and preserves complete text for each retained row.
 A single user text over 1 MiB or JSONL record over 8 MiB is skipped, never offered
 as silently truncated copy text. Initial/backlogged reads inspect at most the
 latest 8 MiB; an incomplete leading record is discarded. Incomplete trailing
-JSONL records wait for their newline. A visible limited-history notice explains
+JSONL records wait for their newline. When enabled, a limited-history notice explains
 omitted older/oversized records. Loading and read failures have distinct states;
 failed refreshes retain already-loaded text and retry. Source-generation plus
 byte-offset IDs distinguish repeated prompts and file replacement. Reading a

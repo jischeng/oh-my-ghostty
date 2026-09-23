@@ -61,7 +61,7 @@ struct TerminalHistoryTableTests {
         #expect(expanded.subviews.count == 3)
     }
 
-    @Test func compactInfoHostsPortsAndHistoryTogether() async throws {
+    @Test func compactInfoHostsPortsAndShellHistoryTogether() async throws {
         let texts = [
             "看看这个模块的实现，重点检查多轮对话的定位和不同 pane 之间的隔离。",
             "Please review the implementation. Preserve the complete prompt when copying, even when this preview wraps onto several lines.",
@@ -69,11 +69,11 @@ struct TerminalHistoryTableTests {
             String(repeating: "长文本预览应当正常换行，不覆盖下一条记录。", count: 20),
         ]
         let items = (0..<16).map { index in
-            InspectorHistoryItem(id: "fixture-\(index)", kind: .agentPrompt,
+            InspectorHistoryItem(id: "fixture-\(index)", kind: .command,
                                  text: texts[index % texts.count], timestamp: Date(timeIntervalSince1970: 1_790_079_600 - Double(index * 90)))
         }
         let info = InspectorInfoContent(portForwards: .init(hostAlias: "dev-server", items: []),
-                                        historyItems: items, isAgentSession: true, agentName: "Claude")
+                                        historyItems: items)
         let host = NSHostingView(rootView: InspectorInfoView(info: info, dividerColor: .gray.opacity(0.2), perform: { _ in })
             .background(Color(nsColor: .windowBackgroundColor)))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 500),
@@ -97,6 +97,25 @@ struct TerminalHistoryTableTests {
             host.cacheDisplay(in: host.bounds, to: image)
             try image.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
         }
+    }
+
+    @Test func agentPaneHidesInfoHistoryEvenIfTranscriptRowsAreCached() async throws {
+        let info = InspectorInfoContent(
+            portForwards: .init(hostAlias: "dev-server", items: []),
+            historyItems: [.init(kind: .agentPrompt, text: "prompt")],
+            isAgentSession: true, agentName: "Pi"
+        )
+        let host = NSHostingView(rootView: InspectorInfoView(info: info, dividerColor: .gray, perform: { _ in }))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 400),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.contentView = host
+        host.frame = window.contentView?.bounds ?? .zero
+        host.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(100))
+        host.layoutSubtreeIfNeeded()
+        #expect(findScroll(in: host) == nil)
     }
 
     private func findScroll(in view: NSView) -> NSScrollView? {

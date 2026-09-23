@@ -895,7 +895,8 @@ The table explicitly uses AppKit's plain style to avoid automatic sidebar insets
 Horizontal padding is eight points with a faint row separator. Shell rows use a
 monospaced font; prompts use the system font. Preview height is measured using
 the same wrapping NSTextField cell and four-line limit as rendering, plus 26
-points for metadata and spacing; short prompts do not reserve the maximum height.
+points for metadata and spacing; the timestamp appears below the command/Prompt,
+not above it, and short prompts do not reserve the maximum height.
 Display previews are additionally bounded to 2,000 characters, but Cmd+C copies
 the retained original text, preserving whitespace and literal markup. Reusable
 cells and cached heights avoid repeated measurement on unchanged snapshots.

@@ -144,6 +144,12 @@ struct TerminalHistoryTableTests {
         #expect(cell.bounds.contains(cell.date.frame))
         #expect(!cell.text.frame.intersects(cell.date.frame))
         #expect(!cell.text.frame.intersects(cell.jump.frame))
+        #expect(cell.text.frame.maxY < cell.date.frame.minY)
         #expect(cell.jump.frame.maxX <= cell.bounds.maxX)
+
+        let shortCell = TerminalHistoryTable.HistoryCell(frame: NSRect(x: 0, y: 0, width: 260, height: 42))
+        shortCell.layout()
+        #expect(shortCell.text.frame.maxY < shortCell.date.frame.minY)
+        #expect(shortCell.bounds.contains(shortCell.date.frame))
     }
 }

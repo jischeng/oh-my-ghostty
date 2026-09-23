@@ -226,10 +226,11 @@ struct TerminalHistoryTable: NSViewRepresentable {
         }
         override func layout() {
             super.layout()
-            date.frame = NSRect(x: Metrics.inset, y: 4, width: max(20, bounds.width - 44), height: 14)
-            jump.frame = NSRect(x: bounds.width - 30, y: 0, width: 24, height: 20)
-            text.frame = NSRect(x: Metrics.inset, y: 22,
+            text.frame = NSRect(x: Metrics.inset, y: 4,
                                 width: max(20, bounds.width - 2 * Metrics.inset), height: max(0, bounds.height - 26))
+            date.frame = NSRect(x: Metrics.inset, y: bounds.height - 18,
+                                width: max(20, bounds.width - 44), height: 14)
+            jump.frame = NSRect(x: bounds.width - 30, y: bounds.height - 22, width: 24, height: 20)
         }
     }
 }

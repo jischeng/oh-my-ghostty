@@ -80,6 +80,10 @@ struct TerminalHistoryTable: NSViewRepresentable {
 
     enum Metrics {
         static let inset: CGFloat = 8
+        static let verticalInset: CGFloat = 8
+        static let textDateGap: CGFloat = 6
+        static let dateHeight: CGFloat = 14
+        static let rowSpacing = verticalInset * 2 + textDateGap + dateHeight
         static let previewHeight: CGFloat = 72
         static func font(for kind: InspectorHistoryItemKind) -> NSFont {
             kind == .command ? .monospacedSystemFont(ofSize: 12, weight: .regular) : .systemFont(ofSize: 12)
@@ -145,7 +149,7 @@ struct TerminalHistoryTable: NSViewRepresentable {
         func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
             let item = items[row]
             if let height = heights[item.id] { return height }
-            let height = Metrics.textHeight(item, width: width - 2 * Metrics.inset) + 26
+            let height = Metrics.textHeight(item, width: width - 2 * Metrics.inset) + Metrics.rowSpacing
             heights[item.id] = height
             return height
         }
@@ -226,11 +230,12 @@ struct TerminalHistoryTable: NSViewRepresentable {
         }
         override func layout() {
             super.layout()
-            text.frame = NSRect(x: Metrics.inset, y: 4,
-                                width: max(20, bounds.width - 2 * Metrics.inset), height: max(0, bounds.height - 26))
-            date.frame = NSRect(x: Metrics.inset, y: bounds.height - 18,
-                                width: max(20, bounds.width - 44), height: 14)
-            jump.frame = NSRect(x: bounds.width - 30, y: bounds.height - 22, width: 24, height: 20)
+            text.frame = NSRect(x: Metrics.inset, y: Metrics.verticalInset,
+                                width: max(20, bounds.width - 2 * Metrics.inset),
+                                height: max(0, bounds.height - Metrics.rowSpacing))
+            date.frame = NSRect(x: Metrics.inset, y: text.frame.maxY + Metrics.textDateGap,
+                                width: max(20, bounds.width - 44), height: Metrics.dateHeight)
+            jump.frame = NSRect(x: bounds.width - 30, y: bounds.height - 26, width: 24, height: 20)
         }
     }
 }

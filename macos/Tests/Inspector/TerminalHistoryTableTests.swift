@@ -14,10 +14,10 @@ struct TerminalHistoryTableTests {
         coordinator.table = table
         coordinator.updateWidth(320)
         let longHeight = coordinator.tableView(table, heightOfRow: 0)
-        #expect(longHeight <= 98)
+        #expect(longHeight <= 108)
         coordinator.items = [.init(id: "short", kind: .agentPrompt, text: "resume")]
         #expect(coordinator.tableView(table, heightOfRow: 0) < longHeight)
-        #expect(coordinator.tableView(table, heightOfRow: 0) < 48)
+        #expect(coordinator.tableView(table, heightOfRow: 0) < 60)
         #expect(!TerminalHistoryTable.Coordinator.canJump(item))
         #expect(TerminalHistoryTable.Coordinator.canJump(.init(
             id: "any-opaque-id", kind: .command, text: "ll",
@@ -144,12 +144,15 @@ struct TerminalHistoryTableTests {
         #expect(cell.bounds.contains(cell.date.frame))
         #expect(!cell.text.frame.intersects(cell.date.frame))
         #expect(!cell.text.frame.intersects(cell.jump.frame))
-        #expect(cell.text.frame.maxY < cell.date.frame.minY)
+        #expect(cell.text.frame.minY == TerminalHistoryTable.Metrics.verticalInset)
+        #expect(cell.text.frame.maxY + TerminalHistoryTable.Metrics.textDateGap == cell.date.frame.minY)
+        #expect(cell.bounds.maxY - cell.date.frame.maxY == TerminalHistoryTable.Metrics.verticalInset)
         #expect(cell.jump.frame.maxX <= cell.bounds.maxX)
 
-        let shortCell = TerminalHistoryTable.HistoryCell(frame: NSRect(x: 0, y: 0, width: 260, height: 42))
+        let shortCell = TerminalHistoryTable.HistoryCell(frame: NSRect(x: 0, y: 0, width: 260, height: 54))
         shortCell.layout()
         #expect(shortCell.text.frame.maxY < shortCell.date.frame.minY)
         #expect(shortCell.bounds.contains(shortCell.date.frame))
+        #expect(shortCell.bounds.maxY - shortCell.date.frame.maxY == TerminalHistoryTable.Metrics.verticalInset)
     }
 }

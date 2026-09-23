@@ -7,12 +7,14 @@ const Allocator = std.mem.Allocator;
 pub const Entry = struct {
     id: u64,
     pin: *PageList.Pin,
+    end_pin: *PageList.Pin,
+    end_inclusive: bool,
     text: [:0]const u8,
     timestamp: i64,
     superseded: bool = false,
 
     pub fn isValid(self: Entry) bool {
-        if (self.superseded or self.pin.garbage) return false;
+        if (self.superseded or self.pin.garbage or self.end_pin.garbage) return false;
         // A clear/overwrite can erase cells without pruning their page.
         return self.pin.rowAndCell().cell.semantic_content == .input;
     }
@@ -25,6 +27,7 @@ pub fn deinit(self: *Self, alloc: Allocator, pages: *PageList) void {
     if (self.input) |pin| pages.untrackPin(pin);
     for (self.entries.items) |entry| {
         pages.untrackPin(entry.pin);
+        pages.untrackPin(entry.end_pin);
         alloc.free(entry.text);
     }
     self.entries.deinit(alloc);
@@ -96,11 +99,21 @@ pub fn finish(self: *Self, alloc: Allocator, pages: *PageList, cursor: PageList.
     errdefer alloc.free(copy);
     const anchor = try pages.trackPin(start.*);
     errdefer pages.untrackPin(anchor);
-    try self.entries.append(alloc, .{ .id = self.next_id, .pin = anchor, .text = copy, .timestamp = timestamp });
+    const end_anchor = try pages.trackPin(cursor);
+    errdefer pages.untrackPin(end_anchor);
+    try self.entries.append(alloc, .{
+        .id = self.next_id,
+        .pin = anchor,
+        .end_pin = end_anchor,
+        .end_inclusive = pending_wrap,
+        .text = copy,
+        .timestamp = timestamp,
+    });
     self.next_id += 1;
     if (self.entries.items.len > 100) {
         const old = self.entries.orderedRemove(0);
         pages.untrackPin(old.pin);
+        pages.untrackPin(old.end_pin);
         alloc.free(old.text);
     }
 }

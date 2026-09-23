@@ -84,9 +84,33 @@ final class TerminalHistoryService {
                     location: .command(surfaceID: snapshot.surfaceID, executionID: id, epoch: snapshot.epoch)
                 ))
             }
-            return snapshot.items.reversed()
+            let items = Array(snapshot.items.reversed())
+            return Self.restoringTimestamps(
+                in: items,
+                from: ShellScrollbackRestoreStore.savedCommands(for: surfaceID)
+            )
         }
         return []
+    }
+
+    static func restoringTimestamps(
+        in items: [InspectorHistoryItem],
+        from saved: [ShellScrollbackRestoreStore.SavedCommand]?
+    ) -> [InspectorHistoryItem] {
+        guard let saved, !saved.isEmpty, items.count >= saved.count else { return items }
+        let offset = items.count - saved.count
+        guard zip(items[offset...], saved).allSatisfy({ $0.text == $1.text }) else { return items }
+        var result = items
+        for index in saved.indices {
+            let item = items[offset + index]
+            result[offset + index] = .init(
+                id: item.id, kind: item.kind, text: item.text,
+                timestamp: saved[index].timestamp, exitCode: item.exitCode,
+                duration: item.duration, promptIndex: item.promptIndex,
+                location: item.location
+            )
+        }
+        return result
     }
 
     func validate(_ location: HistoryLocation, surfaceID: UUID) -> JumpResult? {

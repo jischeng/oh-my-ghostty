@@ -42,6 +42,10 @@ _entrypoint() {
 
     [[ -o interactive ]]              || builtin return 0  # non-interactive shell
     (( ! $+_ghostty_state ))          || builtin return 0  # already initialized
+    # OMG adapter: replay saved display output before drawing the new prompt.
+    if [[ -n ${OH_MY_GHOSTTY_RESTORE_SCROLLBACK_FILE:-} ]]; then
+        builtin source "$GHOSTTY_RESOURCES_DIR/shell-integration/omg/restore.sh"
+    fi
 
     # We require zsh 5.1+ (released Sept 2015) for features like functions_source,
     # introspection arrays, and array pattern substitution.

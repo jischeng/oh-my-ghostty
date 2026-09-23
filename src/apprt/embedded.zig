@@ -1692,6 +1692,37 @@ pub const CAPI = struct {
         }
     }
 
+    // OMG host-only scrollback export. The caller supplies a new path in an
+    // owner-only directory; no clipboard, PTY input, or shell history is read.
+    export fn ghostty_surface_omg_export_scrollback_vt(
+        surface: *Surface,
+        path: [*:0]const u8,
+        max_bytes: usize,
+    ) bool {
+        const core = &surface.core_surface;
+        const bytes = bytes: {
+            core.renderer_state.mutex.lockUncancelable(global.io());
+            defer core.renderer_state.mutex.unlock(global.io());
+            const captured = terminal.omg_scrollback_export.capture(
+                global.alloc(),
+                core.renderer_state.terminal,
+                max_bytes,
+            ) catch return false;
+            break :bytes captured orelse return false;
+        };
+        defer global.alloc().free(bytes);
+        const file = std.Io.Dir.createFileAbsolute(global.io(), std.mem.span(path), .{
+            .exclusive = true,
+            .permissions = .fromMode(0o600),
+        }) catch return false;
+        defer file.close(global.io());
+        var buffer: [4096]u8 = undefined;
+        var writer = file.writer(global.io(), &buffer);
+        writer.interface.writeAll(bytes) catch return false;
+        writer.interface.flush() catch return false;
+        return true;
+    }
+
     // Host-observed connection changes invalidate only OMG navigation records,
     // never terminal contents or input. IDs remain monotonic across epochs.
     export fn ghostty_surface_omg_clear_commands(surface: *Surface) void {

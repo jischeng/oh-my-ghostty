@@ -43,6 +43,31 @@ struct TerminalHistoryServiceTests {
         #expect(service.commands(for: UUID()).isEmpty)
     }
 
+    @Test func restoresRepeatedCommandsByOccurrenceOnlyWhenEntireReplayMatches() {
+        let pane = UUID()
+        let epoch = UUID()
+        let now = Date()
+        let original = [Date(timeIntervalSince1970: 1_000), Date(timeIntervalSince1970: 2_000)]
+        let replayed = (1...3).map { index in
+            InspectorHistoryItem(
+                id: "replayed-\(index)", kind: .command,
+                text: index == 1 ? "new" : "ll", timestamp: now,
+                location: .command(surfaceID: pane, executionID: UInt64(index), epoch: epoch)
+            )
+        }
+        let saved = original.map { ShellScrollbackRestoreStore.SavedCommand(text: "ll", timestamp: $0) }
+        let restored = TerminalHistoryService.restoringTimestamps(in: replayed, from: saved)
+        #expect(restored.map(\.text) == ["new", "ll", "ll"])
+        #expect(restored[0].timestamp == now)
+        #expect(restored[1].timestamp == original[0])
+        #expect(restored[2].timestamp == original[1])
+        #expect(restored.map(\.location) == replayed.map(\.location))
+        #expect(TerminalHistoryService.restoringTimestamps(in: replayed, from: [
+            .init(text: "different", timestamp: original[0]), saved[1],
+        ]) == replayed)
+        #expect(TerminalHistoryService.restoringTimestamps(in: replayed, from: nil) == replayed)
+    }
+
     @Test func previewNeverChangesCopyText() {
         let text = "  " + String(repeating: "完整 Prompt\n", count: 3_000) + "  "
         let item = InspectorHistoryItem(kind: .agentPrompt, text: text)

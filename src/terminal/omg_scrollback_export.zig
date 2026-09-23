@@ -1,0 +1,135 @@
+//! Host-only, bounded VT export of the visible screen and scrollback.
+//! Surviving OSC 133 command ranges are marked from tracked pins, not text search.
+const std = @import("std");
+const Terminal = @import("Terminal.zig");
+const Selection = @import("Selection.zig");
+const fmt = @import("formatter.zig");
+
+pub fn capture(alloc: std.mem.Allocator, t: *const Terminal, max_bytes: usize) !?[]u8 {
+    if (t.screens.active_key != .primary) return null;
+    const screen = t.screens.active;
+    const bottom = screen.pages.getBottomRight(.screen) orelse return null;
+    const top = screen.pages.getTopLeft(.history);
+
+    if (max_bytes == 0) return null;
+    const formatted_buffer = try alloc.alloc(u8, max_bytes);
+    defer alloc.free(formatted_buffer);
+    var formatted = std.Io.Writer.fixed(formatted_buffer);
+    var points: fmt.PinMap.Map = .empty;
+    defer points.deinit(alloc);
+    var formatter: fmt.ScreenFormatter = .init(screen, .{
+        .emit = .vt,
+        .unwrap = true,
+        .trim = false,
+        // Do not bake OSC 10/11 or the old palette into a restored theme.
+    });
+    formatter.content = .{ .selection = Selection.init(top, bottom, false) };
+    formatter.pin_map = .{ .alloc = alloc, .map = &points };
+    formatter.format(&formatted) catch return null;
+    const bytes = formatted.buffered();
+    if (bytes.len == 0 or bytes.len > max_bytes or points.count() != bytes.len) return null;
+
+    const output_buffer = try alloc.alloc(u8, max_bytes);
+    defer alloc.free(output_buffer);
+    var output = std.Io.Writer.fixed(output_buffer);
+    var copied: usize = 0;
+    for (screen.omg_command_history.entries.items) |entry| {
+        if (!entry.isValid()) continue;
+        var start: ?usize = null;
+        var end: ?usize = null;
+        for (copied..points.count()) |i| {
+            const pin = points.get(i) orelse return null;
+            if (start == null) {
+                if (pin.eql(entry.pin.*)) start = i;
+                continue;
+            }
+            if (!pin.before(entry.end_pin.*) and
+                !(entry.end_inclusive and pin.eql(entry.end_pin.*)))
+            {
+                end = i;
+                break;
+            }
+        }
+        const first = start orelse return null;
+        const last = end orelse bytes.len;
+        if (last <= first) return null;
+        output.writeAll(bytes[copied..first]) catch return null;
+        output.writeAll("\x1b]133;B\x07") catch return null;
+        output.writeAll(bytes[first..last]) catch return null;
+        output.writeAll("\x1b]133;C\x07") catch return null;
+        copied = last;
+    }
+    output.writeAll(bytes[copied..]) catch return null;
+    const result = output.buffered();
+    if (result.len > max_bytes) return null;
+    return try alloc.dupe(u8, result);
+}
+
+test "OMG scrollback VT export retains output without baking theme colors" {
+    const alloc = std.testing.allocator;
+    var t = try Terminal.init(std.testing.io, alloc, .{ .cols = 12, .rows = 3 });
+    defer t.deinit(alloc);
+    try t.printString("first line");
+    try t.linefeed();
+    t.carriageReturn();
+    try t.printString("second line");
+    const snapshot = (try capture(alloc, &t, 64 * 1024)).?;
+    defer alloc.free(snapshot);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "first line") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "second line") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\x1b]10;") == null);
+    try std.testing.expect((try capture(alloc, &t, 1)) == null);
+}
+
+test "OMG scrollback VT replay keeps repeated command occurrences distinct" {
+    const alloc = std.testing.allocator;
+    var source = try Terminal.init(std.testing.io, alloc, .{ .cols = 40, .rows = 8 });
+    defer source.deinit(alloc);
+    for (0..2) |_| {
+        try source.semanticPrompt(.init(.fresh_line_new_prompt));
+        try source.printString("$ ");
+        try source.semanticPrompt(.init(.end_prompt_start_input));
+        try source.printString("ll");
+        try source.semanticPrompt(.init(.end_input_start_output));
+        try source.linefeed();
+        source.carriageReturn();
+    }
+    const bytes = (try capture(alloc, &source, 64 * 1024)).?;
+    defer alloc.free(bytes);
+    var restored = try Terminal.init(std.testing.io, alloc, .{ .cols = 40, .rows = 8 });
+    defer restored.deinit(alloc);
+    var stream = restored.vtStream();
+    defer stream.deinit();
+    stream.nextSlice(bytes);
+    const entries = restored.screens.active.omg_command_history.entries.items;
+    try std.testing.expectEqual(@as(usize, 2), entries.len);
+    try std.testing.expectEqualStrings("ll", entries[0].text);
+    try std.testing.expectEqualStrings("ll", entries[1].text);
+    try std.testing.expect(entries[0].id != entries[1].id);
+    try std.testing.expect(!entries[0].pin.eql(entries[1].pin.*));
+    try std.testing.expect(entries[0].isValid());
+    try std.testing.expect(entries[1].isValid());
+}
+
+test "OMG scrollback VT replay preserves a wrapped Unicode command" {
+    const alloc = std.testing.allocator;
+    var source = try Terminal.init(std.testing.io, alloc, .{ .cols = 12, .rows = 8 });
+    defer source.deinit(alloc);
+    try source.semanticPrompt(.init(.fresh_line_new_prompt));
+    try source.printString("$ ");
+    try source.semanticPrompt(.init(.end_prompt_start_input));
+    const command = "echo 你好世界 abcdefghijklmnop";
+    try source.printString(command);
+    try source.semanticPrompt(.init(.end_input_start_output));
+    const bytes = (try capture(alloc, &source, 64 * 1024)).?;
+    defer alloc.free(bytes);
+    var restored = try Terminal.init(std.testing.io, alloc, .{ .cols = 12, .rows = 8 });
+    defer restored.deinit(alloc);
+    var stream = restored.vtStream();
+    defer stream.deinit();
+    stream.nextSlice(bytes);
+    const entries = restored.screens.active.omg_command_history.entries.items;
+    try std.testing.expectEqual(@as(usize, 1), entries.len);
+    try std.testing.expectEqualStrings(command, entries[0].text);
+    try std.testing.expect(entries[0].isValid());
+}

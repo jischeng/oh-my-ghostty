@@ -79,6 +79,11 @@ if [ -n "$GHOSTTY_BASH_INJECT" ]; then
   builtin unset GHOSTTY_BASH_RCFILE
 fi
 
+# OMG adapter: replay saved display output before drawing the new prompt.
+if [[ -n "${OH_MY_GHOSTTY_RESTORE_SCROLLBACK_FILE:-}" ]]; then
+  builtin source "$GHOSTTY_RESOURCES_DIR/shell-integration/omg/restore.sh"
+fi
+
 # Add Ghostty binary to PATH if the path feature is enabled
 if [[ "$GHOSTTY_SHELL_FEATURES" == *"path"* && -n "$GHOSTTY_BIN_DIR" ]]; then
   if [[ ":$PATH:" != *":$GHOSTTY_BIN_DIR:"* ]]; then

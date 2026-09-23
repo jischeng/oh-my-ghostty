@@ -950,6 +950,37 @@ without waiting for OSC 133 D, process exit, or a timer. Command-finished callba
 also refresh independently of desktop notification preferences. Hosts that do
 not implement OMG history may ignore the payload-free action.
 
+For a normal app quit with `sessions.restoreOnLaunch` enabled, OMG saves a
+bounded VT rendering of each restorable, local, non-Agent/non-SSH Shell Surface
+in its channel-specific Application Support `shell-scrollback` directory.
+The host-only `ghostty_surface_omg_export_scrollback_vt` API writes an exclusive
+mode-0600 file without occupying the clipboard; its formatter avoids baking
+old default colors into a new theme. Export is capped at 2 MiB per pane and
+fails closed when it cannot represent all retained valid command anchors.
+The directory is mode 0700; snapshots older than seven days, symlinks,
+non-owner files and oversized files are not replayed. A failed fresh capture
+invalidates the previous snapshot for that Surface rather than showing stale
+output after the next restart. The snapshot contains
+old terminal output, which may include secrets, and is not a recording of a
+live PTY. The newly restored local Shell is a new process. Its one-shot shell
+integration replays the saved VT file before the first prompt, removes that
+file, and prints a visible restored-session boundary. zsh, bash and fish have
+small adapters to a fork-owned restore script. SSH/Agent session restoration
+retains its separate existing behavior. Alternate-screen content is not saved.
+A crash before the normal termination capture has no new scrollback snapshot.
+
+The export uses tracked start and end pins to insert OSC 133 B/C around each
+surviving Shell command as it reconstructs display output. On replay these
+create *new*, Surface-owned command IDs and exact tracked anchors; Info matches
+the ordered command text against a versioned owner-only sidecar **only to
+restore original timestamps**, not to find terminal coordinates. If count or
+text differs, timestamps are not reattached. A missing shell integration does
+not consume the snapshot file and therefore cannot label later coincidental
+commands as restored. Executions repeated verbatim remain distinct records;
+pruned, overwritten, or oversized records are never represented as exact
+anchors. The command history remains bounded to 100 entries after replay and
+subsequent activity.
+
 The retained (currently disabled in Info) Agent history reader is owned by
 `PaneAgentHistoryService`, not the SSH forwarding provider. While disabled,
 Info creates no Agent transcript subscriptions and never starts its polling or

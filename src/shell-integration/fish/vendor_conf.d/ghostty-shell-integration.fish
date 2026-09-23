@@ -43,6 +43,17 @@ ghostty_restore_xdg_data_dir
 # If we aren't interactive or we've already run, don't run.
 status --is-interactive || ghostty_exit
 
+# OMG adapter: replay saved display output before drawing the new prompt.
+if set -q OH_MY_GHOSTTY_RESTORE_SCROLLBACK_FILE
+    set -l omg_restore_file "$OH_MY_GHOSTTY_RESTORE_SCROLLBACK_FILE"
+    set -e OH_MY_GHOSTTY_RESTORE_SCROLLBACK_FILE
+    if test -f "$omg_restore_file" -a -r "$omg_restore_file"
+        /bin/cat -- "$omg_restore_file" 2>/dev/null
+        /usr/bin/printf '\033[0m\r\n--- Restored at %s ---\r\n' (/bin/date '+%Y-%m-%d %H:%M:%S')
+        /bin/rm -f -- "$omg_restore_file" 2>/dev/null
+    end
+end
+
 # We do the full setup on the first prompt render. We do this so that other
 # shell integrations that setup the prompt and modify things are able to run
 # first. We want to run _last_.

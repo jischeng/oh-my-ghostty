@@ -546,6 +546,7 @@ class AppDelegate: NSObject,
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        MainActor.assumeIsolated { ShellScrollbackRestoreStore.captureOpenSurfaces() }
         builtInInfoInspector.shutdown()
         // We have no notifications we want to persist after death,
         // so remove them all now. In the future we may want to be

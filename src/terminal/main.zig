@@ -22,6 +22,7 @@ pub const page = @import("page.zig");
 pub const parse_table = @import("parse_table.zig");
 pub const search = @import("search.zig");
 pub const snapshot = @import("snapshot/main.zig");
+pub const omg_scrollback_export = @import("omg_scrollback_export.zig");
 pub const sgr = @import("sgr.zig");
 pub const size = @import("size.zig");
 pub const size_report = @import("size_report.zig");

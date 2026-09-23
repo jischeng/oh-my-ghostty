@@ -1977,6 +1977,14 @@ extension Ghostty {
                 AgentResumeDescriptor.self,
                 forKey: .agentResumeDescriptor
             )
+            let sshResume = try container.decodeIfPresent(
+                SSHResumeDescriptor.self,
+                forKey: .sshResumeDescriptor
+            )
+            if resume == nil, sshResume == nil, let uuid,
+               let file = ShellScrollbackRestoreStore.replayFile(for: uuid) {
+                config.environmentVariables[ShellScrollbackRestoreStore.environmentKey] = file.path
+            }
             if let executablePath = Bundle.main.executablePath {
                 if let resume, resume.isValid,
                    let command = resume.restorationCommand(
@@ -1986,10 +1994,7 @@ extension Ghostty {
                         ? resume.workingDirectory ?? config.workingDirectory
                         : nil
                     config.command = TerminalController.replaySurvivalCommand(command)
-                } else if let sshResume = try container.decodeIfPresent(
-                    SSHResumeDescriptor.self,
-                    forKey: .sshResumeDescriptor
-                ),
+                } else if let sshResume,
                    let command = sshResume.command(executablePath: executablePath) {
                     config.workingDirectory = sshResume.localWorkingDirectory
                     config.command = TerminalController.replaySurvivalCommand(command)
@@ -2000,10 +2005,7 @@ extension Ghostty {
 
             self.init(app, baseConfig: config, uuid: uuid)
             self.agentResumeDescriptor = resume
-            self.sshResumeDescriptor = try container.decodeIfPresent(
-                SSHResumeDescriptor.self,
-                forKey: .sshResumeDescriptor
-            )
+            self.sshResumeDescriptor = sshResume
 
             // Restore the saved title after initialization
             if let title = savedTitle {

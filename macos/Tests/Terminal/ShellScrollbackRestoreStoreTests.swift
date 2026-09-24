@@ -75,14 +75,94 @@ struct ShellScrollbackRestoreStoreTests {
         process.waitUntilExit()
         let text = try #require(String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8))
         #expect(process.terminationStatus == 0)
-        #expect(text.range(of: "old pane output")!.lowerBound < text.range(of: "remote ready")!.lowerBound)
+        let old = try #require(text.range(of: "old pane output"))
+        let marker = try #require(text.range(of: "──────  Session restored · "))
+        let ready = try #require(text.range(of: "remote ready"))
+        #expect(old.lowerBound < marker.lowerBound)
+        #expect(marker.lowerBound < ready.lowerBound)
+        #expect(text.contains("  ──────\u{001B}[0m"))
         #expect(!FileManager.default.fileExists(atPath: snapshot.path))
         #expect(ShellScrollbackRestoreStore.savedCommands(for: id, baseURL: root) == [
-            .init(text: "remote ll", timestamp: now, sourceLabel: "SSH · cloud"),
-            .init(text: "local pwd", timestamp: now.addingTimeInterval(-60), sourceLabel: "Local"),
+            .init(text: "remote ll", timestamp: now, sourceLabel: "SSH · cloud",
+                  occurrenceID: commands[0].id),
+            .init(text: "local pwd", timestamp: now.addingTimeInterval(-60), sourceLabel: "Local",
+                  occurrenceID: commands[1].id),
         ])
         #expect(!ShellScrollbackRestoreStore.allowsAnchorReconciliation(for: id))
+        #expect(ShellScrollbackRestoreStore.replayCommands(for: id) == [])
         #expect(ShellScrollbackRestoreStore.sshReplayCommand("printf ok", snapshot: nil) == "printf ok")
+        let noSnapshot = ShellScrollbackRestoreStore.sshReplayCommand(
+            "printf 'remote ready\\n'", snapshot: snapshot
+        )
+        let missing = Process()
+        missing.executableURL = URL(fileURLWithPath: "/bin/sh")
+        missing.arguments = ["-c", noSnapshot]
+        let missingOutput = Pipe()
+        missing.standardOutput = missingOutput
+        missing.standardError = FileHandle.nullDevice
+        try missing.run()
+        missing.waitUntilExit()
+        let onlyRemote = try #require(String(data: missingOutput.fileHandleForReading.readDataToEndOfFile(),
+                                             encoding: .utf8))
+        #expect(onlyRemote == "remote ready\n")
+    }
+
+    @Test func v3SSHSidecarKeepsDistinctReplayIdentitiesForRepeatedCommands() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-v3-restore-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let id = UUID()
+        let epoch = UUID()
+        let date = Date()
+        let live = (0..<2).map { index in
+            InspectorHistoryItem(id: "occurrence-\(index)", kind: .command, text: "ll",
+                timestamp: date.addingTimeInterval(Double(index)),
+                location: .command(surfaceID: id, executionID: UInt64(index + 1), epoch: epoch),
+                sourceLabel: "SSH · cloud")
+        }
+        let oldLocal = InspectorHistoryItem(id: "old-local", kind: .command, text: "ll",
+            timestamp: date.addingTimeInterval(-60), location: .unavailable(.expired), sourceLabel: "Local")
+        #expect(ShellScrollbackRestoreStore.save(surfaceID: id, baseURL: root,
+            commands: [live[1], live[0], oldLocal], allowsAnchorReconciliation: false) { file in
+            (try? Data("snapshot\r\n".utf8).write(to: file)) != nil &&
+            (try? FileManager.default.setAttributes([.posixPermissions: 0o600],
+                ofItemAtPath: file.path)) != nil
+        })
+        let snapshot = try #require(ShellScrollbackRestoreStore.replayFile(
+            for: id, baseURL: root, restoreEnabled: true
+        ))
+        try FileManager.default.removeItem(at: snapshot)
+        let saved = try #require(ShellScrollbackRestoreStore.savedCommands(for: id, baseURL: root))
+        let replay = try #require(ShellScrollbackRestoreStore.replayCommands(for: id))
+        #expect(saved.map(\.occurrenceID) == ["occurrence-1", "occurrence-0", "old-local"])
+        #expect(replay.map(\.occurrenceID) == ["occurrence-0", "occurrence-1"])
+        #expect(!ShellScrollbackRestoreStore.allowsAnchorReconciliation(for: id))
+    }
+
+    @Test func v2SSHSnapshotRemainsReadOnlyWithoutOccurrenceMarkers() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-v2-restore-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let id = UUID()
+        let folder = ShellScrollbackRestoreStore.directory(baseURL: root)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        let snapshot = folder.appendingPathComponent("\(id.uuidString).vt")
+        try Data("old output\r\n".utf8).write(to: snapshot)
+        let sidecar = folder.appendingPathComponent("\(id.uuidString).json")
+        let archive: [String: Any] = [
+            "version": 2, "surfaceID": id.uuidString, "allowsAnchorReconciliation": false,
+            "commands": [["text": "ll", "sourceLabel": "SSH · cloud"]],
+        ]
+        try JSONSerialization.data(withJSONObject: archive).write(to: sidecar)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: snapshot.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: sidecar.path)
+        #expect(ShellScrollbackRestoreStore.replayFile(for: id, baseURL: root,
+                                                       restoreEnabled: true) == snapshot)
+        try FileManager.default.removeItem(at: snapshot)
+        #expect(ShellScrollbackRestoreStore.savedCommands(for: id, baseURL: root)?.first?.text == "ll")
+        #expect(ShellScrollbackRestoreStore.replayCommands(for: id) == nil)
+        #expect(!ShellScrollbackRestoreStore.allowsAnchorReconciliation(for: id))
     }
 
     @Test func failedCaptureInvalidatesPreviousSnapshotAndRejectsUnsafeFiles() throws {

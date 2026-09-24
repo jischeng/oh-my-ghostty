@@ -180,6 +180,69 @@ struct TerminalHistoryServiceTests {
         #expect(mixed.count == 5) // Identical text/time is not proof of the same occurrence.
     }
 
+    @Test func v3SSHReplayBindsRepeatedCommandsOnlyWhenEveryOccurrenceMatches() throws {
+        let surfaceID = UUID()
+        let epoch = UUID()
+        let originalEpoch = UUID()
+        let date = Date(timeIntervalSince1970: 1_000)
+        let saved: [ShellScrollbackRestoreStore.SavedCommand] = [
+            .init(text: "ll", timestamp: date.addingTimeInterval(1), sourceLabel: "SSH · cloud",
+                  occurrenceID: "command:\(surfaceID):\(originalEpoch):2"),
+            .init(text: "ll", timestamp: date, sourceLabel: "SSH · cloud",
+                  occurrenceID: "command:\(surfaceID):\(originalEpoch):1"),
+            .init(text: "pwd", timestamp: date.addingTimeInterval(-60), sourceLabel: "Local",
+                  occurrenceID: "old-local"),
+        ]
+        let segment = [saved[1], saved[0]] // encoded oldest to newest
+        let replayed = (0..<2).reversed().map { index in
+            InspectorHistoryItem(id: "replayed-\(index)", kind: .command, text: "ll",
+                location: .command(surfaceID: surfaceID, executionID: UInt64(index + 20), epoch: epoch),
+                sourceLabel: "Local", replayKey: segment[index].occurrenceID)
+        }
+        let verified = try #require(TerminalHistoryService.verifiedReplay(
+            replayed, segment: segment, saved: saved, surfaceID: surfaceID
+        ))
+        #expect(verified.map(\.id) == segment.compactMap(\.occurrenceID))
+        #expect(verified.map(\.sourceLabel) == ["SSH · cloud", "SSH · cloud"])
+        #expect(verified[0].location != verified[1].location)
+        let merged = TerminalHistoryService.presentingHistory(in: verified, from: saved,
+            surfaceID: surfaceID, allowReconciliation: false)
+        #expect(merged.count == 3)
+        #expect(merged.last?.text == "pwd")
+        #expect(merged.last?.location == .unavailable(.expired))
+        let pruned = verified.map { item in
+            InspectorHistoryItem(id: item.id, kind: .command, text: item.text,
+                timestamp: item.timestamp, location: .unavailable(.expired),
+                sourceLabel: item.sourceLabel)
+        }
+        #expect(TerminalHistoryService.presentingHistory(in: pruned, from: saved,
+            surfaceID: surfaceID, allowReconciliation: false).count == 3)
+        let service = TerminalHistoryService()
+        _ = service.synchronizeSession(surfaceID: surfaceID, connectionID: "new-ssh") {}
+        service.installVerifiedReplay(verified, for: surfaceID)
+        #expect(service.validate(verified[0].location, surfaceID: surfaceID) == nil)
+        #expect(service.validate(verified[0].location, surfaceID: UUID()) == .wrongSession)
+        #expect(TerminalHistoryService.verifiedReplay(Array(replayed.dropLast()),
+            segment: segment, saved: saved, surfaceID: surfaceID) == nil)
+        let bad = [segment[1], segment[0]]
+        #expect(TerminalHistoryService.verifiedReplay(replayed,
+            segment: bad, saved: saved, surfaceID: surfaceID) == nil)
+        let unmarked = replayed.map { item in
+            InspectorHistoryItem(id: item.id, kind: .command, text: item.text,
+                location: item.location, sourceLabel: item.sourceLabel)
+        }
+        #expect(TerminalHistoryService.verifiedReplay(unmarked,
+            segment: segment, saved: saved, surfaceID: surfaceID) == nil)
+        #expect(TerminalHistoryService.verifiedReplay(replayed,
+            segment: [segment[0], segment[0]], saved: saved, surfaceID: surfaceID) == nil)
+        #expect(TerminalHistoryService.verifiedReplay(replayed,
+            segment: [segment[0], .init(text: "wrong", timestamp: date,
+                sourceLabel: "SSH · cloud", occurrenceID: segment[1].occurrenceID)],
+            saved: saved, surfaceID: surfaceID) == nil)
+        #expect(TerminalHistoryService.verifiedReplay(replayed,
+            segment: segment, saved: saved, surfaceID: UUID()) == nil)
+    }
+
     @Test func previewNeverChangesCopyText() {
         let text = "  " + String(repeating: "完整 Prompt\n", count: 3_000) + "  "
         let item = InspectorHistoryItem(kind: .agentPrompt, text: text)

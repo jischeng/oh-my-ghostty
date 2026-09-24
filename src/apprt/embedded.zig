@@ -1680,7 +1680,7 @@ pub const CAPI = struct {
     export fn ghostty_surface_omg_commands(
         surface: *Surface,
         userdata: ?*anyopaque,
-        callback: *const fn (?*anyopaque, u64, [*:0]const u8, i64) callconv(.c) void,
+        callback: *const fn (?*anyopaque, u64, [*:0]const u8, i64, ?[*:0]const u8) callconv(.c) void,
     ) void {
         const core = &surface.core_surface;
         core.renderer_state.mutex.lockUncancelable(global.io());
@@ -1688,7 +1688,7 @@ pub const CAPI = struct {
         if (core.renderer_state.terminal.screens.active_key != .primary) return;
         const screen = core.renderer_state.terminal.screens.active;
         for (screen.omg_command_history.entries.items) |entry| {
-            if (entry.isValid()) callback(userdata, entry.id, entry.text.ptr, entry.timestamp);
+            if (entry.isValid()) callback(userdata, entry.id, entry.text.ptr, entry.timestamp, if (entry.replay_key) |key| key.ptr else null);
         }
     }
 
@@ -1698,15 +1698,18 @@ pub const CAPI = struct {
         surface: *Surface,
         path: [*:0]const u8,
         max_bytes: usize,
+        userdata: ?*anyopaque,
+        key_callback: *const fn (?*anyopaque, u64) callconv(.c) ?[*:0]const u8,
     ) bool {
         const core = &surface.core_surface;
         const bytes = bytes: {
             core.renderer_state.mutex.lockUncancelable(global.io());
             defer core.renderer_state.mutex.unlock(global.io());
-            const captured = terminal.omg_scrollback_export.capture(
+            const captured = terminal.omg_scrollback_export.captureWithKeys(
                 global.alloc(),
                 core.renderer_state.terminal,
                 max_bytes,
+                .{ .userdata = userdata, .callback = key_callback },
             ) catch return false;
             break :bytes captured orelse return false;
         };

@@ -10,6 +10,8 @@ pub const Entry = struct {
     end_pin: *PageList.Pin,
     end_inclusive: bool,
     text: [:0]const u8,
+    /// Owner-validated occurrence ID from a restored VT snapshot.
+    replay_key: ?[:0]const u8 = null,
     timestamp: i64,
     superseded: bool = false,
 
@@ -21,21 +23,24 @@ pub const Entry = struct {
 };
 entries: std.ArrayList(Entry) = .empty,
 input: ?*PageList.Pin = null,
+input_key: ?[:0]const u8 = null,
 next_id: u64 = 1,
 
 pub fn deinit(self: *Self, alloc: Allocator, pages: *PageList) void {
     if (self.input) |pin| pages.untrackPin(pin);
+    if (self.input_key) |key| alloc.free(key);
     for (self.entries.items) |entry| {
         pages.untrackPin(entry.pin);
         pages.untrackPin(entry.end_pin);
         alloc.free(entry.text);
+        if (entry.replay_key) |key| alloc.free(key);
     }
     self.entries.deinit(alloc);
     // IDs must not be reused after terminal reset.
     self.* = .{ .next_id = self.next_id };
 }
 
-pub fn begin(self: *Self, pages: *PageList, cursor: PageList.Pin) !void {
+pub fn begin(self: *Self, alloc: Allocator, pages: *PageList, cursor: PageList.Pin, aid: ?[]const u8) !void {
     // A new input at a reused coordinate is a new occurrence, even if it has
     // identical text and the cells are once again marked as `.input`.
     for (self.entries.items) |*entry| {
@@ -47,14 +52,33 @@ pub fn begin(self: *Self, pages: *PageList, cursor: PageList.Pin) !void {
             cursor.rowAndCell().row.semantic_prompt == .prompt_continuation) return;
     }
     if (self.input) |pin| pages.untrackPin(pin);
+    if (self.input_key) |key| alloc.free(key);
     self.input = null;
+    self.input_key = null;
+    const replay_key: ?[:0]const u8 = if (aid) |value| key: {
+        const prefix = "omg:";
+        if (!std.mem.startsWith(u8, value, prefix)) break :key null;
+        const id = value[prefix.len..];
+        if (id.len == 0 or id.len > 256 or !std.ascii.isAlphanumeric(id[0])) break :key null;
+        for (id) |byte| {
+            if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != ':') break :key null;
+        }
+        break :key try alloc.dupeZ(u8, id);
+    } else null;
+    errdefer if (replay_key) |key| alloc.free(key);
     self.input = try pages.trackPin(cursor);
+    self.input_key = replay_key;
 }
 
 pub fn finish(self: *Self, alloc: Allocator, pages: *PageList, cursor: PageList.Pin, pending_wrap: bool, reported_text: ?[]const u8, timestamp: i64) !void {
     const start = self.input orelse return;
     self.input = null;
-    defer pages.untrackPin(start);
+    var replay_key = self.input_key;
+    self.input_key = null;
+    defer {
+        pages.untrackPin(start);
+        if (replay_key) |key| alloc.free(key);
+    }
     if (start.garbage or !(start.before(cursor) or (pending_wrap and start.eql(cursor)))) return;
     for (self.entries.items) |*entry| {
         if (!entry.pin.garbage and
@@ -144,14 +168,17 @@ pub fn finish(self: *Self, alloc: Allocator, pages: *PageList, cursor: PageList.
         .end_pin = end_anchor,
         .end_inclusive = pending_wrap,
         .text = copy,
+        .replay_key = replay_key,
         .timestamp = timestamp,
     });
+    replay_key = null; // Ownership transferred to the recorded entry.
     self.next_id += 1;
     if (self.entries.items.len > 100) {
         const old = self.entries.orderedRemove(0);
         pages.untrackPin(old.pin);
         pages.untrackPin(old.end_pin);
         alloc.free(old.text);
+        if (old.replay_key) |key| alloc.free(key);
     }
 }
 

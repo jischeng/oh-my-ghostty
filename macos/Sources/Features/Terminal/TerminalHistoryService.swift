@@ -21,6 +21,7 @@ final class TerminalHistoryService {
     private var sessions: [UUID: Session] = [:]
     private var archivedBySurface: [UUID: [InspectorHistoryItem]] = [:]
     private var skippedInitialSSHReplay = Set<UUID>()
+    private var preservedExecutionIDs: [UUID: Set<UInt64>] = [:]
     private let commandSource: ((UUID) -> [InspectorHistoryItem])?
 
     /// The injected source is also the test seam; there is no second history store.
@@ -60,10 +61,19 @@ final class TerminalHistoryService {
         let previous = sessions[view.id]
         let skipReplay = previous != nil && view.sshResumeDescriptor != nil && saved != nil &&
             !skippedInitialSSHReplay.contains(view.id)
+        var preserveVerified = false
         if skipReplay, previous?.connectionID != Self.connectionID(context) {
-            // The startup wrapper replayed a prior display before opening the
-            // new SSH transport. Its commands already live in the sidecar.
             skippedInitialSSHReplay.insert(view.id)
+            if let previous, let surface = view.surface, let saved,
+               let replaySegment = ShellScrollbackRestoreStore.replayCommands(for: view.id),
+               let verified = Self.verifiedReplay(
+                   snapshotCommands(surface, surfaceID: view.id, epoch: previous.epoch,
+                                    sourceLabel: previous.sourceLabel),
+                   segment: replaySegment, saved: saved, surfaceID: view.id
+               ) {
+                installVerifiedReplay(verified, for: view.id)
+                preserveVerified = true
+            }
         }
         synchronizeSession(surfaceID: view.id, connectionID: Self.connectionID(context),
                            sourceLabel: Self.sourceLabel(context), captured: {
@@ -73,8 +83,9 @@ final class TerminalHistoryService {
             return Self.excludingRestoredSuffix(rows, saved: saved,
                 canReconcile: ShellScrollbackRestoreStore.allowsAnchorReconciliation(for: view.id))
         }, clear: {
-            guard let surface = view.surface else { return }
+            guard !preserveVerified, let surface = view.surface else { return }
             ghostty_surface_omg_clear_commands(surface)
+            preservedExecutionIDs.removeValue(forKey: view.id)
         })
     }
 
@@ -94,7 +105,7 @@ final class TerminalHistoryService {
             let expired = captured().map { item in
                 InspectorHistoryItem(id: item.id, kind: .command, text: item.text,
                     timestamp: item.timestamp, location: .unavailable(.expired),
-                    sourceLabel: item.sourceLabel)
+                    sourceLabel: item.sourceLabel, replayKey: item.replayKey)
             }
             archivedBySurface[surfaceID, default: []].append(contentsOf: expired)
             if let count = archivedBySurface[surfaceID]?.count, count > 100 {
@@ -110,6 +121,15 @@ final class TerminalHistoryService {
         return epoch
     }
 
+    func installVerifiedReplay(_ records: [InspectorHistoryItem], for surfaceID: UUID) {
+        guard !records.isEmpty else { return }
+        archivedBySurface[surfaceID, default: []].append(contentsOf: records)
+        preservedExecutionIDs[surfaceID] = Set(records.compactMap { item in
+            if case .command(_, let id, _) = item.location { return id }
+            return nil
+        })
+    }
+
     func archivedCommands(for surfaceID: UUID) -> [InspectorHistoryItem] {
         archivedBySurface[surfaceID] ?? []
     }
@@ -118,6 +138,7 @@ final class TerminalHistoryService {
         sessions.removeValue(forKey: surfaceID)
         archivedBySurface.removeValue(forKey: surfaceID)
         skippedInitialSSHReplay.remove(surfaceID)
+        preservedExecutionIDs.removeValue(forKey: surfaceID)
     }
 
     private final class CommandSnapshot {
@@ -136,7 +157,7 @@ final class TerminalHistoryService {
         _ surface: ghostty_surface_t, surfaceID: UUID, epoch: UUID, sourceLabel: String
     ) -> [InspectorHistoryItem] {
         let snapshot = CommandSnapshot(surfaceID: surfaceID, epoch: epoch, sourceLabel: sourceLabel)
-        ghostty_surface_omg_commands(surface, Unmanaged.passUnretained(snapshot).toOpaque()) { context, id, text, timestamp in
+        ghostty_surface_omg_commands(surface, Unmanaged.passUnretained(snapshot).toOpaque()) { context, id, text, timestamp, replayKey in
             guard let context, let text else { return }
             let snapshot = Unmanaged<CommandSnapshot>.fromOpaque(context).takeUnretainedValue()
             snapshot.items.append(.init(
@@ -144,7 +165,8 @@ final class TerminalHistoryService {
                 kind: .command, text: String(cString: text),
                 timestamp: Date(timeIntervalSince1970: TimeInterval(timestamp)),
                 location: .command(surfaceID: snapshot.surfaceID, executionID: id,
-                                   epoch: snapshot.epoch), sourceLabel: snapshot.sourceLabel
+                                   epoch: snapshot.epoch), sourceLabel: snapshot.sourceLabel,
+                replayKey: replayKey.map { String(cString: $0) }
             ))
         }
         return snapshot.items.reversed()
@@ -159,9 +181,25 @@ final class TerminalHistoryService {
                 synchronizeSession(context, in: view)
             }
             guard let epoch = sessions[surfaceID]?.epoch else { return [] }
-            let live = snapshotCommands(surface, surfaceID: surfaceID, epoch: epoch,
-                                        sourceLabel: sessions[surfaceID]?.sourceLabel ?? "Local")
-            let archived = archivedBySurface[surfaceID] ?? []
+            let raw = snapshotCommands(surface, surfaceID: surfaceID, epoch: epoch,
+                                       sourceLabel: sessions[surfaceID]?.sourceLabel ?? "Local")
+            let validIDs = Set(raw.compactMap { item -> UInt64? in
+                if case .command(_, let id, _) = item.location { return id }
+                return nil
+            })
+            let preserved = preservedExecutionIDs[surfaceID] ?? []
+            let live = raw.filter { item in
+                if case .command(_, let id, _) = item.location { return !preserved.contains(id) }
+                return false
+            }
+            let archived = (archivedBySurface[surfaceID] ?? []).map { item in
+                if case .command(_, let id, _) = item.location, !validIDs.contains(id) {
+                    return InspectorHistoryItem(id: item.id, kind: item.kind, text: item.text,
+                        timestamp: item.timestamp, location: .unavailable(.expired),
+                        sourceLabel: item.sourceLabel, replayKey: item.replayKey)
+                }
+                return item
+            }
             let saved = ShellScrollbackRestoreStore.savedCommands(for: surfaceID)
             let combined = Self.presentingHistory(in: live + archived, from: saved,
                 surfaceID: surfaceID,
@@ -171,6 +209,35 @@ final class TerminalHistoryService {
             }
         }
         return []
+    }
+
+    /// Exact v3-only binding. All replayed input markers must match the
+    /// saved current segment in order, with distinct host-owned identities.
+    /// Repeated text alone can never establish a one-to-one mapping.
+    static func verifiedReplay(
+        _ replayedNewestFirst: [InspectorHistoryItem],
+        segment: [ShellScrollbackRestoreStore.SavedCommand],
+        saved: [ShellScrollbackRestoreStore.SavedCommand],
+        surfaceID: UUID
+    ) -> [InspectorHistoryItem]? {
+        guard !segment.isEmpty, replayedNewestFirst.count == segment.count else { return nil }
+        let identities = segment.compactMap(\.occurrenceID)
+        guard identities.count == segment.count, Set(identities).count == segment.count else { return nil }
+        var verified: [InspectorHistoryItem] = []
+        var coreIDs = Set<UInt64>()
+        for (item, command) in zip(replayedNewestFirst.reversed(), segment) {
+            guard let occurrenceID = command.occurrenceID,
+                  item.replayKey == occurrenceID,
+                  saved.filter({ $0.occurrenceID == occurrenceID }) == [command],
+                  item.text == command.text,
+                  case .command(let owner, let id, _) = item.location,
+                  owner == surfaceID, coreIDs.insert(id).inserted else { return nil }
+            verified.append(.init(id: occurrenceID, kind: .command,
+                text: command.text, timestamp: command.timestamp,
+                location: item.location, sourceLabel: command.sourceLabel,
+                replayKey: occurrenceID))
+        }
+        return verified
     }
 
     static func excludingRestoredSuffix(
@@ -200,10 +267,12 @@ final class TerminalHistoryService {
            }) {
             return restoringTimestamps(in: items, from: saved)
         }
-        let archived = saved.enumerated().map { index, command in
-            InspectorHistoryItem(
-                id: "archived:\(surfaceID.uuidString):\(index)", kind: .command,
-                text: command.text, timestamp: command.timestamp,
+        let seenIDs = Set(items.map(\.id))
+        let archived = saved.enumerated().compactMap { index, command -> InspectorHistoryItem? in
+            if let occurrenceID = command.occurrenceID, seenIDs.contains(occurrenceID) { return nil }
+            return .init(
+                id: command.occurrenceID ?? "archived:\(surfaceID.uuidString):\(index)",
+                kind: .command, text: command.text, timestamp: command.timestamp,
                 location: .unavailable(.expired), sourceLabel: command.sourceLabel
             )
         }
@@ -226,7 +295,8 @@ final class TerminalHistoryService {
                 id: item.id, kind: item.kind, text: item.text,
                 timestamp: saved[index].timestamp, exitCode: item.exitCode,
                 duration: item.duration, promptIndex: item.promptIndex,
-                location: item.location, sourceLabel: item.sourceLabel
+                location: item.location, sourceLabel: item.sourceLabel,
+                replayKey: item.replayKey
             )
         }
         return result
@@ -234,7 +304,11 @@ final class TerminalHistoryService {
 
     func validate(_ location: HistoryLocation, surfaceID: UUID) -> JumpResult? {
         guard case .command(let owner, _, let epoch) = location else { return .unavailable }
-        guard owner == surfaceID, sessions[surfaceID]?.epoch == epoch else { return .wrongSession }
+        guard owner == surfaceID else { return .wrongSession }
+        if sessions[surfaceID]?.epoch == epoch { return nil }
+        guard archivedBySurface[surfaceID]?.contains(where: { $0.location == location }) == true else {
+            return .wrongSession
+        }
         return nil
     }
 

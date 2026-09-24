@@ -222,6 +222,8 @@ struct InspectorHistoryItem: Identifiable, Equatable, Sendable {
     let promptIndex: Int?
     let location: HistoryLocation
     let sourceLabel: String?
+    /// Occurrence ID carried by a verified OMG VT replay marker, if any.
+    let replayKey: String?
     /// Display-only bounded text. Copy always uses the original `text`.
     var preview: String {
         let prefix = text.prefix(2_001)
@@ -237,7 +239,8 @@ struct InspectorHistoryItem: Identifiable, Equatable, Sendable {
         duration: UInt64? = nil,
         promptIndex: Int? = nil,
         location: HistoryLocation = .unavailable(.transcriptOnly),
-        sourceLabel: String? = nil
+        sourceLabel: String? = nil,
+        replayKey: String? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -248,6 +251,7 @@ struct InspectorHistoryItem: Identifiable, Equatable, Sendable {
         self.promptIndex = promptIndex
         self.location = location
         self.sourceLabel = sourceLabel
+        self.replayKey = replayKey
     }
 }
 

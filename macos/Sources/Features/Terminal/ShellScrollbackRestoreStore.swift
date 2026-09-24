@@ -3,6 +3,28 @@ import Foundation
 import GhosttyKit
 import OSLog
 
+/// Borrowed C strings remain alive throughout the synchronous, locked VT export.
+private final class ShellSnapshotExportKeys {
+    let keys: [UInt64: UnsafeMutablePointer<CChar>]
+
+    init(commands: [InspectorHistoryItem]) {
+        var keys: [UInt64: UnsafeMutablePointer<CChar>] = [:]
+        for command in commands {
+            guard case .command(_, let id, _) = command.location else { continue }
+            let occurrence = command.replayKey ?? command.id
+            guard occurrence.utf8.count <= 256, !occurrence.isEmpty,
+                  occurrence.utf8.allSatisfy({ byte in
+                      (byte >= 48 && byte <= 57) || (byte >= 65 && byte <= 90) ||
+                      (byte >= 97 && byte <= 122) || byte == 45 || byte == 58
+                  }), let pointer = strdup(occurrence) else { continue }
+            if let old = keys.updateValue(pointer, forKey: id) { free(old) }
+        }
+        self.keys = keys
+    }
+
+    deinit { for pointer in keys.values { free(pointer) } }
+}
+
 /// Bounded scrollback and OSC-anchored command metadata for restored local Shell panes.
 /// Restored PTYs are new processes; this store never attempts to resume a job.
 @MainActor
@@ -17,11 +39,15 @@ enum ShellScrollbackRestoreStore {
         let text: String
         let timestamp: Date?
         let sourceLabel: String?
+        /// Host-owned occurrence identity, never a text-search key.
+        let occurrenceID: String?
 
-        init(text: String, timestamp: Date?, sourceLabel: String? = nil) {
+        init(text: String, timestamp: Date?, sourceLabel: String? = nil,
+             occurrenceID: String? = nil) {
             self.text = text
             self.timestamp = timestamp
             self.sourceLabel = sourceLabel
+            self.occurrenceID = occurrenceID
         }
     }
 
@@ -30,6 +56,8 @@ enum ShellScrollbackRestoreStore {
         let surfaceID: UUID
         let commands: [SavedCommand]
         let allowsAnchorReconciliation: Bool?
+        /// Current core entries in export order. Absent in v1/v2 snapshots.
+        let replayCommands: [SavedCommand]?
     }
     private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "oh-my-ghostty",
                                        category: "shell-scrollback-restore")
@@ -59,11 +87,19 @@ enum ShellScrollbackRestoreStore {
                 if case .sshConnecting = context.state { continue }
                 if case .sshReady = context.state, view.sshResumeDescriptor == nil { continue }
                 let commands = TerminalHistoryService.shared.commands(for: view.id)
+                let keys = ShellSnapshotExportKeys(commands: commands)
                 let local: Bool = if case .local = context.state { true } else { false }
                 if !save(surfaceID: view.id, baseURL: baseURL, commands: commands,
                          allowsAnchorReconciliation: local, export: { temporary in
-                    temporary.path.withCString {
-                        ghostty_surface_omg_export_scrollback_vt(surface, $0, maximumBytes - 256)
+                    temporary.path.withCString { path in
+                        ghostty_surface_omg_export_scrollback_vt(
+                            surface, path, maximumBytes - 256,
+                            Unmanaged.passUnretained(keys).toOpaque()
+                        ) { context, id in
+                            guard let context else { return nil }
+                            let keys = Unmanaged<ShellSnapshotExportKeys>.fromOpaque(context).takeUnretainedValue()
+                            return keys.keys[id].map { UnsafePointer($0) }
+                        }
                     }
                 }) {
                     logger.warning("failed to capture shell scrollback for surface \(view.id.uuidString, privacy: .public)")
@@ -100,9 +136,33 @@ enum ShellScrollbackRestoreStore {
             invalidateOldCapture()
             return false
         }
-        let archive = CommandArchive(version: 2, surfaceID: surfaceID, commands: commands.prefix(100).map {
-            .init(text: $0.text, timestamp: $0.timestamp, sourceLabel: $0.sourceLabel)
-        }, allowsAnchorReconciliation: allowsAnchorReconciliation)
+        let retained = Array(commands.prefix(100))
+        let saved = retained.map { item in
+            SavedCommand(text: item.text, timestamp: item.timestamp, sourceLabel: item.sourceLabel,
+                         occurrenceID: allowsAnchorReconciliation ? nil : (item.replayKey ?? item.id))
+        }
+        var replay: [SavedCommand]?
+        if !allowsAnchorReconciliation {
+            // The VT export includes only valid tracked entries. Never pair
+            // archived records or a truncated sidecar by matching `ll` text.
+            let live = retained.filter { $0.location.isAvailable }
+            let allLive = commands.filter { $0.location.isAvailable }
+            guard live.count == allLive.count else {
+                invalidateOldCapture()
+                return false
+            }
+            replay = live.sorted { lhs, rhs in
+                if case .command(_, let first, _) = lhs.location,
+                   case .command(_, let second, _) = rhs.location { return first < second }
+                return false
+            }.map { item in
+                SavedCommand(text: item.text, timestamp: item.timestamp,
+                             sourceLabel: item.sourceLabel, occurrenceID: item.replayKey ?? item.id)
+            }
+        }
+        let archive = CommandArchive(version: 3, surfaceID: surfaceID, commands: saved,
+                                     allowsAnchorReconciliation: allowsAnchorReconciliation,
+                                     replayCommands: replay)
         guard let data = try? JSONEncoder().encode(archive),
               data.count <= maximumBytes,
               FileManager.default.createFile(atPath: metadata.path, contents: data,
@@ -126,8 +186,12 @@ enum ShellScrollbackRestoreStore {
         let path = Ghostty.Shell.quote(snapshot.path)
         // Replay through the owning local PTY before starting the new SSH
         // transport. Never pass this path to the remote process/environment.
-        return "if [ -f \(path) ]; then /bin/cat -- \(path); " +
-            "/bin/rm -f -- \(path); fi; \(command)"
+        let marker = "/usr/bin/printf '" +
+            "\\033[0;2m\\r\\n  ──────  Session restored · %s  ──────\\033[0m\\r\\n' " +
+            "\"$(/bin/date '+%Y-%m-%d %H:%M:%S')\""
+        return "if [ -f \(path) ] && [ -r \(path) ]; then " +
+            "/bin/cat -- \(path) 2>/dev/null; \(marker); " +
+            "/bin/rm -f -- \(path) 2>/dev/null; fi; \(command)"
     }
 
     /// A restored Surface UUID is the only key. Do not accept a caller-supplied
@@ -165,11 +229,25 @@ enum ShellScrollbackRestoreStore {
         let file = root.appendingPathComponent("\(surfaceID.uuidString).json")
         guard validFile(file), let data = try? Data(contentsOf: file),
               let archive = try? JSONDecoder().decode(CommandArchive.self, from: data),
-              (1...2).contains(archive.version), archive.surfaceID == surfaceID,
+              (1...3).contains(archive.version), archive.surfaceID == surfaceID,
               archive.commands.count <= 100,
-              archive.commands.allSatisfy({ $0.text.utf8.count <= 16_384 }) else { return nil }
+              archive.commands.allSatisfy({
+                  $0.text.utf8.count <= 16_384 && ($0.occurrenceID?.utf8.count ?? 0) <= 256
+              }),
+              (archive.replayCommands?.count ?? 0) <= 100,
+              archive.replayCommands?.allSatisfy({
+                  $0.text.utf8.count <= 16_384 &&
+                      ($0.occurrenceID?.utf8.count ?? 0) > 0 &&
+                      ($0.occurrenceID?.utf8.count ?? 0) <= 256
+              }) ?? true else { return nil }
         savedCommandCache[surfaceID] = archive
         return archive.commands
+    }
+
+    static func replayCommands(for surfaceID: UUID) -> [SavedCommand]? {
+        guard let archive = savedCommandCache[surfaceID], archive.version >= 3,
+              archive.allowsAnchorReconciliation == false else { return nil }
+        return archive.replayCommands
     }
 
     static func allowsAnchorReconciliation(for surfaceID: UUID) -> Bool {

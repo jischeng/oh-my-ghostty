@@ -978,12 +978,24 @@ Agent) are marked restorable even if launched with a custom `+ssh` command,
 and capture their current Surface's VT output plus both archived local
 and remote command records. Connecting or non-replayable remote panes are
 skipped rather than reopening a local Shell with misleading remote output. On app restore,
-the validated local replay wrapper consumes the snapshot **before** restarting
-the SSH transport; the snapshot path is never sent to the remote process.
-SSH snapshots explicitly disable old-command anchor reconciliation: old
-local/remote records remain read-only, while new remote commands obtain new
-per-connection anchors. A prior run that discarded the local epoch cannot
-reconstruct those already-lost records retroactively.
+the validated local replay wrapper consumes the snapshot and prints the same
+`Session restored` boundary **before** restarting the SSH transport; it prints
+no boundary when the snapshot is absent, and the snapshot path is never sent
+to the remote process.
+SSH snapshot sidecar v3 records the host-owned occurrence ID and a separate,
+ordered list of only the core's valid current-epoch entries. The VT exporter
+adds `OSC 133;B;aid=omg:<occurrence-id>` before each eligible input region;
+the core retains that ID only for that execution. On restart, the owning
+Surface must replay the *entire* marked sequence with unique IDs, exact
+command text and sidecar metadata before Info binds any old SSH record to its
+new tracked Pin. The first SSH connection transition then preserves only
+those verified core IDs while starting a separate epoch for new commands.
+If even one marker is missing, reordered, invalidated or mismatched, all old
+SSH records remain read-only. Previous v1/v2 SSH snapshots lack these marker
+identities and remain read-only. Local commands from before the old SSH
+connection were already cleared from the core; they remain read-only unless
+captured with their own markers in a future snapshot. A prior run that
+discarded the local epoch cannot reconstruct those records retroactively.
 The host-only `ghostty_surface_omg_export_scrollback_vt` API writes an exclusive
 mode-0600 file without occupying the clipboard; its formatter avoids baking
 old default colors into a new theme. Snapshot-only formatting drops styled,
@@ -1005,7 +1017,10 @@ retains its separate existing behavior. Alternate-screen content is not saved.
 A crash before the normal termination capture has no new scrollback snapshot.
 
 The export uses tracked start and end pins to insert OSC 133 B/C around each
-surviving current-epoch Shell command as it reconstructs display output. Its C marker
+surviving current-epoch Shell command as it reconstructs display output. Its
+host callback supplies borrowed occurrence IDs under the renderer lock and
+must not reenter terminal APIs; untrusted or absent IDs are never used to
+grant restored navigation. Its C marker
 also carries the already-recorded command in `cmdline_url`, so replay cannot
 turn an early Fish B/Starship redraw into a bogus combined command. On replay these
 create *new*, Surface-owned command IDs and exact tracked anchors; Info matches

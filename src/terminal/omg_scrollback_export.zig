@@ -6,7 +6,21 @@ const Selection = @import("Selection.zig");
 const fmt = @import("formatter.zig");
 const string_encoding = @import("../os/string_encoding.zig");
 
+pub const KeyResolver = struct {
+    userdata: ?*anyopaque,
+    callback: *const fn (?*anyopaque, u64) callconv(.c) ?[*:0]const u8,
+};
+
 pub fn capture(alloc: std.mem.Allocator, t: *const Terminal, max_bytes: usize) !?[]u8 {
+    return captureWithKeys(alloc, t, max_bytes, null);
+}
+
+pub fn captureWithKeys(
+    alloc: std.mem.Allocator,
+    t: *const Terminal,
+    max_bytes: usize,
+    resolver: ?KeyResolver,
+) !?[]u8 {
     if (t.screens.active_key != .primary) return null;
     const screen = t.screens.active;
     const bottom = screen.pages.getBottomRight(.screen) orelse return null;
@@ -56,7 +70,22 @@ pub fn capture(alloc: std.mem.Allocator, t: *const Terminal, max_bytes: usize) !
         const last = end orelse bytes.len;
         if (last <= first) return null;
         output.writeAll(bytes[copied..first]) catch return null;
-        output.writeAll("\x1b]133;B\x07") catch return null;
+        const key: ?[]const u8 = if (resolver) |r| key: {
+            const raw = r.callback(r.userdata, entry.id) orelse break :key null;
+            const value = std.mem.span(raw);
+            if (value.len == 0 or value.len > 256 or !std.ascii.isAlphanumeric(value[0])) break :key null;
+            for (value) |byte| {
+                if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != ':') break :key null;
+            }
+            break :key value;
+        } else null;
+        if (key) |value| {
+            output.writeAll("\x1b]133;B;aid=omg:") catch return null;
+            output.writeAll(value) catch return null;
+            output.writeByte(0x07) catch return null;
+        } else {
+            output.writeAll("\x1b]133;B\x07") catch return null;
+        }
         output.writeAll(bytes[first..last]) catch return null;
         output.writeAll("\x1b]133;C;cmdline_url=") catch return null;
         string_encoding.urlPercentEncode(&output, entry.text) catch return null;
@@ -121,7 +150,19 @@ test "OMG scrollback VT replay keeps repeated command occurrences distinct" {
         try source.linefeed();
         source.carriageReturn();
     }
-    const bytes = (try capture(alloc, &source, 64 * 1024)).?;
+    const resolver: KeyResolver = .{
+        .userdata = null,
+        .callback = struct {
+            fn key(_: ?*anyopaque, id: u64) callconv(.c) ?[*:0]const u8 {
+                return switch (id) {
+                    1 => "original-first",
+                    2 => "original-second",
+                    else => null,
+                };
+            }
+        }.key,
+    };
+    const bytes = (try captureWithKeys(alloc, &source, 64 * 1024, resolver)).?;
     defer alloc.free(bytes);
     var restored = try Terminal.init(std.testing.io, alloc, .{ .cols = 40, .rows = 8 });
     defer restored.deinit(alloc);
@@ -135,13 +176,53 @@ test "OMG scrollback VT replay keeps repeated command occurrences distinct" {
     try std.testing.expectEqualStrings("ll", entries[0].text);
     try std.testing.expectEqualStrings("ll", entries[1].text);
     try std.testing.expect(entries[0].id != entries[1].id);
+    try std.testing.expectEqualStrings("original-first", entries[0].replay_key.?);
+    try std.testing.expectEqualStrings("original-second", entries[1].replay_key.?);
     try std.testing.expect(!entries[0].pin.eql(entries[1].pin.*));
     try std.testing.expect(entries[0].isValid());
     try std.testing.expect(entries[1].isValid());
-    const first_pin = entries[0].pin.*;
+    stream.nextSlice("\r\n\x1b]133;A\x07$ \x1b]133;B\x07pwd\x1b]133;C\x07");
+    const after_new_command = restored.screens.active.omg_command_history.entries.items;
+    try std.testing.expectEqual(@as(usize, 3), after_new_command.len);
+    try std.testing.expectEqualStrings("pwd", after_new_command[2].text);
+    try std.testing.expect(after_new_command[2].replay_key == null);
+    try std.testing.expect(after_new_command[0].isValid());
+    try std.testing.expect(after_new_command[1].isValid());
+    const first_pin = after_new_command[0].pin.*;
     restored.screens.active.scroll(.{ .pin = first_pin });
     const location = restored.screens.active.pages.pointFromPin(.viewport, first_pin).?;
     try std.testing.expect(location.viewport.y < restored.screens.active.pages.rows);
+}
+
+test "OMG scrollback VT export refuses malformed occurrence markers" {
+    const alloc = std.testing.allocator;
+    var source = try Terminal.init(std.testing.io, alloc, .{ .cols = 40, .rows = 8 });
+    defer source.deinit(alloc);
+    try source.semanticPrompt(.init(.fresh_line_new_prompt));
+    try source.printString("$ ");
+    try source.semanticPrompt(.init(.end_prompt_start_input));
+    try source.printString("ll");
+    try source.semanticPrompt(.init(.end_input_start_output));
+    const resolver: KeyResolver = .{
+        .userdata = null,
+        .callback = struct {
+            fn key(_: ?*anyopaque, _: u64) callconv(.c) ?[*:0]const u8 {
+                return "bad;injected-id";
+            }
+        }.key,
+    };
+    const bytes = (try captureWithKeys(alloc, &source, 64 * 1024, resolver)).?;
+    defer alloc.free(bytes);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "aid=omg:") == null);
+    var restored = try Terminal.init(std.testing.io, alloc, .{ .cols = 40, .rows = 8 });
+    defer restored.deinit(alloc);
+    var stream = restored.vtStream();
+    defer stream.deinit();
+    stream.nextSlice(bytes);
+    const entries = restored.screens.active.omg_command_history.entries.items;
+    try std.testing.expectEqual(@as(usize, 1), entries.len);
+    try std.testing.expectEqualStrings("ll", entries[0].text);
+    try std.testing.expect(entries[0].replay_key == null);
 }
 
 test "OMG scrollback VT replay keeps Fish command metadata after a prompt redraw" {

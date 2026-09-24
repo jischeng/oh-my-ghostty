@@ -17,6 +17,9 @@
 
 # We need to be in interactive mode to proceed.
 if [[ "$-" != *i* ]]; then builtin return; fi
+# Local and temporary SSH loaders may meet in the same rc chain.
+if [[ ${_ghostty_bash_initialized:-} == 1 ]]; then builtin return; fi
+_ghostty_bash_initialized=1
 
 # When automatic shell integration is active, we were started in POSIX
 # mode and need to manually recreate the bash startup sequence.
@@ -139,8 +142,16 @@ _ghostty_executing=""
 _ghostty_last_reported_cwd=""
 
 function __ghostty_precmd() {
-  local ret="$?"
-  if test "$_ghostty_executing" != "0"; then
+  local ret="${1:-$?}"
+  # Modern Bash evaluates PS0 in a subshell, so its preexec assignments do
+  # not update the parent's prompt variables. Restore only our own wrapping.
+  if [[ ${_GHOSTTY_MARKED_PS1+x} && $PS1 == "$_GHOSTTY_MARKED_PS1" ]]; then
+    PS1=$_GHOSTTY_SAVE_PS1
+  fi
+  if [[ ${_GHOSTTY_MARKED_PS2+x} && $PS2 == "$_GHOSTTY_MARKED_PS2" ]]; then
+    PS2=$_GHOSTTY_SAVE_PS2
+  fi
+  { # Apply markers to the current, clean prompt after theme callbacks.
     _GHOSTTY_SAVE_PS1="$PS1"
     _GHOSTTY_SAVE_PS2="$PS2"
 
@@ -175,12 +186,21 @@ function __ghostty_precmd() {
     if [[ "$GHOSTTY_SHELL_FEATURES" == *"title"* ]]; then
       PS1=$PS1'\[\e]2;\w\a\]'
     fi
-  fi
+  }
 
+  _GHOSTTY_MARKED_PS1=$PS1
+  _GHOSTTY_MARKED_PS2=$PS2
   if test "$_ghostty_executing" != ""; then
     # End of current command. Report its status.
     builtin printf "\e]133;D;%s;aid=%s\a" "$ret" "$BASHPID"
   fi
+
+  # Host context callbacks share this boundary instead of competing for the
+  # last PROMPT_COMMAND slot. The exit status was captured before any callback.
+  builtin local callback
+  for callback in "${__ghostty_prompt_callbacks[@]}"; do
+    "$callback"
+  done
 
   # Fresh line and start of prompt. When ble.sh is active, emit 133;P instead
   # of 133;A because ble.sh maintains its own cursor position tracking. 133;A's
@@ -228,8 +248,15 @@ if (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )
     [[ -n "$cmd" ]] && __ghostty_preexec "$cmd"
   }
 
+  # Save the command status before prompt/theme/cwd callbacks run. Returning
+  # it preserves the status seen by the next user PROMPT_COMMAND callback.
+  __ghostty_capture_status() {
+    _ghostty_prompt_status=$?
+    return "$_ghostty_prompt_status"
+  }
+
   __ghostty_hook() {
-    builtin local ret=$?
+    builtin local ret=${_ghostty_prompt_status:-$?}
     __ghostty_precmd "$ret"
 
     # Append preexec hook to PS0 if not already present.
@@ -267,7 +294,21 @@ if (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )
       PROMPT_COMMAND+="__ghostty_hook 2>/dev/null"
     fi
   fi
+  if [[ $(builtin declare -p PROMPT_COMMAND 2>/dev/null) == "declare -a "* ]]; then
+    PROMPT_COMMAND=("__ghostty_capture_status" "${PROMPT_COMMAND[@]}")
+  else
+    PROMPT_COMMAND="__ghostty_capture_status;${PROMPT_COMMAND}"
+  fi
 else
+  # bash-preexec restores $? before each precmd callback. Run an existing
+  # PROMPT_COMMAND inside that chain, *before* marking the final theme prompt,
+  # rather than leaving it after the dispatcher where it would erase B/PS2.
+  if [[ ${PROMPT_COMMAND:-} != *"__bp_precmd_invoke_cmd"* && -n ${PROMPT_COMMAND:-} ]]; then
+    _ghostty_original_prompt_command=$PROMPT_COMMAND
+    PROMPT_COMMAND=''
+    __ghostty_user_prompt_command() { builtin eval -- "$_ghostty_original_prompt_command"; }
+    precmd_functions+=(__ghostty_user_prompt_command)
+  fi
   builtin source "$(dirname -- "${BASH_SOURCE[0]}")/bash-preexec.sh"
   preexec_functions+=(__ghostty_preexec)
   precmd_functions+=(__ghostty_precmd)

@@ -149,36 +149,10 @@ function __ghostty_setup --on-event fish_prompt -d "Setup ghostty integration"
         end
     end
 
-    # Setup prompt marking
-    function __ghostty_mark_prompt_start --on-event fish_prompt --on-event fish_posterror
-        # If we never got the output end event, then we need to send it now.
-        if test "$__ghostty_prompt_state" != prompt-start
-            echo -en "\e]133;D\a"
-        end
-
-        set --global __ghostty_prompt_state prompt-start
-        echo -en $__ghostty_prompt_start_mark
-    end
-
-    function __ghostty_mark_output_start --on-event fish_preexec
-        set --global __ghostty_prompt_state pre-exec
-        # Pass the submitted line from Fish itself, not a keyboard interceptor.
-        # Fish/Starship may redraw the prompt after OSC 133 B, causing its
-        # decoration to otherwise be mistaken for user input.
-        if set -q argv[1]
-            set -l encoded (string escape --style=url -- "$argv[1]")
-            if test (string length -- "$encoded") -le 16384
-                echo -en "\e]133;C;cmdline_url=$encoded\a"
-                return
-            end
-        end
-        echo -en "\e]133;C\a"
-    end
-
-    function __ghostty_mark_output_end --on-event fish_postexec
-        set --global __ghostty_prompt_state post-exec
-        echo -en "\e]133;D;$status\a"
-    end
+    # The local and +ssh command lifecycle share one implementation. Setup is
+    # deferred until user prompt/theme initialization has completed.
+    source "$GHOSTTY_RESOURCES_DIR/shell-integration/fish/ghostty-command-markers.fish"
+    __ghostty_command_markers_init
 
     # Report pwd. This is actually built-in to fish but only for terminals
     # that match an allowlist and that isn't us.

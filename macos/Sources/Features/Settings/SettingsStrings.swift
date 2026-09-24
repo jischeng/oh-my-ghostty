@@ -488,16 +488,6 @@ struct SettingsStrings: Equatable, Sendable {
         t("Choose a host from SSH config or an active connection. Registration connects on demand and caches Agent versions and Hook status locally. Automatic registration still requires a connection in OMG.",
           "可从 SSH config 或当前连接中选择主机。点击注册后按需连接，并将 Agent 版本与 Hook 状态缓存在本机；自动注册仍仅在 OMG 建立连接后进行。")
     }
-    var sshHistoryInstallerTitle: String {
-        t("Remote Shell Command History", "远端 Shell 命令历史")
-    }
-    var sshHistoryInstallerExport: String {
-        t("Export reviewed installer…", "导出安装脚本…")
-    }
-    var sshHistoryInstallerCaption: String {
-        t("Remote commands require OSC 133 input markers. Export and inspect the script, transfer it to your chosen SSH account, then explicitly run `python3 omg-shell-history.py install` there. OMG never installs it over SSH automatically. Previously unmarked commands cannot be recovered or precisely jumped to.",
-          "远端命令需要 OSC 133 输入标记。请导出并审阅脚本，传到目标 SSH 账户后在远端显式运行 `python3 omg-shell-history.py install`。OMG 不会自动登录安装；以前未标记的命令无法恢复或精确跳转。")
-    }
     var agentUpdateSettings: String { t("Update Settings", "更新设置") }
     var agentManualChecks: String { t("Manual checks", "手动检查") }
     var agentAutomaticHooksShort: String { t("Auto-update Hooks", "自动更新 Hooks") }

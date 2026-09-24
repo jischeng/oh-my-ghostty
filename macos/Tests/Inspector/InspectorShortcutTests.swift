@@ -145,7 +145,5 @@ struct InspectorShortcutTests {
         #expect(zh.rightSidebarShortcutsSection == "右侧边栏快捷键")
         #expect(zh.inspectorPanelSlotLabel(slot: 1) == "面板 1")
         #expect(zh.inspectorPanelSlotLabel(slot: 4) == "面板 4")
-        #expect(en.sshHistoryInstallerExport == "Export reviewed installer…")
-        #expect(zh.sshHistoryInstallerExport == "导出安装脚本…")
     }
 }

@@ -935,6 +935,48 @@ The transition is conservative: records captured before the host identifies a
 new connection may be discarded rather than attributed to the wrong host.
 Only host-observed SSH transitions are covered; unrecognized nested transports
 cannot be reliably attributed using OSC 133 alone.
+
+For a simple interactive `omg +ssh` destination, the **local** OMG CLI already
+constructs a one-shot remote Fish `-C` command or temporary Bash/Zsh startup
+file to report authenticated SSH context, cwd and Agent status. It now adds
+OSC 133 A/B/C/D Shell integration to that *same* startup path. There is no
+second, simplified remote implementation: `ssh_shell_integration.zig` packages
+the actual local `ghostty.bash` (including its version-aware PS0/bash-preexec
+paths), Zsh `ghostty-integration`, and the shared Fish
+`ghostty-command-markers.fish` module. The temporary Bash/Zsh directory contains
+these files only until startup has sourced them; Fish embeds the shared module
+in `-C`. Remote loading disables the local-only PATH/sudo/ssh-wrapping feature
+flags and does not require a remote OMG executable. Existing initialized
+integration is not registered twice.
+
+Fish emits A in a status-isolated prompt event, invokes the original prompt
+**before** writing B, and uses the submitted line in bounded `cmdline_url`;
+this preserves both `$status` and `$pipestatus` seen by themes. Bash captures
+the command status before user prompt callbacks, then marks their final PS1
+and PS2; its legacy preexec dispatcher retains prior DEBUG handlers. Zsh
+uses the local implementation's PS1/PS2 wrapping, deferred setup and redraw
+handling. Remote cwd callbacks do not compete for Bash's PROMPT_COMMAND
+sentinel: they run at the shared prompt boundary. This runs only in the
+owning interactive SSH transport, does not persist a new remote dotfile, and
+does not reconstruct per-pane history from a global history file.
+Noninteractive SSH, unsupported login Shells and nested transports continue
+to opt out; commands already output without semantic markers cannot be
+reconstructed from their text. `omg +ssh` only owns the transient remote
+startup script, not a long-running remote service. Inspector Option+1…4
+shortcuts are consumed by the local NSEvent monitor; a handled nil must never
+be replaced with the original event and written to the PTY. Plain digits and
+unmatched shortcuts continue to the terminal.
+
+`python3 dist/test_ssh_shell_integration.py --omg
+macos/build/Debug/OMG.app/Contents/MacOS/omg` verifies the generated +ssh
+payload using a fake local transport and controlling PTY, not a retyped copy
+of the hooks. The matrix compares local/remote/existing-integration startup
+for available Fish, Zsh, Bash 3 and modern Bash, covering repeated commands,
+failed-command status, Fish pipeline status, multiline/dynamically changed
+PS2, empty Enter, cancelled input, resize/redraw without new execution,
+preservation of user hooks/rc files, quoted paths and temporary-file cleanup.
+No real host or user's shell configuration is touched by this test.
+
 Keyboard interception is not a supported command source. The temporary typed-input
 collector has been removed: it could capture password/TUI input and caused duplicate
 PTY dispatch. Shell commands are captured at OSC 133 B/C boundaries in a bounded per-screen
@@ -969,24 +1011,6 @@ macOS maps it to a Surface-scoped history notification; visible Info refreshes
 without waiting for OSC 133 D, process exit, or a timer. Command-finished callbacks
 also refresh independently of desktop notification preferences. Hosts that do
 not implement OMG history may ignore the payload-free action.
-
-`omg +ssh` forwards terminal environment and terminfo, but does **not**
-install remote Shell integration. A remote Fish/bash/zsh that does not emit
-OSC 133 B/C produces no per-pane history; restored display bytes cannot be
-searched to invent an execution anchor. Settings → SSH offers an export-only,
-auditable `omg-shell-history.py` installer. OMG never logs in or edits remote
-startup files automatically. The user must inspect and transfer the file to
-the chosen remote account, then explicitly run `python3 omg-shell-history.py
-install` there and start a new Shell. `status` and `uninstall` are supported;
-the installer appends marked source blocks to the user's rc files, backs up
-existing rc content, refuses symlinks/ambiguous blocks, and does not read
-Shell history. Fish emits a bounded URL-encoded submitted command in C; all
-three shells emit semantic A/B/C/D. Bash refuses to replace an existing DEBUG
-trap. This affects **new** remote commands only, not old unmarked output.
-Empty SSH Info explains this prerequisite without falsely asserting that
-no command was executed. Option+1…4 Inspector shortcuts are consumed by the
-AppKit local key monitor: a matched key returns nil, not the original event
-to the terminal PTY; ordinary unmodified digits still pass through.
 
 For a normal app quit with `sessions.restoreOnLaunch` enabled, OMG saves a
 bounded VT rendering of each restorable, local, non-Agent/non-SSH Shell Surface

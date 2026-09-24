@@ -126,10 +126,6 @@ struct InfoStrings: Equatable, Sendable {
     var noHistoryMessage: String {
         t("Commands executed in this pane will appear here.", "在当前窗格执行的命令将显示在此处。")
     }
-    var noRemoteShellHistoryMessage: String {
-        t("No per-pane commands yet. If the remote Shell does not emit OSC 133 input markers, export the opt-in integration script from Settings → SSH and install it on that host. Old output cannot establish command positions.",
-          "当前 pane 暂无可定位命令。若远端 Shell 未发送 OSC 133 输入标记，请从设置 → SSH 导出集成脚本，并在该主机主动安装；旧输出无法反推命令位置。")
-    }
     var noAgentPrompts: String { t("No Prompts Recorded", "暂无提问记录") }
     var noAgentPromptsMessage: String {
         t("Prompts sent to this agent will appear here.", "发送给该 Agent 的 Prompt 将显示在此处。")

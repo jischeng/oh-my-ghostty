@@ -375,8 +375,10 @@ fn runInner(
     };
 
     // A simple interactive Fish, bash, or zsh destination can provide a typed
-    // pane lifecycle and remote cwd without a remote service. +ssh owns the final OpenSSH child
-    // lifetime; the transient remote prompt only updates the active context.
+    // pane lifecycle, remote cwd, and OSC 133 command boundaries without a
+    // remote OMG service or persistent installation. +ssh owns the final
+    // OpenSSH child lifetime; its transient remote startup hooks only annotate
+    // that one terminal connection.
     const lifecycle: ?struct {
         id: []const u8,
         label: []const u8,
@@ -814,6 +816,17 @@ fn remoteFishCommand(
         "function __omg_report_pwd --on-event fish_prompt; set -l __omg_cwd (string escape --style=url \"$PWD\"); printf \"\\e]3008;start={s};type=remote;targethost={s};serverid=%s;cwd=%s\\a\\e]7;file://localhost%s\\a\" \"$OMG_SSH_SERVER_ID\" \"$__omg_cwd\" \"$__omg_cwd\"; end",
         .{ context_id, label },
     ) catch return null;
+    fish_command.writer.writeByte('\n') catch return null;
+    fish_command.writer.writeAll(@import("ssh_shell_integration.zig").fish) catch return null;
+    // Same deferred point as local Fish: initialize after the user's theme,
+    // before the first prompt, with an event that preserves status/pipestatus.
+    fish_command.writer.writeAll(
+        "\nfunction __omg_history_setup --on-event fish_prompt; " ++
+            "functions -e __omg_history_setup; " ++
+            "if not set -q __ghostty_command_markers_initialized; " ++
+            "set -g __ghostty_prompt_start_mark '\\e]133;A\\a'; " ++
+            "__ghostty_command_markers_init; __ghostty_mark_prompt_start; end; end",
+    ) catch return null;
     writeRemoteAgentWrappers(&fish_command.writer, .fish) catch return null;
     if (remote_agent) |agent| {
         fish_command.writer.writeAll("; __omg_report_pwd; ") catch return null;
@@ -936,10 +949,15 @@ fn remoteStartupFileCommand(
         ) catch return null;
         writeRemotePromptFunction(&startup.writer, context_id, label) catch return null;
         startup.writer.writeAll(
-            \\if [[ $(declare -p PROMPT_COMMAND 2>/dev/null) == "declare -a"* ]]; then
-            \\  PROMPT_COMMAND+=(__omg_report_pwd)
-            \\else
-            \\  PROMPT_COMMAND="__omg_report_pwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+            \\# Leave PROMPT_COMMAND ownership to the shared shell integration.
+            \\# Appending after bash-preexec's interactive sentinel loses C events.
+            \\__ghostty_prompt_callbacks+=(__omg_report_pwd)
+            \\
+        ) catch return null;
+        startup.writer.writeAll(
+            \\if [[ ${_ghostty_bash_initialized-} != 1 ]]; then
+            \\  GHOSTTY_SHELL_FEATURES=''
+            \\  builtin source "${__omg_bootstrap_rc%/*}/ghostty.bash"
             \\fi
             \\
         ) catch return null;
@@ -960,6 +978,13 @@ fn remoteStartupFileCommand(
             \\fi
             \\
         ) catch return null;
+        startup.writer.writeAll(
+            \\if (( ! $+_ghostty_state )); then
+            \\  GHOSTTY_SHELL_FEATURES=''
+            \\  builtin source "$__omg_bootstrap_dir/ghostty-integration"
+            \\fi
+            \\
+        ) catch return null;
     }
 
     startup.writer.writeAll(
@@ -971,8 +996,12 @@ fn remoteStartupFileCommand(
     ) catch return null;
     if (std.mem.eql(u8, shell_name, "bash")) {
         startup.writer.writeAll(
-            \\rm -f -- "$__omg_bootstrap_rc"
-            \\unset OMG_SSH_RC __omg_bootstrap_rc
+            \\__omg_bootstrap_dir=${__omg_bootstrap_rc%/*}
+            \\if [[ -d "$__omg_bootstrap_dir" && -O "$__omg_bootstrap_dir" &&
+            \\      "$__omg_bootstrap_dir" == "${TMPDIR:-/tmp}"/omg-ssh.* ]]; then
+            \\  rm -rf -- "$__omg_bootstrap_dir"
+            \\fi
+            \\unset OMG_SSH_RC __omg_bootstrap_rc __omg_bootstrap_dir
             \\
         ) catch return null;
     } else {
@@ -1007,9 +1036,12 @@ fn remoteStartupFileCommand(
     }
     if (std.mem.eql(u8, shell_name, "bash")) {
         command.writer.writeAll(
-            "__omg_rc=$(mktemp \"${TMPDIR:-/tmp}/omg-ssh.XXXXXX\") || exit 1; " ++
-                "OMG_SSH_RC=$__omg_rc; export OMG_SSH_RC; " ++
-                "cat > \"$__omg_rc\" <<'__OMG_BASHRC__'\n",
+            "__omg_dir=$(mktemp -d \"${TMPDIR:-/tmp}/omg-ssh.XXXXXX\") || exit 1; " ++
+                "__omg_rc=$__omg_dir/rc; OMG_SSH_RC=$__omg_rc; export OMG_SSH_RC;\n",
+        ) catch return null;
+        @import("ssh_shell_integration.zig").writeBashFiles(&command.writer) catch return null;
+        command.writer.writeAll(
+            "cat > \"$__omg_rc\" <<'__OMG_BASHRC__'\n",
         ) catch return null;
         command.writer.writeAll(startup.written()) catch return null;
         command.writer.writeAll(
@@ -1019,8 +1051,11 @@ fn remoteStartupFileCommand(
         command.writer.writeAll(
             "__omg_dir=$(mktemp -d \"${TMPDIR:-/tmp}/omg-ssh.XXXXXX\") || exit 1; " ++
                 "OMG_ORIGINAL_ZDOTDIR=${ZDOTDIR:-$HOME}; OMG_SSH_ZDOTDIR=$__omg_dir; " ++
-                "export OMG_ORIGINAL_ZDOTDIR OMG_SSH_ZDOTDIR; " ++
-                "cat > \"$__omg_dir/.zshrc\" <<'__OMG_ZSHRC__'\n",
+                "export OMG_ORIGINAL_ZDOTDIR OMG_SSH_ZDOTDIR;\n",
+        ) catch return null;
+        @import("ssh_shell_integration.zig").writeZshFile(&command.writer) catch return null;
+        command.writer.writeAll(
+            "cat > \"$__omg_dir/.zshrc\" <<'__OMG_ZSHRC__'\n",
         ) catch return null;
         command.writer.writeAll(startup.written()) catch return null;
         command.writer.writeAll(
@@ -1148,7 +1183,12 @@ test remoteShellCommand {
     ).?;
     defer testing.allocator.free(bash_command);
     try testing.expect(std.mem.indexOf(u8, bash_command, "__OMG_BASHRC__") != null);
-    try testing.expect(std.mem.indexOf(u8, bash_command, "PROMPT_COMMAND") != null);
+    try testing.expect(std.mem.indexOf(u8, bash_command, "__ghostty_prompt_callbacks+=(__omg_report_pwd)") != null);
+    try testing.expect(std.mem.indexOf(u8, bash_command, "ghostty.bash") != null);
+    try testing.expect(std.mem.indexOf(u8, bash_command, "bash-preexec.sh") != null);
+    try testing.expect(std.mem.indexOf(u8, bash_command, "__omg_semantic_debug") == null);
+    try testing.expect(std.mem.indexOf(u8, bash_command, "133;B") != null);
+    try testing.expect(std.mem.indexOf(u8, bash_command, "133;C") != null);
     try testing.expect(std.mem.indexOf(u8, bash_command, "cwdhex=%s") != null);
     try testing.expect(std.mem.indexOf(u8, bash_command, "serverid=%s") != null);
     try testing.expect(std.mem.indexOf(u8, bash_command, "targethost=vps-jump") != null);
@@ -1167,6 +1207,10 @@ test remoteShellCommand {
     defer testing.allocator.free(zsh_command);
     try testing.expect(std.mem.indexOf(u8, zsh_command, "__OMG_ZSHRC__") != null);
     try testing.expect(std.mem.indexOf(u8, zsh_command, "precmd_functions") != null);
+    try testing.expect(std.mem.indexOf(u8, zsh_command, "ghostty-integration") != null);
+    try testing.expect(std.mem.indexOf(u8, zsh_command, "__omg_semantic_preexec") == null);
+    try testing.expect(std.mem.indexOf(u8, zsh_command, "133;B") != null);
+    try testing.expect(std.mem.indexOf(u8, zsh_command, "133;C") != null);
     try testing.expect(std.mem.indexOf(u8, zsh_command, "targethost=train") != null);
     try testing.expect(std.mem.indexOf(u8, zsh_command, "-O") != null);
     try testing.expect(std.mem.indexOf(u8, zsh_command, "rm -rf --") != null);
@@ -1182,6 +1226,8 @@ test remoteShellCommand {
     defer testing.allocator.free(command);
     try testing.expect(std.mem.indexOf(u8, command, "exec /bin/sh -c") != null);
     try testing.expect(std.mem.indexOf(u8, command, "case ${SHELL##*/}") != null);
+    try testing.expect(std.mem.indexOf(u8, command, "__ghostty_command_markers_init") != null);
+    try testing.expect(std.mem.indexOf(u8, command, "cmdline_url=%s") != null);
     try testing.expect(std.mem.indexOf(u8, command, "]3008;start=omg-ssh-1") != null);
     try testing.expect(std.mem.indexOf(u8, command, "ssh_host_ed25519_key.pub") != null);
     try testing.expect(std.mem.indexOf(u8, command, "/etc/machine-id") != null);
@@ -1201,6 +1247,7 @@ test remoteShellCommand {
     defer testing.allocator.free(cwd_command);
     try testing.expect(std.mem.indexOf(u8, cwd_command, "cd --") != null);
     try testing.expect(std.mem.indexOf(u8, cwd_command, "OMG_REMOTE_CWD") != null);
+    try testing.expect(std.mem.indexOf(u8, cwd_command, "__ghostty_mark_output_start") != null);
     try testing.expect(std.mem.indexOf(u8, cwd_command, "__omg_report_pwd; codex resume") != null);
     try testing.expect(std.mem.indexOf(u8, cwd_command, "019f-session_1") != null);
     try testing.expect(validAgentSessionID("019f-session_1"));

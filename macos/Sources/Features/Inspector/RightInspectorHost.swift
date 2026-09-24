@@ -1740,6 +1740,7 @@ struct InspectorInfoView: View {
                 isAgent: false,
                 agentName: nil,
                 state: .ready,
+                isRemote: info.isRemoteSession,
                 perform: perform
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -1759,6 +1760,7 @@ private struct InspectorTerminalHistoryListView: View {
     let isAgent: Bool
     let agentName: String?
     let state: PaneAgentHistoryService.State
+    let isRemote: Bool
     let perform: (InspectorPaneActionKind) -> Void
     @ObservedObject private var settings = OhMyGhosttySettings.shared
 
@@ -1801,7 +1803,8 @@ private struct InspectorTerminalHistoryListView: View {
             }
             if items.isEmpty {
                 if state == .ready {
-                    Text(isAgent ? strings.noAgentPromptsMessage : strings.noHistoryMessage)
+                    Text(isAgent ? strings.noAgentPromptsMessage
+                         : (isRemote ? strings.noRemoteShellHistoryMessage : strings.noHistoryMessage))
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .padding(8)

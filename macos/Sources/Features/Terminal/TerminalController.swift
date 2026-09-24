@@ -492,6 +492,15 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         quickInputModel.removeQueuedItem(itemID, for: surfaceID)
     }
 
+    /// A monitor's nil return consumes the key. Do not coalesce that nil with
+    /// the original NSEvent: it would also deliver the shortcut to the PTY.
+    static func routeMonitoredKeyEvent(
+        _ event: NSEvent, handler: ((NSEvent) -> NSEvent?)?
+    ) -> NSEvent? {
+        guard let handler else { return event }
+        return handler(event)
+    }
+
     private func handleQuickInputKeyEvent(_ event: NSEvent) -> NSEvent? {
         let eventController = event.window?.windowController as? TerminalController
         guard eventController === self ||
@@ -809,7 +818,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         quickInputEventMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.keyDown]
         ) { [weak self] event in
-            self?.handleQuickInputKeyEvent(event) ?? event
+            Self.routeMonitoredKeyEvent(event, handler: self?.handleQuickInputKeyEvent)
         }
         quickInputSecureInputCancellable = SecureInput.shared.$enabled
             .dropFirst()

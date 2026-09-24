@@ -970,6 +970,24 @@ without waiting for OSC 133 D, process exit, or a timer. Command-finished callba
 also refresh independently of desktop notification preferences. Hosts that do
 not implement OMG history may ignore the payload-free action.
 
+`omg +ssh` forwards terminal environment and terminfo, but does **not**
+install remote Shell integration. A remote Fish/bash/zsh that does not emit
+OSC 133 B/C produces no per-pane history; restored display bytes cannot be
+searched to invent an execution anchor. Settings → SSH offers an export-only,
+auditable `omg-shell-history.py` installer. OMG never logs in or edits remote
+startup files automatically. The user must inspect and transfer the file to
+the chosen remote account, then explicitly run `python3 omg-shell-history.py
+install` there and start a new Shell. `status` and `uninstall` are supported;
+the installer appends marked source blocks to the user's rc files, backs up
+existing rc content, refuses symlinks/ambiguous blocks, and does not read
+Shell history. Fish emits a bounded URL-encoded submitted command in C; all
+three shells emit semantic A/B/C/D. Bash refuses to replace an existing DEBUG
+trap. This affects **new** remote commands only, not old unmarked output.
+Empty SSH Info explains this prerequisite without falsely asserting that
+no command was executed. Option+1…4 Inspector shortcuts are consumed by the
+AppKit local key monitor: a matched key returns nil, not the original event
+to the terminal PTY; ordinary unmodified digits still pass through.
+
 For a normal app quit with `sessions.restoreOnLaunch` enabled, OMG saves a
 bounded VT rendering of each restorable, local, non-Agent/non-SSH Shell Surface
 in its channel-specific Application Support `shell-scrollback` directory.

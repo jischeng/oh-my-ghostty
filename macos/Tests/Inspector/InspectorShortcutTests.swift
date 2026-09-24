@@ -47,6 +47,34 @@ struct InspectorShortcutTests {
         #expect(slot4.displayValue == "⌥4")
     }
 
+    @Test func inspectorOptionDigitsAreConsumedBeforeTerminalInput() throws {
+        for slot in 1...4 {
+            let digit = String(slot)
+            let key = try #require(NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: .option,
+                timestamp: 0, windowNumber: 0, context: nil,
+                characters: digit, charactersIgnoringModifiers: digit,
+                isARepeat: false, keyCode: UInt16(17 + slot)
+            ))
+            let shortcut = OMGKeyboardShortcut.defaultInspectorPanel(slot: slot)
+            #expect(shortcut.matches(key))
+            let dispatched = TerminalController.routeMonitoredKeyEvent(key) { event in
+                shortcut.matches(event) ? nil : event
+            }
+            #expect(dispatched == nil) // Returning nil must not fall back to the key event.
+            #expect(TerminalController.routeMonitoredKeyEvent(key, handler: nil) === key)
+        }
+        let plain = try #require(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [],
+            timestamp: 0, windowNumber: 0, context: nil,
+            characters: "1", charactersIgnoringModifiers: "1",
+            isARepeat: false, keyCode: 18
+        ))
+        #expect(TerminalController.routeMonitoredKeyEvent(plain) { event in
+            OMGKeyboardShortcut.defaultInspectorPanel(slot: 1).matches(event) ? nil : event
+        } === plain)
+    }
+
     @Test func slotToggleOpensSwitchesAndHidesCorrectly() throws {
         let registry = InspectorRegistry()
         try registry.registerCorePane(
@@ -117,5 +145,7 @@ struct InspectorShortcutTests {
         #expect(zh.rightSidebarShortcutsSection == "右侧边栏快捷键")
         #expect(zh.inspectorPanelSlotLabel(slot: 1) == "面板 1")
         #expect(zh.inspectorPanelSlotLabel(slot: 4) == "面板 4")
+        #expect(en.sshHistoryInstallerExport == "Export reviewed installer…")
+        #expect(zh.sshHistoryInstallerExport == "导出安装脚本…")
     }
 }

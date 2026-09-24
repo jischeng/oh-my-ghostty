@@ -394,6 +394,8 @@ struct BuiltInInfoInspectorProviderTests {
         }
         #expect(info.historyItems.map(\.text) == ["pwd"])
         #expect(info.portForwards.hostAlias == "cloud")
+        #expect(info.isRemoteSession)
+        #expect(!InfoStrings(language: .english).noRemoteShellHistoryMessage.isEmpty)
         #expect(!info.portForwards.canCreate)
         provider.shutdown()
     }

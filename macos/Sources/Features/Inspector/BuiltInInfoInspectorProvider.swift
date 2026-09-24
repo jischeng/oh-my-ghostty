@@ -94,6 +94,7 @@ struct InspectorInfoContent: Equatable, Sendable {
     let isAgentSession: Bool
     let agentName: String?
     let historyState: PaneAgentHistoryService.State
+    let isRemoteSession: Bool
 
     init(
         status: InspectorField? = nil,
@@ -102,7 +103,8 @@ struct InspectorInfoContent: Equatable, Sendable {
         historyItems: [InspectorHistoryItem] = [],
         isAgentSession: Bool = false,
         agentName: String? = nil,
-        historyState: PaneAgentHistoryService.State = .ready
+        historyState: PaneAgentHistoryService.State = .ready,
+        isRemoteSession: Bool = false
     ) {
         self.status = status
         self.fields = fields
@@ -111,6 +113,7 @@ struct InspectorInfoContent: Equatable, Sendable {
         self.isAgentSession = isAgentSession
         self.agentName = agentName
         self.historyState = historyState
+        self.isRemoteSession = isRemoteSession
     }
 }
 
@@ -652,14 +655,15 @@ final class BuiltInInfoInspectorProvider {
             content = .info(.init(
                 portForwards: .init(hostAlias: ssh.alias, items: [], canCreate: false),
                 historyItems: historyInfo.items, isAgentSession: historyInfo.isAgent,
-                agentName: historyInfo.agentName, historyState: historyInfo.state
+                agentName: historyInfo.agentName, historyState: historyInfo.state,
+                isRemoteSession: true
             ))
         case .sshReady(let ssh, _):
             let forwards = ssh.serverID.map { self.content(for: $0, alias: ssh.alias) }
                 ?? .init(hostAlias: ssh.alias, items: [], canCreate: false)
             content = .info(.init(portForwards: forwards, historyItems: historyInfo.items,
                                  isAgentSession: historyInfo.isAgent, agentName: historyInfo.agentName,
-                                 historyState: historyInfo.state))
+                                 historyState: historyInfo.state, isRemoteSession: true))
         }
         do {
             try registry.updatePluginContent(

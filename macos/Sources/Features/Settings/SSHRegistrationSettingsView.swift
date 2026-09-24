@@ -1,4 +1,6 @@
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct SSHRegistrationSettingsView: View {
     let strings: SettingsStrings
@@ -9,6 +11,7 @@ struct SSHRegistrationSettingsView: View {
     @State private var registering = false
     @State private var choices: [SSHRegistrationChoice] = []
     @State private var loadingHosts = false
+    @State private var historyInstallerError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -32,6 +35,17 @@ struct SSHRegistrationSettingsView: View {
                 if registering || loadingHosts || !registry.pending.isEmpty { ProgressView().controlSize(.small) }
             }.controlSize(.small)
             Text(strings.sshRegistrationCaption).font(.caption).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(strings.sshHistoryInstallerTitle).font(.headline)
+                Text(strings.sshHistoryInstallerCaption)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(strings.sshHistoryInstallerExport, action: exportHistoryInstaller)
+                    .controlSize(.small)
+                if let historyInstallerError {
+                    Text(historyInstallerError).font(.caption).foregroundStyle(.red)
+                }
+            }
             ForEach(registry.hosts) { host in
                 HStack {
                     VStack(alignment: .leading, spacing: 3) {
@@ -60,6 +74,22 @@ struct SSHRegistrationSettingsView: View {
     }
 
     private var selectedConnection: GitSSHConnection? { choices.first { $0.id == selectedID }?.connection }
+
+    private func exportHistoryInstaller() {
+        historyInstallerError = nil
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "omg-shell-history.py"
+        panel.allowedContentTypes = [.pythonScript]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try RemoteShellHistoryInstaller.script.write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } catch {
+            historyInstallerError = error.localizedDescription
+        }
+    }
 
     private func loadChoices() async {
         guard !loadingHosts else { return }

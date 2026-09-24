@@ -1,0 +1,2 @@
+# PTY recordings contain significant CR/LF, escape codes and trailing spaces.
+*.vt binary

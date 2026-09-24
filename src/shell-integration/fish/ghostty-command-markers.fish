@@ -23,6 +23,10 @@ function __ghostty_command_markers_init
     end
 
     function __ghostty_mark_output_start --on-event fish_preexec
+        # Older Fish also raises preexec for an empty Enter.
+        if not set -q argv[1]; or test -z "$argv[1]"
+            return
+        end
         set -g __ghostty_prompt_state pre-exec
         if set -q argv[1]
             set -l encoded (string escape --style=url -- "$argv[1]")

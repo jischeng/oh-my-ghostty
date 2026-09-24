@@ -137,6 +137,53 @@ test "OMG scrollback VT export drops styled blank prompt tails but keeps command
     try std.testing.expect(entries[0].isValid());
 }
 
+test "OMG scrollback VT repeated narrow restores do not retain wrapped blank backgrounds" {
+    const alloc = std.testing.allocator;
+    var original = try Terminal.init(std.testing.io, alloc, .{ .cols = 24, .rows = 40 });
+    defer original.deinit(alloc);
+    var original_stream = original.vtStream();
+    defer original_stream.deinit();
+    for (0..2) |_| {
+        original_stream.nextSlice("\x1b]133;A\x07\x1b[42mPROMPT                              \x1b[0m");
+        original_stream.nextSlice("\r\n$ \x1b]133;B\x07ll\x1b]133;C\x07\r\noutput\r\n");
+    }
+    var saved = (try capture(alloc, &original, 64 * 1024)).?;
+    defer alloc.free(saved);
+    for ([_]u16{ 16, 12, 20 }) |cols| {
+        var restored = try Terminal.init(std.testing.io, alloc, .{ .cols = cols, .rows = 40 });
+        defer restored.deinit(alloc);
+        var stream = restored.vtStream();
+        defer stream.deinit();
+        stream.nextSlice(saved);
+        stream.nextSlice("\x1b[0m\r\nrestored\r\n");
+        var styled_characters: usize = 0;
+        for (0..40) |y| {
+            for (0..cols) |x| {
+                const cell = restored.screens.active.pages.getCell(.{ .active = .{
+                    .x = @intCast(x),
+                    .y = @intCast(y),
+                } }).?.cell;
+                if (cell.codepoint() == 0 or cell.codepoint() == ' ') {
+                    try std.testing.expect(!cell.hasStyling());
+                } else if (cell.hasStyling()) {
+                    styled_characters += 1;
+                }
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 12), styled_characters); // Two colored PROMPT labels.
+        const commands = restored.screens.active.omg_command_history.entries.items;
+        try std.testing.expectEqual(@as(usize, 2), commands.len);
+        for (commands) |entry| {
+            try std.testing.expectEqualStrings("ll", entry.text);
+            try std.testing.expect(entry.isValid());
+        }
+        try std.testing.expect(!commands[0].pin.eql(commands[1].pin.*));
+        const next = (try capture(alloc, &restored, 64 * 1024)).?;
+        alloc.free(saved);
+        saved = next;
+    }
+}
+
 test "OMG scrollback VT replay keeps repeated command occurrences distinct" {
     const alloc = std.testing.allocator;
     var source = try Terminal.init(std.testing.io, alloc, .{ .cols = 40, .rows = 8 });

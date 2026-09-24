@@ -336,6 +336,24 @@ test "OMG command history rejects reused input coordinates" {
     try std.testing.expect(entries[0].id != entries[1].id);
 }
 
+test "OMG command history from real SSH Fish 3.1 PTY output" {
+    const Terminal = @import("Terminal.zig");
+    const alloc = std.testing.allocator;
+    var t = try Terminal.init(std.testing.io, alloc, .{ .cols = 120, .rows = 32 });
+    defer t.deinit(alloc);
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice(@embedFile("testdata/omg-shell/remote-fish.vt"));
+    const records = t.screens.active.omg_command_history.entries.items;
+    const commands = [_][]const u8{ "ll", "ll", "ll", "ll", "false", "false | true", "printf \"%s\\n\" \"one\ntwo\"" };
+    try std.testing.expectEqual(commands.len, records.len);
+    for (records, commands, 0..) |entry, text, index| {
+        try std.testing.expectEqualStrings(text, entry.text);
+        try std.testing.expectEqual(@as(u64, @intCast(index + 1)), entry.id);
+        if (index < 4) try std.testing.expect(entry.isValid());
+    }
+}
+
 test "OMG command history includes the final cell before delayed wrap" {
     const Terminal = @import("Terminal.zig");
     const alloc = std.testing.allocator;

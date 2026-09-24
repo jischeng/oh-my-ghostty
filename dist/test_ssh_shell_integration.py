@@ -12,6 +12,8 @@ from pathlib import Path
 import re
 import select
 import shutil
+import shlex
+import sys
 import struct
 import subprocess
 import tempfile
@@ -24,6 +26,7 @@ OSC = re.compile(rb"\x1b\]133;([^\x07\x1b]*)(?:\x07|\x1b\\)")
 
 class Session:
     def __init__(self, argv, env):
+        self.output = bytearray()
         self.master, slave = os.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 120, 0, 0))
 
@@ -48,6 +51,7 @@ class Session:
                 if not chunk:
                     break
                 output.extend(chunk)
+                self.output.extend(chunk)
             elif required in output and b"133;B" in output:
                 return bytes(output)
             if self.process.poll() is not None:
@@ -60,7 +64,10 @@ class Session:
 
     def close(self):
         if self.process.poll() is None:
-            os.write(self.master, b"exit\n")
+            try:
+                os.write(self.master, b"exit\n")
+            except OSError:
+                pass
             try:
                 self.process.wait(timeout=3)
             except subprocess.TimeoutExpired:
@@ -75,7 +82,7 @@ def markers(data, kind):
     return [m for m in OSC.findall(data) if m.split(b";", 1)[0] == kind]
 
 
-def exercise(binary, shell, mode, preintegrated=False):
+def exercise(binary, shell, mode, preintegrated=False, capture_dir=None):
     name = Path(shell).name
     with tempfile.TemporaryDirectory(prefix="omg-ssh shell's-") as temporary:
         home = Path(temporary)
@@ -109,10 +116,12 @@ def exercise(binary, shell, mode, preintegrated=False):
                 f.write(f'\nsource "{ROOT}/src/shell-integration/{integration}"\n')
         fixture = {p: p.read_bytes() for p in [config / "config.fish", home / ".zshrc", home / ".bashrc"] if p.exists()}
         # Explicit --ssh executable captures the real generated payload and
-        # executes it locally; it cannot make an SSH connection.
+        # executes it via the remote login Shell, just like sshd. Testing only
+        # /bin/sh here misses Fish's parsing of the outer command string.
+        # This transport cannot make an SSH connection.
         fake = home / "fake-ssh"
-        fake.write_text("#!/bin/sh\n[ \"$1\" = fixture ] && [ \"$2\" = -tt ] && [ $# = 3 ] || exit 91\n"
-                        "printf %s \"$3\" | wc -c > \"$HOME/payload-size\"\nexec /bin/sh -c \"$3\"\n")
+        transport = ROOT / "dist/ssh_integration_test_transport.py"
+        fake.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(transport))} "$@"\n')
         fake.chmod(0o700)
         env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"),
                "TERM": "dumb", "SHELL": shell, "TMPDIR": str(home),
@@ -140,6 +149,8 @@ def exercise(binary, shell, mode, preintegrated=False):
             for _ in range(4):
                 result = session.command("ll")
                 assert len(markers(result, b"C")) == 1, (name, mode, "duplicate/missing C", result[-700:])
+                if name == "fish":
+                    assert markers(result, b"C") == [b"C;cmdline_url=ll"], "wrong submitted Fish command"
             failed = session.command("false")
             assert b"[S:1" in failed, (name, mode, "prompt status changed", failed[-700:])
             assert any(m.startswith(b"D;1") for m in markers(failed, b"D")), (name, mode, "wrong D", markers(failed, b"D"))
@@ -174,7 +185,9 @@ def exercise(binary, shell, mode, preintegrated=False):
             assert not markers(empty, b"C"), "empty Enter recorded as execution"
             os.write(session.master, b"echo NEVER_RUN")
             time.sleep(0.05)  # Let the editor render before cancelling its input.
-            os.write(session.master, b"\x03\x0c")
+            os.write(session.master, b"\x03")
+            time.sleep(0.1)  # Older login Shells flush queued input on SIGINT.
+            os.write(session.master, b"\x0c")
             cancelled = session.read()
             assert not markers(cancelled, b"C"), "cancelled input recorded as execution"
             # Resize/repaint must not create a new command record.
@@ -185,6 +198,12 @@ def exercise(binary, shell, mode, preintegrated=False):
             for p, original in fixture.items():
                 assert p.read_bytes() == original, f"modified user config: {p.name}"
             assert not list(home.glob("omg-ssh.*")), "temporary bootstrap leaked"
+            if capture_dir and mode == "remote" and not preintegrated:
+                capture_dir.mkdir(parents=True, exist_ok=True)
+                # Remove host/cwd metadata; retain only this synthetic terminal
+                # session for core VT parser regression tests.
+                data = re.sub(rb"\x1b\](?:3008|7);[^\x07\x1b]*(?:\x07|\x1b\\)", b"", bytes(session.output))
+                (capture_dir / f"remote-{name}.vt").write_bytes(data)
             existing = " (existing integration)" if preintegrated else ""
             print(f"PASS {mode} {shell}{existing}: repeats, status, PS2, empty/cancel, resize, user hooks, rc preservation")
         finally:
@@ -195,13 +214,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--omg", required=True)
     parser.add_argument("--shell", action="append", help="test selected Shell executable(s)")
+    parser.add_argument("--capture-dir", type=Path, help="optional synthetic VT fixtures (no real SSH data)")
     args = parser.parse_args()
     binary = str(Path(args.omg).resolve())
+    if not Path(binary).is_file() or not os.access(binary, os.X_OK):
+        parser.error("--omg must point to an executable development build")
+    if args.shell:
+        for shell in args.shell:
+            if not Path(shell).is_file() or not os.access(shell, os.X_OK):
+                parser.error(f"Shell test executable is unavailable: {shell}")
     candidates = args.shell or ["/bin/bash", "/opt/homebrew/bin/bash", "/bin/zsh", shutil.which("fish")]
     for shell in dict.fromkeys(candidates):
         if shell and Path(shell).is_file():
             for mode in ["local", "remote"]:
-                exercise(binary, shell, mode)
+                exercise(binary, shell, mode, capture_dir=args.capture_dir)
             exercise(binary, shell, "remote", preintegrated=True)
 
 

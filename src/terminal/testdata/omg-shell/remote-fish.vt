@@ -1,0 +1,21 @@
+⏎                                                                                                                      ⏎ Welcome to fish, the friendly interactive shell
+Type `help` for instructions on how to use fish
+[?2004h]133;D]133;A[S:0 P:0] TEST> ]133;B[S:0 P:0] TEST> ]133;B[S:0 P:0] TEST> ]133;Bll[S:0 P:0] TEST> ]133;Bll
+[?2004l]133;C;cmdline_url=llLIST
+]133;D;0⏎                                                                                                                      ⏎ [?2004h]133;D]133;A[S:0 P:0] TEST> ]133;B[S:0 P:0] TEST> ]133;Bll[S:0 P:0] TEST> ]133;Bll
+[?2004l]133;C;cmdline_url=llLIST
+]133;D;0⏎                                                                                                                      ⏎ [?2004h]133;D]133;A[S:0 P:0] TEST> ]133;B[S:0 P:0] TEST> ]133;Bll[S:0 P:0] TEST> ]133;Bll
+[?2004l]133;C;cmdline_url=llLIST
+]133;D;0⏎                                                                                                                      ⏎ [?2004h]133;D]133;A[S:0 P:0] TEST> ]133;B[S:0 P:0] TEST> ]133;Bll[S:0 P:0] TEST> ]133;Bll
+[?2004l]133;C;cmdline_url=llLIST
+]133;D;0⏎                                                                                                                      ⏎ [?2004h]133;D]133;A[S:0 P:0] TEST> ]133;B[S:0 P:0] TEST> ]133;Bfalse[S:0 P:0] TEST> ]133;Bfalse
+[?2004l]133;C;cmdline_url=false]133;D;1⏎                                                                                                                      ⏎ [?2004h]133;D]133;A[S:1 P:1] TEST> ]133;B[S:1 P:1] TEST> ]133;Bfalse [S:1 P:1] TEST> ]133;Bfalse [S:1 P:1] TEST> ]133;Bfalse | [S:1 P:1] TEST> ]133;Bfalse | [S:1 P:1] TEST> ]133;Bfalse | true[S:1 P:1] TEST> ]133;Bfalse | true
+[?2004l]133;C;cmdline_url=false%20%7C%20true]133;D;0⏎                                                                                                                      ⏎ [?2004h]133;D]133;A[S:0 P:1 0] TEST> ]133;B[S:0 P:1 0] TEST> ]133;Bprintf [S:0 P:1 0] TEST> ]133;Bprintf [S:0 P:1 0] TEST> ]133;Bprintf "%s\n" [S:0 P:1 0] TEST> ]133;Bprintf "%s\n" [S:0 P:1 0] TEST> ]133;Bprintf "%s\n" "one[S:0 P:1 0] TEST> ]133;Bprintf "%s\n" "one
+[S:0 P:1 0] TEST> ]133;Bprintf "%s\n" "one
+two"[S:0 P:1 0] TEST> ]133;Bprintf "%s\n" "one
+two"
+[?2004l]133;C;cmdline_url=printf%20%22%25s%5Cn%22%20%22one%0Atwo%22one
+two
+]133;D;0⏎                                                                                                                      ⏎ [?2004h]133;D]133;A[S:0 P:0] TEST> ]133;B[S:0 P:0] TEST> ]133;B
+[?2004l]133;D;0⏎                                                                                                                      ⏎ [?2004h]133;D]133;A[S:0 P:0] TEST> ]133;B[S:0 P:0] TEST> ]133;Becho [S:0 P:0] TEST> ]133;Becho [S:0 P:0] TEST> ]133;Becho NEVER_RU[S:0 P:0] TEST> ]133;Becho NEVER_RUN[S:0 P:0] TEST> ]133;Becho NEVER_RUN[S:0 P:0] TEST> ]133;Becho NEVER_RUN^C
+[S:0 P:0] TEST> ]133;B[S:0 P:0] TEST> ]133;B[S:0 P:0] TEST> ]133;B[S:0 P:0] TEST> ]133;B[S:0 P:0] TEST> ]133;B[S:0 P:0] TEST> ]133;B

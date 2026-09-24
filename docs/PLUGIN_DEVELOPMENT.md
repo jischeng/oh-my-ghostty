@@ -947,11 +947,17 @@ paths), Zsh `ghostty-integration`, and the shared Fish
 these files only until startup has sourced them; Fish embeds the shared module
 in `-C`. Remote loading disables the local-only PATH/sudo/ssh-wrapping feature
 flags and does not require a remote OMG executable. Existing initialized
-integration is not registered twice.
+integration is not registered twice. The command passed to sshd uses an opaque
+base64 bootstrap envelope: the remote login Shell parses only a small quoted
+`/bin/sh` decoder, not embedded Bash/Zsh syntax. This avoids Fish 3.1 parsing
+`${BASH_SOURCE[0]}` as its own command substitution before /bin/sh starts.
+Remote `base64 -d` is required (missing decoder produces a clear error, not
+partial execution); the decoder pipe never consumes interactive PTY input.
 
 Fish emits A in a status-isolated prompt event, invokes the original prompt
 **before** writing B, and uses the submitted line in bounded `cmdline_url`;
-this preserves both `$status` and `$pipestatus` seen by themes. Bash captures
+this preserves both `$status` and `$pipestatus` seen by themes. Empty preexec
+events from older Fish do not emit C. Bash captures
 the command status before user prompt callbacks, then marks their final PS1
 and PS2; its legacy preexec dispatcher retains prior DEBUG handlers. Zsh
 uses the local implementation's PS1/PS2 wrapping, deferred setup and redraw
@@ -969,8 +975,12 @@ unmatched shortcuts continue to the terminal.
 
 `python3 dist/test_ssh_shell_integration.py --omg
 macos/build/Debug/OMG.app/Contents/MacOS/omg` verifies the generated +ssh
-payload using a fake local transport and controlling PTY, not a retyped copy
-of the hooks. The matrix compares local/remote/existing-integration startup
+payload using a fake transport with **separate local and remote controlling
+PTYs**, including the target login Shell's `-c` parsing before /bin/sh. This
+keeps signal/input behavior faithful to SSH and avoids testing only a direct
+/bin/sh shortcut or retyped copy of the hooks. `--shell /path/to/fish` can test
+older versions; the compatibility matrix includes Fish 3.1.2, 3.3.1 and 3.7.1
+as well as modern Fish. The matrix compares local/remote/existing-integration startup
 for available Fish, Zsh, Bash 3 and modern Bash, covering repeated commands,
 failed-command status, Fish pipeline status, multiline/dynamically changed
 PS2, empty Enter, cancelled input, resize/redraw without new execution,
@@ -1042,8 +1052,11 @@ The host-only `ghostty_surface_omg_export_scrollback_vt` API writes an exclusive
 mode-0600 file without occupying the clipboard; its formatter avoids baking
 old default colors into a new theme. Snapshot-only formatting drops styled,
 textless cells at the end of non-wrapped rows (including Starship/powerline
-redraw fill) so replay does not paint stray colored rectangles; live terminal
-rendering and valid command anchor coordinates are unchanged. Export is capped at 2 MiB per pane and
+redraw fill). Soft-wrapped trailing blanks retain their width but render with
+default styling; otherwise repeated recovery into narrower panes turns that
+fill into colored bars. Real colored text and interior styled spaces are
+preserved, and no live cell is mutated. Tests cover multiple capture/replay
+cycles at different widths with distinct repeated-command anchors. Export is capped at 2 MiB per pane and
 fails closed when it cannot represent all retained valid command anchors.
 The directory is mode 0700; snapshots older than seven days, symlinks,
 non-owner files and oversized files are not replayed. A failed fresh capture

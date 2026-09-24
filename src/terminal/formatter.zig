@@ -96,9 +96,9 @@ pub const Options = struct {
     /// is currently only space characters (0x20).
     trim: bool = true,
 
-    /// OMG VT snapshot export only: omit styled blank cells after the last
-    /// visible character on a non-wrapped row. Full-screen prompt redraws can
-    /// leave background-only cells that would replay as colored rectangles.
+    /// OMG VT snapshot export only: omit styled blank tails on hard lines,
+    /// and preserve their spacing without background styling on soft wraps.
+    /// Otherwise a restore into a narrower pane reflows them as colored blocks.
     trim_styled_row_tail: bool = false,
 
     /// Replace matching Unicode codepoints with some other values.
@@ -1190,7 +1190,7 @@ pub const PageFormatter = struct {
             // - First row: start_x to end of row (or end_x if single row)
             // - Last row: start of row to end_x
             // - Middle rows: full width
-            const cells_subset, const row_start_x = cells_subset: {
+            const cells_subset, const row_start_x, const blank_tail = cells_subset: {
                 // The end is always straightforward
                 const row_end_x: size.CellCountInt = if (self.rectangle or y == end_y)
                     end_x + 1
@@ -1214,17 +1214,18 @@ pub const PageFormatter = struct {
                     };
                 } else 0;
 
-                var effective_end = row_end_x;
-                if (self.opts.trim_styled_row_tail and !row.wrap and !self.rectangle) {
-                    while (effective_end > row_start_x) {
-                        const cell = cells[effective_end - 1];
+                var text_end = row_end_x;
+                if (self.opts.trim_styled_row_tail and !self.rectangle) {
+                    while (text_end > row_start_x) {
+                        const cell = cells[text_end - 1];
                         const cp = cell.codepoint();
-                        if (cp != 0 and cp != ' ') break;
-                        effective_end -= 1;
+                        if (cell.content_tag == .codepoint_grapheme or (cp != 0 and cp != ' ')) break;
+                        text_end -= 1;
                     }
                 }
+                const effective_end = if (row.wrap) row_end_x else text_end;
                 const subset = cells[row_start_x..effective_end];
-                break :cells_subset .{ subset, row_start_x };
+                break :cells_subset .{ subset, row_start_x, text_end - row_start_x };
             };
 
             // If this row is blank, accumulate to avoid a bunch of extra
@@ -1305,7 +1306,14 @@ pub const PageFormatter = struct {
             // Go through each cell and print it
             var cell_i: usize = 0;
             while (cell_i < cells_subset.len) : (cell_i += 1) {
-                const cell: *const Cell = &cells_subset[cell_i];
+                // Soft-wrap spaces cannot be removed (that would join words
+                // and move anchors). Render tail fill in the default style,
+                // leaving the live terminal cells and their Pin map untouched.
+                const neutral: Cell = .{ .content = .{ .codepoint = .{ .data = ' ' } } };
+                const normalize_tail = self.opts.trim_styled_row_tail and
+                    row.wrap and cell_i >= blank_tail and
+                    cells_subset[cell_i].wide == .narrow;
+                const cell: *const Cell = if (normalize_tail) &neutral else &cells_subset[cell_i];
                 const x: size.CellCountInt = @intCast(row_start_x + cell_i);
 
                 // Fast path: runs of simple cells (single codepoint, no
@@ -1314,6 +1322,7 @@ pub const PageFormatter = struct {
                 // only valid when we have no codepoint map and when our
                 // current style/hyperlink state is known-stable.
                 if (cp_map_empty) fast: {
+                    if (self.opts.trim_styled_row_tail and row.wrap and cell_i >= blank_tail) break :fast;
                     if (comptime formatStyled(emit)) {
                         if (style_id == invalid_style_id) break :fast;
                     }
@@ -1322,7 +1331,7 @@ pub const PageFormatter = struct {
                         emit,
                         self.point_map != null,
                         writer,
-                        cells_subset[cell_i..],
+                        cells_subset[cell_i..if (cell_i < blank_tail) blank_tail else cells_subset.len],
                         x,
                         y,
                         style_id,

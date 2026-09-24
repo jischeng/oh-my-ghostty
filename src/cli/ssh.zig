@@ -793,7 +793,7 @@ fn remoteShellCommand(
     var command: std.Io.Writer.Allocating = .init(alloc);
     defer command.deinit();
     command.writer.writeAll("exec /bin/sh -c ") catch return null;
-    writeLoginShellQuoted(&command.writer, script.written()) catch return null;
+    writeEncodedBootstrapArgument(&command.writer, script.written()) catch return null;
     return command.toOwnedSlice() catch null;
 }
 
@@ -1074,20 +1074,14 @@ fn writeFishSingleQuoted(writer: *std.Io.Writer, value: []const u8) !void {
     try writer.writeByte('\'');
 }
 
-/// OpenSSH passes its command through the user's login shell, which may be
-/// Fish. Unlike POSIX sh, Fish interprets backslashes inside single quotes.
-/// Emit both quotes and backslashes outside quoted segments so every shell
-/// delivers the exact same script bytes to /bin/sh -c.
-fn writeLoginShellQuoted(writer: *std.Io.Writer, value: []const u8) !void {
-    try writer.writeByte('\'');
-    for (value) |byte| {
-        switch (byte) {
-            '\'' => try writer.writeAll("'\\''"),
-            '\\' => try writer.writeAll("'\\\\'"),
-            else => try writer.writeByte(byte),
-        }
-    }
-    try writer.writeByte('\'');
+/// sshd first parses the command using the account's login Shell. Fish 3.1
+/// misparses deeply concatenated quoting around the embedded Bash/Zsh sources
+/// (for example ${BASH_SOURCE[0]}). Keep their syntax opaque until /bin/sh.
+/// Command substitution reads only the decoder pipe, not the interactive PTY.
+fn writeEncodedBootstrapArgument(writer: *std.Io.Writer, value: []const u8) !void {
+    try writer.writeAll("'command -v base64 >/dev/null 2>&1 || { echo \"OMG SSH bootstrap requires base64\" >&2; exit 127; }; __omg_bootstrap=$(printf %s ");
+    try std.base64.standard.Encoder.encodeWriter(writer, value);
+    try writer.writeAll(" | base64 -d) || exit 1; exec /bin/sh -c \"$__omg_bootstrap\"'");
 }
 
 fn writeShellSingleQuoted(writer: *std.Io.Writer, value: []const u8) !void {
@@ -1215,7 +1209,7 @@ test remoteShellCommand {
     try testing.expect(std.mem.indexOf(u8, zsh_command, "-O") != null);
     try testing.expect(std.mem.indexOf(u8, zsh_command, "rm -rf --") != null);
 
-    const command = remoteShellCommand(
+    const encoded_command = remoteShellCommand(
         testing.allocator,
         "cloud",
         "omg-ssh-1",
@@ -1223,8 +1217,11 @@ test remoteShellCommand {
         null,
         null,
     ).?;
+    defer testing.allocator.free(encoded_command);
+    try testing.expect(std.mem.startsWith(u8, encoded_command, "exec /bin/sh -c '"));
+    try testing.expect(std.mem.indexOf(u8, encoded_command, "BASH_SOURCE") == null);
+    const command = try decodeBootstrapForTest(testing.allocator, encoded_command);
     defer testing.allocator.free(command);
-    try testing.expect(std.mem.indexOf(u8, command, "exec /bin/sh -c") != null);
     try testing.expect(std.mem.indexOf(u8, command, "case ${SHELL##*/}") != null);
     try testing.expect(std.mem.indexOf(u8, command, "__ghostty_command_markers_init") != null);
     try testing.expect(std.mem.indexOf(u8, command, "cmdline_url=%s") != null);
@@ -1254,7 +1251,7 @@ test remoteShellCommand {
     try testing.expect(!validAgentSessionID("bad session"));
     try testing.expect(!validAgentSessionID("../escape"));
 
-    const full_cwd_command = remoteShellCommand(
+    const encoded_cwd_command = remoteShellCommand(
         testing.allocator,
         "cloud",
         "omg-ssh-cwd",
@@ -1262,6 +1259,8 @@ test remoteShellCommand {
         null,
         null,
     ).?;
+    defer testing.allocator.free(encoded_cwd_command);
+    const full_cwd_command = try decodeBootstrapForTest(testing.allocator, encoded_cwd_command);
     defer testing.allocator.free(full_cwd_command);
     try testing.expect(std.mem.indexOf(u8, full_cwd_command, "OMG_REMOTE_CWD=") != null);
     try testing.expect(std.mem.indexOf(u8, full_cwd_command, "project") != null);
@@ -1274,6 +1273,28 @@ test remoteShellCommand {
         "'/home/user/project\\'s code'",
         fish_buffer[0..fish_writer.end],
     );
+}
+
+fn decodeBootstrapForTest(alloc: Allocator, command: []const u8) ![]u8 {
+    const prefix = "__omg_bootstrap=$(printf %s ";
+    const start = (std.mem.indexOf(u8, command, prefix) orelse return error.MissingPayload) + prefix.len;
+    const end = std.mem.indexOfPos(u8, command, start, " | base64 -d)") orelse return error.MissingPayload;
+    const encoded = command[start..end];
+    const data = try alloc.alloc(u8, try std.base64.standard.Decoder.calcSizeForSlice(encoded));
+    errdefer alloc.free(data);
+    try std.base64.standard.Decoder.decode(data, encoded);
+    return data;
+}
+
+test "SSH encoded bootstrap protects shell metacharacters" {
+    const text = "\n'quoted' \\ backslash ${BASH_SOURCE[0]} $(dirname foo)\n你好\n";
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try writeEncodedBootstrapArgument(&output.writer, text);
+    const decoded = try decodeBootstrapForTest(std.testing.allocator, output.written());
+    defer std.testing.allocator.free(decoded);
+    try std.testing.expectEqualStrings(text, decoded);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "BASH_SOURCE") == null);
 }
 
 test "replay support directory is isolated by application channel" {

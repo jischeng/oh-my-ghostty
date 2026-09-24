@@ -2,6 +2,7 @@
 Run: python3 dist/test_ssh_agent_wrappers.py
 """
 from pathlib import Path
+import base64
 import json
 import os
 import re
@@ -11,6 +12,25 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+
+BOOTSTRAP_PREFIX = "__omg_bootstrap=$(printf %s "
+BOOTSTRAP_SUFFIX = " | base64 -d)"
+
+
+def decoded_bootstrap(envelope):
+    """Return the bootstrap script behind the base64 envelope.
+
+    The session id (omg-ssh-<n>) lives inside the encoded script, so the
+    acceptance comparison must decode before normalizing it.
+    """
+    start = envelope.find(BOOTSTRAP_PREFIX)
+    if start < 0:
+        return envelope
+    start += len(BOOTSTRAP_PREFIX)
+    end = envelope.find(BOOTSTRAP_SUFFIX, start)
+    if end < 0:
+        raise AssertionError("SSH bootstrap envelope is missing its base64 terminator")
+    return base64.b64decode(envelope[start:end]).decode()
 
 
 class RemoteAgentWrappersTests(unittest.TestCase):
@@ -76,8 +96,9 @@ class RemoteAgentWrappersTests(unittest.TestCase):
                             "--ssh=" + str(capture), "--remote-agent=antigravity", "--", "cloud"],
                            env=dict(os.environ, OMG_CAPTURE=str(output)), capture_output=True, check=True, timeout=30)
             cls.binary_bootstrap = json.loads(output.read_text())[-1]
-            normalized = re.sub(r"omg-ssh-[0-9]+", "omg-ssh-test", cls.binary_bootstrap)
-            if normalized != cls.bootstrap:
+            normalized = re.sub(r"omg-ssh-[0-9]+", "omg-ssh-test",
+                                decoded_bootstrap(cls.binary_bootstrap))
+            if normalized != decoded_bootstrap(cls.bootstrap):
                 raise AssertionError("App binary emits a different SSH bootstrap than current source; rebuild GhosttyKit before linking the app")
         cls.scripts = {"fish": fish.lstrip("; "), "bash": shell, "zsh": shell}
         for name in ("agy", "codex"):

@@ -24,6 +24,20 @@ class RemoteAgentWrappersTests(unittest.TestCase):
         source = (ROOT / "src/cli/ssh.zig").read_text()
         agent = source.split("const RemoteAgent = enum {", 1)[1].split("\n};", 1)[0]
         wrapper = source.split("fn remoteShellCommand(", 1)[1].split("\nfn writeSessionStart", 1)[0]
+        # The snippet runs as its own module rooted at the temp directory, so
+        # the packaging module and the files it embeds must live inside that
+        # root with the same layout as src/: cli/ssh_shell_integration.zig
+        # embeds ../shell-integration/....
+        wrapper = wrapper.replace(
+            '@import("ssh_shell_integration.zig")',
+            '@import("cli/ssh_shell_integration.zig")',
+        )
+        (cls.directory / "cli").mkdir()
+        shutil.copyfile(
+            ROOT / "src/cli/ssh_shell_integration.zig",
+            cls.directory / "cli" / "ssh_shell_integration.zig",
+        )
+        shutil.copytree(ROOT / "src/shell-integration", cls.directory / "shell-integration")
         driver = cls.directory / "wrappers.zig"
         driver.write_text(
             'const std = @import("std");\n'

@@ -14,14 +14,14 @@ struct TerminalHistoryServiceTests {
         #expect(service.validate(anchor, surfaceID: pane) == nil)
         #expect(service.validate(anchor, surfaceID: UUID()) == .wrongSession)
         let remote = service.synchronizeSession(surfaceID: pane, connectionID: "ssh-A") { cleared += 1 }
-        #expect(cleared == 1)
+        #expect(cleared == 0)
         #expect(remote != local)
         #expect(service.validate(anchor, surfaceID: pane) == .wrongSession)
         #expect(service.synchronizeSession(surfaceID: pane, connectionID: "ssh-A") { cleared += 1 } == remote)
-        #expect(cleared == 1) // CWD and connecting -> ready do not change the connection ID.
+        #expect(cleared == 0) // CWD and connecting -> ready do not change the connection ID.
         service.synchronizeSession(surfaceID: pane, connectionID: "ssh-B") { cleared += 1 }
         service.synchronizeSession(surfaceID: pane, connectionID: nil) { cleared += 1 }
-        #expect(cleared == 3)
+        #expect(cleared == 0)
         #expect(service.validate(anchor, surfaceID: pane) == .wrongSession)
         #expect(service.validate(.unavailable(.transcriptOnly), surfaceID: pane) == .unavailable)
         service.removeSurface(pane)
@@ -38,19 +38,48 @@ struct TerminalHistoryServiceTests {
         var clearCount = 0
         let remoteEpoch = service.synchronizeSession(surfaceID: id, connectionID: "ssh-A",
             sourceLabel: "SSH · cloud", captured: { [local] }, clear: { clearCount += 1 })
-        #expect(clearCount == 1)
+        #expect(clearCount == 0)
         #expect(service.archivedCommands(for: id).map(\.text) == ["ll"])
-        #expect(service.archivedCommands(for: id)[0].location == .unavailable(.expired))
+        #expect(service.archivedCommands(for: id)[0].location == local.location)
         #expect(service.archivedCommands(for: id)[0].sourceLabel == "Local")
         let remote = InspectorHistoryItem(id: "remote-ll", kind: .command, text: "ll", timestamp: date,
             location: .command(surfaceID: id, executionID: 2, epoch: remoteEpoch),
             sourceLabel: "SSH · cloud")
         service.synchronizeSession(surfaceID: id, connectionID: "ssh-B",
-            sourceLabel: "SSH · other", captured: { [remote] }, clear: { clearCount += 1 })
-        #expect(clearCount == 2)
+            sourceLabel: "SSH · other", captured: { [local, remote] }, clear: { clearCount += 1 })
+        #expect(clearCount == 0)
         #expect(service.archivedCommands(for: id).map(\.sourceLabel) == ["Local", "SSH · cloud"])
         #expect(service.archivedCommands(for: id).count == 2) // repeated ll survives
-        #expect(service.validate(remote.location, surfaceID: id) == .wrongSession)
+        #expect(service.validate(remote.location, surfaceID: id) == nil)
+        #expect(service.validate(local.location, surfaceID: id) == nil)
+        #expect(service.validate(local.location, surfaceID: UUID()) == .wrongSession)
+        service.synchronizeSession(surfaceID: id, connectionID: nil,
+            captured: { [local, remote] }, clear: { clearCount += 1 })
+        #expect(service.archivedCommands(for: id).count == 2)
+        #expect(clearCount == 0)
+        service.synchronizeSession(surfaceID: id, connectionID: "unverified-replay",
+            preserveAnchors: false, clear: { clearCount += 1 })
+        #expect(clearCount == 1)
+        #expect(service.archivedCommands(for: id).allSatisfy { !$0.location.isAvailable })
+        #expect(service.validate(local.location, surfaceID: id) == .wrongSession)
+    }
+
+    @Test func expiredPinsDoNotRegainNavigationAcrossConnections() {
+        let service = TerminalHistoryService()
+        let pane = UUID()
+        let epoch = service.synchronizeSession(surfaceID: pane, connectionID: nil) {}
+        let item = InspectorHistoryItem(id: "local-command", kind: .command, text: "ssh cloud",
+            location: .command(surfaceID: pane, executionID: 1, epoch: epoch), sourceLabel: "Local")
+        service.synchronizeSession(surfaceID: pane, connectionID: "ssh-A", captured: { [item] }, clear: {})
+        #expect(service.validate(item.location, surfaceID: pane) == nil)
+        // A subsequent core snapshot has no surviving old Pin (clear/prune).
+        service.synchronizeSession(surfaceID: pane, connectionID: nil, captured: { [] }, clear: {})
+        #expect(service.archivedCommands(for: pane).first?.location == .unavailable(.expired))
+        #expect(service.validate(item.location, surfaceID: pane) == .wrongSession)
+    }
+
+    @Test func emptyIdentifiedSnapshotDoesNotInvalidateNewShellCommands() {
+        #expect(TerminalHistoryService.verifiedReplay([], segment: [], saved: [], surfaceID: UUID()) == [])
     }
 
     @Test func readySSHHostIdentityUpdatesLabelWithoutStartingAnotherEpoch() {
@@ -152,7 +181,7 @@ struct TerminalHistoryServiceTests {
         #expect(wrongHost[1].location == .unavailable(.expired))
     }
 
-    @Test func localToSSHArchivesOnlyNewCommandsAfterAnExactReplaySuffix() {
+    @Test func identicalLegacyTextAndTimeNeverDeduplicateDifferentOccurrences() {
         let id = UUID()
         let epoch = UUID()
         let date = Date(timeIntervalSince1970: 1_000)
@@ -165,13 +194,6 @@ struct TerminalHistoryServiceTests {
                 timestamp: date, location: .command(surfaceID: id, executionID: UInt64(index), epoch: epoch),
                 sourceLabel: "Local")
         }
-        #expect(TerminalHistoryService.excludingRestoredSuffix(commands, saved: saved,
-                                                                  canReconcile: true).map(\.text) == ["pwd"])
-        #expect(TerminalHistoryService.excludingRestoredSuffix(commands, saved: saved,
-                                                                  canReconcile: false) == commands)
-        #expect(TerminalHistoryService.excludingRestoredSuffix(commands, saved: [
-            .init(text: "ll", timestamp: date, sourceLabel: "SSH · other"), saved[1]
-        ], canReconcile: true) == commands)
         let archived = commands.map { InspectorHistoryItem(id: $0.id, kind: .command,
             text: $0.text, timestamp: $0.timestamp, location: .unavailable(.expired),
             sourceLabel: $0.sourceLabel) }

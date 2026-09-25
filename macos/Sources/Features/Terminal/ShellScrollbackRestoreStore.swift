@@ -88,9 +88,8 @@ enum ShellScrollbackRestoreStore {
                 if case .sshReady = context.state, view.sshResumeDescriptor == nil { continue }
                 let commands = TerminalHistoryService.shared.commands(for: view.id)
                 let keys = ShellSnapshotExportKeys(commands: commands)
-                let local: Bool = if case .local = context.state { true } else { false }
                 if !save(surfaceID: view.id, baseURL: baseURL, commands: commands,
-                         allowsAnchorReconciliation: local, export: { temporary in
+                         export: { temporary in
                     temporary.path.withCString { path in
                         ghostty_surface_omg_export_scrollback_vt(
                             surface, path, maximumBytes - 256,
@@ -113,7 +112,6 @@ enum ShellScrollbackRestoreStore {
         surfaceID: UUID,
         baseURL: URL,
         commands: [InspectorHistoryItem] = [],
-        allowsAnchorReconciliation: Bool = true,
         export: (URL) -> Bool
     ) -> Bool {
         let root = directory(baseURL: baseURL)
@@ -136,32 +134,33 @@ enum ShellScrollbackRestoreStore {
             invalidateOldCapture()
             return false
         }
-        let retained = Array(commands.prefix(100))
+        // Keep every exportable Pin's metadata, even when older read-only
+        // rows (or changed clocks) sort ahead of it in the UI.
+        let liveCommands = commands.filter { $0.location.isAvailable }
+        guard liveCommands.count <= 100 else {
+            invalidateOldCapture()
+            return false
+        }
+        let retained = (liveCommands + commands.filter { !$0.location.isAvailable }
+            .prefix(100 - liveCommands.count)).sorted {
+                ($0.timestamp ?? .distantPast) > ($1.timestamp ?? .distantPast)
+            }
         let saved = retained.map { item in
             SavedCommand(text: item.text, timestamp: item.timestamp, sourceLabel: item.sourceLabel,
-                         occurrenceID: allowsAnchorReconciliation ? nil : (item.replayKey ?? item.id))
+                         occurrenceID: item.replayKey ?? item.id)
         }
-        var replay: [SavedCommand]?
-        if !allowsAnchorReconciliation {
-            // The VT export includes only valid tracked entries. Never pair
-            // archived records or a truncated sidecar by matching `ll` text.
-            let live = retained.filter { $0.location.isAvailable }
-            let allLive = commands.filter { $0.location.isAvailable }
-            guard live.count == allLive.count else {
-                invalidateOldCapture()
-                return false
-            }
-            replay = live.sorted { lhs, rhs in
-                if case .command(_, let first, _) = lhs.location,
-                   case .command(_, let second, _) = rhs.location { return first < second }
-                return false
-            }.map { item in
-                SavedCommand(text: item.text, timestamp: item.timestamp,
-                             sourceLabel: item.sourceLabel, occurrenceID: item.replayKey ?? item.id)
-            }
+        // Export order comes from core execution IDs, never timestamps or
+        // text. It includes the still-valid local and remote historical Pins.
+        let replay = liveCommands.sorted { lhs, rhs in
+            if case .command(_, let first, _) = lhs.location,
+               case .command(_, let second, _) = rhs.location { return first < second }
+            return false
+        }.map { item in
+            SavedCommand(text: item.text, timestamp: item.timestamp,
+                         sourceLabel: item.sourceLabel, occurrenceID: item.replayKey ?? item.id)
         }
-        let archive = CommandArchive(version: 3, surfaceID: surfaceID, commands: saved,
-                                     allowsAnchorReconciliation: allowsAnchorReconciliation,
+        let archive = CommandArchive(version: 4, surfaceID: surfaceID, commands: saved,
+                                     allowsAnchorReconciliation: false,
                                      replayCommands: replay)
         guard let data = try? JSONEncoder().encode(archive),
               data.count <= maximumBytes,
@@ -209,6 +208,7 @@ enum ShellScrollbackRestoreStore {
         let file = root.appendingPathComponent("\(surfaceID.uuidString).vt")
         guard validFile(file, now: now) else { return nil }
         restoredSurfaceIDs.insert(surfaceID)
+        savedCommandCache.removeValue(forKey: surfaceID)
         return file
     }
 
@@ -229,7 +229,7 @@ enum ShellScrollbackRestoreStore {
         let file = root.appendingPathComponent("\(surfaceID.uuidString).json")
         guard validFile(file), let data = try? Data(contentsOf: file),
               let archive = try? JSONDecoder().decode(CommandArchive.self, from: data),
-              (1...3).contains(archive.version), archive.surfaceID == surfaceID,
+              (1...4).contains(archive.version), archive.surfaceID == surfaceID,
               archive.commands.count <= 100,
               archive.commands.allSatisfy({
                   $0.text.utf8.count <= 16_384 && ($0.occurrenceID?.utf8.count ?? 0) <= 256

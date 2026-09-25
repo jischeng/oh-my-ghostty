@@ -1685,8 +1685,10 @@ pub const CAPI = struct {
         const core = &surface.core_surface;
         core.renderer_state.mutex.lockUncancelable(global.io());
         defer core.renderer_state.mutex.unlock(global.io());
-        if (core.renderer_state.terminal.screens.active_key != .primary) return;
-        const screen = core.renderer_state.terminal.screens.active;
+        // Connection transitions must retain primary-screen identity even
+        // when an SSH program temporarily displays the alternate screen.
+        // Jumping still requires an active primary screen below.
+        const screen = core.renderer_state.terminal.screens.get(.primary) orelse return;
         for (screen.omg_command_history.entries.items) |entry| {
             if (entry.isValid()) callback(userdata, entry.id, entry.text.ptr, entry.timestamp, if (entry.replay_key) |key| key.ptr else null);
         }

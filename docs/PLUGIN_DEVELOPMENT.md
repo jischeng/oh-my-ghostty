@@ -923,13 +923,16 @@ History belongs to the current Surface and connection epoch, never global shell
 history. The local epoch is initialized when each Surface registers, even if
 Info has never opened; moving that Surface between controllers does not reset
 its existing epoch. On a host-observed connection-ID change (including return to local),
-Info archives the previous epoch as read-only entries with its `Local` or
-`SSH · alias` origin (plus a short authenticated server-ID suffix once ready)
-before `ghostty_surface_omg_clear_commands` drops that
-epoch's navigation records on both screens (not terminal contents). The list
-interleaves these and the live epoch by timestamp; archived entries never
-inherit another host's active anchor. IDs are not reused; stale epoch
-references cannot jump.
+Info retains the previous epoch's valid tracked Pins with their original
+`Local` or `SSH · alias` origin (plus a short server-ID suffix once ready).
+An ordinary Local → SSH → another host → Local transition does not clear the
+core command records. New commands receive the new epoch; retained executions
+are excluded from new-epoch labeling by their core execution IDs. The list
+interleaves all segments by timestamp. A retained old-epoch location is allowed
+only for its owning Surface and known historical record, and the core still
+checks its Pin on every jump. Overwritten/pruned/reset pins become read-only;
+unknown initial remote state or an unverifiable replay still fails closed.
+IDs are not reused. Repeated text does not deduplicate different executions.
 Connecting-to-ready or CWD changes within one connection do not clear records.
 The transition is conservative: records captured before the host identifies a
 new connection may be discarded rather than attributed to the wrong host.
@@ -1003,6 +1006,9 @@ the core falls back to the semantic B/C input region; each execution retains
 its own tracked Pin. The host copies a snapshot through the internal
 `ghostty_surface_omg_commands` API and navigates with
 `ghostty_surface_omg_jump_command`; callbacks must not reenter terminal APIs.
+Snapshots enumerate primary-screen command records even while an alternate
+screen is visible, so a temporary TUI does not erase their origin metadata;
+actual navigation still requires the primary screen to be active.
 Successful jumps also return the anchored viewport row and grid top padding;
 AppKit overlays a non-interactive translucent highlight that pulses twice over
 that specific row, without modifying selection, terminal cells, or invoking
@@ -1034,20 +1040,24 @@ the validated local replay wrapper consumes the snapshot and prints the same
 `Session restored` boundary **before** restarting the SSH transport; it prints
 no boundary when the snapshot is absent, and the snapshot path is never sent
 to the remote process.
-SSH snapshot sidecar v3 records the host-owned occurrence ID and a separate,
-ordered list of only the core's valid current-epoch entries. The VT exporter
+Snapshot sidecar v4 uses one protocol for local and SSH panes: it records
+host-owned occurrence IDs and a separate ordered list of the core's valid
+entries across **all retained epochs**, including the local `ssh host`
+command that opened the connection. Valid anchors take retention priority
+over expired read-only rows when the 100-record metadata budget is reached. The VT exporter
 adds `OSC 133;B;aid=omg:<occurrence-id>` before each eligible input region;
 the core retains that ID only for that execution. On restart, the owning
 Surface must replay the *entire* marked sequence with unique IDs, exact
 command text and sidecar metadata before Info binds any old SSH record to its
-new tracked Pin. The first SSH connection transition then preserves only
-those verified core IDs while starting a separate epoch for new commands.
-If even one marker is missing, reordered, invalidated or mismatched, all old
-SSH records remain read-only. Previous v1/v2 SSH snapshots lack these marker
-identities and remain read-only. Local commands from before the old SSH
-connection were already cleared from the core; they remain read-only unless
-captured with their own markers in a future snapshot. A prior run that
-discarded the local epoch cannot reconstruct those records retroactively.
+new tracked Pin. Both local and SSH restoration verify marked entries once
+replay completes, without matching new unmarked input against old text.
+Connection transitions then retain those verified locations with their original
+source and start a separate epoch for new commands. Missing, reordered,
+invalidated or mismatched marker identities never grant a jump target.
+V3 SSH snapshots remain readable and can restore the markers they actually
+contain. V1/v2 SSH snapshots and any older local entries whose pins were
+already discarded remain read-only; the new behavior cannot reconstruct
+those missing identities retroactively.
 The host-only `ghostty_surface_omg_export_scrollback_vt` API writes an exclusive
 mode-0600 file without occupying the clipboard; its formatter avoids baking
 old default colors into a new theme. Snapshot-only formatting drops styled,
@@ -1072,7 +1082,7 @@ retains its separate existing behavior. Alternate-screen content is not saved.
 A crash before the normal termination capture has no new scrollback snapshot.
 
 The export uses tracked start and end pins to insert OSC 133 B/C around each
-surviving current-epoch Shell command as it reconstructs display output. Its
+surviving Shell command, including retained earlier epochs, as it reconstructs display output. Its
 host callback supplies borrowed occurrence IDs under the renderer lock and
 must not reenter terminal APIs; untrusted or absent IDs are never used to
 grant restored navigation. Its C marker

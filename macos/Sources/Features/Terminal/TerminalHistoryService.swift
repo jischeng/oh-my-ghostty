@@ -20,8 +20,10 @@ final class TerminalHistoryService {
     }
     private var sessions: [UUID: Session] = [:]
     private var archivedBySurface: [UUID: [InspectorHistoryItem]] = [:]
-    private var skippedInitialSSHReplay = Set<UUID>()
-    private var preservedExecutionIDs: [UUID: Set<UInt64>] = [:]
+    private var checkedReplay = Set<UUID>()
+    // Core IDs are monotonic even across reset. Retired entries must never
+    // be relabeled as belonging to a new host; one high-water mark is bounded.
+    private var historicalExecutionFloor: [UUID: UInt64] = [:]
     private let commandSource: ((UUID) -> [InspectorHistoryItem])?
 
     /// The injected source is also the test seam; there is no second history store.
@@ -59,39 +61,39 @@ final class TerminalHistoryService {
     func synchronizeSession(_ context: PaneSessionContext, in view: Ghostty.SurfaceView) {
         let saved = ShellScrollbackRestoreStore.savedCommands(for: view.id)
         let previous = sessions[view.id]
-        let skipReplay = previous != nil && view.sshResumeDescriptor != nil && saved != nil &&
-            !skippedInitialSSHReplay.contains(view.id)
-        var preserveVerified = false
-        if skipReplay, previous?.connectionID != Self.connectionID(context) {
-            skippedInitialSSHReplay.insert(view.id)
-            if let previous, let surface = view.surface, let saved,
-               let replaySegment = ShellScrollbackRestoreStore.replayCommands(for: view.id),
-               let verified = Self.verifiedReplay(
-                   snapshotCommands(surface, surfaceID: view.id, epoch: previous.epoch,
-                                    sourceLabel: previous.sourceLabel),
-                   segment: replaySegment, saved: saved, surfaceID: view.id
-               ) {
+        let changing = previous != nil && previous?.connectionID != Self.connectionID(context)
+        let pendingReplay = previous != nil && saved != nil && !checkedReplay.contains(view.id)
+        var rejectReplay = false
+        if pendingReplay, let previous, let surface = view.surface, let saved {
+            let rows = snapshotCommands(surface, surfaceID: view.id, epoch: previous.epoch,
+                                        sourceLabel: previous.sourceLabel)
+            if let segment = ShellScrollbackRestoreStore.replayCommands(for: view.id),
+               let verified = Self.verifiedReplay(rows.filter { $0.replayKey != nil },
+                   segment: segment, saved: saved, surfaceID: view.id) {
                 installVerifiedReplay(verified, for: view.id)
-                preserveVerified = true
+                checkedReplay.insert(view.id)
+            } else if changing {
+                // Legacy/unverifiable replay must not inherit the new SSH
+                // connection's identity. This is not an ordinary transition.
+                rejectReplay = true
+                checkedReplay.insert(view.id)
             }
         }
         synchronizeSession(surfaceID: view.id, connectionID: Self.connectionID(context),
-                           sourceLabel: Self.sourceLabel(context), captured: {
-            guard !skipReplay, let previous, let surface = view.surface else { return [] }
-            let rows = snapshotCommands(surface, surfaceID: view.id, epoch: previous.epoch,
-                                        sourceLabel: previous.sourceLabel)
-            return Self.excludingRestoredSuffix(rows, saved: saved,
-                canReconcile: ShellScrollbackRestoreStore.allowsAnchorReconciliation(for: view.id))
+                           sourceLabel: Self.sourceLabel(context), preserveAnchors: !rejectReplay, captured: {
+            guard !rejectReplay, let previous, let surface = view.surface else { return [] }
+            return snapshotCommands(surface, surfaceID: view.id, epoch: previous.epoch,
+                                    sourceLabel: previous.sourceLabel)
         }, clear: {
-            guard !preserveVerified, let surface = view.surface else { return }
+            guard let surface = view.surface else { return }
             ghostty_surface_omg_clear_commands(surface)
-            preservedExecutionIDs.removeValue(forKey: view.id)
         })
     }
 
     @discardableResult
     func synchronizeSession(
         surfaceID: UUID, connectionID: String?, sourceLabel: String = "Local",
+        preserveAnchors: Bool = true,
         captured: () -> [InspectorHistoryItem] = { [] }, clear: () -> Void
     ) -> UUID {
         if let session = sessions[surfaceID], session.connectionID == connectionID {
@@ -101,33 +103,56 @@ final class TerminalHistoryService {
             }
             return session.epoch
         }
-        if sessions[surfaceID] != nil {
-            let expired = captured().map { item in
-                InspectorHistoryItem(id: item.id, kind: .command, text: item.text,
-                    timestamp: item.timestamp, location: .unavailable(.expired),
-                    sourceLabel: item.sourceLabel, replayKey: item.replayKey)
-            }
-            archivedBySurface[surfaceID, default: []].append(contentsOf: expired)
-            if let count = archivedBySurface[surfaceID]?.count, count > 100 {
-                archivedBySurface[surfaceID]?.removeFirst(count - 100)
-            }
+        if sessions[surfaceID] != nil, preserveAnchors {
+            retainHistoricalAnchors(captured(), for: surfaceID)
+        } else if sessions[surfaceID] != nil || connectionID != nil {
+            clear()
+            archivedBySurface[surfaceID] = (archivedBySurface[surfaceID] ?? []).map(Self.expired)
+            historicalExecutionFloor.removeValue(forKey: surfaceID)
         }
-        // First observation of a local pane can retain commands already captured.
-        // First observation of a remote pane must not inherit an unknown host's rows.
-        if sessions[surfaceID] != nil || connectionID != nil { clear() }
         let epoch = UUID()
         sessions[surfaceID] = .init(connectionID: connectionID, epoch: epoch,
                                     sourceLabel: sourceLabel)
         return epoch
     }
 
+    private static func executionID(_ item: InspectorHistoryItem) -> UInt64? {
+        if case .command(_, let id, _) = item.location { return id }
+        return nil
+    }
+
+    private static func expired(_ item: InspectorHistoryItem) -> InspectorHistoryItem {
+        .init(id: item.id, kind: item.kind, text: item.text, timestamp: item.timestamp,
+              location: .unavailable(.expired), sourceLabel: item.sourceLabel, replayKey: item.replayKey)
+    }
+
+    private func retainHistoricalAnchors(_ records: [InspectorHistoryItem], for surfaceID: UUID) {
+        let valid = Set(records.compactMap(Self.executionID))
+        let previousFloor = historicalExecutionFloor[surfaceID]
+        var highest = previousFloor
+        var added = Set<UInt64>()
+        var history = (archivedBySurface[surfaceID] ?? []).map { item in
+            if let id = Self.executionID(item), !valid.contains(id) { return Self.expired(item) }
+            return item
+        }
+        for item in records {
+            guard case .command(let owner, let id, _) = item.location,
+                  owner == surfaceID, previousFloor.map({ id > $0 }) ?? true,
+                  added.insert(id).inserted else { continue }
+            history.append(item)
+            highest = max(highest ?? id, id)
+        }
+        // IDs remain reserved even if a bounded UI row is evicted, so the
+        // same old core entry is never relabeled as belonging to a new host.
+        historicalExecutionFloor[surfaceID] = highest
+        archivedBySurface[surfaceID] = Array(history.sorted {
+            if $0.location.isAvailable != $1.location.isAvailable { return $0.location.isAvailable }
+            return ($0.timestamp ?? .distantPast) > ($1.timestamp ?? .distantPast)
+        }.prefix(100))
+    }
+
     func installVerifiedReplay(_ records: [InspectorHistoryItem], for surfaceID: UUID) {
-        guard !records.isEmpty else { return }
-        archivedBySurface[surfaceID, default: []].append(contentsOf: records)
-        preservedExecutionIDs[surfaceID] = Set(records.compactMap { item in
-            if case .command(_, let id, _) = item.location { return id }
-            return nil
-        })
+        retainHistoricalAnchors(records, for: surfaceID)
     }
 
     func archivedCommands(for surfaceID: UUID) -> [InspectorHistoryItem] {
@@ -137,8 +162,8 @@ final class TerminalHistoryService {
     func removeSurface(_ surfaceID: UUID) {
         sessions.removeValue(forKey: surfaceID)
         archivedBySurface.removeValue(forKey: surfaceID)
-        skippedInitialSSHReplay.remove(surfaceID)
-        preservedExecutionIDs.removeValue(forKey: surfaceID)
+        checkedReplay.remove(surfaceID)
+        historicalExecutionFloor.removeValue(forKey: surfaceID)
     }
 
     private final class CommandSnapshot {
@@ -183,23 +208,19 @@ final class TerminalHistoryService {
             guard let epoch = sessions[surfaceID]?.epoch else { return [] }
             let raw = snapshotCommands(surface, surfaceID: surfaceID, epoch: epoch,
                                        sourceLabel: sessions[surfaceID]?.sourceLabel ?? "Local")
-            let validIDs = Set(raw.compactMap { item -> UInt64? in
-                if case .command(_, let id, _) = item.location { return id }
-                return nil
-            })
-            let preserved = preservedExecutionIDs[surfaceID] ?? []
+            let validIDs = Set(raw.compactMap(Self.executionID))
+            let previousFloor = historicalExecutionFloor[surfaceID]
             let live = raw.filter { item in
-                if case .command(_, let id, _) = item.location { return !preserved.contains(id) }
+                if case .command(_, let id, _) = item.location { return previousFloor.map { id > $0 } ?? true }
                 return false
             }
             let archived = (archivedBySurface[surfaceID] ?? []).map { item in
                 if case .command(_, let id, _) = item.location, !validIDs.contains(id) {
-                    return InspectorHistoryItem(id: item.id, kind: item.kind, text: item.text,
-                        timestamp: item.timestamp, location: .unavailable(.expired),
-                        sourceLabel: item.sourceLabel, replayKey: item.replayKey)
+                    return Self.expired(item)
                 }
                 return item
             }
+            archivedBySurface[surfaceID] = archived
             let saved = ShellScrollbackRestoreStore.savedCommands(for: surfaceID)
             let combined = Self.presentingHistory(in: live + archived, from: saved,
                 surfaceID: surfaceID,
@@ -211,8 +232,8 @@ final class TerminalHistoryService {
         return []
     }
 
-    /// Exact v3-only binding. All replayed input markers must match the
-    /// saved current segment in order, with distinct host-owned identities.
+    /// Exact v3/v4 binding. All replayed input markers must match the
+    /// saved segments in order, with distinct host-owned identities.
     /// Repeated text alone can never establish a one-to-one mapping.
     static func verifiedReplay(
         _ replayedNewestFirst: [InspectorHistoryItem],
@@ -220,7 +241,7 @@ final class TerminalHistoryService {
         saved: [ShellScrollbackRestoreStore.SavedCommand],
         surfaceID: UUID
     ) -> [InspectorHistoryItem]? {
-        guard !segment.isEmpty, replayedNewestFirst.count == segment.count else { return nil }
+        guard replayedNewestFirst.count == segment.count else { return nil }
         let identities = segment.compactMap(\.occurrenceID)
         guard identities.count == segment.count, Set(identities).count == segment.count else { return nil }
         var verified: [InspectorHistoryItem] = []
@@ -238,18 +259,6 @@ final class TerminalHistoryService {
                 replayKey: occurrenceID))
         }
         return verified
-    }
-
-    static func excludingRestoredSuffix(
-        _ items: [InspectorHistoryItem],
-        saved: [ShellScrollbackRestoreStore.SavedCommand]?,
-        canReconcile: Bool
-    ) -> [InspectorHistoryItem] {
-        guard canReconcile, let saved, !saved.isEmpty, items.count >= saved.count,
-              zip(items.suffix(saved.count), saved).allSatisfy({
-                  $0.text == $1.text && ($0.sourceLabel ?? "Local") == ($1.sourceLabel ?? "Local")
-              }) else { return items }
-        return Array(items.dropLast(saved.count))
     }
 
     /// Replay is best-effort: keep archived commands visible when the Shell

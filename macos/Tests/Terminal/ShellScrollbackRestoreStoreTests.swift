@@ -39,7 +39,7 @@ struct ShellScrollbackRestoreStoreTests {
         #expect(ShellScrollbackRestoreStore.savedCommands(for: surfaceID, baseURL: root) == nil)
         try FileManager.default.removeItem(at: saved)
         #expect(ShellScrollbackRestoreStore.savedCommands(for: surfaceID, baseURL: root) == [
-            .init(text: "ll", timestamp: oldDate),
+            .init(text: "ll", timestamp: oldDate, occurrenceID: command.id),
         ])
     }
 
@@ -55,8 +55,7 @@ struct ShellScrollbackRestoreStoreTests {
             .init(kind: .command, text: "local pwd", timestamp: now.addingTimeInterval(-60),
                   location: .unavailable(.expired), sourceLabel: "Local"),
         ]
-        #expect(ShellScrollbackRestoreStore.save(surfaceID: id, baseURL: root, commands: commands,
-                                                 allowsAnchorReconciliation: false) { file in
+        #expect(ShellScrollbackRestoreStore.save(surfaceID: id, baseURL: root, commands: commands) { file in
             (try? Data("old pane output\r\n".utf8).write(to: file)) != nil &&
             (try? FileManager.default.setAttributes([.posixPermissions: 0o600],
                 ofItemAtPath: file.path)) != nil
@@ -123,7 +122,7 @@ struct ShellScrollbackRestoreStoreTests {
         let oldLocal = InspectorHistoryItem(id: "old-local", kind: .command, text: "ll",
             timestamp: date.addingTimeInterval(-60), location: .unavailable(.expired), sourceLabel: "Local")
         #expect(ShellScrollbackRestoreStore.save(surfaceID: id, baseURL: root,
-            commands: [live[1], live[0], oldLocal], allowsAnchorReconciliation: false) { file in
+            commands: [live[1], live[0], oldLocal]) { file in
             (try? Data("snapshot\r\n".utf8).write(to: file)) != nil &&
             (try? FileManager.default.setAttributes([.posixPermissions: 0o600],
                 ofItemAtPath: file.path)) != nil
@@ -137,6 +136,50 @@ struct ShellScrollbackRestoreStoreTests {
         #expect(saved.map(\.occurrenceID) == ["occurrence-1", "occurrence-0", "old-local"])
         #expect(replay.map(\.occurrenceID) == ["occurrence-0", "occurrence-1"])
         #expect(!ShellScrollbackRestoreStore.allowsAnchorReconciliation(for: id))
+    }
+
+    @Test func v4MixedLocalAndSSHAnchorsSurviveTwoMetadataRestoreCycles() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-mixed-restore-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let surfaceID = UUID()
+        let originalDate = Date(timeIntervalSince1970: 1_000)
+        let labels = ["Local", "SSH · cloud", "SSH · other", "Local"]
+        var items = labels.enumerated().map { index, source in
+            InspectorHistoryItem(id: "occurrence-\(index)", kind: .command, text: "ll",
+                timestamp: originalDate.addingTimeInterval(Double(index)),
+                location: .command(surfaceID: surfaceID, executionID: UInt64(index + 1), epoch: UUID()),
+                sourceLabel: source)
+        }
+        let originalIDs = items.map(\.id)
+        for cycle in 0..<2 {
+            // Metadata roundtrip; real VT key/Pin replay is tested in Zig.
+            #expect(ShellScrollbackRestoreStore.save(surfaceID: surfaceID, baseURL: root,
+                                                      commands: items.reversed()) { file in
+                FileManager.default.createFile(atPath: file.path, contents: Data("VT fixture".utf8),
+                                               attributes: [.posixPermissions: 0o600])
+            })
+            let file = try #require(ShellScrollbackRestoreStore.replayFile(
+                for: surfaceID, baseURL: root, restoreEnabled: true
+            ))
+            try FileManager.default.removeItem(at: file)
+            let saved = try #require(ShellScrollbackRestoreStore.savedCommands(for: surfaceID, baseURL: root))
+            let segment = try #require(ShellScrollbackRestoreStore.replayCommands(for: surfaceID))
+            #expect(segment.map(\.occurrenceID) == originalIDs.map(Optional.some))
+            #expect(segment.map(\.sourceLabel) == labels.map(Optional.some))
+            let epoch = UUID()
+            let raw = segment.enumerated().map { index, command in
+                InspectorHistoryItem(id: "temporary-\(cycle)-\(index)", kind: .command, text: command.text,
+                    location: .command(surfaceID: surfaceID, executionID: UInt64(index + 1), epoch: epoch),
+                    sourceLabel: "Local", replayKey: command.occurrenceID)
+            }
+            items = try #require(TerminalHistoryService.verifiedReplay(
+                raw.reversed(), segment: segment, saved: saved, surfaceID: surfaceID
+            ))
+            #expect(items.map(\.id) == originalIDs)
+            #expect(items.allSatisfy { $0.location.isAvailable })
+            #expect(items.map(\.timestamp) == (0..<4).map { originalDate.addingTimeInterval(Double($0)) })
+        }
     }
 
     @Test func v2SSHSnapshotRemainsReadOnlyWithoutOccurrenceMarkers() throws {

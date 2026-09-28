@@ -468,6 +468,7 @@ class AppDelegate: NSObject,
                 NSApp.arrangeInFront(nil)
             }
         }
+        TerminalTabSelectionRestoration.shared.finishLaunching()
     }
 
     func applicationDidHide(_ notification: Notification) {
@@ -503,6 +504,7 @@ class AppDelegate: NSObject,
         guard MainActor.assumeIsolated({ EditorWorkspaceStore.shared.prepareToTerminate() }) else {
             return .terminateCancel
         }
+        MainActor.assumeIsolated { TerminalTabSelectionRestoration.shared.prepareToQuit() }
         let windows = NSApplication.shared.windows
         if windows.isEmpty { return .terminateNow }
 
@@ -1036,6 +1038,9 @@ class AppDelegate: NSObject,
     }
 
     func application(_ app: NSApplication, willEncodeRestorableState coder: NSCoder) {
+        if OhMyGhosttySettings.shared.restoreSessionsOnLaunch {
+            TerminalTabSelectionRestoration.shared.encode(into: coder)
+        }
         guard ghostty.config.windowSaveState != "never" else { return }
 
         // Encode our quick terminal state if we have it.
@@ -1054,6 +1059,9 @@ class AppDelegate: NSObject,
 
     func application(_ app: NSApplication, didDecodeRestorableState coder: NSCoder) {
         Self.logger.debug("application will restore window state")
+        if OhMyGhosttySettings.shared.restoreSessionsOnLaunch {
+            TerminalTabSelectionRestoration.shared.decode(from: coder)
+        }
 
         // Decode our quick terminal state.
         if ghostty.config.windowSaveState != "never",
@@ -1536,6 +1544,7 @@ extension AppDelegate {
                 if [.OK, .alertFirstButtonReturn].contains(response) {
                     await NSApp.reply(toApplicationShouldTerminate: true)
                 } else {
+                    await TerminalTabSelectionRestoration.shared.cancelQuit()
                     await NSApp.reply(toApplicationShouldTerminate: false)
                 }
             }
@@ -1557,6 +1566,7 @@ extension AppDelegate {
             case .alertSecondButtonReturn:
                 return .terminateNow
             default:
+                MainActor.assumeIsolated { TerminalTabSelectionRestoration.shared.cancelQuit() }
                 return .terminateCancel
             }
         }
@@ -1576,6 +1586,7 @@ extension AppDelegate {
                     await controller.window?.close()
                     continue
                 } else {
+                    await TerminalTabSelectionRestoration.shared.cancelQuit()
                     await NSApp.reply(toApplicationShouldTerminate: false)
                     // Cancel the review
                     return

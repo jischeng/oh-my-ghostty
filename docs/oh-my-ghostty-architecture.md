@@ -137,6 +137,8 @@ Settings 根据 manifest 显式安装/移除 nested/flat JSON hooks、Pi-compati
 
 Right Inspector 的 `builtin.agent-history` 复用同一份 manifest resume/store 真相源，只扫描同时具备本地 JSONL store/discovery 与非空 allowlisted resume arguments 的 Agent。Host 在 utility task 中限制枚举数量、header、消息数和单条消息长度，跳过 symlink，并验证 `AgentConversationID` 与日志元数据；版本化 mtime cache 只重解析新增或改变的 session，`agents.historyLimit` 默认索引 10,000 条；只注册但从未打开该 pane 时不启动 scan、timer、watcher 或 helper process，最后一个可见实例消失时取消未完成任务。外围搜索经 debounce 后先返回标题/元数据，再返回缓存正文摘要，最后按最近会话顺序在后台渐进检索完整 user/assistant 正文，并返回可高亮的 bounded snippet；点击结果会把搜索词带入 transcript，以匹配消息及前后上下文打开。长会话使用 AppKit `NSTableView` 行复用和自动高度缓存，不再让 SwiftUI 对整段动态文本列表持续重新测量。UI 同时提供 Agent 过滤、project/Agent/date 分组、排序、copy、原生 fork、用户/Agent transcript 和手动刷新。Resume 优先定位已有 live Surface，否则构造 typed `AgentResumeDescriptor` 并在新 Tab 中进入 exact conversation。首版不猜测未声明的 CLI flag，不扫描远端 home，也不执行 transcript 内容。
 
+退出时按 `tabSessionID` 额外保存每个原生 window group 的选中 tab 与前台终端 tab，在退出确认/销毁窗口前冻结；取消退出会解除冻结。恢复完成后按已恢复成员身份重新选择，不用窗口创建顺序或 tab 数字推断；后台 pane 的延迟 focus 回调不得把其他 tab 拉到前台，用户主动操作会取消待执行的恢复选择。
+
 ### 6.2 Tab Layout
 
 Vertical Tabs 不是独立 Sidebar 产品，而是 Ghostty tab bar 的另一种 orientation。`macos-tab-layout` 支持：

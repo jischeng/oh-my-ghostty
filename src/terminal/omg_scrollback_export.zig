@@ -114,6 +114,33 @@ test "OMG scrollback VT export retains output without baking theme colors" {
     try std.testing.expect((try capture(alloc, &t, 1)) == null);
 }
 
+test "OMG scrollback VT restores prompt text from narrow to wide without inventing omitted text" {
+    const alloc = std.testing.allocator;
+    // A soft-wrapped complete prompt and an already abbreviated prompt are
+    // different inputs. Reflow must preserve both exactly, not rerun Starship.
+    for ([_][]const u8{ "username ~/project 14:09 >", "…e 14:09 >" }) |prompt| {
+        var source = try Terminal.init(std.testing.io, alloc, .{ .cols = 12, .rows = 12 });
+        defer source.deinit(alloc);
+        try source.printString(prompt);
+        const bytes = (try capture(alloc, &source, 64 * 1024)).?;
+        defer alloc.free(bytes);
+        var restored = try Terminal.init(std.testing.io, alloc, .{ .cols = 100, .rows = 12 });
+        defer restored.deinit(alloc);
+        var stream = restored.vtStream();
+        defer stream.deinit();
+        stream.nextSlice(bytes);
+        var output: std.Io.Writer.Allocating = .init(alloc);
+        defer output.deinit();
+        const formatter: fmt.ScreenFormatter = .init(restored.screens.active, .{
+            .emit = .plain,
+            .unwrap = true,
+            .trim = true,
+        });
+        try formatter.format(&output.writer);
+        try std.testing.expectEqualStrings(prompt, std.mem.trim(u8, output.written(), "\r\n"));
+    }
+}
+
 test "OMG scrollback VT export drops styled blank prompt tails but keeps command anchors" {
     const alloc = std.testing.allocator;
     var source = try Terminal.init(std.testing.io, alloc, .{ .cols = 30, .rows = 5 });

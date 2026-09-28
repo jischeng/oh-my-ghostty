@@ -1028,8 +1028,16 @@ without waiting for OSC 133 D, process exit, or a timer. Command-finished callba
 also refresh independently of desktop notification preferences. Hosts that do
 not implement OMG history may ignore the payload-free action.
 
-For a normal app quit with `sessions.restoreOnLaunch` enabled, OMG saves a
-bounded VT rendering of each restorable, local, non-Agent/non-SSH Shell Surface
+For a normal app quit with `sessions.restoreOnLaunch` enabled, OMG saves the
+selected tab in each native window group and the foreground terminal tab by
+stable `tabSessionID`, not tab index. Selection is frozen before quit dialogs
+or teardown and unfrozen if quit is cancelled. At startup, only restored tabs
+in the matching reconstructed group may be selected; a short bounded retry
+allows AppKit grouping/SwiftUI attachment to finish. User keyboard/mouse input
+cancels any pending retry so restoration does not steal focus. Background
+Surface focus callbacks cannot raise a different tab after selection restore.
+
+OMG also saves a bounded VT rendering of each restorable, local, non-Agent/non-SSH Shell Surface
 in its channel-specific Application Support `shell-scrollback` directory.
 Plain ready SSH panes with an exact `SSHResumeDescriptor` (without an active
 Agent) are marked restorable even if launched with a custom `+ssh` command,
@@ -1065,7 +1073,10 @@ textless cells at the end of non-wrapped rows (including Starship/powerline
 redraw fill). Soft-wrapped trailing blanks retain their width but render with
 default styling; otherwise repeated recovery into narrower panes turns that
 fill into colored bars. Real colored text and interior styled spaces are
-preserved, and no live cell is mutated. Tests cover multiple capture/replay
+preserved, and no live cell is mutated. This is a rendered-cell snapshot, not
+a re-execution of the prompt theme: soft-wrapped complete prompt text can
+reflow to a wider pane, but text already abbreviated by Fish/Starship before
+capture (such as a literal ellipsis) cannot be expanded from missing cells. Tests cover multiple capture/replay
 cycles at different widths with distinct repeated-command anchors. Export is capped at 2 MiB per pane and
 fails closed when it cannot represent all retained valid command anchors.
 The directory is mode 0700; snapshots older than seven days, symlinks,

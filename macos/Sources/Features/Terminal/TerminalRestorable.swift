@@ -194,6 +194,7 @@ class TerminalWindowRestoration: NSObject, NSWindowRestoration {
             }
         }
 
+        TerminalTabSelectionRestoration.shared.registerRestored(c)
         completionHandler(window, nil)
         guard let mode = state.effectiveFullscreenMode, mode != .native else {
             // We let AppKit handle native fullscreen
@@ -230,12 +231,16 @@ class TerminalWindowRestoration: NSObject, NSWindowRestoration {
             // If the view is attached to some other window, we give up
             guard viewWindow == inWindow else { return }
 
+            // A delayed callback for a background tab must not steal focus
+            // from the app-level restored tab selection.
+            if let group = viewWindow.tabGroup, group.selectedWindow !== viewWindow { return }
             inWindow.makeFirstResponder(to)
 
             // If the window is main, then we also make sure it comes forward. This
             // prevents a bug found in #1177 where sometimes on restore the windows
             // would be behind other applications.
-            if viewWindow.isMainWindow {
+            if viewWindow.isMainWindow,
+               viewWindow.tabGroup == nil || viewWindow.tabGroup?.selectedWindow === viewWindow {
                 viewWindow.orderFront(nil)
             }
         }

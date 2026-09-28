@@ -3928,8 +3928,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // and I think its sensible.
         LastWindowPosition.shared.save(window)
 
-        // Remember our last main
+        // Remember our last main and invalidate the app-level selected-tab
+        // snapshot as well as the window's own focused-Surface state.
         Self.lastMain = self
+        NSApp.invalidateRestorableState()
     }
 
     // Called when the window will be encoded. We handle the data encoding here in the

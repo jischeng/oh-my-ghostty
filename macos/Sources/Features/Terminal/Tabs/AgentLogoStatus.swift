@@ -53,12 +53,14 @@ struct AgentLogoStatus: ViewModifier {
                 let tint = activity.flatMap { $0.state == .idle ? nil : $0 }
                     .map { AgentLogoStyle.color($0) } ?? .accentColor
                 tint.opacity(AgentLogoStyle.tintStrength(state: activity?.state, focused: focused))
-                    .mask(content)
+                    // Animate only the tint. Animating the mask (which contains
+                    // the icon) lets selection changes interpolate its layout
+                    // when a new row is inserted above or below it.
                     .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: activity?.state)
                     .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: focused)
+                    .mask(content)
             }
             .opacity(working ? AgentLogoStyle.logoOpacity(breath: breath) : 1)
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: working)
         }
         .onChange(of: working) { isWorking in
             if isWorking { workStarted = Date() }

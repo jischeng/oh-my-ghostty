@@ -58,8 +58,13 @@ the repository executor, including SSH when applicable. Inference always runs
 locally over ACP JSON-RPC 2.0 (LF-delimited stdio). All four adapters follow the same
 initialize/session-new/model-select/session-prompt lifecycle. Claude requires
 `claude-agent-acp`, Pi requires `pi-acp`, Codex requires `codex-acp`, and OpenCode
-uses `opencode acp`. OMG does not auto-install adapters or fall back to non-ACP CLI
-commands. Model discovery supports ACP category=model config options, including
+uses `opencode acp`. OMG does not silently install or update adapters, and never
+falls back to non-ACP CLI commands. Reloading Codex models checks the stable
+`@agentclientprotocol/codex-acp` npm release; installation is opt-in and goes into
+an OMG-owned Application Support directory without changing a global npm install.
+The update is staged in a version-specific directory, then older OMG-managed Codex
+ACP versions are pruned after activation. That managed copy takes precedence for Codex ACP after install;
+other adapters remain user-managed. Model discovery supports ACP category=model config options, including
 groups, and the older availableModels/set-model variant. Missing adapters, login,
 unsupported models and protocol errors fail the route; no default-model substitution
 is performed. The client advertises no filesystem or terminal capabilities, rejects

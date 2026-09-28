@@ -76,7 +76,11 @@ confirmation, and a draft edited while generating is never overwritten. Cancel s
 further attempts. Patches exceeding 200 KB must be split rather than silently truncated.
 Install local ACP adapters `pi-acp`, `@agentclientprotocol/claude-agent-acp` and
 `@agentclientprotocol/codex-acp` as needed; OpenCode provides `opencode acp` itself.
-There is no one-shot CLI fallback. An SSH host/new pod does not need any Agent:
+In Add Models, Reload checks the stable Codex ACP npm version. If an update is
+available, users can explicitly install it for OMG; the app installs it under its
+Application Support directory, removes older OMG-managed versions after activation,
+and does not modify a global npm install. Other adapters remain user-managed. There
+is no one-shot CLI fallback. An SSH host/new pod does not need any Agent:
 only Git reads run remotely, and model calls always use the Mac's ACP adapter.
 The model and privacy notes live inside Add Models; prompt guidance lives inside
 the prompt editor. There is no dedicated undo-generated-message control.

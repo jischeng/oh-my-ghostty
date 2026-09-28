@@ -106,6 +106,12 @@ private struct GitCommitAIAddModels: View {
     @State private var loading = false
     @State private var loadingID: UUID?
     @State private var error: String?
+    @State private var adapterUpdate: GitACPAdapterUpdateInfo?
+    @State private var adapterUpdateError: String?
+    @State private var adapterNotice: String?
+    @State private var checkingAdapterUpdate = false
+    @State private var showingUpdateConfirmation = false
+    @State private var isUpdating = false
     @State private var reloadID = UUID()
 
     private var chosenModels: [String] {
@@ -117,13 +123,38 @@ private struct GitCommitAIAddModels: View {
             Text(GitL10n.text("Add Agent Models…")).font(.headline)
             Picker("Agent", selection: $agent) {
                 ForEach(GitCommitAgent.allCases) { Text($0.title).tag($0) }
-            }
+            }.disabled(isUpdating)
             if agent.canDiscoverModels {
                 HStack {
                     Text(GitL10n.text("Available models"))
                     Spacer()
                     if loading { ProgressView().controlSize(.small) }
-                    Button(GitL10n.text("Reload")) { reloadID = UUID() }.disabled(loading)
+                    Button(GitL10n.text("Reload")) { reloadID = UUID() }.disabled(loading || isUpdating)
+                }
+                if agent == .codex {
+                    if let adapterUpdate, adapterUpdate.updateAvailable {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(GitL10n.format("Codex ACP update available: {0} (installed: {1}).",
+                                adapterUpdate.latestVersion, adapterUpdate.installedVersion ?? GitL10n.text("not detected")))
+                                .font(.caption).foregroundStyle(.secondary)
+                            Button(GitL10n.text(adapterUpdate.installedVersion == nil ? "Install for OMG…" : "Update for OMG…")) {
+                                showingUpdateConfirmation = true
+                            }.disabled(loading || isUpdating)
+                        }
+                    } else if let adapterUpdate {
+                        Text(GitL10n.format("Codex ACP is up to date ({0}).", adapterUpdate.latestVersion))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    if checkingAdapterUpdate {
+                        Text(GitL10n.text("Checking for Codex ACP updates…"))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    if let adapterUpdateError {
+                        Text(adapterUpdateError).font(.caption).foregroundStyle(.secondary)
+                    }
+                    if let adapterNotice {
+                        Text(adapterNotice).font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 TextField(GitL10n.text("Search models…"), text: $query).textFieldStyle(.roundedBorder)
                 List(models.filter { query.isEmpty || $0.localizedCaseInsensitiveContains(query) }, id: \.self) { model in
@@ -147,18 +178,28 @@ private struct GitCommitAIAddModels: View {
             }
         }
         .padding(20).frame(width: 480)
+        .confirmationDialog(GitL10n.text("Update Codex ACP for OMG?"), isPresented: $showingUpdateConfirmation,
+            titleVisibility: .visible) {
+            Button(GitL10n.text("Update and reload")) { Task { await updateCodexAndReload() } }
+            Button(GitL10n.text("Cancel"), role: .cancel) {}
+        } message: {
+            Text(GitL10n.text("OMG will install this stable Codex ACP version in its own Application Support folder. Your global npm installation will not be changed."))
+        }
         .onChange(of: agent) { _ in
-            selected = []; models = []; query = ""; error = nil; reloadID = UUID()
+            selected = []; models = []; query = ""; error = nil; adapterUpdate = nil
+            adapterUpdateError = nil; adapterNotice = nil; reloadID = UUID()
         }
         .task(id: reloadID) {
             let requestedAgent = agent
             let requestID = reloadID
             loadingID = requestID
             error = nil
+            adapterNotice = nil
             loading = true
             defer { if loadingID == requestID { loading = false } }
+            async let modelResult = GitCommitAIService.models(agent: requestedAgent)
             do {
-                let result = try await GitCommitAIService.models(agent: requestedAgent)
+                let result = try await modelResult
                 guard !Task.isCancelled, agent == requestedAgent else { return }
                 models = result
                 if result.isEmpty { error = GitL10n.text("No models found. Check the local ACP adapter and login.") }
@@ -166,6 +207,49 @@ private struct GitCommitAIAddModels: View {
                 guard !Task.isCancelled else { return }
                 self.error = error.localizedDescription
             }
+            guard !Task.isCancelled, agent == requestedAgent else { return }
+            loading = false
+            if requestedAgent == .codex {
+                checkingAdapterUpdate = true
+                defer { checkingAdapterUpdate = false }
+                do {
+                    let updateInfo = try await GitACPAdapterManager.checkCodexUpdate()
+                    guard !Task.isCancelled, agent == requestedAgent else { return }
+                    adapterUpdate = updateInfo
+                    adapterUpdateError = nil
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    adapterUpdateError = GitL10n.text("Could not check the Codex ACP version. Model loading is unaffected.")
+                }
+            } else {
+                adapterUpdate = nil
+                adapterUpdateError = nil
+                checkingAdapterUpdate = false
+            }
+        }
+    }
+
+    @MainActor
+    private func updateCodexAndReload() async {
+        guard let version = adapterUpdate?.latestVersion else { return }
+        isUpdating = true
+        loading = true
+        error = nil
+        adapterNotice = nil
+        defer { isUpdating = false; loading = false }
+        do {
+            try await GitACPAdapterManager.installCodex(version: version)
+            let refreshedModels = try await GitCommitAIService.models(agent: .codex)
+            guard agent == .codex else { return }
+            adapterUpdate = try? await GitACPAdapterManager.checkCodexUpdate()
+            if refreshedModels.isEmpty {
+                error = GitL10n.text("Codex ACP was updated, but no models were returned. The previous model list was kept.")
+            } else {
+                models = refreshedModels
+                adapterNotice = GitL10n.format("Codex ACP {0} updated; models reloaded.", version)
+            }
+        } catch let updateError {
+            error = GitL10n.format("Could not update or reload Codex ACP. The previous model list was kept: {0}", updateError.localizedDescription)
         }
     }
 }

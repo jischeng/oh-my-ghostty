@@ -70,6 +70,41 @@ struct GitCommitAITests {
         #expect(GitCommitAIService.shellQuote("a'; echo unsafe") == "'a'\\''; echo unsafe'")
     }
 
+    @Test func codexACPManagedExecutableUsesTheAppSupportVersion() throws {
+        let support = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: support) }
+        let bin = support.appendingPathComponent("CommitAI/ACP/codex/1.13.1/bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let executable = bin.appendingPathComponent("codex-acp")
+        try Data("#!/bin/sh\\nexit 0\\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        try Data("1.13.1".utf8).write(to: support.appendingPathComponent("CommitAI/ACP/codex/current"))
+        #expect(GitACPAdapterManager.activeCodexBinURL(supportURL: support) == bin)
+    }
+
+    @Test func codexACPPrunesOlderManagedVersionsAfterUpdate() throws {
+        let support = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: support) }
+        let root = support.appendingPathComponent("CommitAI/ACP/codex", isDirectory: true)
+        for name in ["1.12.0", "1.13.1", "metadata"] {
+            try FileManager.default.createDirectory(at: root.appendingPathComponent(name), withIntermediateDirectories: true)
+        }
+        GitACPAdapterManager.pruneInactiveCodexVersions(supportURL: support, keeping: "1.13.1")
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("1.12.0").path))
+        #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("1.13.1").path))
+        #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("metadata").path))
+    }
+
+    @Test func codexACPVersionChecksUseStableSemverOrdering() {
+        #expect(GitACPAdapterManager.isStableVersion("1.13.1"))
+        #expect(!GitACPAdapterManager.isStableVersion("1.13.2-preview.5"))
+        #expect(!GitACPAdapterManager.isStableVersion("01.13.1"))
+        #expect(GitACPAdapterManager.isNewer("1.13.1", than: "1.12.0"))
+        #expect(GitACPAdapterManager.isNewer("2.0.0", than: "1.99.99"))
+        #expect(!GitACPAdapterManager.isNewer("1.13.1", than: "1.13.1"))
+        #expect(!GitACPAdapterManager.isNewer("1.12.9", than: "1.13.0"))
+    }
+
     @Test func acpModelsSupportGroupedAndLegacyCatalogs() {
         let current = GitACPModels(response: ["configOptions": [["id": "model-choice", "category": "model",
             "options": [["group": "vendor", "options": [["value": "model-a"], ["value": "model-b"]]]]]]])

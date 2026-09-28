@@ -178,9 +178,11 @@ actor GitACPService {
             let overrides = try GitACPEnvironment.prepare(agent: agent, directory: directory, base: environment)
             let invocation = (["/usr/bin/env"] + overrides.sorted { $0.key < $1.key }.map { $0.key + "=" + $0.value }
                 + agent.acpCommand).map(GitCommitAIService.shellQuote).joined(separator: " ")
+            let managedPath = agent == .codex ? GitACPAdapterManager.activeCodexBinURL()?.path : nil
+            let pathPrefix = managedPath.map { "export PATH=" + GitCommitAIService.shellQuote($0) + ":\"$PATH\"; " } ?? ""
             let shell = environment["SHELL"] ?? "/bin/zsh"
             try await connection.start(executable: shell,
-                arguments: ["-lic", "cd " + GitCommitAIService.shellQuote(directory.path) + " && exec " + invocation],
+                arguments: ["-lic", "cd " + GitCommitAIService.shellQuote(directory.path) + " && " + pathPrefix + "exec " + invocation],
                 cwd: directory, environment: environment)
             let initialized = try await connection.request("initialize", params: ["protocolVersion": 1,
                 "clientCapabilities": ["fs": ["readTextFile": false, "writeTextFile": false], "terminal": false],

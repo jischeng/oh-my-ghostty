@@ -115,7 +115,7 @@ struct OhMyGhosttySettingsTests {
         settings.editorFontSize = 15.5
         settings.editorTabWidth = 2
         settings.editorWordWrap = false
-        settings.restoreSessionsOnLaunch = false
+        settings.startupMode = .newTerminal
         settings.quitWithoutConfirmation = true
 
         let data = try Data(contentsOf: url)
@@ -145,7 +145,7 @@ struct OhMyGhosttySettingsTests {
         #expect((object["editor.fontSize"] as? NSNumber)?.doubleValue == 15.5)
         #expect((object["editor.tabWidth"] as? NSNumber)?.doubleValue == 2)
         #expect(object["editor.wordWrap"] as? Bool == false)
-        #expect(object["sessions.restoreOnLaunch"] as? Bool == false)
+        #expect(object["sessions.startupMode"] as? String == "newTerminal")
         #expect(object["general.quitWithoutConfirmation"] as? Bool == true)
 
         let restored = OhMyGhosttySettings(fileURL: url)
@@ -176,8 +176,54 @@ struct OhMyGhosttySettingsTests {
         #expect(restored.editorSettings.fontSize == 15.5)
         #expect(restored.editorSettings.tabWidth == 2)
         #expect(!restored.editorSettings.wordWrap)
-        #expect(!restored.restoreSessionsOnLaunch)
+        #expect(restored.startupMode == .newTerminal)
         #expect(restored.quitWithoutConfirmation)
+    }
+
+    @Test func legacyRestoreBooleanMigratesWithoutChangingTheEffectiveMode() throws {
+        for (legacy, expected) in [(false, OMGStartupMode.newTerminal),
+                                   (true, OMGStartupMode.restoreSessions)] {
+            let (_, url) = temporarySettings()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                     withIntermediateDirectories: true)
+            try Data("{\"sessions.restoreOnLaunch\":\(legacy)}".utf8).write(to: url)
+            let settings = OhMyGhosttySettings(fileURL: url)
+            #expect(settings.startupMode == expected)
+            let object = try #require(JSONSerialization.jsonObject(
+                with: Data(contentsOf: url)) as? [String: Any])
+            #expect(object["sessions.startupMode"] as? String == expected.rawValue)
+            #expect(object["sessions.restoreOnLaunch"] == nil)
+        }
+    }
+
+    @Test func newStartupModeWinsOverLegacyBooleanDuringMigration() throws {
+        let (_, url) = temporarySettings()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                 withIntermediateDirectories: true)
+        try Data("{\"sessions.startupMode\":\"restoreTabs\",\"sessions.restoreOnLaunch\":false}".utf8)
+            .write(to: url)
+        let settings = OhMyGhosttySettings(fileURL: url)
+        #expect(settings.startupMode == .restoreTabs)
+        let object = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        #expect(object["sessions.restoreOnLaunch"] == nil)
+    }
+
+    @Test func allStartupModesPersistAndInvalidValueFailsSafe() throws {
+        let (settings, url) = temporarySettings()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        for mode in OMGStartupMode.allCases {
+            settings.startupMode = mode
+            #expect(OhMyGhosttySettings(fileURL: url).startupMode == mode)
+        }
+        try Data("{\"sessions.startupMode\":\"bad\"}".utf8).write(to: url)
+        settings.reloadFromDisk()
+        #expect(settings.startupMode == .restoreSessions)
+        #expect(!OMGStartupMode.newTerminal.restoresTabs)
+        #expect(OMGStartupMode.restoreTabs.restoresTabs)
+        #expect(!OMGStartupMode.restoreTabs.restoresSessions)
+        #expect(OMGStartupMode.restoreSessions.restoresSessions)
     }
 
     @Test func legacySmoothResizeBooleanMigratesToRenderingMode() throws {
@@ -360,7 +406,7 @@ struct OhMyGhosttySettingsTests {
         #expect(descriptors.contains { $0.id == "editor.fontSize" })
         #expect(descriptors.contains { $0.id == "editor.tabWidth" })
         #expect(descriptors.contains { $0.id == "editor.wordWrap" })
-        #expect(descriptors.contains { $0.id == "sessions.restoreOnLaunch" })
+        #expect(descriptors.contains { $0.id == "sessions.startupMode" })
         #expect(descriptors.contains { $0.id == "general.language" })
         #expect(descriptors.contains { $0.id == "general.quitWithoutConfirmation" })
         #expect(descriptors.contains { $0.id == "appearance.backgroundOpacity" })
@@ -496,6 +542,10 @@ struct OhMyGhosttySettingsTests {
         #expect(zh.editorOpenDestinationTitle(.currentPane) == "当前窗格")
         #expect(en.editorOpenDestinationTitle(.newTab) == "New Tab")
         #expect(zh.languageSystem == "跟随系统")
+        #expect(zh.startupModeLabel == "重新打开 OMG 时")
+        #expect(en.startupModeTitle(.newTerminal) == "Open a New Terminal")
+        #expect(en.startupModeTitle(.restoreTabs) == "Restore All Tabs")
+        #expect(zh.startupModeTitle(.restoreSessions) == "恢复所有会话")
         #expect(zh.quitWithoutConfirmationLabel == "退出时无需确认")
         #expect(en.quitWithoutConfirmationLabel == "Quit Without Confirmation")
         #expect(zh.groupingTitle(.project) == "按项目")

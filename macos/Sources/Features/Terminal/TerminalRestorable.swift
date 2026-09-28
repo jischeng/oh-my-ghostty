@@ -145,8 +145,8 @@ class TerminalWindowRestoration: NSObject, NSWindowRestoration {
         // no matter what. Note its safe to use "ghostty.config" directly here
         // because window restoration is only ever invoked on app start so we
         // don't have to deal with config reloads.
-        if !OhMyGhosttySettings.shared.restoreSessionsOnLaunch {
-            AppDelegate.logger.warning("skip restoration: sessions.restoreOnLaunch=false")
+        if !OhMyGhosttySettings.shared.startupMode.restoresTabs {
+            AppDelegate.logger.warning("skip restoration: sessions.startupMode=newTerminal")
             completionHandler(nil, nil)
             return
         }

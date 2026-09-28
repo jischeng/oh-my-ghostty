@@ -66,11 +66,28 @@ enum ShellScrollbackRestoreStore {
         baseURL.appendingPathComponent("shell-scrollback", isDirectory: true)
     }
 
+    /// Leaving full-session mode must not leave a stale VT file that could be
+    /// replayed if the user later changes settings externally between launches.
+    static func discardPendingSnapshots(
+        baseURL: URL = OMGApplicationEnvironment.applicationSupportURL()
+    ) {
+        let root = directory(baseURL: baseURL)
+        guard let values = try? root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+              values.isDirectory == true, values.isSymbolicLink != true,
+              let files = try? FileManager.default.contentsOfDirectory(
+                  at: root, includingPropertiesForKeys: nil
+              ) else { return }
+        for file in files where ["vt", "json", "partial"].contains(file.pathExtension) {
+            guard UUID(uuidString: file.deletingPathExtension().lastPathComponent) != nil else { continue }
+            try? FileManager.default.removeItem(at: file)
+        }
+    }
+
     static func captureOpenSurfaces(
         controllers: [TerminalController] = TerminalController.all,
         baseURL: URL = OMGApplicationEnvironment.applicationSupportURL()
     ) {
-        guard OhMyGhosttySettings.shared.restoreSessionsOnLaunch else { return }
+        guard OhMyGhosttySettings.shared.startupMode.restoresSessions else { return }
         let root = directory(baseURL: baseURL)
         guard secureDirectory(root) else { return }
         removeExpired(in: root)
@@ -201,7 +218,7 @@ enum ShellScrollbackRestoreStore {
         now: Date = Date(),
         restoreEnabled: Bool? = nil
     ) -> URL? {
-        guard restoreEnabled ?? OhMyGhosttySettings.shared.restoreSessionsOnLaunch else { return nil }
+        guard restoreEnabled ?? OhMyGhosttySettings.shared.startupMode.restoresSessions else { return nil }
         let root = directory(baseURL: baseURL)
         guard let values = try? root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
               values.isDirectory == true, values.isSymbolicLink != true else { return nil }

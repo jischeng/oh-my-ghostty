@@ -261,9 +261,9 @@ class AppDelegate: NSObject,
             if key == nil || key == "general.language" {
                 applyMenuLocalization()
             }
-            if key == nil || key == "sessions.restoreOnLaunch" {
+            if key == nil || key == "sessions.startupMode" {
                 UserDefaults.ghostty.setValue(
-                    OhMyGhosttySettings.shared.restoreSessionsOnLaunch,
+                    OhMyGhosttySettings.shared.startupMode.restoresTabs,
                     forKey: "NSQuitAlwaysKeepsWindows"
                 )
             }
@@ -488,7 +488,8 @@ class AppDelegate: NSObject,
             // is possible to have other windows in a few scenarios:
             //   - if we're opening a URL since `application(_:openFile:)` is called before this.
             //   - if we're restoring from persisted state
-            if TerminalController.all.isEmpty && derivedConfig.initialWindow {
+            if TerminalController.all.isEmpty &&
+                (derivedConfig.initialWindow || OhMyGhosttySettings.shared.startupMode == .newTerminal) {
                 undoManager.disableUndoRegistration()
                 _ = TerminalController.newWindow(ghostty)
                 undoManager.enableUndoRegistration()
@@ -504,7 +505,13 @@ class AppDelegate: NSObject,
         guard MainActor.assumeIsolated({ EditorWorkspaceStore.shared.prepareToTerminate() }) else {
             return .terminateCancel
         }
-        MainActor.assumeIsolated { TerminalTabSelectionRestoration.shared.prepareToQuit() }
+        MainActor.assumeIsolated {
+            if OhMyGhosttySettings.shared.startupMode.restoresTabs {
+                TerminalTabSelectionRestoration.shared.prepareToQuit()
+            } else {
+                TerminalTabSelectionRestoration.shared.cancelQuit()
+            }
+        }
         let windows = NSApplication.shared.windows
         if windows.isEmpty { return .terminateNow }
 
@@ -548,7 +555,13 @@ class AppDelegate: NSObject,
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        MainActor.assumeIsolated { ShellScrollbackRestoreStore.captureOpenSurfaces() }
+        MainActor.assumeIsolated {
+            if OhMyGhosttySettings.shared.startupMode.restoresSessions {
+                ShellScrollbackRestoreStore.captureOpenSurfaces()
+            } else {
+                ShellScrollbackRestoreStore.discardPendingSnapshots()
+            }
+        }
         builtInInfoInspector.shutdown()
         // We have no notifications we want to persist after death,
         // so remove them all now. In the future we may want to be
@@ -932,11 +945,11 @@ class AppDelegate: NSObject,
         // Depending on the "window-save-state" setting we have to set the NSQuitAlwaysKeepsWindows
         // configuration. This is the only way to carefully control whether macOS invokes the
         // state restoration system.
-        let restoreSessionsOnLaunch = MainActor.assumeIsolated {
-            OhMyGhosttySettings.shared.restoreSessionsOnLaunch
+        let restoreTabsOnLaunch = MainActor.assumeIsolated {
+            OhMyGhosttySettings.shared.startupMode.restoresTabs
         }
         UserDefaults.ghostty.setValue(
-            restoreSessionsOnLaunch,
+            restoreTabsOnLaunch,
             forKey: "NSQuitAlwaysKeepsWindows"
         )
 
@@ -1038,10 +1051,11 @@ class AppDelegate: NSObject,
     }
 
     func application(_ app: NSApplication, willEncodeRestorableState coder: NSCoder) {
-        if OhMyGhosttySettings.shared.restoreSessionsOnLaunch {
+        if OhMyGhosttySettings.shared.startupMode.restoresTabs {
             TerminalTabSelectionRestoration.shared.encode(into: coder)
         }
-        guard ghostty.config.windowSaveState != "never" else { return }
+        guard ghostty.config.windowSaveState != "never",
+              OhMyGhosttySettings.shared.startupMode.restoresTabs else { return }
 
         // Encode our quick terminal state if we have it.
         switch quickTerminalControllerState {
@@ -1059,12 +1073,13 @@ class AppDelegate: NSObject,
 
     func application(_ app: NSApplication, didDecodeRestorableState coder: NSCoder) {
         Self.logger.debug("application will restore window state")
-        if OhMyGhosttySettings.shared.restoreSessionsOnLaunch {
+        if OhMyGhosttySettings.shared.startupMode.restoresTabs {
             TerminalTabSelectionRestoration.shared.decode(from: coder)
         }
 
         // Decode our quick terminal state.
         if ghostty.config.windowSaveState != "never",
+            OhMyGhosttySettings.shared.startupMode.restoresTabs,
             let state = QuickTerminalRestorableState(coder: coder) {
             quickTerminalControllerState = .pendingRestore(state)
         }

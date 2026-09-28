@@ -915,6 +915,17 @@ prefix. Available jump buttons appear on hover/selection. The retained Agent
 history table/model code is dormant in Info until message identities can be
 bound to verified terminal anchors; no text search or ordinal marker matching
 is exposed as a jump. A submission/status hook's cursor is not a verified render position.
+Settings > General > Sessions has three startup modes: `newTerminal` starts a
+fresh local Shell without restoring windows/tabs; `restoreTabs` restores the
+window/tab/split tree and safe local cwd (including windows originally
+running custom commands, which reopen as fresh local Shells) but intentionally
+ignores old VT output, Agent/SSH resume descriptors and old command anchors; and
+`restoreSessions` enables the best-effort full behavior below. No mode keeps
+old Shell processes running. Legacy `sessions.restoreOnLaunch=false/true`
+migrates to `newTerminal`/`restoreSessions`, respectively, without changing
+existing users' startup behavior. AppKit selected-tab restoration applies to
+the latter two modes only. Quick Terminal state follows the same tab gate.
+
 For SSH panes the port-forwarding section stays above history. Empty ports occupy
 64 points rather than a fixed 220-point panel; populated ports grow to a maximum
 of 180 points, with their own scroll area. The add-port control remains in the
@@ -1028,7 +1039,7 @@ without waiting for OSC 133 D, process exit, or a timer. Command-finished callba
 also refresh independently of desktop notification preferences. Hosts that do
 not implement OMG history may ignore the payload-free action.
 
-For a normal app quit with `sessions.restoreOnLaunch` enabled, OMG saves the
+For a normal app quit with `sessions.startupMode=restoreSessions`, OMG saves the
 selected tab in each native window group and the foreground terminal tab by
 stable `tabSessionID`, not tab index. Selection is frozen before quit dialogs
 or teardown and unfrozen if quit is cancelled. At startup, only restored tabs

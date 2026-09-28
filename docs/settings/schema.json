@@ -320,11 +320,12 @@
       "description": "Allow completion events to request a notification.",
       "type": "boolean"
     },
-    "sessions.restoreOnLaunch": {
+    "sessions.startupMode": {
       "category": "general",
-      "default": true,
-      "description": "Restore open windows, tabs, splits, and active agent sessions.",
-      "type": "boolean"
+      "default": "restoreSessions",
+      "description": "Choose a fresh terminal, layout-only tabs, or full session restoration on next launch.",
+      "enum": ["newTerminal", "restoreTabs", "restoreSessions"],
+      "type": "string"
     },
     "tabs.grouping": {
       "category": "tabs",

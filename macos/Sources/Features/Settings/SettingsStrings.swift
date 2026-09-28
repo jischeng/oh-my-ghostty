@@ -85,13 +85,18 @@ struct SettingsStrings: Equatable, Sendable {
             "Agent History 索引并展示的最大历史会话数量，默认值为 10,000 条。"
         )
     }
-    var restoreSessionsLabel: String {
-        t("Restore Windows and Agent Sessions", "恢复窗口与 Agent 会话")
+    var startupModeLabel: String { t("When OMG Opens", "重新打开 OMG 时") }
+    func startupModeTitle(_ mode: OMGStartupMode) -> String {
+        switch mode {
+        case .newTerminal: t("Open a New Terminal", "打开新终端")
+        case .restoreTabs: t("Restore All Tabs", "恢复所有标签页")
+        case .restoreSessions: t("Restore All Sessions", "恢复所有会话")
+        }
     }
-    var restoreSessionsCaption: String {
+    var startupModeCaption: String {
         t(
-            "Restores open windows, tabs, splits, working directories, and agents that were still running when OMG quit.",
-            "恢复 OMG 退出时仍然打开的窗口、标签页、分屏、工作目录以及仍在运行的 Agent。"
+            "New Terminal opens a fresh Shell. Tabs restores windows, tabs, splits and directories with fresh local Shells. Sessions also restores saved output and validated command anchors, reconnects SSH and resumes eligible Agent conversations. Shell processes do not survive quitting OMG. Applies on next launch.",
+            "新终端不保留旧标签；恢复标签页会还原窗口、标签、分屏和目录，但每个窗格都是新的本地 Shell；恢复会话还会回放旧输出和可验证命令锚点、重连 SSH，并恢复可用的 Agent 对话。退出 OMG 后 Shell 进程不会继续运行。下次启动生效。"
         )
     }
     var quitSection: String { t("Quit", "退出") }

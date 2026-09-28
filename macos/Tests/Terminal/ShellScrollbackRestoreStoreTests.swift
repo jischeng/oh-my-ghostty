@@ -208,6 +208,31 @@ struct ShellScrollbackRestoreStoreTests {
         #expect(!ShellScrollbackRestoreStore.allowsAnchorReconciliation(for: id))
     }
 
+    @Test func tabOnlyModeDiscardsOnlyOwnedSnapshotNames() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-mode-cleanup-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let folder = ShellScrollbackRestoreStore.directory(baseURL: root)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let id = UUID()
+        let vt = folder.appendingPathComponent("\(id.uuidString).vt")
+        let json = folder.appendingPathComponent("\(id.uuidString).json")
+        let unrelated = folder.appendingPathComponent("keep.vt")
+        for file in [vt, json, unrelated] { try Data("data".utf8).write(to: file) }
+        ShellScrollbackRestoreStore.discardPendingSnapshots(baseURL: root)
+        #expect(!FileManager.default.fileExists(atPath: vt.path))
+        #expect(!FileManager.default.fileExists(atPath: json.path))
+        #expect(FileManager.default.fileExists(atPath: unrelated.path))
+        let redirected = root.appendingPathComponent("elsewhere", isDirectory: true)
+        try FileManager.default.createDirectory(at: redirected, withIntermediateDirectories: true)
+        let preserved = redirected.appendingPathComponent("\(UUID().uuidString).vt")
+        try Data("safe".utf8).write(to: preserved)
+        try FileManager.default.removeItem(at: folder)
+        try FileManager.default.createSymbolicLink(at: folder, withDestinationURL: redirected)
+        ShellScrollbackRestoreStore.discardPendingSnapshots(baseURL: root)
+        #expect(FileManager.default.fileExists(atPath: preserved.path))
+    }
+
     @Test func failedCaptureInvalidatesPreviousSnapshotAndRejectsUnsafeFiles() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("omg-restore-test-\(UUID().uuidString)")

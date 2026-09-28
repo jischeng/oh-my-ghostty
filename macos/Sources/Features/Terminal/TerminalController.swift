@@ -250,6 +250,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// This is set to false by init if the window managed by this controller should not be restorable.
     /// For example, terminals executing custom scripts are not restorable.
     private var restorable: Bool = true
+    private let startedWithCustomCommand: Bool
+
+    static func canRestoreWindow(
+        customCommand: Bool, mode: OMGStartupMode, hasResumeDescriptor: Bool
+    ) -> Bool {
+        !customCommand || mode == .restoreTabs || hasResumeDescriptor
+    }
 
     /// The configuration derived from the Ghostty config so we don't need to rely on references.
     private(set) var derivedConfig: DerivedConfig
@@ -711,7 +718,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // time of writing this: it'd just restore to a shell in the same directory
         // as the script. We may want to revisit this behavior when we have scrollback
         // restoration.
-        self.restorable = (base?.command ?? "") == ""
+        self.startedWithCustomCommand = !(base?.command ?? "").isEmpty
+        self.restorable = Self.canRestoreWindow(
+            customCommand: startedWithCustomCommand,
+            mode: OhMyGhosttySettings.shared.startupMode,
+            hasResumeDescriptor: false
+        )
 
         // Setup our initial derived config based on the current app config
         self.derivedConfig = DerivedConfig(ghostty.config)
@@ -4145,6 +4157,25 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 agentScreenStableTicks = [:]
                 agentValidationWorkItems.values.forEach { $0.cancel() }
                 agentValidationWorkItems = [:]
+            }
+        }
+        if changedKey == nil || changedKey == "sessions.startupMode" {
+            let hasResume = surfaceTree.contains {
+                $0.agentResumeDescriptor != nil || $0.sshResumeDescriptor != nil
+            }
+            let next = Self.canRestoreWindow(
+                customCommand: startedWithCustomCommand,
+                mode: settings.startupMode,
+                hasResumeDescriptor: hasResume
+            )
+            if restorable != next {
+                restorable = next
+                window?.isRestorable = next
+                if next {
+                    window?.restorationClass = TerminalWindowRestoration.self
+                    window?.identifier = .init(String(describing: TerminalWindowRestoration.self))
+                }
+                invalidateRestorableState()
             }
         }
         if changedKey == nil || changedKey == "keyboard.quickInputHeight" {

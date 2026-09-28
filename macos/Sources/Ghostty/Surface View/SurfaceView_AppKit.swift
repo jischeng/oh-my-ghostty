@@ -1973,46 +1973,65 @@ extension Ghostty {
             config.environmentVariables["OH_MY_GHOSTTY_CHANNEL"] =
                 OMGApplicationEnvironment.channel()
             config.workingDirectory = try container.decode(String?.self, forKey: .pwd)
-            let resume = try container.decodeIfPresent(
-                AgentResumeDescriptor.self,
-                forKey: .agentResumeDescriptor
-            )
-            let sshResume = try container.decodeIfPresent(
-                SSHResumeDescriptor.self,
-                forKey: .sshResumeDescriptor
-            )
-            let shellSnapshot: URL? = if resume == nil, let uuid {
+            let startupMode = OhMyGhosttySettings.shared.startupMode
+            // Layout-only recovery must not fail just because a stale Agent or
+            // SSH descriptor cannot be decoded; it never launches that program.
+            let resume: AgentResumeDescriptor?
+            let sshResume: SSHResumeDescriptor?
+            if startupMode.restoresSessions {
+                resume = try container.decodeIfPresent(
+                    AgentResumeDescriptor.self, forKey: .agentResumeDescriptor
+                )
+                sshResume = try container.decodeIfPresent(
+                    SSHResumeDescriptor.self, forKey: .sshResumeDescriptor
+                )
+            } else {
+                resume = try? container.decodeIfPresent(
+                    AgentResumeDescriptor.self, forKey: .agentResumeDescriptor
+                )
+                sshResume = try? container.decodeIfPresent(
+                    SSHResumeDescriptor.self, forKey: .sshResumeDescriptor
+                )
+            }
+            if startupMode == .restoreTabs {
+                config.workingDirectory = TerminalStartupRestorationPolicy.localWorkingDirectory(
+                    saved: config.workingDirectory, agent: resume, ssh: sshResume
+                )
+            }
+            let shellSnapshot: URL? = if startupMode.restoresSessions, resume == nil, let uuid {
                 ShellScrollbackRestoreStore.replayFile(for: uuid)
             } else {
                 nil
             }
-            if sshResume == nil, let shellSnapshot {
-                config.environmentVariables[ShellScrollbackRestoreStore.environmentKey] = shellSnapshot.path
-            }
-            if let executablePath = Bundle.main.executablePath {
-                if let resume, resume.isValid,
-                   let command = resume.restorationCommand(
-                       executablePath: executablePath
-                   ) {
-                    config.workingDirectory = resume.scope == .local
-                        ? resume.workingDirectory ?? config.workingDirectory
-                        : nil
-                    config.command = TerminalController.replaySurvivalCommand(command)
-                } else if let sshResume,
-                   let command = sshResume.command(executablePath: executablePath) {
-                    config.workingDirectory = sshResume.localWorkingDirectory
-                    let replay = ShellScrollbackRestoreStore.sshReplayCommand(
-                        command, snapshot: shellSnapshot
-                    )
-                    config.command = TerminalController.replaySurvivalCommand(replay)
+            if startupMode.restoresSessions {
+                if sshResume == nil, let shellSnapshot {
+                    config.environmentVariables[ShellScrollbackRestoreStore.environmentKey] = shellSnapshot.path
+                }
+                if let executablePath = Bundle.main.executablePath {
+                    if let resume, resume.isValid,
+                       let command = resume.restorationCommand(
+                           executablePath: executablePath
+                       ) {
+                        config.workingDirectory = resume.scope == .local
+                            ? resume.workingDirectory ?? config.workingDirectory
+                            : nil
+                        config.command = TerminalController.replaySurvivalCommand(command)
+                    } else if let sshResume,
+                       let command = sshResume.command(executablePath: executablePath) {
+                        config.workingDirectory = sshResume.localWorkingDirectory
+                        let replay = ShellScrollbackRestoreStore.sshReplayCommand(
+                            command, snapshot: shellSnapshot
+                        )
+                        config.command = TerminalController.replaySurvivalCommand(replay)
+                    }
                 }
             }
             let savedTitle = try container.decodeIfPresent(String.self, forKey: .title)
             let isUserSetTitle = try container.decodeIfPresent(Bool.self, forKey: .isUserSetTitle) ?? false
 
             self.init(app, baseConfig: config, uuid: uuid)
-            self.agentResumeDescriptor = resume
-            self.sshResumeDescriptor = sshResume
+            self.agentResumeDescriptor = startupMode.restoresSessions ? resume : nil
+            self.sshResumeDescriptor = startupMode.restoresSessions ? sshResume : nil
 
             // Restore the saved title after initialization
             if let title = savedTitle {

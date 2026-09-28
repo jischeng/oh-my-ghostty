@@ -256,11 +256,12 @@ struct SettingsView: View {
                     Text(strings.agentHistoryLimitCaption)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Toggle(
-                        strings.restoreSessionsLabel,
-                        isOn: $settings.restoreSessionsOnLaunch
-                    )
-                    Text(strings.restoreSessionsCaption)
+                    Picker(strings.startupModeLabel, selection: $settings.startupMode) {
+                        ForEach(OMGStartupMode.allCases) { mode in
+                            Text(strings.startupModeTitle(mode)).tag(mode)
+                        }
+                    }
+                    Text(strings.startupModeCaption)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

@@ -42,6 +42,16 @@ enum OMGApplicationEnvironment {
     }
 }
 
+enum OMGStartupMode: String, CaseIterable, Identifiable, Sendable {
+    case newTerminal
+    case restoreTabs
+    case restoreSessions
+
+    var id: String { rawValue }
+    var restoresTabs: Bool { self != .newTerminal }
+    var restoresSessions: Bool { self == .restoreSessions }
+}
+
 enum TerminalResizeRenderingMode: String, CaseIterable, Identifiable, Sendable {
     case duringDrag
     case onRelease
@@ -499,9 +509,11 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Maximum number of historical agent sessions to index and display.",
             requiresNewWindow: false, category: "general"),
         .init(
-            id: "sessions.restoreOnLaunch", type: .boolean, defaultValue: "true",
-            allowedValues: nil, minimum: nil, maximum: nil,
-            description: "Restore open windows, tabs, splits, and active agent sessions.",
+            id: "sessions.startupMode", type: .enumeration,
+            defaultValue: OMGStartupMode.restoreSessions.rawValue,
+            allowedValues: OMGStartupMode.allCases.map(\.rawValue),
+            minimum: nil, maximum: nil,
+            description: "Choose a fresh terminal, layout-only tabs, or full session restoration on next launch.",
             requiresNewWindow: false, category: "general"),
     ]
 
@@ -789,8 +801,8 @@ final class OhMyGhosttySettings: ObservableObject {
             }
         }
     }
-    @Published var restoreSessionsOnLaunch = true {
-        didSet { persist("sessions.restoreOnLaunch", restoreSessionsOnLaunch) }
+    @Published var startupMode: OMGStartupMode = .restoreSessions {
+        didSet { persist("sessions.startupMode", startupMode.rawValue) }
     }
     @Published var quitWithoutConfirmation =
         OMGApplicationEnvironment.quitWithoutConfirmationDefault() {
@@ -867,8 +879,9 @@ final class OhMyGhosttySettings: ObservableObject {
             }
             let migratedPathDisplay = migratePathDisplayDefault()
             let migratedResizeRendering = migrateResizeRenderingSetting()
+            let migratedStartupMode = migrateStartupModeSetting()
             applyChosenValues()
-            if migratedPathDisplay || migratedResizeRendering { save() }
+            if migratedPathDisplay || migratedResizeRendering || migratedStartupMode { save() }
             lastError = nil
             writeAppearanceOverlay()
             notifyRuntime()
@@ -895,6 +908,16 @@ final class OhMyGhosttySettings: ObservableObject {
         chosen["terminal.resizeRendering"] = enabled
             ? TerminalResizeRenderingMode.duringDrag.rawValue
             : TerminalResizeRenderingMode.onRelease.rawValue
+        return true
+    }
+
+    private func migrateStartupModeSetting() -> Bool {
+        let legacy = chosen.removeValue(forKey: "sessions.restoreOnLaunch") as? Bool
+        guard let legacy else { return false }
+        if chosen["sessions.startupMode"] == nil {
+            chosen["sessions.startupMode"] = (legacy
+                ? OMGStartupMode.restoreSessions : .newTerminal).rawValue
+        }
         return true
     }
 
@@ -1083,10 +1106,7 @@ final class OhMyGhosttySettings: ObservableObject {
                 fallback: 10_000,
                 range: 100...50_000
             )
-            restoreSessionsOnLaunch = boolValue(
-                "sessions.restoreOnLaunch",
-                fallback: true
-            )
+            startupMode = enumValue("sessions.startupMode", fallback: .restoreSessions)
             quitWithoutConfirmation = boolValue(
                 "general.quitWithoutConfirmation",
                 fallback: OMGApplicationEnvironment.quitWithoutConfirmationDefault()

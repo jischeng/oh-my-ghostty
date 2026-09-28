@@ -37,7 +37,17 @@ enum DevMemoryDiagnostics {
     }
 
     static func tabCreated() { record("tab_created") }
+    static func tabClosed() { record("tab_closed") }
+    static func splitTreeChanged(from oldTree: SplitTree<Ghostty.SurfaceView>,
+                                 to newTree: SplitTree<Ghostty.SurfaceView>) {
+        guard enabled, writer != nil else { return }
+        let previous = oldTree.reduce(0) { count, _ in count + 1 }
+        let current = newTree.reduce(0) { count, _ in count + 1 }
+        if previous > 0 && current > previous { record("split_added") }
+        if current > 0 && current < previous { record("split_removed") }
+    }
     static func windowOpened() { record("window_opened") }
+    static func windowFocused() { record("window_focused") }
     static func windowClosing() { record("window_closing") }
 
     private static func record(_ event: String) {
@@ -52,7 +62,11 @@ enum DevMemoryDiagnostics {
     static func surfaceCreated() {}
     static func surfaceDestroyed() {}
     static func tabCreated() {}
+    static func tabClosed() {}
+    static func splitTreeChanged(from: SplitTree<Ghostty.SurfaceView>,
+                                 to: SplitTree<Ghostty.SurfaceView>) {}
     static func windowOpened() {}
+    static func windowFocused() {}
     static func windowClosing() {}
 #endif
 }
@@ -117,7 +131,8 @@ final class DevMemoryLog {
 
     private static let events: Set<String> = [
         "start", "sample", "surface_created", "surface_destroyed", "tab_created",
-        "window_opened", "window_closing"
+        "tab_closed", "split_added", "split_removed", "window_opened",
+        "window_focused", "window_closing"
     ]
     private static let timestamp: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()

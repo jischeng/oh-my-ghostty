@@ -55,6 +55,7 @@ class BaseTerminalController: NSWindowController,
         didSet {
             Self.updateSurfaceControllers(self, from: oldValue, to: surfaceTree)
             surfaceTreeDidChange(from: oldValue, to: surfaceTree)
+            DevMemoryDiagnostics.splitTreeChanged(from: oldValue, to: surfaceTree)
         }
     }
 
@@ -1397,6 +1398,7 @@ class BaseTerminalController: NSWindowController,
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
+        DevMemoryDiagnostics.windowFocused()
         // If when we become key our first responder is the window itself, then we
         // want to move focus to our focused terminal surface. This works around
         // various weirdness with moving surfaces around.

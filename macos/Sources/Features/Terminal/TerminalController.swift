@@ -3892,6 +3892,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     override func windowWillClose(_ notification: Notification) {
+        DevMemoryDiagnostics.tabClosed()
         DevMemoryDiagnostics.windowClosing()
         super.windowWillClose(notification)
         EditorWorkspaceStore.shared.remove(tabID: tabSessionID)

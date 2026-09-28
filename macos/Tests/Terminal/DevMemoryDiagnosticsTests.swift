@@ -23,6 +23,27 @@ struct DevMemoryDiagnosticsTests {
         #expect(permissions?.intValue == 0o600)
     }
 
+    @Test func actionMarkersKeepTheSameMetadataOnlySchema() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-memory-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let log = DevMemoryLog(directory: root)
+        let actions = ["tab_closed", "split_added", "split_removed",
+                       "window_focused", "window_closing"]
+        for action in actions {
+            log.append(event: action, surfaces: 2, tabs: 1, windows: 1)
+        }
+        let file = root.appendingPathComponent("events.jsonl")
+        let lines = try String(contentsOf: file, encoding: .utf8).split(separator: "\n")
+        #expect(lines.count == actions.count)
+        for (line, action) in zip(lines, actions) {
+            let fields = try #require(JSONSerialization.jsonObject(
+                with: Data(line.utf8)) as? [String: Any])
+            #expect(Set(fields.keys) == ["time", "event", "surfaces", "tabs", "windows"])
+            #expect(fields["event"] as? String == action)
+        }
+    }
+
     @Test func rotatesWithoutExceedingTwoMegabytes() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("omg-memory-test-\(UUID().uuidString)")

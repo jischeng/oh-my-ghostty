@@ -401,6 +401,7 @@ extension Ghostty {
                 return
             }
             self.surfaceModel = Ghostty.Surface(cSurface: surface)
+            DevMemoryDiagnostics.surfaceCreated()
 
             // Setup our tracking area so we get mouse moved events
             updateTrackingAreas()
@@ -414,6 +415,9 @@ extension Ghostty {
         }
 
         deinit {
+            if surfaceModel != nil {
+                Task { @MainActor in DevMemoryDiagnostics.surfaceDestroyed() }
+            }
             let historySurfaceID = id
             Task { @MainActor in TerminalHistoryService.shared.removeSurface(historySurfaceID) }
 

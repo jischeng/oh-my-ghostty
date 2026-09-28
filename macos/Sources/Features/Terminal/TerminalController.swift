@@ -761,6 +761,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             tabLayoutState: initialLayoutState
         )
         (NSApp.delegate as? AppDelegate)?.inspectorRegistry.openTab(self.tabSessionID)
+        DevMemoryDiagnostics.tabCreated()
 
         // Setup our notifications for behaviors
         let center = NotificationCenter.default
@@ -3741,6 +3742,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     override func windowDidLoad() {
         super.windowDidLoad()
         guard let window else { return }
+        DevMemoryDiagnostics.windowOpened()
 
         // I copy this because we may change the source in the future but also because
         // I regularly audit our codebase for "ghostty.config" access because generally
@@ -3890,6 +3892,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     override func windowWillClose(_ notification: Notification) {
+        DevMemoryDiagnostics.windowClosing()
         super.windowWillClose(notification)
         EditorWorkspaceStore.shared.remove(tabID: tabSessionID)
         (NSApp.delegate as? AppDelegate)?.releaseInspectorState(tabID: tabSessionID)

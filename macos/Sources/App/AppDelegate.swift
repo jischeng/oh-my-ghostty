@@ -230,6 +230,7 @@ class AppDelegate: NSObject,
             )
         }
         super.init()
+        MainActor.assumeIsolated { DevMemoryDiagnostics.start() }
 
         ghostty.delegate = self
         let appearanceObservation = MainActor.assumeIsolated {

@@ -474,7 +474,7 @@ struct InspectorGitView: View {
         VStack(spacing: 8) {
             GitHistoryScopePicker(title: content.history.snapshot?.browsedBranch ?? content.history.scope.displayName,
                                   branches: content.workingTree.branches, enabled: content.workingTree.branchesError == nil,
-                                  isBusy: content.operation != nil,
+                                  isActive: content.activeTab == .history, isBusy: content.operation != nil,
                                   worktrees: content.workingTree.worktrees, worktreesError: content.workingTree.worktreesError,
                                   state: collectionState, stateKey: collectionKey + "/refs/picker", selectedID: historySelectionID,
                                   tags: Array(Set(content.history.snapshot?.decorationsByCommitID.values.joined().filter { $0.kind == .tag } ?? [])).sorted { $0.name < $1.name }) {
@@ -491,6 +491,7 @@ struct InspectorGitView: View {
                     expandedCommits: content.expandedCommits,
                     fileMode: changesMode,
                     isSearching: !historyQuery.isEmpty,
+                    isActive: content.activeTab == .history,
                     controller: historyController,
                     hasMore: content.history.hasMore,
                     isLoading: content.history.isLoading,

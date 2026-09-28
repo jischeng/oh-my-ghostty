@@ -43,7 +43,7 @@ class GitHoverTableView: InspectorCopyTableView {
     }
     func clearHover() { setHover(at: nil) }
     func updateHoverFromPointer() {
-        guard let window, window.isKeyWindow else { clearHover(); return }
+        guard !isHidden, let window, window.isKeyWindow else { clearHover(); return }
         setHover(at: convert(window.mouseLocationOutsideOfEventStream, from: nil))
     }
     func refreshRowBackgrounds() {

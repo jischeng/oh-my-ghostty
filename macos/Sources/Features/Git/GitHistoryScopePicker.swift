@@ -5,6 +5,7 @@ struct GitHistoryScopePicker: NSViewRepresentable {
     let title: String
     let branches: [GitBranchInfo]
     let enabled: Bool
+    var isActive = true
     var isBusy = false
     var worktrees: [GitWorktreeInfo] = []
     var worktreesError: String?
@@ -86,7 +87,10 @@ struct GitHistoryScopePicker: NSViewRepresentable {
         }
     }
     func makeNSView(context: Context) -> Control { Control() }
-    func updateNSView(_ view: Control, context: Context) { view.configure(self) }
+    func updateNSView(_ view: Control, context: Context) {
+        view.configure(self)
+        view.isHidden = !isActive
+    }
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: Control, context: Context) -> CGSize? {
         CGSize(width: proposal.width ?? 0, height: 28)
     }

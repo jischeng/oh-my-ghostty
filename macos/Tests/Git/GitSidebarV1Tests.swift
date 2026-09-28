@@ -46,6 +46,8 @@ struct GitSidebarV1Tests {
         defer { win.contentView = nil; win.close() }
         try await Task.sleep(for: .milliseconds(100))
         let table = try #require(find(NSTableView.self, in: host).first)
+        let picker = try #require(find(GitHistoryScopePicker.Control.self, in: host).first)
+        #expect(!table.isHidden && !picker.isHidden)
         let scroll = try #require(table.enclosingScrollView)
         scroll.contentView.scroll(to: NSPoint(x: 0, y: 250))
         scroll.reflectScrolledClipView(scroll.contentView)
@@ -57,6 +59,9 @@ struct GitSidebarV1Tests {
             try await Task.sleep(for: .milliseconds(80))
             host.layoutSubtreeIfNeeded()
             #expect(find(NSTableView.self, in: host).contains { $0 === table })
+            #expect(find(GitHistoryScopePicker.Control.self, in: host).contains { $0 === picker })
+            #expect(table.isHidden == (tab != .history), "Inactive history rows must not expose AppKit tooltips")
+            #expect(picker.isHidden == (tab != .history), "Inactive history picker must not expose its tooltip")
             #expect(scroll.contentView.bounds.origin == offset)
         }
     }

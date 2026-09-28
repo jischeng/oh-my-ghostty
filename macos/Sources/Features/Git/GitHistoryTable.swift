@@ -8,6 +8,7 @@ struct GitHistoryTable: NSViewRepresentable {
     var expandedCommits: [GitCommitID: GitCommitExpansion] = [:]
     var fileMode: GitCollectionMode = .list
     var isSearching = false
+    var isActive = true
     var controller: GitCollectionController?
     var hasMore = false
     var isLoading = false
@@ -53,10 +54,18 @@ struct GitHistoryTable: NSViewRepresentable {
         table.menu = context.coordinator.makeContextMenu()
         scroll.documentView = table
         context.coordinator.attach(table: table, scroll: scroll)
+        table.isHidden = !isActive
         context.coordinator.update(self)
         return scroll
     }
-    func updateNSView(_ scroll: NSScrollView, context: Context) { context.coordinator.update(self) }
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        if let table = scroll.documentView as? GitHoverTableView {
+            // SwiftUI opacity/hit testing does not suppress AppKit cell tooltips.
+            table.isHidden = !isActive
+            if !isActive { table.clearHover() }
+        }
+        context.coordinator.update(self)
+    }
 
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
         private enum Row: Hashable {
@@ -156,7 +165,7 @@ struct GitHistoryTable: NSViewRepresentable {
             updating = true
             defer {
                 updating = false
-                (table as? GitHoverTableView)?.updateHoverFromPointer()
+                if new.isActive { (table as? GitHoverTableView)?.updateHoverFromPointer() }
                 DispatchQueue.main.async { [weak self] in self?.viewportChanged() }
             }
             if changed {

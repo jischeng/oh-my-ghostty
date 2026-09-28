@@ -3033,7 +3033,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             // showWindow makes regular windows key and ordered front. AppKit can
             // throw while selecting a tab if its fullscreen stack is inconsistent,
             // so this must cross the Objective-C exception bridge.
-            controller.showWindowSafely(self)
+            if controller.showWindowSafely(self),
+               parentController.tabLayout == .vertical {
+                // The selection KVO callback runs on the next turn. Update the
+                // sidebar while the newly selected window is being presented.
+                Self.refreshTabs(in: window.tabGroup)
+            }
 
             // We also activate our app so that it becomes front. This may be
             // necessary for the dock menu.

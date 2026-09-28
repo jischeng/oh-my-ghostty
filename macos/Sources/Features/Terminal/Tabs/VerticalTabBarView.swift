@@ -1779,6 +1779,9 @@ private struct VerticalTabRow: View {
                     selected: presentation.selected,
                     hovered: presentation.hovered
                 )))
+                // Selection should follow the active window immediately, not
+                // inherit an animation from its presentation transaction.
+                .transaction { $0.animation = nil }
         )
         .onHover(perform: hoverChanged)
         .onReceive(surface.$title.receive(on: DispatchQueue.main)) { _ in

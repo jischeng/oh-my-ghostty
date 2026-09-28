@@ -630,6 +630,9 @@ struct VerticalTabsIntegrationTests {
                 let target = controllers[index]
                 eighth.selectVerticalTab(target)
                 #expect(tabGroup.selectedWindow === target.window)
+                #expect(controllers.allSatisfy {
+                    $0.selectedTabID == ObjectIdentifier(target)
+                })
                 #expect(target.window?.frame.size == expectedFrameSize)
                 #expect((target.window as? VerticalTabsTerminalWindow)?.nativeTabBarIsSuppressed == true)
             }

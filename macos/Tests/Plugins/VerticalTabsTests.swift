@@ -710,6 +710,29 @@ struct VerticalTabsTests {
         #expect(updates[1].1 == true)
     }
 
+    @Test @MainActor func pendingSelectionSurvivesOldWindowNotifications() {
+        let state = VerticalTabWindowLayoutState(isSidebarVisible: true)
+        let oldObject = NSObject()
+        let newObject = NSObject()
+        let otherObject = NSObject()
+        let oldTab = ObjectIdentifier(oldObject)
+        let newTab = ObjectIdentifier(newObject)
+        let otherTab = ObjectIdentifier(otherObject)
+
+        state.anticipateTabSelection(newTab, from: oldTab)
+        state.reconcileTabSelection(oldTab)
+        #expect(state.pendingSelectedTabID == newTab)
+        state.reconcileTabSelection(newTab)
+        #expect(state.pendingSelectedTabID == nil)
+
+        state.anticipateTabSelection(newTab, from: oldTab)
+        state.reconcileTabSelection(otherTab)
+        #expect(state.pendingSelectedTabID == nil)
+        state.anticipateTabSelection(newTab, from: oldTab)
+        state.cancelPendingTabSelection(newTab)
+        #expect(state.pendingSelectedTabID == nil)
+    }
+
     @Test @MainActor func resizePersistsOnlyTheFinalWidth() async throws {
         let (settings, url) = temporarySettings()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }

@@ -62,7 +62,9 @@ final class VerticalTabWindowLayoutState: ObservableObject {
     @Published private(set) var inspectorWidth = RightInspectorMetrics.defaultWidth
     @Published private(set) var committedInspectorWidth = RightInspectorMetrics.defaultWidth
     @Published private(set) var selectedInspectorPaneID: String?
+    @Published private(set) var pendingSelectedTabID: ObjectIdentifier?
 
+    private var pendingSelectionSourceID: ObjectIdentifier?
     private var pendingSidebarWidth: CGFloat?
     private var resizeWorkItem: DispatchWorkItem?
     private var sidebarPersistenceWorkItem: DispatchWorkItem?
@@ -127,6 +129,27 @@ final class VerticalTabWindowLayoutState: ObservableObject {
 
     func toggleSidebar() {
         setSidebarVisible(!isSidebarVisible)
+    }
+
+    func anticipateTabSelection(_ target: ObjectIdentifier, from source: ObjectIdentifier?) {
+        pendingSelectionSourceID = source
+        pendingSelectedTabID = target
+    }
+
+    func reconcileTabSelection(_ selected: ObjectIdentifier?) {
+        guard let pendingSelectedTabID else { return }
+        // Ignore observations of the old window during AppKit's tab switch.
+        // A different selection means an external action superseded ours.
+        guard selected == pendingSelectedTabID ||
+                (selected != nil && selected != pendingSelectionSourceID) else { return }
+        pendingSelectionSourceID = nil
+        self.pendingSelectedTabID = nil
+    }
+
+    func cancelPendingTabSelection(_ target: ObjectIdentifier) {
+        guard pendingSelectedTabID == target else { return }
+        pendingSelectionSourceID = nil
+        pendingSelectedTabID = nil
     }
 
     func setInspectorVisible(_ visible: Bool) {
@@ -824,7 +847,7 @@ struct TerminalTabSidebarView: View {
     ) -> some View {
         let tab = organizedTab.controller
         let tabID = ObjectIdentifier(tab)
-        let selected = controller.selectedTabID == tabID
+        let selected = (layoutState.pendingSelectedTabID ?? controller.selectedTabID) == tabID
         let dragIsActive = tabDropActivity != .idle || surfaceDropActivity != .idle
         let hovered = !dragIsActive && controller.hoveredTabID == tabID
         if let surface = tab.focusedSurface ?? tab.surfaceTree.first {

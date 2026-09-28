@@ -211,6 +211,10 @@ struct VerticalTabsIntegrationTests {
                 withBaseConfig: configuration(title: title)
             ))
             controller.titleOverride = title
+            #expect(
+                (first.tabLayoutState.pendingSelectedTabID ?? first.selectedTabID) ==
+                    ObjectIdentifier(controller)
+            )
             controllers.append(controller)
         }
 

@@ -2002,6 +2002,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // The row's controller identifies the target. UI projections and the
         // source's group can lag behind native reorder/restore notifications.
         let tabGroup = targetWindow.tabGroup
+        if tabLayout == .vertical {
+            let sourceID = (tabGroup?.selectedWindow?.windowController as? TerminalController)
+                .map(ObjectIdentifier.init)
+            tabLayoutState.anticipateTabSelection(ObjectIdentifier(controller), from: sourceID)
+        }
         tabGroup?.selectedWindow = targetWindow
         controller.markTabActivated()
         // Key status alone does not guarantee native tab/front ordering.
@@ -2693,6 +2698,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         if selectedTabID != selectedID {
             selectedTabID = selectedID
         }
+        tabLayoutState.reconcileTabSelection(selectedID)
     }
 
     private static func refreshTabs(in tabGroup: NSWindowTabGroup?) {
@@ -3017,6 +3023,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 return nil
             }
             Self.refreshTabs(in: tabGroup)
+            if parentController.tabLayout == .vertical {
+                let sourceID = (tabGroup.selectedWindow?.windowController as? TerminalController)
+                    .map(ObjectIdentifier.init)
+                parentController.tabLayoutState.anticipateTabSelection(
+                    ObjectIdentifier(controller), from: sourceID
+                )
+            }
         }
 
         // We're dispatching this async because otherwise the lastCascadePoint doesn't
@@ -3033,11 +3046,14 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             // showWindow makes regular windows key and ordered front. AppKit can
             // throw while selecting a tab if its fullscreen stack is inconsistent,
             // so this must cross the Objective-C exception bridge.
-            if controller.showWindowSafely(self),
-               parentController.tabLayout == .vertical {
-                // The selection KVO callback runs on the next turn. Update the
-                // sidebar while the newly selected window is being presented.
-                Self.refreshTabs(in: window.tabGroup)
+            if controller.showWindowSafely(self) {
+                if parentController.tabLayout == .vertical {
+                    Self.refreshTabs(in: window.tabGroup)
+                }
+            } else {
+                parentController.tabLayoutState.cancelPendingTabSelection(
+                    ObjectIdentifier(controller)
+                )
             }
 
             // We also activate our app so that it becomes front. This may be

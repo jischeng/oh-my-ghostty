@@ -223,12 +223,19 @@ struct GitHistoryExpansionProviderTests {
         let context = InspectorPaneContext(tabID: UUID(), surfaceID: UUID(), title: "Terminal", workingDirectory: directory.path)
         registry.presentationDidChange(to: BuiltInGitInspectorProvider.paneID, context: context)
         defer { registry.presentationDidChange(to: nil, context: context) }
-        let initial = try await waitFor(registry, context: context) { $0.history.commits.count == 100 }
-        try #require(!initial.workingTree.unstaged.isEmpty && !initial.workingTree.branches.isEmpty)
+        _ = try await waitFor(registry, context: context) { $0.history.commits.count == 100 }
         func send(_ action: InspectorGitAction) {
             registry.performAction(paneID: BuiltInGitInspectorProvider.paneID,
                 action: .init(context: context, kind: .gitAction(action)))
         }
+        // The initial history load omits lazy worktree status; forced refresh
+        // legitimately enriches isDirty from nil to true. Hydrate the baseline
+        // before comparing whole snapshots, rather than racing that enrichment.
+        send(.refresh)
+        let initial = try await waitFor(registry, context: context) {
+            $0.history.commits.count == 100 && $0.workingTree.worktrees.first?.isDirty == true
+        }
+        try #require(!initial.workingTree.unstaged.isEmpty && !initial.workingTree.branches.isEmpty)
         send(refreshFirst ? .refresh : .loadMoreHistory)
         send(refreshFirst ? .loadMoreHistory : .refresh)
         if case .git(let loading) = registry.content(for: BuiltInGitInspectorProvider.paneID, context: context) {
@@ -239,7 +246,9 @@ struct GitHistoryExpansionProviderTests {
         #expect(loaded.history.hasMore)
         send(.refresh)
         send(.selectHistoryScope(.currentBranch))
-        let filtered = try await waitFor(registry, context: context) { $0.history.snapshot?.scope == .currentBranch }
+        let filtered = try await waitFor(registry, context: context) {
+            $0.history.snapshot?.scope == .currentBranch && $0.workingTree.worktrees.first?.isDirty == true
+        }
         #expect(filtered.workingTree == initial.workingTree)
         #expect(filtered.history.commits.count == 100)
     }

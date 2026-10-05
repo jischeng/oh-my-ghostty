@@ -3,6 +3,9 @@ import SwiftUI
 import Testing
 @testable import Ghostty
 
+// Optional real CoreDrag regression, not a routine app-hosted unit test.
+// Run after native tab/drag changes on an unlocked, foreground desktop.
+@Suite(.tags(.interactiveDesktop))
 @MainActor
 struct VerticalTabMouseTests {
     private final class MonitorOwner { var received = 0 }
@@ -28,8 +31,17 @@ struct VerticalTabMouseTests {
         defer { for controller in controllers { controller.window?.delegate = nil; controller.window?.close() } }
         first.setTabGroupingMode(.none); first.setTabOrderingMode(.manual); first.setSidebarVisible(true)
         first.selectVerticalTab(first)
-        NSApp.activate(ignoringOtherApps: true)
-        try await Task.sleep(for: .milliseconds(250))
+        if #available(macOS 14.0, *) {
+            NSApp.activate()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        for _ in 0..<20 {
+            if NSApp.isActive && firstWindow.isKeyWindow { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try #require(NSApp.isActive && firstWindow.isKeyWindow,
+            "Optional desktop test needs an unlocked desktop and the test window in foreground; do not diagnose a drag regression without these preconditions.")
         let group = try #require(firstWindow.tabGroup)
         first.selectVerticalTab(first)
         try await Task.sleep(for: .milliseconds(50))

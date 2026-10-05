@@ -13,13 +13,16 @@ Use this skill in the `oh-my-ghostty` repo. Never open the Xcode GUI. Never touc
 
 ## Core Rules
 
-1. **Testing strategy by release type**:
-   - **Patch releases (`0.x.Y`)**: Run **only targeted tests** for changed modules and their direct dependents (`--only-testing GhosttyTests/<Suites>`). Do NOT run the full test suite.
-   - **Minor/Major releases (`0.X.0`)**: Run the **full test suite** (`macos/build.nu --action test`).
+1. **Testing strategy by changed modules, not release type**:
+   - For patch/minor/major releases, preview then execute `macos/build.nu --action test --changed-since "v<PREVIOUS_VERSION>"`. This includes all release commits and worktree changes, plus direct module dependents and version smoke coverage.
+   - Shared host/core, build/test infrastructure, or unmapped changes conservatively select all routine Swift suites. Explicit broad sweeps remain available with `--test-modules all`; do not force them solely because of a minor bump.
+   - `.interactiveDesktop` native drag/focus tests are optional, excluded by default, and reported **NOT RUN**, not passed. After relevant native tab/drag/focus/event changes, schedule them explicitly with `--include-desktop-tests` on an unlocked foreground desktop. XCUITest stays excluded.
+   - Swift selection does not replace affected Zig/Python/shell or artifact checks. See `docs/TESTING.md`.
 2. **Build and test strictly serially**: Never run multiple builds or tests concurrently (`build.db: database is locked`).
 3. **Shell compatibility**: Pi shell may be Fish. Wrap multiline shell commands with `/bin/bash -lc '...'`.
 4. **GitHub CLI target**: Always pass `--repo jischeng/oh-my-ghostty` when running `gh release create` (`upstream` points to `ghostty-org/ghostty`).
-5. **Signing & Rosetta**: If Keychain lacks `Developer ID Application`, set `OMG_SIGNING_IDENTITY=-` (ad-hoc). If Rosetta 2 is not installed, the script verifies the `x86_64` Mach-O slice without launching it. Document both in release notes.
+5. **Release signing**: Use `OMG_SIGNING_IDENTITY=-` for ad-hoc signatures. Apps and DMGs are not notarized. Developer ID certificates, Apple account authentication, and notarization profiles are not release prerequisites. Record ad-hoc signing, no notarization, and first-launch Gatekeeper behavior in release notes. Sparkle EdDSA signing remains required.
+6. **Rosetta**: If Rosetta 2 is not installed, the script verifies the `x86_64` Mach-O slice without launching it. Record the actual architecture checks and any unperformed launch checks in release notes.
 
 ---
 
@@ -55,12 +58,19 @@ plutil -lint macos/Ghostty-Info.plist
 xcrun ibtool --warnings --errors --notices --output-format human-readable-text macos/Sources/App/MainMenu.xib
 rm -f default.profraw
 
-# 2. Tests
-# Patch release (0.x.Y): targeted only
-macos/build.nu --action test --only-testing GhosttyTests/<ChangedSuites>
+# 2. Swift tests for all commits since the previous published OMG version
+macos/build.nu --action test --changed-since "v<PREVIOUS_VERSION>" --test-plan-only
+macos/build.nu --action test --changed-since "v<PREVIOUS_VERSION>"
 
-# Minor/Major release (0.X.0): full suite
-# macos/build.nu --action test
+# Explicit modules or an intentional broad routine sweep
+# macos/build.nu --action test --test-modules git,editor
+# macos/build.nu --action test --test-modules all
+
+# Optional real native drag regression after relevant changes; desktop must be unlocked
+# macos/build.nu --action test --only-testing GhosttyTests/VerticalTabMouseTests --include-desktop-tests
+
+# Selector changes need offline contract tests too
+python3 -m unittest discover -s dist -p 'test_omg_test_plan.py'
 ```
 
 ### Step 3: Build Release Binaries
@@ -105,5 +115,5 @@ gh release create "v<OMG_VERSION>" \
 ## Completion Report Checklist
 - Commit SHAs and tag name (`vX.Y.Z`).
 - Architectures built (`arm64`, `x86_64`, `universal`).
-- Signing (`ad-hoc` or `Developer ID`) and notarization status.
+- Ad-hoc code-signature verification, launch-probe evidence, and explicit not-notarized status.
 - GitHub Release URL and list of 5 uploaded assets.

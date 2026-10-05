@@ -3,20 +3,67 @@
 # Build the macOS Ghostty app using xcodebuild with a clean environment
 # to avoid Nix shell interference (NIX_LDFLAGS, NIX_CFLAGS_COMPILE, etc.).
 
+def test-plan [arguments: list<string>] {
+    let planner = ($env.FILE_PWD | path join ".." "dist" "omg_test_plan.py")
+    let result = (^python3 $planner ...$arguments | complete)
+    if $result.exit_code != 0 {
+        error make {msg: ($result.stderr | str trim)}
+    }
+    $result.stdout | from json
+}
+
 def main [
     --scheme: string = "Ghostty"       # Xcode scheme (Ghostty, DockTilePlugin)
     --configuration: string = "Debug"  # Build configuration (Debug, Release, ReleaseLocal)
     --action: string = "build"         # xcodebuild action (build, test, clean, etc.)
-    --only-testing: string = ""         # Comma-separated test identifiers, e.g. GhosttyTests/AgentIntegrationManagerTests
+    --only-testing: string = ""         # Comma-separated suite/method identifiers
+    --test-modules: string              # Comma-separated modules, or all (Swift tests only)
+    --changed-since: string             # Git ref/commit; includes staged, unstaged, untracked changes
+    --include-desktop-tests             # Opt in to foreground/unlocked native interaction tests
+    --test-plan-only                    # Print the selection as JSON without building/running tests
+    --list-test-modules                 # List modules and direct dependents without building
     --marketing-version: string         # Optional local build version override
 ] {
     let project = ($env.FILE_PWD | path join "Ghostty.xcodeproj")
     let build_dir = ($env.FILE_PWD | path join "build")
 
-    # Skip UI tests for CLI-based invocations because it requires
-    # special permissions.
+    if $list_test_modules {
+        print (test-plan [--list-modules] | to json)
+        return
+    }
+    if $action != "test" and ($test_modules != null or $changed_since != null or $only_testing != "" or $include_desktop_tests or $test_plan_only) {
+        error make {msg: "Test selection flags require --action test"}
+    }
+    let module_args = if $test_modules == null { [] } else { [--modules $test_modules] }
+    let changed_args = if $changed_since == null { [] } else { [--changed-since $changed_since] }
+    let only_args = if $only_testing == "" { [] } else { [--only-testing $only_testing] }
+    let desktop_args = if $include_desktop_tests { [--include-desktop-tests] } else { [] }
+    let plan = if $action == "test" {
+        test-plan [...$module_args ...$changed_args ...$only_args ...$desktop_args]
+    } else {
+        {only_testing: [], skip_testing: []}
+    }
+    if $test_plan_only {
+        print ($plan | to json)
+        return
+    }
+    if $action == "test" {
+        print $"Swift test scope: ($plan.scope); modules: ($plan.modules | str join ', '); suites: ($plan.suite_count)"
+        if ($plan.full_suite_paths | is-not-empty) or ($plan.unknown_paths | is-not-empty) {
+            print "Shared infrastructure or unmapped changes: conservatively selecting all regular Swift suites."
+        }
+        if ($plan.deferred_desktop | is-not-empty) {
+            print ("NOT RUN (optional interactive desktop): " + ($plan.deferred_desktop | str join ', ') + ". Use --include-desktop-tests with an unlocked foreground desktop.")
+        }
+        if not $plan.run_swift {
+            print "No Swift suites selected; xcodebuild was not executed. Run applicable documentation/script/core checks separately."
+            return
+        }
+    }
+    # XCUITest still needs a separate permissions-enabled workflow. Native desktop
+    # tests inside GhosttyTests are independently optional, not XCUITest.
     let skip_testing = if $action == "test" {
-        [-skip-testing GhosttyUITests -parallel-testing-enabled NO]
+        $plan.skip_testing | each {|test| ["-skip-testing" $test] } | flatten | append [-parallel-testing-enabled NO]
     } else {
         []
     }
@@ -25,8 +72,7 @@ def main [
     } else {
         [$"MARKETING_VERSION=($marketing_version)"]
     }
-    let selected_tests = ($only_testing | split row "," | where {|test| $test != "" }
-        | each {|test| ["-only-testing" $test] } | flatten)
+    let selected_tests = ($plan.only_testing | each {|test| ["-only-testing" $test] } | flatten)
 
     (^env -i
         $"HOME=($env.HOME)"

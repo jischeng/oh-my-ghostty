@@ -2,10 +2,10 @@
 set -euo pipefail
 
 if [[ $# -ne 1 || ! "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "usage: OMG_SIGNING_IDENTITY=... PREVIOUS_TAG=vX.Y.Z $0 OMG_VERSION" >&2
+  echo "usage: OMG_SIGNING_IDENTITY=- PREVIOUS_TAG=vX.Y.Z $0 OMG_VERSION" >&2
   exit 64
 fi
-: "${OMG_SIGNING_IDENTITY:?set OMG_SIGNING_IDENTITY to a Developer ID identity or - for ad-hoc}"
+: "${OMG_SIGNING_IDENTITY:?set OMG_SIGNING_IDENTITY to - for ad-hoc release signing}"
 : "${PREVIOUS_TAG:?set PREVIOUS_TAG to the previous published OMG tag}"
 
 omg_version=$1
@@ -138,6 +138,7 @@ for arch in arm64 x86_64 universal; do
     fi
     mode=$(awk '/build mode/{print $NF}' <<<"$output")
     [[ "$mode" == ".ReleaseFast" ]] || { echo "$arch DMG build mode is $mode" >&2; exit 1; }
+    printf '[%s] DMG launch=ok mode=%s\n' "$arch" "$mode"
   fi
   detached=false
   for _ in {1..10}; do
@@ -148,7 +149,7 @@ for arch in arm64 x86_64 universal; do
     sleep 0.5
   done
   [[ "$detached" == true ]] || { echo "could not unmount $mount_base/mnt" >&2; exit 1; }
-  printf '[%s] dmg_mount=valid launch=ok mode=%s\n' "$arch" "$mode"
+  printf '[%s] dmg_mount=valid\n' "$arch"
 done
 
 printf 'artifacts=%s\nsigning_identity=%s\n' "$artifacts" \

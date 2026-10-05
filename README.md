@@ -142,9 +142,10 @@ Download the architecture-specific DMG from
 Drag `OMG.app` to Applications. Because the bundle identifier and executable
 are independent, official Ghostty and OMG can coexist.
 
-Release notes state whether an artifact is Developer ID signed and notarized.
-Do not assume an unnotarized development build has the same Gatekeeper behavior
-as a final distribution build.
+Release apps are **ad-hoc signed** and **not notarized**. macOS Gatekeeper may
+block the first launch. If you trust the downloaded app, review it in System
+Settings > Privacy & Security and allow it there; do not disable Gatekeeper
+globally.
 
 ## Relationship with Ghostty
 
@@ -254,7 +255,7 @@ Maintainers must follow [Releasing OMG](docs/RELEASING.md). It defines:
 - arm64/x86_64 isolation;
 - OMG/Ghostty dual versioning;
 - validation gates;
-- Developer ID signing and notarization;
+- ad-hoc code signing and executable launch verification;
 - DMG packaging and checksums;
 - merge, tag, and GitHub Release rules;
 - updater limitations and privacy-safe secret handling.
@@ -270,7 +271,6 @@ Planned work, not current features:
 - external Inspector and status wire messages;
 - Git Inspector and expanded Info machine-resource sections;
 - official agent adapters and QuickInput/Pi integration;
-- dedicated signed/notarized CI and OMG Sparkle appcast;
 - additional developer and remote-workflow tools.
 
 See [Plugin Capability Audit](docs/plugin-capability-audit.md) for implementation

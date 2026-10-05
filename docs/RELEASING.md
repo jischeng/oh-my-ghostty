@@ -135,12 +135,11 @@ git rev-parse upstream/main
 - SwiftLint;
 - Nushell for `macos/build.nu`;
 - GitHub CLI (`gh`) for publishing;
-- Apple `codesign`, `notarytool`, `stapler`, `hdiutil`, `ditto`, and `plutil`;
-- a **Developer ID Application** certificate and Apple notarization access for
-  public binary releases.
+- Apple `codesign`, `hdiutil`, `ditto`, and `plutil`.
 
-Do not distribute Apple Development-signed or ad-hoc builds as final releases.
-They are suitable only for local development.
+Public releases use **ad-hoc code signatures** (`OMG_SIGNING_IDENTITY=-`).
+Apps and DMGs are **not notarized**. Developer ID certificates, Apple developer
+account credentials, and notarization profiles are not release prerequisites.
 
 ## Environment and secrets
 
@@ -152,22 +151,12 @@ export OMG_VERSION="<x.y.z>"
 export GHOSTTY_VERSION="<x.y.z-or-x.y.z-dev>"
 export GHOSTTY_REVISION="<full-upstream-commit>"
 export OMG_BUILD_ROOT="$PWD/.release-build/$OMG_VERSION"
-export OMG_SIGNING_IDENTITY="<Developer ID Application identity>"
-export OMG_APPLE_TEAM_ID="<apple-team-id>"
-export OMG_NOTARY_PROFILE="<notarytool-keychain-profile>"
+export OMG_SIGNING_IDENTITY=-
 ```
 
-For one-time credential setup, provide values interactively or via a secure
-secret manager:
-
-```bash
-xcrun notarytool store-credentials "$OMG_NOTARY_PROFILE" \
-  --apple-id "<your-apple-id>" \
-  --team-id "$OMG_APPLE_TEAM_ID" \
-  --password "<app-specific-password>"
-```
-
-The keychain profile name may be documented; credential values may not.
+Release signing uses the literal identity `-`; no certificate lookup or Apple
+account authentication is required. Sparkle update signing uses its separate
+EdDSA key as described in [Updater and Sparkle signing](#9-updater-and-sparkle-signing).
 
 ## 1. Development build
 
@@ -363,21 +352,43 @@ xcrun ibtool --warnings --errors --notices \
   --output-format human-readable-text macos/Sources/App/MainMenu.xib
 ```
 
-App-hosted tests (UI test automation is intentionally serialized):
+App-hosted Swift selection is based on changed modules and direct dependents,
+not on patch/minor/major release size. Use the previous **published OMG tag**, so
+all release commits are covered rather than only the version bump:
 
 ```bash
-xcodebuild \
-  -project macos/Ghostty.xcodeproj \
-  -scheme Ghostty \
-  -configuration Debug \
-  "SYMROOT=$PWD/macos/build" \
-  -parallel-testing-enabled NO \
-  test
+macos/build.nu --action test --changed-since "v<PREVIOUS_VERSION>" --test-plan-only
+macos/build.nu --action test --changed-since "v<PREVIOUS_VERSION>"
 ```
+
+Shared host/core, build/test infrastructure, or unmapped changes fall back to all
+routine Swift suites. For an intentional broad sweep, use
+`macos/build.nu --action test --test-modules all`. Builds/tests remain serialized.
+Affected Zig/Python/shell tests and actual-artifact checks still run separately;
+the selector does not claim to run those layers.
+
+Real native desktop interaction suites tagged `.interactiveDesktop` are optional
+and excluded by default, with an explicit **NOT RUN** report. After relevant native
+tab, drag/drop, focus, or event-routing changes, schedule them explicitly on an
+unlocked desktop with a foreground test application:
+
+```bash
+macos/build.nu --action test \
+  --only-testing GhosttyTests/VerticalTabMouseTests --include-desktop-tests
+```
+
+A locked/background test session cannot establish native drag/focus behavior;
+record deferred coverage rather than treating it as passed. Pure policy/lifecycle
+and routine tab integration tests still run by default. This optional desktop
+tier does not automatically block unrelated releases. XCUITest is a separate
+permissions-enabled workflow and remains excluded by the wrapper. Full selection
+rules, module map, and selector contract tests are in [TESTING.md](TESTING.md).
 
 Success criteria:
 
-- no test failures;
+- no failures in the selected routine tests, with recorded scope/results;
+- optional desktop tests run and their results, or an explicit not-run reason,
+  are recorded separately (never called passed if not run);
 - SwiftLint has zero violations;
 - XIB/JSON/plist checks have no errors;
 - Debug and both Release architectures build;
@@ -388,21 +399,12 @@ Success criteria:
 
 ## 4. Signing
 
-Sign every nested Sparkle component and the app with the same identity.
-Mixing Team IDs can pass superficial bundle inspection but fail at launch with
-`Library not loaded: Sparkle` and a dyld signature error. The universal updater
-app must be signed too; signing only the two manual-download apps leaves the
-Sparkle enclosure unusable.
-
-Public releases require one Developer ID identity and hardened runtime. For a
-local preflight only, set `OMG_SIGNING_IDENTITY=-`; the signing script then
-removes hardened runtime from every ad-hoc signature. Hardened runtime library
-validation cannot assign independently ad-hoc signed embedded frameworks a
-shared Team ID, so combining ad-hoc signatures with runtime makes the app pass
-`codesign --verify --deep` but abort in dyld before `main`.
+Ad-hoc sign every nested Sparkle component, plug-in, and app with identity `-`.
+Sign the arm64, x86_64, and universal apps. Hardened runtime must be disabled for
+all ad-hoc signatures. The universal app is the Sparkle updater enclosure.
 
 ```bash
-export OMG_SIGNING_IDENTITY="<Developer ID Application identity>"
+export OMG_SIGNING_IDENTITY=-
 
 for arch in arm64 x86_64 universal; do
   dist/macos/sign_omg_app.sh \
@@ -422,29 +424,18 @@ codesign -dv --verbose=4 \
 "$OMG_BUILD_ROOT/arm64/Release/OMG.app/Contents/MacOS/omg" --version
 ```
 
-The identity must be Developer ID Application for distribution. Do not put the
-real identity, certificate, Team ID, or keychain password in source files.
+Static code-signature verification and the executable launch probe are both
+required. Ad-hoc signing does not replace Sparkle's EdDSA update signature.
 
-## 5. Notarize the apps
+## 5. Notarization status
 
-Notarize a zip of each signed app, staple the ticket, then package the DMG:
+OMG apps and DMGs are not notarized. Notarization submission and ticket stapling
+are not release workflow steps. Release notes must state **ad-hoc signed; not
+notarized** and disclose that macOS Gatekeeper may block the first launch. Users
+who trust the downloaded app can use macOS System Settings > Privacy & Security
+to review and allow it. Do not disable Gatekeeper globally.
 
-```bash
-for arch in arm64 x86_64 universal; do
-  app="$OMG_BUILD_ROOT/$arch/Release/OMG.app"
-  zip="$OMG_BUILD_ROOT/OMG-$OMG_VERSION-macos-$arch.zip"
-  ditto -c -k --keepParent "$app" "$zip"
-  xcrun notarytool submit "$zip" \
-    --keychain-profile "$OMG_NOTARY_PROFILE" --wait
-  xcrun stapler staple "$app"
-  xcrun stapler validate "$app"
-done
-```
-
-Do not continue after an `Invalid` notarization result. Inspect the submission
-log with `xcrun notarytool log` and fix signing/entitlements first.
-
-## 6. Package and notarize DMGs
+## 6. Package DMGs
 
 ```bash
 mkdir -p "$OMG_BUILD_ROOT/artifacts"
@@ -457,10 +448,6 @@ for arch in arm64 x86_64 universal; do
 done
 
 for dmg in "$OMG_BUILD_ROOT"/artifacts/*.dmg; do
-  xcrun notarytool submit "$dmg" \
-    --keychain-profile "$OMG_NOTARY_PROFILE" --wait
-  xcrun stapler staple "$dmg"
-  xcrun stapler validate "$dmg"
   hdiutil verify "$dmg"
 done
 
@@ -598,8 +585,8 @@ and artifact names; it is not an OMG publishing script.
 | Symptom | Cause | Required action |
 | --- | --- | --- |
 | x86_64 undefined `_ghostty_*` symbols | arm64-only GhosttyKit | rebuild universal XCFramework |
-| dyld refuses Sparkle at launch | nested Team IDs differ, or hardened runtime was retained on an ad-hoc build | re-sign all nested components with one Developer ID, or remove runtime for local ad-hoc preflight |
-| Gatekeeper rejects public DMG | Development/ad-hoc signature or no notarization | use Developer ID and complete notarization |
+| dyld refuses Sparkle at launch | inconsistent nested signatures or hardened runtime on ad-hoc components | ad-hoc re-sign all nested components and the app without hardened runtime; repeat the launch probe |
+| Gatekeeper blocks first launch | app is ad-hoc signed and not notarized | disclose this in release notes; trusted downloads can be reviewed in System Settings > Privacy & Security; do not disable Gatekeeper globally |
 | `Ghostty.app` appears in output | stale build or old product settings | clean build; expected product is `OMG.app` |
 | Release sorts below same version | tag used prerelease suffix | use plain `vX.Y.Z` OMG tag |
 | Update check compares against Ghostty | wrong appcast | use only OMG-owned appcast |

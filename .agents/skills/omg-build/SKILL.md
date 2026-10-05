@@ -46,7 +46,23 @@ macos/build.nu --action clean
 
 ### A. Targeted Swift Testing (Fastest)
 
-`macos/build.nu` supports `--only-testing` to run specific test suites or methods without waiting for the full 300+ test suite:
+`macos/build.nu` supports module/change-based selection and `--only-testing`.
+Prefer changed modules and their direct dependents; release size alone does not
+require a full sweep. See `docs/TESTING.md` for the executable mapping, fallback
+rules, and non-Swift checks.
+
+```bash
+macos/build.nu --list-test-modules
+macos/build.nu --action test --test-modules git,editor
+macos/build.nu --action test --changed-since HEAD~1 --test-plan-only
+macos/build.nu --action test --changed-since HEAD~1
+```
+
+For releases, use the previous published OMG tag rather than only the latest
+commit. These selectors run Swift tests only; rebuild GhosttyKit and run affected
+Zig/Python/shell tests separately. Use one scope selector per invocation.
+
+Specific suites/methods remain available:
 
 ```bash
 # Run one test suite
@@ -59,10 +75,34 @@ macos/build.nu --action test --only-testing GhosttyTests/SSHHostRegistryTests,Gh
 macos/build.nu --action test --only-testing GhosttyTests/SSHHostRegistryTests/testRegistrationPersistsExactConnectionsAndSwitchingOnlyReadsCache
 ```
 
-### B. Full Swift Test Suite
+### B. Broad Routine and Optional Desktop Tests
+
+Shared host/core, build/test infrastructure, and unmapped changes conservatively
+select all routine Swift suites. An explicit broad sweep is also available:
 
 ```bash
-macos/build.nu --action test
+macos/build.nu --action test --test-modules all
+# Equivalent: macos/build.nu --action test
+```
+
+Real native drag/focus tests tagged `.interactiveDesktop` are optional, excluded
+by default, and reported as **NOT RUN**, not passed. After relevant native tab,
+drag/drop, focus, or event-routing changes, explicitly schedule them on an
+unlocked desktop with the test app in foreground:
+
+```bash
+macos/build.nu --action test --only-testing GhosttyTests/VerticalTabMouseTests --include-desktop-tests
+```
+
+An explicit desktop test without opt-in fails with guidance. An opted-in test
+without a foreground key window fails early on its prerequisite, not a misleading
+drag assertion. XCUITest remains excluded; this flag does not enable it. Raw
+`xcodebuild` does not apply the wrapper's selection policy.
+
+Validate selector changes without launching Xcode:
+
+```bash
+python3 -m unittest discover -s dist -p 'test_omg_test_plan.py'
 ```
 
 ### C. Zig Core Testing

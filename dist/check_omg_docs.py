@@ -71,6 +71,13 @@ else:
     if undocumented:
         fail(f"Plugin guide is missing capabilities: {', '.join(undocumented)}")
 
+release_guide = (ROOT / "docs/RELEASING.md").read_text()
+for required in ["OMG_SIGNING_IDENTITY=-", "not notarized"]:
+    if required not in release_guide:
+        fail(f"Release guide is missing signing policy: {required}")
+if re.search(r"\b(?:notarytool|stapler)\s+(?:submit|store-credentials|staple)\b", release_guide):
+    fail("Release guide contains notarization steps outside the release workflow")
+
 readme = (ROOT / "README.md").read_text()
 for required in ["docs/RELEASING.md", "docs/PLUGIN_DEVELOPMENT.md"]:
     if required not in readme:

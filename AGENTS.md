@@ -12,10 +12,26 @@ A file for [guiding coding agents](https://agents.md/).
   - Prefer to run targeted tests with `-Dtest-filter` because the full
     test suite is slow to run.
 - **Test filter (Zig)**: `zig build test -Dtest-filter=<test name>`
+- **Test (Swift modules)**: `macos/build.nu --action test --test-modules git,editor`
+- **Test (Swift changes)**: `macos/build.nu --action test --changed-since <base-ref>`
+  - Inspect with `--test-plan-only`; releases use the previous published OMG tag.
+  - Shared host/core, build/test infrastructure, or unmapped changes fall back to
+    all routine Swift suites. Release size alone does not require a full sweep.
+- **Test (Swift routine full)**: `macos/build.nu --action test --test-modules all`
+  - Interactive-desktop tests are optional and excluded by default, not passed.
+  - After native tab/drag/focus changes, run relevant desktop tests explicitly on
+    an unlocked foreground desktop with `--include-desktop-tests`.
+  - Swift selection does not replace affected Zig/Python/shell/artifact checks.
+- **Test selector contract**: `python3 -m unittest discover -s dist -p 'test_omg_test_plan.py'`
+  - Test tiers and mappings: `docs/TESTING.md`. Build and test strictly serially.
 - **Formatting (Zig)**: `zig fmt .`
 - **Formatting (Swift)**: `swiftlint lint --strict --fix`
 - **Formatting (other)**: `prettier -w .`
 - **OMG documentation contract:** `python3 dist/check_omg_docs.py`
+- **OMG release signing:** Use `OMG_SIGNING_IDENTITY=-` (ad-hoc). Apps and DMGs are
+  not notarized. Developer ID certificates and notarization credentials are not
+  release prerequisites. Keep code-signature, launch, DMG, and Sparkle EdDSA
+  checks; see `docs/RELEASING.md`.
 
 Any change to plugin APIs, manifests, wire messages, capabilities, lifecycle,
 loading/discovery, package layout, Inspector provider behavior, or permissions

@@ -12,10 +12,13 @@ release does not automatically require every unrelated feature suite.
    routine tests.
 2. **Broad routine regression**: all routine Swift suites for shared host/core,
    build/test infrastructure, unmapped changes, or an explicitly requested sweep.
-3. **Optional interactive desktop**: suites tagged `.interactiveDesktop`, currently
-   `VerticalTabMouseTests`. Its actual CoreDrag loop and key-window assertions need
-   an unlocked desktop and a foreground test application. Lockscreen, background,
-   and unattended runs cannot establish that behavior.
+3. **Optional interactive desktop**: suites or individual tests tagged
+   `.interactiveDesktop`: `VerticalTabMouseTests` and the visual
+   `VerticalTabsIntegrationTests.appKitTabGroupDrivesVerticalTabsWithoutRecreatingSurfaces`.
+   Real CoreDrag, menu focus routing, native window appearance, and screenshots
+   need an unlocked desktop and foreground test application. Lockscreen,
+   background, and unattended runs cannot establish that behavior. Other methods
+   in a mixed suite remain routine tests.
 
 The wrapper excludes interactive-desktop suites by default and prints **NOT RUN**
 when the chosen scope contains one. This is not a pass or a silently swallowed
@@ -54,6 +57,11 @@ macos/build.nu --action test --test-modules all
 # Optional real native drag regression; keep desktop unlocked/test window foreground
 macos/build.nu --action test \
   --only-testing GhosttyTests/VerticalTabMouseTests --include-desktop-tests
+
+# Optional visual test; Swift Testing method selectors include parentheses
+macos/build.nu --action test \
+  --only-testing 'GhosttyTests/VerticalTabsIntegrationTests/appKitTabGroupDrivesVerticalTabsWithoutRecreatingSurfaces()' \
+  --include-desktop-tests
 ```
 
 Use exactly one of `--test-modules`, `--changed-since`, and `--only-testing`.
@@ -105,7 +113,8 @@ Selection safety:
 - Suite names are discovered from `Tests`/`Suite` type declarations in Swift test
   files. Add new areas and dependency edges to the map alongside feature changes.
   Unmapped test files or undiscoverable test types are errors, not silently omitted
-  coverage. Keep each desktop-tagged suite in its own file.
+  coverage. Keep each desktop-tagged test type in its own file. Method-level tags
+  exclude only that method, not the remaining routine tests in its suite.
 
 ## Non-Swift and release gates
 

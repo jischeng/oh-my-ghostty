@@ -66,13 +66,15 @@ Measured validation results:
 - Fake-transport shell integration: **12 scenarios passed**, covering system and
   Homebrew Bash, Zsh, and Fish in local, remote, and already-integrated modes.
 - SSH wrapper tests: **4 passed**; Dev diagnostic sampler tests: **4 passed**.
-- Test selector/CLI contract: **39 tests passed**, without Xcode/desktop interaction.
+- Test selector/CLI contract: **40 tests passed**, without Xcode/desktop interaction.
 - Targeted Swift update module: **43 tests in 4 suites passed**.
-- Release-delta routine Swift regression: **918 tests in 112 suites passed**.
+- Release-delta routine Swift regression: **917 tests in 112 suites passed**.
   Shared core/host and test-infrastructure changes selected a broad routine sweep.
-- **Optional interactive desktop: NOT RUN**. Real native drag/focus tests require
-  explicit `--include-desktop-tests` on an unlocked foreground desktop. Routine
-  tab integration and drag lifecycle/policy tests remain included.
+- **Optional interactive desktop: NOT RUN**. Real native drag/focus and visual
+  menu/appearance/screenshot tests require explicit `--include-desktop-tests` on an
+  unlocked foreground desktop. Method-level selection keeps the other two
+  `VerticalTabsIntegrationTests` methods in routine coverage; both passed.
+  Tab policy and drag lifecycle tests remain included.
 
 Swift test selection now follows changed modules and direct dependents for every
 release category, with conservative broad fallback for shared/unmapped changes;

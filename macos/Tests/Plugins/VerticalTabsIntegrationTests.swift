@@ -122,7 +122,9 @@ struct VerticalTabsIntegrationTests {
         #expect(remotePi < tolerance)
     }
 
-    @Test func appKitTabGroupDrivesVerticalTabsWithoutRecreatingSurfaces() async throws {
+    // Real menu routing, native window appearance, and screenshots require foreground focus.
+    @Test(.tags(.interactiveDesktop))
+    func appKitTabGroupDrivesVerticalTabsWithoutRecreatingSurfaces() async throws {
         let inspectorPresentation = InspectorPresentationStore.shared
         let previousInspectorPresentation = inspectorPresentation.snapshot
         inspectorPresentation.replace(with: .init())
@@ -181,6 +183,12 @@ struct VerticalTabsIntegrationTests {
             "oh-my-ghostty",
         ]
         var controllers: [TerminalController] = []
+        defer {
+            for controller in controllers {
+                controller.window?.delegate = nil
+                controller.window?.close()
+            }
+        }
 
         let first = TerminalController(
             appDelegate.ghostty,
@@ -190,6 +198,17 @@ struct VerticalTabsIntegrationTests {
         controllers.append(first)
         let initialWindow = try #require(first.window as? VerticalTabsTerminalWindow)
         first.showWindow(nil)
+        if #available(macOS 14.0, *) {
+            NSApp.activate()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        for _ in 0..<20 {
+            if NSApp.isActive && initialWindow.isKeyWindow { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try #require(NSApp.isActive && initialWindow.isKeyWindow,
+            "Optional visual desktop test requires an unlocked foreground test window for menu routing and native appearance.")
         try await settle([first])
         initialWindow.contentView?.superview?.layoutSubtreeIfNeeded()
         #expect(initialWindow.sidebarToggleIsInstalled)
@@ -216,13 +235,6 @@ struct VerticalTabsIntegrationTests {
                     ObjectIdentifier(controller)
             )
             controllers.append(controller)
-        }
-
-        defer {
-            for controller in controllers {
-                controller.window?.delegate = nil
-                controller.window?.close()
-            }
         }
 
         try await settle(controllers)

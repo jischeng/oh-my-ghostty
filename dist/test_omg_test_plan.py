@@ -11,6 +11,8 @@ import unittest
 import omg_test_plan as planner
 
 ROOT = Path(__file__).resolve().parent.parent
+VISUAL_DESKTOP_TEST = "GhosttyTests/VerticalTabsIntegrationTests/appKitTabGroupDrivesVerticalTabsWithoutRecreatingSurfaces()"
+DESKTOP_TESTS = {"GhosttyTests/VerticalTabMouseTests", VISUAL_DESKTOP_TEST}
 
 
 def add_suite(root, relative, name, desktop=False):
@@ -68,7 +70,9 @@ class PlannerTests(unittest.TestCase):
         self.assertIn("GhosttyTests/VerticalTabDragLifecycleTests", result["only_testing"])
         self.assertIn("GhosttyTests/VerticalTabsIntegrationTests", result["only_testing"])
         self.assertNotIn("GhosttyTests/VerticalTabMouseTests", result["only_testing"])
-        self.assertEqual(result["deferred_desktop"], ["GhosttyTests/VerticalTabMouseTests"])
+        self.assertEqual(set(result["deferred_desktop"]), DESKTOP_TESTS)
+        self.assertIn("GhosttyTests/VerticalTabsIntegrationTests", result["only_testing"])
+        self.assertIn(VISUAL_DESKTOP_TEST, result["skip_testing"])
 
     def test_opt_in_restores_desktop_without_enabling_xcuitest(self):
         result = self.plan(modules=["tabs"], include_desktop=True)
@@ -77,7 +81,8 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(result["deferred_desktop"], [])
 
     def test_native_suite_or_method_requires_explicit_opt_in(self):
-        for test in ["GhosttyTests/VerticalTabMouseTests", "GhosttyTests/VerticalTabMouseTests/mouseSelectionKeepsWorkingAcrossNativeWindows"]:
+        for test in ["GhosttyTests/VerticalTabMouseTests", "GhosttyTests/VerticalTabMouseTests/mouseSelectionKeepsWorkingAcrossNativeWindows",
+                     VISUAL_DESKTOP_TEST, VISUAL_DESKTOP_TEST[:-2]]:
             with self.subTest(test=test), self.assertRaisesRegex(ValueError, "requires --include-desktop-tests"):
                 self.plan(only_testing=[test])
             self.assertEqual(self.plan(only_testing=[test], include_desktop=True)["only_testing"], [test])
@@ -89,7 +94,14 @@ class PlannerTests(unittest.TestCase):
     def test_explicit_target_still_excludes_desktop(self):
         result = self.plan(only_testing=["GhosttyTests"])
         self.assertIn("GhosttyTests/VerticalTabMouseTests", result["skip_testing"])
-        self.assertEqual(result["deferred_desktop"], ["GhosttyTests/VerticalTabMouseTests"])
+        self.assertEqual(set(result["deferred_desktop"]), DESKTOP_TESTS)
+
+    def test_mixed_suite_keeps_normal_methods_and_defers_only_tagged_method(self):
+        result = self.plan(only_testing=["GhosttyTests/VerticalTabsIntegrationTests"])
+        self.assertEqual(result["only_testing"], ["GhosttyTests/VerticalTabsIntegrationTests"])
+        self.assertEqual(result["deferred_desktop"], [VISUAL_DESKTOP_TEST])
+        self.assertIn(VISUAL_DESKTOP_TEST, result["skip_testing"])
+        self.assertEqual(result["suite_count"], 1)
 
     def test_bad_selections_fail_instead_of_running_zero_tests(self):
         for kwargs in [{"modules": []}, {"modules": ["gti"]}, {"only_testing": []},
@@ -157,7 +169,7 @@ class PlannerTests(unittest.TestCase):
         self.assertNotIn("GhosttyTests/GitDiffServiceTests", result["only_testing"])
 
     def test_catalog_discovers_all_current_tests_and_single_desktop_suite(self):
-        self.assertEqual(self.catalog[1], {"GhosttyTests/VerticalTabMouseTests"})
+        self.assertEqual(self.catalog[1], DESKTOP_TESTS)
         self.assertTrue(all(self.catalog[0].values()))
 
     def test_new_unmapped_test_file_is_an_error(self):

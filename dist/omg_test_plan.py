@@ -100,6 +100,12 @@ NO_SWIFT_GLOBS = ("docs/**", "*.md", "LICENSE*", ".agents/skills/*/SKILL.md")
 SMOKE_SUITE = "GhosttyTests/OhMyGhosttyVersionTests"
 SUITE_TYPE = re.compile(r"\b(?:struct|class|enum)\s+(\w+(?:Tests|Suite))\b")
 DESKTOP_TAG = re.compile(r"\.tags\([^)]*\.interactiveDesktop\b")
+SUITE_TRAITS = re.compile(r"@Suite\s*\((.*?)\)\s*(?:@MainActor\s*)?(?:struct|class|enum)\s+\w+", re.DOTALL)
+METHOD_TRAITS = re.compile(r"@Test\s*\((.*?)\)\s*func\s+(\w+)", re.DOTALL)
+
+
+def normalized_identifier(identifier):
+    return identifier[:-2] if identifier.endswith("()") else identifier
 
 
 def matches(path, patterns):
@@ -129,8 +135,15 @@ def inventory(root):
         files[path] = names
         if DESKTOP_TAG.search(text):
             if len(names) != 1:
-                raise ValueError(f"Put each interactiveDesktop suite in its own file: {path}")
-            desktop.update(names)
+                raise ValueError(f"Put each desktop-tagged test type in its own file: {path}")
+            suite_tagged = any(DESKTOP_TAG.search(traits) for traits in SUITE_TRAITS.findall(text))
+            methods = [method for traits, method in METHOD_TRAITS.findall(text) if DESKTOP_TAG.search(traits)]
+            if not suite_tagged and not methods:
+                raise ValueError(f"Cannot discover interactiveDesktop tag in {path}")
+            if suite_tagged:
+                desktop.update(names)
+            else:
+                desktop.update(next(iter(names)) + "/" + method + "()" for method in methods)
     assigned = set()
     for name, module in MODULES.items():
         for pattern in module.tests:
@@ -201,8 +214,9 @@ def make_plan(catalog, *, modules=None, paths=None, only_testing=None, include_d
             suite = "/".join(test.split("/")[:2])
             if test != "GhosttyTests" and suite not in all_suites:
                 raise ValueError(f"Unknown app-hosted suite: {test}")
-            if suite in desktop and not include_desktop:
-                raise ValueError("Interactive desktop suite requires --include-desktop-tests (unlocked, foreground desktop)")
+            if any(normalized_identifier(test) == normalized_identifier(identifier) or test.startswith(identifier + "/")
+                   for identifier in desktop) and not include_desktop:
+                raise ValueError("Interactive desktop suite/method requires --include-desktop-tests (unlocked, foreground desktop)")
     elif modules is not None:
         roots = set(modules)
         if not roots or roots - (set(MODULES) | {"all"}):
@@ -239,7 +253,9 @@ def make_plan(catalog, *, modules=None, paths=None, only_testing=None, include_d
     else:
         expanded = set(MODULES) if scope == "all" else set()
     omitted = desktop if scope == "all" or "GhosttyTests" in selected else {
-        test for test in desktop if any(identifier == test or identifier.startswith(test + "/") for identifier in selected)
+        test for test in desktop if any(normalized_identifier(identifier) == normalized_identifier(test) or
+                                       identifier.startswith(test + "/") or test.startswith(identifier + "/")
+                                       for identifier in selected)
     }
     skip = {"GhosttyUITests"}
     if not include_desktop:

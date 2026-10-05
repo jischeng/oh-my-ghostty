@@ -49,11 +49,40 @@ for arch in arm64 x86_64 universal; do
 done
 (cd "$artifacts" && shasum -a 256 *.dmg > SHA256SUMS.txt)
 
-gh release download "$PREVIOUS_TAG" \
+if ! gh release download "$PREVIOUS_TAG" \
   -R jischeng/oh-my-ghostty \
   -p appcast.xml \
   -D "$artifacts" \
-  --clobber
+  --clobber; then
+  # A cached feed is usable only when it matches the published asset digest.
+  python3 - "$repo_root" "$PREVIOUS_TAG" "$artifacts/appcast.xml" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+
+repo, tag, destination = sys.argv[1:]
+if not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
+    raise SystemExit("invalid previous release tag")
+metadata = json.loads(subprocess.check_output([
+    "gh", "api", f"repos/jischeng/oh-my-ghostty/releases/tags/{tag}"
+]))
+asset = next((a for a in metadata["assets"] if a["name"] == "appcast.xml"), None)
+if not asset or not (asset.get("digest") or "").startswith("sha256:"):
+    raise SystemExit("published appcast has no trusted SHA-256 digest")
+cached = Path(repo) / ".release-build" / tag[1:] / "artifacts" / "appcast.xml"
+if not cached.is_file():
+    raise SystemExit("previous appcast cache is unavailable")
+digest = "sha256:" + hashlib.sha256(cached.read_bytes()).hexdigest()
+if digest != asset["digest"]:
+    raise SystemExit("cached previous appcast does not match the published asset")
+shutil.copyfile(cached, destination)
+print("previous_appcast=verified-published-cache")
+PY
+fi
 
 appcast_tool=${GENERATE_APPCAST-}
 if [[ -z "$appcast_tool" ]]; then

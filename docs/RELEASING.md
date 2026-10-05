@@ -562,7 +562,9 @@ The architecture-specific DMGs are manual-download assets; the universal DMG
 is the single updater enclosure.
 
 Before generation, copy the currently published `appcast.xml` into the artifacts
-directory so Sparkle preserves recent entries. Verify that every new
+directory so Sparkle preserves recent entries. If the asset download is
+unavailable, the packaging script can use the previous release's local artifact
+cache only after its SHA-256 matches the asset digest returned by GitHub's API. Verify that every new
 enclosure has `sparkle:edSignature`, architecture/system requirements, the
 expected `sparkle:shortVersionString`, and a strictly larger numeric
 `sparkle:version` (`CFBundleVersion`). Upload the generated `appcast.xml` as a

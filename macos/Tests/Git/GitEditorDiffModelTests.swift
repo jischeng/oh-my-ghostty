@@ -163,6 +163,74 @@ struct GitEditorDiffModelTests {
         #expect(await executor.commands.filter { $0.first == "rev-list" }.count == 1)
     }
 
+    @Test func largeSourcesAndPatchesLoadAcrossGitTargets() async throws {
+        let root = try await makeRepository()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try await git(["config", "user.name", "Diff Test"], in: root)
+        try await git(["config", "user.email", "diff@example.com"], in: root)
+        let before = String(repeating: "unchanged source line with enough bytes to exceed the old limit\n", count: 10_000)
+        let after = before + "added line\n"
+        let url = root.appendingPathComponent("large.txt")
+        try Data(before.utf8).write(to: url)
+        try await git(["add", "."], in: root)
+        try await git(["commit", "-m", "base"], in: root)
+        try Data(after.utf8).write(to: url)
+        let repository = GitRepositoryIdentity(worktreePath: root.path, gitDirPath: root.path + "/.git",
+                                               commonGitDirPath: root.path + "/.git")
+        // Small patches of large files must not fall back to raw patch text.
+        for target: GitDiffTarget in [.unstaged, .staged, .commit(GitCommitID("HEAD")),
+                                      .comparison(base: GitCommitID("HEAD^"), head: GitCommitID("HEAD"))] {
+            if target == .staged { try await git(["add", "."], in: root) }
+            let resolvedTarget: GitDiffTarget
+            if case .commit = target {
+                try await git(["commit", "-m", "change"], in: root)
+                let head = try await LocalGitExecutor().execute(arguments: ["rev-parse", "HEAD"], workingDirectory: root.path)
+                resolvedTarget = .commit(GitCommitID(head.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines)))
+            } else { resolvedTarget = target }
+            let model = GitEditorDiffModel(request: .init(repository: repository, target: resolvedTarget, file: nil),
+                                           service: GitDiffService(diffByteLimit: 1024))
+            await model.reload().value
+            #expect(model.error == nil && model.content?.sourceError == nil)
+            #expect(model.content?.before == before && model.content?.after == after)
+            #expect(model.content?.presentation?.isConsistent == true)
+            #expect(model.content?.presentation?.changeAnchors.count == 1)
+            model.cancel()
+        }
+        // A patch itself over 512 KB is also readable, including untracked files.
+        try Data(before.utf8).write(to: root.appendingPathComponent("untracked.txt"))
+        let model = makeModel(root: root, file: .init(path: "untracked.txt", status: "A", isUntracked: true))
+        defer { model.cancel() }
+        await model.reload().value
+        #expect(model.content?.document.text.utf8.count ?? 0 > 512 * 1024)
+        #expect(model.content?.document.isTruncated == false)
+        #expect(model.content?.sourceError == nil)
+        #expect(model.content?.after == before)
+        #expect(model.content?.presentation?.isConsistent == true)
+    }
+
+    @Test func snapshotLimitRetainsTheCompletePatchAndRefreshRecovers() async throws {
+        let root = try await makeRepository()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("base\n".utf8).write(to: root.appendingPathComponent("large.txt"))
+        try await git(["add", "."], in: root)
+        try Data(String(repeating: "large line\n", count: 100).utf8).write(to: root.appendingPathComponent("large.txt"))
+        let repository = GitRepositoryIdentity(worktreePath: root.path, gitDirPath: root.path + "/.git",
+                                               commonGitDirPath: root.path + "/.git")
+        let model = GitEditorDiffModel(request: .init(repository: repository, target: .unstaged, file: nil),
+                                       service: GitDiffService(sourceByteLimit: 64))
+        defer { model.cancel() }
+        await model.reload().value
+        #expect(model.error == nil)
+        #expect(model.content?.sourceError != nil)
+        #expect(model.content?.presentation == nil)
+        #expect(model.content?.document.isTruncated == false)
+        #expect(model.content?.document.text.contains("+large line") == true)
+        try Data("small\n".utf8).write(to: root.appendingPathComponent("large.txt"))
+        await model.reload().value
+        #expect(model.content?.sourceError == nil)
+        #expect(model.content?.presentation?.isConsistent == true)
+    }
+
     private func makeModel(root: URL, file: GitDiffFile? = nil) -> GitEditorDiffModel {
         let repository = GitRepositoryIdentity(worktreePath: root.path, gitDirPath: root.path + "/.git",
                                                commonGitDirPath: root.path + "/.git")

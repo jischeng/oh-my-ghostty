@@ -5,28 +5,39 @@ struct GitDiffTextView: NSViewRepresentable {
     let text: String
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSScrollView()
+        Self.makeScrollView(text: text)
+    }
+
+    /// Explicit TextKit geometry keeps the patch fallback scrollable even when
+    /// SwiftUI first creates it with a zero-sized viewport.
+    static func makeScrollView(text: String) -> NSScrollView {
+        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 640, height: 480))
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
         scrollView.autohidesScrollers = false
         scrollView.borderType = .noBorder
 
-        let textView = NSTextView()
+        let textView = NSTextView(frame: scrollView.contentView.bounds)
         textView.isEditable = false
         textView.isSelectable = true
         textView.allowsUndo = false
         textView.usesFontPanel = false
         textView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         textView.textContainerInset = NSSize(width: 12, height: 12)
-        textView.minSize = NSSize(width: 0, height: 0)
+        textView.minSize = scrollView.contentView.bounds.size
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isHorizontallyResizable = true
         textView.isVerticallyResizable = true
         textView.autoresizingMask = [.width]
+        textView.textContainer?.containerSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.textContainer?.widthTracksTextView = false
+        textView.textContainer?.heightTracksTextView = false
         textView.drawsBackground = true
         textView.backgroundColor = NSColor.textBackgroundColor
-        textView.textStorage?.setAttributedString(GitDiffTextRenderer.render(text))
         scrollView.documentView = textView
+        textView.textStorage?.setAttributedString(GitDiffTextRenderer.render(text))
         return scrollView
     }
 
@@ -35,6 +46,8 @@ struct GitDiffTextView: NSViewRepresentable {
         let rendered = GitDiffTextRenderer.render(text)
         guard textView.attributedString() != rendered else { return }
         textView.textStorage?.setAttributedString(rendered)
+        scrollView.contentView.scroll(to: .zero)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 }
 

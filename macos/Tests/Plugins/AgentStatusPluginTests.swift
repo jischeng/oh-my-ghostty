@@ -124,7 +124,7 @@ struct AgentStatusPluginTests {
             .omp: ("omp", "AgentOMP", 4),
             .opencode: ("opencode", "AgentOpenCode", 4),
             .amp: ("amp", "AgentAmp", 2),
-            .antigravity: ("agy", "AgentAntigravity", 0),
+            .antigravity: ("agy", "AgentAntigravity", 3),
             .cline: ("cline", "AgentCline", 7),
             .copilot: ("copilot", "AgentCopilot", 5),
             .crush: ("crush", "AgentCrush", 0),
@@ -961,7 +961,7 @@ struct AgentStatusPluginTests {
         let detectors = SupportedAgent.allCases.filter {
             $0.definition.hook.kind == .none
         }
-        #expect(Set(detectors) == [.antigravity, .crush, .hermes])
+        #expect(Set(detectors) == [.crush, .hermes])
 
         for agent in detectors {
             #expect(installer.installationState(agent) == .missing)
@@ -1009,7 +1009,7 @@ struct AgentStatusPluginTests {
         let installer = AgentHookInstaller(homeURL: home)
 
         try installer.migrateImplicitDetectorsIfNeeded()
-        for agent in [SupportedAgent.antigravity, .crush, .hermes] {
+        for agent in [SupportedAgent.crush, .hermes] {
             #expect(installer.installationState(agent) == .current)
         }
         let migrationURL = home
@@ -1024,7 +1024,7 @@ struct AgentStatusPluginTests {
         #expect(installer.installationState(.crush) == .missing)
         try installer.migrateImplicitDetectorsIfNeeded()
         #expect(installer.installationState(.crush) == .missing)
-        #expect(installer.installationState(.antigravity) == .current)
+        #expect(installer.installationState(.antigravity) == .missing)
         #expect(installer.installationState(.hermes) == .current)
     }
 

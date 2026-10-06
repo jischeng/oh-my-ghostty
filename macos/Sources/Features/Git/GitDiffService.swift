@@ -1,17 +1,23 @@
 import Foundation
 
 struct GitDiffService: Sendable {
-    static let defaultDiffByteLimit = 512 * 1024
+    static let defaultDiffByteLimit = 2 * 1024 * 1024
+    // A small patch can belong to a large file. Snapshot reads have their own
+    // budget, matching the editor's 10 MB file limit rather than the patch limit.
+    static let defaultSourceByteLimit = 10 * 1024 * 1024
 
     private let executor: (any GitExecutor)?
     let diffByteLimit: Int
+    let sourceByteLimit: Int
 
     init(
         executor: (any GitExecutor)? = nil,
-        diffByteLimit: Int = GitDiffService.defaultDiffByteLimit
+        diffByteLimit: Int = GitDiffService.defaultDiffByteLimit,
+        sourceByteLimit: Int = GitDiffService.defaultSourceByteLimit
     ) {
         self.executor = executor
         self.diffByteLimit = max(1, diffByteLimit)
+        self.sourceByteLimit = max(1, sourceByteLimit)
     }
 
     /// Read both sides of the index in one invocation, including untracked
@@ -254,12 +260,12 @@ struct GitDiffService: Sendable {
         }
     }
 
-    /// Full source snapshots use the same bounded Git reader as patches.
+    /// Full source snapshots are bounded independently of patch output.
     func sourceVersions(for file: GitDiffFile, repository: GitRepositoryIdentity,
                         target: GitDiffTarget, knownBase: GitDiffCommitBase? = nil) async throws -> (before: String, after: String) {
         func blob(_ revision: String, _ path: String) async throws -> String {
             let result = try await run(["show", "\(revision):\(path)"], repository: repository,
-                                       maxOutputBytes: diffByteLimit)
+                                       maxOutputBytes: sourceByteLimit)
             guard !result.stdout.contains(0), let text = String(data: result.stdout, encoding: .utf8) else {
                 throw EditorDocumentError.binaryFile
             }
@@ -287,7 +293,7 @@ struct GitDiffService: Sendable {
             } else {
                 let path = (repository.worktreePath as NSString).appendingPathComponent(file.path)
                 let data = try await (executor ?? repository.executor).readWorkingFile(
-                    at: path, root: repository.worktreePath, limit: diffByteLimit
+                    at: path, root: repository.worktreePath, limit: sourceByteLimit
                 )
                 guard !data.contains(0), let text = String(data: data, encoding: .utf8) else {
                     throw EditorDocumentError.binaryFile

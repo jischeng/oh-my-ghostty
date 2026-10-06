@@ -234,6 +234,7 @@ struct AgentDefinition: Codable, Equatable, Sendable {
 
         enum Dialect: String, CaseIterable, Codable, Sendable {
             case amp
+            case antigravity
             case cline
             case copilot
             case cursor

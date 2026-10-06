@@ -536,8 +536,8 @@ struct SettingsStrings: Equatable, Sendable {
     var agentVersionUnknown: String { t("Version Unknown", "版本未知") }
     var agentExternalUpdater: String { t("CLI: use its original installer; status extensions can still be updated here.", "CLI 请使用原安装方式更新；状态扩展仍可在此更新。") }
     var agentDetectorUpdateExplanation: String {
-        t("No separate status Hook. Detection improvements ship with OMG; reinstalling the detector only enables detection.",
-          "无独立状态 Hook，检测逻辑随 OMG 更新；重装检测器仅启用检测功能。")
+        t("OMG currently uses a detector, not a vendor status Hook, for this Agent. Detection improvements ship with OMG; reinstalling the detector only enables detection.",
+          "OMG 当前通过检测器识别此 Agent，尚未接入厂商状态 Hook。检测逻辑随 OMG 更新；重装检测器仅启用检测功能。")
     }
     var agentHostDetectorOnly: String { t("Detector is managed on this Mac", "检测器由本机管理") }
     var agentUpdateScopeCaption: String {

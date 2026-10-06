@@ -77,7 +77,7 @@ enum AgentHookRemoteAction: String {
 
 struct AgentHookInstaller {
     static let marker = "_omg_agent_status"
-    static let hookVersion = 8
+    static let hookVersion = 9
     static let detectorMarkerVersion = 1
     static let didChangeNotification = Notification.Name(
         "com.oh-my-ghostty.agentIntegrationDidChange"
@@ -133,7 +133,7 @@ struct AgentHookInstaller {
         switch definition.hook.kind {
         case .json:
             let url = hookURL(for: agent)
-            guard containsMarker(in: url) else { return .missing }
+            guard containsMarker(in: url, agent: agent) else { return .missing }
             guard hasCurrentJSONHooks(at: url, agent: agent) else {
                 return .updateAvailable
             }
@@ -318,21 +318,30 @@ def remove_omg(entry):
     return result
 
 
-def load_hooks(path):
+def load_hooks(path, agent):
     if path.exists():
         root = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(root, dict):
             raise ValueError(str(path) + " is not a JSON object")
     else:
         root = {}
-    hooks = root.get("hooks", {})
+    key = "omg-agent-status" if SPEC[agent].get("dialect") == "antigravity" else "hooks"
+    hooks = root.get(key, {})
     if not isinstance(hooks, dict):
         raise ValueError(str(path) + " hooks is not an object")
     return root, hooks
 
 
 def validate_json(path, agent):
-    _, hooks = load_hooks(path)
+    root, hooks = load_hooks(path, agent)
+    if SPEC[agent].get("dialect") == "antigravity" and "omg-agent-status" in root:
+        if not any(event != "enabled" for event in hooks):
+            raise ValueError(str(path) + " omg-agent-status is owned by another hook")
+        for event, entries in hooks.items():
+            if event == "enabled": continue
+            if not isinstance(entries, list) or not entries or not all(
+                    isinstance(entry, dict) and remove_omg(entry) is None for entry in entries):
+                raise ValueError(str(path) + " omg-agent-status is owned by another hook")
     for item in SPEC[agent]["entries"]:
         existing = hooks.get(item["event"], [])
         if not isinstance(existing, list):
@@ -342,7 +351,9 @@ def validate_json(path, agent):
 
 
 def install_json(path, agent):
-    root, hooks = load_hooks(path)
+    root, hooks = load_hooks(path, agent)
+    named = SPEC[agent].get("dialect") == "antigravity"
+    if named: hooks["enabled"] = True
     for item in SPEC[agent]["entries"]:
         event = item["event"]
         existing = hooks.get(event, [])
@@ -350,7 +361,7 @@ def install_json(path, agent):
             raise ValueError(str(path) + " " + event + " is not an array")
         hooks[event] = [entry for entry in (remove_omg(value) for value in existing) if entry is not None]
         hooks[event].append(item["entry"])
-    root["hooks"] = hooks
+    root["omg-agent-status" if named else "hooks"] = hooks
     if SPEC[agent].get("dialect") in ("cursor", "copilot") and "version" not in root:
         root["version"] = 1
     backup(path)
@@ -429,12 +440,14 @@ def state(agent):
         item = SPEC[agent]
         path = expand(item["path"])
         if not path.exists(): return "missing"
-        root, hooks = load_hooks(path)
+        root, hooks = load_hooks(path, agent)
         owned = any(remove_omg(entry) != entry for entries in hooks.values()
                     if isinstance(entries, list) for entry in entries if isinstance(entry, dict))
         if not owned: return "missing"
         current = all(item_entry["entry"] in hooks.get(item_entry["event"], [])
                       for item_entry in item["entries"])
+        if item.get("dialect") == "antigravity":
+            current = current and hooks.get("enabled", True) is not False
         if agent == "codex":
             config = HOME / ".codex/config.toml"
             text = config.read_text(encoding="utf-8") if config.exists() else ""
@@ -461,7 +474,14 @@ def remove(agent):
     if agent in SPEC:
         path = expand(SPEC[agent]["path"])
         if not path.exists(): return
-        root, hooks = load_hooks(path)
+        root, hooks = load_hooks(path, agent)
+        if SPEC[agent].get("dialect") == "antigravity":
+            if "omg-agent-status" not in root: return
+            validate_json(path, agent)
+            del root["omg-agent-status"]
+            backup(path)
+            atomic_write(path, json.dumps(root, indent=2, sort_keys=True) + "\n")
+            return
         for event, entries in hooks.items():
             if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
                 raise ValueError(str(path) + " invalid hooks")
@@ -538,7 +558,7 @@ else:
         let url = hookURL(for: agent)
         switch agent.definition.hook.kind {
         case .json:
-            try removeJSONHooks(at: url)
+            try removeJSONHooks(at: url, agent: agent)
         case .plugin:
             if FileManager.default.fileExists(atPath: url.path) {
                 try FileManager.default.removeItem(at: url)
@@ -769,11 +789,11 @@ else:
         return URL(fileURLWithPath: path)
     }
 
-    private func containsMarker(in url: URL) -> Bool {
+    private func containsMarker(in url: URL, agent: SupportedAgent) -> Bool {
         guard let data = try? Data(contentsOf: url),
               let root = try? JSONSerialization.jsonObject(with: data),
               let dictionary = root as? [String: Any],
-              let hooks = dictionary["hooks"] as? [String: Any] else {
+              let hooks = dictionary[agent == .antigravity ? Self.antigravityHookName : "hooks"] as? [String: Any] else {
             return false
         }
         return hooks.values.contains { value in
@@ -789,9 +809,10 @@ else:
         guard let data = try? Data(contentsOf: url),
               let root = try? JSONSerialization.jsonObject(with: data),
               let dictionary = root as? [String: Any],
-              let hooks = dictionary["hooks"] as? [String: Any] else {
+              let hooks = dictionary[agent == .antigravity ? Self.antigravityHookName : "hooks"] as? [String: Any] else {
             return false
         }
+        if agent == .antigravity, hooks["enabled"] as? Bool == false { return false }
         return Self.hookEvents(agent).allSatisfy { event, _, _ in
             guard let entries = hooks[event] as? [[String: Any]] else {
                 return false
@@ -829,7 +850,19 @@ else:
         agent: SupportedAgent
     ) throws {
         let root = try loadJSONObject(at: url)
-        let hooks = try hooksDictionary(root["hooks"])
+        let hooks = try hooksDictionary(root[agent == .antigravity ? Self.antigravityHookName : "hooks"])
+        if agent == .antigravity, root[Self.antigravityHookName] != nil {
+            // Refuse a same-named third-party hook rather than taking ownership.
+            guard hooks.keys.contains(where: { $0 != "enabled" }) else {
+                throw AgentHookInstallerError.invalidHooks(Self.antigravityHookName)
+            }
+            for (event, value) in hooks where event != "enabled" {
+                let entries = try hookEntries(value, event: event)
+                guard !entries.isEmpty, entries.allSatisfy({ Self.removingOMGCommands($0) == nil }) else {
+                    throw AgentHookInstallerError.invalidHooks(Self.antigravityHookName)
+                }
+            }
+        }
         for (event, _, _) in Self.hookEvents(agent) {
             _ = try hookEntries(hooks[event], event: event)
         }
@@ -840,7 +873,9 @@ else:
         agent: SupportedAgent
     ) throws {
         var root = try loadJSONObject(at: url)
-        var hooks = try hooksDictionary(root["hooks"])
+        let key = agent == .antigravity ? Self.antigravityHookName : "hooks"
+        var hooks = try hooksDictionary(root[key])
+        if agent == .antigravity { hooks["enabled"] = true }
         for (event, state, matcher) in Self.hookEvents(agent) {
             let existing = try hookEntries(hooks[event], event: event)
             var entries = existing.compactMap(Self.removingOMGCommands)
@@ -852,7 +887,7 @@ else:
             ))
             hooks[event] = entries
         }
-        root["hooks"] = hooks
+        root[key] = hooks
         if Self.jsonHookUsesRootVersion(agent.definition.hook.dialect),
            root["version"] == nil {
             root["version"] = 1
@@ -860,9 +895,16 @@ else:
         try writeJSONObject(root, to: url)
     }
 
-    private func removeJSONHooks(at url: URL) throws {
+    private func removeJSONHooks(at url: URL, agent: SupportedAgent) throws {
         guard FileManager.default.fileExists(atPath: url.path) else { return }
         var root = try loadJSONObject(at: url)
+        if agent == .antigravity {
+            guard root[Self.antigravityHookName] != nil else { return }
+            try validateJSONHooks(at: url, agent: agent)
+            root.removeValue(forKey: Self.antigravityHookName)
+            try writeJSONObject(root, to: url)
+            return
+        }
         guard root["hooks"] != nil else { return }
         var hooks = try hooksDictionary(root["hooks"])
         for key in Array(hooks.keys) {
@@ -1061,6 +1103,12 @@ else:
             )
         )
         switch agent.definition.hook.dialect ?? .nested {
+        case .antigravity:
+            let handler: [String: Any] = ["type": "command", "command": command, "timeout": 5]
+            if event == "PostToolUse" {
+                return ["matcher": "*", "hooks": [handler]]
+            }
+            return handler
         case .flat, .cursor, .copilot:
             var entry: [String: Any] = ["command": command]
             if agent.definition.hook.dialect == .flat {
@@ -1108,6 +1156,7 @@ else:
         state: TabActivityState?,
         attentionKind: TabAttentionKind? = nil
     ) -> String {
+        if agent == .antigravity { return antigravityHookCommand(state: state) }
         let action = state == nil ? "end" : "start"
         var metadata = "type=app;omg_agent=\(agent.rawValue);" +
             "omg_scope=%s;omg_liveness=pgid"
@@ -1134,6 +1183,41 @@ else:
             "printf '\\033]3008;\(action)=omg-agent-\(agent.rawValue)-%s;" +
             "\(metadata)\\007' \(arguments) > \"/dev/$omg_tty\" " +
             "2>/dev/null || true"
+    }
+
+    private static let antigravityHookName = "omg-agent-status"
+
+    /// agy stdout is a JSON protocol channel; OSC goes only to the controlling TTY.
+    private static func antigravityHookCommand(state: TabActivityState?) -> String {
+        let script = #"""
+import json, os, re, subprocess, sys, urllib.parse
+response = {"decision": "allow"} if sys.argv[1] == "done" else {}
+try:
+    payload = json.loads(sys.stdin.read(1048576))
+    state = sys.argv[1]
+    if state == "done":
+        if payload.get("error") or payload.get("terminationReason") == "error": state = "error"
+        elif payload.get("fullyIdle") is False: state = "working"
+    pgid = os.getpgid(os.getppid())
+    scope = "remote" if os.environ.get("SSH_CONNECTION") else "local"
+    conversation = payload.get("conversationId", "")
+    if not isinstance(conversation, str): conversation = ""
+    conversation = urllib.parse.quote(conversation[:128], safe="._~-")
+    sequence = "\033]3008;start=omg-agent-antigravity-%d;type=app;omg_agent=antigravity;omg_scope=%s;omg_liveness=pgid;omg_state=%s;omg_conversation=%s\007" % (pgid, scope, state, conversation)
+    try:
+        fd = os.open("/dev/tty", os.O_WRONLY | os.O_NOCTTY)
+    except OSError:
+        tty = subprocess.run(["ps", "-o", "tty=", "-p", str(os.getppid())], capture_output=True, text=True, timeout=2).stdout.strip()
+        if not re.fullmatch(r"(?:pts/[0-9]+|tty[A-Za-z0-9._-]+)", tty): raise OSError("No controlling terminal")
+        fd = os.open("/dev/" + tty, os.O_WRONLY | os.O_NOCTTY)
+    try: os.write(fd, sequence.encode())
+    finally: os.close(fd)
+except (ValueError, OSError, TypeError, AttributeError, subprocess.SubprocessError):
+    pass
+print(json.dumps(response))
+"""#
+        let quoted = "'" + script.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        return ": \(marker); : _omg_agent_status_v\(hookVersion); python3 -c \(quoted) \(state?.rawValue ?? "done")"
     }
 
     private static func pluginSource(for agent: SupportedAgent) -> String? {

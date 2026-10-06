@@ -62,7 +62,6 @@ struct AgentIntegrationManagerTests {
 #!/usr/bin/python3
 import os, pathlib, sys
 if sys.argv[1:] == ["--version"]: print("codex-cli 0.154.0")
-elif sys.argv[1:] == ["update", "--help"]: print("Usage: codex update [OPTIONS]")
 elif sys.argv[1:] == ["update"]: pathlib.Path(os.environ["UPDATE_LOG"]).write_text("native update")
 else: sys.exit(2)
 """#, at: home.appendingPathComponent("codex"))
@@ -76,6 +75,82 @@ else: sys.exit(2)
         _ = try await python(AgentIntegrationManager.cliScript(update: .codex), environment: environment)
         #expect(try String(contentsOf: log, encoding: .utf8) == "native update")
     }
+    @Test(arguments: [SupportedAgent.codex, .claude, .omp, .qoder, .opencode, .pi, .reasonix,
+                      .antigravity, .cursor, .amp, .copilot, .droid, .kimi, .hermes, .grok, .cline, .qwen])
+    func nativeUpdatePolicyNeverProbesHelp(agent: SupportedAgent) async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let log = home.appendingPathComponent("calls.jsonl")
+        try executable(#"""
+#!/usr/bin/python3
+import json, os, pathlib, sys
+with pathlib.Path(os.environ["UPDATE_LOG"]).open("a") as log:
+    log.write(json.dumps(sys.argv[1:]) + "\n")
+if sys.argv[1:] == ["--version"]: print("1.0.0")
+elif "--help" in sys.argv: sys.exit(2)
+elif os.environ.get("FAIL_UPDATE"):
+    print("native update failed", file=sys.stderr)
+    sys.exit(1)
+"""#, at: home.appendingPathComponent(agent.definition.command))
+        var environment = ["HOME": home.path, "PATH": home.path + ":/usr/bin:/bin", "UPDATE_LOG": log.path]
+        let data = try await python(AgentIntegrationManager.cliScript(checkLatest: false), environment: environment)
+        let inventory = try JSONDecoder().decode([String: AgentCLIInstallation].self, from: data)
+        #expect(inventory[agent.rawValue]?.updater == "native")
+        #expect(inventory[agent.rawValue]?.canAutomaticallyUpdate == true)
+        #expect(inventory[agent.rawValue]?.needsUpdateCheck == true)
+        #expect(try String(contentsOf: log, encoding: .utf8) == "[\"--version\"]\n")
+        try FileManager.default.removeItem(at: log)
+        _ = try await python(AgentIntegrationManager.cliScript(update: agent), environment: environment)
+        let calls = try String(contentsOf: log, encoding: .utf8).split(separator: "\n").map {
+            try JSONDecoder().decode([String].self, from: Data($0.utf8))
+        }
+        let expected: [String] = switch agent {
+        case .pi: ["update", "--all"]
+        case .opencode, .reasonix: ["upgrade"]
+        case .kimi: ["upgrade", "--yes"]
+        case .hermes: ["update", "--yes", "--no-gateway-restart"]
+        default: ["update"]
+        }
+        #expect(calls == [["--version"], expected])
+        environment["FAIL_UPDATE"] = "1"
+        await #expect(throws: (any Error).self) {
+            _ = try await python(AgentIntegrationManager.cliScript(update: agent), environment: environment)
+        }
+    }
+
+    @Test func npmInstalledPiStillUsesNativeUpdateAll() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = home.appendingPathComponent("node_modules")
+        let package = root.appendingPathComponent("pi-test")
+        try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        try #"{"name":"pi-test","version":"1.0.0","bin":{"pi":"cli"}}"#
+            .write(to: package.appendingPathComponent("package.json"), atomically: true, encoding: .utf8)
+        try executable(#"""
+#!/usr/bin/python3
+import json, os, pathlib, sys
+pathlib.Path(os.environ["UPDATE_LOG"]).write_text(json.dumps(sys.argv[1:]))
+"""#, at: package.appendingPathComponent("cli"))
+        try FileManager.default.createSymbolicLink(
+            at: home.appendingPathComponent("pi"), withDestinationURL: package.appendingPathComponent("cli")
+        )
+        // Any npm operation except inventory is a test failure.
+        try executable("#!/bin/sh\n[ \"$1\" = root ] || exit 2\nprintf '%s\\n' \"$OMG_TEST_ROOT\"\n",
+                       at: home.appendingPathComponent("npm"))
+        let log = home.appendingPathComponent("updates.json")
+        let environment = ["HOME": home.path, "PATH": home.path + ":/usr/bin:/bin",
+                           "OMG_TEST_ROOT": root.path, "UPDATE_LOG": log.path]
+        let data = try await python(AgentIntegrationManager.cliScript(), environment: environment)
+        let inventory = try JSONDecoder().decode([String: AgentCLIInstallation].self, from: data)
+        #expect(inventory["pi"]?.package == "pi-test")
+        #expect(inventory["pi"]?.updater == "native")
+        #expect(!FileManager.default.fileExists(atPath: log.path))
+        _ = try await python(AgentIntegrationManager.cliScript(update: .pi), environment: environment)
+        let arguments = try JSONDecoder().decode([String].self, from: Data(contentsOf: log))
+        #expect(arguments == ["update", "--all"])
+    }
+
     @Test func offlineSSHIsNotScheduledAndDoesNotAdvanceItsDeadline() async throws {
         let suite = "AgentIntegrationTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))
@@ -218,25 +293,26 @@ else: sys.exit(2)
         #expect(!FileManager.default.fileExists(atPath: home.appendingPathComponent(".config/oh-my-ghostty/agent-detectors").path))
     }
 
-    @Test func npmUpdateUsesVerifiedExecutableAndExactNewerVersion() async throws {
+    @Test(arguments: [SupportedAgent.crush, .qwen, .droid, .grok])
+    func npmUpdateUsesVerifiedExecutableAndExactNewerVersion(agent: SupportedAgent) async throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: home) }
         let bin = home.appendingPathComponent("bin")
         let root = home.appendingPathComponent("node_modules")
-        let package = root.appendingPathComponent("@example/codex")
+        let package = root.appendingPathComponent("@example/qwen")
         try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
-        try #"{"name":"@example/codex","version":"1.0.0","bin":{"codex":"cli"}}"#
+        try #"{"name":"@example/qwen","version":"1.0.0","bin":{"\#(agent.definition.command)":"cli"}}"#
             .write(to: package.appendingPathComponent("package.json"), atomically: true, encoding: .utf8)
         try executable("#!/bin/sh\necho 1.0.0\n", at: package.appendingPathComponent("cli"))
-        let command = bin.appendingPathComponent("codex")
+        let command = bin.appendingPathComponent(agent.definition.command)
         try FileManager.default.createSymbolicLink(at: command, withDestinationURL: package.appendingPathComponent("cli"))
         try executable(#"""
 #!/usr/bin/python3
 import json, os, pathlib, sys
 if sys.argv[1] == "root": print(os.environ["OMG_TEST_ROOT"])
 elif sys.argv[1] == "outdated":
-    print(json.dumps({"@example/codex": {"latest": os.environ["OMG_TEST_LATEST"]}}))
+    print(json.dumps({"@example/qwen": {"latest": os.environ["OMG_TEST_LATEST"]}}))
     sys.exit(1)
 elif sys.argv[1] == "install":
     pathlib.Path(os.environ["OMG_TEST_LOG"]).write_text(json.dumps(sys.argv[1:]))
@@ -249,28 +325,112 @@ else: sys.exit(2)
         ]
         let output = try await python(AgentIntegrationManager.cliScript(), environment: environment)
         let values = try JSONDecoder().decode([String: AgentCLIInstallation].self, from: output)
-        #expect(values["codex"]?.updateAvailable == true)
+        #expect(values[agent.rawValue]?.updateAvailable == true)
+        #expect(values[agent.rawValue]?.updater == nil)
         var installedOnlyEnvironment = environment
         installedOnlyEnvironment.removeValue(forKey: "OMG_TEST_LATEST")
         let inventory = try await python(AgentIntegrationManager.cliScript(checkLatest: false), environment: installedOnlyEnvironment)
         let installedOnly = try JSONDecoder().decode([String: AgentCLIInstallation].self, from: inventory)
-        #expect(installedOnly["codex"]?.version == "1.0.0")
-        #expect(installedOnly["codex"]?.latest == nil)
-        _ = try await python(AgentIntegrationManager.cliScript(update: .codex), environment: environment)
-        #expect(try String(contentsOf: log, encoding: .utf8).contains("@example/codex@1.2.0"))
+        #expect(installedOnly[agent.rawValue]?.version == "1.0.0")
+        #expect(installedOnly[agent.rawValue]?.latest == nil)
+        _ = try await python(AgentIntegrationManager.cliScript(update: agent), environment: environment)
+        #expect(try String(contentsOf: log, encoding: .utf8).contains("@example/qwen@1.2.0"))
         try FileManager.default.removeItem(at: log)
         environment["OMG_TEST_LATEST"] = "0.9.0"
-        _ = try await python(AgentIntegrationManager.cliScript(update: .codex), environment: environment)
+        _ = try await python(AgentIntegrationManager.cliScript(update: agent), environment: environment)
         #expect(!FileManager.default.fileExists(atPath: log.path))
         try FileManager.default.removeItem(at: command)
         try executable("#!/bin/sh\necho 9.0.0\n", at: command)
         let unmanaged = try await python(AgentIntegrationManager.cliScript(), environment: environment)
         let unmanagedValues = try JSONDecoder().decode([String: AgentCLIInstallation].self, from: unmanaged)
-        #expect(unmanagedValues["codex"]?.package == nil)
-        await #expect(throws: (any Error).self) {
-            _ = try await python(AgentIntegrationManager.cliScript(update: .codex), environment: environment)
+        #expect(unmanagedValues[agent.rawValue]?.package == nil)
+        if agent == .crush {
+            await #expect(throws: (any Error).self) {
+                _ = try await python(AgentIntegrationManager.cliScript(update: agent), environment: environment)
+            }
+        } else {
+            #expect(unmanagedValues[agent.rawValue]?.updater == "native")
         }
         #expect(!FileManager.default.fileExists(atPath: log.path))
+    }
+
+    @Test func antigravityHooksPreserveNamedConfigAndEmitOnlyJSONOnStdout() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let url = home.appendingPathComponent(".gemini/config/hooks.json")
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let unrelated = #"{"third-party":{"Stop":[{"command":"echo preserved"}]}}"#
+        try unrelated.write(to: url, atomically: true, encoding: .utf8)
+        let installer = AgentHookInstaller(homeURL: home)
+        try installer.install(.antigravity)
+        #expect(installer.installationState(.antigravity) == .current)
+        let root = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        #expect(root["third-party"] != nil)
+        let hooks = try #require(root["omg-agent-status"] as? [String: Any])
+        let pre = try #require((hooks["PreInvocation"] as? [[String: Any]])?.first?["command"] as? String)
+        let stop = try #require((hooks["Stop"] as? [[String: Any]])?.first?["command"] as? String)
+        let data = try JSONEncoder().encode(["pre": pre, "stop": stop])
+        let driver = #"""
+import base64, fcntl, json, os, pty, subprocess, termios
+commands = json.loads(base64.b64decode("\#(data.base64EncodedString())"))
+def execute(command, payload, remote=False, terminal=True):
+    environment = dict(os.environ)
+    environment.pop("SSH_CONNECTION", None)
+    if remote: environment["SSH_CONNECTION"] = "test"
+    master, slave = pty.openpty()
+    def setup():
+        os.setsid()
+        if terminal: fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+    process = subprocess.Popen(["/bin/sh", "-c", command], stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment,
+        preexec_fn=setup, pass_fds=(slave,))
+    process.stdin.write(json.dumps(payload).encode())
+    process.stdin.close()
+    stdout = process.stdout.read()
+    stderr = process.stderr.read()
+    response = json.loads(stdout)
+    os.set_blocking(master, False)
+    try: sequence = os.read(master, 65536).decode()
+    except BlockingIOError: sequence = ""
+    # macOS can defer the session leader's reap until the PTY is closed.
+    os.close(master); os.close(slave)
+    assert process.wait(timeout=10) == 0, stderr
+    return response, sequence
+for remote in (False, True):
+    response, sequence = execute(commands["pre"], {"conversationId": "test-123"}, remote)
+    assert response == {}
+    assert "omg_state=working" in sequence
+    assert "omg_scope=" + ("remote" if remote else "local") in sequence
+    assert "omg_conversation=test-123" in sequence
+    response, sequence = execute(commands["stop"], {"conversationId": "test-123", "fullyIdle": True}, remote)
+    assert response == {"decision": "allow"}
+    assert "omg_state=done" in sequence
+    _, sequence = execute(commands["stop"], {"fullyIdle": False}, remote)
+    assert "omg_state=working" in sequence
+    _, sequence = execute(commands["stop"], {"terminationReason": "error"}, remote)
+    assert "omg_state=error" in sequence
+response, sequence = execute(commands["pre"], {}, terminal=False)
+assert response == {} and not sequence
+print("PTY local/SSH and headless protocol checks passed")
+"""#
+        _ = try await python(driver, environment: ["HOME": home.path, "PATH": "/usr/bin:/bin"])
+        let environment = ["HOME": home.path, "PATH": "/usr/bin:/bin"]
+        let remoteStatus = try await hookStates(home: home)
+        #expect(remoteStatus["antigravity"] == "current")
+        _ = try await python(AgentHookInstaller.remoteInstallerScript(action: .remove, agents: [.antigravity]), environment: environment)
+        #expect(installer.installationState(.antigravity) == .missing)
+        _ = try await python(AgentHookInstaller.remoteInstallerScript(agents: [.antigravity]), environment: environment)
+        #expect(installer.installationState(.antigravity) == .current)
+        try installer.uninstall(.antigravity)
+        let remaining = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        #expect(remaining.count == 1 && remaining["third-party"] != nil)
+        try #"{"omg-agent-status":{"Stop":[{"command":"echo user-owned"}]}}"#
+            .write(to: url, atomically: true, encoding: .utf8)
+        #expect(throws: (any Error).self) { try installer.install(.antigravity) }
+        await #expect(throws: (any Error).self) {
+            _ = try await python(AgentHookInstaller.remoteInstallerScript(agents: [.antigravity]), environment: environment)
+        }
+        #expect(try String(contentsOf: url, encoding: .utf8).contains("user-owned"))
     }
 
     private func hookStates(home: URL) async throws -> [String: String] {

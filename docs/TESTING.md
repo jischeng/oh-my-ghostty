@@ -14,7 +14,8 @@ release does not automatically require every unrelated feature suite.
    build/test infrastructure, unmapped changes, or an explicitly requested sweep.
 3. **Optional interactive desktop**: suites or individual tests tagged
    `.interactiveDesktop`: `VerticalTabMouseTests` and the visual
-   `VerticalTabsIntegrationTests.appKitTabGroupDrivesVerticalTabsWithoutRecreatingSurfaces`.
+   `VerticalTabsIntegrationTests.appKitTabGroupDrivesVerticalTabsWithoutRecreatingSurfaces`,
+   and `TerminalLinkHoverTests.commandHoverRemainsStable` (Cmd-link hover in single/split panes).
    Real CoreDrag, menu focus routing, native window appearance, and screenshots
    need an unlocked desktop and foreground test application. Lockscreen,
    background, and unattended runs cannot establish that behavior. Other methods
@@ -57,6 +58,11 @@ macos/build.nu --action test --test-modules all
 # Optional real native drag regression; keep desktop unlocked/test window foreground
 macos/build.nu --action test \
   --only-testing GhosttyTests/VerticalTabMouseTests --include-desktop-tests
+
+# Optional Cmd-link hover regression (single pane and split panes)
+macos/build.nu --action test \
+  --only-testing 'GhosttyTests/TerminalLinkHoverTests/commandHoverRemainsStable()' \
+  --include-desktop-tests
 
 # Optional visual test; Swift Testing method selectors include parentheses
 macos/build.nu --action test \

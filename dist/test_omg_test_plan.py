@@ -12,7 +12,8 @@ import omg_test_plan as planner
 
 ROOT = Path(__file__).resolve().parent.parent
 VISUAL_DESKTOP_TEST = "GhosttyTests/VerticalTabsIntegrationTests/appKitTabGroupDrivesVerticalTabsWithoutRecreatingSurfaces()"
-DESKTOP_TESTS = {"GhosttyTests/VerticalTabMouseTests", VISUAL_DESKTOP_TEST}
+LINK_HOVER_DESKTOP_TEST = "GhosttyTests/TerminalLinkHoverTests/commandHoverRemainsStable()"
+DESKTOP_TESTS = {"GhosttyTests/VerticalTabMouseTests", VISUAL_DESKTOP_TEST, LINK_HOVER_DESKTOP_TEST}
 
 
 def add_suite(root, relative, name, desktop=False):
@@ -82,7 +83,8 @@ class PlannerTests(unittest.TestCase):
 
     def test_native_suite_or_method_requires_explicit_opt_in(self):
         for test in ["GhosttyTests/VerticalTabMouseTests", "GhosttyTests/VerticalTabMouseTests/mouseSelectionKeepsWorkingAcrossNativeWindows",
-                     VISUAL_DESKTOP_TEST, VISUAL_DESKTOP_TEST[:-2]]:
+                     VISUAL_DESKTOP_TEST, VISUAL_DESKTOP_TEST[:-2],
+                     LINK_HOVER_DESKTOP_TEST, LINK_HOVER_DESKTOP_TEST[:-2]]:
             with self.subTest(test=test), self.assertRaisesRegex(ValueError, "requires --include-desktop-tests"):
                 self.plan(only_testing=[test])
             self.assertEqual(self.plan(only_testing=[test], include_desktop=True)["only_testing"], [test])
@@ -167,6 +169,12 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(result["root_modules"], ["update"])
         self.assertIn(planner.SMOKE_SUITE, result["only_testing"])
         self.assertNotIn("GhosttyTests/GitDiffServiceTests", result["only_testing"])
+
+    def test_link_hover_suite_keeps_routine_methods_without_desktop(self):
+        result = self.plan(only_testing=["GhosttyTests/TerminalLinkHoverTests"])
+        self.assertEqual(result["only_testing"], ["GhosttyTests/TerminalLinkHoverTests"])
+        self.assertEqual(result["deferred_desktop"], [LINK_HOVER_DESKTOP_TEST])
+        self.assertIn(LINK_HOVER_DESKTOP_TEST, result["skip_testing"])
 
     def test_catalog_discovers_all_current_tests_and_single_desktop_suite(self):
         self.assertEqual(self.catalog[1], DESKTOP_TESTS)

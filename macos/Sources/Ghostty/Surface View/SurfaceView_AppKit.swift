@@ -607,6 +607,12 @@ extension Ghostty {
             addCursorRect(bounds, cursor: pointerStyle.cursor)
         }
 
+        override func cursorUpdate(with event: NSEvent) {
+            // AppKit updates cursors independently of mouseMoved. Reapply the
+            // core's current shape instead of falling back to an ancestor's cursor.
+            pointerStyle.cursor.set()
+        }
+
         func setCursorVisibility(_ visible: Bool) {
             cursorVisible = visible
             // Technically this action could be called anytime we want to
@@ -891,12 +897,23 @@ extension Ghostty {
         }
 
         override func updateTrackingAreas() {
-            // To update our tracking area we just recreate it all.
-            trackingAreas.forEach { removeTrackingArea($0) }
+            super.updateTrackingAreas()
+            // inVisibleRect follows geometry automatically. Replacing this area
+            // during SwiftUI hover updates can synthesize exit/enter events and
+            // clear the core's Cmd-link state while the pointer is still inside.
+            guard trackingAreas.isEmpty else { return }
+
+            // Cursor updates require activeInKeyWindow, while mouse reporting
+            // below must remain active even for an unfocused terminal.
+            addTrackingArea(NSTrackingArea(
+                rect: .zero,
+                options: [.cursorUpdate, .inVisibleRect, .activeInKeyWindow],
+                owner: self,
+                userInfo: nil))
 
             // This tracking area is across the entire frame to notify us of mouse movements.
             addTrackingArea(NSTrackingArea(
-                rect: frame,
+                rect: .zero,
                 options: [
                     .mouseEnteredAndExited,
                     .mouseMoved,

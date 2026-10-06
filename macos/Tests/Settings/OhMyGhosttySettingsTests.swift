@@ -554,6 +554,8 @@ struct OhMyGhosttySettingsTests {
         #expect(zh.orderingTitle(.recentlyUsed) == "最近使用")
         #expect(zh.agentHooksUpdateRequired == "需要更新 Hooks")
         #expect(zh.agentDetectorMissing == "未安装检测器")
+        #expect(zh.agentDetectorUpdateExplanation.contains("尚未接入厂商状态 Hook"))
+        #expect(en.agentDetectorUpdateExplanation.contains("not a vendor status Hook"))
     }
 
     private func temporarySettings() -> (OhMyGhosttySettings, URL) {

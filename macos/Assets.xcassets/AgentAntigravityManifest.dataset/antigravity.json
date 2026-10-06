@@ -16,8 +16,14 @@
     "resumeArguments": []
   },
   "hook": {
-    "kind": "none",
-    "path": "",
-    "events": []
+    "kind": "json",
+    "dialect": "antigravity",
+    "path": "~/.gemini/config/hooks.json",
+    "conversationField": "conversationId",
+    "events": [
+      {"name": "PreInvocation", "state": "working"},
+      {"name": "PostToolUse", "state": "working"},
+      {"name": "Stop", "state": "done"}
+    ]
   }
 }

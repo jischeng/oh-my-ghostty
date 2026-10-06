@@ -359,7 +359,18 @@ import base64, json, os, pathlib, re, shutil, subprocess
 COMMANDS = json.loads(base64.b64decode("\#(data.base64EncodedString())"))
 UPDATE = "\#(update?.rawValue ?? "")"
 CHECK_LATEST = \#(checkLatest ? "True" : "False")
-NATIVE_UPDATES = {"codex": "update", "claude": "update", "omp": "update", "qoder": "update", "opencode": "upgrade"}
+# Explicit policy, not a capability probe: vendor commands own version checks.
+NATIVE_UPDATES = {
+    "codex": ["update"], "claude": ["update"],
+    "omp": ["update"], "qoder": ["update"],
+    "opencode": ["upgrade"], "pi": ["update", "--all"],
+    "reasonix": ["upgrade"], "antigravity": ["update"],
+    "cursor": ["update"], "amp": ["update"],
+    "copilot": ["update"], "droid": ["update"],
+    "kimi": ["upgrade", "--yes"],
+    "hermes": ["update", "--yes", "--no-gateway-restart"],
+    "grok": ["update"], "cline": ["update"], "qwen": ["update"],
+}
 
 def run(args, timeout=30):
     result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout)
@@ -409,20 +420,16 @@ for agent, command in COMMANDS.items():
             version = run([path, "--version"], timeout=8)
             if version.returncode == 0: item["version"] = version.stdout.strip()[:160]
         except (subprocess.TimeoutExpired, OSError): pass
-        if agent in NATIVE_UPDATES:
-            subcommand = NATIVE_UPDATES[agent]
-            try:
-                help_result = run([path, subcommand, "--help"], timeout=5)
-                if help_result.returncode == 0 and re.search(
-                    r"(?im)^\s*(?:usage:|\$).*?\b" + re.escape(subcommand) + r"\b", help_result.stdout):
-                    item["updater"] = "native"
-            except (subprocess.TimeoutExpired, OSError, RuntimeError): pass
+    # Droid's npm builds are pinned; Grok and Qwen self-update only standalone
+    # installs. Keep verified npm installations on their original source.
+    if agent in NATIVE_UPDATES and not (package and agent in ("droid", "grok", "qwen")):
+        item["updater"] = "native"
     installed[agent] = item
 
 if UPDATE:
     item = installed[UPDATE]
     if item.get("updater") == "native":
-        result = run([item["path"], NATIVE_UPDATES[UPDATE]], timeout=180)
+        result = run([item["path"]] + NATIVE_UPDATES[UPDATE], timeout=180)
         if result.returncode != 0: raise RuntimeError(result.stderr.strip()[:2000] or "Native updater failed")
         raise SystemExit(0)
     if not item.get("package"): raise RuntimeError("Agent is not managed by this npm installation")
@@ -431,11 +438,12 @@ if UPDATE:
         result = run([npm, "install", "--global", "--", item["package"] + "@" + latest], timeout=180)
         if result.returncode != 0: raise RuntimeError(result.stderr.strip()[:2000])
 else:
-    names = sorted(set(item["package"] for item in installed.values() if item.get("package")))
+    names = sorted(set(item["package"] for item in installed.values()
+                       if item.get("package") and item.get("updater") != "native"))
     if names and CHECK_LATEST:
         outdated = outdated_packages(names)
         for item in installed.values():
-            if item.get("package"):
+            if item.get("package") and item.get("updater") != "native":
                 item["latest"] = outdated.get(item["package"], {}).get("latest", item["version"])
     print(json.dumps(installed))
 """#

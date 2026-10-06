@@ -559,17 +559,63 @@ Credentials, host keys and ProxyJump remain owned by OpenSSH. No remote install 
 remove is performed merely by selecting a host or checking its status.
 
 CLI checks use the account's login/interactive shell PATH. An executable whose
-resolved path matches a global npm package's declared bin uses that npm installation.
-For standalone Codex, Claude, OMP, Qoder and OpenCode, discovery checks the allowlisted
-native update subcommand's `--help` without executing an update. Supported native
-installations expose CLI auto-update independently of npm package metadata. Codex
-uses `codex update` (verified against the installed CLI help); Claude uses
-[`claude update`](https://code.claude.com/docs/en/cli-usage), and OpenCode uses
-[`opencode upgrade`](https://opencode.ai/v2/docs/cli/commands/). Native commands own
+resolved path matches a global npm package's declared bin records npm metadata.
+Discovery uses an explicit native update policy when the executable exists in
+PATH; this policy takes precedence over npm updates, including npm-installed Pi.
+Agents without a native policy retain the existing verified npm update path. It never probes `update --help`
+or parses help text to infer update support. The policy is:
+
+| Agent | Native update command |
+| --- | --- |
+| Codex | `codex update` |
+| Claude | `claude update` |
+| OMP | `omp update` |
+| Qoder | `qodercli update` |
+| OpenCode | `opencode upgrade` |
+| Pi | `pi update --all` |
+| Reasonix | `reasonix upgrade` |
+| Antigravity | `agy update` |
+| Cursor | `cursor-agent update` |
+| Amp | `amp update` |
+| Copilot | `copilot update` |
+| Droid | `droid update` (standalone only) |
+| Kimi | `kimi upgrade --yes` |
+| Hermes | `hermes update --yes --no-gateway-restart` |
+| Grok | `grok update` (script/native only) |
+| Cline | `cline update` |
+| Qwen | `qwen update` (standalone only) |
+
+Sources: [Amp CLI](https://ampcode.com/docs/markdown/cli),
+[Copilot CLI reference](https://docs.github.com/en/copilot/reference/cli-command-reference),
+[Droid CLI reference](https://docs.factory.com/droid-cli/cli-reference.md),
+[Kimi command reference](https://moonshotai.github.io/kimi-code/en/reference/kimi-command.md),
+[Hermes update parser](https://github.com/NousResearch/hermes-agent/blob/main/hermes_cli/subcommands/update.py),
+[Grok installation/self-management](https://github.com/superagent-ai/grok-cli#install),
+[Cline command registration](https://github.com/cline/cline/blob/main/apps/cli/src/main.ts)
+and [updater](https://github.com/cline/cline/blob/main/apps/cli/src/commands/update.ts),
+and [Qwen updater](https://github.com/QwenLM/qwen-code/blob/main/packages/cli/src/commands/update.ts).
+Kimi's flag skips its update confirmation, not Agent tool permissions. Hermes
+updates without interactive config prompts or restarting gateway services.
+Droid's npm builds intentionally pin their version; Grok documents self-update
+for script installs only; Qwen's updater only replaces standalone binaries and
+prints manual instructions for package-manager installs. Verified npm installations
+of these three keep the npm update path. Other unsupported installation forms
+remain owned by the vendor updater, which may require manual installation.
+Cline's native updater selects its own package manager and may also update Kanban
+according to vendor defaults. OMG does not execute vendor install scripts to
+migrate sources. [Crush](https://github.com/charmbracelet/crush#installation)
+remains on its verified npm/original-installer path: `update-providers` updates
+provider metadata, not the CLI binary.
+
+Pi's `--all` also updates its installed extensions. Supported native installations
+expose CLI auto-update independently of npm package metadata. Native commands own
 their version/channel checks and run only on an explicit update or enabled schedule;
 the manual button says Check & Update rather than claiming a newer version is known.
+A native update succeeds only with exit code 0; failures are reported without
+falling back to npm or another installer. Older CLIs lacking the policy command
+report an execution error rather than being classified through help output.
 Other installations show their version and an original-installer hint.
-Before each update, the installation source and, for npm, registry state are
+Before each update, the executable and, for npm updates, registry state are
 rechecked, then the selected newer stable version is installed explicitly. OMG
 does not downgrade versions, switch prerelease channels, use sudo, or update
 unselected Agents. Hook maintenance runs before CLI discovery so registry errors
@@ -579,16 +625,18 @@ cannot prevent Hook updates. npm registry semantics follow
 Tests execute the exported script against temporary homes across every Hook
 dialect, verify scoped removal preserves third-party Hooks, and exercise npm bin
 identity, exact-version updates, downgrade rejection and per-host policy isolation.
+Native policy tests cover every allowlisted command, Pi's `--all`, absence of help
+probes during discovery, and nonzero update failures.
 
 `AgentHookInstaller` installs only the closed mechanism selected by each bundled
-manifest: nested JSON, Cursor/Copilot/Reasonix flat JSON, Pi-compatible or
+manifest: Antigravity named JSON, nested JSON, Cursor/Copilot/Reasonix flat JSON, Pi-compatible or
 OpenCode/Amp plugins, marker-delimited Kimi TOML, and event-named Cline scripts.
 It never removes unrelated JSON/TOML entries, never overwrites a non-OMG Cline
 script, rejects malformed config rather than replacing it, uses atomic
 mode-preserving writes (0600 for new files), and keeps a one-time `.omg-backup`
 beside each existing file. Removal deletes only OMG-owned commands or blocks.
 
-Antigravity, Crush, and Hermes do not expose a supported vendor hook path. Their
+OMG currently has no vendor Hook adapter for Crush or Hermes. Their
 Install action therefore creates a Host-owned, versioned detector marker under
 `~/.config/oh-my-ghostty/agent-detectors/<agent>.json`; the directory is mode
 0700 and each exact allowlisted marker is mode 0600. The host enables process and
@@ -600,11 +648,40 @@ while reinstalling a detector only enables its local marker. Agents without patt
 identity until their process exits.
 Remove deletes only a regular marker whose owner/agent fields match OMG, and
 Update replaces stale marker content. A one-time global sentinel migrates the
-three previously implicit detectors to Installed; after that, a user removal is
+remaining previously implicit detectors to Installed; after that, a user removal is
 never auto-installed again. Conflicting or non-file content fails closed. These
 markers are local Host policy and are intentionally excluded from
-the exported remote hook installer; OMG does not claim to install a vendor hook
-that does not exist.
+the exported remote hook installer; OMG does not claim to install an adapter
+that it does not yet implement.
+
+The locally inspected `agy` 1.2.17 binary includes a Hooks Guide documenting
+named hooks in a customization root's `hooks.json` (for example,
+`.agents/hooks.json`). Events include `PreInvocation`, `PostInvocation`,
+`PreToolUse`, `PostToolUse`, and `Stop`; payloads use camelCase
+`conversationId`, and stdout is a JSON response channel. This is evidence of
+vendor Hook support. The bundled
+Antigravity manifest now selects a named JSON Hook adapter under
+`~/.gemini/config/hooks.json`, the global customization root documented in the
+binary's Customizations Guide. The `antigravity` dialect owns only the
+`omg-agent-status` top-level named hook, preserving all other named hooks.
+`PreInvocation` and `PostToolUse` report working; `Stop` reports done only when
+background work is not explicitly active (`fullyIdle: false` retains working),
+and reports error for an error termination. `PostInvocation` is not completion.
+There is no supported permission-wait event in this adapter: it never invents
+attention from tool activity or emits permission grants. Tool hooks use grouped
+matcher/handler arrays; invocation/stop handlers are flat arrays. Stdout always
+contains a JSON response (`{}` or a non-blocking Stop decision); OSC 3008 goes
+only to the controlling TTY. Conversation identity is escaped and bounded.
+Without a TTY the hook safely returns JSON without emitting status.
+
+Local and exported SSH installers share generated handlers, preserve unrelated
+hooks, refuse a same-named unowned hook, back up existing JSON, and support
+status/update/removal. A previously installed Antigravity detector marker is
+inert; it is not sufficient to report Hooks Installed and does not cause silent
+Hook installation. Install the new Hook explicitly on each selected host.
+SSH bootstrap identity wrappers remain a fallback before the first model turn;
+native Hook events provide working/completion signals. Reconnect an SSH pane
+or restart agy after installing to reload configuration.
 
 Adapters emit OSC 3008 contexts with IDs
 `omg-agent-<allowlisted-agent>-<numeric-instance-id>`, `type=app`, a bounded
@@ -677,7 +754,7 @@ terminal title while no typed hook event owns the context. When the title no
 longer matches a working pattern the host downgrades that title-derived
 `working` state to `idle`, so the ring clears once the agent settles instead of
 spinning forever. Agents without `titleStatus` (including the screen-detected
-Antigravity/Crush/Hermes) are unaffected by this title path.
+Crush/Hermes) are unaffected by this title path.
 
 Because the event is written to the owning TTY, the same hook works through
 OpenSSH. Shell hooks resolve the target TTY from the parent process with
@@ -702,7 +779,7 @@ Reasonix, OMP, OpenCode, Amp, Antigravity, Cline, Copilot, Crush, Cursor Agent,
 Droid, Grok, Hermes, Kimi, and Qwen Code. Manifests can select only closed host
 mechanisms; they cannot inject Swift, shell, or arbitrary remote commands. Hook
 `dialect` is a closed, decoded enum (`amp`, `cline`, `copilot`, `cursor`, `flat`,
-`kimi`, `nested`, `opencode`, or `pi`); unknown values reject the bundled
+`antigravity`, `kimi`, `nested`, `opencode`, or `pi`); unknown values reject the bundled
 manifest instead of silently falling through to another hook shape. Local hook
 installation and the exported remote installer derive JSON hook entries from
 the same typed builder.

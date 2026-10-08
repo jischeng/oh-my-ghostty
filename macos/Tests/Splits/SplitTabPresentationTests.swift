@@ -83,6 +83,64 @@ struct SplitTabPresentationTests {
         }
     }
 
+    @Test func nativeBreathAnimatesOnlyLayerOpacityAndStopsAtFullBrightness() throws {
+        // Keep the unattached fixture's transaction open; committing an
+        // orphan layer lets CoreAnimation discard its pending animations.
+        CATransaction.begin()
+        defer { CATransaction.commit() }
+        let layer = CALayer()
+        AgentLogoLayerBreath.setRunning(true, on: layer)
+        let animation = try #require(layer.animation(forKey: AgentLogoLayerBreath.key) as? CABasicAnimation)
+        #expect(animation.keyPath == "opacity")
+        #expect(animation.fromValue as? Double == 1)
+        #expect(animation.toValue as? Double == 0.30)
+        #expect(animation.duration == 0.9)
+        #expect(animation.autoreverses)
+        #expect(animation.repeatCount.isInfinite)
+        #expect(layer.opacity == 1)
+        // Mark the installed animation to detect accidental restarts on an
+        // unrelated activity/focus update.
+        let marked = try #require(animation.copy() as? CABasicAnimation)
+        marked.beginTime = 123
+        layer.add(marked, forKey: AgentLogoLayerBreath.key)
+        AgentLogoLayerBreath.setRunning(true, on: layer)
+        #expect(layer.animation(forKey: AgentLogoLayerBreath.key)?.beginTime == 123)
+        AgentLogoLayerBreath.setRunning(false, on: layer)
+        #expect(layer.animationKeys()?.isEmpty ?? true)
+        #expect(layer.opacity == 1)
+    }
+
+    @Test func nativeLogoHasStableSizeAndDoesNotAnimateWithoutVisibleWindow() throws {
+        let host = AgentLogoAnimationHost()
+        host.setContent(AnyView(Color.red.frame(width: 18, height: 18)), working: true)
+        #expect(host.hostingView.fittingSize == CGSize(width: 18, height: 18))
+        let layer = try #require(host.layer)
+        #expect(layer.animation(forKey: AgentLogoLayerBreath.key) == nil)
+        #expect(host.hitTest(.zero) == nil)
+        AgentLogoLayerBreath.setRunning(true, on: layer)
+        host.setContent(AnyView(Color.green.frame(width: 18, height: 18)), working: false)
+        #expect(layer.animation(forKey: AgentLogoLayerBreath.key) == nil)
+        #expect(layer.opacity == 1)
+        AgentLogoLayerBreath.setRunning(true, on: layer)
+        host.stop()
+        #expect(layer.animation(forKey: AgentLogoLayerBreath.key) == nil)
+    }
+
+    private func snapshot<V: View>(_ content: V) throws -> NSBitmapImageRep {
+        // ImageRenderer cannot render the AppKit container. Exercise the real
+        // NSHostingView/subview path instead of silently omitting the logos.
+        let host = NSHostingView(rootView: content)
+        host.frame = NSRect(origin: .zero, size: host.fittingSize)
+        let window = NSWindow(contentRect: host.frame, styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer { window.close() }
+        host.layoutSubtreeIfNeeded()
+        let bitmap = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+        host.cacheDisplay(in: host.bounds, to: bitmap)
+        return bitmap
+    }
+
     @Test func focusAndWorkUseSameTintStrengthWhileDoneRemainsVisible() {
         #expect(AgentLogoStyle.tintStrength(state: .idle, focused: true) ==
                 AgentLogoStyle.tintStrength(state: .working, focused: true))
@@ -111,10 +169,7 @@ struct SplitTabPresentationTests {
         }.padding(20)
             .background(Color(red: 0.14, green: 0.14, blue: 0.19))
             .environment(\.colorScheme, .dark)
-        let renderer = ImageRenderer(content: content)
-        renderer.scale = 3
-        let image = try #require(renderer.nsImage)
-        let bitmap = try #require(image.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:)))
+        let bitmap = try snapshot(content)
         let png = try #require(bitmap.representation(using: .png, properties: [:]))
         try png.write(to: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("omg-agent-tint-preview.png"))
     }
@@ -138,10 +193,7 @@ struct SplitTabPresentationTests {
                 .frame(width: TabIconMetrics.footprint, height: TabIconMetrics.footprint)
             }
         }
-        let renderer = ImageRenderer(content: preview.padding(16).background(Color(nsColor: .windowBackgroundColor)))
-        renderer.scale = 4
-        let image = try #require(renderer.nsImage)
-        let bitmap = try #require(image.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:)))
+        let bitmap = try snapshot(preview.padding(16).background(Color(nsColor: .windowBackgroundColor)))
         let png = try #require(bitmap.representation(using: .png, properties: [:]))
         try png.write(to: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("omg-pane-icons-preview.png"))
     }

@@ -87,8 +87,14 @@ restarted app. An external CSV may contain a PID but the app's JSONL does not.
    Do not repeatedly attach Allocations to an unentitled app. A `leaks` result
    or a Time Profiler trace alone does not rule out still-referenced memory.
 
-`AgentLogoStatus.swift`'s animated `TimelineView` remains a profiling lead,
-not an established memory root cause. Persistent diagnostic logs deliberately
+Agent logo animation remains a profiling lead, not an established memory
+root cause. The former `TimelineView` and subsequent SwiftUI `repeatForever`
+opacity animation both produced window-level SwiftUI rendering hotspots in
+CPU investigations. The current implementation hosts static tinted content in
+an AppKit container and animates only that container's layer with
+`CABasicAnimation`; hidden, occluded and detached containers stop animating.
+Validate CPU improvements with a visible working Agent under the same workload,
+not an idle app baseline or passing functional tests. Persistent diagnostic logs deliberately
 exclude framebuffers, renderer resources, IOSurface ownership, image-cache
 and scrollback bytes; obtain system-level numbers independently rather than
 inferring them from view counts.

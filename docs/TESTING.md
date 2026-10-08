@@ -149,6 +149,15 @@ For releases, use the **previous published OMG tag**, inspect the plan, and reco
 selected modules, any broad fallback, measured results, and desktop tests not run
 in the release notes. Do not select only the version bump commit. Full routine
 regression remains useful for upstream syncs, cross-module refactors, and periodic
-sweeps. Release apps use ad-hoc code signatures and are not notarized; code-signature,
-Sparkle EdDSA, and artifact launch checks remain separate gates. See
+sweeps. Release apps use persistent self-signed code signatures and are not notarized;
+certificate/DR continuity, Sparkle EdDSA, and artifact launch checks remain separate
+gates. Run signing contracts separately:
+
+```bash
+python3 -m unittest discover -s dist -p 'test_omg_signing.py'
+python3 -m unittest discover -s dist -p 'test_omg_keychain.py'
+```
+
+Full TCC permission-upgrade experiments are not a prerequisite for this policy;
+report them NOT RUN if omitted. See
 [RELEASING.md](RELEASING.md).

@@ -2,10 +2,10 @@
 set -euo pipefail
 
 if [[ $# -ne 1 || ! "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "usage: OMG_SIGNING_IDENTITY=- PREVIOUS_TAG=vX.Y.Z $0 OMG_VERSION" >&2
+  echo "usage: OMG_SIGNING_IDENTITY=<certificate> PREVIOUS_TAG=vX.Y.Z $0 OMG_VERSION" >&2
   exit 64
 fi
-: "${OMG_SIGNING_IDENTITY:?set OMG_SIGNING_IDENTITY to - for ad-hoc release signing}"
+: "${OMG_SIGNING_IDENTITY:?source the persistent signing.env before release packaging}"
 : "${PREVIOUS_TAG:?set PREVIOUS_TAG to the previous published OMG tag}"
 
 omg_version=$1
@@ -13,12 +13,25 @@ repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
 build_root="$repo_root/.release-build/$omg_version"
 artifacts="$build_root/artifacts"
+signing_mode=$(python3 dist/macos/omg_signing.py policy)
+[[ "$signing_mode" == self-signed || "$signing_mode" == developer-id ]] || {
+  echo "public releases require persistent self-signed or Developer ID signing" >&2; exit 1;
+}
+release_requirement=
 
 for arch in arm64 x86_64 universal; do
   app="$build_root/$arch/Release/OMG.app"
   [[ -x "$app/Contents/MacOS/omg" ]] || { echo "missing $app" >&2; exit 1; }
   dist/macos/sign_omg_app.sh "$app"
-  codesign --verify --deep --strict "$app"
+  check_args=(verify "$app")
+  if [[ -n "${OMG_PREVIOUS_SIGNED_APP:-}" ]]; then
+    check_args+=(--previous "$OMG_PREVIOUS_SIGNED_APP")
+  fi
+  current_requirement=$(python3 dist/macos/omg_signing.py "${check_args[@]}")
+  if [[ -n "$release_requirement" && "$current_requirement" != "$release_requirement" ]]; then
+    echo "release architectures have different designated requirements" >&2; exit 1;
+  fi
+  release_requirement=$current_requirement
 
   if [[ "$arch" == x86_64 ]] && ! arch -x86_64 true >/dev/null 2>&1; then
     # Rosetta 2 is not installed; verify architecture and ReleaseFast marker via strings instead
@@ -37,6 +50,7 @@ for arch in arm64 x86_64 universal; do
     printf '[%s] signature=valid launch=ok mode=%s\n' "$arch" "$mode"
   fi
 done
+printf '%s\n' "$release_requirement" > "$build_root/signing-requirement.txt"
 
 rm -rf "$artifacts"
 mkdir -p "$artifacts"
@@ -153,6 +167,10 @@ mkdir "$mount_base/mnt"
 for arch in arm64 x86_64 universal; do
   dmg="$artifacts/OMG-$omg_version-macos-$arch.dmg"
   hdiutil attach -readonly -nobrowse -mountpoint "$mount_base/mnt" "$dmg" >/dev/null
+  mounted_requirement=$(python3 dist/macos/omg_signing.py verify "$mount_base/mnt/OMG.app")
+  [[ "$mounted_requirement" == "$release_requirement" ]] || {
+    echo "DMG app identity differs from signed release" >&2; exit 1;
+  }
   bin="$mount_base/mnt/OMG.app/Contents/MacOS/omg"
   if [[ "$arch" == x86_64 ]] && ! arch -x86_64 true >/dev/null 2>&1; then
     lipo -archs "$bin" | grep -q 'x86_64' || { echo "$arch DMG binary missing x86_64 slice" >&2; exit 1; }
@@ -181,5 +199,4 @@ for arch in arm64 x86_64 universal; do
   printf '[%s] dmg_mount=valid\n' "$arch"
 done
 
-printf 'artifacts=%s\nsigning_identity=%s\n' "$artifacts" \
-  "$([[ "$OMG_SIGNING_IDENTITY" == - ]] && echo ad-hoc || echo Developer-ID)"
+printf 'artifacts=%s\nsigning_mode=%s\n' "$artifacts" "$signing_mode"

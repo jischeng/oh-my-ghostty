@@ -34,6 +34,8 @@ The checked-in scripts that are authoritative for OMG are:
 
 - `macos/build.nu` — Xcode development/test wrapper;
 - `dist/macos/sign_omg_app.sh` — consistent nested code signing;
+- `dist/macos/omg_signing.py` — persistent identity creation and release signature policy;
+- `dist/macos/omg_keychain.py` — local login-Keychain credential storage and automatic unlock;
 - `dist/macos/package_omg_dmg.sh` — architecture-specific and universal DMG packaging.
 
 A future OMG GitHub Actions release workflow must implement this document; it
@@ -137,9 +139,12 @@ git rev-parse upstream/main
 - GitHub CLI (`gh`) for publishing;
 - Apple `codesign`, `hdiutil`, `ditto`, and `plutil`.
 
-Public releases use **ad-hoc code signatures** (`OMG_SIGNING_IDENTITY=-`).
-Apps and DMGs are **not notarized**. Developer ID certificates, Apple developer
-account credentials, and notarization profiles are not release prerequisites.
+Public releases use **persistent self-signed code signatures**
+(`OMG_SIGNING_MODE=self-signed`). The certificate fingerprint and app identifier
+are pinned in the designated requirement (DR), instead of a per-build code hash.
+Apps and DMGs are **not notarized**. Developer ID certificates, paid Apple
+membership, and notarization profiles are not release prerequisites. Self-signing
+is not equivalent to Apple-trusted distribution.
 
 ## Environment and secrets
 
@@ -151,12 +156,85 @@ export OMG_VERSION="<x.y.z>"
 export GHOSTTY_VERSION="<x.y.z-or-x.y.z-dev>"
 export GHOSTTY_REVISION="<full-upstream-commit>"
 export OMG_BUILD_ROOT="$PWD/.release-build/$OMG_VERSION"
-export OMG_SIGNING_IDENTITY=-
+source "$HOME/Library/Application Support/OMG/ReleaseSigning/signing.env"
 ```
 
-Release signing uses the literal identity `-`; no certificate lookup or Apple
-account authentication is required. Sparkle update signing uses its separate
-EdDSA key as described in [Updater and Sparkle signing](#9-updater-and-sparkle-signing).
+Create the production identity **once**, interactively, outside the repository:
+
+```bash
+python3 dist/macos/omg_signing.py create \
+  "$HOME/Library/Application Support/OMG/ReleaseSigning"
+```
+
+The tool creates a private Keychain and an encrypted `identity.p12` backup using
+one password entered without echo. It restores the user's Keychain search list
+and does not install system trust. The private `signing.env` sets
+`OMG_SIGNING_MODE`, the exact certificate SHA-1 fingerprint in
+`OMG_SIGNING_IDENTITY`, and `OMG_SIGNING_KEYCHAIN`. SHA-1 here is the certificate
+identifier used by Apple's requirement language, not a download integrity hash.
+
+Back up `identity.p12` and `certificate.pem` securely; store the password
+separately. Do not use shell tracing while provisioning or unlocking; Apple's
+`security` CLI passes some passwords through short-lived process arguments.
+Protect the signing machine and backups. Never commit them or log command
+arguments containing passwords. The tool refuses an existing directory and
+preserves a failed partial provisioning directory for diagnosis rather than
+silently replacing a key. The certificate lasts ten years; plan renewal before
+expiry. Replacing this pinned leaf certificate changes identity and may require
+users to authorize again. A private CA/rotation policy is not implemented.
+
+### Optional automatic signing unlock
+
+To avoid entering the signing password on each release, save a dedicated generic
+credential in the **local login Keychain**, once, from an interactive terminal:
+
+```bash
+source "<private-signing-directory>/signing.env"
+python3 dist/macos/omg_signing.py store-password
+```
+
+Enter the existing private signing-Keychain password, not your macOS account
+password. This does not retrieve or modify the entry in Apple Passwords. The
+credential service is `com.jischeng.omg.release-signing.unlock`, scoped by the
+certificate fingerprint. Setup verifies the password by locking/unlocking only
+the configured private signing Keychain before creating/updating the credential.
+It refuses to treat the login Keychain as the signing Keychain.
+
+`sign_omg_app.sh` automatically unlocks a configured self-signed Keychain before
+signing. The helper uses Security.framework directly: the password is never a
+command argument, environment variable, plaintext file, or printed result. A
+retrieved native password buffer is cleared and freed after use. This guarantee
+applies to credential setup/automatic unlock; initial certificate provisioning
+still uses the `security` CLI as described above.
+
+Unattended unlock disables GUI interaction **for that process only** and fails
+closed if the login Keychain is locked, the credential is missing, or access is
+denied. There is no ad-hoc fallback. If the private signing Keychain is already
+unlocked, it does not read the stored password. On later releases, source the
+same configuration; no manual unlock command is normally needed.
+
+Default Keychain access control is preserved, not changed to allow all apps.
+The creating Python executable may be authorized, not an individual Python
+script: treat release agents and the signing account as trusted. This is
+convenience automation, not an agent sandbox or protection against arbitrary
+code under the same user. A Python upgrade/executable change may require running
+`store-password` interactively again and approving the system access prompt.
+Headless/locked sessions are not guaranteed to work.
+
+Manual recovery remains available without printing a password:
+
+```bash
+security unlock-keychain "$OMG_SIGNING_KEYCHAIN"
+```
+
+For recovery on another machine, restore the original encrypted p12, import it
+into a private Keychain using Keychain Access or `security import`, grant
+`codesign` access, and update only the Keychain path in the local configuration.
+Keep the original certificate fingerprint. Do not run `create` to replace a lost
+identity. Certificate loss/compromise needs an explicit identity migration.
+
+Sparkle update signing uses its **separate** EdDSA key as described in
+[Updater and Sparkle signing](#9-updater-and-sparkle-signing).
 
 ## 1. Development build
 
@@ -399,12 +477,14 @@ Success criteria:
 
 ## 4. Signing
 
-Ad-hoc sign every nested Sparkle component, plug-in, and app with identity `-`.
-Sign the arm64, x86_64, and universal apps. Hardened runtime must be disabled for
-all ad-hoc signatures. The universal app is the Sparkle updater enclosure.
+Sign every nested Sparkle component, plug-in, and app with the same persistent
+certificate. Sign the arm64, x86_64, and universal apps. Self-signed releases have
+no Apple Team ID, so hardened runtime/library validation stays disabled. The
+universal app is the Sparkle updater enclosure. Public packaging fails closed
+without a persistent identity and rejects ad-hoc/development modes.
 
 ```bash
-export OMG_SIGNING_IDENTITY=-
+source "$HOME/Library/Application Support/OMG/ReleaseSigning/signing.env"
 
 for arch in arm64 x86_64 universal; do
   dist/macos/sign_omg_app.sh \
@@ -425,13 +505,63 @@ codesign -dv --verbose=4 \
 ```
 
 Static code-signature verification and the executable launch probe are both
-required. Ad-hoc signing does not replace Sparkle's EdDSA update signature.
+required. `omg_signing.py verify` checks the compiled DR against the exact
+certificate-and-identifier requirement, and verifies the signer of all present
+nested components. TeamIdentifier equality alone is insufficient for self-signed
+apps because unrelated issuers both have `TeamIdentifier=not set`.
+
+```bash
+python3 dist/macos/omg_signing.py verify \
+  "$OMG_BUILD_ROOT/universal/Release/OMG.app"
+python3 -m unittest discover -s dist -p 'test_omg_signing.py'
+python3 -m unittest discover -s dist -p 'test_omg_keychain.py'
+# Optional isolated certificate/code-signature/launch smoke, not a TCC test:
+OMG_RUN_SIGNING_SMOKE=1 python3 -m unittest discover -s dist -p 'test_omg_signing.py'
+OMG_RUN_SIGNING_SMOKE=1 python3 -m unittest discover -s dist -p 'test_omg_keychain.py'
+```
+
+The native credential test uses two disposable private Keychains, never the real
+login Keychain or a production credential.
+
+After the first persistent release, supply its preserved signed app to enforce
+mutual DR compatibility with the next release:
+
+```bash
+export OMG_PREVIOUS_SIGNED_APP="<previous-persistent-release>/OMG.app"
+```
+
+The release packaging wrapper checks this when provided, requires identical DRs
+across architectures, saves `signing-requirement.txt` outside the upload assets,
+and checks identities again inside mounted DMGs. Preserve the prior app and
+requirement with release records. Do not point this variable at an old ad-hoc
+app: its cdhash cannot be retained by a changed executable.
+
+Signing modes are explicit: `self-signed` (default), `development` (Dev installer),
+`developer-id` (future Apple-issued distribution; hardened runtime and timestamp),
+and `ad-hoc` (local diagnostics only, never accepted by public packaging).
+Switching to Developer ID is a separate authorized migration, not a fallback;
+it may require one more authorization. Code signing does not replace Sparkle's
+EdDSA update signature.
+
+### Permission migration and verification scope
+
+The first transition from the old ad-hoc releases can require authorization once.
+Stable signing targets retention of existing grants across later updates; it does
+not grant access, suppress first-time requests, or cover newly accessed protected
+resources. It also does not change OMG's plugin capability/permission model.
+
+Full Desktop/Documents/Downloads and Sparkle upgrade permission experiments are
+**NOT RUN**, not passed. Per the maintainer's decision, they are not prerequisites
+for adopting this signing policy. Static signing/launch tests establish code
+identity, not end-to-end TCC behavior; monitor actual upgrades and report this
+limitation honestly. Do not reset/edit user TCC databases or require Full Disk
+Access to conceal identity problems.
 
 ## 5. Notarization status
 
 OMG apps and DMGs are not notarized. Notarization submission and ticket stapling
-are not release workflow steps. Release notes must state **ad-hoc signed; not
-notarized** and disclose that macOS Gatekeeper may block the first launch. Users
+are not release workflow steps. Release notes must state **persistently
+self-signed; not notarized** and disclose that macOS Gatekeeper may block the first launch. Users
 who trust the downloaded app can use macOS System Settings > Privacy & Security
 to review and allow it. Do not disable Gatekeeper globally.
 
@@ -587,8 +717,9 @@ and artifact names; it is not an OMG publishing script.
 | Symptom | Cause | Required action |
 | --- | --- | --- |
 | x86_64 undefined `_ghostty_*` symbols | arm64-only GhosttyKit | rebuild universal XCFramework |
-| dyld refuses Sparkle at launch | inconsistent nested signatures or hardened runtime on ad-hoc components | ad-hoc re-sign all nested components and the app without hardened runtime; repeat the launch probe |
-| Gatekeeper blocks first launch | app is ad-hoc signed and not notarized | disclose this in release notes; trusted downloads can be reviewed in System Settings > Privacy & Security; do not disable Gatekeeper globally |
+| dyld refuses Sparkle at launch | inconsistent nested signatures or hardened runtime without an Apple Team ID | re-sign all components with the same persistent identity and correct runtime mode; repeat the launch probe |
+| Folder requests repeat after an update | changed certificate/DR or a newly protected resource | inspect old/new DR compatibility; do not reset TCC or regenerate keys as a workaround |
+| Gatekeeper blocks first launch | app is self-signed and not notarized | disclose this in release notes; trusted downloads can be reviewed in System Settings > Privacy & Security; do not disable Gatekeeper globally |
 | `Ghostty.app` appears in output | stale build or old product settings | clean build; expected product is `OMG.app` |
 | Release sorts below same version | tag used prerelease suffix | use plain `vX.Y.Z` OMG tag |
 | Update check compares against Ghostty | wrong appcast | use only OMG-owned appcast |

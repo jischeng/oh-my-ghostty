@@ -36,7 +36,8 @@ elif [[ "$actual_archs" != "$arch" ]]; then
   exit 1
 fi
 
-codesign --verify --deep --strict "$app_path"
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+python3 "$repo_root/dist/macos/omg_signing.py" verify "$app_path"
 
 app_signature=$(codesign -dv --verbose=4 "$app_path" 2>&1)
 if grep -q '^Signature=adhoc$' <<< "$app_signature" &&

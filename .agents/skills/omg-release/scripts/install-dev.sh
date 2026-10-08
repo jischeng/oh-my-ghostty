@@ -111,7 +111,9 @@ source_version=$(plutil -extract CFBundleShortVersionString raw "$source_app/Con
   exit 1
 }
 
+OMG_SIGNING_MODE=development \
 OMG_SIGNING_IDENTITY="$dev_signing_identity" \
+OMG_SIGNING_KEYCHAIN= \
 OMG_SIGNING_ENTITLEMENTS="$repo_root/macos/GhosttyDebug.entitlements" \
   dist/macos/sign_omg_app.sh "$source_app"
 designated_requirement=$(codesign -d -r- "$source_app" 2>&1)

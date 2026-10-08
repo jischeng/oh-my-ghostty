@@ -28,10 +28,13 @@ A file for [guiding coding agents](https://agents.md/).
 - **Formatting (Swift)**: `swiftlint lint --strict --fix`
 - **Formatting (other)**: `prettier -w .`
 - **OMG documentation contract:** `python3 dist/check_omg_docs.py`
-- **OMG release signing:** Use `OMG_SIGNING_IDENTITY=-` (ad-hoc). Apps and DMGs are
-  not notarized. Developer ID certificates and notarization credentials are not
-  release prerequisites. Keep code-signature, launch, DMG, and Sparkle EdDSA
-  checks; see `docs/RELEASING.md`.
+- **OMG release signing:** Use persistent self-signed code signing
+  (`OMG_SIGNING_MODE=self-signed`) with the same pinned certificate on every
+  release. Source the private `signing.env`; never regenerate an existing identity
+  or fall back to ad-hoc for public releases. Apps and DMGs are not notarized;
+  Developer ID and Apple membership are not prerequisites. Keep code-signature,
+  identity continuity, launch, DMG, and Sparkle EdDSA checks; see
+  `docs/RELEASING.md`.
 
 Any change to plugin APIs, manifests, wire messages, capabilities, lifecycle,
 loading/discovery, package layout, Inspector provider behavior, or permissions

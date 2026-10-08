@@ -1509,6 +1509,12 @@ messages today.
 
 No public plugin sandbox exists because no external runtime exists.
 
+The host's [persistent self-signed release identity](RELEASING.md#4-signing)
+maintains code identity across updates; it does not grant filesystem access,
+add plugin capabilities, or replace macOS user consent. The old ad-hoc to
+persistent-signature migration can require users to authorize once. Actual
+folder-permission retention is not an end-to-end validated plugin guarantee.
+
 | Resource                            | Public plugin API today          |
 | ----------------------------------- | -------------------------------- |
 | filesystem                          | none                             |

@@ -21,7 +21,7 @@ Use this skill in the `oh-my-ghostty` repo. Never open the Xcode GUI. Never touc
 2. **Build and test strictly serially**: Never run multiple builds or tests concurrently (`build.db: database is locked`).
 3. **Shell compatibility**: Pi shell may be Fish. Wrap multiline shell commands with `/bin/bash -lc '...'`.
 4. **GitHub CLI target**: Always pass `--repo jischeng/oh-my-ghostty` when running `gh release create` (`upstream` points to `ghostty-org/ghostty`).
-5. **Release signing**: Use `OMG_SIGNING_IDENTITY=-` for ad-hoc signatures. Apps and DMGs are not notarized. Developer ID certificates, Apple account authentication, and notarization profiles are not release prerequisites. Record ad-hoc signing, no notarization, and first-launch Gatekeeper behavior in release notes. Sparkle EdDSA signing remains required.
+5. **Release signing**: Use persistent self-signing (`OMG_SIGNING_MODE=self-signed`) with the same pinned certificate on every release. Source the private `signing.env`; initialize it once with `python3 dist/macos/omg_signing.py create <private-directory>`. Never regenerate an existing identity or fall back to ad-hoc for public releases. Apps and DMGs are not notarized; Developer ID, paid membership, and notarization profiles are not prerequisites. Record persistent self-signing, no notarization, first-launch Gatekeeper behavior, and the possible one-time authorization on migration. Full TCC upgrade experiments are not a release prerequisite and must be reported NOT RUN when omitted. Sparkle EdDSA signing remains required.
 6. **Rosetta**: If Rosetta 2 is not installed, the script verifies the `x86_64` Mach-O slice without launching it. Record the actual architecture checks and any unperformed launch checks in release notes.
 
 ---
@@ -58,6 +58,10 @@ plutil -lint macos/Ghostty-Info.plist
 xcrun ibtool --warnings --errors --notices --output-format human-readable-text macos/Sources/App/MainMenu.xib
 rm -f default.profraw
 
+# Signing policy contracts (separate from app-hosted Swift tests)
+python3 -m unittest discover -s dist -p 'test_omg_signing.py'
+python3 -m unittest discover -s dist -p 'test_omg_keychain.py'
+
 # 2. Swift tests for all commits since the previous published OMG version
 macos/build.nu --action test --changed-since "v<PREVIOUS_VERSION>" --test-plan-only
 macos/build.nu --action test --changed-since "v<PREVIOUS_VERSION>"
@@ -81,7 +85,13 @@ Output placed under `.release-build/<OMG_VERSION>/`.
 
 ### Step 4: Sign & Package DMGs
 ```bash
-OMG_SIGNING_IDENTITY=- \
+source "<private-signing-directory>/signing.env"
+# One-time interactive setup (not required on every release):
+# python3 dist/macos/omg_signing.py store-password
+# The signing script automatically unlocks from the dedicated login-Keychain item.
+# If access fails, stop; never read/print credentials or fall back to ad-hoc.
+# After the first persistent release, preserve its app and set:
+# export OMG_PREVIOUS_SIGNED_APP="<previous-persistent-release>/OMG.app"
 PREVIOUS_TAG=v<PREVIOUS_VERSION> \
 .agents/skills/omg-release/scripts/package-release.sh <OMG_VERSION>
 ```
@@ -115,5 +125,6 @@ gh release create "v<OMG_VERSION>" \
 ## Completion Report Checklist
 - Commit SHAs and tag name (`vX.Y.Z`).
 - Architectures built (`arm64`, `x86_64`, `universal`).
-- Ad-hoc code-signature verification, launch-probe evidence, and explicit not-notarized status.
+- Persistent certificate/DR verification, launch-probe evidence, and explicit not-notarized status.
+- Prior persistent app compatibility if supplied; report migration/omitted desktop TCC verification honestly.
 - GitHub Release URL and list of 5 uploaded assets.

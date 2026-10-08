@@ -39,6 +39,8 @@ for document in DOCS:
 required_paths = [
     "macos/build.nu",
     "dist/macos/sign_omg_app.sh",
+    "dist/macos/omg_signing.py",
+    "dist/macos/omg_keychain.py",
     "dist/macos/package_omg_dmg.sh",
     "macos/Ghostty.xcodeproj",
     "macos/Ghostty-Info.plist",
@@ -72,7 +74,13 @@ else:
         fail(f"Plugin guide is missing capabilities: {', '.join(undocumented)}")
 
 release_guide = (ROOT / "docs/RELEASING.md").read_text()
-for required in ["OMG_SIGNING_IDENTITY=-", "not notarized"]:
+for required in [
+    "OMG_SIGNING_MODE=self-signed",
+    "signing.env",
+    "OMG_PREVIOUS_SIGNED_APP",
+    "store-password",
+    "not notarized",
+]:
     if required not in release_guide:
         fail(f"Release guide is missing signing policy: {required}")
 if re.search(r"\b(?:notarytool|stapler)\s+(?:submit|store-credentials|staple)\b", release_guide):

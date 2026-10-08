@@ -171,11 +171,16 @@ final class BuiltInInfoInspectorProvider {
     ) throws -> () -> Void
     typealias LocalPortAllocator = (_ preferredPort: Int) throws -> Int
     typealias ForwardReadiness = (_ localPort: Int) async -> Bool
-    typealias RemoteProcessResolver = (
-        _ alias: String,
-        _ remoteHost: String,
-        _ remotePort: Int
-    ) async -> String?
+    typealias RemoteProcessBatchResolver = (_ alias: String, _ ports: [Int]) async throws -> [Int: String]
+    enum ProcessProbeError: Error { case unavailable, invalidOutput }
+
+    private struct ProcessProbe: Hashable {
+        let id: String
+        let token: UUID
+        let alias: String
+        let port: Int
+    }
+
     typealias URLOpener = (URL) -> Void
     typealias AddressCopier = (String) -> Void
 
@@ -194,12 +199,15 @@ final class BuiltInInfoInspectorProvider {
     private let processLauncher: ProcessLauncher
     private let localPortAllocator: LocalPortAllocator
     private let forwardReadiness: ForwardReadiness
-    private let remoteProcessResolver: RemoteProcessResolver
+    private let remoteProcessResolver: RemoteProcessBatchResolver
+    private let processRefreshInterval: Duration
     private let openURL: URLOpener
     private let copyAddress: AddressCopier
     private var desiredForwards: Set<DesiredForward>
     private var runtimeForwards: [String: RuntimeForward] = [:]
-    private var processRefreshTasks: [String: Task<Void, Never>] = [:]
+    private var processRefreshTask: Task<Void, Never>?
+    private var processRefreshDemand: Set<ProcessProbe> = []
+    private var processRefreshGeneration = UUID()
     private var presentedContexts: [UUID: InspectorPaneContext] = [:]
     private var servers = ConnectionServers()
     private var isRegistered = false
@@ -216,7 +224,8 @@ final class BuiltInInfoInspectorProvider {
         processLauncher: @escaping ProcessLauncher = BuiltInInfoInspectorProvider.launchProcess,
         localPortAllocator: @escaping LocalPortAllocator = BuiltInInfoInspectorProvider.allocateLocalPort,
         forwardReadiness: @escaping ForwardReadiness = BuiltInInfoInspectorProvider.waitUntilForwardReady,
-        remoteProcessResolver: @escaping RemoteProcessResolver = BuiltInInfoInspectorProvider.resolveRemoteProcess,
+        remoteProcessBatchResolver: @escaping RemoteProcessBatchResolver = BuiltInInfoInspectorProvider.resolveRemoteProcesses,
+        processRefreshInterval: Duration = .seconds(30),
         openURL: @escaping URLOpener = { NSWorkspace.shared.open($0) },
         copyAddress: @escaping AddressCopier = BuiltInInfoInspectorProvider.copyToPasteboard,
         historyService: TerminalHistoryService? = nil
@@ -229,7 +238,8 @@ final class BuiltInInfoInspectorProvider {
         self.processLauncher = processLauncher
         self.localPortAllocator = localPortAllocator
         self.forwardReadiness = forwardReadiness
-        self.remoteProcessResolver = remoteProcessResolver
+        self.remoteProcessResolver = remoteProcessBatchResolver
+        self.processRefreshInterval = processRefreshInterval
         self.openURL = openURL
         self.copyAddress = copyAddress
         self.desiredForwards = Self.loadDesiredForwards(from: resolvedPersistenceURL)
@@ -280,6 +290,7 @@ final class BuiltInInfoInspectorProvider {
     }
 
     deinit {
+        processRefreshTask?.cancel()
         for observer in notificationObservers {
             NotificationCenter.default.removeObserver(observer)
         }
@@ -331,8 +342,10 @@ final class BuiltInInfoInspectorProvider {
         agentHistory.shutdown()
         let running = runtimeForwards.values
         runtimeForwards.removeAll()
-        for task in processRefreshTasks.values { task.cancel() }
-        processRefreshTasks.removeAll()
+        processRefreshTask?.cancel()
+        processRefreshTask = nil
+        processRefreshDemand.removeAll()
+        processRefreshGeneration = UUID()
         for forward in running { forward.stop() }
     }
 
@@ -348,6 +361,7 @@ final class BuiltInInfoInspectorProvider {
             guard let alias = next.readyAliases[desired.serverID] else { continue }
             startRuntimeForward(desired, alias: alias)
         }
+        reconcileProcessRefresh()
         publishPresentedContexts()
     }
 
@@ -392,6 +406,7 @@ final class BuiltInInfoInspectorProvider {
             presentedContexts.removeValue(forKey: context.tabID)
             agentHistory.retain(surfaces: Set(presentedContexts.values.compactMap(\.surfaceID)))
         }
+        reconcileProcessRefresh()
     }
 
     private func handle(_ action: InspectorPaneAction) {
@@ -505,15 +520,7 @@ final class BuiltInInfoInspectorProvider {
                 runtime.status = .active
                 runtimeForwards[desired.id] = runtime
                 publishPresentedContexts()
-                if desired.target.isLoopback {
-                    startProcessRefresh(
-                        id: desired.id,
-                        token: token,
-                        alias: alias,
-                        remoteHost: desired.remoteHost,
-                        remotePort: desired.remotePort
-                    )
-                }
+                reconcileProcessRefresh()
             }
         } catch {
             let message = Self.failureDescription(error)
@@ -532,40 +539,75 @@ final class BuiltInInfoInspectorProvider {
         }
     }
 
-    private func startProcessRefresh(
-        id: String,
-        token: UUID,
-        alias: String,
-        remoteHost: String,
-        remotePort: Int
-    ) {
-        processRefreshTasks.removeValue(forKey: id)?.cancel()
-        processRefreshTasks[id] = Task { [weak self] in
+    private func reconcileProcessRefresh() {
+        let visibleServers = Set(presentedContexts.values.compactMap { Self.readyServer($0)?.id })
+        let demand = Set(runtimeForwards.compactMap { id, runtime -> ProcessProbe? in
+            guard runtime.status == .active, runtime.desired.target.isLoopback,
+                  visibleServers.contains(runtime.desired.serverID) else { return nil }
+            return .init(id: id, token: runtime.token, alias: runtime.alias, port: runtime.desired.remotePort)
+        })
+        guard demand != processRefreshDemand else { return }
+        let previous = processRefreshTask
+        previous?.cancel()
+        processRefreshDemand = demand
+        let generation = UUID()
+        processRefreshGeneration = generation
+        let resolver = remoteProcessResolver
+        let interval = processRefreshInterval
+        // A replacement waits for cancellation to settle, so rapid visibility
+        // changes cannot overlap old and new SSH subprocesses.
+        processRefreshTask = Task { [weak self] in
+            await previous?.value
+            guard !Task.isCancelled, !demand.isEmpty else { return }
+            let groups = Dictionary(grouping: demand, by: \.alias)
+            var failures: [String: Int] = [:]
+            var roundsUntilRetry: [String: Int] = [:]
             while !Task.isCancelled {
-                guard let self else { return }
-                let processName = await remoteProcessResolver(
-                    alias,
-                    remoteHost,
-                    remotePort
-                )
-                guard !Task.isCancelled,
-                      var runtime = runtimeForwards[id],
-                      runtime.token == token,
-                      runtime.status == .active else { return }
-                if runtime.processName != processName {
-                    runtime.processName = processName
-                    runtimeForwards[id] = runtime
-                    publishPresentedContexts()
+                for alias in groups.keys.sorted() {
+                    guard !Task.isCancelled, let probes = groups[alias] else { return }
+                    if let rounds = roundsUntilRetry[alias], rounds > 0 {
+                        roundsUntilRetry[alias] = rounds - 1
+                        continue
+                    }
+                    do {
+                        let names = try await resolver(alias, Array(Set(probes.map(\.port))).sorted())
+                        guard !Task.isCancelled else { return }
+                        self?.applyProcessNames(names, probes: probes, generation: generation)
+                        failures[alias] = 0
+                    } catch {
+                        guard !Task.isCancelled else { return }
+                        // Retain cached names on transport/tool failure, and
+                        // retry after 2/4 base intervals (60/120s by default).
+                        let count = min(2, (failures[alias] ?? 0) + 1)
+                        failures[alias] = count
+                        roundsUntilRetry[alias] = (1 << count) - 1
+                    }
                 }
-                try? await Task.sleep(for: .seconds(5))
+                do { try await Task.sleep(for: interval) } catch { return }
             }
         }
     }
 
+    private func applyProcessNames(_ names: [Int: String], probes: [ProcessProbe], generation: UUID) {
+        guard generation == processRefreshGeneration else { return }
+        var changed = false
+        for probe in probes {
+            guard var runtime = runtimeForwards[probe.id], runtime.token == probe.token,
+                  runtime.status == .active else { continue }
+            let name = names[probe.port]
+            if runtime.processName != name {
+                runtime.processName = name
+                runtimeForwards[probe.id] = runtime
+                changed = true
+            }
+        }
+        if changed { publishPresentedContexts() }
+    }
+
     private func stopRuntimeForward(id: String) {
-        processRefreshTasks.removeValue(forKey: id)?.cancel()
         guard let runtime = runtimeForwards.removeValue(forKey: id) else { return }
         runtime.stop()
+        reconcileProcessRefresh()
     }
 
     private func processDidTerminate(
@@ -575,7 +617,6 @@ final class BuiltInInfoInspectorProvider {
         errorOutput: String
     ) {
         guard var runtime = runtimeForwards[id], runtime.token == token else { return }
-        processRefreshTasks.removeValue(forKey: id)?.cancel()
         if case .failed = runtime.status {
             return
         }
@@ -585,6 +626,7 @@ final class BuiltInInfoInspectorProvider {
             localPort: runtime.localPort
         ))
         runtimeForwards[id] = runtime
+        reconcileProcessRefresh()
         publishPresentedContexts()
     }
 
@@ -869,74 +911,87 @@ final class BuiltInInfoInspectorProvider {
         return message ?? strings.sshExited(status: status)
     }
 
-    nonisolated private static func resolveRemoteProcess(
-        alias: String,
-        remoteHost _: String,
-        remotePort: Int
-    ) async -> String? {
-        await Task.detached(priority: .utility) {
-            let process = Process()
-            let output = Pipe()
-            let command = Self.remoteProcessCommand(port: remotePort)
-            let remoteCommand = "exec /bin/sh -c \(Self.shellQuote(command))"
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-            process.arguments = [
-                "-T",
-                "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=5",
-                "-o", "ConnectionAttempts=1",
-                alias,
-                remoteCommand,
-            ]
-            process.standardInput = FileHandle.nullDevice
-            process.standardOutput = output
-            process.standardError = FileHandle.nullDevice
-            do { try process.run() } catch { return nil }
-            let timeout = Task.detached {
-                try? await Task.sleep(for: .seconds(6))
-                if process.isRunning { process.terminate() }
-            }
-            process.waitUntilExit()
-            timeout.cancel()
-            guard process.terminationStatus == 0 else { return nil }
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            guard let decoded = String(
-                bytes: data.prefix(512),
-                encoding: .utf8
-            ) else { return nil }
-            let value = decoded.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !value.isEmpty, value.count <= 128,
-                  !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
-                return nil
-            }
-            return value
-        }.value
+    nonisolated private static func resolveRemoteProcesses(alias: String, ports: [Int]) async throws -> [Int: String] {
+        let command = "exec /bin/sh -c \(shellQuote(remoteProcessCommand(ports: ports)))"
+        let result = try await GitProcessRunner().run(
+            executablePath: "/usr/bin/ssh",
+            arguments: ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                        "-o", "ConnectionAttempts=1", "--", alias, command],
+            workingDirectory: "/", maxOutputBytes: 64 * 1024, timeout: 6
+        )
+        guard result.exitCode == 0 else { throw ProcessProbeError.unavailable }
+        return try parseRemoteProcessOutput(result.stdout, ports: ports)
     }
 
-    nonisolated private static func remoteProcessCommand(port: Int) -> String {
-        """
-        port=\(port)
-        pid=''
-        fallback=''
+    nonisolated static func parseRemoteProcessOutput(_ data: Data, ports: [Int]) throws -> [Int: String] {
+        guard data.count <= 64 * 1024, let text = String(data: data, encoding: .utf8) else {
+            throw ProcessProbeError.invalidOutput
+        }
+        var lines = text.components(separatedBy: "\n")
+        if lines.last == "" { lines.removeLast() }
+        guard lines.popLast() == "OMG_PROCESS_PROBE_V1" else { throw ProcessProbeError.invalidOutput }
+        let requested = Set(ports)
+        var seen: Set<Int> = []
+        var names: [Int: String] = [:]
+        for line in lines {
+            let fields = line.components(separatedBy: "\t")
+            guard fields.count == 2, let port = Int(fields[0]), requested.contains(port),
+                  seen.insert(port).inserted, fields[1].count <= 128,
+                  !fields[1].unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+                throw ProcessProbeError.invalidOutput
+            }
+            if !fields[1].isEmpty { names[port] = fields[1] }
+        }
+        guard seen == requested else { throw ProcessProbeError.invalidOutput }
+        return names
+    }
+
+    nonisolated static func remoteProcessCommand(ports: [Int]) -> String {
+        // Only validated integer ports enter the remote shell. lsof/ss each
+        // scan listeners once per batch; fuser is the per-port last resort.
+        let ports = Array(Set(ports.filter(validPort))).sorted().map(String.init).joined(separator: " ")
+        return """
+        export LC_ALL=C
+        tool=''
+        snapshot=''
         if command -v lsof >/dev/null 2>&1; then
-          pid=$(lsof -nP -iTCP:$port -sTCP:LISTEN -F p 2>/dev/null | sed -n 's/^p//p' | head -n 1)
-          fallback=$(lsof -nP -iTCP:$port -sTCP:LISTEN -F c 2>/dev/null | sed -n 's/^c//p' | head -n 1)
+          tool=lsof
+          snapshot=$(lsof -nP -iTCP -sTCP:LISTEN -Fpcn 2>/dev/null | awk '
+            /^p/ { pid=substr($0,2) }
+            /^c/ { name=substr($0,2) }
+            /^n/ { endpoint=substr($0,2); sub(/^.*:/,"",endpoint); print endpoint " " pid " " name }
+          ')
         elif command -v ss >/dev/null 2>&1; then
-          socket=$(ss -H -ltnp "sport = :$port" 2>/dev/null | head -n 1)
-          pid=$(printf '%s' "$socket" | sed -n 's/.*pid=\\([0-9]*\\).*/\\1/p')
-          fallback=$(printf '%s' "$socket" | sed -n 's/.*users:(("\\([^"]*\\)".*/\\1/p')
+          tool=ss
+          snapshot=$(ss -H -ltnp 2>/dev/null) || exit 69
         elif command -v fuser >/dev/null 2>&1; then
-          pid=$(fuser "$port/tcp" 2>/dev/null | awk '{print $1}')
+          tool=fuser
+        else
+          exit 69
         fi
-        if [ -n "$pid" ] && command -v ps >/dev/null 2>&1; then
-          args=$(ps -p "$pid" -o args= 2>/dev/null | head -n 1)
-          executable=${args%% *}
-          if [ -n "$executable" ]; then
-            printf '%s\\n' "${executable##*/}"
-            exit 0
+        for port in \(ports); do
+          pid=''
+          fallback=''
+          if [ "$tool" = lsof ]; then
+            row=$(printf '%s\\n' "$snapshot" | awk -v port="$port" '$1 == port { print; exit }')
+            pid=$(printf '%s' "$row" | awk '{print $2}')
+            fallback=$(printf '%s' "$row" | cut -d ' ' -f 3-)
+          elif [ "$tool" = ss ]; then
+            socket=$(printf '%s\\n' "$snapshot" | awk -v port="$port" '$4 ~ (":" port "$") { print; exit }')
+            pid=$(printf '%s' "$socket" | sed -n 's/.*pid=\\([0-9]*\\).*/\\1/p')
+            fallback=$(printf '%s' "$socket" | sed -n 's/.*users:(("\\([^"]*\\)".*/\\1/p')
+          else
+            pid=$(fuser "$port/tcp" 2>/dev/null | awk '{print $1}')
           fi
-        fi
-        [ -n "$fallback" ] && printf '%s\\n' "$fallback"
+          name="$fallback"
+          if [ -n "$pid" ] && command -v ps >/dev/null 2>&1; then
+            args=$(ps -p "$pid" -o args= 2>/dev/null | head -n 1)
+            executable=${args%% *}
+            [ -z "$executable" ] || name=${executable##*/}
+          fi
+          printf '%s\\t%s\\n' "$port" "$name"
+        done
+        printf 'OMG_PROCESS_PROBE_V1\\n'
         """
     }
 

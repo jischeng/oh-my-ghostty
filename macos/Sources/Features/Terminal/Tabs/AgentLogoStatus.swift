@@ -32,6 +32,10 @@ enum AgentLogoStyle {
     }
 
     static func logoOpacity(breath: Double) -> Double { 0.30 + 0.70 * breath }
+
+    static func animates(state: TabActivityState?, visible: Bool, reduceMotion: Bool) -> Bool {
+        state == .working && visible && !reduceMotion
+    }
 }
 
 /// Alpha-masked tint preserves transparent silhouettes and underlying image detail.
@@ -40,31 +44,36 @@ enum AgentLogoStyle {
 struct AgentLogoStatus: ViewModifier {
     let activity: TabActivity?
     var focused = false
-    @State private var workStarted = Date()
+    @State private var visible = false
+    @State private var dimmed = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func body(content: Content) -> some View {
-        let working = activity?.state == .working
-        TimelineView(.animation(minimumInterval: 1.0 / 20, paused: !working || reduceMotion)) { timeline in
-            let breath = AgentLogoStyle.breath(
-                at: timeline.date.timeIntervalSince(workStarted), reduceMotion: reduceMotion
-            )
-            content.overlay {
-                let tint = activity.flatMap { $0.state == .idle ? nil : $0 }
-                    .map { AgentLogoStyle.color($0) } ?? .accentColor
-                tint.opacity(AgentLogoStyle.tintStrength(state: activity?.state, focused: focused))
-                    // Animate only the tint. Animating the mask (which contains
-                    // the icon) lets selection changes interpolate its layout
-                    // when a new row is inserted above or below it.
-                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: activity?.state)
-                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: focused)
-                    .mask(content)
-            }
-            .opacity(working ? AgentLogoStyle.logoOpacity(breath: breath) : 1)
+        let animating = AgentLogoStyle.animates(
+            state: activity?.state, visible: visible, reduceMotion: reduceMotion
+        )
+        content.overlay {
+            let tint = activity.flatMap { $0.state == .idle ? nil : $0 }
+                .map { AgentLogoStyle.color($0) } ?? .accentColor
+            tint.opacity(AgentLogoStyle.tintStrength(state: activity?.state, focused: focused))
+                // Animate only the tint, never the mask's layout.
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: activity?.state)
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: focused)
+                .mask(content)
         }
-        .onChange(of: working) { isWorking in
-            if isWorking { workStarted = Date() }
+        // Only the opacity interpolates. No timer re-evaluates the masked
+        // content or its containing tab/window every animation frame.
+        .opacity(dimmed ? AgentLogoStyle.logoOpacity(breath: 0) : 1)
+        .animation(
+            animating ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true) : nil,
+            value: dimmed
+        )
+        .onAppear { visible = true }
+        .onDisappear {
+            visible = false
+            dimmed = false
         }
+        .onChange(of: animating) { dimmed = $0 }
     }
 }
 

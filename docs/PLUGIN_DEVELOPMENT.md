@@ -1643,7 +1643,23 @@ Closing a terminal tab releases its registry snapshots and built-in Git, Files
 and Agent History derived presentation state. Nonempty authored Git commit
 drafts remain available for tab restoration without retaining full history or
 file snapshots. Late asynchronous content updates for a closed tab are ignored. Closing or hiding an Inspector view does not terminate
-managed port forwards. Identical plugin snapshots do not broadcast another UI
+managed port forwards. Remote listener process-name probes are independent of
+those tunnels: only active loopback forwards belonging to a presented Info
+server are probed. Hiding the last Info presentation for a server stops its
+periodic probes; re-presenting it refreshes immediately. Multiple presentations
+share the same probe demand. Visible probes refresh every 30 seconds. Each
+SSH alias receives one batch for all eligible ports, with at most one probe
+subprocess active across aliases. `lsof`/`ss` scan listeners once per batch;
+`fuser` remains a per-port fallback within that same SSH connection. Probe
+execution uses the shared asynchronous process runner, a six-second deadline,
+and a 64 KiB combined output limit. Cancellation terminates the query SSH (not
+the forwarding tunnel), settles before a replacement starts, and ignores late
+results using generation and forward tokens. Transport, tool and malformed-output
+failures retain cached process names and retry after 60 then 120 seconds;
+successful queries with no listener clear the cached name. Batch records must
+cover exactly the requested ports, end with a completion marker, and contain
+process names of at most 128 characters without control characters.
+Identical plugin snapshots do not broadcast another UI
 revision; Agent History reuses one decorated session array per host and active
 session set instead of allocating it separately for every tab.
 

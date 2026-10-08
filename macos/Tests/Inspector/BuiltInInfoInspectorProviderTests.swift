@@ -35,7 +35,7 @@ struct BuiltInInfoInspectorProviderTests {
             },
             localPortAllocator: { _ in 41_000 },
             forwardReadiness: { _ in true },
-            remoteProcessResolver: { _, _, _ in "node" },
+            remoteProcessBatchResolver: { _, ports in Dictionary(uniqueKeysWithValues: ports.map { ($0, "node") }) },
             openURL: { openedURLs.append($0) },
             copyAddress: { copiedAddresses.append($0) }
         )
@@ -145,7 +145,7 @@ struct BuiltInInfoInspectorProviderTests {
             },
             localPortAllocator: { _ in 42_000 },
             forwardReadiness: { _ in true },
-            remoteProcessResolver: { _, _, _ in nil },
+            remoteProcessBatchResolver: { _, _ in [:] },
             openURL: { _ in },
             copyAddress: { _ in }
         )
@@ -160,6 +160,223 @@ struct BuiltInInfoInspectorProviderTests {
         #expect(restoredLaunches.first?.remote == 8_080)
         #expect(restoredLaunches.first?.local == 42_000)
         restored.shutdown()
+    }
+
+    @Test func processProbesFollowInfoVisibilityWithoutStoppingTunnels() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let registry = InspectorRegistry()
+        var probes = 0
+        var stops = 0
+        let provider = BuiltInInfoInspectorProvider(
+            registry: registry, persistenceURL: root.appendingPathComponent("port-forwards.json"),
+            processLauncher: { _, _, _, _, _ in { stops += 1 } },
+            localPortAllocator: { _ in 41_000 }, forwardReadiness: { _ in true },
+            remoteProcessBatchResolver: { _, _ in
+                probes += 1
+                guard probes == 1 else { throw BuiltInInfoInspectorProvider.ProcessProbeError.unavailable }
+                return [8080: "node"]
+            },
+            processRefreshInterval: .milliseconds(30)
+        )
+        try provider.setEnabled(true)
+        defer { provider.shutdown() }
+        let serverID = "hostkey-SHA256:visibility="
+        let context = sshContext(alias: "cloud", serverID: serverID, connectionID: "omg-ssh-1")
+        provider.synchronizeConnections(.init(connected: [serverID], readyAliases: [serverID: "cloud"]))
+        registry.performAction(paneID: BuiltInInfoInspectorProvider.paneID,
+                               action: .init(context: context, kind: .createPortForward(target: "8080")))
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(probes == 0)
+        #expect(provider.content(for: serverID, alias: "cloud").items.first?.status == .active)
+        registry.presentationDidChange(to: BuiltInInfoInspectorProvider.paneID, context: context)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(probes > 1)
+        #expect(provider.content(for: serverID, alias: "cloud").items.first?.processName == "node")
+        registry.presentationDidChange(to: nil, context: context)
+        let hiddenCount = probes
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(probes == hiddenCount)
+        #expect(stops == 0)
+        registry.presentationDidChange(to: BuiltInInfoInspectorProvider.paneID, context: context)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(probes > hiddenCount)
+        provider.synchronizeConnections(.init())
+        let disconnectedCount = probes
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(probes == disconnectedCount)
+        #expect(stops == 1)
+    }
+
+    @Test func batchesPortsAndSharesDemandAcrossInfoPresentations() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let registry = InspectorRegistry()
+        var batches: [[Int]] = []
+        var cancellations = 0
+        let provider = BuiltInInfoInspectorProvider(
+            registry: registry, persistenceURL: root.appendingPathComponent("port-forwards.json"),
+            processLauncher: { _, _, _, _, _ in {} },
+            localPortAllocator: { $0 }, forwardReadiness: { _ in true },
+            remoteProcessBatchResolver: { alias, ports in
+                #expect(alias == "cloud")
+                batches.append(ports)
+                if batches.count > 1 {
+                    do { try await Task.sleep(for: .seconds(60)) } catch { cancellations += 1; throw error }
+                }
+                return Dictionary(uniqueKeysWithValues: ports.map { ($0, "node") })
+            },
+            processRefreshInterval: .milliseconds(30)
+        )
+        try provider.setEnabled(true)
+        defer { provider.shutdown() }
+        let serverID = "hostkey-SHA256:batch="
+        let first = sshContext(alias: "cloud", serverID: serverID, connectionID: "omg-ssh-1")
+        let second = sshContext(alias: "cloud", serverID: serverID, connectionID: "omg-ssh-2")
+        provider.synchronizeConnections(.init(connected: [serverID], readyAliases: [serverID: "cloud"]))
+        let ports = [5175, 5176, 5178, 5180, 5181, 5186, 10100, 15244]
+        for port in ports {
+            registry.performAction(paneID: BuiltInInfoInspectorProvider.paneID,
+                                   action: .init(context: first, kind: .createPortForward(target: String(port))))
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(batches.isEmpty)
+        registry.presentationDidChange(to: BuiltInInfoInspectorProvider.paneID, context: first)
+        registry.presentationDidChange(to: BuiltInInfoInspectorProvider.paneID, context: second)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(batches == [ports, ports])
+        #expect(provider.content(for: serverID, alias: "cloud").items.allSatisfy { $0.processName == "node" })
+        registry.presentationDidChange(to: nil, context: first)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(cancellations == 0)
+        #expect(batches.count == 2)
+        registry.presentationDidChange(to: nil, context: second)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(cancellations == 1)
+        #expect(batches.count == 2)
+    }
+
+    @Test func cancelledBatchCannotPublishIntoReopenedInfo() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let registry = InspectorRegistry()
+        var reply: CheckedContinuation<[Int: String], Never>?
+        var calls = 0
+        let provider = BuiltInInfoInspectorProvider(
+            registry: registry, persistenceURL: root.appendingPathComponent("port-forwards.json"),
+            processLauncher: { _, _, _, _, _ in {} },
+            localPortAllocator: { $0 }, forwardReadiness: { _ in true },
+            remoteProcessBatchResolver: { _, _ in
+                calls += 1
+                if calls == 1 { return await withCheckedContinuation { reply = $0 } }
+                return [:]
+            }
+        )
+        try provider.setEnabled(true)
+        defer { provider.shutdown() }
+        let serverID = "hostkey-SHA256:late="
+        let context = sshContext(alias: "cloud", serverID: serverID, connectionID: "omg-ssh-1")
+        provider.synchronizeConnections(.init(connected: [serverID], readyAliases: [serverID: "cloud"]))
+        registry.performAction(paneID: BuiltInInfoInspectorProvider.paneID,
+                               action: .init(context: context, kind: .createPortForward(target: "8080")))
+        registry.presentationDidChange(to: BuiltInInfoInspectorProvider.paneID, context: context)
+        for _ in 0..<100 where reply == nil { try await Task.sleep(for: .milliseconds(10)) }
+        let pending = try #require(reply)
+        registry.presentationDidChange(to: nil, context: context)
+        registry.presentationDidChange(to: BuiltInInfoInspectorProvider.paneID, context: context)
+        #expect(calls == 1) // replacement waits for the old resolver to settle
+        pending.resume(returning: [8080: "stale"])
+        for _ in 0..<100 where calls < 2 { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(calls == 2)
+        #expect(provider.content(for: serverID, alias: "cloud").items.first?.processName == nil)
+    }
+
+    @Test func batchFailuresBackOffAndPreserveCachedNames() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let registry = InspectorRegistry()
+        var calls: [ContinuousClock.Instant] = []
+        let provider = BuiltInInfoInspectorProvider(
+            registry: registry, persistenceURL: root.appendingPathComponent("port-forwards.json"),
+            processLauncher: { _, _, _, _, _ in {} },
+            localPortAllocator: { $0 }, forwardReadiness: { _ in true },
+            remoteProcessBatchResolver: { _, _ in
+                calls.append(.now)
+                if calls.count == 1 { return [8080: "node"] }
+                if calls.count < 4 { throw BuiltInInfoInspectorProvider.ProcessProbeError.unavailable }
+                return [:] // successful probe confirms no listener; clear the old name
+            },
+            processRefreshInterval: .milliseconds(30)
+        )
+        try provider.setEnabled(true)
+        defer { provider.shutdown() }
+        let serverID = "hostkey-SHA256:backoff="
+        let context = sshContext(alias: "cloud", serverID: serverID, connectionID: "omg-ssh-1")
+        provider.synchronizeConnections(.init(connected: [serverID], readyAliases: [serverID: "cloud"]))
+        registry.performAction(paneID: BuiltInInfoInspectorProvider.paneID,
+                               action: .init(context: context, kind: .createPortForward(target: "8080")))
+        registry.presentationDidChange(to: BuiltInInfoInspectorProvider.paneID, context: context)
+        for _ in 0..<100 where calls.count < 2 { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(provider.content(for: serverID, alias: "cloud").items.first?.processName == "node")
+        for _ in 0..<200 where calls.count < 4 { try await Task.sleep(for: .milliseconds(10)) }
+        registry.presentationDidChange(to: nil, context: context)
+        try #require(calls.count >= 4)
+        #expect(calls[2] - calls[1] >= .milliseconds(60))
+        #expect(calls[3] - calls[2] >= .milliseconds(120))
+        #expect(provider.content(for: serverID, alias: "cloud").items.first?.processName == nil)
+    }
+
+    @Test func batchShellScansListenersOnceAndHandlesMissingPorts() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let scripts = [
+            "lsof": "#!/bin/sh\nprintf 'scan\\n' >> \"$PROBE_SCAN_LOG\"\nprintf 'p123\\ncnode\\nn127.0.0.1:8080\\nn[::1]:8081\\np124\\ncpython\\nn*:9000\\n'\n",
+            "ps": "#!/bin/sh\nprintf '/usr/bin/node server.js\\n'\n"
+        ]
+        for (name, script) in scripts {
+            let file = root.appendingPathComponent(name)
+            try script.write(to: file, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
+        }
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = "\(root.path):/usr/bin:/bin"
+        let log = root.appendingPathComponent("scans")
+        environment["PROBE_SCAN_LOG"] = log.path
+        let ports = [8080, 8081, 8082]
+        let result = try await GitProcessRunner().run(
+            executablePath: "/bin/sh",
+            arguments: ["-c", BuiltInInfoInspectorProvider.remoteProcessCommand(ports: ports)],
+            workingDirectory: root.path, environment: environment, maxOutputBytes: 64 * 1024, timeout: 6
+        )
+        #expect(result.exitCode == 0)
+        #expect(try BuiltInInfoInspectorProvider.parseRemoteProcessOutput(result.stdout, ports: ports) ==
+                [8080: "node", 8081: "node"])
+        #expect(try String(contentsOf: log, encoding: .utf8) == "scan\n")
+    }
+
+    @Test func batchOutputRequiresCompleteBoundedPortRecords() throws {
+        let ports = [8080, 8081]
+        let names = try BuiltInInfoInspectorProvider.parseRemoteProcessOutput(
+            Data("8080\tnode\n8081\t\nOMG_PROCESS_PROBE_V1\n".utf8), ports: ports
+        )
+        #expect(names == [8080: "node"])
+        for invalid in [
+            "8080\tnode\n", // incomplete/missing completion marker
+            "8080\tnode\nOMG_PROCESS_PROBE_V1\n", // missing requested port
+            "8080\tnode\n8080\tnode\nOMG_PROCESS_PROBE_V1\n", // duplicate
+            "8080\tnode\n9000\tssh\nOMG_PROCESS_PROBE_V1\n", // unrequested
+            "8080\tnode\r\n8081\t\nOMG_PROCESS_PROBE_V1\n", // control character
+            "8080\t" + String(repeating: "x", count: 129) + "\n8081\t\nOMG_PROCESS_PROBE_V1\n"
+        ] {
+            #expect(throws: BuiltInInfoInspectorProvider.ProcessProbeError.self) {
+                try BuiltInInfoInspectorProvider.parseRemoteProcessOutput(Data(invalid.utf8), ports: ports)
+            }
+        }
+        let command = BuiltInInfoInspectorProvider.remoteProcessCommand(ports: [8081, -1, 8080, 8080, 65536])
+        #expect(command.contains("for port in 8080 8081; do"))
+        #expect(command.components(separatedBy: "lsof -nP").count == 2)
+        #expect(command.components(separatedBy: "ss -H").count == 2)
     }
 
     @Test func supportsExplicitTargetsAndMigratesLoopbackPersistence() async throws {
@@ -201,9 +418,9 @@ struct BuiltInInfoInspectorProviderTests {
             },
             localPortAllocator: { $0 },
             forwardReadiness: { _ in true },
-            remoteProcessResolver: { _, _, _ in
+            remoteProcessBatchResolver: { _, _ in
                 processProbeCount += 1
-                return nil
+                return [:]
             },
             openURL: { _ in },
             copyAddress: { _ in }
@@ -251,7 +468,7 @@ struct BuiltInInfoInspectorProviderTests {
             },
             localPortAllocator: { $0 },
             forwardReadiness: { _ in true },
-            remoteProcessResolver: { _, _, _ in nil },
+            remoteProcessBatchResolver: { _, _ in [:] },
             openURL: { _ in },
             copyAddress: { _ in }
         )
@@ -302,7 +519,7 @@ struct BuiltInInfoInspectorProviderTests {
                 try? await Task.sleep(for: .seconds(1))
                 return false
             },
-            remoteProcessResolver: { _, _, _ in nil },
+            remoteProcessBatchResolver: { _, _ in [:] },
             openURL: { _ in },
             copyAddress: { _ in }
         )

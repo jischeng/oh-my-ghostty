@@ -74,6 +74,15 @@ struct SplitTabPresentationTests {
         #expect(abs(AgentLogoStyle.breath(at: 1.8, reduceMotion: false) - 1) < 0.001)
     }
 
+    @Test func breathRunsOnlyForVisibleWorkingLogos() {
+        #expect(AgentLogoStyle.animates(state: .working, visible: true, reduceMotion: false))
+        #expect(!AgentLogoStyle.animates(state: .working, visible: false, reduceMotion: false))
+        #expect(!AgentLogoStyle.animates(state: .working, visible: true, reduceMotion: true))
+        for state: TabActivityState? in [nil, .idle, .done, .needsAttention, .error] {
+            #expect(!AgentLogoStyle.animates(state: state, visible: true, reduceMotion: false))
+        }
+    }
+
     @Test func focusAndWorkUseSameTintStrengthWhileDoneRemainsVisible() {
         #expect(AgentLogoStyle.tintStrength(state: .idle, focused: true) ==
                 AgentLogoStyle.tintStrength(state: .working, focused: true))

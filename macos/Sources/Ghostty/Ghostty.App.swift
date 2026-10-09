@@ -1951,12 +1951,15 @@ extension Ghostty {
                 guard let surface = target.target.surface else { return }
                 guard let surfaceView = self.surfaceView(from: surface) else { return }
                 guard v.len > 0 else {
-                    surfaceView.hoverUrl = nil
+                    if surfaceView.hoverUrl != nil { surfaceView.hoverUrl = nil }
                     return
                 }
 
+                // OMG: the core resends the same URL on every hovered cell;
+                // republishing re-renders overlays and resets the cursor.
                 let buffer = Data(bytes: v.url!, count: v.len)
-                surfaceView.hoverUrl = String(data: buffer, encoding: .utf8)
+                let url = String(data: buffer, encoding: .utf8)
+                if surfaceView.hoverUrl != url { surfaceView.hoverUrl = url }
 
             default:
                 assertionFailure()

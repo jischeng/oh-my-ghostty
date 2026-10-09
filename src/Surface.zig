@@ -252,6 +252,10 @@ const Mouse = struct {
     /// only process link hover events when the mouse actually moves cells.
     link_point: ?terminal.point.Coordinate = null,
 
+    /// OMG: a Cmd-link press was withheld from mouse reporting, so its
+    /// motion and release must be withheld too.
+    link_click_bypass: bool = false,
+
     /// Return the left-click pin only if it still belongs to the active screen.
     fn activeLeftClickPin(self: *const Mouse, screens: *const terminal.ScreenSet) ?*terminal.Pin {
         return self.selection_gesture.validatedLeftClickPin(screens);
@@ -2818,7 +2822,8 @@ pub fn keyCallback(
         // OR
         // 2. mouse reporting is on and we are not reporting shift to the terminal
         if (self.io.terminal.flags.mouse_event == .none or
-            (self.mouse.mods.shift and !self.mouseShiftCapture(false)))
+            (self.mouse.mods.shift and !self.mouseShiftCapture(false)) or
+            linkModsBypassCapture(self.mouse.mods))
         {
             // Refresh our link state
             const pos = self.rt_surface.getCursorPos() catch break :mouse_mods;
@@ -3923,6 +3928,19 @@ pub fn mouseButtonCallback(
     // bottleneck.
     const shift_capture = self.mouseShiftCapture(true);
 
+    // OMG: Cmd-click on a hovered link belongs to Ghostty even while an app
+    // captures the mouse. Withhold the whole press/release pair from the app.
+    const link_click_bypass = if (button == .left) bypass: {
+        if (action == .release) {
+            const v = self.mouse.link_click_bypass;
+            self.mouse.link_click_bypass = false;
+            break :bypass v;
+        }
+        const v = self.mouse.over_link and linkModsBypassCapture(mods);
+        self.mouse.link_click_bypass = v;
+        break :bypass v;
+    } else false;
+
     // Shift-click continues the previous mouse state if we have a selection.
     // cursorPosCallback will also do a mouse report so we don't need to do any
     // of the logic below.
@@ -4038,6 +4056,7 @@ pub fn mouseButtonCallback(
             // If we have shift-pressed and we aren't allowed to capture it,
             // then we do not do a mouse report.
             if (mods.shift and !shift_capture) break :report;
+            if (link_click_bypass) break :report;
 
             // In any other mouse button scenario without shift pressed we
             // clear the selection since the underlying application can handle
@@ -4494,6 +4513,23 @@ fn linkAtPin(
     return null;
 }
 
+/// OMG: macOS mouse protocols cannot encode Cmd, so a Cmd-only link gesture
+/// is never meaningful to a mouse-reporting app and stays with Ghostty.
+fn linkModsBypassCapture(mods: input.Mods) bool {
+    if (comptime !builtin.target.os.tag.isDarwin()) return false;
+    return mods.binding().equal(input.ctrlOrSuper(.{}));
+}
+
+test "OMG Cmd link gesture bypasses mouse capture only on macOS" {
+    const darwin = comptime builtin.target.os.tag.isDarwin();
+    try std.testing.expectEqual(darwin, linkModsBypassCapture(.{ .super = true }));
+    try std.testing.expectEqual(darwin, linkModsBypassCapture(.{ .super = true, .sides = .{ .super = .right } }));
+    try std.testing.expect(!linkModsBypassCapture(.{}));
+    try std.testing.expect(!linkModsBypassCapture(.{ .shift = true }));
+    try std.testing.expect(!linkModsBypassCapture(.{ .super = true, .shift = true }));
+    try std.testing.expect(!linkModsBypassCapture(.{ .ctrl = true }));
+}
+
 /// This returns the mouse mods to consider for link highlighting or
 /// other purposes taking into account when shift is pressed for releasing
 /// the mouse from capture.
@@ -4754,7 +4790,8 @@ pub fn cursorPosCallback(
         self.mouse.link_point == null or
         (self.mouse.link_point != null and !self.mouse.link_point.?.eql(pos_vp))) and
         (self.io.terminal.flags.mouse_event == .none or
-            (self.mouse.mods.shift and !self.mouseShiftCapture(false))))
+            (self.mouse.mods.shift and !self.mouseShiftCapture(false)) or
+            linkModsBypassCapture(self.mouse.mods)))
     {
         // If we were previously over a link, we always update. We do this so that if the text
         // changed underneath us, even if the mouse didn't move, we update the URL hints and state
@@ -4771,6 +4808,7 @@ pub fn cursorPosCallback(
                 if (state != .release) break :report;
             }
         }
+        if (self.mouse.link_click_bypass) break :report;
 
         // We use the first mouse button we find pressed in order to report
         // since the spec (afaict) does not say...

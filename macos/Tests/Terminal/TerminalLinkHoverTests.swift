@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import GhosttyKit
 import Testing
 @testable import Ghostty
@@ -55,6 +56,21 @@ struct TerminalLinkHoverTests {
             surface.cursorUpdate(with: event)
             #expect(NSCursor.current == surface.pointerStyle.cursor)
         }
+    }
+
+    @Test func repeatedSameShapeDoesNotRepublish() throws {
+        let controller = try makeController(split: false)
+        defer { controller.window?.delegate = nil; controller.window?.close() }
+        let surface = try #require(controller.focusedSurface)
+        surface.setCursorShape(GHOSTTY_MOUSE_SHAPE_TEXT)
+        var published = 0
+        let token = surface.$pointerStyle.dropFirst().sink { _ in published += 1 }
+        defer { token.cancel() }
+        for _ in 0..<10 { surface.setCursorShape(GHOSTTY_MOUSE_SHAPE_POINTER) }
+        #expect(published == 1, "Moving across one link must not republish the cursor per cell")
+        #expect(surface.pointerStyle == .link)
+        surface.setCursorShape(GHOSTTY_MOUSE_SHAPE_TEXT)
+        #expect(published == 2)
     }
 
     @Test(arguments: [false, true])

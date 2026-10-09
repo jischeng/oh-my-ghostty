@@ -49,12 +49,20 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
         editor.onQueue = onQueue
         editor.onCancel = onCancel
         scrollView.documentView = editor
+        scrollView.isHidden = !isPresented
         context.coordinator.editor = editor
         return scrollView
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let editor = scrollView.documentView as? ComposerTextView else { return }
+        // SwiftUI opacity/allowsHitTesting do not remove the NSTextView from
+        // AppKit cursor handling. A dismissed composer would keep resetting the
+        // terminal cursor to an I-beam, flickering against Cmd-link pointers.
+        if scrollView.isHidden == isPresented {
+            scrollView.isHidden = !isPresented
+            scrollView.window?.invalidateCursorRects(for: scrollView)
+        }
         editor.placeholder = placeholder
         editor.onPasteImage = onPasteImage
         editor.onSend = onSend

@@ -1527,26 +1527,35 @@ struct SidebarResizeInteraction: NSViewRepresentable {
     let currentWidth: () -> CGFloat
     let resize: (CGFloat, Bool) -> Void
     let direction: Direction
+    /// OMG: reports hover-or-drag so the divider line can highlight.
+    let onActiveChange: (Bool) -> Void
 
     init(
         currentWidth: @escaping () -> CGFloat,
         resize: @escaping (CGFloat, Bool) -> Void,
-        direction: Direction = .leading
+        direction: Direction = .leading,
+        onActiveChange: @escaping (Bool) -> Void = { _ in }
     ) {
         self.currentWidth = currentWidth
         self.resize = resize
         self.direction = direction
+        self.onActiveChange = onActiveChange
     }
 
     func makeNSView(context: Context) -> DragView {
-        DragView(currentWidth: currentWidth, resize: resize, direction: direction)
+        let view = DragView(currentWidth: currentWidth, resize: resize, direction: direction)
+        view.onActiveChange = onActiveChange
+        return view
     }
 
     func updateNSView(_ view: DragView, context: Context) {
         view.currentWidth = currentWidth
         view.resize = resize
-        view.direction = direction
-        view.window?.invalidateCursorRects(for: view)
+        view.onActiveChange = onActiveChange
+        if view.direction != direction {
+            view.direction = direction
+            view.window?.invalidateCursorRects(for: view)
+        }
     }
 
     final class DragView: NSView {
@@ -1558,6 +1567,11 @@ struct SidebarResizeInteraction: NSViewRepresentable {
         private weak var resizeWindow: NSWindow?
         private var resizeDeferralActive = false
         private(set) var registeredCursorBounds: NSRect?
+        var onActiveChange: (Bool) -> Void = { _ in }
+        private var isHovering = false { didSet { updateActive() } }
+        private var isDragging = false { didSet { updateActive() } }
+        /// Hover or drag. Changes only on enter/exit/down/up, never per move.
+        private(set) var isActive = false
 
         init(
             currentWidth: @escaping () -> CGFloat,
@@ -1568,7 +1582,25 @@ struct SidebarResizeInteraction: NSViewRepresentable {
             self.resize = resize
             self.direction = direction
             super.init(frame: .zero)
+            // inVisibleRect follows geometry, so the area is never replaced
+            // (replacing it would synthesize exit/enter pairs).
+            addTrackingArea(NSTrackingArea(
+                rect: .zero,
+                options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+                owner: self
+            ))
         }
+
+        private func updateActive() {
+            let active = isHovering || isDragging
+            guard active != isActive else { return }
+            isActive = active
+            onActiveChange(active)
+        }
+
+        override func mouseEntered(with event: NSEvent) { isHovering = true }
+
+        override func mouseExited(with event: NSEvent) { isHovering = false }
 
         @available(*, unavailable)
         required init?(coder: NSCoder) {
@@ -1580,6 +1612,8 @@ struct SidebarResizeInteraction: NSViewRepresentable {
             window?.invalidateCursorRects(for: self)
             if window == nil {
                 finishResizeDeferral()
+                isHovering = false
+                isDragging = false
             }
         }
 
@@ -1603,6 +1637,7 @@ struct SidebarResizeInteraction: NSViewRepresentable {
         override func mouseDown(with event: NSEvent) {
             startWidth = currentWidth()
             startPosition = event.locationInWindow
+            isDragging = true
             beginResizeDeferral()
         }
 
@@ -1613,6 +1648,7 @@ struct SidebarResizeInteraction: NSViewRepresentable {
         override func mouseUp(with event: NSEvent) {
             resize(proposedWidth(for: event), true)
             finishResizeDeferral()
+            isDragging = false
         }
 
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool {

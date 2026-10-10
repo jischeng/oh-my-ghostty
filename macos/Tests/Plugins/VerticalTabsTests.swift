@@ -684,6 +684,30 @@ struct VerticalTabsTests {
         #expect(updates[1].1 == true)
     }
 
+    @Test @MainActor func dividerActiveStateChangesOnlyOnTransitions() throws {
+        var changes: [Bool] = []
+        let view = SidebarResizeInteraction.DragView(
+            currentWidth: { 240 },
+            resize: { _, _ in },
+            direction: .trailing
+        )
+        view.onActiveChange = { changes.append($0) }
+        #expect(view.trackingAreas.contains { $0.options.contains([.mouseEnteredAndExited, .inVisibleRect]) })
+        let enter = try #require(mouseEvent(type: .leftMouseDown, x: 0))
+        view.mouseEntered(with: enter)
+        view.mouseEntered(with: enter)
+        let down = try #require(mouseEvent(type: .leftMouseDown, x: 100))
+        let dragged = try #require(mouseEvent(type: .leftMouseDragged, x: 140))
+        let up = try #require(mouseEvent(type: .leftMouseUp, x: 140))
+        view.mouseDown(with: down)
+        view.mouseExited(with: enter) // Dragging past the hit area keeps it lit.
+        view.mouseDragged(with: dragged)
+        #expect(changes == [true])
+        view.mouseUp(with: up)
+        #expect(changes == [true, false])
+        #expect(!view.isActive)
+    }
+
     @Test @MainActor func sharedTopDividerUsesVerticalResizeContract() throws {
         var updates: [(CGFloat, Bool)] = []
         let view = SidebarResizeInteraction.DragView(

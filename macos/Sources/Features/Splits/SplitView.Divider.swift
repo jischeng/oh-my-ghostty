@@ -7,7 +7,10 @@ extension SplitView {
         let visibleSize: CGFloat
         let invisibleSize: CGFloat
         let color: Color
+        /// OMG: true while the parent split is being dragged.
+        var isResizing = false
         @Binding var split: CGFloat
+        @State private var isHovered = false
 
         private var visibleWidth: CGFloat? {
             switch direction {
@@ -58,11 +61,13 @@ extension SplitView {
                     .frame(width: invisibleWidth, height: invisibleHeight)
                     .contentShape(Rectangle()) // Makes it hit testable for pointerStyle
                 Rectangle()
-                    .fill(color)
+                    // OMG: highlight the line instead of relying on the cursor.
+                    .fill(isHovered || isResizing ? TerminalResizeBoundary.activeColor : color)
                     .frame(width: visibleWidth, height: visibleHeight)
             }
             .backport.pointerStyle(pointerStyle)
             .onHover { isHovered in
+                if self.isHovered != isHovered { self.isHovered = isHovered }
                 // macOS 15+ we use the pointerStyle helper which is much less
                 // error-prone versus manual NSCursor push/pop
                 if #available(macOS 15, *) {

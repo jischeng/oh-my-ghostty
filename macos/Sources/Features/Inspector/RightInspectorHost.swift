@@ -61,13 +61,21 @@ struct TerminalResizeBoundary: View {
     let currentExtent: () -> CGFloat
     let resize: (CGFloat, Bool) -> Void
     let accessibilityLabel: String
+    /// OMG: hover-or-drag state from the AppKit tracking area. It flips only on
+    /// enter/exit/down/up, so the line never flickers while the mouse moves.
+    @State private var isActive = false
+
+    /// Theme-consistent highlight; OMG uses the accent for selection chrome.
+    static let activeColor = Color.accentColor
+
+    private var lineColor: Color { isActive ? Self.activeColor : color }
 
     @ViewBuilder
     var body: some View {
         switch edge {
         case .leading:
             ZStack(alignment: .leading) {
-                TerminalSidebarDividerLine(color: color)
+                TerminalSidebarDividerLine(color: lineColor)
                 interaction(direction: .trailing)
             }
             .frame(width: TerminalShellStyle.resizeHitWidth)
@@ -75,7 +83,7 @@ struct TerminalResizeBoundary: View {
 
         case .trailing:
             ZStack(alignment: .trailing) {
-                TerminalSidebarDividerLine(color: color)
+                TerminalSidebarDividerLine(color: lineColor)
                 interaction(direction: .leading)
             }
             .frame(width: TerminalShellStyle.resizeHitWidth)
@@ -84,7 +92,7 @@ struct TerminalResizeBoundary: View {
         case .top:
             ZStack(alignment: .top) {
                 Rectangle()
-                    .fill(color)
+                    .fill(lineColor)
                     .frame(height: TerminalShellStyle.dividerWidth)
                     .frame(maxWidth: .infinity)
                 interaction(direction: .top)
@@ -100,7 +108,8 @@ struct TerminalResizeBoundary: View {
         SidebarResizeInteraction(
             currentWidth: currentExtent,
             resize: resize,
-            direction: direction
+            direction: direction,
+            onActiveChange: { isActive = $0 }
         )
         .contentShape(Rectangle())
         .accessibilityLabel(accessibilityLabel)

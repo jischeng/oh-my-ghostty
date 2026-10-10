@@ -83,6 +83,10 @@ extension Ghostty {
         // Whether the pointer should be visible or not
         @Published private(set) var pointerStyle: CursorStyle = .horizontalText
 
+        // OMG: true while the core reports a hovered link. Links show a hint
+        // chip instead of switching the cursor to a pointing hand.
+        @Published private(set) var isHoveringLink: Bool = false
+
         // Whether the mouse is currently over this surface
         @Published private(set) var mouseOverSurface: Bool = false
 
@@ -561,7 +565,9 @@ extension Ghostty {
                 style = .grabActive
 
             case GHOSTTY_MOUSE_SHAPE_POINTER:
-                style = .link
+                // OMG: keep the current cursor; SurfaceLinkHint marks the link.
+                if !isHoveringLink { isHoveringLink = true }
+                return
 
             case GHOSTTY_MOUSE_SHAPE_W_RESIZE:
                 style = .resizeLeft
@@ -597,6 +603,8 @@ extension Ghostty {
                 // We ignore unknown shapes.
                 return
             }
+
+            if isHoveringLink { isHoveringLink = false }
 
             // OMG: the core resends the same shape on every hovered cell.
             // Republishing it re-renders SwiftUI overlays and rebuilds cursor

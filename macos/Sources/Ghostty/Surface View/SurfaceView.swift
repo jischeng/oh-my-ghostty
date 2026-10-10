@@ -111,6 +111,9 @@ extension Ghostty {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
 
+                // OMG: Cmd-hover link hint near the mouse (replaces the hand cursor).
+                SurfaceLinkHint(surfaceView: surfaceView, config: ghostty.config)
+
                 // If we have secure input enabled and we're the focused surface and window
                 // then we want to show the secure input overlay.
                 if ghostty.config.secureInputIndication &&

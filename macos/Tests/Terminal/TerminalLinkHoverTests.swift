@@ -58,19 +58,38 @@ struct TerminalLinkHoverTests {
         }
     }
 
-    @Test func repeatedSameShapeDoesNotRepublish() throws {
+    @Test func linkHoverShowsHintWithoutChangingCursor() throws {
         let controller = try makeController(split: false)
         defer { controller.window?.delegate = nil; controller.window?.close() }
         let surface = try #require(controller.focusedSurface)
         surface.setCursorShape(GHOSTTY_MOUSE_SHAPE_TEXT)
-        var published = 0
-        let token = surface.$pointerStyle.dropFirst().sink { _ in published += 1 }
-        defer { token.cancel() }
+        var styles = 0
+        var hovers = 0
+        let styleToken = surface.$pointerStyle.dropFirst().sink { _ in styles += 1 }
+        let hoverToken = surface.$isHoveringLink.dropFirst().sink { _ in hovers += 1 }
+        defer { styleToken.cancel(); hoverToken.cancel() }
         for _ in 0..<10 { surface.setCursorShape(GHOSTTY_MOUSE_SHAPE_POINTER) }
-        #expect(published == 1, "Moving across one link must not republish the cursor per cell")
-        #expect(surface.pointerStyle == .link)
+        #expect(styles == 0, "Links must not switch the cursor to a pointing hand")
+        #expect(surface.pointerStyle == .horizontalText)
+        #expect(surface.isHoveringLink)
+        #expect(hovers == 1, "Moving across one link must not republish per cell")
         surface.setCursorShape(GHOSTTY_MOUSE_SHAPE_TEXT)
-        #expect(published == 2)
+        #expect(!surface.isHoveringLink)
+        #expect(hovers == 2)
+        #expect(styles == 0)
+    }
+
+    @Test func linkHintStaysInsideSurface() {
+        let container = CGSize(width: 400, height: 300)
+        let chip = CGSize(width: 90, height: 20)
+        // AppKit y=290 is near the top; the chip sits below-right of the cursor.
+        let normal = SurfaceLinkHint.origin(for: CGPoint(x: 100, y: 290), chip: chip, container: container)
+        #expect(normal == CGPoint(x: 114, y: 28))
+        // Near the bottom-right corner it flips to the top-left of the cursor.
+        let corner = SurfaceLinkHint.origin(for: CGPoint(x: 390, y: 5), chip: chip, container: container)
+        #expect(corner.x + chip.width <= 390)
+        #expect(corner.y + chip.height <= 295)
+        #expect(corner.x >= SurfaceLinkHint.edgeInset && corner.y >= SurfaceLinkHint.edgeInset)
     }
 
     @Test(arguments: [false, true])
@@ -127,7 +146,8 @@ struct TerminalLinkHoverTests {
             event.flags = .maskCommand
             event.post(tap: .cghidEventTap)
             try await Task.sleep(for: .milliseconds(50))
-            #expect(surface.pointerStyle == .link)
+            #expect(surface.isHoveringLink)
+            #expect(surface.pointerStyle != .link)
             #expect(surface.mouseOverSurface)
         }
     }

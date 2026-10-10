@@ -640,6 +640,9 @@ struct AgentQuickInputDock<Content: View>: View {
                         model: model,
                         color: controller.sidebarDividerColor
                     )
+                    // The hit area overlaps the composer below; keep it on top
+                    // so mouseDown reaches the drag view, not the editor.
+                    .zIndex(1)
                     AgentQuickInputComposer(
                         controller: controller,
                         model: model,

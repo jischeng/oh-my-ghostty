@@ -1667,8 +1667,18 @@ fn mouseRefreshLinks(
                     .sel = link.selection,
                     .trim = false,
                 });
+                // OMG: preview relative paths against the clicked output's cwd,
+                // matching what Cmd-click opens (the host would use its own cwd).
+                const preview_str = if (comptime builtin.target.os.tag == .macos)
+                    try omgHoverPath(
+                        alloc,
+                        str,
+                        self.io.terminal.screens.active.omg_cwd_history.cwdAt(link.selection.start()),
+                    )
+                else
+                    str;
                 break :link .{
-                    .{ .url = str },
+                    .{ .url = preview_str },
                     self.config.link_previews == .true,
                 };
             },
@@ -4511,6 +4521,55 @@ fn linkAtPin(
     }
 
     return null;
+}
+
+/// OMG: join a relative path candidate with its output cwd for the hover
+/// preview. URLs, absolute and home paths are returned unchanged.
+fn omgHoverPath(
+    alloc: Allocator,
+    value: [:0]const u8,
+    cwd: ?[]const u8,
+) Allocator.Error![:0]const u8 {
+    var path: []const u8 = value;
+    if (path.len >= 2 and (path[0] == '\'' or path[0] == '"') and path[path.len - 1] == path[0]) {
+        path = path[1 .. path.len - 1];
+    }
+    if (path.len == 0 or path[0] == '/' or path[0] == '~') return value;
+    // A scheme is letters/digits/+.- before ':' followed by something other
+    // than a :line[:col] location suffix.
+    if (std.mem.indexOfScalar(u8, path, ':')) |colon| scheme: {
+        if (colon == 0 or !std.ascii.isAlphabetic(path[0])) break :scheme;
+        for (path[0..colon]) |c| {
+            if (!std.ascii.isAlphanumeric(c) and c != '+' and c != '.' and c != '-') break :scheme;
+        }
+        for (path[colon + 1 ..]) |c| {
+            if (!std.ascii.isDigit(c) and c != ':') return value;
+        }
+    }
+    const dir = cwd orelse return value;
+    if (dir.len == 0) return value;
+    const sep = if (dir[dir.len - 1] == '/') "" else "/";
+    return std.fmt.allocPrintSentinel(alloc, "{s}{s}{s}", .{ dir, sep, path }, 0);
+}
+
+test "OMG hover path resolves relative candidates against output cwd" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct { value: [:0]const u8, cwd: ?[]const u8, expected: []const u8 }{
+        .{ .value = "shell.nix", .cwd = "/repo", .expected = "/repo/shell.nix" },
+        .{ .value = "'App icon.icon'", .cwd = "/repo/", .expected = "/repo/App icon.icon" },
+        .{ .value = "src/main.zig:12:3", .cwd = "/repo", .expected = "/repo/src/main.zig:12:3" },
+        .{ .value = "README.md:12", .cwd = "/repo", .expected = "/repo/README.md:12" },
+        .{ .value = "/tmp/file", .cwd = "/repo", .expected = "/tmp/file" },
+        .{ .value = "~/file", .cwd = "/repo", .expected = "~/file" },
+        .{ .value = "https://example.com/a", .cwd = "/repo", .expected = "https://example.com/a" },
+        .{ .value = "mailto:user@example.com", .cwd = "/repo", .expected = "mailto:user@example.com" },
+        .{ .value = "shell.nix", .cwd = null, .expected = "shell.nix" },
+    };
+    for (cases) |case| {
+        const result = try omgHoverPath(alloc, case.value, case.cwd);
+        defer if (result.ptr != case.value.ptr) alloc.free(result);
+        try std.testing.expectEqualStrings(case.expected, result);
+    }
 }
 
 /// OMG: macOS mouse protocols cannot encode Cmd, so a Cmd-only link gesture

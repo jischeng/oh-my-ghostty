@@ -8,7 +8,7 @@ pub const quoted_regex =
 ;
 
 pub const regex =
-    \\(?<![\w./~:@$+-])(?!(?:\.{3,}|[\w.\-/]*\.{3,}))(?![0-9]+(?:[A-Za-z]+)?\.[0-9]+)(?:(?:~|/|\.{1,2}/|[\w.\-]+/)[\w./-]*|\.[A-Za-z0-9_][\w.\-]*|(?![0-9]+\.[0-9]+)[^\s/:*?"'<>|()]+\.(?:7z|[A-Za-z][A-Za-z0-9_]{0,7})|(?:Makefile|Dockerfile|Containerfile|Vagrantfile|Gemfile|Rakefile|LICENSE|LICENCE|README)|\.{1,2}|(?<=[📁📂]\s)[\w.\-]+)(?::[0-9]+(?::[0-9]+)?)?(?![/\w.~@$+-])
+    \\(?<![\w./~:@$+-])(?!(?:\.{3,}|[\w.\-/]*\.{3,}))(?![0-9]+(?:[A-Za-z]+)?\.[0-9]+)(?:(?:~|/|\.{1,2}/|[\w.\-]+/)[\w./-]*|\.[A-Za-z0-9_][\w.\-]*|(?![0-9]+\.[0-9]+)[^\s/:*?"'<>|()]+\.(?:7z|[A-Za-z][A-Za-z0-9_]{0,7})|(?:Makefile|Dockerfile|Containerfile|Vagrantfile|Gemfile|Rakefile|LICENSE|LICENCE|README)|\.{1,2}|(?<=[📁📂\x{E000}-\x{F8FF}\x{F0000}-\x{FFFFD}]\s|[📁📂\x{E000}-\x{F8FF}\x{F0000}-\x{FFFFD}]\s\s)[\w.\-]+)(?::[0-9]+(?::[0-9]+)?)?(?![/\w.~@$+-])
 ;
 
 test "OMG bare path candidates" {
@@ -19,6 +19,11 @@ test "OMG bare path candidates" {
     const cases = [_]struct { input: []const u8, expected: []const u8 }{
         .{ .input = "README.md", .expected = "README.md" },
         .{ .input = "📁 src", .expected = "src" },
+        // Nerd Font icons (eza/lsd) live in the Private Use Area.
+        .{ .input = "\u{F07B} nix", .expected = "nix" },
+        .{ .input = "\u{F0214} env", .expected = "env" },
+        .{ .input = "\u{E5FF}  zig-out", .expected = "zig-out" },
+        .{ .input = "chengjisheng 20 Aug 17:45 \u{E779} Makefile", .expected = "Makefile" },
         .{ .input = "'src'", .expected = "'src'" },
         .{ .input = "'README.md'", .expected = "'README.md'" },
         .{ .input = "'App icon.icon'", .expected = "'App icon.icon'" },
@@ -66,6 +71,8 @@ test "OMG bare path candidates" {
         "git",
         "status",
         "12:34:56",
+        "drwxr-xr-x@",
+        "chengjisheng 20 Aug 17:45",
     }) |input| {
         if (re.search(input, .{})) |result| {
             var match = result;

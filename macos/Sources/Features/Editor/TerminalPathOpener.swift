@@ -118,10 +118,19 @@ enum TerminalPathOpener {
         return true
     }
 
+    /// A directory click must never submit shell commands to an agent's chat
+    /// input. Preserve explicit destinations; use a sibling shell for current-pane.
+    static func directoryDestination(preferred: EditorOpenDestination, hasAgent: Bool) -> EditorOpenDestination {
+        hasAgent && preferred == .currentPane ? .splitRight : preferred
+    }
+
     private static func openDirectory(
         _ path: String, controller: TerminalController, source: Ghostty.SurfaceView, session: PaneSessionContext
     ) throws {
-        let destination = OhMyGhosttySettings.shared.editorDirectoryOpenDestination
+        let destination = directoryDestination(
+            preferred: OhMyGhosttySettings.shared.editorDirectoryOpenDestination,
+            hasAgent: controller.agentActivity(for: source) != nil || controller.agentResumeDescriptor(for: source) != nil
+        )
         if destination == .currentPane {
             guard let terminal = source.surfaceModel else { return }
             EditorWorkspaceStore.shared.workspace(for: controller.tabSessionID, surfaceID: source.id).isVisible = false

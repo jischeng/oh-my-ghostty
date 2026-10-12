@@ -35,6 +35,13 @@ struct TerminalPathOpenerTests {
         #expect(TerminalPathTarget.baseDirectory(historical: "", paneDirectory: "/new", isRemote: false) == "")
     }
 
+    @Test @MainActor func directoryClickNeverSubmitsCdToAnAgent() {
+        #expect(TerminalPathOpener.directoryDestination(preferred: .currentPane, hasAgent: true) == .splitRight)
+        #expect(TerminalPathOpener.directoryDestination(preferred: .currentPane, hasAgent: false) == .currentPane)
+        #expect(TerminalPathOpener.directoryDestination(preferred: .newTab, hasAgent: true) == .newTab)
+        #expect(TerminalPathOpener.directoryDestination(preferred: .splitDown, hasAgent: true) == .splitDown)
+    }
+
     @Test func directoryCommandTreatsShellMetacharactersAsLiteralNames() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let folder = root.appendingPathComponent("folder ' $(echo oops); 中文")

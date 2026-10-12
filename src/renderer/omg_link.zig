@@ -213,3 +213,31 @@ test "OMG viewport links reveal multiple verified paths without hover and follow
     defer released.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 0), released.count());
 }
+
+test "OMG agent Python and cd quoted paths survive terminal soft wrapping" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const path = "/home/chengjisheng/deeproute/mapping.worktrees/trajectory_server_to_paimon/lake_search/ETL/bag_topic_pipeline";
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 50, .rows = 12 });
+    defer t.deinit(alloc);
+    try t.setPwd("/repo");
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("\"code\": \"from pathlib import Path\\nb=Path('" ++ path ++ "')\\nfor rel in {}\"\r\ncd -- '" ++ path ++ "'\r\n");
+    var config = try @import("link.zig").Set.fromConfig(alloc, &.{.{
+        .regex = @import("../config/omg_path.zig").quoted_regex,
+        .action = .{ .open = {} },
+        .highlight = .{ .hover_mods = input.ctrlOrSuper(.{}) },
+    }});
+    defer config.deinit(alloc);
+    var cache: Cache = .{};
+    defer cache.deinit(alloc);
+    _ = try cache.putPending(alloc, "/repo", "'" ++ path ++ "'");
+    _ = cache.resolve("/repo", "'" ++ path ++ "'", true);
+    var frame: terminal.RenderState = .empty;
+    defer frame.deinit(alloc);
+    try frame.update(alloc, &t);
+    var cells = try collect(alloc, alloc, t.screens.active, &frame, config.links, &cache, input.ctrlOrSuper(.{}));
+    defer cells.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 2 * (path.len + 2)), cells.count());
+}

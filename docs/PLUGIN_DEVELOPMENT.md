@@ -2073,9 +2073,12 @@ directories have independent default destinations (`editor.fileOpenDestination`
 and `editor.directoryOpenDestination`): current pane, new tab, or four split
 directions. An explicit Files menu destination overrides the file default.
 The directory default applies only to Command-click navigation, not Files tree
-expansion. Current-pane directory navigation changes the existing shell's cwd;
-new panes start in the requested directory, using the existing SSH replay path
-for remote sessions. These host-owned actions add no external plugin permission.
+expansion. Current-pane directory navigation changes the existing shell's cwd.
+When the source has an active agent activity or resume descriptor, a current-pane
+preference instead opens a right-hand sibling shell: shell commands must never
+be submitted into the agent's chat input. Explicit new-tab/split choices are
+unchanged. New panes start in the requested directory, using the existing SSH
+replay path for remote sessions. These host-owned actions add no external plugin permission.
 
 Local relative terminal links carry the cwd recorded at their output position,
 using OSC 7 transitions anchored to tracked screen pins. Changing directories

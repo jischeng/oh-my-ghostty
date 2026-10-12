@@ -709,17 +709,23 @@ pub const PromptTitle = enum(c_int) {
 
 pub const MouseOverLink = struct {
     url: [:0]const u8,
+    /// OMG: resolve in the host's source filesystem, just like OpenUrl.
+    base_directory: ?[]const u8 = null,
 
     // Sync with: ghostty_action_mouse_over_link_s
     pub const C = extern struct {
         url: [*]const u8,
         len: usize,
+        base_directory: ?[*]const u8 = null,
+        base_directory_len: usize = 0,
     };
 
     pub fn cval(self: MouseOverLink) C {
         return .{
             .url = self.url.ptr,
             .len = self.url.len,
+            .base_directory = if (self.base_directory) |v| v.ptr else null,
+            .base_directory_len = if (self.base_directory) |v| v.len else 0,
         };
     }
 };

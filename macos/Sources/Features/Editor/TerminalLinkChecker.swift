@@ -29,8 +29,14 @@ enum TerminalLinkChecker {
             return
         }
         let filesystem = resolved.filesystem, path = resolved.path
-        Task {
+        let controller = resolved.controller, session = resolved.session
+        Task { [weak source, weak controller] in
             let exists = ((try? await filesystem.itemType(at: path)) ?? nil) != nil
+            guard let source, let controller,
+                  controller.paneSessionContext(for: source)?.state == session.state else {
+                reply(false)
+                return
+            }
             reply(exists)
         }
     }

@@ -813,6 +813,34 @@ struct WorkspaceProviderTests {
         #expect(filesystem.descriptor.displayName == "cloud")
     }
 
+    @Test func remoteItemTypeTestsTargetNotDirectoryContents() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let empty = root.appendingPathComponent("empty ' $(echo bad)")
+        let populated = root.appendingPathComponent("populated")
+        try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: populated, withIntermediateDirectories: true)
+        let file = populated.appendingPathComponent("env")
+        try Data().write(to: file)
+        let link = root.appendingPathComponent("directory-link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: empty)
+        for (path, expected) in [(empty.path, "directory"), (populated.path, "directory"),
+                                 (file.path, "file"), (link.path, "directory"),
+                                 (root.appendingPathComponent("missing").path, "missing")] {
+            let process = Process()
+            let pipe = Pipe()
+            process.executableURL = URL(fileURLWithPath: "/bin/sh")
+            process.arguments = ["-c", SSHWorkspaceFilesystem.itemTypeCommand(path)]
+            process.standardOutput = pipe
+            try process.run()
+            let output = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            #expect(process.terminationStatus == 0)
+            #expect(String(data: output, encoding: .utf8) == expected)
+        }
+    }
+
     @Test func parsesSFTPFileAttributesAndPermissions() {
         let output = "-rwxr-xr-x 1 user group 12345678 Jan 1 00:00 /remote/script.sh"
         let attrs = SSHWorkspaceFilesystem.parseFileAttributes(from: output)

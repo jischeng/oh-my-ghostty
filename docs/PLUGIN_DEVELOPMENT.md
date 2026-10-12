@@ -2077,13 +2077,26 @@ expansion. Current-pane directory navigation changes the existing shell's cwd;
 new panes start in the requested directory, using the existing SSH replay path
 for remote sessions. These host-owned actions add no external plugin permission.
 
-Relative terminal links now carry the cwd recorded at their output position,
+Local relative terminal links carry the cwd recorded at their output position,
 using OSC 7 transitions anchored to tracked screen pins. Changing directories
-does not reinterpret older filenames against the new cwd. Each screen retains
+locally does not reinterpret older filenames against the new cwd. Each screen retains
 at most 1024 transitions with paths up to 4096 bytes; unknown/expired metadata
 does not fall back to guessing the current directory. Quoted names containing
 spaces are matched as one path. Absolute links are independent of this history.
-The additional native `open_url` cwd fields are not plugin wire capabilities.
+SSH relative links instead use the source pane's known remote working directory:
+core OSC 7 history is local-only and must never supply a Mac directory to a
+remote filesystem. Historical remote cwd is not reconstructed; use absolute
+links when referring to files from an earlier remote directory. Hover previews,
+existence checks, and opening share the same host resolver, including relative
+OSC 8 targets and Chinese filenames. Native `open_url` and `mouse_over_link`
+cwd fields are host/core interfaces, not plugin wire capabilities.
+
+Plain long `ls` listings can expose directory and extensionless filenames
+without icon prefixes; metadata columns are not candidates. SSH `itemType`
+checks the exact quoted target with POSIX shell file/directory tests (following
+symlinks), rather than classifying the first child of an SFTP directory listing.
+These read-only checks reuse the established SSH transport; no connection to a
+host named by terminal link text is created.
 
 Known non-text formats (including DMG, PDF and images) use the system default
 application before creating an editor pane. Binary/unsupported-encoding and

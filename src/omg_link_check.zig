@@ -11,7 +11,7 @@ const Cache = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-pub const Status = enum { pending, exists, missing };
+pub const Status = enum { queued, pending, exists, missing };
 
 /// Bound the metadata a single surface can accumulate while Cmd is held.
 const max_entries = 256;
@@ -49,11 +49,29 @@ pub fn get(self: *const Cache, cwd: []const u8, value: []const u8) ?Status {
 pub fn putPending(self: *Cache, alloc: Allocator, cwd: []const u8, value: []const u8) Allocator.Error!bool {
     var buf: [8192]u8 = undefined;
     const key = keyFor(&buf, cwd, value) orelse return false;
-    if (self.map.count() >= max_entries) self.clear(alloc);
+    if (self.map.contains(key)) return false;
+    // Never clear in the middle of a viewport scan: that would repeatedly
+    // discard pending answers and reissue the same requests.
+    if (self.map.count() >= max_entries) return false;
     const owned = try alloc.dupe(u8, key);
     errdefer alloc.free(owned);
     try self.map.put(alloc, owned, .pending);
     return true;
+}
+
+/// Queue a renderer-discovered candidate for dispatch on the app thread.
+pub fn enqueue(self: *Cache, alloc: Allocator, cwd: []const u8, value: []const u8) !bool {
+    if (self.get(cwd, value) != null) return false;
+    if (!try self.putPending(alloc, cwd, value)) return false;
+    var buf: [8192]u8 = undefined;
+    self.map.getPtr(keyFor(&buf, cwd, value).?).?.* = .queued;
+    return true;
+}
+
+pub fn hasQueued(self: *const Cache) bool {
+    var it = self.map.valueIterator();
+    while (it.next()) |status| if (status.* == .queued) return true;
+    return false;
 }
 
 /// Apply a host answer. Answers for entries cleared by a later Cmd press are

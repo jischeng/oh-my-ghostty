@@ -1967,16 +1967,23 @@ extension Ghostty {
             case GHOSTTY_TARGET_SURFACE:
                 guard let surface = target.target.surface else { return }
                 guard let surfaceView = self.surfaceView(from: surface) else { return }
-                guard v.len > 0 else {
-                    if surfaceView.hoverUrl != nil { surfaceView.hoverUrl = nil }
-                    return
+                // Copy borrowed values before leaving the core callback. Resolve
+                // on the main actor, after releasing the core's renderer lock.
+                let raw = v.len > 0 ? String(data: Data(bytes: v.url!, count: v.len), encoding: .utf8) : nil
+                let base = v.base_directory.flatMap {
+                    String(bytes: UnsafeRawBufferPointer(start: $0, count: Int(v.base_directory_len)), encoding: .utf8)
                 }
-
-                // OMG: the core resends the same URL on every hovered cell;
-                // republishing re-renders overlays and resets the cursor.
-                let buffer = Data(bytes: v.url!, count: v.len)
-                let url = String(data: buffer, encoding: .utf8)
-                if surfaceView.hoverUrl != url { surfaceView.hoverUrl = url }
+                // Enqueue clears too, so mouse exit cannot be overtaken by an
+                // earlier pending preview update. Avoid republishing per cell.
+                DispatchQueue.main.async { [weak surfaceView] in
+                    guard let surfaceView else { return }
+                    let url = raw.flatMap { value in
+                        TerminalPathTarget.isCandidate(value)
+                            ? TerminalPathOpener.resolve(value, from: surfaceView, baseDirectory: base)?.path
+                            : value
+                    }
+                    if surfaceView.hoverUrl != url { surfaceView.hoverUrl = url }
+                }
 
             default:
                 assertionFailure()

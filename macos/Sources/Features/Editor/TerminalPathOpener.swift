@@ -45,6 +45,15 @@ enum TerminalPathTarget {
         return (directory as NSString).appendingPathComponent(path)
     }
 
+    /// Core history contains local OSC7 directories, not remote shell/agent
+    /// directories. Never use that local base for an SSH filesystem.
+    static func baseDirectory(historical: String?, paneDirectory: String, isRemote: Bool) -> String {
+        if isRemote { return paneDirectory }
+        return historical.map { value in
+            value.hasPrefix("file:") ? (URL(string: value)?.path ?? "") : value
+        } ?? paneDirectory
+    }
+
     static func directoryCommand(_ path: String) -> String {
         "cd -- '" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
@@ -72,9 +81,11 @@ enum TerminalPathOpener {
             workingDirectory: session.workingDirectory, workspace: session.workspace, session: session
         )
         let filesystem = WorkspaceFilesystemFactory.make(for: context)
-        let directory = baseDirectory.map { value in
-            value.hasPrefix("file:") ? (URL(string: value)?.path ?? "") : value
-        } ?? filesystem.descriptor.workingDirectory
+        let directory = TerminalPathTarget.baseDirectory(
+            historical: baseDirectory,
+            paneDirectory: filesystem.descriptor.workingDirectory,
+            isRemote: filesystem.descriptor.kind == .ssh
+        )
         guard let path = TerminalPathTarget.path(value, directory: directory,
                                                  isRemote: filesystem.descriptor.kind == .ssh) else { return nil }
         return .init(controller: controller, session: session, context: context, filesystem: filesystem, path: path)

@@ -1202,11 +1202,24 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
     }
 
     func itemType(at path: String) async throws -> WorkspaceItemType? {
-        guard let output = try? await runSFTP(batch: "ls -la \(Self.quote(path))"),
-              let attrs = Self.parseFileAttributes(from: output) else {
-            return nil
+        // SFTP ls on a directory lists its children, not the target's type.
+        // Test the exact path; this also works for empty directories and follows
+        // symlinks consistently with local itemType. No directory enumeration.
+        guard !path.isEmpty, !path.contains("\0") else { return nil }
+        let output = try await SSHSFTPClient.runCommand(
+            Self.itemTypeCommand(path), host: host.alias, connection: connection
+        )
+        switch output.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "directory": return .directory
+        case "file": return .file
+        default: return nil
         }
-        return attrs.isDirectory ? .directory : .file
+    }
+
+    static func itemTypeCommand(_ path: String) -> String {
+        let literal = shellQuote(path)
+        return "if [ -d \(literal) ]; then printf directory; " +
+            "elif [ -f \(literal) ]; then printf file; else printf missing; fi"
     }
 
     func readFile(at path: String) async throws -> Data {

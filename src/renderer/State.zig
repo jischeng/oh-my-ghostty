@@ -41,6 +41,11 @@ preedit: ?Preedit = null,
 /// need about the mouse.
 mouse: Mouse = .{},
 
+/// OMG: shared existence cache, protected by mutex. Owned by the surface.
+omg_link_checks: @import("../omg_link_check.zig") = .{},
+omg_link_allocator: Allocator = std.heap.page_allocator,
+omg_link_dispatch_pending: bool = false,
+
 /// The number of threads currently waiting to acquire `mutex` via
 /// `lockDemand`. This is not protected by the mutex; it is read by
 /// hot lock/unlock loops (the IO parse thread) in `yieldToDemand` to
@@ -122,16 +127,6 @@ pub const Mouse = struct {
     /// This could really just be mods in general and we probably will
     /// move it out of mouse state at some point.
     mods: inputpkg.Mods = .{},
-
-    /// OMG (macOS): viewport span of the hovered regex link the surface has
-    /// confirmed. The renderer underlines exactly this span so the underline
-    /// always matches what Cmd-click opens. Only meaningful with `point`.
-    omg_link: ?OmgLinkRange = null,
-
-    pub const OmgLinkRange = struct {
-        start: terminalpkg.point.Coordinate,
-        end: terminalpkg.point.Coordinate,
-    };
 };
 
 /// The pre-edit state. See Surface.preeditCallback for more information.

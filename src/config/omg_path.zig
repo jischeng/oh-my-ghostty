@@ -8,7 +8,14 @@ pub const quoted_regex =
     \\'(?![A-Za-z][A-Za-z0-9+.-]*:)[^'\r\n]+'|"(?![A-Za-z][A-Za-z0-9+.-]*:)[^"\r\n]+"
 ;
 
-pub const regex =
+// Plain ls -l (including localized month names), without Nerd Font icons.
+// Consume the metadata as context, but \K makes only the filename clickable.
+// Do not accept arbitrary bare words: owner/size/date columns stay unlinked.
+const listing_regex =
+    \\(?m)^[d-][rwxstST-]{9}[+@.]?[ \t]+\d+[ \t]+\S+[ \t]+\S+[ \t]+\S+[ \t]+(?:\S+[ \t]+\d{1,2}[ \t]+(?:\d{1,2}:\d{2}|\d{4})|\d{4}-\d{2}-\d{2}[ \t]+\d{1,2}:\d{2})[ \t]+\K[\w.\-]+/?(?=[ \t]*(?:\r?$|\x00))
+;
+
+pub const regex = listing_regex ++ "|" ++
     \\(?<![\w./~:@$+-])(?!(?:\.{3,}|[\w.\-/]*\.{3,}))(?![0-9]+(?:[A-Za-z]+)?\.[0-9]+)(?:(?:~|/|\.{1,2}/|[\w.\-]+/)[\w./-]*|\.[A-Za-z0-9_][\w.\-]*(?![\w.\-(])|(?![0-9]+\.[0-9]+)[^\s/:*?"'<>|()\x{2018}-\x{201F}\x{3000}-\x{303F}\x{FF00}-\x{FF65}]+\.(?:7z|[A-Za-z][A-Za-z0-9_]{0,7})|(?:Makefile|Dockerfile|Containerfile|Vagrantfile|Gemfile|Rakefile|LICENSE|LICENCE|README)|\.{1,2}|(?<=[📁📂\x{E000}-\x{F8FF}\x{F0000}-\x{FFFFD}]\s|[📁📂\x{E000}-\x{F8FF}\x{F0000}-\x{FFFFD}]\s\s)[\w.\-]+)(?::[0-9]+(?::[0-9]+)?)?(?![/\w.~@$+-])
 ;
 
@@ -19,6 +26,10 @@ test "OMG bare path candidates" {
 
     const cases = [_]struct { input: []const u8, expected: []const u8 }{
         .{ .input = "README.md", .expected = "README.md" },
+        .{ .input = "drwx------ 2 chengjisheng chengjisheng 4.0K 10月 12 14:32 adapter", .expected = "adapter" },
+        .{ .input = "drwxr-xr-x 12 user group 4096 Oct 12 2025 backend", .expected = "backend" },
+        .{ .input = "drwxr-xr-x 2 user group 4096 2026-10-12 14:32 bi_board_server_frontend", .expected = "bi_board_server_frontend" },
+        .{ .input = "-rw------- 1 user group 42 Oct 12 14:32 env", .expected = "env" },
         .{ .input = "📁 src", .expected = "src" },
         // Nerd Font icons (eza/lsd) live in the Private Use Area.
         .{ .input = "\u{F07B} nix", .expected = "nix" },

@@ -746,6 +746,9 @@ typedef enum {
 typedef struct {
   const char* url;
   size_t len;
+  // OMG: same source cwd semantics as OpenUrl; never pre-resolve against the host.
+  const char* base_directory;
+  size_t base_directory_len;
 } ghostty_action_mouse_over_link_s;
 
 // apprt.action.SizeLimit

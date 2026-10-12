@@ -175,6 +175,9 @@ pub const Message = union(enum) {
     /// Selected search index change
     search_selected: ?usize,
 
+    /// OMG: dispatch queued viewport path checks on the app thread.
+    omg_link_dispatch: void,
+
     pub const ReportTitleStyle = enum {
         csi_21_t,
 

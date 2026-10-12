@@ -1322,6 +1322,25 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     if (!state.mouse.mods.equal(inputpkg.ctrlOrSuper(.{})))
                         break :osc8 .empty;
 
+                    if (comptime builtin.os.tag == .macos) {
+                        const cells = @import("omg_link.zig").collect(
+                            arena_alloc,
+                            state.omg_link_allocator,
+                            state.terminal.screens.active,
+                            &self.terminal_state,
+                            self.config.links.links,
+                            &state.omg_link_checks,
+                            state.mouse.mods,
+                        ) catch |err| {
+                            log.warn("error collecting viewport links err={}", .{err});
+                            break :osc8 .empty;
+                        };
+                        if (state.omg_link_checks.hasQueued() and !state.omg_link_dispatch_pending) {
+                            state.omg_link_dispatch_pending = self.surface_mailbox.push(.omg_link_dispatch, .instant) > 0;
+                        }
+                        break :osc8 cells;
+                    }
+
                     // If our mouse isn't hovering, we have no links.
                     const vp = state.mouse.point orelse break :osc8 .empty;
 
@@ -1358,8 +1377,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             // Outside the critical area we can update our links to contain
             // our regex results.
-            // OMG (macOS): hover links underline only the span the surface
-            // confirmed (existence-checked); always-on links still render.
+            // OMG's Cmd links were computed from this frame under the lock.
+            // Never reuse a viewport span captured during an earlier hover.
             const omg_link = comptime builtin.os.tag == .macos;
             self.config.links.renderCellMap(
                 arena_alloc,
@@ -1370,17 +1389,6 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             ) catch |err| {
                 log.warn("error searching for regex links err={}", .{err});
             };
-            if (omg_link) omg: {
-                if (critical.mouse.point == null) break :omg;
-                const range = critical.mouse.omg_link orelse break :omg;
-                @import("omg_link.zig").addRange(
-                    arena_alloc,
-                    &critical.links,
-                    range,
-                    self.terminal_state.cols,
-                    self.terminal_state.rows,
-                ) catch |err| log.warn("error adding hovered link err={}", .{err});
-            }
 
             // Clear our highlight state and update.
             if (self.search_matches_dirty or self.terminal_state.dirty != .false) {

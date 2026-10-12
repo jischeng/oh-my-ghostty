@@ -21,6 +21,20 @@ struct TerminalPathOpenerTests {
         #expect(TerminalPathTarget.path("~/README.md", directory: "/remote", isRemote: true) == nil)
     }
 
+    @Test func remoteLinksIgnoreLocalHistoryAndResolveChineseOSC8Targets() {
+        let remote = "/home/user/deeproute/mapping.worktrees/trajectory_server_to_paimon"
+        for history in [nil, "", "/Users/me/local", "file:///Users/me/local"] as [String?] {
+            let base = TerminalPathTarget.baseDirectory(historical: history, paneDirectory: remote, isRemote: true)
+            #expect(base == remote)
+            #expect(TerminalPathTarget.path("docs/Bag轨迹入湖替换缺口核查.md", directory: base, isRemote: true)
+                    == remote + "/docs/Bag轨迹入湖替换缺口核查.md")
+            #expect(TerminalPathTarget.path("adapter", directory: base, isRemote: true) == remote + "/adapter")
+            #expect(TerminalPathTarget.path("/srv/docs/a.md", directory: base, isRemote: true) == "/srv/docs/a.md")
+        }
+        #expect(TerminalPathTarget.baseDirectory(historical: "/old", paneDirectory: "/new", isRemote: false) == "/old")
+        #expect(TerminalPathTarget.baseDirectory(historical: "", paneDirectory: "/new", isRemote: false) == "")
+    }
+
     @Test func directoryCommandTreatsShellMetacharactersAsLiteralNames() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let folder = root.appendingPathComponent("folder ' $(echo oops); 中文")
@@ -82,6 +96,29 @@ struct TerminalPathOpenerTests {
         let workspace = EditorWorkspaceStore.shared.workspace(for: controller.tabSessionID, surfaceID: surface.id)
         let cApp = try #require(app.app)
         let cSurface = try #require(surface.surface)
+        // Hover carries the raw target and historical base separately, just as
+        // the click action does. A relative target must not acquire a '/' from
+        // Foundation's process-cwd URL normalization.
+        var hoverTarget = ghostty_target_s()
+        hoverTarget.tag = GHOSTTY_TARGET_SURFACE
+        hoverTarget.target.surface = cSurface
+        var hoverAction = ghostty_action_s()
+        hoverAction.tag = GHOSTTY_ACTION_MOUSE_OVER_LINK
+        let hoverValue = "docs/中文.md"
+        hoverValue.withCString { value in
+            root.path.withCString { base in
+                hoverAction.action.mouse_over_link.url = value
+                hoverAction.action.mouse_over_link.len = hoverValue.utf8.count
+                hoverAction.action.mouse_over_link.base_directory = base
+                hoverAction.action.mouse_over_link.base_directory_len = root.path.utf8.count
+                _ = Ghostty.App.action(cApp, target: hoverTarget, action: hoverAction)
+            }
+        }
+        for _ in 0..<50 {
+            if surface.hoverUrl == root.path + "/docs/中文.md" { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(surface.hoverUrl == root.path + "/docs/中文.md")
         func dispatchLink(_ value: String, kind: ghostty_action_open_url_kind_e, baseDirectory: String? = nil) -> Bool {
             var target = ghostty_target_s()
             target.tag = GHOSTTY_TARGET_SURFACE

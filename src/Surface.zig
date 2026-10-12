@@ -257,9 +257,6 @@ const Mouse = struct {
     /// motion and release must be withheld too.
     link_click_bypass: bool = false,
 
-    /// OMG (macOS): host-checked existence of hovered path candidates.
-    omg_link_checks: OmgLinkCheck = .{},
-
     /// Return the left-click pin only if it still belongs to the active screen.
     fn activeLeftClickPin(self: *const Mouse, screens: *const terminal.ScreenSet) ?*terminal.Pin {
         return self.selection_gesture.validatedLeftClickPin(screens);
@@ -619,6 +616,7 @@ pub fn init(
         .renderer_state = .{
             .mutex = mutex,
             .terminal = &self.io.terminal,
+            .omg_link_allocator = alloc,
         },
         .renderer_thr = undefined,
         .mouse = .{},
@@ -833,7 +831,7 @@ pub fn deinit(self: *Surface) void {
     self.renderer.deinit();
     self.io_thread.deinit();
     self.mouse.selection_gesture.deinit(&self.io.terminal);
-    self.mouse.omg_link_checks.deinit(self.alloc);
+    self.renderer_state.omg_link_checks.deinit(self.alloc);
     self.io.deinit();
 
     if (self.inspector) |v| {
@@ -1135,6 +1133,23 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
         .renderer_health => |health| self.updateRendererHealth(health),
 
         .scrollbar => |scrollbar| self.updateScrollbar(scrollbar),
+
+        .omg_link_dispatch => {
+            self.renderer_state.mutex.lockUncancelable(global.io());
+            defer self.renderer_state.mutex.unlock(global.io());
+            self.renderer_state.omg_link_dispatch_pending = false;
+            var it = self.renderer_state.omg_link_checks.map.iterator();
+            while (it.next()) |entry| {
+                if (entry.value_ptr.* != .queued) continue;
+                entry.value_ptr.* = .pending;
+                const key = entry.key_ptr.*;
+                const sep = std.mem.indexOfScalar(u8, key, 0).?;
+                _ = try self.rt_app.performAction(.{ .surface = self }, .omg_link_check, .{
+                    .url = key[sep + 1 ..],
+                    .base_directory = key[0..sep],
+                });
+            }
+        },
 
         .present_surface => try self.presentSurface(),
 
@@ -1593,13 +1608,6 @@ fn searchCallback_(
 fn modsChanged(self: *Surface, mods: input.Mods) void {
     // The only place we keep track of mods currently is on the mouse.
     if (!self.mouse.mods.equal(mods)) {
-        // OMG: each new Cmd press re-checks path existence (VS Code style).
-        if (comptime builtin.target.os.tag == .macos) {
-            if (mods.binding().equal(input.ctrlOrSuper(.{}))) {
-                self.mouse.omg_link_checks.clear(self.alloc);
-            }
-        }
-
         // The mouse mods only contain binding modifiers since we don't
         // want caps/num lock or sided modifiers to affect the mouse.
         self.mouse.mods = mods.binding();
@@ -1611,6 +1619,11 @@ fn modsChanged(self: *Surface, mods: input.Mods) void {
             self.renderer_state.mutex.lockUncancelable(global.io());
             defer self.renderer_state.mutex.unlock(global.io());
             self.renderer_state.mouse.mods = self.mouseModsWithCapture(self.mouse.mods);
+            if (comptime builtin.target.os.tag == .macos) {
+                if (mods.binding().equal(input.ctrlOrSuper(.{}))) {
+                    self.renderer_state.omg_link_checks.clear(self.alloc);
+                }
+            }
 
             // We use the clear screen dirty flag to force a rebuild of all
             // rows because changing mouse mods can affect the highlight state
@@ -1653,8 +1666,6 @@ fn mouseRefreshLinks(
     // Get our link at the current position. This returns null if there
     // isn't a link OR if we shouldn't be showing links for some reason
     // (see further comments for cases).
-    // OMG: exact span of the confirmed regex link for the renderer.
-    var omg_range: ?rendererpkg.State.Mouse.OmgLinkRange = null;
     const link_: ?apprt.action.MouseOverLink, const preview: bool = link: {
         // If we clicked and our mouse moved cells then we never
         // highlight links until the mouse is unclicked. This follows
@@ -1681,21 +1692,16 @@ fn mouseRefreshLinks(
                     .sel = link.selection,
                     .trim = false,
                 });
-                if (comptime builtin.target.os.tag == .macos) {
-                    omg_range = self.omgViewportRange(link.selection);
-                }
-                // OMG: preview relative paths against the clicked output's cwd,
-                // matching what Cmd-click opens (the host would use its own cwd).
-                const preview_str = if (comptime builtin.target.os.tag == .macos)
-                    try omgHoverPath(
-                        alloc,
-                        str,
-                        self.io.terminal.screens.active.omg_cwd_history.cwdAt(link.selection.start()),
-                    )
-                else
-                    str;
+                // OMG: keep raw text and source cwd separate so the host can
+                // resolve SSH paths without accidentally using a local base.
                 break :link .{
-                    .{ .url = preview_str },
+                    .{
+                        .url = str,
+                        .base_directory = if (comptime builtin.target.os.tag == .macos)
+                            self.io.terminal.screens.active.omg_cwd_history.cwdAt(link.selection.start()) orelse ""
+                        else
+                            null,
+                    },
                     self.config.link_previews == .true,
                 };
             },
@@ -1708,7 +1714,13 @@ fn mouseRefreshLinks(
                     break :link .{ null, false };
                 };
                 break :link .{
-                    .{ .url = try alloc.dupeZ(u8, uri) },
+                    .{
+                        .url = try alloc.dupeZ(u8, uri),
+                        .base_directory = if (comptime builtin.target.os.tag == .macos)
+                            self.io.terminal.screens.active.omg_cwd_history.cwdAt(pin) orelse ""
+                        else
+                            null,
+                    },
                     self.config.link_previews != .false,
                 };
             },
@@ -1719,9 +1731,6 @@ fn mouseRefreshLinks(
     // apprt so it can highlight it.
     if (link_) |link| {
         self.renderer_state.mouse.point = pos_vp;
-        if (comptime builtin.target.os.tag == .macos) {
-            self.renderer_state.mouse.omg_link = omg_range;
-        }
         self.mouse.over_link = true;
         self.renderer_state.terminal.screens.active.dirty.hyperlink_hover = true;
         _ = try self.rt_app.performAction(
@@ -4562,8 +4571,8 @@ fn omgLinkExists(self: *Surface, sel: terminal.Selection) !bool {
     defer self.alloc.free(value);
     if (!OmgLinkCheck.needsCheck(value)) return true;
     const cwd = screen.omg_cwd_history.cwdAt(sel.start()) orelse "";
-    if (self.mouse.omg_link_checks.get(cwd, value)) |status| return status == .exists;
-    if (!try self.mouse.omg_link_checks.putPending(self.alloc, cwd, value)) return false;
+    if (self.renderer_state.omg_link_checks.get(cwd, value)) |status| return status == .exists;
+    if (!try self.renderer_state.omg_link_checks.putPending(self.alloc, cwd, value)) return false;
     _ = self.rt_app.performAction(
         .{ .surface = self },
         .omg_link_check,
@@ -4572,77 +4581,20 @@ fn omgLinkExists(self: *Surface, sel: terminal.Selection) !bool {
     return false;
 }
 
-/// OMG: viewport span of a link selection, or null if it is offscreen.
-///
-/// Requires the renderer state mutex is held.
-fn omgViewportRange(self: *Surface, sel: terminal.Selection) ?rendererpkg.State.Mouse.OmgLinkRange {
-    const screen = self.renderer_state.terminal.screens.active;
-    const ordered = sel.ordered(screen, .forward);
-    const start = screen.pages.pointFromPin(.viewport, ordered.start()) orelse return null;
-    const end = screen.pages.pointFromPin(.viewport, ordered.end()) orelse return null;
-    return .{ .start = start.coord(), .end = end.coord() };
-}
-
 /// OMG: apply a host answer for an omg_link_check request and refresh the
 /// hover state if the mouse is still waiting on it.
 pub fn omgLinkChecked(self: *Surface, url: []const u8, base_directory: []const u8, exists: bool) void {
     self.renderer_state.mutex.lockUncancelable(global.io());
     defer self.renderer_state.mutex.unlock(global.io());
-    if (!self.mouse.omg_link_checks.resolve(base_directory, url, exists) or !exists) return;
+    if (!self.renderer_state.omg_link_checks.resolve(base_directory, url, exists)) return;
+    self.renderer_state.terminal.flags.dirty.clear = true;
+    self.queueRender() catch {};
+    if (!exists) return;
     if (!linkModsBypassCapture(self.mouse.mods) and self.io.terminal.flags.mouse_event != .none) return;
     const pos = self.rt_surface.getCursorPos() catch return;
     self.mouseRefreshLinks(pos, self.posToViewport(pos.x, pos.y), self.mouse.over_link) catch |err| {
         log.warn("failed to refresh links after check err={}", .{err});
     };
-}
-
-/// OMG: join a relative path candidate with its output cwd for the hover
-/// preview. URLs, absolute and home paths are returned unchanged.
-fn omgHoverPath(
-    alloc: Allocator,
-    value: [:0]const u8,
-    cwd: ?[]const u8,
-) Allocator.Error![:0]const u8 {
-    var path: []const u8 = value;
-    if (path.len >= 2 and (path[0] == '\'' or path[0] == '"') and path[path.len - 1] == path[0]) {
-        path = path[1 .. path.len - 1];
-    }
-    if (path.len == 0 or path[0] == '/' or path[0] == '~') return value;
-    // A scheme is letters/digits/+.- before ':' followed by something other
-    // than a :line[:col] location suffix.
-    if (std.mem.indexOfScalar(u8, path, ':')) |colon| scheme: {
-        if (colon == 0 or !std.ascii.isAlphabetic(path[0])) break :scheme;
-        for (path[0..colon]) |c| {
-            if (!std.ascii.isAlphanumeric(c) and c != '+' and c != '.' and c != '-') break :scheme;
-        }
-        for (path[colon + 1 ..]) |c| {
-            if (!std.ascii.isDigit(c) and c != ':') return value;
-        }
-    }
-    const dir = cwd orelse return value;
-    if (dir.len == 0) return value;
-    const sep = if (dir[dir.len - 1] == '/') "" else "/";
-    return std.fmt.allocPrintSentinel(alloc, "{s}{s}{s}", .{ dir, sep, path }, 0);
-}
-
-test "OMG hover path resolves relative candidates against output cwd" {
-    const alloc = std.testing.allocator;
-    const cases = [_]struct { value: [:0]const u8, cwd: ?[]const u8, expected: []const u8 }{
-        .{ .value = "shell.nix", .cwd = "/repo", .expected = "/repo/shell.nix" },
-        .{ .value = "'App icon.icon'", .cwd = "/repo/", .expected = "/repo/App icon.icon" },
-        .{ .value = "src/main.zig:12:3", .cwd = "/repo", .expected = "/repo/src/main.zig:12:3" },
-        .{ .value = "README.md:12", .cwd = "/repo", .expected = "/repo/README.md:12" },
-        .{ .value = "/tmp/file", .cwd = "/repo", .expected = "/tmp/file" },
-        .{ .value = "~/file", .cwd = "/repo", .expected = "~/file" },
-        .{ .value = "https://example.com/a", .cwd = "/repo", .expected = "https://example.com/a" },
-        .{ .value = "mailto:user@example.com", .cwd = "/repo", .expected = "mailto:user@example.com" },
-        .{ .value = "shell.nix", .cwd = null, .expected = "shell.nix" },
-    };
-    for (cases) |case| {
-        const result = try omgHoverPath(alloc, case.value, case.cwd);
-        defer if (result.ptr != case.value.ptr) alloc.free(result);
-        try std.testing.expectEqualStrings(case.expected, result);
-    }
 }
 
 /// OMG: macOS mouse protocols cannot encode Cmd, so a Cmd-only link gesture

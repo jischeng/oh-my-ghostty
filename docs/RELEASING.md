@@ -190,7 +190,9 @@ credential in the **local login Keychain**, once, from an interactive terminal:
 
 ```bash
 source "<private-signing-directory>/signing.env"
-python3 dist/macos/omg_signing.py store-password
+# Set OMG_SIGNING_PYTHON to the existing authorized absolute executable
+# for legacy setups without a runtime pin; do not guess from PATH.
+bash dist/macos/signing-python.sh store-password
 ```
 
 Enter the existing private signing-Keychain password, not your macOS account
@@ -220,6 +222,37 @@ convenience automation, not an agent sandbox or protection against arbitrary
 code under the same user. A Python upgrade/executable change may require running
 `store-password` interactively again and approving the system access prompt.
 Headless/locked sessions are not guaranteed to work.
+
+### Signing interpreter pin and early preflight
+
+All app signing and packaging helpers use `dist/macos/signing-python.sh`.
+Credential commands (`unlock`, `store-password`) refuse to select an interpreter
+from PATH. The private `signing-python.pin`, beside `OMG_SIGNING_KEYCHAIN`, stores
+the canonical executable path and its SHA-256 with mode 0600; it contains no
+password. A successful credential-based unlock records an absent pin; successful
+interactive `store-password` explicitly replaces it. An already-unlocked signing
+Keychain does not demonstrate credential ACL access and therefore does not create
+a runtime pin. `OMG_SIGNING_PYTHON` is an explicit absolute-runtime override for
+legacy recovery or deliberate reauthorization; do not cycle through interpreters
+or silently replace a changed/missing pin. A virtualenv or stable symlink alone
+does not stabilize the underlying executable's Keychain authorization.
+
+Run this **before** version edits and expensive builds:
+```bash
+source "<private-signing-directory>/signing.env"
+bash dist/macos/signing-python.sh unlock
+```
+The release build wrapper also preflights before removing any old build output,
+and the packaging wrapper before signing any app. Thus ACL failures no longer
+first appear after compiling all three app variants. Python paths/fingerprints
+may be logged for diagnosis; credentials may not. If the pin changes after a
+Python/Xcode upgrade, stop and ask the owner to authorize the explicitly chosen
+runtime interactively, using the same launcher for setup and release. Keep the
+existing certificate and private Keychain; neither a new identity nor ad-hoc
+signing fixes this issue. After recovery, resume packaging already-built apps.
+On the current maintainer machine, Python 3.14.7 previously had credential access
+while 3.12.11 was denied; this is host-specific history, not a universal Python
+version requirement. Do not run `store-password` at every release.
 
 Manual recovery remains available without printing a password:
 

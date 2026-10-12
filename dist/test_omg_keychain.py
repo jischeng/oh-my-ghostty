@@ -143,6 +143,37 @@ class CredentialContracts(unittest.TestCase):
             self.assertEqual(signing.main(), 1)
             prompt.assert_not_called()
 
+    def test_runtime_pin_records_canonical_executable_without_secrets(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            signing.pin_signing_interpreter(directory)
+            pin = directory / "signing-python.pin"
+            lines = pin.read_text().splitlines()
+            self.assertEqual(lines[0], str(Path(sys.executable).resolve()))
+            self.assertRegex(lines[1], r"^[0-9a-f]{64}$")
+            self.assertEqual(pin.stat().st_mode & 0o777, 0o600)
+            self.assertNotIn("password", pin.read_text())
+            pin.write_text("preserve old pin")
+            signing.pin_signing_interpreter(directory)
+            self.assertEqual(pin.read_text(), "preserve old pin")
+
+    def test_runtime_launcher_fails_closed_before_access_with_missing_or_changed_pin(self):
+        launcher = ROOT / "dist/macos/signing-python.sh"
+        with tempfile.TemporaryDirectory() as temp:
+            env = {**os.environ, "OMG_SIGNING_KEYCHAIN": str(Path(temp) / "release.keychain-db")}
+            env.pop("OMG_SIGNING_PYTHON", None)
+            result = subprocess.run(["bash", str(launcher), "unlock"], env=env, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("no pinned signing interpreter", result.stderr)
+            (Path(temp) / "signing-python.pin").write_text(str(Path(sys.executable).resolve()) + "\n" + "0" * 64 + "\n")
+            result = subprocess.run(["bash", str(launcher), "unlock"], env=env, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("interpreter changed", result.stderr)
+
+    def test_release_preflight_precedes_build_deletion(self):
+        text = (ROOT / ".agents/skills/omg-release/scripts/build-release.sh").read_text()
+        self.assertLess(text.index("signing-python.sh unlock"), text.index('rm -rf "$build_root"'))
+
     def test_cli_store_never_prints_secret(self):
         with patch.object(sys, "argv", ["omg_signing.py", "store-password"]), patch("sys.stdin.isatty", return_value=True), patch.object(signing.getpass, "getpass", return_value="fixture-secret"), patch.object(signing, "unlock_signing_keychain") as store, patch("sys.stdout") as output:
             self.assertEqual(signing.main(), 0)

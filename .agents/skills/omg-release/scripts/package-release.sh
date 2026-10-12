@@ -13,10 +13,14 @@ repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
 build_root="$repo_root/.release-build/$omg_version"
 artifacts="$build_root/artifacts"
-signing_mode=$(python3 dist/macos/omg_signing.py policy)
+signing_mode=$(bash dist/macos/signing-python.sh policy)
 [[ "$signing_mode" == self-signed || "$signing_mode" == developer-id ]] || {
   echo "public releases require persistent self-signed or Developer ID signing" >&2; exit 1;
 }
+# Fail before signing any architecture or removing existing artifacts.
+if [[ "$signing_mode" == self-signed ]]; then
+  bash dist/macos/signing-python.sh unlock
+fi
 release_requirement=
 
 for arch in arm64 x86_64 universal; do
@@ -27,7 +31,7 @@ for arch in arm64 x86_64 universal; do
   if [[ -n "${OMG_PREVIOUS_SIGNED_APP:-}" ]]; then
     check_args+=(--previous "$OMG_PREVIOUS_SIGNED_APP")
   fi
-  current_requirement=$(python3 dist/macos/omg_signing.py "${check_args[@]}")
+  current_requirement=$(bash dist/macos/signing-python.sh "${check_args[@]}")
   if [[ -n "$release_requirement" && "$current_requirement" != "$release_requirement" ]]; then
     echo "release architectures have different designated requirements" >&2; exit 1;
   fi
@@ -167,7 +171,7 @@ mkdir "$mount_base/mnt"
 for arch in arm64 x86_64 universal; do
   dmg="$artifacts/OMG-$omg_version-macos-$arch.dmg"
   hdiutil attach -readonly -nobrowse -mountpoint "$mount_base/mnt" "$dmg" >/dev/null
-  mounted_requirement=$(python3 dist/macos/omg_signing.py verify "$mount_base/mnt/OMG.app")
+  mounted_requirement=$(bash dist/macos/signing-python.sh verify "$mount_base/mnt/OMG.app")
   [[ "$mounted_requirement" == "$release_requirement" ]] || {
     echo "DMG app identity differs from signed release" >&2; exit 1;
   }

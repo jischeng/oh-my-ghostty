@@ -48,7 +48,8 @@ class MacKeychain:
     @staticmethod
     def check(status, operation):
         if status:
-            raise KeychainError(f"{operation} failed (OSStatus {status}); unlock the login Keychain or run store-password interactively")
+            raise KeychainError(f"{operation} failed (OSStatus {status}); check the pinned signing Python first; "
+                                "unlock the login Keychain or run bash dist/macos/signing-python.sh store-password interactively")
 
     @contextmanager
     def open(self, path):

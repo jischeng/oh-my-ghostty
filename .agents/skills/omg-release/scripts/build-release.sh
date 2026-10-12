@@ -10,6 +10,15 @@ omg_version=$1
 repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
 
+# Credential/ACL failures must be discovered before deleting or building apps.
+mode=$(bash dist/macos/signing-python.sh policy)
+[[ "$mode" == self-signed || "$mode" == developer-id ]] || {
+  echo "public release builds require persistent signing configuration" >&2; exit 1;
+}
+if [[ "$mode" == self-signed ]]; then
+  bash dist/macos/signing-python.sh unlock
+fi
+
 plist="macos/Ghostty-Info.plist"
 ghostty_version=$(plutil -extract GhosttyBaseVersion raw "$plist")
 build_root="$repo_root/.release-build/$omg_version"

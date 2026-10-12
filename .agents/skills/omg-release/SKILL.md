@@ -40,6 +40,40 @@ Use this skill in the `oh-my-ghostty` repo. Never open the Xcode GUI. Never touc
 
 ## Workflow 2: Publish OMG Release
 
+### Step 0: Signing Preflight (Before Version Bump or Build)
+
+Source the existing private configuration, then run:
+```bash
+source "<private-signing-directory>/signing.env"
+bash dist/macos/signing-python.sh unlock
+```
+The launcher uses `signing-python.pin` next to the private Keychain (canonical
+Python executable + SHA-256, no secret). Never use bare `python3` for credential
+setup/unlock: PATH can select Python 3.12 while the existing ACL trusts 3.14.
+A successful actual credential unlock records the initial pin; an already-unlocked
+Keychain alone does not prove credential access and does not create a pin.
+
+For this machine's legacy setup, the previously authorized interpreter was
+Homebrew **3.14.7**. If no pin exists, explicitly choose that installed executable:
+```bash
+export OMG_SIGNING_PYTHON="/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/bin/python3.14"
+bash dist/macos/signing-python.sh unlock
+```
+Do not substitute another installed Python automatically. A missing executable,
+fingerprint change, or OSStatus -25293 requires stopping before builds. Report
+the executable path/version (not secrets). If the original runtime is unavailable
+or denied, the owner performs one-time reauthorization from an interactive terminal:
+```bash
+# Explicitly choose the intended runtime first; keep the existing certificate.
+export OMG_SIGNING_PYTHON="/absolute/path/to/chosen/python3"
+bash dist/macos/signing-python.sh store-password
+bash dist/macos/signing-python.sh unlock
+```
+This saves the runtime pin only after successful setup. No allow-all ACL,
+identity regeneration, ad-hoc fallback, password retrieval CLI, or shell tracing.
+`build-release.sh` and `package-release.sh` repeat the preflight automatically;
+resume packaging existing apps after recovery, do not rebuild just for an ACL error.
+
 ### Step 1: Version & Release Notes
 1. Ensure on `main` branch, synced with `origin/main`.
 2. Update version in `macos/Ghostty.xcodeproj/project.pbxproj` (all 3 configs: update `MARKETING_VERSION` and increment `CURRENT_PROJECT_VERSION`).
@@ -87,7 +121,7 @@ Output placed under `.release-build/<OMG_VERSION>/`.
 ```bash
 source "<private-signing-directory>/signing.env"
 # One-time interactive setup (not required on every release):
-# python3 dist/macos/omg_signing.py store-password
+# bash dist/macos/signing-python.sh store-password
 # The signing script automatically unlocks from the dedicated login-Keychain item.
 # If access fails, stop; never read/print credentials or fall back to ad-hoc.
 # After the first persistent release, preserve its app and set:

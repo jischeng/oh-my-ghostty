@@ -3,6 +3,7 @@
 
 import argparse
 import getpass
+import hashlib
 import os
 from pathlib import Path
 import plistlib
@@ -183,6 +184,24 @@ def create_identity(destination, password):
     # Failed partial provisioning is deliberately preserved, never silently rotated.
 
 
+def pin_signing_interpreter(directory, replace=False):
+    """Non-secret runtime metadata; certificate/credentials remain unchanged."""
+    pin = directory / "signing-python.pin"
+    if pin.exists() and not replace:
+        return
+    executable = Path(sys.executable).resolve()
+    digest = hashlib.sha256(executable.read_bytes()).hexdigest()
+    # Atomic replacement, private permissions. No password or credential IDs.
+    fd, temporary = tempfile.mkstemp(prefix=".signing-python-", dir=directory)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write(f"{executable}\n{digest}\n")
+        os.replace(temporary, pin)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 def unlock_signing_keychain(password=None):
     mode, identity = policy()
     if mode != "self-signed":
@@ -194,8 +213,14 @@ def unlock_signing_keychain(password=None):
     from omg_keychain import store_password, unlock
     if password is not None:
         store_password(path, identity, password)
+        pin_signing_interpreter(path.parent, replace=True)
         return "credential-stored"
-    return unlock(path, identity)
+    result = unlock(path, identity)
+    # An already-unlocked keychain doesn't prove this executable has credential
+    # access. Pin only after actual successful retrieval, or manual store above.
+    if result == "unlocked":
+        pin_signing_interpreter(path.parent)
+    return result
 
 
 def main():

@@ -12,13 +12,13 @@ fi
 app_path=$1
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 entitlements=${OMG_SIGNING_ENTITLEMENTS:-"$repo_root/macos/Ghostty.entitlements"}
-mode=$(python3 "$repo_root/dist/macos/omg_signing.py" policy)
+mode=$(bash "$repo_root/dist/macos/signing-python.sh" policy)
 [[ -f "$entitlements" ]] || { echo "missing signing entitlements" >&2; exit 1; }
 if [[ "$mode" == self-signed ]]; then
   [[ "$(plutil -extract CFBundleIdentifier raw "$app_path/Contents/Info.plist")" == com.jischeng.omg ]] || {
     echo "self-signed release requires com.jischeng.omg" >&2; exit 1;
   }
-  requirement=$(python3 "$repo_root/dist/macos/omg_signing.py" requirement)
+  requirement=$(bash "$repo_root/dist/macos/signing-python.sh" requirement)
 fi
 
 if [[ ! -x "$app_path/Contents/MacOS/omg" ]]; then
@@ -32,7 +32,7 @@ if [[ -n "${OMG_SIGNING_KEYCHAIN:-}" ]]; then
   [[ -f "$OMG_SIGNING_KEYCHAIN" ]] || { echo "missing signing keychain" >&2; exit 1; }
   sign_options+=(--keychain "$OMG_SIGNING_KEYCHAIN")
   if [[ "$mode" == self-signed ]]; then
-    python3 "$repo_root/dist/macos/omg_signing.py" unlock
+    bash "$repo_root/dist/macos/signing-python.sh" unlock
   fi
 fi
 case "$mode" in
@@ -68,5 +68,5 @@ codesign \
 
 codesign --verify --deep --strict --verbose=2 "$app_path"
 if [[ "$mode" == self-signed || "$mode" == developer-id ]]; then
-  python3 "$repo_root/dist/macos/omg_signing.py" verify "$app_path"
+  bash "$repo_root/dist/macos/signing-python.sh" verify "$app_path"
 fi

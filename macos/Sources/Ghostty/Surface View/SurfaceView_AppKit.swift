@@ -83,6 +83,9 @@ extension Ghostty {
         // Whether the pointer should be visible or not
         @Published private(set) var pointerStyle: CursorStyle = .horizontalText
 
+        // OMG: coalesce filesystem probes and retain short-lived results per pane.
+        let linkCheckBatcher = TerminalLinkCheckBatcher()
+
         // OMG: true while the core reports a hovered link. Links show a hint
         // chip instead of switching the cursor to a pointing hand.
         @Published private(set) var isHoveringLink: Bool = false

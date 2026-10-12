@@ -45,6 +45,7 @@ mouse: Mouse = .{},
 omg_link_checks: @import("../omg_link_check.zig") = .{},
 omg_link_allocator: Allocator = std.heap.page_allocator,
 omg_link_dispatch_pending: bool = false,
+omg_link_results_dirty: bool = false,
 
 /// The number of threads currently waiting to acquire `mutex` via
 /// `lockDemand`. This is not protected by the mutex; it is read by

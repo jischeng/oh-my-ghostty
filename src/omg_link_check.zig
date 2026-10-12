@@ -17,6 +17,8 @@ pub const Status = enum { queued, pending, exists, missing };
 const max_entries = 256;
 
 map: std.StringHashMapUnmanaged(Status) = .empty,
+/// Invalidates renderer matches only when answers/epochs change, not on reads.
+revision: u64 = 0,
 
 pub fn deinit(self: *Cache, alloc: Allocator) void {
     self.clear(alloc);
@@ -24,6 +26,7 @@ pub fn deinit(self: *Cache, alloc: Allocator) void {
 }
 
 pub fn clear(self: *Cache, alloc: Allocator) void {
+    self.revision +%= 1;
     var it = self.map.keyIterator();
     while (it.next()) |key| alloc.free(key.*);
     self.map.clearRetainingCapacity();
@@ -82,6 +85,7 @@ pub fn resolve(self: *Cache, cwd: []const u8, value: []const u8, exists: bool) b
     const status = self.map.getPtr(key) orelse return false;
     if (status.* != .pending) return false;
     status.* = if (exists) .exists else .missing;
+    self.revision +%= 1;
     return true;
 }
 

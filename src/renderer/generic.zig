@@ -146,6 +146,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         search_matches: ?renderer.Message.SearchMatches,
         search_selected_match: ?renderer.Message.SearchMatch,
         search_matches_dirty: bool,
+        omg_link_frame: @import("omg_link.zig").FrameCache = .{},
 
         /// The current set of cells to render. This is rebuilt on every frame
         /// but we keep this around so that we don't reallocate. Each set of
@@ -817,6 +818,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         }
 
         pub fn deinit(self: *Self) void {
+            self.omg_link_frame.deinit(self.alloc);
             if (self.overlay) |*overlay| overlay.deinit(self.alloc);
             self.terminal_state.deinit(self.alloc);
             if (self.search_selected_match) |*m| m.arena.deinit();
@@ -1323,7 +1325,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         break :osc8 .empty;
 
                     if (comptime builtin.os.tag == .macos) {
-                        const cells = @import("omg_link.zig").collect(
+                        const cells = self.omg_link_frame.get(
+                            self.alloc,
                             arena_alloc,
                             state.omg_link_allocator,
                             state.terminal.screens.active,
@@ -2089,6 +2092,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             self.config.deinit();
             self.config = config.*;
+            self.omg_link_frame.signature = null;
 
             // If our background image path changed, prepare the new bg image.
             if (bg_image_changed) try self.prepBackgroundImage();

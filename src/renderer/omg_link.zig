@@ -6,6 +6,62 @@ const input = @import("../input.zig");
 const Cache = @import("../omg_link_check.zig");
 const Link = @import("link.zig").Link;
 
+/// Cache cell positions only with a fingerprint of the actual frame contents,
+/// row identities, cwd and verification revision. Scroll/reflow/rewrites all
+/// invalidate it; mouse movement, cursor blink and repeated paints do not run
+/// the regex scanner again. Callers reset signature when link config changes.
+pub const FrameCache = struct {
+    signature: ?u64 = null,
+    cells: terminal.RenderState.CellSet = .empty,
+
+    pub fn deinit(self: *FrameCache, alloc: std.mem.Allocator) void {
+        self.cells.deinit(alloc);
+        self.* = .{};
+    }
+
+    pub fn get(
+        self: *FrameCache,
+        storage_alloc: std.mem.Allocator,
+        output_alloc: std.mem.Allocator,
+        cache_alloc: std.mem.Allocator,
+        screen: *terminal.Screen,
+        frame: *const terminal.RenderState,
+        links: []const Link,
+        cache: *Cache,
+        mods: input.Mods,
+    ) !terminal.RenderState.CellSet {
+        const enabled = mods.equal(input.ctrlOrSuper(.{}));
+        if (!enabled) return .empty;
+        var hash = std.hash.Wyhash.init(0);
+        hash.update(std.mem.asBytes(&frame.cols));
+        hash.update(std.mem.asBytes(&frame.rows));
+        hash.update(std.mem.asBytes(&cache.revision));
+        const rows = frame.row_data.slice();
+        for (rows.items(.pin), rows.items(.serial), rows.items(.raw), rows.items(.cells)) |pin, serial, raw, cells| {
+            const node = @intFromPtr(pin.node);
+            hash.update(std.mem.asBytes(&node));
+            hash.update(std.mem.asBytes(&pin.y));
+            hash.update(std.mem.asBytes(&serial));
+            const wrap = raw.wrap;
+            hash.update(std.mem.asBytes(&wrap));
+            hash.update(std.mem.sliceAsBytes(cells.items(.raw)));
+            for (cells.items(.raw), cells.items(.grapheme)) |cell, grapheme| {
+                if (cell.hasGrapheme()) hash.update(std.mem.sliceAsBytes(grapheme));
+            }
+            hash.update(screen.omg_cwd_history.cwdAt(pin) orelse "");
+            hash.update(&.{0});
+        }
+        const signature = hash.final();
+        if (self.signature == null or self.signature.? != signature) {
+            var fresh = try collect(storage_alloc, cache_alloc, screen, frame, links, cache, mods);
+            std.mem.swap(terminal.RenderState.CellSet, &self.cells, &fresh);
+            fresh.deinit(storage_alloc);
+            self.signature = signature;
+        }
+        return self.cells.clone(output_alloc);
+    }
+};
+
 pub fn collect(
     alloc: std.mem.Allocator,
     cache_alloc: std.mem.Allocator,
@@ -115,12 +171,25 @@ test "OMG viewport links reveal multiple verified paths without hover and follow
     try std.testing.expect(set.contains(.{ .x = 5, .y = 0 }));
     try std.testing.expect(!set.contains(.{ .x = 10, .y = 0 }));
     try std.testing.expect(cache.hasQueued());
+    var cached: FrameCache = .{};
+    defer cached.deinit(alloc);
+    var initial = try cached.get(alloc, alloc, alloc, t.screens.active, &frame, config.links, &cache, input.ctrlOrSuper(.{}));
+    defer initial.deinit(alloc);
+    // Unchanged paints may allocate their output cell set but must not allocate
+    // scanner/string-map buffers or execute another regex scan.
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    var reused = try cached.get(failing.allocator(), alloc, alloc, t.screens.active, &frame, config.links, &cache, input.ctrlOrSuper(.{}));
+    defer reused.deinit(alloc);
+    try std.testing.expectEqual(initial.count(), reused.count());
     // Scroll the linked row off the live viewport without any mouse movement.
     stream.nextSlice("new\r\nmore\r\n");
     try frame.update(alloc, &t);
     var scrolled = try collect(alloc, alloc, t.screens.active, &frame, config.links, &cache, input.ctrlOrSuper(.{}));
     defer scrolled.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 0), scrolled.count());
+    var cached_scrolled = try cached.get(alloc, alloc, alloc, t.screens.active, &frame, config.links, &cache, input.ctrlOrSuper(.{}));
+    defer cached_scrolled.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 0), cached_scrolled.count());
     t.scrollViewport(.top);
     try frame.update(alloc, &t);
     var restored = try collect(alloc, alloc, t.screens.active, &frame, config.links, &cache, input.ctrlOrSuper(.{}));

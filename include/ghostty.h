@@ -1232,6 +1232,8 @@ GHOSTTY_API bool ghostty_surface_omg_jump_command(ghostty_surface_t, uint64_t, u
 GHOSTTY_API void ghostty_surface_omg_clear_commands(ghostty_surface_t);
 // Answer a GHOSTTY_ACTION_OMG_LINK_CHECK. Must be called on the main thread.
 GHOSTTY_API void ghostty_surface_omg_link_checked(ghostty_surface_t, const char*, uintptr_t, const char*, uintptr_t, bool);
+// Complete a group of answers; refresh links/rendering once, on the main thread.
+GHOSTTY_API void ghostty_surface_omg_link_checks_flush(ghostty_surface_t);
 // Writes a bounded VT display snapshot to a new, owner-only absolute file.
 // Key callback returns a borrowed occurrence ID for the current command ID;
 // it must not reenter terminal APIs while the snapshot lock is held.

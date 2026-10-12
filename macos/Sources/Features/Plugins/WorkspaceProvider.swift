@@ -705,6 +705,8 @@ protocol WorkspaceFilesystem: Sendable {
     func readFile(at path: String) async throws -> Data
     func writeFile(_ data: Data, at path: String, replacing expectedData: Data) async throws
     func itemType(at path: String) async throws -> WorkspaceItemType?
+    /// Missing paths are omitted. Implementations may batch remote round trips.
+    func itemTypes(at paths: [String]) async throws -> [String: WorkspaceItemType]
 }
 
 enum WorkspaceFileActions {
@@ -744,6 +746,14 @@ extension WorkspaceFilesystem {
 
     func itemType(at path: String) async throws -> WorkspaceItemType? {
         nil
+    }
+
+    func itemTypes(at paths: [String]) async throws -> [String: WorkspaceItemType] {
+        var result: [String: WorkspaceItemType] = [:]
+        for path in Set(paths) {
+            if let kind = try await itemType(at: path) { result[path] = kind }
+        }
+        return result
     }
 }
 
@@ -820,6 +830,21 @@ struct LocalWorkspaceFilesystem: WorkspaceFilesystem {
         try await Task.detached(priority: .utility) {
             // FileManager refuses to replace an existing destination, including symlinks.
             try FileManager.default.moveItem(atPath: path, toPath: destination)
+        }.value
+    }
+
+    func itemTypes(at paths: [String]) async throws -> [String: WorkspaceItemType] {
+        try await Task.detached(priority: .utility) {
+            var result: [String: WorkspaceItemType] = [:]
+            for path in Set(paths) {
+                try Task.checkCancellation()
+                let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+                var isDir: ObjCBool = false
+                if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) {
+                    result[path] = isDir.boolValue ? .directory : .file
+                }
+            }
+            return result
         }.value
     }
 
@@ -1214,6 +1239,63 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
         case "file": return .file
         default: return nil
         }
+    }
+
+    func itemTypes(at paths: [String]) async throws -> [String: WorkspaceItemType] {
+        var result: [String: WorkspaceItemType] = [:]
+        for batch in try Self.itemTypeBatches(paths) {
+            try Task.checkCancellation()
+            let output = try await SSHSFTPClient.runCommand(
+                Self.itemTypesCommand(batch), host: host.alias, connection: connection
+            )
+            let types = try Self.parseItemTypes(output, paths: batch)
+            result.merge(types) { _, new in new }
+        }
+        return result
+    }
+
+    /// Bound both remote argv size and request count. A typical ls viewport
+    /// fits in a single SSH command rather than one command per filename.
+    static func itemTypeBatches(_ paths: [String]) throws -> [[String]] {
+        var batches: [[String]] = [], batch: [String] = []
+        var bytes = 0
+        for path in Set(paths).sorted() {
+            guard !path.isEmpty, !path.contains("\0"), path.utf8.count <= 16_384 else {
+                throw WorkspaceFilesystemError.invalidPath
+            }
+            let cost = itemTypesCommand([path]).utf8.count
+            guard cost <= 32_768 else { throw WorkspaceFilesystemError.invalidPath }
+            if !batch.isEmpty && (batch.count >= 128 || bytes + cost > 32_768) {
+                batches.append(batch)
+                batch = []
+                bytes = 0
+            }
+            batch.append(path)
+            bytes += cost
+        }
+        if !batch.isEmpty { batches.append(batch) }
+        return batches
+    }
+
+    static func itemTypesCommand(_ paths: [String]) -> String {
+        paths.map { path in
+            let literal = shellQuote(path)
+            return "if [ -d \(literal) ]; then printf D; " +
+                "elif [ -f \(literal) ]; then printf F; else printf M; fi;"
+        }.joined(separator: " ")
+    }
+
+    static func parseItemTypes(_ output: String, paths: [String]) throws -> [String: WorkspaceItemType] {
+        let types = Array(output.utf8)
+        guard types.count == paths.count, types.allSatisfy({ [68, 70, 77].contains($0) }) else {
+            throw WorkspaceFilesystemError.invalidResponse
+        }
+        var result: [String: WorkspaceItemType] = [:]
+        for (path, type) in zip(paths, types) {
+            if type == 68 { result[path] = .directory }
+            if type == 70 { result[path] = .file }
+        }
+        return result
     }
 
     static func itemTypeCommand(_ path: String) -> String {

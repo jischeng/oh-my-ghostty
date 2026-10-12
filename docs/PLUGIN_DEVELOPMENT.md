@@ -2098,6 +2098,20 @@ symlinks), rather than classifying the first child of an SFTP directory listing.
 These read-only checks reuse the established SSH transport; no connection to a
 host named by terminal link text is created.
 
+The internal `WorkspaceFilesystem.itemTypes` batch operation omits missing
+paths. Cmd-link checks coalesce requests for 12 ms, deduplicate resolved paths,
+and allow only one active batch per surface. SSH batches contain at most 128
+paths and 32 KiB of shell command text, with a strictly validated one-byte type
+response per path; local batches run off the main actor. Both present and absent
+results are cached for three seconds, keyed by surface/session revision,
+filesystem identity, directory and resolved path. Transport failures are not
+negative-cached. Cache expiry or a context change causes a new check. Clicking
+still rechecks the target through the opener. The host applies answers before
+one native `ghostty_surface_omg_link_checks_flush` call, instead of scheduling
+an entire screen rebuild for each filename. The renderer reuses link cells only
+when content/row identity, cwd, dimensions, configuration and check revision
+match; scroll/reflow/content changes invalidate the match cache.
+
 Known non-text formats (including DMG, PDF and images) use the system default
 application before creating an editor pane. Binary/unsupported-encoding and
 oversized text failures also fall back to the default application. Remote

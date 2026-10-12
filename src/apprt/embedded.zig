@@ -1757,6 +1757,10 @@ pub const CAPI = struct {
         );
     }
 
+    export fn ghostty_surface_omg_link_checks_flush(surface: *Surface) void {
+        surface.core_surface.omgLinkChecksFlush();
+    }
+
     export fn ghostty_surface_omg_jump_command(
         surface: *Surface,
         id: u64,

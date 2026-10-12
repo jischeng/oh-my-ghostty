@@ -4581,15 +4581,23 @@ fn omgLinkExists(self: *Surface, sel: terminal.Selection) !bool {
     return false;
 }
 
-/// OMG: apply a host answer for an omg_link_check request and refresh the
-/// hover state if the mouse is still waiting on it.
+/// OMG: apply one answer without scheduling a frame. The host flushes once
+/// after applying the whole filesystem batch.
 pub fn omgLinkChecked(self: *Surface, url: []const u8, base_directory: []const u8, exists: bool) void {
     self.renderer_state.mutex.lockUncancelable(global.io());
     defer self.renderer_state.mutex.unlock(global.io());
-    if (!self.renderer_state.omg_link_checks.resolve(base_directory, url, exists)) return;
+    if (self.renderer_state.omg_link_checks.resolve(base_directory, url, exists)) {
+        self.renderer_state.omg_link_results_dirty = true;
+    }
+}
+
+pub fn omgLinkChecksFlush(self: *Surface) void {
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
+    if (!self.renderer_state.omg_link_results_dirty) return;
+    self.renderer_state.omg_link_results_dirty = false;
     self.renderer_state.terminal.flags.dirty.clear = true;
     self.queueRender() catch {};
-    if (!exists) return;
     if (!linkModsBypassCapture(self.mouse.mods) and self.io.terminal.flags.mouse_event != .none) return;
     const pos = self.rt_surface.getCursorPos() catch return;
     self.mouseRefreshLinks(pos, self.posToViewport(pos.x, pos.y), self.mouse.over_link) catch |err| {

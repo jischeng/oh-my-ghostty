@@ -4569,6 +4569,7 @@ fn omgLinkExists(self: *Surface, sel: terminal.Selection) !bool {
     const screen = self.renderer_state.terminal.screens.active;
     const value = try screen.selectionString(self.alloc, .{ .sel = sel, .trim = false });
     defer self.alloc.free(value);
+    if (OmgLinkCheck.isBareRoot(value)) return false;
     if (!OmgLinkCheck.needsCheck(value)) return true;
     const cwd = screen.omg_cwd_history.cwdAt(sel.start()) orelse "";
     if (self.renderer_state.omg_link_checks.get(cwd, value)) |status| return status == .exists;

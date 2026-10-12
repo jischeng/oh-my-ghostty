@@ -89,6 +89,18 @@ pub fn resolve(self: *Cache, cwd: []const u8, value: []const u8, exists: bool) b
     return true;
 }
 
+/// Standalone root separators in prose/code aren't useful implicit links.
+/// Explicit OSC8 links retain their author-provided target.
+pub fn isBareRoot(value: []const u8) bool {
+    return std.mem.eql(u8, std.mem.trim(u8, value, " \t\r\n'\""), "/");
+}
+
+test "OMG bare root is not an implicit link" {
+    try std.testing.expect(isBareRoot("/"));
+    try std.testing.expect(isBareRoot("'/'"));
+    try std.testing.expect(!isBareRoot("/home/user"));
+}
+
 /// True for filesystem candidates. Scheme URLs (other than file:) are opened
 /// by their handler and never checked against a filesystem.
 pub fn needsCheck(value: []const u8) bool {

@@ -147,6 +147,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         search_selected_match: ?renderer.Message.SearchMatch,
         search_matches_dirty: bool,
         omg_link_frame: @import("omg_link.zig").FrameCache = .{},
+        omg_links_visible: bool = false,
 
         /// The current set of cells to render. This is rebuilt on every frame
         /// but we keep this around so that we don't reallocate. Each set of
@@ -1377,6 +1378,18 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // within it. This must be done before anything reads the
             // render state (e.g. rebuildCells).
             self.terminal_state.endUpdate();
+
+            // Link decoration can change without any terminal text changing.
+            // Invalidate GPU rows on both modifier edges, including release
+            // with a stationary pointer (no mouse-move event to dirty rows).
+            if (comptime builtin.os.tag == .macos) {
+                const visible = critical.mouse.mods.equal(inputpkg.ctrlOrSuper(.{}));
+                if (visible != self.omg_links_visible) {
+                    self.omg_links_visible = visible;
+                    self.terminal_state.dirty = .full;
+                    for (self.terminal_state.row_data.items(.dirty)) |*dirty| dirty.* = true;
+                }
+            }
 
             // Outside the critical area we can update our links to contain
             // our regex results.

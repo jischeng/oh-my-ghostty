@@ -104,6 +104,7 @@ pub fn collect(
                 if (last.coord().y < top or first.coord().y >= top + pins.len) continue;
                 const value = try screen.selectionString(alloc, .{ .sel = sel, .trim = false });
                 defer alloc.free(value);
+                if (Cache.isBareRoot(value)) continue;
                 if (Cache.needsCheck(value)) {
                     const cwd = screen.omg_cwd_history.cwdAt(sel.start()) orelse "";
                     if (cache.get(cwd, value)) |status| {
@@ -181,6 +182,11 @@ test "OMG viewport links reveal multiple verified paths without hover and follow
     var reused = try cached.get(failing.allocator(), alloc, alloc, t.screens.active, &frame, config.links, &cache, input.ctrlOrSuper(.{}));
     defer reused.deinit(alloc);
     try std.testing.expectEqual(initial.count(), reused.count());
+    // Releasing Cmd without changing content or mouse position must not
+    // return the cached decorated cells.
+    var cached_released = try cached.get(failing.allocator(), alloc, alloc, t.screens.active, &frame, config.links, &cache, .{});
+    defer cached_released.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 0), cached_released.count());
     // Scroll the linked row off the live viewport without any mouse movement.
     stream.nextSlice("new\r\nmore\r\n");
     try frame.update(alloc, &t);

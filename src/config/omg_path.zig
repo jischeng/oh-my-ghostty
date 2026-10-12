@@ -5,7 +5,7 @@ const std = @import("std");
 const oni = @import("oniguruma");
 
 pub const quoted_regex =
-    \\'(?![A-Za-z][A-Za-z0-9+.-]*:)[^'\r\n]+'|"(?![A-Za-z][A-Za-z0-9+.-]*:)[^"\r\n]+"
+    \\'(?![A-Za-z][A-Za-z0-9+.-]*:)[^'"\r\n]+'|"(?![A-Za-z][A-Za-z0-9+.-]*:)[^"'\r\n]+"
 ;
 
 // Plain ls -l (including localized month names), without Nerd Font icons.
@@ -16,7 +16,7 @@ const listing_regex =
 ;
 
 pub const regex = listing_regex ++ "|" ++
-    \\(?<![\w./~:@$+-])(?!(?:\.{3,}|[\w.\-/]*\.{3,}))(?![0-9]+(?:[A-Za-z]+)?\.[0-9]+)(?:(?:~|/|\.{1,2}/|[\w.\-]+/)[\w./-]*|\.[A-Za-z0-9_][\w.\-]*(?![\w.\-(])|(?![0-9]+\.[0-9]+)[^\s/:*?"'<>|()\x{2018}-\x{201F}\x{3000}-\x{303F}\x{FF00}-\x{FF65}]+\.(?:7z|[A-Za-z][A-Za-z0-9_]{0,7})|(?:Makefile|Dockerfile|Containerfile|Vagrantfile|Gemfile|Rakefile|LICENSE|LICENCE|README)|\.{1,2}|(?<=[📁📂\x{E000}-\x{F8FF}\x{F0000}-\x{FFFFD}]\s|[📁📂\x{E000}-\x{F8FF}\x{F0000}-\x{FFFFD}]\s\s)[\w.\-]+)(?::[0-9]+(?::[0-9]+)?)?(?![/\w.~@$+-])
+    \\(?<![\w./~:@$+-])(?!/(?![\w./-]))(?!(?:\.{3,}|[\w.\-/]*\.{3,}))(?![0-9]+(?:[A-Za-z]+)?\.[0-9]+)(?:(?:~|/|\.{1,2}/|[\w.\-]+/)[\w./-]*|\.[A-Za-z0-9_][\w.\-]*(?![\w.\-(])|(?![0-9]+\.[0-9]+)[^\s/:*?"'<>|()\x{2018}-\x{201F}\x{3000}-\x{303F}\x{FF00}-\x{FF65}]+\.(?:7z|[A-Za-z][A-Za-z0-9_]{0,7})|(?:Makefile|Dockerfile|Containerfile|Vagrantfile|Gemfile|Rakefile|LICENSE|LICENCE|README)|\.{1,2}|(?<=[📁📂\x{E000}-\x{F8FF}\x{F0000}-\x{FFFFD}]\s|[📁📂\x{E000}-\x{F8FF}\x{F0000}-\x{FFFFD}]\s\s)[\w.\-]+)(?::[0-9]+(?::[0-9]+)?)?(?![/\w.~@$+-])
 ;
 
 test "OMG bare path candidates" {
@@ -26,6 +26,7 @@ test "OMG bare path candidates" {
 
     const cases = [_]struct { input: []const u8, expected: []const u8 }{
         .{ .input = "README.md", .expected = "README.md" },
+        .{ .input = "\"b=Path('/home/user/project/lake_search/ETL/bag_topic_pipeline')\\nfor rel in\"", .expected = "'/home/user/project/lake_search/ETL/bag_topic_pipeline'" },
         .{ .input = "drwx------ 2 chengjisheng chengjisheng 4.0K 10月 12 14:32 adapter", .expected = "adapter" },
         .{ .input = "drwxr-xr-x 12 user group 4096 Oct 12 2025 backend", .expected = "backend" },
         .{ .input = "drwxr-xr-x 2 user group 4096 2026-10-12 14:32 bi_board_server_frontend", .expected = "bi_board_server_frontend" },
@@ -89,6 +90,8 @@ test "OMG bare path candidates" {
         "12:34:56",
         "drwxr-xr-x@",
         "chengjisheng 20 Aug 17:45",
+        "/",
+        " / ",
         // A method call is not a dotfile.
         ".zIndex(1)",
     }) |input| {

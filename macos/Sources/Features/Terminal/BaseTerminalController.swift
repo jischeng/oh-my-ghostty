@@ -938,7 +938,7 @@ class BaseTerminalController: NSWindowController,
         // If we're the main window receiving key input, then we want to avoid
         // calling this on our focused surface because that'll trigger a double
         // flagsChanged call.
-        if NSApp.mainWindow == window {
+        if NSApp.keyWindow == window, window?.firstResponder === focusedSurface {
             surfaces = surfaces.filter { $0 != focusedSurface }
         }
 

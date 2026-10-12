@@ -689,6 +689,23 @@ extension Ghostty {
                     NotificationCenter.default.post(name: .terminalHistoryDidChange, object: view.id)
                 }
 
+            case GHOSTTY_ACTION_OMG_LINK_CHECK:
+                guard target.tag == GHOSTTY_TARGET_SURFACE,
+                      let surface = target.target.surface,
+                      let view = self.surfaceView(from: surface) else { return false }
+                // Copy the borrowed strings, then leave the core callback: it
+                // holds the renderer lock and the reply re-enters the core.
+                let v = action.action.omg_link_check
+                guard let url = String(bytes: UnsafeRawBufferPointer(start: v.url, count: Int(v.len)), encoding: .utf8),
+                      let base = String(bytes: UnsafeRawBufferPointer(
+                          start: v.base_directory, count: Int(v.base_directory_len)), encoding: .utf8)
+                else { return false }
+                DispatchQueue.main.async { [weak view] in
+                    guard let view else { return }
+                    TerminalLinkChecker.check(url: url, baseDirectory: base, from: view)
+                }
+                return true
+
             case GHOSTTY_ACTION_COMMAND_FINISHED:
                 commandFinished(app, target: target, v: action.action.command_finished)
 

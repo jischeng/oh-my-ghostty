@@ -53,11 +53,20 @@ enum TerminalPathTarget {
 @MainActor
 enum TerminalPathOpener {
     /// Return true for file candidates even when absent, so prose cannot reach Launch Services.
-    static func open(_ value: String, from source: Ghostty.SurfaceView, baseDirectory: String? = nil) -> Bool {
-        guard TerminalPathTarget.isCandidate(value) else { return false }
+    struct Resolved {
+        let controller: TerminalController
+        let session: PaneSessionContext
+        let context: InspectorPaneContext
+        let filesystem: any WorkspaceFilesystem
+        let path: String
+    }
+
+    /// Resolve a candidate against the source pane's local or SSH filesystem.
+    /// Shared by Cmd-hover existence checks and Cmd-click so both agree.
+    static func resolve(_ value: String, from source: Ghostty.SurfaceView, baseDirectory: String?) -> Resolved? {
         guard let controller = source.window?.windowController as? TerminalController,
-              let session = controller.paneSessionContext(for: source) else { return true }
-        if case .sshConnecting = session.state { return true }
+              let session = controller.paneSessionContext(for: source) else { return nil }
+        if case .sshConnecting = session.state { return nil }
         let context = InspectorPaneContext(
             tabID: controller.tabSessionID, surfaceID: source.id, title: session.presentationTitle,
             workingDirectory: session.workingDirectory, workspace: session.workspace, session: session
@@ -67,7 +76,15 @@ enum TerminalPathOpener {
             value.hasPrefix("file:") ? (URL(string: value)?.path ?? "") : value
         } ?? filesystem.descriptor.workingDirectory
         guard let path = TerminalPathTarget.path(value, directory: directory,
-                                                 isRemote: filesystem.descriptor.kind == .ssh) else { return true }
+                                                 isRemote: filesystem.descriptor.kind == .ssh) else { return nil }
+        return .init(controller: controller, session: session, context: context, filesystem: filesystem, path: path)
+    }
+
+    static func open(_ value: String, from source: Ghostty.SurfaceView, baseDirectory: String? = nil) -> Bool {
+        guard TerminalPathTarget.isCandidate(value) else { return false }
+        guard let resolved = resolve(value, from: source, baseDirectory: baseDirectory) else { return true }
+        let controller = resolved.controller, session = resolved.session
+        let context = resolved.context, filesystem = resolved.filesystem, path = resolved.path
         Task { [weak controller, weak source] in
             do {
                 guard let kind = try await filesystem.itemType(at: path),

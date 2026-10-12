@@ -113,6 +113,16 @@ pub const regex =
     "|" ++
     bare_relative_path_branch;
 
+/// OMG: macOS variant without space-joined path segments. Unquoted paths stop
+/// at whitespace so `cd /repo && make` links only `/repo`; quoted paths with
+/// spaces are matched separately and every path is checked for existence.
+pub const no_space_regex =
+    scheme_url_branch ++
+    "|" ++
+    rooted_or_relative_path_prefix ++ path_chars ++ "+" ++ no_trailing_colon ++
+    "|" ++
+    bare_relative_path_branch;
+
 test "url regex" {
     const testing = std.testing;
 
@@ -513,5 +523,25 @@ test "url regex" {
             reg.deinit();
             return error.TestUnexpectedResult;
         } else |_| {}
+    }
+}
+
+test "OMG no-space url regex stops unquoted paths at whitespace" {
+    const testing = std.testing;
+    try oni.testing.ensureInit();
+    var re = try oni.Regex.init(no_space_regex, .{}, oni.Encoding.utf8, oni.Syntax.default, null);
+    defer re.deinit();
+    const cases = [_]struct { input: []const u8, expect: []const u8 }{
+        .{ .input = "$ cd /Users/me/oh-my-ghostty && swiftlint lint --strict", .expect = "/Users/me/oh-my-ghostty" },
+        .{ .input = "see https://example.com/a?b=1 now", .expect = "https://example.com/a?b=1" },
+        .{ .input = "open src/config/url.zig:12 please", .expect = "src/config/url.zig:12" },
+        .{ .input = "run ./build.sh then", .expect = "./build.sh" },
+    };
+    for (cases) |case| {
+        var m = try re.search(case.input, .{});
+        defer m.deinit();
+        const s: usize = @intCast(m.starts()[0]);
+        const e: usize = @intCast(m.ends()[0]);
+        try testing.expectEqualStrings(case.expect, case.input[s..e]);
     }
 }

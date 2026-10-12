@@ -1,5 +1,6 @@
 //! Lower-priority macOS Cmd-click candidates. The host checks existence using
-//! the source pane's filesystem before opening; ordinary words may be candidates.
+//! the source pane's filesystem before a candidate is underlined or opened, so
+//! these patterns only need to find plausible spans, never prove a path.
 const std = @import("std");
 const oni = @import("oniguruma");
 
@@ -8,7 +9,7 @@ pub const quoted_regex =
 ;
 
 pub const regex =
-    \\(?<![\w./~:@$+-])(?!(?:\.{3,}|[\w.\-/]*\.{3,}))(?![0-9]+(?:[A-Za-z]+)?\.[0-9]+)(?:(?:~|/|\.{1,2}/|[\w.\-]+/)[\w./-]*|\.[A-Za-z0-9_][\w.\-]*|(?![0-9]+\.[0-9]+)[^\s/:*?"'<>|()]+\.(?:7z|[A-Za-z][A-Za-z0-9_]{0,7})|(?:Makefile|Dockerfile|Containerfile|Vagrantfile|Gemfile|Rakefile|LICENSE|LICENCE|README)|\.{1,2}|(?<=[📁📂\x{E000}-\x{F8FF}\x{F0000}-\x{FFFFD}]\s|[📁📂\x{E000}-\x{F8FF}\x{F0000}-\x{FFFFD}]\s\s)[\w.\-]+)(?::[0-9]+(?::[0-9]+)?)?(?![/\w.~@$+-])
+    \\(?<![\w./~:@$+-])(?!(?:\.{3,}|[\w.\-/]*\.{3,}))(?![0-9]+(?:[A-Za-z]+)?\.[0-9]+)(?:(?:~|/|\.{1,2}/|[\w.\-]+/)[\w./-]*|\.[A-Za-z0-9_][\w.\-]*(?![\w.\-(])|(?![0-9]+\.[0-9]+)[^\s/:*?"'<>|()\x{2018}-\x{201F}\x{3000}-\x{303F}\x{FF00}-\x{FF65}]+\.(?:7z|[A-Za-z][A-Za-z0-9_]{0,7})|(?:Makefile|Dockerfile|Containerfile|Vagrantfile|Gemfile|Rakefile|LICENSE|LICENCE|README)|\.{1,2}|(?<=[📁📂\x{E000}-\x{F8FF}\x{F0000}-\x{FFFFD}]\s|[📁📂\x{E000}-\x{F8FF}\x{F0000}-\x{FFFFD}]\s\s)[\w.\-]+)(?::[0-9]+(?::[0-9]+)?)?(?![/\w.~@$+-])
 ;
 
 test "OMG bare path candidates" {
@@ -42,6 +43,10 @@ test "OMG bare path candidates" {
         .{ .input = "../parent/file.zig", .expected = "../parent/file.zig" },
         .{ .input = "1.txt", .expected = "1.txt" },
         .{ .input = "archive.7z", .expected = "archive.7z" },
+        // CJK prose: full-width punctuation ends the candidate.
+        .{ .input = "放到了上层（AgentQuickInput.swift 加了", .expected = "AgentQuickInput.swift" },
+        .{ .input = "规则（omg_path.zig）", .expected = "omg_path.zig" },
+        .{ .input = "见 omg_path.zig。", .expected = "omg_path.zig" },
     };
     for (cases) |case| {
         var match = try re.search(case.input, .{});
@@ -73,6 +78,8 @@ test "OMG bare path candidates" {
         "12:34:56",
         "drwxr-xr-x@",
         "chengjisheng 20 Aug 17:45",
+        // A method call is not a dotfile.
+        ".zIndex(1)",
     }) |input| {
         if (re.search(input, .{})) |result| {
             var match = result;

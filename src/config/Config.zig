@@ -4016,18 +4016,15 @@ pub fn default(alloc_gpa: Allocator) Allocator.Error!Config {
         try result.link.links.append(alloc, .{
             .regex = @import("omg_path.zig").quoted_regex,
             .action = .{ .open = {} },
-            .highlight = .{ .always_mods = inputpkg.ctrlOrSuper(.{}) },
+            .highlight = .{ .hover_mods = inputpkg.ctrlOrSuper(.{}) },
         });
     }
 
     // Add our default link for URL detection
     try result.link.links.append(alloc, .{
-        .regex = url.regex,
+        .regex = if (comptime builtin.target.os.tag == .macos) url.no_space_regex else url.regex,
         .action = .{ .open = {} },
-        .highlight = if (comptime builtin.target.os.tag == .macos)
-            .{ .always_mods = inputpkg.ctrlOrSuper(.{}) }
-        else
-            .{ .hover_mods = inputpkg.ctrlOrSuper(.{}) },
+        .highlight = .{ .hover_mods = inputpkg.ctrlOrSuper(.{}) },
     });
     if (comptime builtin.target.os.tag == .macos) {
         // OMG validates bare path candidates against the source pane's filesystem.
@@ -4035,7 +4032,7 @@ pub fn default(alloc_gpa: Allocator) Allocator.Error!Config {
         try result.link.links.append(alloc, .{
             .regex = @import("omg_path.zig").regex,
             .action = .{ .open = {} },
-            .highlight = .{ .always_mods = inputpkg.ctrlOrSuper(.{}) },
+            .highlight = .{ .hover_mods = inputpkg.ctrlOrSuper(.{}) },
         });
     }
 

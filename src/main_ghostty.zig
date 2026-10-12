@@ -241,6 +241,8 @@ test {
     _ = @import("input.zig");
     _ = @import("cli.zig");
     _ = @import("surface_mouse.zig");
+    _ = @import("omg_link_check.zig");
+    _ = @import("renderer/omg_link.zig");
 
     // Libraries
     _ = @import("tripwire.zig");

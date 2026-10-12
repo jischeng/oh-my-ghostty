@@ -887,6 +887,16 @@ typedef struct {
   const char* metadata;
 } ghostty_action_context_signal_s;
 
+// apprt.action.OmgLinkCheck.C
+// OMG: strings are borrowed for the callback; reply with
+// ghostty_surface_omg_link_checked using the same values.
+typedef struct {
+  const char* url;
+  uintptr_t len;
+  const char* base_directory;
+  uintptr_t base_directory_len;
+} ghostty_action_omg_link_check_s;
+
 // apprt.action.CommandFinished.C
 typedef struct {
   // -1 if no exit code was reported, otherwise 0-255
@@ -990,6 +1000,7 @@ typedef enum {
   GHOSTTY_ACTION_MOVE_TAB_TO_NEW_WINDOW,
   GHOSTTY_ACTION_CONTEXT_SIGNAL,
   GHOSTTY_ACTION_COMMAND_HISTORY_CHANGED,
+  GHOSTTY_ACTION_OMG_LINK_CHECK,
 } ghostty_action_tag_e;
 
 typedef union {
@@ -1028,6 +1039,7 @@ typedef union {
   ghostty_surface_message_childexited_s child_exited;
   ghostty_action_progress_report_s progress_report;
   ghostty_action_context_signal_s context_signal;
+  ghostty_action_omg_link_check_s omg_link_check;
   ghostty_action_command_finished_s command_finished;
   ghostty_action_start_search_s start_search;
   ghostty_action_search_total_s search_total;
@@ -1215,6 +1227,8 @@ GHOSTTY_API void ghostty_surface_omg_commands(ghostty_surface_t, void*, void (*)
 // On success returns the exact anchored viewport row and top grid padding in points.
 GHOSTTY_API bool ghostty_surface_omg_jump_command(ghostty_surface_t, uint64_t, uint32_t*, double*);
 GHOSTTY_API void ghostty_surface_omg_clear_commands(ghostty_surface_t);
+// Answer a GHOSTTY_ACTION_OMG_LINK_CHECK. Must be called on the main thread.
+GHOSTTY_API void ghostty_surface_omg_link_checked(ghostty_surface_t, const char*, uintptr_t, const char*, uintptr_t, bool);
 // Writes a bounded VT display snapshot to a new, owner-only absolute file.
 // Key callback returns a borrowed occurrence ID for the current command ID;
 // it must not reenter terminal APIs while the snapshot lock is held.

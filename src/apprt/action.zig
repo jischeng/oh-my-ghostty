@@ -363,6 +363,11 @@ pub const Action = union(Key) {
     /// OMG: semantic command record was committed; host may refresh its snapshot.
     command_history_changed: void,
 
+    /// OMG: ask the host whether a Cmd-hover path candidate exists in the
+    /// source pane's filesystem. The host replies asynchronously with
+    /// ghostty_surface_omg_link_checked using the same url/base_directory.
+    omg_link_check: OmgLinkCheck,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -436,6 +441,7 @@ pub const Action = union(Key) {
         move_tab_to_new_window,
         context_signal,
         command_history_changed,
+        omg_link_check,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
@@ -822,6 +828,30 @@ pub const ContextSignal = struct {
             },
             .id = self.id.ptr,
             .metadata = self.metadata.ptr,
+        };
+    }
+};
+
+/// OMG: a path candidate to check. Both strings are borrowed for the call.
+pub const OmgLinkCheck = struct {
+    url: []const u8,
+    /// Output cwd recorded at the candidate; empty means unknown.
+    base_directory: []const u8,
+
+    // Sync with: ghostty_action_omg_link_check_s
+    pub const C = extern struct {
+        url: [*]const u8,
+        len: usize,
+        base_directory: [*]const u8,
+        base_directory_len: usize,
+    };
+
+    pub fn cval(self: OmgLinkCheck) C {
+        return .{
+            .url = self.url.ptr,
+            .len = self.url.len,
+            .base_directory = self.base_directory.ptr,
+            .base_directory_len = self.base_directory.len,
         };
     }
 };

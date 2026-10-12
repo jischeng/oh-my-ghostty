@@ -1322,20 +1322,6 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     if (!state.mouse.mods.equal(inputpkg.ctrlOrSuper(.{})))
                         break :osc8 .empty;
 
-                    if (comptime builtin.os.tag == .macos) {
-                        var set: terminal.RenderState.CellSet = .empty;
-                        const row_slice = self.terminal_state.row_data.slice();
-                        for (0.., row_slice.items(.raw), row_slice.items(.cells)) |y, row, cells| {
-                            if (!row.hyperlink) continue;
-                            for (0.., cells.items(.raw)) |x, cell| {
-                                if (cell.hyperlink) {
-                                    set.put(arena_alloc, .{ .x = @intCast(x), .y = @intCast(y) }, {}) catch {};
-                                }
-                            }
-                        }
-                        break :osc8 set;
-                    }
-
                     // If our mouse isn't hovering, we have no links.
                     const vp = state.mouse.point orelse break :osc8 .empty;
 
@@ -1372,15 +1358,29 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             // Outside the critical area we can update our links to contain
             // our regex results.
+            // OMG (macOS): hover links underline only the span the surface
+            // confirmed (existence-checked); always-on links still render.
+            const omg_link = comptime builtin.os.tag == .macos;
             self.config.links.renderCellMap(
                 arena_alloc,
                 &critical.links,
                 &self.terminal_state,
-                state.mouse.point,
+                if (omg_link) null else state.mouse.point,
                 state.mouse.mods,
             ) catch |err| {
                 log.warn("error searching for regex links err={}", .{err});
             };
+            if (omg_link) omg: {
+                if (critical.mouse.point == null) break :omg;
+                const range = critical.mouse.omg_link orelse break :omg;
+                @import("omg_link.zig").addRange(
+                    arena_alloc,
+                    &critical.links,
+                    range,
+                    self.terminal_state.cols,
+                    self.terminal_state.rows,
+                ) catch |err| log.warn("error adding hovered link err={}", .{err});
+            }
 
             // Clear our highlight state and update.
             if (self.search_matches_dirty or self.terminal_state.dirty != .false) {

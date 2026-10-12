@@ -1741,6 +1741,22 @@ pub const CAPI = struct {
         }
     }
 
+    // OMG: host answer for an omg_link_check action.
+    export fn ghostty_surface_omg_link_checked(
+        surface: *Surface,
+        url: [*]const u8,
+        url_len: usize,
+        base_directory: [*]const u8,
+        base_directory_len: usize,
+        exists: bool,
+    ) void {
+        surface.core_surface.omgLinkChecked(
+            url[0..url_len],
+            base_directory[0..base_directory_len],
+            exists,
+        );
+    }
+
     export fn ghostty_surface_omg_jump_command(
         surface: *Surface,
         id: u64,

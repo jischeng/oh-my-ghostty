@@ -111,6 +111,27 @@ struct TerminalLinkHoverTests {
         }
     }
 
+    @Test func linkCheckResolvesAgainstSourcePaneFilesystem() async throws {
+        let controller = try makeController(split: false)
+        defer { controller.window?.delegate = nil; controller.window?.close() }
+        let surface = try #require(controller.focusedSurface)
+        let dir = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data().write(to: dir.appending(path: "env"))
+        let existing = TerminalPathOpener.resolve("env", from: surface, baseDirectory: dir.path)
+        #expect(existing?.path == dir.appending(path: "env").path)
+        let kind = try await existing?.filesystem.itemType(at: existing?.path ?? "")
+        #expect(kind == .file)
+        let missing = try #require(TerminalPathOpener.resolve("missing.swift", from: surface, baseDirectory: dir.path))
+        #expect(try await missing.filesystem.itemType(at: missing.path) == nil)
+        // Unknown output cwd: relative candidates never resolve, so they stay unlinked.
+        #expect(TerminalPathOpener.resolve("env", from: surface, baseDirectory: "") == nil)
+        // Replies for candidates the core never requested are ignored safely.
+        TerminalLinkChecker.check(url: "env", baseDirectory: dir.path, from: surface)
+        try await Task.sleep(for: .milliseconds(100))
+    }
+
     @Test(.tags(.interactiveDesktop))
     func commandHoverRemainsStable() async throws {
         for split in [false, true] {

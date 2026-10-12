@@ -122,6 +122,16 @@ pub const Mouse = struct {
     /// This could really just be mods in general and we probably will
     /// move it out of mouse state at some point.
     mods: inputpkg.Mods = .{},
+
+    /// OMG (macOS): viewport span of the hovered regex link the surface has
+    /// confirmed. The renderer underlines exactly this span so the underline
+    /// always matches what Cmd-click opens. Only meaningful with `point`.
+    omg_link: ?OmgLinkRange = null,
+
+    pub const OmgLinkRange = struct {
+        start: terminalpkg.point.Coordinate,
+        end: terminalpkg.point.Coordinate,
+    };
 };
 
 /// The pre-edit state. See Surface.preeditCallback for more information.

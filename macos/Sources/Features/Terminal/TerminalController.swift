@@ -626,6 +626,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         terminal.sendText(text)
         terminal.sendKeyEvent(.init(key: .enter))
+        quickInputModel.recordSentText(text, for: surfaceID)
         acknowledgeTerminalAgentState(for: surface)
         quickInputModel.setStatusMessage(nil)
         if restoreFocus {

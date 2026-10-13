@@ -251,12 +251,9 @@ enum AgentQuickInputMetrics {
 }
 
 enum AgentQuickInputMotion {
-    static let terminalResizeDeferralDuration = 0.34
-    static let dock = Animation.spring(
-        response: terminalResizeDeferralDuration,
-        dampingFraction: 0.92,
-        blendDuration: 0.1
-    )
+    // Coalesce layout changes until the next main-loop turn, without waiting
+    // for a dock animation: presentation is immediate, like terminal splits.
+    static let terminalResizeDeferralDuration = 0.0
     static let queue = Animation.spring(
         response: 0.42,
         dampingFraction: 0.72,
@@ -287,6 +284,7 @@ struct AgentQuickInputQueueItem: Identifiable, Equatable, Sendable {
 struct AgentQuickInputPaneState: Equatable, Sendable {
     var draft = ""
     var queue: [AgentQuickInputQueueItem] = []
+    var history: [String] = []
 }
 
 @MainActor
@@ -321,6 +319,37 @@ final class AgentQuickInputModel: ObservableObject {
     var targetQueue: [AgentQuickInputQueueItem] {
         guard let targetSurfaceID else { return [] }
         return paneStates[targetSurfaceID]?.queue ?? []
+    }
+
+    static let historyLimit = 50
+
+    var targetHistory: [String] {
+        guard let targetSurfaceID else { return [] }
+        return paneStates[targetSurfaceID]?.history ?? []
+    }
+
+    /// Record only after submission succeeds, including manual/automatic queue sends.
+    func recordSentText(_ text: String, for surfaceID: UUID) {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        var state = paneStates[surfaceID] ?? .init()
+        if state.history.last != text { state.history.append(text) }
+        state.history = Array(state.history.suffix(Self.historyLimit))
+        paneStates[surfaceID] = state
+    }
+
+    @discardableResult
+    func recallLastSentText() -> Bool {
+        guard draft.isEmpty, !isEditingQueuedItem,
+              let text = targetHistory.last else { return false }
+        useHistoryText(text)
+        return true
+    }
+
+    func useHistoryText(_ text: String) {
+        guard !isEditingQueuedItem, targetSurfaceID != nil else { return }
+        draft = text
+        statusMessage = nil
+        requestFocus()
     }
 
     var isEditingQueuedItem: Bool { editingQueueItemID != nil }
@@ -630,9 +659,8 @@ struct AgentQuickInputDock<Content: View>: View {
                 .accessibilityHidden(true)
         }
         .overlay(alignment: .bottom) {
-            // Animate only presentation properties in the overlay. The costly
-            // terminal resize above happens once, while the dock and queue can
-            // still move and fade smoothly on the compositor.
+            // The dock opens immediately; only queue presentation animates.
+            // The costly terminal resize above still happens once.
             VStack(spacing: 0) {
                 VStack(spacing: 0) {
                     AgentQuickInputResizeHandle(
@@ -655,11 +683,12 @@ struct AgentQuickInputDock<Content: View>: View {
                     height: model.dockHeight + TerminalShellStyle.dividerWidth,
                     alignment: .top
                 )
-                .offset(y: model.isPresented ? 0 : 18)
                 .opacity(model.isPresented ? 1 : 0)
                 .allowsHitTesting(model.isPresented)
                 .accessibilityHidden(!model.isPresented)
-                .animation(AgentQuickInputMotion.dock, value: model.isPresented)
+                // Queue changes can coincide with dock dismissal. Do not
+                // inherit the queue's spring for the composer in that case.
+                .transaction { $0.animation = nil }
 
                 if let surfaceID = presentedQueueSurfaceID,
                    let queue = model.state(for: surfaceID)?.queue,
@@ -950,6 +979,8 @@ private struct AgentQuickInputComposer: View {
     let backgroundColor: Color
     let backgroundOpacity: Double
 
+    @State private var isHistoryPresented = false
+
     /// Effective chrome background (see `TerminalController.terminalChromeBackground`).
     private var chromeBackground: Color { controller.terminalChromeBackground }
 
@@ -977,7 +1008,8 @@ private struct AgentQuickInputComposer: View {
                 },
                 onSend: controller.sendQuickInputDraft,
                 onQueue: controller.queueQuickInputDraft,
-                onCancel: controller.dismissQuickInput
+                onCancel: controller.dismissQuickInput,
+                onRecallHistory: model.recallLastSentText
             )
             .background(.clear)
 
@@ -1002,6 +1034,17 @@ private struct AgentQuickInputComposer: View {
                         .lineLimit(1)
                 }
                 Spacer()
+                Button {
+                    isHistoryPresented.toggle()
+                } label: {
+                    Label("History", systemImage: "clock.arrow.circlepath")
+                }
+                .buttonStyle(.plain)
+                .disabled(model.targetHistory.isEmpty || model.isEditingQueuedItem)
+                .help("Recall sent messages for this pane (↑ when input is empty)")
+                .popover(isPresented: $isHistoryPresented, arrowEdge: .bottom) {
+                    historyPopover
+                }
                 if !model.targetQueue.isEmpty {
                     AgentQuickInputQueueDepthIndicator(
                         count: model.targetQueue.count
@@ -1017,6 +1060,38 @@ private struct AgentQuickInputComposer: View {
         .background(chromeBackground)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Agent Quick Input")
+        .onChange(of: model.targetSurfaceID) { _ in isHistoryPresented = false }
+        .onChange(of: model.isPresented) { presented in
+            if !presented { isHistoryPresented = false }
+        }
+    }
+
+    private var historyPopover: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Sent History")
+                .font(.headline)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(model.targetHistory.indices.reversed()), id: \.self) { index in
+                        Button {
+                            let text = model.targetHistory[index]
+                            isHistoryPresented = false
+                            model.useHistoryText(text)
+                        } label: {
+                            Text(model.targetHistory[index])
+                                .font(.system(size: 12, design: .monospaced))
+                                .lineLimit(3)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(8)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .frame(width: 360, height: 260)
     }
 
     private var editorFont: NSFont {

@@ -11,6 +11,7 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
     let onSend: () -> Void
     let onQueue: () -> Void
     let onCancel: () -> Void
+    var onRecallHistory: (() -> Bool)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(text: $text)
@@ -48,6 +49,7 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
         editor.onSend = onSend
         editor.onQueue = onQueue
         editor.onCancel = onCancel
+        editor.onRecallHistory = onRecallHistory
         scrollView.documentView = editor
         scrollView.isHidden = !isPresented
         context.coordinator.editor = editor
@@ -68,8 +70,10 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
         editor.onSend = onSend
         editor.onQueue = onQueue
         editor.onCancel = onCancel
+        editor.onRecallHistory = onRecallHistory
         if !editor.hasMarkedText(), editor.string != text {
             editor.string = text
+            editor.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
             editor.resetLocalUndoManager()
         }
         configureTypography(for: editor)
@@ -173,6 +177,7 @@ final class ComposerTextView: NSTextView {
     var onSend: (() -> Void)?
     var onQueue: (() -> Void)?
     var onCancel: (() -> Void)?
+    var onRecallHistory: (() -> Bool)?
 
     private let localUndoManager = UndoManager()
     override var undoManager: UndoManager? { localUndoManager }
@@ -241,6 +246,12 @@ final class ComposerTextView: NSTextView {
     }
 
     override func keyDown(with event: NSEvent) {
+        if event.keyCode == 126,
+           event.modifierFlags.isDisjoint(with: [.command, .option, .control, .shift]),
+           string.isEmpty, !hasMarkedText(),
+           onRecallHistory?() == true {
+            return
+        }
         if event.keyCode == 53 {
             if hasMarkedText() {
                 super.keyDown(with: event)

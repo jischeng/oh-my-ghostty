@@ -38,6 +38,85 @@ struct AgentQuickInputTests {
         #expect(model.state(for: second)?.draft == "second draft")
     }
 
+    @Test func historyIsPaneScopedAndRecallDoesNotSendOrOverwriteDraft() {
+        let first = UUID()
+        let second = UUID()
+        let model = AgentQuickInputModel(dockHeight: 252)
+        model.present(for: first)
+        #expect(!model.recallLastSentText())
+        model.recordSentText("first\nmessage 🐱", for: first)
+        model.recordSentText("second pane", for: second)
+        #expect(model.targetHistory == ["first\nmessage 🐱"])
+        #expect(model.recallLastSentText())
+        #expect(model.draft == "first\nmessage 🐱")
+        #expect(model.isPresented)
+        #expect(model.targetQueue.isEmpty)
+        model.draft = "unfinished"
+        #expect(!model.recallLastSentText())
+        #expect(model.draft == "unfinished")
+        model.present(for: second)
+        #expect(model.recallLastSentText())
+        #expect(model.draft == "second pane")
+        model.removeState(for: first)
+        model.present(for: first)
+        #expect(model.targetHistory.isEmpty)
+    }
+
+    @Test func historyIsBoundedDeduplicatedAndMovesWithPaneState() throws {
+        let surfaceID = UUID()
+        let model = AgentQuickInputModel(dockHeight: 252)
+        model.present(for: surfaceID)
+        model.recordSentText(" \n", for: surfaceID)
+        model.draft = "not yet sent"
+        _ = model.enqueueDraft()
+        #expect(model.targetHistory.isEmpty)
+        for index in 0..<60 { model.recordSentText("message \(index)", for: surfaceID) }
+        model.recordSentText("message 59", for: surfaceID)
+        #expect(model.targetHistory.count == AgentQuickInputModel.historyLimit)
+        #expect(model.targetHistory.first == "message 10")
+        #expect(model.targetHistory.last == "message 59")
+        let transferred = try #require(model.state(for: surfaceID))
+        let destination = AgentQuickInputModel(dockHeight: 252)
+        destination.restore(transferred, for: surfaceID)
+        destination.present(for: surfaceID)
+        #expect(destination.targetHistory == model.targetHistory)
+        let queued = try #require(destination.targetQueue.first)
+        destination.editQueuedItem(queued.id, for: surfaceID)
+        destination.draft = ""
+        #expect(!destination.recallLastSentText())
+        destination.useHistoryText("do not overwrite edit")
+        #expect(destination.draft.isEmpty)
+    }
+
+    @Test func nativeEditorRecallsOnlyOnUnmodifiedUpWithEmptyInput() throws {
+        let editor = ComposerTextView()
+        var recalled = 0
+        editor.onRecallHistory = { recalled += 1; return true }
+        let up = try #require(keyEvent(keyCode: 126, modifiers: []))
+        editor.keyDown(with: up)
+        #expect(recalled == 1)
+        editor.string = "unfinished\ntext"
+        editor.keyDown(with: up)
+        #expect(recalled == 1)
+        editor.string = ""
+        let optionUp = try #require(keyEvent(keyCode: 126, modifiers: [.option]))
+        editor.keyDown(with: optionUp)
+        #expect(recalled == 1)
+        let shiftUp = try #require(keyEvent(keyCode: 126, modifiers: [.shift]))
+        editor.keyDown(with: shiftUp)
+        #expect(recalled == 1)
+        editor.setMarkedText(
+            "ni", selectedRange: NSRange(location: 2, length: 0),
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        editor.keyDown(with: up)
+        #expect(recalled == 1)
+    }
+
+    @Test func dockDoesNotWaitForAnAnimationToResizeTerminal() {
+        #expect(AgentQuickInputMotion.terminalResizeDeferralDuration == 0)
+    }
+
     @Test func queuedMessageCanBeEditedInPlace() throws {
         let surfaceID = UUID()
         let model = AgentQuickInputModel(dockHeight: 252)

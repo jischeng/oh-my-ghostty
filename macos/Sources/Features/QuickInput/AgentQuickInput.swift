@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 struct OMGKeyboardShortcut: Equatable {
@@ -284,7 +285,6 @@ struct AgentQuickInputQueueItem: Identifiable, Equatable, Sendable {
 struct AgentQuickInputPaneState: Equatable, Sendable {
     var draft = ""
     var queue: [AgentQuickInputQueueItem] = []
-    var history: [String] = []
 }
 
 @MainActor
@@ -309,11 +309,23 @@ final class AgentQuickInputModel: ObservableObject {
     private var isApplyingState = false
     private var pendingDockHeight: CGFloat?
     private var dockResizeWorkItem: DispatchWorkItem?
+    let historyStore: QuickInputHistoryStore
+    private(set) var historyTabID = UUID()
+    private var historyObserver: AnyCancellable?
 
-    init(dockHeight: CGFloat? = nil) {
+    init(dockHeight: CGFloat? = nil, historyStore: QuickInputHistoryStore? = nil) {
+        self.historyStore = historyStore ?? QuickInputHistoryStore()
         self.dockHeight = dockHeight ?? CGFloat(
             OhMyGhosttySettings.shared.quickInputHeight
         )
+        historyObserver = self.historyStore.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+    }
+
+    func bindHistory(to tabID: UUID, paneIDs: Set<UUID>) {
+        historyTabID = tabID
+        historyStore.bind(paneIDs: paneIDs, to: tabID)
     }
 
     var targetQueue: [AgentQuickInputQueueItem] {
@@ -321,20 +333,18 @@ final class AgentQuickInputModel: ObservableObject {
         return paneStates[targetSurfaceID]?.queue ?? []
     }
 
-    static let historyLimit = 50
+    static let historyLimit = QuickInputHistoryStore.perPaneLimit
 
+    // Up always recalls this pane's most recent send, regardless of the menu's
+    // visibility setting. Other panes must not silently replace its last input.
     var targetHistory: [String] {
-        guard let targetSurfaceID else { return [] }
-        return paneStates[targetSurfaceID]?.history ?? []
+        historyStore.visibleEntries(paneID: targetSurfaceID, tabID: historyTabID, scope: .pane)
+            .reversed().map(\.text)
     }
 
     /// Record only after submission succeeds, including manual/automatic queue sends.
     func recordSentText(_ text: String, for surfaceID: UUID) {
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        var state = paneStates[surfaceID] ?? .init()
-        if state.history.last != text { state.history.append(text) }
-        state.history = Array(state.history.suffix(Self.historyLimit))
-        paneStates[surfaceID] = state
+        historyStore.record(text, paneID: surfaceID, tabID: historyTabID)
     }
 
     @discardableResult
@@ -347,7 +357,7 @@ final class AgentQuickInputModel: ObservableObject {
 
     func useHistoryText(_ text: String) {
         guard !isEditingQueuedItem, targetSurfaceID != nil else { return }
-        draft = text
+        draft = draft.isEmpty ? text : draft + (draft.hasSuffix("\n") ? "" : "\n") + text
         statusMessage = nil
         requestFocus()
     }
@@ -980,6 +990,8 @@ private struct AgentQuickInputComposer: View {
     let backgroundOpacity: Double
 
     @State private var isHistoryPresented = false
+    @ObservedObject private var settings = OhMyGhosttySettings.shared
+    private var strings: SettingsStrings { SettingsStrings(language: settings.language) }
 
     /// Effective chrome background (see `TerminalController.terminalChromeBackground`).
     private var chromeBackground: Color { controller.terminalChromeBackground }
@@ -1037,11 +1049,11 @@ private struct AgentQuickInputComposer: View {
                 Button {
                     isHistoryPresented.toggle()
                 } label: {
-                    Label("History", systemImage: "clock.arrow.circlepath")
+                    Label(strings.quickInputHistoryButton, systemImage: "clock.arrow.circlepath")
                 }
                 .buttonStyle(.plain)
-                .disabled(model.targetHistory.isEmpty || model.isEditingQueuedItem)
-                .help("Recall sent messages for this pane (↑ when input is empty)")
+                .disabled(model.isEditingQueuedItem)
+                .help(strings.quickInputHistoryButtonHelp)
                 .popover(isPresented: $isHistoryPresented, arrowEdge: .bottom) {
                     historyPopover
                 }
@@ -1067,31 +1079,10 @@ private struct AgentQuickInputComposer: View {
     }
 
     private var historyPopover: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Sent History")
-                .font(.headline)
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 4) {
-                    ForEach(Array(model.targetHistory.indices.reversed()), id: \.self) { index in
-                        Button {
-                            let text = model.targetHistory[index]
-                            isHistoryPresented = false
-                            model.useHistoryText(text)
-                        } label: {
-                            Text(model.targetHistory[index])
-                                .font(.system(size: 12, design: .monospaced))
-                                .lineLimit(3)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(8)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
+        QuickInputHistoryView(model: model, store: model.historyStore, settings: settings) { text in
+            isHistoryPresented = false
+            model.useHistoryText(text)
         }
-        .padding(12)
-        .frame(width: 360, height: 260)
     }
 
     private var editorFont: NSFont {

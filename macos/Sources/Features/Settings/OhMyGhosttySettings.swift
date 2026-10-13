@@ -407,6 +407,22 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Last committed Agent Quick Input dock height in points.",
             requiresNewWindow: false, category: "keyboard"),
         .init(
+            id: "keyboard.quickInputHistoryScope", type: .enumeration,
+            defaultValue: QuickInputHistoryScope.pane.rawValue,
+            allowedValues: QuickInputHistoryScope.allCases.map(\.rawValue), minimum: nil, maximum: nil,
+            description: "Visible Quick Input history: current pane, current tab, or all windows.",
+            requiresNewWindow: false, category: "keyboard"),
+        .init(
+            id: "keyboard.quickInputHistoryRetentionDays", type: .number, defaultValue: "7",
+            allowedValues: nil, minimum: 1, maximum: 365,
+            description: "Quick Input history expiration in days, including in-memory history.",
+            requiresNewWindow: false, category: "keyboard"),
+        .init(
+            id: "keyboard.quickInputHistoryKeepAfterQuit", type: .boolean, defaultValue: "true",
+            allowedValues: nil, minimum: nil, maximum: nil,
+            description: "Keep Quick Input history on disk after quitting. Disabling deletes the saved copy.",
+            requiresNewWindow: false, category: "keyboard"),
+        .init(
             id: "terminal.resizeRendering", type: .enumeration,
             defaultValue: TerminalResizeRenderingMode.onRelease.rawValue,
             allowedValues: TerminalResizeRenderingMode.allCases.map(\.rawValue),
@@ -711,6 +727,23 @@ final class OhMyGhosttySettings: ObservableObject {
                 persist("keyboard.quickInputHeight", clamped)
             }
         }
+    }
+    @Published var quickInputHistoryScope: QuickInputHistoryScope = .pane {
+        didSet { persist("keyboard.quickInputHistoryScope", quickInputHistoryScope.rawValue) }
+    }
+    @Published var quickInputHistoryRetentionDays: Double = 7 {
+        didSet {
+            let value = quickInputHistoryRetentionDays.isFinite
+                ? min(max(quickInputHistoryRetentionDays.rounded(), 1), 365) : 7
+            if quickInputHistoryRetentionDays != value {
+                quickInputHistoryRetentionDays = value
+            } else {
+                persist("keyboard.quickInputHistoryRetentionDays", value)
+            }
+        }
+    }
+    @Published var quickInputHistoryKeepAfterQuit = true {
+        didSet { persist("keyboard.quickInputHistoryKeepAfterQuit", quickInputHistoryKeepAfterQuit) }
     }
     @Published var terminalResizeRendering: TerminalResizeRenderingMode = .onRelease {
         didSet { persist("terminal.resizeRendering", terminalResizeRendering.rawValue) }
@@ -1080,6 +1113,11 @@ final class OhMyGhosttySettings: ObservableObject {
                 fallback: Double(AgentQuickInputMetrics.defaultHeight),
                 range: 140...480
             )
+            quickInputHistoryScope = enumValue("keyboard.quickInputHistoryScope", fallback: .pane)
+            quickInputHistoryRetentionDays = numberValue(
+                "keyboard.quickInputHistoryRetentionDays", fallback: 7, range: 1...365
+            ).rounded()
+            quickInputHistoryKeepAfterQuit = boolValue("keyboard.quickInputHistoryKeepAfterQuit", fallback: true)
             terminalResizeRendering = enumValue(
                 "terminal.resizeRendering",
                 fallback: .onRelease

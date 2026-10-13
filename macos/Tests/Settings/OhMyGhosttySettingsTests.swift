@@ -88,6 +88,37 @@ struct OhMyGhosttySettingsTests {
         #expect(disk.gitAutoFetchInterval == 10)
     }
 
+    @Test func quickInputHistorySettingsDefaultClampAndRoundTrip() throws {
+        let (settings, url) = temporarySettings()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        #expect(settings.quickInputHistoryScope == .pane)
+        #expect(settings.quickInputHistoryRetentionDays == 7)
+        #expect(settings.quickInputHistoryKeepAfterQuit)
+        settings.quickInputHistoryScope = .tab
+        settings.quickInputHistoryRetentionDays = 30
+        settings.quickInputHistoryKeepAfterQuit = false
+        let restored = OhMyGhosttySettings(fileURL: url)
+        #expect(restored.quickInputHistoryScope == .tab)
+        #expect(restored.quickInputHistoryRetentionDays == 30)
+        #expect(!restored.quickInputHistoryKeepAfterQuit)
+        settings.quickInputHistoryRetentionDays = 0
+        #expect(settings.quickInputHistoryRetentionDays == 1)
+        settings.quickInputHistoryRetentionDays = 400
+        #expect(settings.quickInputHistoryRetentionDays == 365)
+        settings.quickInputHistoryRetentionDays = 3.4
+        #expect(settings.quickInputHistoryRetentionDays == 3)
+        settings.quickInputHistoryRetentionDays = .nan
+        #expect(settings.quickInputHistoryRetentionDays == 7)
+        settings.quickInputHistoryScope = .global
+        #expect(OhMyGhosttySettings(fileURL: url).quickInputHistoryScope == .global)
+        let english = SettingsStrings(language: .english)
+        let chinese = SettingsStrings(language: .simplifiedChinese)
+        #expect(english.quickInputHistoryScopeName(.tab) == "Current Tab")
+        #expect(chinese.quickInputHistoryScopeName(.tab) == "当前 Tab")
+        #expect(english.quickInputHistoryRetentionValue(7) == "7 days")
+        #expect(chinese.quickInputHistoryRetentionValue(7) == "7 天")
+    }
+
     @Test func typedSettingsRoundTripThroughHumanReadableFile() throws {
         let (settings, url) = temporarySettings()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
@@ -400,6 +431,9 @@ struct OhMyGhosttySettingsTests {
         #expect(descriptors.contains { $0.id == "agents.openQuickInputOnComplete" })
         #expect(descriptors.contains { $0.id == "keyboard.quickInput" })
         #expect(descriptors.contains { $0.id == "keyboard.quickInputHeight" })
+        #expect(descriptors.contains { $0.id == "keyboard.quickInputHistoryScope" })
+        #expect(descriptors.contains { $0.id == "keyboard.quickInputHistoryRetentionDays" })
+        #expect(descriptors.contains { $0.id == "keyboard.quickInputHistoryKeepAfterQuit" })
         #expect(descriptors.contains { $0.id == "terminal.resizeRendering" })
         #expect(descriptors.contains { $0.id == "editor.keymapPreset" })
         #expect(descriptors.contains { $0.id == "editor.backgroundMode" })

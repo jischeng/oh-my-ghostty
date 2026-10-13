@@ -511,6 +511,9 @@ struct SettingsView: View {
                         .foregroundStyle(.orange)
                     }
                 }
+                OMGSettingsSection(strings.quickInputHistoryTitle) {
+                    QuickInputHistorySettingsView(settings: settings)
+                }
                 OMGSettingsSection(strings.rightSidebarShortcutsSection) {
                     Text(strings.rightSidebarShortcutsCaption)
                         .font(.caption)

@@ -410,6 +410,48 @@ struct SettingsStrings: Equatable, Sendable {
             "拖动输入框上方的分隔线可调整高度，并会记住最后确认的高度。"
         )
     }
+    var quickInputHistoryTitle: String { t("Sent History", "发送历史") }
+    var quickInputHistoryButton: String { t("History", "历史") }
+    var quickInputHistoryButtonHelp: String {
+        t("Search sent messages; ↑ recalls this pane's last send when input is empty.",
+          "搜索已发送内容；输入为空时按 ↑ 恢复当前 Pane 上次发送的内容。")
+    }
+    var quickInputHistorySearch: String { t("Search messages…", "搜索历史内容…") }
+    var quickInputHistoryClearSearch: String { t("Clear search", "清除搜索") }
+    var quickInputHistoryEmpty: String { t("No history in this scope yet", "当前范围暂无发送历史") }
+    var quickInputHistoryNoMatches: String { t("No matching messages", "没有匹配的历史内容") }
+    var quickInputHistoryAppendHint: String {
+        t("Select to append to your draft · Never sends automatically",
+          "点击追加到草稿 · 不会自动发送")
+    }
+    var quickInputHistoryStorageError: String {
+        t("History storage failed. Current in-memory history is still available.",
+          "历史存储失败，当前内存中的历史仍可使用。")
+    }
+    var quickInputHistoryScopeLabel: String { t("History Visibility", "历史可见范围") }
+    func quickInputHistoryScopeName(_ scope: QuickInputHistoryScope) -> String {
+        switch scope {
+        case .pane: t("Current Pane", "当前 Pane")
+        case .tab: t("Current Tab", "当前 Tab")
+        case .global: t("All Windows", "所有窗口")
+        }
+    }
+    var quickInputHistoryRetentionLabel: String { t("History Expiration", "历史过期时间") }
+    var quickInputHistoryDayUnit: String { t("days", "天") }
+    func quickInputHistoryRetentionValue(_ days: Int) -> String { t("\(days) days", "\(days) 天") }
+    var quickInputHistoryKeepLabel: String { t("Keep History After Quitting OMG", "退出 OMG 后保留历史") }
+    var quickInputHistoryPrivacyCaption: String {
+        t("Stored locally, unencrypted. Messages may contain sensitive data. Turning this off deletes the saved copy; memory history remains until exit. Expiration applies in both modes.",
+          "历史在本机明文保存，内容可能包含敏感信息。关闭后删除磁盘副本，内存历史保留至退出；两种模式都按过期时间清理。")
+    }
+    var quickInputHistoryClearButton: String { t("Clear All Quick Input History…", "清空所有 Quick Input 历史…") }
+    var quickInputHistoryClearTitle: String { t("Clear all Quick Input history?", "清空所有 Quick Input 历史？") }
+    var quickInputHistoryClearMessage: String {
+        t("Removes history from all panes and tabs, including the saved copy. Drafts and queues are unchanged.",
+          "删除所有 Pane 和 Tab 的发送历史及磁盘副本，不影响草稿或待发送队列。")
+    }
+    var quickInputHistoryClearConfirm: String { t("Clear History", "清空历史") }
+    var quickInputHistoryClearCancel: String { t("Cancel", "取消") }
     var resetShortcutButton: String { t("Reset", "重置") }
     var rightSidebarShortcutsSection: String { t("Right Sidebar Shortcuts", "右侧边栏快捷键") }
     var rightSidebarShortcutsCaption: String {

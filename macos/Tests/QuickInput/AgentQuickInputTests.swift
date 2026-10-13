@@ -59,6 +59,9 @@ struct AgentQuickInputTests {
         #expect(model.draft == "second pane")
         model.removeState(for: first)
         model.present(for: first)
+        #expect(model.targetHistory == ["first\nmessage 🐱"])
+        // A newly created pane never inherits a closed pane's history.
+        model.present(for: UUID())
         #expect(model.targetHistory.isEmpty)
     }
 
@@ -76,7 +79,8 @@ struct AgentQuickInputTests {
         #expect(model.targetHistory.first == "message 10")
         #expect(model.targetHistory.last == "message 59")
         let transferred = try #require(model.state(for: surfaceID))
-        let destination = AgentQuickInputModel(dockHeight: 252)
+        let destination = AgentQuickInputModel(dockHeight: 252, historyStore: model.historyStore)
+        destination.bindHistory(to: UUID(), paneIDs: [surfaceID])
         destination.restore(transferred, for: surfaceID)
         destination.present(for: surfaceID)
         #expect(destination.targetHistory == model.targetHistory)
@@ -86,6 +90,20 @@ struct AgentQuickInputTests {
         #expect(!destination.recallLastSentText())
         destination.useHistoryText("do not overwrite edit")
         #expect(destination.draft.isEmpty)
+    }
+
+    @Test func selectingHistoryAppendsWithoutSendingOrChangingQueue() {
+        let model = AgentQuickInputModel(dockHeight: 252)
+        model.present(for: UUID())
+        model.draft = "existing draft"
+        model.useHistoryText("old\nmessage")
+        #expect(model.draft == "existing draft\nold\nmessage")
+        model.draft = "existing draft\n"
+        model.useHistoryText("another")
+        #expect(model.draft == "existing draft\nanother")
+        #expect(model.targetQueue.isEmpty)
+        #expect(model.targetHistory.isEmpty)
+        #expect(model.isPresented)
     }
 
     @Test func nativeEditorRecallsOnlyOnUnmodifiedUpWithEmptyInput() throws {

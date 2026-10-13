@@ -302,6 +302,27 @@
       "minimum": 140,
       "type": "number"
     },
+    "keyboard.quickInputHistoryKeepAfterQuit": {
+      "category": "keyboard",
+      "default": true,
+      "description": "Keep Quick Input history on disk after quitting. Disabling deletes the saved copy.",
+      "type": "boolean"
+    },
+    "keyboard.quickInputHistoryRetentionDays": {
+      "category": "keyboard",
+      "default": 7,
+      "description": "Quick Input history expiration in days, including in-memory history.",
+      "maximum": 365,
+      "minimum": 1,
+      "type": "number"
+    },
+    "keyboard.quickInputHistoryScope": {
+      "category": "keyboard",
+      "default": "pane",
+      "description": "Visible Quick Input history: current pane, current tab, or all windows.",
+      "enum": ["pane", "tab", "global"],
+      "type": "string"
+    },
     "notifications.attention": {
       "category": "agents",
       "default": true,

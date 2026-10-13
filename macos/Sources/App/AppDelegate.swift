@@ -557,6 +557,8 @@ class AppDelegate: NSObject,
 
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated {
+            QuickInputHistoryStore.shared.pruneExpired()
+            QuickInputHistoryStore.shared.flushPendingWrites()
             if OhMyGhosttySettings.shared.startupMode.restoresSessions {
                 ShellScrollbackRestoreStore.captureOpenSurfaces()
             } else {

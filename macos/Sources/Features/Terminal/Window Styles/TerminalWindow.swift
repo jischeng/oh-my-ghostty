@@ -29,7 +29,6 @@ class TerminalWindow: NSWindow {
     let inspectorToggleAccessory = NSTitlebarAccessoryViewController()
     var inspectorToggleWidthConstraint: NSLayoutConstraint?
     var inspectorToggleCancellable: AnyCancellable?
-    var inspectorCollapseWorkItem: DispatchWorkItem?
     var inspectorAppearanceWorkItem: DispatchWorkItem?
     let inspectorTitlebarPresentation = InspectorTitlebarPresentation()
 

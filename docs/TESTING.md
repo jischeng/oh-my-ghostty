@@ -13,7 +13,8 @@ release does not automatically require every unrelated feature suite.
 2. **Broad routine regression**: all routine Swift suites for shared host/core,
    build/test infrastructure, unmapped changes, or an explicitly requested sweep.
 3. **Optional interactive desktop**: suites or individual tests tagged
-   `.interactiveDesktop`: `VerticalTabMouseTests` and the visual
+   `.interactiveDesktop`: `VerticalTabMouseTests`, `QuickInputFooterMouseTests`
+   (History icon/gap/text/padding mouse hit coverage), and the visual
    `VerticalTabsIntegrationTests.appKitTabGroupDrivesVerticalTabsWithoutRecreatingSurfaces`,
    and `TerminalLinkHoverTests.commandHoverRemainsStable` (Cmd-link hover in single/split panes).
    Real CoreDrag, menu focus routing, native window appearance, and screenshots

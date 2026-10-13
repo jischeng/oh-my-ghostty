@@ -1025,20 +1025,18 @@ private struct AgentQuickInputComposer: View {
             )
             .background(.clear)
 
-            HStack(spacing: 12) {
-                if model.isEditingQueuedItem {
-                    Text("⌘↩ Save Edit")
-                    Text("·")
-                    Text("⌥⌘↩ Move to Queue End")
-                    Text("·")
-                    Text("Esc Cancel")
-                } else {
-                    Text("⌘↩ Send")
-                    Text("·")
-                    Text("⌥⌘↩ Queue")
-                    Text("·")
-                    Text("Esc Cancel")
-                }
+            HStack(spacing: QuickInputFooterStyle.itemSpacing) {
+                QuickInputShortcutHint(
+                    symbols: ["command", "return"],
+                    title: model.isEditingQueuedItem ? strings.quickInputSaveTitle : strings.quickInputSendTitle
+                )
+                Text("·").foregroundStyle(.tertiary)
+                QuickInputShortcutHint(
+                    symbols: ["option", "command", "return"],
+                    title: model.isEditingQueuedItem ? strings.quickInputMoveTitle : strings.quickInputQueueTitle
+                )
+                Text("·").foregroundStyle(.tertiary)
+                QuickInputShortcutHint(symbols: ["escape"], title: strings.quickInputCancelTitle)
                 if let statusMessage = model.statusMessage {
                     Text("·")
                     Text(statusMessage)
@@ -1046,12 +1044,9 @@ private struct AgentQuickInputComposer: View {
                         .lineLimit(1)
                 }
                 Spacer()
-                Button {
+                QuickInputHistoryButton(title: strings.quickInputHistoryButton) {
                     isHistoryPresented.toggle()
-                } label: {
-                    Label(strings.quickInputHistoryButton, systemImage: "clock.arrow.circlepath")
                 }
-                .buttonStyle(.plain)
                 .disabled(model.isEditingQueuedItem)
                 .help(strings.quickInputHistoryButtonHelp)
                 .popover(isPresented: $isHistoryPresented, arrowEdge: .bottom) {
@@ -1064,7 +1059,7 @@ private struct AgentQuickInputComposer: View {
                     .help("Queued messages")
                 }
             }
-            .font(.system(size: 13, design: .monospaced))
+            .font(QuickInputFooterStyle.font)
             .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 14)

@@ -7,10 +7,6 @@ enum TerminalShellStyle {
     static let dividerWidth: CGFloat = 1
     static let minimumTerminalWidth: CGFloat = 320
     static let resizeOverlap = resizeHitWidth - dividerWidth
-    static let sidebarTransitionDuration = 0.18
-    static let sidebarTransitionAnimation = Animation.easeOut(
-        duration: sidebarTransitionDuration
-    )
 
     static func presentedInspectorWidth(
         preferred: CGFloat,
@@ -122,29 +118,20 @@ struct TerminalSidebarTransitionContainer<Content: View>: View {
         case right
 
         var alignment: Alignment { self == .left ? .leading : .trailing }
-        func hiddenOffset(for width: CGFloat) -> CGFloat {
-            self == .left ? -width : width
-        }
     }
 
     let isVisible: Bool
     let width: CGFloat
     let edge: Edge
-    let animationsEnabled: Bool
     let retainsContent: Bool
     let background: Color
     let content: Content
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var occupiesSpace: Bool
     @State private var hasMounted: Bool
-    @State private var revealProgress: CGFloat
-    @State private var transitionTask: Task<Void, Never>?
 
     init(
         isVisible: Bool,
         width: CGFloat,
         edge: Edge,
-        animationsEnabled: Bool,
         retainsContent: Bool = false,
         background: Color,
         @ViewBuilder content: () -> Content
@@ -152,83 +139,35 @@ struct TerminalSidebarTransitionContainer<Content: View>: View {
         self.isVisible = isVisible
         self.width = width
         self.edge = edge
-        self.animationsEnabled = animationsEnabled
         self.retainsContent = retainsContent
         self.background = background
         self.content = content()
-        self._occupiesSpace = State(initialValue: isVisible)
         self._hasMounted = State(initialValue: isVisible)
-        self._revealProgress = State(initialValue: isVisible ? 1 : 0)
     }
 
     var body: some View {
         ZStack(alignment: edge.alignment) {
-            if occupiesSpace || (retainsContent && hasMounted) {
+            if isVisible || (retainsContent && hasMounted) {
                 content
-                    .transaction { if retainsContent { $0.animation = nil } }
                     .frame(width: width, alignment: edge.alignment)
-                    .offset(
-                        x: (1 - revealProgress) * edge.hiddenOffset(for: width)
-                    )
-                    .opacity(occupiesSpace ? 1 : 0)
-                    .allowsHitTesting(isVisible && revealProgress == 1)
-                    .accessibilityHidden(!isVisible || revealProgress != 1)
+                    .opacity(isVisible ? 1 : 0)
+                    .allowsHitTesting(isVisible)
+                    .accessibilityHidden(!isVisible)
             }
         }
         .frame(
-            width: occupiesSpace ? width : 0,
+            width: isVisible ? width : 0,
             alignment: edge.alignment
         )
         .background(background)
         .clipped()
-        .onAppear { synchronizeImmediately() }
-        .onChange(of: isVisible) { visible in transition(to: visible) }
-        .onChange(of: reduceMotion) { _ in synchronizeImmediately() }
-        .onChange(of: animationsEnabled) { _ in synchronizeImmediately() }
-        .onDisappear { transitionTask?.cancel() }
-    }
-
-    private func transition(to visible: Bool) {
-        if visible { hasMounted = true }
-        transitionTask?.cancel()
-        transitionTask = nil
-        guard !reduceMotion, animationsEnabled else {
-            occupiesSpace = visible
-            revealProgress = visible ? 1 : 0
-            return
+        // Match Quick Input: layout and visibility change together, without
+        // retaining a slide-out width or inheriting unrelated parent animations.
+        .transaction { $0.animation = nil }
+        .onAppear { if isVisible { hasMounted = true } }
+        .onChange(of: isVisible) { visible in
+            if visible { hasMounted = true }
         }
-
-        if visible {
-            let needsMount = !occupiesSpace
-            occupiesSpace = true
-            if needsMount { revealProgress = 0 }
-            transitionTask = Task { @MainActor in
-                if needsMount { await Task.yield() }
-                guard !Task.isCancelled else { return }
-                withAnimation(TerminalShellStyle.sidebarTransitionAnimation) {
-                    revealProgress = 1
-                }
-            }
-        } else {
-            withAnimation(TerminalShellStyle.sidebarTransitionAnimation) {
-                revealProgress = 0
-            }
-            transitionTask = Task { @MainActor in
-                try? await Task.sleep(for: .seconds(
-                    TerminalShellStyle.sidebarTransitionDuration
-                ))
-                guard !Task.isCancelled else { return }
-                occupiesSpace = false
-            }
-        }
-    }
-
-    private func synchronizeImmediately() {
-        transitionTask?.cancel()
-        transitionTask = nil
-        occupiesSpace = isVisible
-        if isVisible { hasMounted = true }
-        revealProgress = isVisible ? 1 : 0
     }
 }
 
@@ -364,44 +303,10 @@ extension TerminalWindow {
             let targetWidth = isVisible
                 ? presentedWidth
                 : TerminalTitlebarMetrics.inspectorCollapsedWidth
-            self.inspectorCollapseWorkItem?.cancel()
-            self.inspectorCollapseWorkItem = nil
-            if isVisible {
-                // Expand the AppKit accessory before revealing Plugin controls.
-                // The next-turn reveal then animates with the content pane rather
-                // than appearing in the old collapsed frame first.
-                self.applyInspectorAccessoryWidth(
-                    targetWidth,
-                    controller: controller
-                )
-                guard !self.inspectorTitlebarPresentation.isVisible else { return }
-                let workItem = DispatchWorkItem { [weak self, weak controller] in
-                    guard let self, let controller,
-                          controller.tabLayoutState.isInspectorVisible else { return }
-                    self.inspectorCollapseWorkItem = nil
-                    self.inspectorTitlebarPresentation.setVisible(true)
-                }
-                self.inspectorCollapseWorkItem = workItem
-                DispatchQueue.main.async(execute: workItem)
-            } else {
-                // Animate Plugin controls out with the pane, then contract the
-                // accessory only after the shared transition duration.
-                self.inspectorTitlebarPresentation.setVisible(false)
-                let workItem = DispatchWorkItem { [weak self, weak controller] in
-                    guard let self, let controller,
-                          !controller.tabLayoutState.isInspectorVisible else { return }
-                    self.inspectorCollapseWorkItem = nil
-                    self.applyInspectorAccessoryWidth(
-                        targetWidth,
-                        controller: controller
-                    )
-                }
-                self.inspectorCollapseWorkItem = workItem
-                DispatchQueue.main.asyncAfter(
-                    deadline: .now() + TerminalShellStyle.sidebarTransitionDuration,
-                    execute: workItem
-                )
-            }
+            // Resize the native accessory and its controls in the same turn
+            // as the pane. No delayed collapse or separate titlebar animation.
+            self.applyInspectorAccessoryWidth(targetWidth, controller: controller)
+            self.inspectorTitlebarPresentation.setVisible(isVisible)
         }
 
         // AppKit may reset an already-visible transparent window to opaque when
@@ -512,7 +417,6 @@ private struct InspectorTitlebarControls: View {
                 }
                 .padding(.leading, titlebarLeadingInset)
                 .frame(width: pluginWidth, alignment: .leading)
-                .transition(.opacity.combined(with: .offset(x: 6, y: 0)))
             } else {
                 Spacer(minLength: 0)
             }
@@ -530,10 +434,7 @@ private struct InspectorTitlebarControls: View {
         }
         .frame(width: presentation.width, alignment: .trailing)
         .frame(maxHeight: .infinity)
-        .animation(
-            TerminalShellStyle.sidebarTransitionAnimation,
-            value: inspectorVisible
-        )
+        .transaction { $0.animation = nil }
     }
 
     private func select(_ paneID: String) {
@@ -594,7 +495,6 @@ struct TerminalShellLayoutContainer<Content: View>: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let selectedPresentation = controller.selectedTabID == ObjectIdentifier(controller)
             let leftVisible = showsTabSidebar && layoutState.isSidebarVisible
             let leftWidth = presentedSidebarWidth + TerminalShellStyle.dividerWidth
             let inspectorWidth = presentedInspectorWidth(totalWidth: geometry.size.width)
@@ -606,7 +506,6 @@ struct TerminalShellLayoutContainer<Content: View>: View {
                     isVisible: leftVisible,
                     width: leftWidth,
                     edge: .left,
-                    animationsEnabled: selectedPresentation,
                     background: chromeBackground
                 ) {
                     HStack(spacing: 0) {
@@ -640,7 +539,6 @@ struct TerminalShellLayoutContainer<Content: View>: View {
                     isVisible: rightVisible,
                     width: rightWidth,
                     edge: .right,
-                    animationsEnabled: selectedPresentation,
                     retainsContent: true,
                     background: chromeBackground
                 ) {

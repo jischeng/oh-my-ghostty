@@ -2141,8 +2141,11 @@ not a plugin API or a ProseMirror view.
 Inspector visibility is independent of its native view lifetime. After the
 first opening, the sidebar retains its pane deck until its host is removed.
 Hiding still sends `disappeared` immediately and showing sends `appeared`;
-hidden context updates must not reactivate providers. Slide transitions move
-the fixed-width shell without animating layout inside provider content.
+hidden context updates must not reactivate providers. Sidebar open/close is
+immediate, matching Quick Input: visibility, shell width and native titlebar
+accessory width update together, without slide/fade animations or a delayed
+collapse. Retained hidden content cannot receive pointer events or appear in
+accessibility navigation. This does not change provider lifecycle semantics.
 
 The built-in Git sidebar shares one search and List/Folder toolbar below its
 History, Changes and Branches tabs. Search text is independent per tab; the

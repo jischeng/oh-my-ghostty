@@ -377,7 +377,7 @@ struct SettingsStrings: Equatable, Sendable {
     var editorTabWidthLabel: String { t("Tab Width", "Tab 宽度") }
     var resetEditorButton: String { t("Reset Editor Settings", "重置编辑器设置") }
 
-    var quickInputSection: String { t("Agent Quick Input", "Agent 快速输入") }
+    var quickInputSection: String { t("Quick Input", "快速输入") }
     var openQuickInputOnAgentStartLabel: String {
         t("Open Composer When Agent Starts", "打开 Agent 时展开输入框")
     }
@@ -410,6 +410,11 @@ struct SettingsStrings: Equatable, Sendable {
             "拖动输入框上方的分隔线可调整高度，并会记住最后确认的高度。"
         )
     }
+    var quickInputSendTitle: String { t("Send", "发送") }
+    var quickInputQueueTitle: String { t("Queue", "入队") }
+    var quickInputCancelTitle: String { t("Cancel", "取消") }
+    var quickInputSaveTitle: String { t("Save Edit", "保存修改") }
+    var quickInputMoveTitle: String { t("Move to Queue End", "移到队尾") }
     var quickInputHistoryTitle: String { t("Sent History", "发送历史") }
     var quickInputHistoryButton: String { t("History", "历史") }
     var quickInputHistoryButtonHelp: String {

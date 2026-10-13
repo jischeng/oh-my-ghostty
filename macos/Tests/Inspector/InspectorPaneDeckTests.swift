@@ -17,7 +17,7 @@ struct InspectorPaneDeckTests {
             HStack {
                 Spacer()
                 TerminalSidebarTransitionContainer(isVisible: visible, width: 280, edge: .right,
-                    animationsEnabled: true, retainsContent: true, background: .clear) {
+                    retainsContent: true, background: .clear) {
                     MountProbe { mounts += 1; return NSView() }
                 }
             }
@@ -34,11 +34,33 @@ struct InspectorPaneDeckTests {
         #expect(mounts == 0)
         for visible in [true, false, true, false, true] {
             host.rootView = root(visible)
-            try await Task.sleep(for: .milliseconds(240))
+            // Content must already be available before the former 180ms
+            // slide-out/reveal interval, and must stay mounted across toggles.
+            try await Task.sleep(for: .milliseconds(60))
             host.layoutSubtreeIfNeeded()
             #expect(mounts == 1)
         }
     }
+    @Test func sidebarLayoutUpdatesImmediatelyForBothEdges() {
+        for edge in [TerminalSidebarTransitionContainer<Color>.Edge.left, .right] {
+            func root(_ visible: Bool) -> some View {
+                TerminalSidebarTransitionContainer(isVisible: visible, width: 280, edge: edge,
+                    retainsContent: true, background: .clear) { Color.red }
+            }
+            let host = NSHostingView(rootView: root(false))
+            #expect(host.fittingSize.width == 0)
+            host.rootView = root(true)
+            host.layoutSubtreeIfNeeded()
+            #expect(host.fittingSize.width == 280)
+            host.rootView = root(false)
+            host.layoutSubtreeIfNeeded()
+            #expect(host.fittingSize.width == 0)
+            host.rootView = root(true)
+            host.layoutSubtreeIfNeeded()
+            #expect(host.fittingSize.width == 280)
+        }
+    }
+
     @Test func switchingVisitedPanesRetainsNativeViewsAndBoundsTheCacheToItsTab() async throws {
         let registry = InspectorRegistry()
         let context = InspectorPaneContext(tabID: UUID(), surfaceID: UUID(), title: "Test", workingDirectory: "/repo")

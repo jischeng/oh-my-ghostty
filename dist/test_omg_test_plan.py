@@ -13,7 +13,13 @@ import omg_test_plan as planner
 ROOT = Path(__file__).resolve().parent.parent
 VISUAL_DESKTOP_TEST = "GhosttyTests/VerticalTabsIntegrationTests/appKitTabGroupDrivesVerticalTabsWithoutRecreatingSurfaces()"
 LINK_HOVER_DESKTOP_TEST = "GhosttyTests/TerminalLinkHoverTests/commandHoverRemainsStable()"
-DESKTOP_TESTS = {"GhosttyTests/VerticalTabMouseTests", VISUAL_DESKTOP_TEST, LINK_HOVER_DESKTOP_TEST}
+QUICK_INPUT_DESKTOP_TEST = "GhosttyTests/QuickInputFooterMouseTests"
+DESKTOP_TESTS = {
+    "GhosttyTests/VerticalTabMouseTests",
+    QUICK_INPUT_DESKTOP_TEST,
+    VISUAL_DESKTOP_TEST,
+    LINK_HOVER_DESKTOP_TEST,
+}
 
 
 def add_suite(root, relative, name, desktop=False):
@@ -71,7 +77,7 @@ class PlannerTests(unittest.TestCase):
         self.assertIn("GhosttyTests/VerticalTabDragLifecycleTests", result["only_testing"])
         self.assertIn("GhosttyTests/VerticalTabsIntegrationTests", result["only_testing"])
         self.assertNotIn("GhosttyTests/VerticalTabMouseTests", result["only_testing"])
-        self.assertEqual(set(result["deferred_desktop"]), DESKTOP_TESTS)
+        self.assertEqual(set(result["deferred_desktop"]), DESKTOP_TESTS - {QUICK_INPUT_DESKTOP_TEST})
         self.assertIn("GhosttyTests/VerticalTabsIntegrationTests", result["only_testing"])
         self.assertIn(VISUAL_DESKTOP_TEST, result["skip_testing"])
 
@@ -84,7 +90,7 @@ class PlannerTests(unittest.TestCase):
     def test_native_suite_or_method_requires_explicit_opt_in(self):
         for test in ["GhosttyTests/VerticalTabMouseTests", "GhosttyTests/VerticalTabMouseTests/mouseSelectionKeepsWorkingAcrossNativeWindows",
                      VISUAL_DESKTOP_TEST, VISUAL_DESKTOP_TEST[:-2],
-                     LINK_HOVER_DESKTOP_TEST, LINK_HOVER_DESKTOP_TEST[:-2]]:
+                     LINK_HOVER_DESKTOP_TEST, LINK_HOVER_DESKTOP_TEST[:-2], QUICK_INPUT_DESKTOP_TEST]:
             with self.subTest(test=test), self.assertRaisesRegex(ValueError, "requires --include-desktop-tests"):
                 self.plan(only_testing=[test])
             self.assertEqual(self.plan(only_testing=[test], include_desktop=True)["only_testing"], [test])

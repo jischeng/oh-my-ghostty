@@ -39,6 +39,16 @@ struct QuickInputHistoryStoreTests {
         try await Task.sleep(for: .milliseconds(100))
         hosting.layoutSubtreeIfNeeded()
         let compactHeight = hosting.fittingSize.height
+        #expect(compactHeight < 160)
+        store.record("Another short prompt", paneID: pane, tabID: tab)
+        hosting.layoutSubtreeIfNeeded()
+        hosting.display()
+        try await Task.sleep(for: .milliseconds(100))
+        hosting.layoutSubtreeIfNeeded()
+        let twoRowHeight = hosting.fittingSize.height
+        // Two short entries must both fit, without inheriting a one-row viewport.
+        #expect(twoRowHeight > compactHeight + 25)
+        #expect(twoRowHeight < 220)
         for index in 0..<15 {
             store.record("Prompt \(index)\nSecond line with context\nThird line", paneID: pane, tabID: tab)
         }
@@ -49,7 +59,8 @@ struct QuickInputHistoryStoreTests {
         let expandedHeight = hosting.fittingSize.height
         #expect(hosting.fittingSize.width == 400)
         #expect(compactHeight < expandedHeight)
-        #expect(expandedHeight < 550)
+        #expect(expandedHeight > 480)
+        #expect(expandedHeight < 600)
         // Keep an offscreen rendering for human layout review, without showing
         // a window, taking focus, or touching the installed release app.
         hosting.frame.size = hosting.fittingSize

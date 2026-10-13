@@ -1,9 +1,22 @@
+import AppKit
 import SwiftUI
 
-private struct QuickInputHistoryHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 88
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
+private enum QuickInputHistoryLayout {
+    static func listHeight(_ entries: [QuickInputHistoryEntry]) -> CGFloat {
+        let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = 1
+        let lineHeight = ceil(font.ascender - font.descender + font.leading) + 1
+        let height = entries.reduce(CGFloat(0)) { height, entry in
+            let text = NSAttributedString(string: String(entry.text.prefix(400)), attributes: [
+                .font: font, .paragraphStyle: paragraph,
+            ])
+            let bounds = text.boundingRect(with: NSSize(width: 368, height: CGFloat.greatestFiniteMagnitude),
+                                           options: [.usesLineFragmentOrigin, .usesFontLeading])
+            // Date, 3pt gap, 6pt vertical padding, and at most three text lines.
+            return height + 14 + 3 + 12 + min(max(ceil(bounds.height), lineHeight), lineHeight * 3)
+        }
+        return min(height + CGFloat(max(entries.count - 1, 0)), 480)
     }
 }
 
@@ -13,8 +26,7 @@ struct QuickInputHistoryView: View {
     @ObservedObject var settings: OhMyGhosttySettings
     let onSelect: (String) -> Void
     @State private var query = ""
-    @State private var contentHeight: CGFloat = 88
-    @State private var measuredEntryIDs: [UUID] = []
+    @State private var isSearchExpanded = false
     @FocusState private var isSearchFocused: Bool
 
     private var strings: SettingsStrings { SettingsStrings(language: settings.language) }
@@ -26,10 +38,9 @@ struct QuickInputHistoryView: View {
     var body: some View {
         // Filter once per render, not once again for every row's divider.
         let matches = entries
-        let entryIDs = matches.map(\.id)
-        // Use a count-based first layout until SwiftUI has measured this exact
-        // result set. Never reuse a previous search's (or one-row) tiny height.
-        let listHeight = measuredEntryIDs == entryIDs ? contentHeight : CGFloat(matches.count) * 88
+        // Compute from bounded previews rather than measuring inside a scroll
+        // viewport, which can report clipped content and leave only one row visible.
+        let listHeight = QuickInputHistoryLayout.listHeight(matches)
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline) {
                 Label(strings.quickInputHistoryTitle, systemImage: "clock.arrow.circlepath")
@@ -41,33 +52,51 @@ struct QuickInputHistoryView: View {
                 Text("\(matches.count)")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
+                Button {
+                    isSearchExpanded.toggle()
+                    if isSearchExpanded {
+                        isSearchFocused = true
+                    } else {
+                        query = ""
+                        isSearchFocused = false
+                    }
+                } label: {
+                    Image(systemName: isSearchExpanded ? "xmark" : "magnifyingglass")
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(isSearchExpanded ? strings.quickInputHistoryClearSearch : strings.quickInputHistorySearch)
+                .accessibilityLabel(isSearchExpanded ? strings.quickInputHistoryClearSearch : strings.quickInputHistorySearch)
             }
             .padding(.horizontal, 14)
             .padding(.top, 14)
             .padding(.bottom, 10)
 
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                TextField(strings.quickInputHistorySearch, text: $query)
-                    .textFieldStyle(.plain)
-                    .focused($isSearchFocused)
-                if !query.isEmpty {
-                    Button {
-                        query = ""
-                        isSearchFocused = true
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
+            if isSearchExpanded {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField(strings.quickInputHistorySearch, text: $query)
+                        .textFieldStyle(.plain)
+                        .focused($isSearchFocused)
+                    if !query.isEmpty {
+                        Button {
+                            query = ""
+                            isSearchFocused = true
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(strings.quickInputHistoryClearSearch)
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(strings.quickInputHistoryClearSearch)
                 }
+                .padding(9)
+                .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 7))
+                .padding(.horizontal, 14)
+                .padding(.bottom, 10)
             }
-            .padding(9)
-            .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 7))
-            .padding(.horizontal, 14)
-            .padding(.bottom, 12)
             Divider()
 
             if matches.isEmpty {
@@ -91,20 +120,11 @@ struct QuickInputHistoryView: View {
                             }
                         }
                     }
-                    .background {
-                        GeometryReader { geometry in
-                            Color.clear.preference(key: QuickInputHistoryHeightKey.self,
-                                                   value: geometry.size.height)
-                        }
-                    }
+                    // Measure the complete intrinsic list, not a VStack
+                    // compressed to the previous popover viewport height.
+                    .fixedSize(horizontal: false, vertical: true)
                 }
-                .frame(height: min(max(listHeight, 60), 340))
-                .onPreferenceChange(QuickInputHistoryHeightKey.self) { height in
-                    if measuredEntryIDs != entryIDs || abs(contentHeight - height) > 0.5 {
-                        measuredEntryIDs = entryIDs
-                        contentHeight = height
-                    }
-                }
+                .frame(height: min(max(listHeight, 40), 480))
             }
 
             Divider()
@@ -125,7 +145,6 @@ struct QuickInputHistoryView: View {
         .environment(\.locale, Locale(identifier: strings.languageCode))
         .onAppear {
             store.pruneExpired()
-            isSearchFocused = true
         }
     }
 }
@@ -137,7 +156,7 @@ private struct QuickInputHistoryRow: View {
 
     var body: some View {
         Button(action: action) {
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(entry.sentAt, format: .dateTime.year().month().day().hour().minute())
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -145,14 +164,15 @@ private struct QuickInputHistoryRow: View {
                 // make search and scrolling expensive. Selection uses full text.
                 Text(String(entry.text.prefix(400)))
                     .font(.system(size: 12, design: .monospaced))
-                    .lineSpacing(3)
+                    .lineSpacing(1)
                     .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
                     .multilineTextAlignment(.leading)
                     .foregroundStyle(.primary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .padding(.vertical, 6)
             .background(isHovered ? Color.primary.opacity(0.06) : .clear,
                         in: RoundedRectangle(cornerRadius: 6))
             .contentShape(Rectangle())

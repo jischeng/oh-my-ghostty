@@ -30,7 +30,7 @@
 ![OMG split terminal, Agent CLI and Git Inspector](docs/images/omg-agent-git-workspace.png)
 
 *An everyday workspace: vertical tabs, an Agent CLI and repository history side
-by side. Account details and personal paths are redacted in these screenshots.*
+by side.*
 
 ## Why OMG?
 

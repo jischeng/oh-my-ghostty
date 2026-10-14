@@ -28,7 +28,7 @@
 
 ![OMG 分屏终端、Agent CLI 与 Git Inspector](docs/images/omg-agent-git-workspace.png)
 
-*日常工作区：垂直标签页、Agent CLI 与仓库历史并排展示。截图中的账号信息与私人路径已脱敏。*
+*日常工作区：垂直标签页、Agent CLI 与仓库历史并排展示。*
 
 ## 为什么做 OMG？
 

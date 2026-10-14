@@ -4,6 +4,7 @@ import SwiftUI
 enum QuickInputFooterStyle {
     static let font = Font.system(size: 12)
     static let iconFont = Font.system(size: 10, weight: .regular)
+    static let shortcutIconFont = Font.system(size: 8, weight: .regular)
     static let labelSpacing: CGFloat = 6
     static let itemSpacing: CGFloat = 4
 }
@@ -35,7 +36,7 @@ struct QuickInputShortcutHint: View {
         HStack(spacing: QuickInputFooterStyle.labelSpacing) {
             HStack(spacing: 2) {
                 ForEach(symbols, id: \.self) { symbol in
-                    Image(systemName: symbol).font(QuickInputFooterStyle.iconFont)
+                    Image(systemName: symbol).font(QuickInputFooterStyle.shortcutIconFont)
                 }
             }
             Text(title).font(QuickInputFooterStyle.font)

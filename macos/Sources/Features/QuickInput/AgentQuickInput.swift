@@ -292,7 +292,11 @@ struct AgentQuickInputPaneState: Equatable, Sendable {
 
 @MainActor
 final class AgentQuickInputModel: ObservableObject {
-    @Published private(set) var isPresented = false
+    @Published private(set) var isPresented = false {
+        didSet {
+            if !isSynchronizingGlobal { globalPresentation?.setPresented(isPresented) }
+        }
+    }
     @Published private(set) var targetSurfaceID: UUID?
     @Published var draft = "" {
         didSet {
@@ -312,6 +316,10 @@ final class AgentQuickInputModel: ObservableObject {
     let historyPresentation = QuickInputHistoryPresentation()
     private var historyNavigation = QuickInputHistoryNavigation()
     private var presentationObserver: AnyCancellable?
+    private var globalObservers: Set<AnyCancellable> = []
+    private let globalPresentation: QuickInputGlobalPresentation?
+    private var isSynchronizingGlobal = false
+    private var currentSurfaceID: (() -> UUID?)?
 
     private var draftBeforeEditing: String?
     private var isApplyingState = false
@@ -321,7 +329,9 @@ final class AgentQuickInputModel: ObservableObject {
     private(set) var historyTabID = UUID()
     private var historyObserver: AnyCancellable?
 
-    init(dockHeight: CGFloat? = nil, historyStore: QuickInputHistoryStore? = nil) {
+    init(dockHeight: CGFloat? = nil, historyStore: QuickInputHistoryStore? = nil,
+         globalPresentation: QuickInputGlobalPresentation? = nil) {
+        self.globalPresentation = globalPresentation
         self.historyStore = historyStore ?? QuickInputHistoryStore()
         self.dockHeight = dockHeight ?? CGFloat(
             OhMyGhosttySettings.shared.quickInputHeight
@@ -331,6 +341,33 @@ final class AgentQuickInputModel: ObservableObject {
         }
         presentationObserver = historyPresentation.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
+        }
+        if let globalPresentation {
+            globalPresentation.$isPresented.sink { [weak self] visible in
+                self?.synchronizeGlobalPresentation(visible)
+            }.store(in: &globalObservers)
+            globalPresentation.$isPinned.sink { [weak self] pinned in
+                self?.isPinned = pinned
+            }.store(in: &globalObservers)
+        }
+    }
+
+    func bindGlobalTarget(_ currentSurfaceID: @escaping () -> UUID?) {
+        self.currentSurfaceID = currentSurfaceID
+        if let globalPresentation { synchronizeGlobalPresentation(globalPresentation.isPresented) }
+    }
+
+    private func synchronizeGlobalPresentation(_ visible: Bool) {
+        isSynchronizingGlobal = true
+        defer { isSynchronizingGlobal = false }
+        if visible {
+            guard let surfaceID = currentSurfaceID?() ?? targetSurfaceID else { return }
+            present(for: surfaceID, requestFocus: false)
+        } else {
+            if isEditingQueuedItem { cancelQueuedItemEdit() }
+            historyPresentation.close()
+            historyNavigation.edited()
+            isPresented = false
         }
     }
 
@@ -374,7 +411,9 @@ final class AgentQuickInputModel: ObservableObject {
         requestFocus()
     }
 
-    func togglePinned() { isPinned.toggle() }
+    func togglePinned() {
+        if let globalPresentation { globalPresentation.togglePinned() } else { isPinned.toggle() }
+    }
 
     func toggleHistory(scope: QuickInputHistoryScope) {
         guard !isEditingQueuedItem else { return }
@@ -600,6 +639,8 @@ final class AgentQuickInputModel: ObservableObject {
     func removeState(for surfaceID: UUID) {
         paneStates.removeValue(forKey: surfaceID)
         if targetSurfaceID == surfaceID {
+            isSynchronizingGlobal = true
+            defer { isSynchronizingGlobal = false }
             historyPresentation.close()
             historyNavigation.edited()
             isPresented = false

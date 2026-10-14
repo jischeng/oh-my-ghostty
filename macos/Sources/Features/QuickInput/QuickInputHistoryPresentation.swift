@@ -8,9 +8,10 @@ final class QuickInputHistoryPresentation: ObservableObject {
     @Published var isSearching = false
     @Published private(set) var selectedID: UUID?
     @Published private(set) var focusRequestID = 0
+    @Published private(set) var keyboardSelectionRevision = 0
 
     func open(entries: [QuickInputHistoryEntry]) {
-        selectedID = entries.first?.id
+        reconcile(entries: entries)
         isPresented = true
         requestFocus()
     }
@@ -46,11 +47,17 @@ final class QuickInputHistoryPresentation: ObservableObject {
 
     func select(_ id: UUID) { selectedID = id }
 
+    func hover(_ id: UUID) {
+        guard selectedID != id else { return }
+        selectedID = id
+    }
+
     func reconcile(entries: [QuickInputHistoryEntry]) {
         if !entries.contains(where: { $0.id == selectedID }) { selectedID = entries.first?.id }
     }
 
     func moveSelection(by delta: Int, entries: [QuickInputHistoryEntry]) {
+        defer { keyboardSelectionRevision &+= 1 }
         guard !entries.isEmpty else { selectedID = nil; return }
         guard let index = entries.firstIndex(where: { $0.id == selectedID }) else {
             selectedID = entries.first?.id

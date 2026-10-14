@@ -318,7 +318,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     @Published private(set) var agentActivities: [UUID: TabActivity] = [:]
     @Published private(set) var tabPaneFocusHistory = TabPaneFocusHistory()
     @Published private(set) var agentResumeDescriptors: [UUID: AgentResumeDescriptor] = [:]
-    let quickInputModel = AgentQuickInputModel(historyStore: .shared)
+    let quickInputModel = AgentQuickInputModel(historyStore: .shared, globalPresentation: .shared)
     private var quickInputEventMonitor: Any?
     private var quickInputSecureInputCancellable: AnyCancellable?
     private var quickInputLastTerminalSurfaceID: UUID?
@@ -982,6 +982,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let surfaces = surfaceTree.map { $0 }
         let activeIDs = Set(surfaces.map(\.id))
         quickInputModel.bindHistory(to: tabSessionID, paneIDs: activeIDs)
+        quickInputModel.bindGlobalTarget { [weak self] in
+            (self?.focusedSurface ?? self?.surfaceTree.first)?.id
+        }
         paneSessionObservers = paneSessionObservers.filter { activeIDs.contains($0.key) }
         paneSessionContexts = paneSessionContexts.filter { activeIDs.contains($0.key) }
         agentActivities = agentActivities.filter { activeIDs.contains($0.key) }
@@ -4136,6 +4139,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         surfaceAppearanceCancellables.removeAll()
 
         guard let focusedSurface else { return }
+        quickInputModel.bindGlobalTarget { [weak self] in
+            (self?.focusedSurface ?? self?.surfaceTree.first)?.id
+        }
         syncAppearance(focusedSurface.derivedConfig)
 
         // We also want to get notified of certain changes to update our appearance.

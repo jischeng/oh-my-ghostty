@@ -63,8 +63,9 @@ struct QuickInputHistoryStoreTests {
         #expect(expandedHeight < 600)
         // Keep an offscreen rendering for human layout review, without showing
         // a window, taking focus, or touching the installed release app.
+        let previouslySelected = model.historyPresentation.selectedID
         model.historyPresentation.open(entries: store.visibleEntries(paneID: pane, tabID: tab, scope: .tab))
-        #expect(model.historyPresentation.selectedID == store.entries.last?.id)
+        #expect(model.historyPresentation.selectedID == previouslySelected)
         hosting.frame.size = hosting.fittingSize
         hosting.layoutSubtreeIfNeeded()
         let bitmap = try #require(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))

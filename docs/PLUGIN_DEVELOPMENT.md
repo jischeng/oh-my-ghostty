@@ -444,7 +444,10 @@ Quick Input presentation and focus remain Host-owned. The built-in composer part
 
 Pin and History keyboard navigation are also Host-owned UI state. Pin only
 prevents automatic composer dismissal after a user-confirmed Send/Queue/queued
-edit; explicit dismiss and target removal still win. History visibility defaults
+edit; explicit dismiss still wins. Composer visibility and Pin are process-wide
+OMG UI state shared across tabs/windows; targets, drafts and queues remain owned
+by their original models/Surfaces. Target removal does not close unrelated tabs.
+History visibility defaults
 to the current Tab (stored explicit preferences are respected). `Command-Shift-H`
 toggles the searchable picker, and guarded composer arrows recall immutable sent
 messages without modifying them or sending automatically. Picker insertion may

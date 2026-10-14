@@ -126,18 +126,24 @@ struct QuickInputHistoryView: View {
                     ScrollView {
                         LazyVStack(spacing: 0) {
                             ForEach(matches) { entry in
-                                QuickInputHistoryRow(entry: entry, isSelected: presentation.selectedID == entry.id) {
-                                    presentation.select(entry.id)
-                                    onSelect(entry.text)
-                                }
+                                QuickInputHistoryRow(entry: entry, isSelected: presentation.selectedID == entry.id,
+                                    onHover: { presentation.hover(entry.id) }, action: {
+                                        presentation.select(entry.id)
+                                        onSelect(entry.text)
+                                    })
                                 .id(entry.id)
                                 if entry.id != matches.last?.id { Divider().padding(.horizontal, 12) }
                             }
                         }
                     }
                     .frame(height: min(max(listHeight, 40), 480))
-                    .onChange(of: presentation.selectedID) { id in
-                        if let id { proxy.scrollTo(id, anchor: .center) }
+                    .onAppear {
+                        if let id = presentation.selectedID { proxy.scrollTo(id, anchor: .center) }
+                    }
+                    // Hover updates selection but must not scroll the list out
+                    // from under the pointer. Only keyboard navigation scrolls.
+                    .onChange(of: presentation.keyboardSelectionRevision) { _ in
+                        if let id = presentation.selectedID { proxy.scrollTo(id, anchor: .center) }
                     }
                 }
             }
@@ -172,8 +178,8 @@ struct QuickInputHistoryView: View {
 private struct QuickInputHistoryRow: View {
     let entry: QuickInputHistoryEntry
     let isSelected: Bool
+    let onHover: () -> Void
     let action: () -> Void
-    @State private var isHovered = false
 
     var body: some View {
         Button(action: action) {
@@ -187,12 +193,12 @@ private struct QuickInputHistoryRow: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12).padding(.vertical, 6)
-            .background(Color.primary.opacity(isSelected ? 0.12 : (isHovered ? 0.06 : 0)),
+            .background(Color.primary.opacity(isSelected ? 0.06 : 0),
                         in: RoundedRectangle(cornerRadius: 6))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain).padding(.horizontal, 4)
-        .onHover { isHovered = $0 }
+        .onHover { hovered in if hovered { onHover() } }
         .accessibilityAddTraits(isSelected ? [.isSelected] : [])
         .help(String(entry.text.prefix(1_000)))
     }

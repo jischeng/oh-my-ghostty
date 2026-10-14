@@ -7,6 +7,8 @@ struct OMGKeyboardShortcut: Equatable {
         .command, .shift, .option, .control,
     ]
 
+    static let quickInputHistory = OMGKeyboardShortcut(key: "h", modifiers: [.command, .shift])
+
     static let defaultQuickInput = OMGKeyboardShortcut(
         key: "e",
         modifiers: [.command, .shift]
@@ -102,6 +104,7 @@ struct OMGKeyboardShortcut: Equatable {
 
     @MainActor
     func conflictingMenuItemTitle(in menu: NSMenu? = NSApp.mainMenu) -> String? {
+        if self == .quickInputHistory { return "Quick Input History (⌘⇧H)" }
         guard let menu else { return nil }
         for item in menu.items {
             let itemModifiers = item.keyEquivalentModifierMask
@@ -221,7 +224,7 @@ enum AgentQuickInputMetrics {
     static let queueMinimumWidth: CGFloat = 150
     static let queueMaximumWidth: CGFloat = 420
     static let queueHorizontalInset: CGFloat = 12
-    static let editorLineSpacing: CGFloat = 3
+    static let editorLineSpacing: CGFloat = 1
 
     static func queueCardWidth(
         previewCount: Int,
@@ -294,6 +297,7 @@ final class AgentQuickInputModel: ObservableObject {
     @Published var draft = "" {
         didSet {
             guard !isApplyingState, let targetSurfaceID else { return }
+            historyNavigation.edited()
             var state = paneStates[targetSurfaceID] ?? .init()
             state.draft = draft
             paneStates[targetSurfaceID] = state
@@ -304,6 +308,10 @@ final class AgentQuickInputModel: ObservableObject {
     @Published private(set) var dockHeight: CGFloat
     @Published private(set) var editingQueueItemID: UUID?
     @Published private(set) var focusRequestID = 0
+    @Published private(set) var isPinned = false
+    let historyPresentation = QuickInputHistoryPresentation()
+    private var historyNavigation = QuickInputHistoryNavigation()
+    private var presentationObserver: AnyCancellable?
 
     private var draftBeforeEditing: String?
     private var isApplyingState = false
@@ -321,6 +329,9 @@ final class AgentQuickInputModel: ObservableObject {
         historyObserver = self.historyStore.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
+        presentationObserver = historyPresentation.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
     }
 
     func bindHistory(to tabID: UUID, paneIDs: Set<UUID>) {
@@ -335,8 +346,8 @@ final class AgentQuickInputModel: ObservableObject {
 
     static let historyLimit = QuickInputHistoryStore.perPaneLimit
 
-    // Up always recalls this pane's most recent send, regardless of the menu's
-    // visibility setting. Other panes must not silently replace its last input.
+    // Pane-scoped projection for callers that need only this pane's sends.
+    // Interactive history navigation uses the configured visibility scope.
     var targetHistory: [String] {
         historyStore.visibleEntries(paneID: targetSurfaceID, tabID: historyTabID, scope: .pane)
             .reversed().map(\.text)
@@ -355,16 +366,69 @@ final class AgentQuickInputModel: ObservableObject {
         return true
     }
 
-    func useHistoryText(_ text: String) {
+    func useHistoryText(_ text: String, mode: QuickInputHistoryInsertionMode = .append) {
         guard !isEditingQueuedItem, targetSurfaceID != nil else { return }
-        draft = draft.isEmpty ? text : draft + (draft.hasSuffix("\n") ? "" : "\n") + text
+        draft = mode == .replace || draft.isEmpty
+            ? text : draft + (draft.hasSuffix("\n") ? "" : "\n") + text
         statusMessage = nil
         requestFocus()
+    }
+
+    func togglePinned() { isPinned.toggle() }
+
+    func toggleHistory(scope: QuickInputHistoryScope) {
+        guard !isEditingQueuedItem else { return }
+        if historyPresentation.isPresented {
+            historyPresentation.close()
+            requestFocus()
+        } else {
+            historyPresentation.open(entries: historyStore.visibleEntries(
+                paneID: targetSurfaceID, tabID: historyTabID, scope: scope,
+                query: historyPresentation.isSearching ? historyPresentation.query : ""
+            ))
+        }
+    }
+
+    func historyCaretMoved() { historyNavigation.caretMoved() }
+
+    func navigateHistory(_ direction: QuickInputHistoryDirection, current: QuickInputDraftSnapshot,
+                         scope: QuickInputHistoryScope, atBoundary: Bool,
+                         isRepeat: Bool) -> QuickInputHistoryNavigationResult {
+        guard !isEditingQueuedItem else { return .unhandled }
+        let entries = historyStore.visibleEntries(paneID: targetSurfaceID, tabID: historyTabID, scope: scope)
+        let result = historyNavigation.navigate(direction, current: current, entries: entries.map(\.text),
+                                                atBoundary: atBoundary, isRepeat: isRepeat)
+        if case .restore(let snapshot) = result {
+            // Browsing changes the display only. Keep the newest unsent draft
+            // in pane state for dismiss/reopen, pane switches and pane moves.
+            // User edits go through draft.didSet and promote to that latest slot.
+            applyDraft(snapshot.text)
+        }
+        return result
+    }
+
+    /// Pin changes automatic completion only; explicit dismiss always wins.
+    func completeSubmission(clearDraft: Bool) {
+        historyPresentation.close()
+        historyNavigation.edited()
+        if isPinned {
+            if clearDraft { draft = "" }
+            statusMessage = nil
+            requestFocus()
+        } else {
+            dismiss(preservingDraft: !clearDraft)
+        }
     }
 
     var isEditingQueuedItem: Bool { editingQueueItemID != nil }
 
     func present(for surfaceID: UUID, requestFocus: Bool = true) {
+        if isPresented, targetSurfaceID == surfaceID {
+            if requestFocus { self.requestFocus() }
+            return
+        }
+        historyNavigation.edited()
+        if targetSurfaceID != surfaceID { historyPresentation.close() }
         targetSurfaceID = surfaceID
         applyDraft(paneStates[surfaceID]?.draft ?? "")
         statusMessage = nil
@@ -378,6 +442,8 @@ final class AgentQuickInputModel: ObservableObject {
     }
 
     func dismiss(preservingDraft: Bool = true) {
+        historyPresentation.close()
+        historyNavigation.edited()
         if isEditingQueuedItem {
             cancelQueuedItemEdit()
             return
@@ -430,6 +496,8 @@ final class AgentQuickInputModel: ObservableObject {
               let item = state.queue.first(where: { $0.id == itemID }) else {
             return
         }
+        historyNavigation.edited()
+        historyPresentation.close()
         editingQueueItemID = itemID
         draftBeforeEditing = state.draft
         targetSurfaceID = surfaceID
@@ -462,7 +530,7 @@ final class AgentQuickInputModel: ObservableObject {
         }
         state.draft = draftBeforeEditing ?? ""
         paneStates[surfaceID] = state
-        finishQueuedItemEdit(restoredDraft: state.draft)
+        finishQueuedItemEdit(restoredDraft: state.draft, automatically: true)
         return true
     }
 
@@ -532,6 +600,8 @@ final class AgentQuickInputModel: ObservableObject {
     func removeState(for surfaceID: UUID) {
         paneStates.removeValue(forKey: surfaceID)
         if targetSurfaceID == surfaceID {
+            historyPresentation.close()
+            historyNavigation.edited()
             isPresented = false
             targetSurfaceID = nil
             editingQueueItemID = nil
@@ -550,12 +620,14 @@ final class AgentQuickInputModel: ObservableObject {
         isApplyingState = false
     }
 
-    private func finishQueuedItemEdit(restoredDraft: String) {
+    private func finishQueuedItemEdit(restoredDraft: String, automatically: Bool = false) {
         editingQueueItemID = nil
         draftBeforeEditing = nil
+        historyNavigation.edited()
         applyDraft(restoredDraft)
         statusMessage = nil
-        isPresented = false
+        isPresented = automatically && isPinned
+        if isPresented { requestFocus() }
     }
 
     private func applyPendingDockHeight() {
@@ -974,6 +1046,7 @@ private struct AgentQuickInputQueueDepthIndicator: View {
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: "tray.full")
+                .font(QuickInputFooterStyle.iconFont)
             Text("\(count)")
                 .monospacedDigit()
         }
@@ -989,7 +1062,6 @@ private struct AgentQuickInputComposer: View {
     let backgroundColor: Color
     let backgroundOpacity: Double
 
-    @State private var isHistoryPresented = false
     @ObservedObject private var settings = OhMyGhosttySettings.shared
     private var strings: SettingsStrings { SettingsStrings(language: settings.language) }
 
@@ -1006,6 +1078,7 @@ private struct AgentQuickInputComposer: View {
                 isPresented: model.isPresented,
                 focusRequestID: model.focusRequestID,
                 font: editorFont,
+                textColor: OMGThemeBackground.palette(for: controller.window, config: controller.ghostty.config).foreground,
                 onPasteImage: { file, completion in
                     guard let surfaceID = model.targetSurfaceID else {
                         completion(Ghostty.Shell.escape(file.path))
@@ -1021,22 +1094,30 @@ private struct AgentQuickInputComposer: View {
                 onSend: controller.sendQuickInputDraft,
                 onQueue: controller.queueQuickInputDraft,
                 onCancel: controller.dismissQuickInput,
-                onRecallHistory: model.recallLastSentText
+                onNavigateHistory: { direction, snapshot, atBoundary, isRepeat in
+                    model.navigateHistory(direction, current: snapshot, scope: settings.quickInputHistoryScope,
+                                          atBoundary: atBoundary, isRepeat: isRepeat)
+                },
+                onHistoryCaretMoved: model.historyCaretMoved
             )
             .background(.clear)
 
             HStack(spacing: QuickInputFooterStyle.itemSpacing) {
-                QuickInputShortcutHint(
+                QuickInputFooterActionButton(
                     symbols: ["command", "return"],
-                    title: model.isEditingQueuedItem ? strings.quickInputSaveTitle : strings.quickInputSendTitle
+                    title: model.isEditingQueuedItem ? strings.quickInputSaveTitle : strings.quickInputSendTitle,
+                    action: controller.sendQuickInputDraft
                 )
-                Text("·").foregroundStyle(.tertiary)
-                QuickInputShortcutHint(
+                .help(model.isEditingQueuedItem ? "⌘↩ " + strings.quickInputSaveTitle : "⌘↩ " + strings.quickInputSendTitle)
+                QuickInputFooterActionButton(
                     symbols: ["option", "command", "return"],
-                    title: model.isEditingQueuedItem ? strings.quickInputMoveTitle : strings.quickInputQueueTitle
+                    title: model.isEditingQueuedItem ? strings.quickInputMoveTitle : strings.quickInputQueueTitle,
+                    action: controller.queueQuickInputDraft
                 )
-                Text("·").foregroundStyle(.tertiary)
-                QuickInputShortcutHint(symbols: ["escape"], title: strings.quickInputCancelTitle)
+                .help("⌥⌘↩ " + strings.quickInputQueueTitle)
+                QuickInputFooterActionButton(symbols: ["escape"], title: strings.quickInputCancelTitle,
+                                            action: controller.dismissQuickInput)
+                    .help("Esc " + strings.quickInputCancelTitle)
                 if let statusMessage = model.statusMessage {
                     Text("·")
                     Text(statusMessage)
@@ -1044,12 +1125,21 @@ private struct AgentQuickInputComposer: View {
                         .lineLimit(1)
                 }
                 Spacer()
-                QuickInputHistoryButton(title: strings.quickInputHistoryButton) {
-                    isHistoryPresented.toggle()
+                QuickInputFooterIconButton(
+                    title: model.isPinned ? strings.quickInputUnpinHelp : strings.quickInputPinHelp,
+                    symbol: model.isPinned ? "pin.fill" : "pin",
+                    isActive: model.isPinned,
+                    action: model.togglePinned
+                )
+                QuickInputHistoryButton(title: strings.quickInputHistoryButtonHelp,
+                                        isActive: model.historyPresentation.isPresented) {
+                    controller.toggleQuickInputHistory()
                 }
                 .disabled(model.isEditingQueuedItem)
-                .help(strings.quickInputHistoryButtonHelp)
-                .popover(isPresented: $isHistoryPresented, arrowEdge: .bottom) {
+                .popover(isPresented: Binding(
+                    get: { model.historyPresentation.isPresented },
+                    set: { model.historyPresentation.isPresented = $0 }
+                ), arrowEdge: .bottom) {
                     historyPopover
                 }
                 if !model.targetQueue.isEmpty {
@@ -1067,30 +1157,17 @@ private struct AgentQuickInputComposer: View {
         .background(chromeBackground)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Agent Quick Input")
-        .onChange(of: model.targetSurfaceID) { _ in isHistoryPresented = false }
-        .onChange(of: model.isPresented) { presented in
-            if !presented { isHistoryPresented = false }
-        }
     }
 
     private var historyPopover: some View {
         QuickInputHistoryView(model: model, store: model.historyStore, settings: settings) { text in
-            isHistoryPresented = false
-            model.useHistoryText(text)
+            model.historyPresentation.close()
+            model.useHistoryText(text, mode: settings.quickInputHistoryInsertionMode)
         }
     }
 
     private var editorFont: NSFont {
-        let size = CGFloat(controller.ghostty.config.fontSize)
-        if let family = controller.ghostty.config.fontFamily,
-           let font = NSFontManager.shared.font(
-               withFamily: family,
-               traits: [],
-               weight: 5,
-               size: size
-           ) ?? NSFont(name: family, size: size) {
-            return font
-        }
-        return .monospacedSystemFont(ofSize: size, weight: .regular)
+        QuickInputTypography.font(family: controller.ghostty.config.fontFamily,
+                                  size: CGFloat(controller.ghostty.config.fontSize))
     }
 }

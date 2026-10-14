@@ -442,6 +442,16 @@ hooks into a separate bounded, presentation-only OSC path owned by Core.
 
 Quick Input presentation and focus remain Host-owned. The built-in composer participates in macOS `Option-Command` directional focus navigation, but this does not grant a plugin focus control. When the user enables `agents.openQuickInputOnStart`, the Host may expand Quick Input on the focused Pane's first Agent activity without changing first responder. `agents.openQuickInputOnComplete` applies the same Host-owned presentation policy to a newly completed focused Agent session. Plugin lifecycle messages cannot force focus or override either preference.
 
+Pin and History keyboard navigation are also Host-owned UI state. Pin only
+prevents automatic composer dismissal after a user-confirmed Send/Queue/queued
+edit; explicit dismiss and target removal still win. History visibility defaults
+to the current Tab (stored explicit preferences are respected). `Command-Shift-H`
+toggles the searchable picker, and guarded composer arrows recall immutable sent
+messages without modifying them or sending automatically. Picker insertion may
+append or replace the draft according to the user's setting. None of these UI
+actions adds process-plugin wire messages, expands focus permissions, or changes
+queue dispatch/consent or provider lifecycle semantics.
+
 ### Session status API
 
 `setSessionStatus` arguments:

@@ -6,20 +6,19 @@ import Testing
 @MainActor
 struct QuickInputPresentationTests {
     @Test func footerSymbolsExistAndRenderConsistentlyInBothLanguages() throws {
-        for symbol in ["command", "option", "return", "escape", "clock.arrow.circlepath"] {
+        for symbol in ["command", "option", "return", "escape", "clock.arrow.circlepath", "pin", "pin.fill"] {
             #expect(NSImage(systemSymbolName: symbol, accessibilityDescription: nil) != nil)
         }
         for language in [OhMyGhosttyLanguage.english, .simplifiedChinese] {
             let strings = SettingsStrings(language: language)
             #expect(strings.quickInputSection == (language == .english ? "Quick Input" : "快速输入"))
             let footer = HStack(spacing: QuickInputFooterStyle.itemSpacing) {
-                QuickInputShortcutHint(symbols: ["command", "return"], title: strings.quickInputSendTitle)
-                Text("·")
-                QuickInputShortcutHint(symbols: ["option", "command", "return"], title: strings.quickInputQueueTitle)
-                Text("·")
-                QuickInputShortcutHint(symbols: ["escape"], title: strings.quickInputCancelTitle)
+                QuickInputFooterActionButton(symbols: ["command", "return"], title: strings.quickInputSendTitle) {}
+                QuickInputFooterActionButton(symbols: ["option", "command", "return"], title: strings.quickInputQueueTitle) {}
+                QuickInputFooterActionButton(symbols: ["escape"], title: strings.quickInputCancelTitle) {}
                 Spacer()
-                QuickInputHistoryButton(title: strings.quickInputHistoryButton) {}
+                QuickInputFooterIconButton(title: strings.quickInputPinHelp, symbol: "pin.fill", isActive: true) {}
+                QuickInputHistoryButton(title: strings.quickInputHistoryButtonHelp) {}
             }
             .font(QuickInputFooterStyle.font)
             .foregroundStyle(.secondary)
@@ -32,6 +31,35 @@ struct QuickInputPresentationTests {
             #expect(host.fittingSize.height < 60)
             try capture(host, name: "footer-\(language.rawValue)")
         }
+    }
+
+    @Test func inputUsesRegularFaceAndConfiguredForegroundForTextAndCaret() async throws {
+        let foreground = NSColor(srgbRed: 0.8, green: 0.82, blue: 0.85, alpha: 1)
+        let font = QuickInputTypography.font(family: "Menlo", size: 13)
+        let root = AgentQuickInputTextEditor(
+            text: .constant("Quick Input Regular / 快速输入\n匹配终端字体和前景色"),
+            placeholder: "Type here…", isPresented: true, focusRequestID: 0,
+            font: font, textColor: foreground, onPasteImage: nil,
+            onSend: {}, onQueue: {}, onCancel: {}
+        ).background(Color(nsColor: NSColor(srgbRed: 0.12, green: 0.14, blue: 0.16, alpha: 1)))
+        let host = NSHostingView(rootView: root)
+        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 620, height: 90),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer { window.contentView = nil; window.close() }
+        host.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+        func find(_ view: NSView) -> ComposerTextView? {
+            (view as? ComposerTextView) ?? view.subviews.lazy.compactMap(find).first
+        }
+        let editor = try #require(find(host))
+        #expect(editor.font?.pointSize == 13)
+        #expect(editor.font?.fontDescriptor.symbolicTraits.contains(.bold) == false)
+        #expect(editor.textColor == foreground)
+        #expect(editor.insertionPointColor == foreground)
+        #expect((editor.typingAttributes[.foregroundColor] as? NSColor) == foreground)
+        try capture(host, name: "typography")
     }
 
     @Test func quickInputAndHistorySettingsRenderInEditor() async throws {

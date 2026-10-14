@@ -6,7 +6,7 @@ import Testing
 @MainActor
 @Suite(.tags(.interactiveDesktop))
 struct QuickInputFooterMouseTests {
-    @Test func historyIconGapTextAndPaddingAllActivateOneButton() async throws {
+    @Test func historyIconAndPaddingAllActivateOneButton() async throws {
         var activations = 0
         let host = NSHostingView(rootView: QuickInputHistoryButton(title: "历史") {
             activations += 1
@@ -28,7 +28,7 @@ struct QuickInputFooterMouseTests {
         try #require(NSApp.isActive && window.isKeyWindow,
                      "Requires an unlocked foreground desktop and key test window")
         host.layoutSubtreeIfNeeded()
-        let locations: [CGFloat] = [1, 12, 22, 36, host.bounds.width - 1]
+        let locations: [CGFloat] = [1, 6, host.bounds.midX, host.bounds.width - 6, host.bounds.width - 1]
         for (index, x) in locations.enumerated() {
             let point = host.convert(NSPoint(x: x, y: host.bounds.midY), to: nil)
             let down = try #require(NSEvent.mouseEvent(with: .leftMouseDown, location: point,

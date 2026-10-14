@@ -411,23 +411,34 @@ struct SettingsStrings: Equatable, Sendable {
         )
     }
     var quickInputSendTitle: String { t("Send", "发送") }
-    var quickInputQueueTitle: String { t("Queue", "入队") }
+    var quickInputQueueTitle: String { t("Queue", "排队") }
     var quickInputCancelTitle: String { t("Cancel", "取消") }
     var quickInputSaveTitle: String { t("Save Edit", "保存修改") }
     var quickInputMoveTitle: String { t("Move to Queue End", "移到队尾") }
     var quickInputHistoryTitle: String { t("Sent History", "发送历史") }
     var quickInputHistoryButton: String { t("History", "历史") }
-    var quickInputHistoryButtonHelp: String {
-        t("Search sent messages; ↑ recalls this pane's last send when input is empty.",
-          "搜索已发送内容；输入为空时按 ↑ 恢复当前 Pane 上次发送的内容。")
+    var quickInputHistoryButtonHelp: String { t("History · ⌘⇧H", "历史 · ⌘⇧H") }
+    var quickInputPinHelp: String {
+        t("Pin Quick Input: keep it open after sending or queueing", "固定快速输入：发送或排队后保持展开")
     }
+    var quickInputUnpinHelp: String { t("Unpin Quick Input", "取消固定快速输入") }
     var quickInputHistorySearch: String { t("Search messages…", "搜索历史内容…") }
     var quickInputHistoryClearSearch: String { t("Clear search", "清除搜索") }
+    var quickInputHistoryExitSearch: String { t("Exit search", "退出搜索") }
     var quickInputHistoryEmpty: String { t("No history in this scope yet", "当前范围暂无发送历史") }
     var quickInputHistoryNoMatches: String { t("No matching messages", "没有匹配的历史内容") }
     var quickInputHistoryAppendHint: String {
-        t("Select to append to your draft · Never sends automatically",
-          "点击追加到草稿 · 不会自动发送")
+        t("↑↓ Select · Enter to append · Esc to close", "↑↓ 选择 · Enter 追加 · Esc 关闭")
+    }
+    var quickInputHistoryReplaceHint: String {
+        t("↑↓ Select · Enter to replace · Esc to close", "↑↓ 选择 · Enter 覆盖 · Esc 关闭")
+    }
+    var quickInputHistoryInsertionLabel: String { t("History Selection", "历史回填方式") }
+    func quickInputHistoryInsertionName(_ mode: QuickInputHistoryInsertionMode) -> String {
+        switch mode {
+        case .append: t("Append to Draft", "追加到草稿")
+        case .replace: t("Replace Draft", "覆盖草稿")
+        }
     }
     var quickInputHistoryStorageError: String {
         t("History storage failed. Current in-memory history is still available.",

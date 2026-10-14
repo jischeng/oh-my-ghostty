@@ -7,11 +7,15 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
     let isPresented: Bool
     let focusRequestID: Int
     let font: NSFont
+    var textColor: NSColor = .labelColor
     let onPasteImage: ((URL, @escaping (String) -> Void) -> Void)?
     let onSend: () -> Void
     let onQueue: () -> Void
     let onCancel: () -> Void
     var onRecallHistory: (() -> Bool)?
+    var onNavigateHistory: ((QuickInputHistoryDirection, QuickInputDraftSnapshot, Bool, Bool)
+        -> QuickInputHistoryNavigationResult)?
+    var onHistoryCaretMoved: (() -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(text: $text)
@@ -50,6 +54,8 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
         editor.onQueue = onQueue
         editor.onCancel = onCancel
         editor.onRecallHistory = onRecallHistory
+        editor.onNavigateHistory = onNavigateHistory
+        editor.onHistoryCaretMoved = onHistoryCaretMoved
         scrollView.documentView = editor
         scrollView.isHidden = !isPresented
         context.coordinator.editor = editor
@@ -71,18 +77,20 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
         editor.onQueue = onQueue
         editor.onCancel = onCancel
         editor.onRecallHistory = onRecallHistory
+        editor.onNavigateHistory = onNavigateHistory
+        editor.onHistoryCaretMoved = onHistoryCaretMoved
         if !editor.hasMarkedText(), editor.string != text {
-            editor.string = text
-            editor.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
-            editor.resetLocalUndoManager()
+            editor.restoreHistorySnapshot(.init(text: text,
+                selection: NSRange(location: (text as NSString).length, length: 0)))
         }
         configureTypography(for: editor)
         if isPresented,
            focusRequestID != context.coordinator.handledFocusRequestID {
             context.coordinator.handledFocusRequestID = focusRequestID
-            DispatchQueue.main.async { [weak editor] in
-                guard let editor, editor.window != nil else { return }
-                editor.window?.makeFirstResponder(editor)
+            DispatchQueue.main.async { [weak editor, weak scrollView] in
+                guard let editor, let scrollView, !scrollView.isHidden,
+                      let window = editor.window else { return }
+                window.makeFirstResponder(editor)
             }
         }
     }
@@ -91,12 +99,15 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.lineSpacing = AgentQuickInputMetrics.editorLineSpacing
         editor.font = font
+        editor.textColor = textColor
+        editor.insertionPointColor = textColor
         editor.defaultParagraphStyle = paragraphStyle
         editor.typingAttributes[.font] = font
+        editor.typingAttributes[.foregroundColor] = textColor
         editor.typingAttributes[.paragraphStyle] = paragraphStyle
         if let storage = editor.textStorage, storage.length > 0 {
             storage.addAttributes(
-                [.font: font, .paragraphStyle: paragraphStyle],
+                [.font: font, .foregroundColor: textColor, .paragraphStyle: paragraphStyle],
                 range: NSRange(location: 0, length: storage.length)
             )
         }
@@ -106,14 +117,23 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
         @Binding var text: String
         weak var editor: ComposerTextView?
         var handledFocusRequestID = 0
+        private var lastSelection: NSRange?
 
         init(text: Binding<String>) {
             self._text = text
         }
 
         func textDidChange(_ notification: Notification) {
-            guard let editor else { return }
+            guard let editor, !editor.isRestoringHistory, text != editor.string else { return }
             text = editor.string
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard let editor else { return }
+            let previous = lastSelection
+            lastSelection = editor.selectedRange()
+            guard !editor.isRestoringHistory, previous != lastSelection else { return }
+            editor.onHistoryCaretMoved?()
         }
     }
 }
@@ -178,6 +198,51 @@ final class ComposerTextView: NSTextView {
     var onQueue: (() -> Void)?
     var onCancel: (() -> Void)?
     var onRecallHistory: (() -> Bool)?
+    var onNavigateHistory: ((QuickInputHistoryDirection, QuickInputDraftSnapshot, Bool, Bool)
+        -> QuickInputHistoryNavigationResult)?
+    var onHistoryCaretMoved: (() -> Void)?
+    private(set) var isRestoringHistory = false
+
+    func restoreHistorySnapshot(_ snapshot: QuickInputDraftSnapshot) {
+        isRestoringHistory = true
+        string = snapshot.text
+        let length = (string as NSString).length
+        let location = min(snapshot.selection.location, length)
+        setSelectedRange(NSRange(location: location, length: min(snapshot.selection.length, length - location)))
+        resetLocalUndoManager()
+        scrollRangeToVisible(selectedRange())
+        isRestoringHistory = false
+    }
+
+    func isOnHistoryBoundary(_ direction: QuickInputHistoryDirection) -> Bool {
+        guard selectedRange().length == 0 else { return false }
+        guard !string.isEmpty else { return true }
+        guard let layoutManager, let textContainer else { return false }
+        layoutManager.ensureLayout(for: textContainer)
+        let length = (string as NSString).length
+        let location = min(selectedRange().location, length)
+        let hasTrailingLine = string.hasSuffix("\n") && !layoutManager.extraLineFragmentRect.isEmpty
+        let caretRect: NSRect
+        if location == length && hasTrailingLine {
+            caretRect = layoutManager.extraLineFragmentRect
+        } else {
+            let glyph = layoutManager.glyphIndexForCharacter(at: min(location, length - 1))
+            caretRect = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+        }
+        let boundary: NSRect
+        switch direction {
+        case .older:
+            boundary = layoutManager.lineFragmentRect(forGlyphAt: 0, effectiveRange: nil)
+        case .newer:
+            if hasTrailingLine {
+                boundary = layoutManager.extraLineFragmentRect
+            } else {
+                let glyph = layoutManager.glyphIndexForCharacter(at: length - 1)
+                boundary = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+            }
+        }
+        return abs(caretRect.minY - boundary.minY) < 0.5
+    }
 
     private let localUndoManager = UndoManager()
     override var undoManager: UndoManager? { localUndoManager }
@@ -246,7 +311,18 @@ final class ComposerTextView: NSTextView {
     }
 
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 126,
+        if [UInt16(126), 125].contains(event.keyCode), !hasMarkedText(),
+           event.modifierFlags.isDisjoint(with: [.command, .option, .control, .shift]),
+           let onNavigateHistory {
+            let direction: QuickInputHistoryDirection = event.keyCode == 126 ? .older : .newer
+            let snapshot = QuickInputDraftSnapshot(text: string, selection: selectedRange())
+            switch onNavigateHistory(direction, snapshot, isOnHistoryBoundary(direction), event.isARepeat) {
+            case .restore(let snapshot): restoreHistorySnapshot(snapshot); return
+            case .consumed: return
+            case .unhandled: break
+            }
+        }
+        if onNavigateHistory == nil, event.keyCode == 126,
            event.modifierFlags.isDisjoint(with: [.command, .option, .control, .shift]),
            string.isEmpty, !hasMarkedText(),
            onRecallHistory?() == true {

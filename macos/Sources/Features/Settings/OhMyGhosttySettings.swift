@@ -408,9 +408,15 @@ final class OhMyGhosttySettings: ObservableObject {
             requiresNewWindow: false, category: "keyboard"),
         .init(
             id: "keyboard.quickInputHistoryScope", type: .enumeration,
-            defaultValue: QuickInputHistoryScope.pane.rawValue,
+            defaultValue: QuickInputHistoryScope.tab.rawValue,
             allowedValues: QuickInputHistoryScope.allCases.map(\.rawValue), minimum: nil, maximum: nil,
             description: "Visible Quick Input history: current pane, current tab, or all windows.",
+            requiresNewWindow: false, category: "keyboard"),
+        .init(
+            id: "keyboard.quickInputHistoryInsertionMode", type: .enumeration,
+            defaultValue: QuickInputHistoryInsertionMode.append.rawValue,
+            allowedValues: QuickInputHistoryInsertionMode.allCases.map(\.rawValue), minimum: nil, maximum: nil,
+            description: "Append a selected history message to the draft or replace the draft.",
             requiresNewWindow: false, category: "keyboard"),
         .init(
             id: "keyboard.quickInputHistoryRetentionDays", type: .number, defaultValue: "7",
@@ -728,8 +734,11 @@ final class OhMyGhosttySettings: ObservableObject {
             }
         }
     }
-    @Published var quickInputHistoryScope: QuickInputHistoryScope = .pane {
+    @Published var quickInputHistoryScope: QuickInputHistoryScope = .tab {
         didSet { persist("keyboard.quickInputHistoryScope", quickInputHistoryScope.rawValue) }
+    }
+    @Published var quickInputHistoryInsertionMode: QuickInputHistoryInsertionMode = .append {
+        didSet { persist("keyboard.quickInputHistoryInsertionMode", quickInputHistoryInsertionMode.rawValue) }
     }
     @Published var quickInputHistoryRetentionDays: Double = 7 {
         didSet {
@@ -1113,7 +1122,8 @@ final class OhMyGhosttySettings: ObservableObject {
                 fallback: Double(AgentQuickInputMetrics.defaultHeight),
                 range: 140...480
             )
-            quickInputHistoryScope = enumValue("keyboard.quickInputHistoryScope", fallback: .pane)
+            quickInputHistoryScope = enumValue("keyboard.quickInputHistoryScope", fallback: .tab)
+            quickInputHistoryInsertionMode = enumValue("keyboard.quickInputHistoryInsertionMode", fallback: .append)
             quickInputHistoryRetentionDays = numberValue(
                 "keyboard.quickInputHistoryRetentionDays", fallback: 7, range: 1...365
             ).rounded()

@@ -302,6 +302,13 @@
       "minimum": 140,
       "type": "number"
     },
+    "keyboard.quickInputHistoryInsertionMode": {
+      "category": "keyboard",
+      "default": "append",
+      "description": "Append a selected history message to the draft or replace the draft.",
+      "enum": ["append", "replace"],
+      "type": "string"
+    },
     "keyboard.quickInputHistoryKeepAfterQuit": {
       "category": "keyboard",
       "default": true,
@@ -318,7 +325,7 @@
     },
     "keyboard.quickInputHistoryScope": {
       "category": "keyboard",
-      "default": "pane",
+      "default": "tab",
       "description": "Visible Quick Input history: current pane, current tab, or all windows.",
       "enum": ["pane", "tab", "global"],
       "type": "string"

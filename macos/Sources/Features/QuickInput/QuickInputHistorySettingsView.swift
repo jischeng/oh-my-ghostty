@@ -12,6 +12,11 @@ struct QuickInputHistorySettingsView: View {
                 Text(strings.quickInputHistoryScopeName(scope)).tag(scope)
             }
         }
+        Picker(strings.quickInputHistoryInsertionLabel, selection: $settings.quickInputHistoryInsertionMode) {
+            ForEach(QuickInputHistoryInsertionMode.allCases, id: \.self) { mode in
+                Text(strings.quickInputHistoryInsertionName(mode)).tag(mode)
+            }
+        }
         LabeledContent(strings.quickInputHistoryRetentionLabel) {
             HStack(spacing: 6) {
                 TextField("", value: $settings.quickInputHistoryRetentionDays,

@@ -91,16 +91,21 @@ struct OhMyGhosttySettingsTests {
     @Test func quickInputHistorySettingsDefaultClampAndRoundTrip() throws {
         let (settings, url) = temporarySettings()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        #expect(settings.quickInputHistoryScope == .pane)
+        #expect(settings.quickInputHistoryScope == .tab)
+        #expect(settings.quickInputHistoryInsertionMode == .append)
         #expect(settings.quickInputHistoryRetentionDays == 7)
         #expect(settings.quickInputHistoryKeepAfterQuit)
         settings.quickInputHistoryScope = .tab
         settings.quickInputHistoryRetentionDays = 30
         settings.quickInputHistoryKeepAfterQuit = false
+        settings.quickInputHistoryInsertionMode = .replace
         let restored = OhMyGhosttySettings(fileURL: url)
         #expect(restored.quickInputHistoryScope == .tab)
         #expect(restored.quickInputHistoryRetentionDays == 30)
         #expect(!restored.quickInputHistoryKeepAfterQuit)
+        #expect(restored.quickInputHistoryInsertionMode == .replace)
+        settings.quickInputHistoryScope = .pane
+        #expect(OhMyGhosttySettings(fileURL: url).quickInputHistoryScope == .pane)
         settings.quickInputHistoryRetentionDays = 0
         #expect(settings.quickInputHistoryRetentionDays == 1)
         settings.quickInputHistoryRetentionDays = 400
@@ -432,6 +437,7 @@ struct OhMyGhosttySettingsTests {
         #expect(descriptors.contains { $0.id == "keyboard.quickInput" })
         #expect(descriptors.contains { $0.id == "keyboard.quickInputHeight" })
         #expect(descriptors.contains { $0.id == "keyboard.quickInputHistoryScope" })
+        #expect(descriptors.contains { $0.id == "keyboard.quickInputHistoryInsertionMode" })
         #expect(descriptors.contains { $0.id == "keyboard.quickInputHistoryRetentionDays" })
         #expect(descriptors.contains { $0.id == "keyboard.quickInputHistoryKeepAfterQuit" })
         #expect(descriptors.contains { $0.id == "terminal.resizeRendering" })

@@ -14,7 +14,7 @@ release does not automatically require every unrelated feature suite.
    build/test infrastructure, unmapped changes, or an explicitly requested sweep.
 3. **Optional interactive desktop**: suites or individual tests tagged
    `.interactiveDesktop`: `VerticalTabMouseTests`, `QuickInputFooterMouseTests`
-   (History icon/gap/text/padding mouse hit coverage), and the visual
+   (icon-only History and its complete padded mouse hit target), and the visual
    `VerticalTabsIntegrationTests.appKitTabGroupDrivesVerticalTabsWithoutRecreatingSurfaces`,
    and `TerminalLinkHoverTests.commandHoverRemainsStable` (Cmd-link hover in single/split panes).
    Real CoreDrag, menu focus routing, native window appearance, and screenshots

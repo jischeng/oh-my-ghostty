@@ -414,15 +414,15 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             guard quickInputModel.confirmQueuedItemEdit(moveToEnd: false) else {
                 return
             }
-            restoreTerminalFocus(surfaceID: surfaceID)
+            if !quickInputModel.isPinned { restoreTerminalFocus(surfaceID: surfaceID) }
             return
         }
         let text = quickInputModel.draft
-        guard submitQuickInputText(text, to: surfaceID, restoreFocus: true) else {
+        guard submitQuickInputText(text, to: surfaceID, restoreFocus: !quickInputModel.isPinned) else {
             return
         }
         beginQuickInputResizeDeferral()
-        quickInputModel.dismiss(preservingDraft: false)
+        quickInputModel.completeSubmission(clearDraft: true)
     }
 
     func queueQuickInputDraft() {
@@ -431,16 +431,25 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             guard quickInputModel.confirmQueuedItemEdit(moveToEnd: true) else {
                 return
             }
-            restoreTerminalFocus(surfaceID: surfaceID)
+            if !quickInputModel.isPinned { restoreTerminalFocus(surfaceID: surfaceID) }
             return
         }
         beginQuickInputResizeDeferral()
         guard quickInputModel.enqueueDraft() != nil else { return }
-        quickInputModel.dismiss()
+        quickInputModel.completeSubmission(clearDraft: false)
         if agentActivities[surfaceID]?.state == .done {
             dispatchNextQuickInput(for: surfaceID)
         }
-        restoreTerminalFocus(surfaceID: surfaceID)
+        if !quickInputModel.isPinned { restoreTerminalFocus(surfaceID: surfaceID) }
+    }
+
+    func toggleQuickInputHistory() {
+        guard !quickInputModel.isEditingQueuedItem else { return }
+        if !quickInputModel.isPresented {
+            guard let surface = focusedSurface ?? surfaceTree.first else { return }
+            presentQuickInput(for: surface, requestFocus: false)
+        }
+        quickInputModel.toggleHistory(scope: OhMyGhosttySettings.shared.quickInputHistoryScope)
     }
 
     func dismissQuickInput() {
@@ -516,6 +525,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
 
         let settings = OhMyGhosttySettings.shared
+        if OMGKeyboardShortcut.quickInputHistory.matches(event) {
+            toggleQuickInputHistory()
+            return nil
+        }
         for slot in 1...4 {
             let storage = settings.inspectorPanelShortcut(slot: slot)
             if let shortcut = OMGKeyboardShortcut(storageValue: storage), shortcut.matches(event) {

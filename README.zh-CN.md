@@ -26,13 +26,19 @@
 > OMG 是独立开发、仍在持续演进的 **Ghostty fork，尚未到 1.0**，不是 Ghostty 官方版本。
 > 它有独立的应用身份，可以与 `Ghostty.app` 共存。公开版本提供 Apple Silicon 和 Intel 下载。
 
-![OMG 垂直标签页与文件 Inspector](docs/images/right-inspector-files.png)
+![OMG 分屏终端、Agent CLI 与 Git Inspector](docs/images/omg-agent-git-workspace.png)
+
+*日常工作区：垂直标签页、Agent CLI 与仓库历史并排展示。截图中的账号信息与私人路径已脱敏。*
 
 ## 为什么做 OMG？
 
 使用 Agent CLI 时，经常要在终端输出、长提示词、文件和仓库上下文之间切换。
 OMG 保留 Ghostty 作为终端宿主，在外层增加原生工作流能力，而不是重写一个终端引擎，
 也不是提供模型服务。
+
+OMG 目前仍处于迭代开发阶段。在作者的日常工作流中，它已能承担一些原先需要在
+Ghostty、VS Code 等工具之间切换完成的任务，做到**部分替代**。这是个人使用体验，
+不是对完整 IDE、所有 VS Code 扩展或 Ghostty 跨平台版本的替代承诺。
 
 | 你想做什么 | OMG 提供什么 |
 | --- | --- |
@@ -41,10 +47,54 @@ OMG 保留 Ghostty 作为终端宿主，在外层增加原生工作流能力，�
 | 整理多个会话 | **垂直标签页**：分组、排序、可选的 Agent 活动状态；也保留原生横向标签页 |
 | 查看当前工作区 | **文件 Inspector 与编辑器**：包括实时 Markdown 预览 |
 | 在会话旁边检查仓库 | **Git Inspector**：查看状态、diff 和历史 |
-| 处理远程工作区 | **SSH 文件浏览与端口转发**：使用 OpenSSH 配置及系统工具 |
+| 找回之前执行的命令 | **命令历史**：在 Info 中查看；shell integration 锚点仍有效时可跳回保留的输出 |
+| 根据暂存修改起草提交信息 | **ACP 连接本机安装的 Agent**：可配置 Agent/模型与提示词，确认内容后再提交 |
+| 处理远程工作区 | **SSH Git 仓库识别、Agent 会话状态、文件浏览与端口转发**：使用 OpenSSH 配置及系统工具 |
 
 Codex、Claude Code、Pi 等 Agent CLI 需要自行安装。可选的 Agent 集成用于提供活动/会话
 上下文，各 Agent 的能力不完全相同。OMG 不提供模型订阅，也不取代你的 Agent CLI。
+
+## 不只是终端输入
+
+- **编辑器**：在终端工作区中查看、编辑文件、检查 diff，使用实时 Markdown 预览。
+  它是针对工作流的编辑能力，不是 VS Code 扩展生态的完整实现。
+- **历史命令**：Info Inspector 中可以查看之前的 shell 命令。跳转依赖保留的
+  shell integration 锚点；锚点过期后不会伪造精确位置。它与 Quick Input 发送历史、
+  Agent 会话记录是不同的内容。
+- **端口转发**：基于已识别的 SSH 连接，在 Info 中管理远程端口，提供浏览器打开、
+  复制与停止等操作。
+- **ACP 生成 commit message**：读取暂存区 patch，通过 Agent Client Protocol 连接
+  本机安装的 Agent 起草提交信息。支持 Claude、Pi、Codex、OpenCode 对应适配器，
+  安装与认证需明确配置。SSH 仓库的 Git 数据在远程读取，ACP 进程仍运行在 Mac 上；
+  生成消息不会自动执行 commit。
+
+**本机 Agent 不等于离线推理**：ACP 进程可能调用远程模型服务，暂存代码也可能发送到
+相应服务。启用前请了解其数据政策及 OMG 的
+[提交信息生成配置](docs/settings/configuration.md)。
+
+## 从个人 SSH 工作流出发
+
+OMG 的一部分优化来自维护者自己的使用方式：经常通过 SSH 连接远程机器，
+在远程 Git 仓库里工作，并直接在 SSH 会话中运行 Agent CLI。
+我们希望远程终端不只是显示输出，也能提供与当前会话对应的工作区上下文。
+
+- 对于**已经识别且连接就绪的 SSH Pane**，OMG 可以识别远程工作目录和 Git 仓库。
+  Git Inspector 查询的是远程仓库，而不是误用本机同名目录；可以在终端旁查看远程
+  Git 状态、diff 与提交历史。
+- **远程 Agent 活动/会话状态**可以跟随所属 SSH Pane，在标签页中显示工作中、
+  需要关注、完成或失败等状态。支持 hook 的 Agent 需要在远程账号中明确安装集成，
+  不同 Agent 支持程度不同；OMG 不会偷偷修改远程 dotfiles。
+- 远程文件浏览、端口转发、分屏与会话恢复复用捕获的 OpenSSH 连接和工作目录上下文，
+  保留受支持的 alias、端口及跳板配置。
+
+这些能力是针对真实个人工作流的优化，**不是“任意嵌套 SSH、任意 Agent 都自动识别”的承诺**。
+识别依赖可恢复的连接/工作区信息，以及可用的远程工具与认证。
+具体边界见 [SSH Git transport](docs/PLUGIN_DEVELOPMENT.md#ssh-git-parity-and-transport)
+和 [Agent 集成配置](docs/settings/configuration.md)。
+
+![OMG SSH 分屏会话与垂直标签页中的 Agent 状态](docs/images/omg-ssh-agent-splits.png)
+
+*SSH 分屏会话，以及左侧标签页中与会话关联的 Agent 活动状态。*
 
 ## 下载与安装
 
@@ -106,8 +156,10 @@ Release 附带 `SHA256SUMS.txt`；详情见[发版规范](docs/RELEASING.md)。
   历史保存在本机，不意味着整个工作流都离线。
 - **OMG 新增应用能力目前面向 macOS**；仓库继承了跨平台 Ghostty 源码，
   不代表已经提供相同功能的 OMG Linux/Windows 版本。
-- 内建 typed provider 是宿主功能；**尚未提供公开的第三方可执行插件加载器/SDK**。
-  已实现与计划中的边界见[插件开发说明](docs/PLUGIN_DEVELOPMENT.md)。
+- **插件系统：Beta。** 内建 provider/扩展基础仍在演进，尚不是稳定的公开 API，
+  后续开发、分发与协作流程也仍在思考设计。内建 typed provider 已用于宿主功能，
+  但**尚未提供公开的第三方可执行插件加载器/SDK**；Beta 不等于已经支持外部插件安装。
+  各项能力的准确状态见[插件开发说明](docs/PLUGIN_DEVELOPMENT.md)。
 - 这是持续开发的 0.x 项目，不承诺零 Bug 或稳定的公开扩展 API。
   请结合[发版说明](https://github.com/jischeng/oh-my-ghostty/releases)与
   [已报告问题](https://github.com/jischeng/oh-my-ghostty/issues)了解现状。
@@ -147,6 +199,23 @@ Ghostty 由 Mitchell Hashimoto 与贡献者创建。感谢
 [Ghostty 上游](https://github.com/ghostty-org/ghostty)；本 fork 保留原版权、许可和归属，
 不隶属于官方项目，也没有暗示官方背书。继承的终端配置可参考
 [Ghostty 文档](https://ghostty.org/docs)。
+
+## 感谢与参考
+
+- **[Ghostty](https://github.com/ghostty-org/ghostty)**：终端技术基础与上游项目，
+  由 Mitchell Hashimoto 和贡献者共同创建。
+- **[Visual Studio Code](https://github.com/microsoft/vscode)**：工作区、Git 和远程开发
+  交互的重要参考；不代表 OMG 嵌入了 VS Code 或实现了其完整扩展系统。
+- **[CodeEdit / CodeEditSourceEditor](https://github.com/CodeEditApp/CodeEditSourceEditor)**：
+  OMG 使用的原生源码编辑器组件。
+- **[CodeMirror](https://codemirror.net/)、[Mermaid](https://mermaid.js.org/)**
+  及 Markdown 渲染生态：提供实时 Markdown 编辑、图表等基础能力。
+- **[Agent Client Protocol](https://agentclientprotocol.com/)** 及各 Agent 适配器作者：
+  让本机 Agent 集成成为可能。
+
+感谢这些工具、项目与贡献者。参考或集成不代表获得官方背书；组件保留各自的许可证和声明。
+Markdown 资源的第三方声明见
+[THIRD_PARTY_NOTICES](macos/Resources/MarkdownPreview/THIRD_PARTY_NOTICES.md)。
 
 ## 许可证
 

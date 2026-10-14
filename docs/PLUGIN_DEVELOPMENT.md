@@ -1,6 +1,11 @@
 # OMG Plugin Development
 
-> **Public API status:** pre-release / not externally loadable.
+> **Plugin system maturity: Beta. Public API status:** pre-release / not externally loadable.
+>
+> Beta describes the evolving host-extension foundation, not a stable public
+> plugin runtime. The future development/distribution workflow is still being
+> designed; capability-specific Experimental/Internal/Planned labels below remain
+> authoritative. It does not promise third-party executable loading or API stability.
 
 This document is the source of truth for OMG's plugin and host-extension
 contracts. It intentionally describes only code that exists. OMG currently has

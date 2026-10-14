@@ -27,13 +27,21 @@
 > official Ghostty release. It can coexist with `Ghostty.app` and uses its own
 > application identity. Public releases are available for Apple Silicon and Intel.
 
-![OMG vertical tabs and Files Inspector](docs/images/right-inspector-files.png)
+![OMG split terminal, Agent CLI and Git Inspector](docs/images/omg-agent-git-workspace.png)
+
+*An everyday workspace: vertical tabs, an Agent CLI and repository history side
+by side. Account details and personal paths are redacted in these screenshots.*
 
 ## Why OMG?
 
 Running an Agent CLI often means switching between terminal output, long prompts,
 files and repository context. OMG adds a native application layer around Ghostty
 for that workflow—not another terminal engine or a hosted AI service.
+
+OMG is still in iterative development. In the author's everyday workflow, it
+already handles some tasks that previously required switching between Ghostty,
+VS Code and other tools. That is a personal-use observation, not a claim to
+replace a full IDE, every VS Code extension, or Ghostty's cross-platform releases.
 
 | What you want to do | What OMG adds |
 | --- | --- |
@@ -42,11 +50,63 @@ for that workflow—not another terminal engine or a hosted AI service.
 | Organize several sessions | **Vertical tabs** with grouping/order controls and optional Agent activity indicators; native horizontal tabs remain available |
 | Work with the current workspace | **Files Inspector + editor**, including live Markdown preview |
 | Check repository context alongside a running session | **Git Inspector** for status, diffs and history |
-| Work on remote machines | **SSH workspace browsing and port forwarding**, using OpenSSH configuration and system tools |
+| Find earlier shell activity | **Command history** in Info, with navigation back to retained output when valid shell-integration anchors are available |
+| Draft a commit message from staged changes | **ACP connection to a locally installed Agent**, with configurable Agent/model routes and a prompt; review the draft before committing |
+| Work on remote machines | **SSH-aware Git, Agent session status, file browsing and port forwarding**, using OpenSSH configuration and system tools |
 
 Agent CLIs such as Codex, Claude Code and Pi are installed separately. OMG's
 optional Agent integrations provide activity/session context; support varies by
 Agent. OMG does not supply a model subscription or replace your Agent CLI.
+
+## More than terminal input
+
+- **Editor:** inspect and edit workspace files, review diffs, and use live
+  Markdown preview without leaving the terminal workspace. It is a focused
+  editor, not an implementation of VS Code's extension ecosystem.
+- **Command history:** review earlier shell commands in the Info Inspector.
+  Navigation depends on valid retained shell-integration anchors; expired
+  entries do not pretend to have an exact output location. This is separate
+  from Quick Input sent-message history and an Agent's transcript.
+- **Port forwarding:** manage remote ports from Info, with browser/copy/stop
+  actions, using the recognized SSH connection context.
+- **AI commit-message drafts over ACP:** read the staged patch and ask an
+  installed Agent through the Agent Client Protocol. Supported adapters include
+  Claude, Pi, Codex and OpenCode; setup/authentication is explicit. For an SSH
+  repository, Git reads happen remotely while the ACP process runs on the Mac.
+  Generation does not commit automatically.
+
+A local ACP process can still call a remote model service: **local Agent does
+not mean offline inference**. Staged source may be sent to that provider; review
+its policy and OMG's [commit-generation settings](docs/settings/configuration.md)
+before enabling the feature.
+
+## Built around an SSH-heavy workflow
+
+OMG grew out of the maintainer's own workflow: connecting to remote machines,
+working in Git repositories there, and running Agent CLIs inside SSH sessions.
+A remote terminal should offer useful workspace context—not just display bytes.
+
+- A **recognized, ready SSH pane** can resolve the remote working directory and
+  Git repository. The Git Inspector runs against that remote repository rather
+  than a same-path local directory, with status, diffs and history alongside the
+  terminal.
+- **Remote Agent activity/session context** can follow the owning SSH pane, so
+  its tab can show working, attention, completion or failure states. Supported
+  hook integrations require explicit installation in the remote account;
+  availability varies by Agent. OMG does not silently modify remote dotfiles.
+- Remote Files browsing, port forwarding and split/session restoration build on
+  the captured OpenSSH connection and workspace context, including supported
+  alias, port and jump-host options.
+
+This is optimization for a real personal workflow, not a promise to recognize
+arbitrary nested SSH sessions or every Agent automatically. Recognition requires
+recoverable connection/workspace context and usable remote tools/authentication.
+See [SSH Git transport](docs/PLUGIN_DEVELOPMENT.md#ssh-git-parity-and-transport)
+and [Agent integration](docs/settings/configuration.md) for the exact boundaries.
+
+![OMG SSH session with split panes and Agent activity in vertical tabs](docs/images/omg-ssh-agent-splits.png)
+
+*An SSH session with split panes and Agent activity indicators in the tab sidebar.*
 
 ## Download and install
 
@@ -113,9 +173,12 @@ focus, queue and persistence details.
   Local history storage is not a promise that every workflow stays offline.
 - **OMG's added application features target macOS.** Inherited cross-platform
   Ghostty source is not a promise of equivalent OMG Linux/Windows releases.
-- Built-in typed providers are working host features. A public third-party
-  executable plugin loader/SDK is **not available yet**. See
-  [Plugin Development](docs/PLUGIN_DEVELOPMENT.md) for implemented vs planned status.
+- **Plugin system: Beta.** The in-tree provider/extension foundation is still
+  evolving, is not a stable public API, and its future development/distribution
+  workflow is still being designed. Built-in typed providers are working host
+  features; a public third-party executable plugin loader/SDK is **not available
+  yet**. Beta does not mean external plugin installation is supported. See
+  [Plugin Development](docs/PLUGIN_DEVELOPMENT.md) for exact capability status.
 - This is active pre-1.0 development, not a claim of bug-free behavior or a stable
   public extension API. Consult [release notes](https://github.com/jischeng/oh-my-ghostty/releases)
   and [reported issues](https://github.com/jischeng/oh-my-ghostty/issues).
@@ -161,6 +224,25 @@ Ghostty was created by Mitchell Hashimoto and its contributors. Thank you to the
 [upstream project](https://github.com/ghostty-org/ghostty); this fork preserves its
 copyright, license and attribution, and is not affiliated with or endorsed by it.
 For the inherited terminal configuration, consult [Ghostty documentation](https://ghostty.org/docs).
+
+## Thanks and inspiration
+
+- **[Ghostty](https://github.com/ghostty-org/ghostty):** the terminal foundation
+  and upstream project; created by Mitchell Hashimoto and its contributors.
+- **[Visual Studio Code](https://github.com/microsoft/vscode):** an important
+  workflow/UI reference for workspace, Git and remote-development interactions,
+  not a claim that OMG embeds VS Code or implements its extension system.
+- **[CodeEdit / CodeEditSourceEditor](https://github.com/CodeEditApp/CodeEditSourceEditor):**
+  the native source-editor component used by OMG.
+- **[CodeMirror](https://codemirror.net/), [Mermaid](https://mermaid.js.org/) and
+  the Markdown rendering ecosystem:** live Markdown editing and diagram support.
+- **[Agent Client Protocol](https://agentclientprotocol.com/)** and the Agent
+  adapter authors who make local Agent integration possible.
+
+Thank you to these projects and their contributors. Reference/integration does
+not imply their endorsement. Components retain their own licenses and notices;
+Markdown asset notices are in
+[THIRD_PARTY_NOTICES](macos/Resources/MarkdownPreview/THIRD_PARTY_NOTICES.md).
 
 ## License
 

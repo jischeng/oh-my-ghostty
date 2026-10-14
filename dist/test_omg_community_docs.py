@@ -48,6 +48,17 @@ class CommunityDocsTests(unittest.TestCase):
         self.assertIn("not available yet", english)
         self.assertIn("pre-1.0", english)
 
+    def test_readmes_cover_workspace_features_and_beta_boundaries(self):
+        english = " ".join((ROOT / "README.md").read_text().lower().replace("**", "").split())
+        chinese = (ROOT / "README.zh-CN.md").read_text()
+        for feature in ["command history", "port forwarding", "agent client protocol", "editor", "plugin system: beta"]:
+            self.assertIn(feature, english)
+        self.assertIn("local agent does not mean offline inference", english)
+        self.assertIn("not available yet", english)
+        for phrase in ["部分替代", "插件系统：Beta", "命令历史", "端口转发", "CodeEditSourceEditor"]:
+            self.assertIn(phrase, chinese)
+        self.assertIn("Plugin system maturity: Beta", (ROOT / "docs/PLUGIN_DEVELOPMENT.md").read_text())
+
     def test_all_inherited_vouch_jobs_are_upstream_only(self):
         workflows = sorted((ROOT / ".github/workflows").glob("vouch-*.yml"))
         self.assertGreaterEqual(len(workflows), 5)

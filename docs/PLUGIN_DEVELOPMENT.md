@@ -2156,6 +2156,13 @@ preview, not a claim of complete Typora-style rich-text editing. The internal
 `window.omgLiveEditorView()` test hook returns a CodeMirror `EditorView`; it is
 not a plugin API or a ProseMirror view.
 
+Mermaid widgets distinguish DOM construction from mounting. Detached widgets wait
+outside the serialized renderer queue, live remounts can retry discarded results,
+and widget destruction cancels mount observation. Changed source cannot accept
+stale SVGs; completed widgets do not rerender merely because their DOM moves.
+Renderer/load errors are visible and terminal, not silently retried. These are
+Host-owned editor lifecycle details and do not expand plugin APIs or permissions.
+
 ### Git collection navigation
 
 Inspector visibility is independent of its native view lifetime. After the

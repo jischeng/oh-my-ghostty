@@ -120,26 +120,94 @@ async function diagramFixture() {
   window.DOMPurify = { sanitize: value => value };
   let measurements = 0;
   const view = { state: EditorState.create({ doc: source }), requestMeasure() { measurements++; } };
-  const root = createBlockWidget({ from: 0, to: source.length, kind: 'code', source }).toDOM(view);
+  const widget = createBlockWidget({ from: 0, to: source.length, kind: 'code', source });
+  const root = widget.toDOM(view);
   document.body.replaceChildren(root);
   await new Promise(setImmediate);
   assert.equal(typeof resolveRender, 'function');
-  return { root, view, finish: async () => {
+  return { root, view, destroy: () => widget.destroy(root), finish: async () => {
     resolveRender({ svg: '<svg><text>diagram</text></svg>' });
     await new Promise(setImmediate);
     return measurements;
   } };
 }
 {
-  const { root, view, finish } = await diagramFixture();
+  const { root, view, finish, destroy } = await diagramFixture();
   view.state = view.state.update({ changes: { from: view.state.doc.length, insert: '\nother text' } }).state;
   assert.ok(await finish() > 0);
   assert.ok(root.querySelector('figure svg'), 'unrelated typing must not cancel a reused diagram widget');
+  destroy();
 }
 {
-  const { root, finish } = await diagramFixture();
+  const { root, finish, destroy } = await diagramFixture();
   root.remove();
   await finish();
   assert.equal(root.querySelector('figure'), null, 'detached widgets must not accept old asynchronous results');
+  document.body.append(root);
+  await new Promise(setImmediate);
+  assert.ok(await finish() > 0);
+  assert.ok(root.querySelector('.mermaid svg'), 'a live remounted widget must retry the discarded render');
+  destroy();
 }
 console.log('Markdown widgets: asynchronous Mermaid reuse and stale-result rejection passed');
+
+// toDOM builds a widget; attachment is a separate lifecycle event. If a widget
+// is mounted after the initial microtask, it must still render exactly once.
+{
+  const source = '```mermaid\ngraph LR; A-->B\n```';
+  let renders = 0;
+  window.omgMarkdownModel.ensureMermaid = async () => ({
+    initialize() {},
+    async render() { renders++; return { svg: '<svg><text>delayed mount</text></svg>' }; },
+  });
+  const view = { state: EditorState.create({ doc: source }), requestMeasure() {} };
+  const widget = createBlockWidget({ from: 0, to: source.length, kind: 'code', source });
+  const root = widget.toDOM(view);
+  await new Promise(setImmediate);
+  assert.equal(renders, 0, 'a detached widget must not enter the global renderer queue');
+  document.body.replaceChildren(root);
+  await new Promise(setImmediate);
+  assert.equal(renders, 1, 'delayed attachment must not permanently drop diagram rendering');
+  assert.ok(root.querySelector('.mermaid svg'));
+  root.remove();
+  document.body.append(root);
+  await new Promise(setImmediate);
+  assert.equal(renders, 1, 'DOM movement must not render a completed diagram twice');
+  widget.destroy(root);
+}
+{
+  const source = '```mermaid\ngraph LR; A-->B\n```';
+  let renders = 0;
+  window.omgMarkdownModel.ensureMermaid = async () => ({
+    initialize() {},
+    async render() { renders++; return { svg: '<svg></svg>' }; },
+  });
+  const view = { state: EditorState.create({ doc: source }), requestMeasure() {} };
+  const widget = createBlockWidget({ from: 0, to: source.length, kind: 'code', source });
+  const root = widget.toDOM(view);
+  widget.destroy(root);
+  await new Promise(setImmediate);
+  document.body.replaceChildren(root);
+  await new Promise(setImmediate);
+  assert.equal(renders, 0, 'destroying a not-yet-mounted widget must cancel its pending render');
+}
+{
+  const source = '```mermaid\ngraph LR; A-->B\n```';
+  let renders = 0;
+  window.omgMarkdownModel.ensureMermaid = async () => ({
+    initialize() {},
+    async render() { renders++; throw new Error('invalid diagram'); },
+  });
+  const view = { state: EditorState.create({ doc: source }), requestMeasure() {} };
+  const widget = createBlockWidget({ from: 0, to: source.length, kind: 'code', source });
+  const root = widget.toDOM(view);
+  document.body.replaceChildren(root);
+  await new Promise(setImmediate);
+  assert.equal(renders, 1);
+  assert.ok(root.querySelector('.render-error'), 'renderer errors must be visible, not silently retried');
+  document.body.append(document.createElement('div'));
+  await new Promise(setImmediate);
+  assert.equal(renders, 1, 'a terminal renderer error must not start a retry loop');
+  widget.destroy(root);
+}
+console.log('Markdown widgets: delayed mount, remount, one-shot rendering, errors and pre-mount teardown passed');

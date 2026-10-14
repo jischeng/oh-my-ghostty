@@ -81,7 +81,12 @@ class BlockWidget extends WidgetType {
     return true;
   }
 
-  destroy(root) { root.omgCellEdit?.stop(); }
+  destroy(root) {
+    root.omgCellEdit?.stop();
+    root.omgDiagramStopped = true;
+    root.omgDiagramMountObserver?.disconnect();
+    root.omgDiagramMountObserver = null;
+  }
 
   installTableEditing(root, view) {
     const sourceRows = this.block.rows?.filter(row => !row.delimiter) || [];
@@ -195,39 +200,75 @@ class BlockWidget extends WidgetType {
   renderDiagrams(root, view) {
     const codes = [...root.querySelectorAll('pre > code.language-mermaid')];
     if (!codes.length) return;
-    const current = () => root.isConnected &&
+    const sourceMatches = () => this.block.to <= view.state.doc.length &&
       view.state.doc.sliceString(this.block.from, this.block.to) === this.block.source;
-    // Mermaid has global theme/config state, so serialize just its renderer.
-    diagramQueue = diagramQueue.catch(() => {}).then(async () => {
-      if (!current()) return;
-      const mermaid = await (window.omgMarkdownModel?.ensureMermaid || window.omgEnsureMermaid)();
-      if (!current()) return;
-      mermaid.initialize({ startOnLoad: false, securityLevel: 'strict',
-        theme: this.options.theme === 'dark' ? 'dark' : 'default', suppressErrorRendering: true,
-        maxTextSize: 50000, htmlLabels: false, flowchart: { htmlLabels: false } });
-      for (const code of codes) {
+    const current = () => !root.omgDiagramStopped && root.isConnected && sourceMatches();
+    let queued = false, finished = false;
+    const stopWatching = () => {
+      root.omgDiagramMountObserver?.disconnect();
+      root.omgDiagramMountObserver = null;
+    };
+    const showError = (code, error) => {
+      const message = document.createElement('p');
+      message.className = 'render-error';
+      message.textContent = `Mermaid: ${String(error.message || error).slice(0, 300)}`;
+      code.parentElement.after(message);
+      code.omgDiagramFinished = true;
+      view.requestMeasure();
+    };
+    const request = () => {
+      if (finished || queued || root.omgDiagramStopped || !root.isConnected) return;
+      if (!sourceMatches()) { stopWatching(); return; }
+      queued = true;
+      // Mermaid has global theme/config state, so serialize just its renderer.
+      // Detached DOM must not block this queue while waiting to be mounted.
+      diagramQueue = diagramQueue.catch(() => {}).then(async () => {
         if (!current()) return;
-        try {
-          const result = await mermaid.render(`omg-live-diagram-${++diagramID}`, code.textContent);
+        const mermaid = await (window.omgMarkdownModel?.ensureMermaid || window.omgEnsureMermaid)();
+        if (!current()) return;
+        mermaid.initialize({ startOnLoad: false, securityLevel: 'strict',
+          theme: this.options.theme === 'dark' ? 'dark' : 'default', suppressErrorRendering: true,
+          maxTextSize: 50000, htmlLabels: false, flowchart: { htmlLabels: false } });
+        for (const code of codes) {
           if (!current()) return;
-          const figure = document.createElement('figure');
-          figure.className = 'mermaid';
-          figure.innerHTML = window.DOMPurify.sanitize(result.svg, {
-            USE_PROFILES: { svg: true, svgFilters: true },
-            FORBID_TAGS: ['foreignObject', 'script'], FORBID_ATTR: ['onload'],
-          });
-          code.parentElement.replaceWith(figure);
-          view.requestMeasure();
-        } catch (error) {
-          if (!current()) return;
-          const message = document.createElement('p');
-          message.className = 'render-error';
-          message.textContent = `Mermaid: ${String(error.message || error).slice(0, 300)}`;
-          code.parentElement.after(message);
-          view.requestMeasure();
+          if (code.omgDiagramFinished || !root.contains(code)) continue;
+          try {
+            const result = await mermaid.render(`omg-live-diagram-${++diagramID}`, code.textContent);
+            if (!current()) return;
+            const figure = document.createElement('figure');
+            figure.className = 'mermaid';
+            figure.innerHTML = window.DOMPurify.sanitize(result.svg, {
+              USE_PROFILES: { svg: true, svgFilters: true },
+              FORBID_TAGS: ['foreignObject', 'script'], FORBID_ATTR: ['onload'],
+            });
+            code.parentElement.replaceWith(figure);
+            view.requestMeasure();
+          } catch (error) {
+            if (!current()) return;
+            showError(code, error);
+          }
         }
-      }
-    }).catch(() => { if (current()) view.requestMeasure(); });
+        finished = true;
+        stopWatching();
+      }).catch(error => {
+        if (!current()) return;
+        const code = codes.find(code => root.contains(code));
+        if (code) showError(code, error);
+        finished = true;
+        stopWatching();
+      }).finally(() => {
+        queued = false;
+        // If attachment changed during loading/rendering, a still-live widget
+        // may now be connected again. Retry only that valid lifecycle, never a
+        // destroyed/stale widget or a terminal renderer error.
+        if (!finished && current()) request();
+      });
+    };
+    // toDOM is construction, not a mount notification. CodeMirror/host DOM
+    // updates can connect or temporarily move a widget after the first task.
+    root.omgDiagramMountObserver = new window.MutationObserver(request);
+    root.omgDiagramMountObserver.observe(root.ownerDocument, { childList: true, subtree: true });
+    request();
   }
 
   // Keep native selection, copying, links and temporary cell editing in the DOM.

@@ -39,6 +39,16 @@ when they have no visible block; splitting only by visible HTML blocks is not a
 complete source-range model. Relative image sources remain unchanged in Markdown
 and resolve through the existing local/SSH image scheme.
 
+Mermaid widget construction and DOM mounting are separate lifecycle events.
+Rendering starts only once the widget is connected, using a mount observer rather
+than assuming the first construction-time microtask sees mounted DOM. Temporary
+detachment discards asynchronous results; a still-live remounted widget can retry.
+Destruction cancels the observer, changed source rejects stale results, completed
+SVGs are not rendered again on DOM movement, and terminal renderer/load errors
+are shown instead of entering a retry loop. Detached widgets do not occupy the
+shared serialized Mermaid renderer queue. Node and actual WKWebView regressions
+cover delayed attachment, in-flight detachment, and teardown.
+
 This is a source-based live preview, not a complete Typora-style rich-text editor.
 Ordinary-line input and complex-block source editing have different interactions.
 Table editing, reference definitions, nested block ranges, Chinese composition,

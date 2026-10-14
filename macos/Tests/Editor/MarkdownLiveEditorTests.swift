@@ -86,10 +86,10 @@ struct MarkdownLiveEditorTests {
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let sample = try String(contentsOf: root.appendingPathComponent("dist/tests/fixtures/markdown-preview.md"), encoding: .utf8)
         text = sample
-        _ = try await web.callAsyncJavaScript("return await window.renderMarkdown(markdown, options);", arguments: [
+        _ = try await callJavaScript(web, body: "return await window.renderMarkdown(markdown, options);", arguments: [
             "markdown": sample,
             "options": ["theme": "dark", "background": "#202020", "foreground": "#eeeeee", "editable": true],
-        ], in: nil, in: .page)
+        ])
         let positionsJSON = try #require(try await web.evaluateJavaScript("""
         JSON.stringify(window.omgMarkdownModel.parseBlocks(window.getMarkdown())
             .filter(block => block.kind === 'code' && block.language === 'mermaid').map(block => block.from))
@@ -103,6 +103,31 @@ struct MarkdownLiveEditorTests {
                 rendered = try await web.evaluateJavaScript("!!document.querySelector('.omg-block-widget[data-source-from=\"\(position)\"] .mermaid svg')") as? Bool == true
                 if rendered { break }
                 try await Task.sleep(for: .milliseconds(100))
+            }
+            if !rendered {
+                let diagnostics = try? await web.evaluateJavaScript("""
+                JSON.stringify({
+                    visibility: document.visibilityState, focused: document.hasFocus(),
+                    activeElement: document.activeElement?.className,
+                    position: \(position), innerHeight: window.innerHeight,
+                    selection: window.omgLiveEditorView?.()?.state.selection.main.head,
+                    viewport: window.omgLiveEditorView?.()?.viewport,
+                    visibleRanges: window.omgLiveEditorView?.()?.visibleRanges,
+                    mermaidLoaded: !!window.mermaid,
+                    widgets: Array.from(document.querySelectorAll('.omg-block-widget')).map(e => ({
+                        from: e.dataset.sourceFrom, kind: e.className,
+                        y: e.getBoundingClientRect().y, height: e.getBoundingClientRect().height,
+                        svg: !!e.querySelector('.mermaid svg'),
+                        error: e.querySelector('.render-error')?.textContent?.slice(0, 300),
+                        hasMermaidSource: !!e.querySelector('code.language-mermaid')
+                    })),
+                    scroll: Array.from(document.querySelectorAll('.cm-scroller')).map(e => ({
+                        top: e.scrollTop, height: e.clientHeight, scrollHeight: e.scrollHeight
+                    }))
+                })
+                """)
+                print("Mermaid timeout diagnostic: key=\(window.isKeyWindow) visible=\(window.isVisible) "
+                      + "occluded=\(!window.occlusionState.contains(.visible)) js=\(diagnostics ?? "unavailable")")
             }
             #expect(rendered, "A visible Mermaid block should render its diagram")
         }
@@ -124,11 +149,11 @@ struct MarkdownLiveEditorTests {
         }
         for (theme, width) in [("light", 900), ("dark", 900), ("dark", 380)] {
             window.setContentSize(NSSize(width: width, height: 650))
-            _ = try await web.callAsyncJavaScript("return await window.renderMarkdown(markdown, options);", arguments: [
+            _ = try await callJavaScript(web, body: "return await window.renderMarkdown(markdown, options);", arguments: [
                 "markdown": sample,
                 "options": ["theme": theme, "background": theme == "dark" ? "#202020" : "#ffffff",
                             "foreground": theme == "dark" ? "#eeeeee" : "#1f2328", "editable": true],
-            ], in: nil, in: .page)
+            ])
             _ = try await web.evaluateJavaScript("window.scrollMarkdownTo(0)")
             try await Task.sleep(for: .milliseconds(300))
             #expect(try await web.evaluateJavaScript("document.documentElement.scrollWidth <= window.innerWidth") as? Bool == true)
@@ -136,6 +161,63 @@ struct MarkdownLiveEditorTests {
             if let data = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: data),
                let png = bitmap.representation(using: .png, properties: [:]) {
                 try png.write(to: URL(fileURLWithPath: "/tmp/omg-live-markdown-\(theme)-\(width).png"))
+            }
+        }
+    }
+
+    @Test func liveMermaidConstructedWhileDetachedRendersAfterMount() async throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 650),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: MarkdownPreviewView(
+            text: .constant("# Warmup"), fileURL: URL(fileURLWithPath: "/tmp/delayed-mermaid.md"),
+            terminalBackground: .black, foregroundColor: .white
+        ))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.contentView = nil; window.close() }
+        var web: MarkdownPreviewWebView?
+        var ready = false
+        for _ in 0..<150 {
+            web = findWebView(window.contentView)
+            if let web {
+                ready = (try? await web.evaluateJavaScript("!!window.omgLiveEditorView?.()")) as? Bool == true
+            }
+            if ready { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        try #require(ready)
+        let preview = try #require(web)
+        let state = try await callJavaScript(preview, body: """
+        const view = window.omgLiveEditorView();
+        view.dom.remove();
+        await window.renderMarkdown(markdown, options);
+        // Let construction-time render tasks run while the DOM is detached.
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const widget = view.dom.querySelector('.omg-block-widget');
+        const state = { constructedDetached: !!widget && !widget.isConnected,
+                        renderedDetached: !!widget?.querySelector('.mermaid svg') };
+        document.getElementById('content').append(view.dom);
+        return state;
+        """, arguments: [
+            "markdown": "# Delayed mount\n\n```mermaid\ngraph LR; A-->B\n```",
+            "options": ["theme": "dark", "background": "#202020", "foreground": "#eeeeee", "editable": true],
+        ])
+        let result = try #require(state as? [String: Bool])
+        #expect(result["constructedDetached"] == true)
+        #expect(result["renderedDetached"] == false)
+        var rendered = false
+        for _ in 0..<100 {
+            rendered = try await preview.evaluateJavaScript("!!document.querySelector('.omg-block-widget .mermaid svg')") as? Bool == true
+            if rendered { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(rendered, "A Mermaid widget mounted after its construction task must still render")
+    }
+
+    private func callJavaScript(_ web: WKWebView, body: String, arguments: [String: Any]) async throws -> Any {
+        try await withCheckedThrowingContinuation { continuation in
+            web.callAsyncJavaScript(body, arguments: arguments, in: nil, in: .page) { result in
+                continuation.resume(with: result)
             }
         }
     }

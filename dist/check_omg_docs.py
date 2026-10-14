@@ -9,6 +9,11 @@ from urllib.parse import unquote
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = [
     ROOT / "README.md",
+    ROOT / "README.zh-CN.md",
+    ROOT / "CONTRIBUTING.md",
+    ROOT / "docs/REPORTING.md",
+    ROOT / "docs/CONTRIBUTING.md",
+    ROOT / ".agents/skills/omg-issue-report/SKILL.md",
     ROOT / "docs/RELEASING.md",
     ROOT / "docs/PLUGIN_DEVELOPMENT.md",
 ]
@@ -87,7 +92,10 @@ if re.search(r"\b(?:notarytool|stapler)\s+(?:submit|store-credentials|staple)\b"
     fail("Release guide contains notarization steps outside the release workflow")
 
 readme = (ROOT / "README.md").read_text()
-for required in ["docs/RELEASING.md", "docs/PLUGIN_DEVELOPMENT.md"]:
+for required in [
+    "README.zh-CN.md", "docs/REPORTING.md", "docs/CONTRIBUTING.md",
+    "docs/RELEASING.md", "docs/PLUGIN_DEVELOPMENT.md",
+]:
     if required not in readme:
         fail(f"README does not link to {required}")
 

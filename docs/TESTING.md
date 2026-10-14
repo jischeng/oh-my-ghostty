@@ -142,6 +142,9 @@ python3 dist/test_ssh_shell_integration.py \
   --omg macos/build/Debug/OMG.app/Contents/MacOS/omg
 python3 -m unittest discover -s dist -p 'test_ssh_agent_wrappers.py'
 
+# Public README/report/contribution entry points and upstream-only Vouch jobs
+python3 -m unittest discover -s dist -p 'test_omg_community_docs.py'
+
 # Always keep the OMG documentation contract
 python3 dist/check_omg_docs.py
 ```

@@ -1,9 +1,15 @@
-# Contributing to Ghostty
+# Contributing to Oh My Ghostty
 
-This document describes the process of contributing to Ghostty. It is intended
-for anyone considering opening an **issue**, **discussion** or **pull request**.
-For people who are interested in developing Ghostty and technical details behind
-it, please check out our ["Developing Ghostty"](HACKING.md) document as well.
+For this repository, start with the public [OMG contribution guide](docs/CONTRIBUTING.md)
+and [reporting guide](docs/REPORTING.md). English and Chinese contributions are
+welcome. OMG has its own Issue/PR entry points and does **not** require approval
+through Ghostty's upstream vouch process; inherited Vouch jobs run only in the
+official Ghostty repository.
+
+For work submitted to official Ghostty, follow its
+[current upstream guide](https://github.com/ghostty-org/ghostty/blob/main/CONTRIBUTING.md)
+and [Developing Ghostty](HACKING.md). The retained text below is upstream
+reference material, not OMG's contribution entry point.
 
 ## OMG-specific contribution rules
 
@@ -20,6 +26,12 @@ Plugin-related review checklist:
 
 - [ ] Plugin API/manifest/lifecycle/loading/capabilities are unchanged; or
 - [ ] `docs/PLUGIN_DEVELOPMENT.md` and compatibility tests are updated.
+
+<details>
+<summary>Upstream Ghostty contribution policy (reference only)</summary>
+
+The following text describes upstream Ghostty. For OMG, use the guides linked
+above rather than opening a Ghostty vouch/triage discussion.
 
 > [!NOTE]
 >
@@ -209,3 +221,5 @@ pull request will be accepted with a high degree of certainty.
 > **Pull requests are NOT a place to discuss feature design.** Please do
 > not open a WIP pull request to discuss a feature. Instead, use a discussion
 > and link to your branch.
+
+</details>

@@ -1,295 +1,168 @@
 <p align="center">
-  <img src="images/omg/omg-app-icon-1024.png" alt="OMG app icon" width="160">
+  <img src="images/omg/omg-app-icon-1024.png" alt="Oh My Ghostty app icon" width="112">
 </p>
 
-<h1 align="center">OMG</h1>
+<h1 align="center">Oh My Ghostty · OMG</h1>
 
 <p align="center">
-  A Ghostty-based macOS terminal with an extensible application shell.
+  A macOS terminal for AI-agent workflows, built on Ghostty.
   <br>
-  Vertical tabs, a native Inspector, Files browsing, visual Settings, and
-  host-owned extension boundaries without replacing the Ghostty terminal core.
+  Keep your agents, prompts, files and Git context in one native window.
 </p>
 
 <p align="center">
-  <a href="https://github.com/jischeng/oh-my-ghostty/releases">Downloads</a>
-  ·
-  <a href="docs/PLUGIN_DEVELOPMENT.md">Plugins</a>
-  ·
-  <a href="docs/RELEASING.md">Releasing</a>
-  ·
-  <a href="docs/oh-my-ghostty-architecture.md">Architecture</a>
+  <a href="https://github.com/jischeng/oh-my-ghostty/releases/latest">Download</a>
+  · <a href="README.zh-CN.md">简体中文</a>
+  · <a href="docs/REPORTING.md">Report a problem</a>
+  · <a href="docs/CONTRIBUTING.md">Contribute</a>
 </p>
 
-![OMG with vertical tabs and the Files Inspector](docs/images/right-inspector-files.png)
+<p align="center">
+  <a href="https://github.com/jischeng/oh-my-ghostty/releases/latest"><img src="https://img.shields.io/github/v/release/jischeng/oh-my-ghostty?label=release" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/macOS-13%2B-blue" alt="macOS 13 or later">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT license"></a>
+</p>
 
-## What is OMG?
+> OMG is an independent, actively developed **pre-1.0 Ghostty fork**, not an
+> official Ghostty release. It can coexist with `Ghostty.app` and uses its own
+> application identity. Public releases are available for Apple Silicon and Intel.
 
-OMG is an independent macOS application built on the
-[Ghostty](https://github.com/ghostty-org/ghostty) terminal core. Ghostty
-provides terminal emulation, rendering, PTY/shell lifecycle, input, and the
-configuration foundation. OMG adds an application layer designed for richer
-native workflows and future extension points.
-
-OMG is not an official Ghostty release. It uses its own application identity:
-
-```text
-Application:       OMG.app
-Executable:        omg
-Bundle identifier: com.jischeng.omg
-```
-
-It can be installed and run alongside the official `Ghostty.app` without
-replacing it.
+![OMG vertical tabs and Files Inspector](docs/images/right-inspector-files.png)
 
 ## Why OMG?
 
-The goal is to extend the terminal application shell while preserving Ghostty's
-core behavior and performance-sensitive paths. OMG keeps Horizontal tabs on
-Ghostty's native implementation and adds optional presentation/integration
-layers around the same canonical terminal model.
+Running an Agent CLI often means switching between terminal output, long prompts,
+files and repository context. OMG adds a native application layer around Ghostty
+for that workflow—not another terminal engine or a hosted AI service.
 
-Core design rules:
+| What you want to do | What OMG adds |
+| --- | --- |
+| Write a multiline prompt without fighting terminal input | **Quick Input**: a resizable composer with deliberate Send and Queue actions |
+| Reuse a prompt or keep the composer open | **Sent history** with search, keyboard navigation, append/replace, and a global Pin control |
+| Organize several sessions | **Vertical tabs** with grouping/order controls and optional Agent activity indicators; native horizontal tabs remain available |
+| Work with the current workspace | **Files Inspector + editor**, including live Markdown preview |
+| Check repository context alongside a running session | **Git Inspector** for status, diffs and history |
+| Work on remote machines | **SSH workspace browsing and port forwarding**, using OpenSSH configuration and system tools |
 
-- Ghostty owns renderer, PTY, terminal state, input, and shell lifecycle;
-- `NSWindowTabGroup.windows` remains the canonical macOS tab model;
-- native AppKit/SwiftUI owns application presentation;
-- extension providers contribute validated data, not arbitrary views or
-  terminal objects;
-- OMG and Ghostty versions are tracked independently.
+Agent CLIs such as Codex, Claude Code and Pi are installed separately. OMG's
+optional Agent integrations provide activity/session context; support varies by
+Agent. OMG does not supply a model subscription or replace your Agent CLI.
 
-## Features
+## Download and install
 
-### Ghostty terminal core
+Requires **macOS 13 or later**. Open the
+[latest GitHub release](https://github.com/jischeng/oh-my-ghostty/releases/latest)
+and choose a DMG:
 
-- Ghostty renderer, terminal emulation, PTY, input, themes, and keybindings;
-- Ghostty configuration remains the inherited terminal baseline;
-- Horizontal layout continues to use Ghostty's native titlebar tabs.
+| Mac | Release asset |
+| --- | --- |
+| Apple Silicon | `OMG-<version>-macos-arm64.dmg` |
+| Intel | `OMG-<version>-macos-x86_64.dmg` |
+| Either architecture | `OMG-<version>-macos-universal.dmg` |
 
-### Vertical Tabs
+1. Open the DMG and drag **OMG.app** to Applications.
+2. Launch OMG. It does not replace the official Ghostty app.
+3. If macOS blocks the first launch, review the warning and—only if you trust the
+   download—allow the app in **System Settings → Privacy & Security**.
 
-- left session/tab Sidebar backed by the same `NSWindowTabGroup` order;
-- tab selection, close, drag reorder, restore, and `⌘1...⌘9` behavior;
-- project/date grouping and manual/created/recent ordering;
-- shared window-group visibility and committed width state;
-- terminal-safe show/hide and resize behavior.
+**Signing:** releases use a persistent **self-signed identity** and are **not
+notarized**. They are not Apple Developer ID-signed apps. Do not disable Gatekeeper
+globally. Releases include `SHA256SUMS.txt`; signing and distribution details are
+in [Releasing OMG](docs/RELEASING.md).
 
-### Right Inspector and Files
+To uninstall, remove `OMG.app`. Settings, saved session data and history are not
+automatically erased. You can clear sent history in Settings before removing the
+app; see [configuration and storage](docs/settings/configuration.md).
 
-- Core-owned Inspector host shared by Horizontal and Vertical layouts;
-- extensible titlebar pane switch with deterministic overflow;
-- recursive Files tree following the selected tab's live working directory;
-- incremental, cancellable subtree loading that preserves scroll, selection,
-  expansion identity, and cached children;
-- file/folder creation, refresh, collapse, and type-aware host icons;
-- theme-derived backgrounds, separators, opacity, and vibrancy.
+## Your first Agent workflow
 
-### Native Settings and appearance
+1. Start your usual shell or installed Agent CLI in the terminal.
+2. Press **⌘⇧E** to open Quick Input and write a prompt. Use **⌘↩** to send it,
+   or **⌥⌘↩** to queue it. Queue dispatch depends on the owning Agent session's
+   normalized completion signals; it is not a generic shell-command scheduler.
+3. Press **⌘⇧H** or click the clock icon to open sent history. Use **↑/↓** to
+   select, type to search, and **Enter** to insert. Selection does not send text.
+4. Use **Pin** to keep Quick Input open after sending/queueing. Explicit Escape
+   still closes it; visibility and Pin are shared across OMG tabs/windows.
+5. Open **Settings → Editor → Quick Input** for history scope, append/replace,
+   expiration and retention. Agent hook installation is optional and explicit in
+   **Settings → Agent Integration**.
 
-- native macOS Settings window;
-- OMG-owned tabs, appearance, terminal, keyboard, plugin, and advanced pages;
-- optional theme/font/opacity/blur/cursor overrides layered on Ghostty config;
-- live updates without rebuilding terminal surfaces;
-- separate OMG settings file and typed schema.
+| Shortcut | Action |
+| --- | --- |
+| ⌘⇧E | Toggle Quick Input (configurable) |
+| ⌘↩ | Send the draft; save when editing a queued message |
+| ⌥⌘↩ | Queue the draft; move a queued edit to the queue end |
+| ⌘⇧H | Toggle History; reopening remembers selection/search |
+| ↑ / ↓ | Browse History; in the composer, initial boundary navigation needs two distinct presses |
+| Esc | Dismiss the composer; in History, leave search before closing |
 
-### Extension foundation
+Browse-only history navigation preserves the newest unsent draft and caret;
+editing recalled text makes it a new draft without changing the sent record.
+See the [full Quick Input behavior](docs/settings/configuration.md) for IME,
+focus, queue and persistence details.
 
-OMG includes tested protocol, capability, status, and Inspector registry
-components. The built-in Files provider dogfoods the typed Inspector boundary.
-An Experimental in-tree SSH workspace provider reads OpenSSH aliases and uses
-the system SFTP client for remote Files without owning credentials. Its Info
-Inspector pane reserves hidden future machine status/resources and session
-sections, and currently presents only localized VS Code-style port forwarding:
-port or `host:port` targets, same-port preference, remote loopback process names,
-hover browser/copy/stop actions, and detailed failures.
-Forwards are shared across Panes reaching the same cryptographically identified
-SSH server even through different aliases/direct IPs/jump routes and restore
-with restored SSH sessions.
-Splitting an active SSH Pane launches a new independent `omg +ssh` child from
-the original OpenSSH argv and ready remote cwd, preserving config aliases,
-ProxyJump, explicit options, and folder context without keystroke injection.
+## Privacy and current boundaries
 
-The built-in Agent Status integration recognizes Codex, Claude Code, Pi, Qoder
-CLI, Reasonix, OMP, OpenCode, Amp, Antigravity, Cline, Copilot, Crush, Cursor
-Agent, Droid, Grok, Hermes, Kimi, and Qwen Code through bundled manifests.
-In Vertical Tabs, the highest-priority activity across every split replaces the
-terminal/cloud icon with the OpenAI, Claude, or Pi glyph. Idle has no ring;
-working uses a rotating quarter-circle progress indicator, while approval,
-completion, and failure use the trailing status slot. Selecting a completed Tab
-acknowledges it back to idle without losing agent identity. Horizontal Tabs remain the
-unmodified Ghostty native presentation. Instance-scoped bounded OSC events follow
-the owning Surface and also work in SSH when hooks are installed explicitly in
-the remote account. Settings can export an auditable remote installer; OMG never
-silently changes remote dotfiles. Agent command, hook, icon, and resume behavior
-come from bundled, allowlisted manifests. With **Restore Windows and Agent
-Sessions** enabled (the default), OMG restores every open window/tab/split and
-uses an exact validated conversation ID whenever the Agent exposes a resumable
-session API; Agents without one restart fresh in the same cwd. Local and SSH
-restore share the same original SSH argv and typed allowlist. These
-in-tree providers are not installable third-party plugins.
-A public third-party executable loader is **not implemented yet**; see
-[Plugin Development](docs/PLUGIN_DEVELOPMENT.md) for exact Stable,
-Experimental, Internal, and Planned status.
+- **Sent history is local, unencrypted text.** It can contain private prompts,
+  source code or credentials. The default is Tab visibility, seven-day expiration
+  and retention after quitting. Change these settings or clear history when needed.
+- History is bounded, but stored records from closed panes can remain until expiry.
+  Turning retention off removes the saved copy, not the current in-memory history.
+- An Agent CLI or remote server has its own network and data-handling policies.
+  Local history storage is not a promise that every workflow stays offline.
+- **OMG's added application features target macOS.** Inherited cross-platform
+  Ghostty source is not a promise of equivalent OMG Linux/Windows releases.
+- Built-in typed providers are working host features. A public third-party
+  executable plugin loader/SDK is **not available yet**. See
+  [Plugin Development](docs/PLUGIN_DEVELOPMENT.md) for implemented vs planned status.
+- This is active pre-1.0 development, not a claim of bug-free behavior or a stable
+  public extension API. Consult [release notes](https://github.com/jischeng/oh-my-ghostty/releases)
+  and [reported issues](https://github.com/jischeng/oh-my-ghostty/issues).
 
-## Installation
+## Feedback and contributions
 
-Download the architecture-specific DMG from
-[GitHub Releases](https://github.com/jischeng/oh-my-ghostty/releases):
+English and Chinese are welcome. OMG has its **own** community entry points; you
+do not need to complete Ghostty's upstream vouch process to participate here.
 
-- `OMG-<version>-macos-arm64.dmg` for Apple Silicon;
-- `OMG-<version>-macos-x86_64.dmg` for Intel Macs.
+- [Reporting guide](docs/REPORTING.md): reproduction, version identification,
+  evidence, privacy and optional agent-assisted reporting.
+- [Open an OMG issue](https://github.com/jischeng/oh-my-ghostty/issues/new/choose):
+  bugs or workflow requests. Do not send OMG-only problems to upstream Ghostty.
+- [Contribution guide](docs/CONTRIBUTING.md): focused patches, build/test commands,
+  documentation requirements, AI disclosure and PR expectations.
+- Security concerns: use the confidential-reporting guidance in
+  [Reporting](docs/REPORTING.md), not an ordinary public issue with exploit details.
 
-Drag `OMG.app` to Applications. Because the bundle identifier and executable
-are independent, official Ghostty and OMG can coexist.
+## Build from source
 
-Release apps are **ad-hoc signed** and **not notarized**. macOS Gatekeeper may
-block the first launch. If you trust the downloaded app, review it in System
-Settings > Privacy & Security and allow it there; do not disable Gatekeeper
-globally.
-
-## Relationship with Ghostty
-
-OMG is based on Ghostty and retains its license/attribution. The exact base is
-recorded in every app bundle and release:
-
-```text
-OMG <OMG_VERSION>
-Based on Ghostty <GHOSTTY_VERSION>
-Ghostty revision <GHOSTTY_REVISION>
-```
-
-OMG SemVer controls OMG release/update ordering. Before 1.0, bug-fix-only
-releases bump PATCH; any new user-visible feature or any Ghostty base/revision
-sync bumps MINOR. Version 1.0 is never automatic and requires an explicit stable
-product/API milestone decision. Ghostty versions remain separate metadata and
-never enter OMG SemVer precedence.
-
-Upstream project:
-
-- source: <https://github.com/ghostty-org/ghostty>
-- documentation: <https://ghostty.org/docs>
-
-## Plugins
-
-The current running application supports host-owned status presentation and
-in-process typed Inspector providers. The process protocol codec,
-authorization policy, manifest model, and status router are tested but are not
-connected to discovery, a socket server, or a supervised external executable.
-
-An Experimental `PluginInstallationManager` can store a validated GitHub
-`manifest.json` package under OMG Application Support and keep plugin data in a
-separate directory. Installed packages are currently inert: there is no public
-install command/UI, executable loader, process supervisor, hot reload, or
-third-party SDK. Do not treat protocol types or storage installation alone as a
-production plugin runtime.
-
-See [Plugin Development](docs/PLUGIN_DEVELOPMENT.md) for:
-
-- current manifest and wire shapes;
-- lifecycle and capability status;
-- Inspector provider reference;
-- permissions/security limitations;
-- a working in-tree provider test;
-- the required documentation maintenance rule.
-
-## Development
-
-### Prerequisites
-
-- macOS with Xcode command-line tools;
-- Zig 0.16.0 (examples use `mise`);
-- SwiftLint;
-- Nushell for the macOS wrapper.
-
-### Build GhosttyKit
-
-Required after Zig/core/build changes and on a clean checkout:
+You need Xcode, Zig 0.16.0, Nushell and SwiftLint. **Build GhosttyKit first on a
+clean checkout**, following the [contribution guide](docs/CONTRIBUTING.md). Then:
 
 ```bash
-env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
-  -u ALL_PROXY -u all_proxy \
-  mise exec zig@0.16.0 -- zig build \
-    -Doptimize=ReleaseFast \
-    -Demit-xcframework=true \
-    -Dxcframework-target=native \
-    -Demit-macos-app=false \
-    -Dversion-string=1.3.2-dev
+macos/build.nu --configuration Debug --action build
+macos/build.nu --action test --test-modules quick-input
 ```
 
-Use the current `GhosttyBaseVersion` value instead of copying the example when
-the upstream base changes.
+The Debug output is `macos/build/Debug/OMG.app`; the internal Xcode scheme/Swift
+module is still named `Ghostty`. Local installs use **OMG Dev**, with separate
+identity and mutable storage—never overwrite a user's release OMG for testing.
+The current Swift test target requires macOS 15.5+. See [Testing](docs/TESTING.md)
+for selection and optional foreground-desktop coverage.
 
-### Build and test the macOS app
+## Architecture and upstream
 
-```bash
-macos/build.nu --scheme Ghostty --configuration Debug --action build
-macos/build.nu --scheme Ghostty --configuration Debug --action test
-```
+OMG retains the complete Ghostty macOS host and favors fork-owned feature files
+and small upstream adapters. It keeps OMG release versions separate from the
+Ghostty base version/revision. See [Architecture](docs/oh-my-ghostty-architecture.md)
+and [Releasing](docs/RELEASING.md) for the engineering contracts.
 
-Output:
-
-```text
-macos/build/Debug/OMG.app
-```
-
-The Xcode target/scheme and Swift module retain the internal name `Ghostty` for
-upstream compatibility. The shipped product remains `OMG.app`. Install local
-builds only as `/Applications/OMG Dev.app`; Debug uses a separate bundle ID and
-separate mutable storage, so development builds do not overwrite the stable
-`/Applications/OMG.app` terminal or its settings, restoration, plugins, and SSH
-replay state.
-
-Project commands and validation requirements are also documented in
-`AGENTS.md` and `macos/AGENTS.md`. Validate documentation links, protocol
-version references, required scripts, and privacy-sensitive patterns with:
-
-```bash
-python3 dist/check_omg_docs.py
-```
-
-## Build and release
-
-Maintainers must follow [Releasing OMG](docs/RELEASING.md). It defines:
-
-- Development and local Release builds;
-- arm64/x86_64 isolation;
-- OMG/Ghostty dual versioning;
-- validation gates;
-- ad-hoc code signing and executable launch verification;
-- DMG packaging and checksums;
-- merge, tag, and GitHub Release rules;
-- updater limitations and privacy-safe secret handling.
-
-The inherited upstream Ghostty release workflows are not the OMG release path.
-
-## Roadmap
-
-Planned work, not current features:
-
-- supervised out-of-process plugin discovery/loading and permissions;
-- public plugin package/install/update lifecycle;
-- external Inspector and status wire messages;
-- Git Inspector and expanded Info machine-resource sections;
-- official agent adapters and QuickInput/Pi integration;
-- additional developer and remote-workflow tools.
-
-See [Plugin Capability Audit](docs/plugin-capability-audit.md) for implementation
-gaps and [Architecture](docs/oh-my-ghostty-architecture.md) for design context.
-
-## Credits
-
-OMG is built on Ghostty. Ghostty was created by Mitchell Hashimoto and the
-Ghostty contributors. This fork preserves upstream copyright, license, and
-attribution. OMG is not affiliated with or endorsed by the official Ghostty
-project.
+Ghostty was created by Mitchell Hashimoto and its contributors. Thank you to the
+[upstream project](https://github.com/ghostty-org/ghostty); this fork preserves its
+copyright, license and attribution, and is not affiliated with or endorsed by it.
+For the inherited terminal configuration, consult [Ghostty documentation](https://ghostty.org/docs).
 
 ## License
 
-This repository remains under the [MIT License](LICENSE):
-
-```text
-Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
-```
-
-The copyright notice and license terms must remain with copies or substantial
-portions of the software.
+[MIT](LICENSE). Preserve the Ghostty copyright notice and license terms when
+redistributing copies or substantial portions of this software.

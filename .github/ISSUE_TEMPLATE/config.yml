@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Reporting guide and privacy
+    url: https://github.com/jischeng/oh-my-ghostty/blob/main/docs/REPORTING.md
+    about: What to include, how to redact evidence, and where to report OMG problems.
+  - name: Contributing to OMG
+    url: https://github.com/jischeng/oh-my-ghostty/blob/main/docs/CONTRIBUTING.md
+    about: Build, test, documentation and pull-request expectations; no upstream vouch required.

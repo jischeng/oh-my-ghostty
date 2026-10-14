@@ -43,7 +43,7 @@ struct GitProcessRunner: Sendable {
         defer { deadline.cancel() }
         let io = DispatchGroup()
         return try await withTaskCancellationHandler {
-            try invocation.launch()
+            try await invocation.launch()
             read(output.fileHandleForReading, stream: .stdout, invocation: invocation, group: io)
             read(errors.fileHandleForReading, stream: .stderr, invocation: invocation, group: io)
             try? output.fileHandleForWriting.close()
@@ -112,13 +112,16 @@ struct GitProcessRunner: Sendable {
         } catch { invocation.abort(.executionFailed(error.localizedDescription)) }
     }
 
-    /// The lock protects both launch/stop ordering and result publication. Pipe
-    /// callbacks are drained before result(), so no stream writes race its data.
+    /// A dedicated queue orders Foundation process launch/stop operations.
+    /// The state lock must never surround Process APIs: Foundation can deliver
+    /// termination callbacks while holding its own internal process lock.
+    /// Pipe callbacks are drained before result publication.
     private final class Invocation: @unchecked Sendable {
         enum Stream { case stdout, stderr }
         private let process: Process
         private let limit: Int?
         private let lock = NSLock()
+        private let processQueue = DispatchQueue(label: "omg.git-process.lifecycle", qos: .utility)
         private var channels: [DispatchIO] = []
         private var output = Data()
         private var errors = Data()
@@ -132,11 +135,26 @@ struct GitProcessRunner: Sendable {
             self.limit = limit
         }
 
-        func launch() throws {
-            lock.lock()
-            defer { lock.unlock() }
-            if let failure { throw failure }
-            do { try process.run() } catch { throw GitExecutionError.executionFailed(error.localizedDescription) }
+        func launch() async throws {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                processQueue.async {
+                    self.lock.lock()
+                    let failure = self.failure
+                    self.lock.unlock()
+                    if let failure {
+                        continuation.resume(throwing: failure)
+                        return
+                    }
+                    // Process.run can block during spawn. Do not occupy the
+                    // MainActor/cooperative executor or hold the callback lock.
+                    do {
+                        try self.process.run()
+                        continuation.resume()
+                    } catch {
+                        continuation.resume(throwing: GitExecutionError.executionFailed(error.localizedDescription))
+                    }
+                }
+            }
         }
 
         func add(_ channel: DispatchIO) {
@@ -171,16 +189,15 @@ struct GitProcessRunner: Sendable {
             guard failure == nil else { lock.unlock(); return }
             failure = error
             let activeChannels = channels
-            if process.isRunning { Darwin.kill(process.processIdentifier, SIGTERM) }
             lock.unlock()
             activeChannels.forEach { $0.close(flags: .stop) }
-            // A noisy hook may ignore SIGTERM. The spawned process remains the
-            // sole signal target; never signal the terminal's foreground group.
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + .milliseconds(250)) { [weak self] in
-                guard let self else { return }
-                lock.lock()
-                if !exited && process.isRunning { Darwin.kill(process.processIdentifier, SIGKILL) }
-                lock.unlock()
+            processQueue.async {
+                if self.process.isRunning { Darwin.kill(self.process.processIdentifier, SIGTERM) }
+            }
+            // Never signal the terminal's foreground group. Escalation is
+            // serialized with launch but never holds the termination state lock.
+            processQueue.asyncAfter(deadline: .now() + .milliseconds(250)) {
+                if self.process.isRunning { Darwin.kill(self.process.processIdentifier, SIGKILL) }
             }
         }
 
@@ -208,12 +225,17 @@ struct GitProcessRunner: Sendable {
 
         func result() throws -> GitExecutionResult {
             lock.lock()
-            defer { lock.unlock() }
+            let failure = failure
+            let inputError = inputError
+            let output = output
+            let errors = errors
+            lock.unlock()
             if let failure { throw failure }
-            if process.terminationStatus == 0, let inputError {
+            let status = process.terminationStatus
+            if status == 0, let inputError {
                 throw GitExecutionError.executionFailed(GitL10n.format("Could not send the complete process input ({0}).", String(describing: inputError)))
             }
-            return GitExecutionResult(exitCode: process.terminationStatus, stdout: output, stderr: errors)
+            return GitExecutionResult(exitCode: status, stdout: output, stderr: errors)
         }
     }
 }

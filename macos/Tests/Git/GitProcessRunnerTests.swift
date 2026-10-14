@@ -15,6 +15,48 @@ struct GitProcessRunnerTests {
         }
     }
 
+    @Test func fastExitRacingTimeoutAndCancellationSettlesWithoutBlockingCallbacks() async throws {
+        let start = ContinuousClock.now
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for _ in 0..<8 {
+                group.addTask {
+                    for _ in 0..<20 {
+                        do {
+                            let result = try await GitProcessRunner().run(executablePath: "/bin/sh",
+                                arguments: ["-c", "printf done"], workingDirectory: "/", timeout: 0.005)
+                            #expect(result.isSuccess && result.stdoutString == "done")
+                        } catch let error as GitExecutionError {
+                            #expect(error == .timedOut)
+                        }
+                        let task = Task {
+                            try await GitProcessRunner().run(executablePath: "/bin/sh",
+                                arguments: ["-c", "exit 0"], workingDirectory: "/", timeout: 1)
+                        }
+                        await Task.yield()
+                        task.cancel()
+                        do { _ = try await task.value } catch let error as GitExecutionError {
+                            #expect(error == .cancelled)
+                        } catch is CancellationError {
+                            // Cancellation observed before launch is also valid.
+                        }
+                    }
+                }
+            }
+            try await group.waitForAll()
+        }
+        #expect(ContinuousClock.now - start < .seconds(15))
+    }
+
+    @Test func invalidExecutableDoesNotStrandTheLaunchContinuation() async throws {
+        do {
+            _ = try await GitProcessRunner().run(executablePath: "/omg-does-not-exist",
+                arguments: [], workingDirectory: "/", timeout: 0.2)
+            Issue.record("An invalid executable must fail")
+        } catch let error as GitExecutionError {
+            if case .executionFailed = error {} else { Issue.record("Unexpected failure: \(error)") }
+        }
+    }
+
     @Test func concurrentBinaryPipesAreDrainedBeforePublishingResults() async throws {
         let payload = Data((0..<200_000).map { UInt8($0 % 256) })
         try await withThrowingTaskGroup(of: Void.self) { group in

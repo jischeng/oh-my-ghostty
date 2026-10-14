@@ -2042,6 +2042,13 @@ compose `GitProcessRunner`, which owns stdin and separate stdout/stderr channels
 cancellation and combined output limits. Normal results are published only
 after streams drain; excess output terminates the spawned process (with a
 bounded termination grace period), instead of waiting forever for it to exit.
+Foundation process launch/termination operations are ordered on a dedicated
+serial queue, outside the result-state lock. Synchronous process spawning does
+not occupy the MainActor/cooperative executor; termination callbacks never need
+to acquire a lock held around Foundation Process APIs. Signals target only the
+spawned process, never the user's terminal foreground group. Cancellation before
+launch and launch failures settle their continuations explicitly. This does not
+claim recursive cleanup of unrelated login shells or descendant processes.
 The executor interface has no implicit local-file read: each transport owns
 its working-file reader. Output is bounded,
 connection liveness is checked, repository roots with line breaks are rejected,

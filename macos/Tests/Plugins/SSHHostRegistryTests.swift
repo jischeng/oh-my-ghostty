@@ -19,9 +19,12 @@ struct SSHHostRegistryTests {
         #expect(registry.isConnected(id))
         registry.reconcile()
         #expect(registry.connections[id] == active)
+        #expect(registry.targetID(for: active) == id)
         live = [try GitSSHConnection(destination: "cloud", options: ["-p", "2222"])]
         registry.reconcile()
         #expect(!registry.isConnected(id))
+        #expect(registry.targetID(for: live[0]) == RegisteredSSHHost.id(for: live[0]))
+        #expect(registry.targetID(for: live[0]) != id)
     }
     actor Probe {
         var calls = 0

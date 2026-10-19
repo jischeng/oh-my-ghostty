@@ -25,6 +25,10 @@ struct AgentIntegrationSettingsView: View {
             .padding(.vertical, 4)
             Text(strings.agentIntegrationExplanation)
                 .font(.caption).foregroundStyle(.secondary)
+            if !local {
+                Text(strings.sshAgentHookExplanation)
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if snapshot.hooks.values.contains(.updateAvailable) {
                 Label(strings.agentIntegrationUpdateAvailable, systemImage: "arrow.down.circle")
                     .font(.callout).foregroundStyle(.orange)
@@ -50,6 +54,10 @@ struct AgentIntegrationSettingsView: View {
             .fixedSize().help(strings.agentHostLabel)
         }
 
+        .onAppear { selectRequestedTarget() }
+        .onReceive(NotificationCenter.default.publisher(for: .omgSelectAgentIntegrationTarget)) { _ in
+            selectRequestedTarget()
+        }
         .task(id: target) {
             if local {
                 if refreshOnAppear { await manager.refresh(target: target) }
@@ -61,6 +69,12 @@ struct AgentIntegrationSettingsView: View {
             let ids = hosts.map(\.id)
             if !local && !ids.contains(target) { target = AgentIntegrationManager.localID } else if !local { manager.loadCached(target: target) }
         }
+    }
+
+    private func selectRequestedTarget() {
+        guard let requested = SettingsNavigation.consumeAgentTarget(),
+              registry.host(requested) != nil else { return }
+        target = requested
     }
 
     private var scheduleSummary: some View {

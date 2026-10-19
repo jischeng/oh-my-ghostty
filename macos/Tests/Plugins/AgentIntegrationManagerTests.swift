@@ -5,6 +5,31 @@ import Testing
 
 @MainActor
 struct AgentIntegrationManagerTests {
+    @Test func sshHookOnboardingUsesInventoryWithoutInstallingAnything() {
+        #expect(SSHAgentHookOnboarding.prompt(snapshot: nil) == .checkRequired)
+        #expect(SSHAgentHookOnboarding.prompt(snapshot: .init()) == .checkRequired)
+        let agy = AgentCLIInstallation(version: "1.3.5", path: "/bin/agy")
+        var snapshot = AgentIntegrationSnapshot(hooks: [.antigravity: .missing], cli: [.antigravity: agy])
+        #expect(SSHAgentHookOnboarding.prompt(snapshot: snapshot) == .setupRequired([.antigravity]))
+        snapshot.hooks[.antigravity] = .updateAvailable
+        #expect(SSHAgentHookOnboarding.prompt(snapshot: snapshot) == .setupRequired([.antigravity]))
+        snapshot.hooks[.antigravity] = .current
+        #expect(SSHAgentHookOnboarding.prompt(snapshot: snapshot) == nil)
+        snapshot.hooks.removeValue(forKey: .antigravity)
+        #expect(SSHAgentHookOnboarding.prompt(snapshot: snapshot) == .checkRequired)
+        snapshot.error = "Python unavailable"
+        #expect(SSHAgentHookOnboarding.prompt(snapshot: snapshot) == .checkRequired)
+    }
+
+    @Test func sshHookOnboardingIgnoresAbsentCLIsAndLocalDetectors() {
+        let snapshot = AgentIntegrationSnapshot(
+            hooks: [.antigravity: .missing, .codex: .current, .crush: .missing, .hermes: .missing],
+            cli: [.antigravity: .init(), .codex: .init(path: "/bin/codex"),
+                  .crush: .init(path: "/bin/crush"), .hermes: .init(path: "/bin/hermes")]
+        )
+        #expect(SSHAgentHookOnboarding.prompt(snapshot: snapshot) == nil)
+    }
+
     @Test func appUpgradeChecksHooksImmediatelyAndPreservesCLIDeadline() async throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let suite = "AgentIntegrationTests.\(UUID().uuidString)"

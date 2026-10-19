@@ -551,6 +551,20 @@ struct SettingsStrings: Equatable, Sendable {
         t("Choose a host from SSH config or an active connection. Registration connects on demand and caches Agent versions and Hook status locally. Automatic registration still requires a connection in OMG.",
           "可从 SSH config 或当前连接中选择主机。点击注册后按需连接，并将 Agent 版本与 Hook 状态缓存在本机；自动注册仍仅在 OMG 建立连接后进行。")
     }
+    var sshAgentHookTitle: String { t("Set up SSH Agent status", "接入 SSH Agent 状态") }
+    var sshAgentHookExplanation: String {
+        t("Remote Agents need their own OMG status Hooks; installing or upgrading OMG does not copy this Mac’s Hooks to SSH accounts. Check this host, then choose Install Extension for the Agents you use. This does not upgrade any CLI. Restart the affected Agent after installation.",
+          "远端 Agent 需要单独安装 OMG 状态 Hook；安装或升级 OMG 不会将本机 Hook 同步到 SSH 账户。检查此主机后，为使用的 Agent 选择“安装状态扩展”，不会升级 CLI。安装后请重启对应 Agent。")
+    }
+    var sshAgentHookCheck: String { t("Check & Set Up…", "检查并设置…") }
+    var sshAgentHookDismiss: String { t("Dismiss for this tab", "此标签页暂不提示") }
+    func sshAgentHooksNeeded(_ names: String) -> String {
+        t("Status Hooks need setup: \(names).", "以下 Agent 的状态 Hook 需要接入：\(names)。")
+    }
+    var sshAgentHookPrompt: String {
+        t("Agent icons and task status over SSH require Hooks in this remote account. Check and choose which to install; nothing is installed automatically.",
+          "SSH 内的 Agent 图标与任务状态依赖远端账户的 Hook。可检查后选择安装，不会自动修改远端配置。")
+    }
     var agentUpdateSettings: String { t("Update Settings", "更新设置") }
     var agentManualChecks: String { t("Manual checks", "手动检查") }
     var agentAutomaticHooksShort: String { t("Auto-update Hooks", "自动更新 Hooks") }

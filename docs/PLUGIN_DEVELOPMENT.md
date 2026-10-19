@@ -576,6 +576,18 @@ output; it requires Python 3 and existing non-interactive SSH authentication.
 Credentials, host keys and ProxyJump remain owned by OpenSSH. No remote install or
 remove is performed merely by selecting a host or checking its status.
 
+A ready, focused SSH pane shows a non-blocking Agent Hook onboarding banner when
+its inventory is unknown/failed, or an installed CLI has a missing/outdated Hook.
+Detector-only Agents and CLIs absent from PATH do not trigger a missing-Hook hint.
+The banner is hidden when normalized status events are disabled and can be dismissed
+for that tab/host. Merely presenting it performs no SSH work or remote writes.
+**Check & Set Up** explicitly registers/refreshes the pane's exact SSH connection
+and opens Agent Integration with that host selected (including config-host mapping).
+Users then explicitly install individual status extensions; no Hook or CLI is
+installed/upgraded by the banner. Errors remain visible and retryable. The UI explains
+that local Hooks are not copied to SSH accounts and affected Agents must restart
+after installation. Existing per-host automatic check/update defaults are unchanged.
+
 CLI checks use the account's login/interactive shell PATH. An executable whose
 resolved path matches a global npm package's declared bin records npm metadata.
 Discovery uses an explicit native update policy when the executable exists in

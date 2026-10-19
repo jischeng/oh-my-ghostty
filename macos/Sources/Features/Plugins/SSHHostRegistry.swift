@@ -74,9 +74,7 @@ final class SSHHostRegistry: ObservableObject {
 
     func reconcile() {
         let current = Dictionary(live().map { connection in
-            let exact = RegisteredSSHHost.id(for: connection)
-            let configured = hosts.first { matchesConfiguration($0, connection) }
-            return (host(exact)?.id ?? configured?.id ?? exact, connection)
+            (targetID(for: connection), connection)
         }, uniquingKeysWith: { first, _ in first })
         let removed = Set(connections.keys).subtracting(current.keys)
         for id in removed {
@@ -96,6 +94,12 @@ final class SSHHostRegistry: ObservableObject {
                 self?.tasks[id] = nil
             }
         }
+    }
+
+    /// Resolve active panes to the same target used by registration and settings.
+    func targetID(for connection: GitSSHConnection) -> String {
+        let exact = RegisteredSSHHost.id(for: connection)
+        return host(exact)?.id ?? hosts.first { matchesConfiguration($0, connection) }?.id ?? exact
     }
 
     func host(_ id: String) -> RegisteredSSHHost? { hosts.first { $0.id == id } }

@@ -532,7 +532,10 @@ struct TerminalShellLayoutContainer<Content: View>: View {
                     backgroundColor: backgroundColor,
                     backgroundOpacity: backgroundOpacity
                 ) {
-                    content
+                    VStack(spacing: 0) {
+                        SSHAgentHookOnboardingBanner(controller: controller)
+                        content
+                    }
                 }
 
                 TerminalSidebarTransitionContainer(

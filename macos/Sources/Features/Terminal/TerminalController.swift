@@ -1129,8 +1129,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             if let detected = detectedSSHReconnectProcessIDs[surfaceID] {
                 if processGroupID == detected,
                    Self.processGroupExists(detected),
-                   case .sshReady(let ssh, _) = context.state,
-                   ssh.connectionID == "omg-ssh-detected-\(detected)" {
+                   context.inferredSSHProcessGroupID == detected {
                     continue
                 }
                 context.endDetectedSSHReconnect(processGroupID: detected)
@@ -1229,6 +1228,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 DispatchQueue.main.async { [weak self] in
                     guard let self,
                           observedForegroundProcessIDs[surfaceID] == processGroupID,
+                          let currentSurface = surfaceTree.first(where: { $0.id == surfaceID }),
+                          currentSurface.surfaceModel?.foregroundPID == processGroupID,
                           let context = paneSessionContexts[surfaceID],
                           case .local = context.state else { return }
                     applyObservedForegroundProcess(

@@ -930,7 +930,10 @@ OpenSSH child, so multi-hop aliases do not incur a separate shell-detection
 login. After `childExec` returns
 for normal `exit`, Ctrl-D, authentication/network failure, or remote close,
 `+ssh` emits the matching end from the actual child-process wait path and then
-re-emits the inherited local cwd as OSC 7. It never parses `Connection closed`
+re-emits the inherited local cwd as OSC 7. At both local session start and end,
+`+ssh` disables mouse tracking and extended mouse encodings left behind by an
+interrupted remote TUI; it does not reset the screen or unrelated terminal modes.
+This cleanup also runs on a failed OpenSSH child launch. It never parses `Connection closed`
 or other terminal output. This is an in-process first-party lifecycle bridge,
 not a new external plugin wire capability and not authorization for arbitrary
 filesystem/network access.
@@ -1345,8 +1348,11 @@ optional working directory, workspace identity, and the canonical
 SSH disconnect, the last validated server identity/cwd remains as dormant
 reconnect metadata. If a replay survival shell no longer has the shell wrapper,
 the Host's bounded foreground-process poll recognizes only a matching `ssh`
-command for that previous alias and temporarily restores `sshReady`; process
-exit returns it to local. A connection begin, remote cwd update, matching
+command for that previous alias and enters `sshConnecting`; it must not promote
+that connection to `sshReady` using the previous login's cwd. Only a fresh remote
+prompt or validated remote Agent cwd can make the new workspace ready. Until
+then providers must not display either the dormant repository or a local
+repository as the active remote workspace. Process exit returns it to local. A connection begin, remote cwd update, matching
 disconnect, focused Pane change, or local cwd
 change produces a new context/lifecycle appearance for the selected provider;
 the previous appearance is discarded and its asynchronous work must not

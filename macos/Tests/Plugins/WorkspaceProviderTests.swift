@@ -402,15 +402,29 @@ struct WorkspaceProviderTests {
         ))
 
         context.applyDetectedSSHReconnect(processGroupID: 42)
-        guard case .sshReady(let detected, let detectedCWD) = context.state else {
-            Issue.record("Expected a detected SSH reconnect")
+        guard case .sshConnecting(let detected) = context.state else {
+            Issue.record("Expected a detected SSH reconnect awaiting fresh cwd")
             return
         }
         #expect(detected.connectionID == "omg-ssh-detected-42")
         #expect(detected.alias == "cloud")
         #expect(detected.serverID == "hostkey-SHA256:test=")
-        #expect(detectedCWD == "/tmp")
+        #expect(context.workspace == nil)
+        #expect(context.remoteTabBreadcrumb == nil)
+        #expect(context.disconnectedRemoteWorkingDirectory == "/tmp")
+        // An old process observation must not end the new connection.
+        context.endDetectedSSHReconnect(processGroupID: 41)
+        #expect(context.isSSHSession)
+        context.applyInferredRemoteWorkingDirectory("/home/test")
+        #expect(context.workingDirectory == "/home/test")
+        #expect(context.workspace?.workingDirectory == "/home/test")
         context.endDetectedSSHReconnect(processGroupID: 42)
+        #expect(context.state == .local)
+        // Reconnecting and disconnecting before any remote cwd arrives must
+        // also leave connecting state, without reviving the old repository.
+        context.applyDetectedSSHReconnect(processGroupID: 43)
+        #expect(context.workspace == nil)
+        context.endDetectedSSHReconnect(processGroupID: 43)
         #expect(context.state == .local)
 
         context.updateLocalMetadata(

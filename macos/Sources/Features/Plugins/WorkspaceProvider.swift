@@ -347,22 +347,28 @@ struct PaneSessionContext: Equatable, Sendable {
 
     mutating func applyDetectedSSHReconnect(processGroupID: Int) {
         guard case .local = state,
-              let previous = disconnectedSSH,
-              let workingDirectory = disconnectedRemoteWorkingDirectory else { return }
-        state = .sshReady(.init(
+              let previous = disconnectedSSH else { return }
+        // A matching host proves the destination, not the new login's cwd.
+        // Keep the old path only as restoration metadata until a fresh remote
+        // prompt or Agent signal reports this connection's actual directory.
+        state = .sshConnecting(.init(
             connectionID: "omg-ssh-detected-\(processGroupID)",
             alias: previous.alias,
             serverID: previous.serverID,
             replay: previous.replay,
             transferTarget: previous.transferTarget,
             localProcessGroupID: processGroupID
-        ), workingDirectory: workingDirectory)
+        ))
         revision &+= 1
     }
 
     mutating func endDetectedSSHReconnect(processGroupID: Int) {
-        guard case .sshReady(let ssh, _) = state,
-              ssh.connectionID == "omg-ssh-detected-\(processGroupID)" else { return }
+        let ssh: SSH
+        switch state {
+        case .sshConnecting(let current), .sshReady(let current, _): ssh = current
+        case .local: return
+        }
+        guard ssh.connectionID == "omg-ssh-detected-\(processGroupID)" else { return }
         state = .local
         revision &+= 1
     }

@@ -1092,12 +1092,18 @@ fn writeShellSingleQuoted(writer: *std.Io.Writer, value: []const u8) !void {
     try writer.writeByte('\'');
 }
 
+// SSH cannot relay a remote TUI's cleanup after a broken transport. Reset only
+// mouse reporting/encoding at connection boundaries, not screen contents or
+// unrelated terminal modes. Also repair modes inherited from a previous login.
+const reset_mouse_modes = "\x1b[?9;1000;1002;1003;1005;1006;1015;1016l";
+
 fn writeSessionStart(
     writer: *std.Io.Writer,
     context_id: []const u8,
     label: []const u8,
     local_cwd: []const u8,
 ) !void {
+    try writer.writeAll(reset_mouse_modes);
     try writer.print(
         "\x1b]3008;start={s};type=remote;targethost={s};localcwd=",
         .{ context_id, label },
@@ -1112,6 +1118,7 @@ fn writeSessionEnd(
     exit_code: u8,
     local_cwd: []const u8,
 ) !void {
+    try writer.writeAll(reset_mouse_modes);
     try writer.print(
         "\x1b]3008;end={s};exit={s};status={d};cwd=",
         .{ context_id, if (exit_code == 0) "success" else "failure", exit_code },
@@ -1318,6 +1325,7 @@ test "session start carries the pre-SSH local cwd" {
         "/Users/test/my project",
     );
     const output = buffer[0..writer.end];
+    try testing.expect(std.mem.startsWith(u8, output, reset_mouse_modes));
     try testing.expect(std.mem.indexOf(u8, output, "]3008;start=omg-ssh-1") != null);
     try testing.expect(std.mem.indexOf(u8, output, "targethost=cloud") != null);
     try testing.expect(std.mem.indexOf(u8, output, "localcwd=/Users/test/my%20project") != null);
@@ -1329,10 +1337,45 @@ test "session end emits typed lifecycle and local cwd resync" {
     var writer: std.Io.Writer = .fixed(&buffer);
     try writeSessionEnd(&writer, "omg-ssh-1", 255, "/Users/test/my project");
     const output = buffer[0..writer.end];
+    try testing.expect(std.mem.startsWith(u8, output, reset_mouse_modes));
     try testing.expect(std.mem.indexOf(u8, output, "]3008;end=omg-ssh-1") != null);
     try testing.expect(std.mem.indexOf(u8, output, "exit=failure;status=255") != null);
     try testing.expect(std.mem.indexOf(u8, output, "cwd=/Users/test/my%20project") != null);
     try testing.expect(std.mem.indexOf(u8, output, "]7;file://localhost/Users/test/my%20project") != null);
+}
+
+test "session boundaries clear abandoned remote mouse modes" {
+    const testing = std.testing;
+    const terminal = @import("../terminal/main.zig");
+    var t = try terminal.Terminal.init(testing.io, testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+    });
+    defer t.deinit(testing.allocator);
+    var stream = t.vtStream();
+    defer stream.deinit();
+
+    inline for (.{ false, true }) |ending| {
+        // A disconnected remote application left all-motion SGR reporting on.
+        stream.nextSlice("\x1b[?1003;1006h");
+        try testing.expect(t.modes.get(.mouse_event_any));
+        try testing.expect(t.modes.get(.mouse_format_sgr));
+        var buffer: [512]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buffer);
+        if (ending) {
+            try writeSessionEnd(&writer, "omg-ssh-1", 255, "/tmp");
+        } else {
+            try writeSessionStart(&writer, "omg-ssh-1", "cloud", "/tmp");
+        }
+        stream.nextSlice(buffer[0..writer.end]);
+        inline for (.{
+            .mouse_event_x10,    .mouse_event_normal,      .mouse_event_button,
+            .mouse_event_any,    .mouse_format_utf8,       .mouse_format_sgr,
+            .mouse_format_urxvt, .mouse_format_sgr_pixels,
+        }) |mode| {
+            try testing.expect(!t.modes.get(mode));
+        }
+    }
 }
 
 fn resolveDestination(

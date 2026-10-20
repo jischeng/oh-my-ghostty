@@ -4,6 +4,29 @@ import Testing
 
 @MainActor
 struct SSHHostRegistryTests {
+    @Test func setupReservesExactHostImmediatelyWithoutNetworkOrInstallation() async throws {
+        let suite = "SSHRegistryTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let probe = Probe()
+        let connection = try GitSSHConnection(destination: "cloud", options: ["-p", "2222", "-J", "jump"])
+        let registry = SSHHostRegistry(defaults: defaults, live: { [connection] }, inventory: { try await probe.read($0) })
+        let target = registry.prepareSetup(connection)
+        #expect(registry.host(target)?.connection == connection)
+        #expect(registry.host(target)?.snapshot.cli.isEmpty == true)
+        #expect(registry.prepareSetup(connection) == target)
+        registry.reconcile()
+        #expect(await probe.calls == 0)
+        #expect(!registry.isCollecting(target))
+        let manager = AgentIntegrationManager(defaults: defaults, connectionTargets: { [] }, registry: registry)
+        manager.acknowledgeOnboarding(target: target)
+        #expect(manager.onboardingPrompt(target: target) == nil)
+        await registry.register(connection)
+        manager.loadCached(target: target)
+        #expect(manager.onboarding[target]?.knownAgents == [.codex])
+        #expect(manager.onboardingPrompt(target: target) == nil)
+    }
+
     @Test func configRegistrationRecognizesLaterSessionsFromOtherWorkingDirectories() async throws {
         let suite = "SSHRegistryTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))

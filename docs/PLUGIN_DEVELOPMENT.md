@@ -527,29 +527,45 @@ and enabled automatic checks. Updates respect each host's automatic-Hook prefere
 (default off), affect only existing integrations, and never reinstall removed ones.
 Failed inspections leave the revision pending for retry. Manual checks also record
 the inspected revision; disabling automatic checks suppresses upgrade checks too.
-Switching remote hosts only reads persisted inventory; it never starts SSH or waits
-for version discovery. The capture time and connection state remain visible.
-Manual Check Now is the explicit remote refresh path. Legacy alias-only update
+Switching previously captured hosts (including This Mac) renders cached inventory
+immediately, without waiting for CLI discovery or registry version checks. An explicitly
+selected, uncaptured target discovers CLIs in the background without checking npm
+versions; **Check Now** performs a full version check. The connection state remains
+visible and check timestamps are available in **Schedule**. Legacy alias-only update
 preferences do not automatically enable updates for newly registered identities.
 Hook state and install/update/remove actions are scoped to that selected account;
 changing selection never retargets an in-flight operation. The normalized status
 events master switch remains an OMG-wide presentation setting. Detector-only
 agents are explicitly shown as managed by the local Host, not as remote hooks.
-The host picker sits beside the section title (`Agent Integration · host`).
-Update preferences are grouped in one popover; per-Agent CLI auto-update and
-reinstall/removal actions live in each row's menu. Version guidance uses a help
-indicator instead of repeated instructional text. Rows adapt to narrow forms.
+The full-width host card is clickable. Agent rows show an icon, executable path,
+status-integration switch and disclosure; installed CLIs sort first. Expanding a row
+separates Hook reinstall/update from CLI version/update controls. Help/export and
+verbose safety information live behind the help button, not repeated under each row.
+A host-level **Enable All Detected** button installs/updates only detected CLIs'
+missing/outdated integrations (including local detectors, never remote detectors),
+without updating any CLI. Each result is recorded; a failed Agent does not discard
+successful installations or hide its error. Progress is adjacent to the action buttons.
+Rows adapt to narrow forms.
 
 `AgentIntegrationManager` checks installed Hooks while OMG runs, including when
 Settings is closed. Each account has an independent hourly/daily/weekly interval,
-automatic-check preference, optional automatic Hook updates, and per-Agent CLI
-auto-update switches. Local checks default to daily; SSH background checks and all
+automatic-check preference, optional automatic Hook updates, and one unified CLI
+auto-update switch for all supported, detected CLIs on that account. Existing legacy
+per-Agent update choices remain limited to their original scope until the user explicitly
+switches to the unified policy; migration never broadens permission. Local checks
+default to daily; SSH background checks and all
 automatic installation default off. Enabling a target does not install missing
 Hooks or Agent executables. Policy and check timestamps are stored in the app's
 UserDefaults domain under `OMG.AgentIntegration.Policies.v1`, separating Dev and
 release. Errors stay attached to their target; the last successful Hook check is
 displayed separately from a CLI discovery failure. Failed attempts retry at the
-configured interval; per-target operations are serialized.
+configured interval; per-target operations are serialized. The optional launch/SSH
+reconnect check performs full enabled maintenance once per app run/connection in
+addition to the interval; it is off for existing policies unless explicitly enabled.
+**Schedule** shows trigger settings and check/maintenance timestamps; the summary
+shows the next due check or a disconnected pause. A minute timer evaluates deadlines.
+Updates never delay quitting, kill an Agent session or install a remote updater daemon.
+Hook maintenance only updates existing integrations, never reinstalls a disabled one.
 
 SSH automatic work additionally requires a matching **ready SSH pane in OMG**.
 The scheduler reads `TerminalController.paneSessionContexts`, observes connection
@@ -579,14 +595,19 @@ remove is performed merely by selecting a host or checking its status.
 A ready, focused SSH pane shows a non-blocking Agent Hook onboarding banner when
 its inventory is unknown/failed, or an installed CLI has a missing/outdated Hook.
 Detector-only Agents and CLIs absent from PATH do not trigger a missing-Hook hint.
-The banner is hidden when normalized status events are disabled and can be dismissed
-for that tab/host. Merely presenting it performs no SSH work or remote writes.
-**Check & Set Up** explicitly registers/refreshes the pane's exact SSH connection
-and opens Agent Integration with that host selected (including config-host mapping).
-Users then explicitly install individual status extensions; no Hook or CLI is
-installed/upgraded by the banner. Errors remain visible and retryable. The UI explains
-that local Hooks are not copied to SSH accounts and affected Agents must restart
-after installation. Existing per-host automatic check/update defaults are unchanged.
+The banner is hidden when normalized status events are disabled. Merely presenting it
+performs no SSH work or remote writes. **Enable All Detected** authorizes Hook setup
+for detected Agents; **Customize** authorizes only inventory discovery and navigation.
+Both reserve the pane's exact target locally (including config-host mapping) and open
+Settings immediately, before any SSH round trip. Network/installation progress stays
+beside the buttons in Settings; failures remain visible there and can be retried.
+The choice (including dismissal) and known CLI IDs persist per account in
+`OMG.AgentIntegration.Onboarding.v1`. Reconnects, app restarts, Hook upgrades,
+manual removal and partial failures do not re-prompt; only a newly detected CLI does.
+When inventory was unknown at the click, the first successful CLI inventory becomes
+the baseline. Local inventory is cached in `OMG.AgentIntegration.LocalSnapshot.v1`.
+The UI explains that local Hooks are not copied to SSH accounts and affected Agents
+must restart after installation. Choosing setup does not enable automatic updates.
 
 CLI checks use the account's login/interactive shell PATH. An executable whose
 resolved path matches a global npm package's declared bin records npm metadata.

@@ -565,6 +565,42 @@ struct SettingsStrings: Equatable, Sendable {
         t("Agent icons and task status over SSH require Hooks in this remote account. Check and choose which to install; nothing is installed automatically.",
           "SSH 内的 Agent 图标与任务状态依赖远端账户的 Hook。可检查后选择安装，不会自动修改远端配置。")
     }
+    var agentSetupAll: String { t("Enable All Detected", "一键接入") }
+    var agentSetupCustom: String { t("Customize…", "自定义…") }
+    var agentSetupDismiss: String { t("Only notify me about new Agents", "仅在发现新 Agent 时提醒") }
+    var agentSetupBrief: String {
+        t("Enable status Hooks for detected Agents. No CLI upgrades. Your choice is remembered for this host.",
+          "为检测到的 Agent 接入状态 Hook，不升级 CLI。此主机会记住你的选择。")
+    }
+    var agentListTitle: String { t("Coding Agents", "Coding Agents") }
+    var agentLocalMachine: String { t("Agents and integrations on this Mac", "此 Mac 的 Agent 与集成") }
+    var agentMaintenanceOK: String { t("Completed", "已完成") }
+    var agentMaintenanceFailed: String { t("Some operations failed", "部分操作失败") }
+    var agentEnabled: String { t("On", "已接入") }
+    var agentDisabled: String { t("Off", "未接入") }
+    var agentStatusIntegration: String { t("Status integration", "状态集成") }
+    var agentRestartBrief: String { t("Hooks saved. Restart affected Agents to load them.", "Hook 已保存，重启对应 Agent 后生效。") }
+    var agentMaintenance: String { t("Automatic maintenance", "自动维护") }
+    var agentAutoHooksBrief: String { t("Auto-update Hooks", "Hook 自动更新") }
+    var agentAutoCLIsBrief: String { t("Auto-update CLIs", "CLI 自动更新") }
+    var agentScheduleTitle: String { t("Update Schedule", "更新计划") }
+    var agentHooksUpdateScope: String { t("Keep enabled status integrations up to date", "保持已接入的状态扩展为最新版本") }
+    var agentCLIUpdateScope: String { t("Update supported Agent applications", "更新受支持的 Agent 应用") }
+    var agentLaunchReconnectShort: String { t("Also at launch / reconnect", "启动 / 重连时检查") }
+    var agentCheckOnConnection: String { t("Also check at launch / SSH reconnect", "启动 / SSH 重连时也检查") }
+    var agentScheduleBrief: String {
+        t("Updates existing Hooks and supported CLIs while OMG is open; SSH must be connected. Does not install missing integrations, block quitting or end Agent sessions.",
+          "在 OMG 运行时更新已接入的 Hook 和受支持的 CLI，SSH 需保持连接。不自动接入未启用的 Agent，不阻塞退出或结束 Agent 会话。")
+    }
+    var agentConnectionAndTimer: String { t("Launch / reconnect + scheduled", "启动 / 重连 + 定时") }
+    var agentTimerOnly: String { t("Scheduled while OMG is open", "OMG 运行期间定时执行") }
+    var agentNextCheck: String { t("Next check", "下次检查") }
+    var agentCheckDue: String { t("Check due", "等待检查") }
+    var agentLastMaintenance: String { t("Last maintenance:", "上次自动维护：") }
+    var agentDiscovering: String { t("Checking Agents…", "正在检测 Agent…") }
+    var agentInstallingHooks: String { t("Installing Hooks…", "正在接入 Hook…") }
+    var agentUpdatingCLI: String { t("Updating CLI…", "正在更新 CLI…") }
+    var agentLegacyCLIScope: String { t("Previously selected CLIs only. Turn off and on to include all supported CLIs.", "保留之前选择的 CLI 范围；关闭后再开启可应用于全部受支持的 CLI。") }
     var agentUpdateSettings: String { t("Update Settings", "更新设置") }
     var agentManualChecks: String { t("Manual checks", "手动检查") }
     var agentAutomaticHooksShort: String { t("Auto-update Hooks", "自动更新 Hooks") }

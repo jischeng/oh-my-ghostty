@@ -70,6 +70,35 @@ struct SettingsLayoutTests {
         try capture(host, name: "appearance-wide")
     }
 
+    @Test func agentDetailsFitEnglishAndChineseWithoutNetworkRefresh() async throws {
+        let suite = "SettingsLayoutTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: home)
+        }
+        let snapshot = AgentIntegrationSnapshot(hooks: [.codex: .updateAvailable, .pi: .missing],
+            cli: [.codex: .init(version: "0.154.0", path: "/very/long/path/to/an/agent/bin/codex", updater: "native"), .pi: .init()])
+        let manager = AgentIntegrationManager(defaults: defaults, snapshots: ["local": snapshot], connectionTargets: { [] })
+        let settings = OhMyGhosttySettings(fileURL: home.appendingPathComponent("settings.json"))
+        for language in [OhMyGhosttyLanguage.english, .simplifiedChinese] {
+            for scheme in [ColorScheme.light, .dark] {
+                let host = NSHostingView(rootView: Form {
+                    AgentIntegrationSettingsView(strings: .init(language: language), settings: settings,
+                        manager: manager, refreshOnAppear: false, expanded: [.codex])
+                }.formStyle(.grouped).environment(\.colorScheme, scheme))
+                let window = makeWindow(host, width: 450)
+                defer { window.close() }
+                try await Task.sleep(for: .milliseconds(150))
+                host.layoutSubtreeIfNeeded()
+                #expect(host.bounds.width == 450)
+                #expect(manager.busy.isEmpty)
+                try capture(host, name: "agent-detail-\(language.rawValue)-\(scheme)")
+            }
+        }
+    }
+
     @Test func themedSettingsRenderLightAndDarkWithoutSystemCanvas() async throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: home) }

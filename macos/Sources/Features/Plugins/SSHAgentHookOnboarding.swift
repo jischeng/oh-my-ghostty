@@ -1,8 +1,7 @@
 import SwiftUI
 
-/// A cached inventory is a hint, not permission to write to an SSH account.
-/// Unknown inventories invite an explicit check; known inventories only flag
-/// installed CLIs with missing/outdated Hooks (never detector-only Agents).
+/// The first offer uses cached inventory. After either choice, only a newly
+/// discovered CLI can prompt again; stale/missing Hooks are handled in Settings.
 enum SSHAgentHookOnboarding: Equatable {
     case checkRequired
     case setupRequired([SupportedAgent])
@@ -21,15 +20,11 @@ enum SSHAgentHookOnboarding: Equatable {
     }
 }
 
-/// Does not connect, register, or install merely because a pane became ready.
-/// Checking/registering is an explicit click; installation remains per-Agent in Settings.
 struct SSHAgentHookOnboardingBanner: View {
     @ObservedObject var controller: TerminalController
     @ObservedObject var registry: SSHHostRegistry = .shared
     @ObservedObject var manager: AgentIntegrationManager = .shared
     @ObservedObject var settings: OhMyGhosttySettings = .shared
-    @State private var dismissed: Set<String> = []
-    @State private var checking: Set<String> = []
     @State private var sessionRevision: UInt64 = 0
 
     private var strings: SettingsStrings { .init(language: settings.language) }
@@ -46,9 +41,28 @@ struct SSHAgentHookOnboardingBanner: View {
         Group {
             if settings.agentStatusHooksEnabled, let connection {
                 let target = registry.targetID(for: connection)
-                let snapshot = registry.host(target)?.snapshot
-                if !dismissed.contains(target), let prompt = SSHAgentHookOnboarding.prompt(snapshot: snapshot) {
-                    banner(connection: connection, target: target, prompt: prompt)
+                if let prompt = manager.onboardingPrompt(target: target) {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "sparkles").foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(strings.sshAgentHookTitle + " · " + connection.destination).fontWeight(.medium)
+                            Text(strings.agentSetupBrief).foregroundStyle(.secondary)
+                            if case .setupRequired(let agents) = prompt {
+                                Text(agents.map(\.displayName).joined(separator: " · ")).foregroundStyle(.secondary)
+                            }
+                            HStack(spacing: 10) {
+                                Button(strings.agentSetupAll) { setup(connection, installAll: true) }
+                                    .buttonStyle(.borderedProminent)
+                                Button(strings.agentSetupCustom) { setup(connection, installAll: false) }
+                            }
+                        }
+                        Spacer(minLength: 0)
+                        Button { manager.acknowledgeOnboarding(target: target) } label: { Image(systemName: "xmark") }
+                            .buttonStyle(.plain).help(strings.agentSetupDismiss)
+                            .accessibilityLabel(strings.agentSetupDismiss)
+                    }
+                    .font(.caption).controlSize(.small).padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading).background(.bar)
                 }
             }
         }
@@ -57,46 +71,10 @@ struct SSHAgentHookOnboardingBanner: View {
         }
     }
 
-    private func banner(connection: GitSSHConnection, target: String, prompt: SSHAgentHookOnboarding) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "info.circle").foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(strings.sshAgentHookTitle + " · " + connection.destination).fontWeight(.medium)
-                Text(strings.sshAgentHookPrompt).foregroundStyle(.secondary)
-                if case .setupRequired(let agents) = prompt {
-                    Text(strings.sshAgentHooksNeeded(agents.map(\.displayName).joined(separator: ", ")))
-                        .foregroundStyle(.secondary)
-                }
-                if let error = registry.errors[target] {
-                    Text(error).foregroundStyle(.red).textSelection(.enabled)
-                }
-                Button(strings.sshAgentHookCheck) { check(connection, target: target) }
-                    .disabled(checking.contains(target) || registry.isCollecting(target) || manager.busy.contains(target))
-            }
-            Spacer(minLength: 0)
-            if checking.contains(target) { ProgressView().controlSize(.small) }
-            Button { dismissed.insert(target) } label: {
-                Image(systemName: "xmark")
-            }
-            .buttonStyle(.plain).help(strings.sshAgentHookDismiss)
-            .accessibilityLabel(strings.sshAgentHookDismiss)
-        }
-        .font(.caption).controlSize(.small)
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.bar)
-    }
-
-    private func check(_ captured: GitSSHConnection, target: String) {
-        checking.insert(target)
-        Task {
-            defer { checking.remove(target) }
-            // Uses the pane's exact SSH options, including configured target mapping.
-            await registry.register(captured, targetID: target)
-            guard registry.errors[target] == nil, registry.host(target) != nil,
-                  connection == captured, !dismissed.contains(target) else { return }
-            manager.loadCached(target: target)
-            SettingsNavigation.openAgentIntegration(target: target)
-        }
+    private func setup(_ connection: GitSSHConnection, installAll: Bool) {
+        let target = registry.prepareSetup(connection)
+        manager.beginSetup(target: target, installAll: installAll)
+        // Navigation is synchronous with the click, never gated on SSH/CLI discovery.
+        SettingsNavigation.openAgentIntegration(target: target)
     }
 }

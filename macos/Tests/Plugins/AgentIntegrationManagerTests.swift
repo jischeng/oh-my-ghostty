@@ -30,6 +30,115 @@ struct AgentIntegrationManagerTests {
         #expect(SSHAgentHookOnboarding.prompt(snapshot: snapshot) == nil)
     }
 
+    @Test func onboardingChoiceSurvivesRestartAndOnlyNewCLIsPrompt() throws {
+        let suite = "AgentIntegrationTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var snapshot = AgentIntegrationSnapshot(hooks: [.antigravity: .missing], cli: [.antigravity: .init(path: "/bin/agy")])
+        let manager = AgentIntegrationManager(defaults: defaults, snapshots: ["local": snapshot], connectionTargets: { [] })
+        manager.acknowledgeOnboarding(target: "local")
+        #expect(manager.onboardingPrompt(target: "local") == nil)
+        snapshot.hooks[.antigravity] = .updateAvailable
+        let reopened = AgentIntegrationManager(defaults: defaults, snapshots: ["local": snapshot], connectionTargets: { [] })
+        #expect(reopened.onboardingPrompt(target: "local") == nil)
+        snapshot.cli[.pi] = .init(path: "/bin/pi")
+        let discovered = AgentIntegrationManager(defaults: defaults, snapshots: ["local": snapshot], connectionTargets: { [] })
+        #expect(discovered.onboardingPrompt(target: "local") == .setupRequired([.pi]))
+        discovered.acknowledgeOnboarding(target: "local")
+        #expect(discovered.onboardingPrompt(target: "local") == nil)
+        #expect(discovered.onboardingPrompt(target: "other-host") == .checkRequired)
+    }
+
+    @Test func unknownOnboardingBaselineWaitsForInventoryNotAnError() {
+        var choice = AgentIntegrationOnboarding.choice(snapshot: nil)
+        choice.receive(.init(error: "offline"))
+        #expect(choice.awaitingFirstInventory)
+        let first = AgentIntegrationSnapshot(cli: [.antigravity: .init(path: "/bin/agy"), .codex: .init()])
+        choice.receive(first)
+        #expect(!choice.awaitingFirstInventory)
+        #expect(choice.knownAgents == [.antigravity])
+        #expect(choice.newlyDetected(in: first).isEmpty)
+        var second = first
+        second.cli[.codex] = .init(path: "/bin/codex")
+        choice.receive(second)
+        #expect(choice.newlyDetected(in: second) == [.codex])
+    }
+
+    @Test func bulkSetupInstallsOnlyDetectedHooksAndReportsPartialFailure() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let suite = "AgentIntegrationTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: home)
+        }
+        let hooks = home.appendingPathComponent(".gemini/config/hooks.json")
+        try FileManager.default.createDirectory(at: hooks.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let unowned = #"{"omg-agent-status":{"Stop":[{"command":"echo user-owned"}]}}"#
+        try unowned.write(to: hooks, atomically: true, encoding: .utf8)
+        let snapshot = AgentIntegrationSnapshot(cli: [.antigravity: .init(path: "/bin/agy"), .pi: .init(path: "/bin/pi"), .codex: .init()])
+        let manager = AgentIntegrationManager(defaults: defaults, homeURL: home, snapshots: ["local": snapshot], connectionTargets: { [] })
+        manager.acknowledgeOnboarding(target: "local")
+        await manager.installDetectedHooks(target: "local")
+        let installer = AgentHookInstaller(homeURL: home)
+        #expect(installer.installationState(.pi) == .current)
+        #expect(installer.installationState(.codex) == .missing)
+        #expect(try String(contentsOf: hooks, encoding: .utf8) == unowned)
+        #expect(manager.snapshots["local"]?.error?.contains("Antigravity") == true)
+        #expect(manager.snapshots["local"]?.hooksChanged == true)
+        #expect(manager.busy.isEmpty && manager.operations.isEmpty)
+        #expect(manager.onboardingPrompt(target: "local") == nil)
+        let restored = AgentIntegrationManager(defaults: defaults, connectionTargets: { [] })
+        #expect(restored.snapshots["local"]?.cli[.pi]?.path == "/bin/pi")
+        #expect(restored.snapshots["local"]?.error?.contains("Antigravity") == true)
+    }
+
+    @Test func bulkSetupSkipsCurrentAbsentAndRemoteDetectorIntegrations() {
+        let snapshot = AgentIntegrationSnapshot(hooks: [.pi: .current, .antigravity: .updateAvailable],
+            cli: [.pi: .init(path: "/bin/pi"), .antigravity: .init(path: "/bin/agy"),
+                  .crush: .init(path: "/bin/crush"), .codex: .init()])
+        #expect(AgentIntegrationManager.hookSetupCandidates(snapshot: snapshot, local: false) == [.antigravity])
+        #expect(Set(AgentIntegrationManager.hookSetupCandidates(snapshot: snapshot, local: true)) == [.antigravity, .crush])
+    }
+
+    @Test func unifiedCLIUpdatesPreserveLegacySelectionUntilExplicitlyEnabled() throws {
+        var policy = try JSONDecoder().decode(AgentIntegrationPolicy.self, from: Data(#"{"checkAutomatically":true,"updateHooksAutomatically":false,"automaticallyUpdatedAgents":["pi"],"intervalHours":24}"#.utf8))
+        #expect(policy.updateAllCLIsAutomatically == nil)
+        #expect(policy.updatesCLI(.pi))
+        #expect(!policy.updatesCLI(.antigravity))
+        policy.updateAllCLIsAutomatically = true
+        #expect(SupportedAgent.allCases.allSatisfy { policy.updatesCLI($0) })
+        policy.lastAttempt = Date(timeIntervalSince1970: 100)
+        #expect(policy.nextCheck == Date(timeIntervalSince1970: 86_500))
+        policy.checkAutomatically = false
+        #expect(policy.nextCheck == nil)
+    }
+
+    @Test func connectionMaintenanceIsOptInAndRunsOncePerLaunch() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let suite = "AgentIntegrationTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: home)
+        }
+        let manager = AgentIntegrationManager(defaults: defaults, homeURL: home, connectionTargets: { [] })
+        var policy = manager.policy(for: "local")
+        policy.lastAttempt = Date()
+        policy.checkedIntegrationRevision = manager.integrationRevision
+        manager.setPolicy(policy, for: "local")
+        #expect(!manager.shouldCheck("local", at: Date()))
+        policy.checkOnConnection = true
+        manager.setPolicy(policy, for: "local")
+        #expect(manager.shouldCheck("local", at: Date()))
+        await manager.refresh(target: "local", automatic: true)
+        #expect(!manager.shouldCheck("local", at: Date()))
+        #expect(manager.policy(for: "local").lastMaintenance != nil)
+        let restarted = AgentIntegrationManager(defaults: defaults, homeURL: home, connectionTargets: { [] })
+        #expect(restarted.shouldCheck("local", at: Date()))
+        #expect(!restarted.shouldCheck("ssh:offline", at: Date()))
+    }
+
     @Test func appUpgradeChecksHooksImmediatelyAndPreservesCLIDeadline() async throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let suite = "AgentIntegrationTests.\(UUID().uuidString)"

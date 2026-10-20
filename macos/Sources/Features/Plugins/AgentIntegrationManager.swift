@@ -10,6 +10,22 @@ struct AgentIntegrationPolicy: Codable, Equatable {
     var lastAttempt: Date?
     var lastSuccess: Date?
     var checkedIntegrationRevision: String?
+    // Optional for compatibility with existing per-Agent policies.
+    var updateAllCLIsAutomatically: Bool?
+    var checkOnConnection: Bool?
+    var lastMaintenance: Date?
+    var lastMaintenanceError: String?
+
+    var updatesCLIs: Bool { updateAllCLIsAutomatically == true || !automaticallyUpdatedAgents.isEmpty }
+
+    func updatesCLI(_ agent: SupportedAgent) -> Bool {
+        updateAllCLIsAutomatically == true || automaticallyUpdatedAgents.contains(agent)
+    }
+
+    var nextCheck: Date? {
+        guard checkAutomatically, let lastAttempt else { return nil }
+        return lastAttempt.addingTimeInterval(Double(max(1, intervalHours)) * 3_600)
+    }
 
     func needsIntegrationCheck(revision: String) -> Bool {
         checkAutomatically && checkedIntegrationRevision != revision
@@ -62,6 +78,10 @@ final class AgentIntegrationManager: ObservableObject {
     @Published private(set) var snapshots: [String: AgentIntegrationSnapshot] = [:]
     @Published private(set) var busy: Set<String> = []
     @Published private(set) var connectedTargets: Set<String> = []
+    @Published private(set) var onboarding: [String: AgentIntegrationOnboarding] = [:]
+    @Published private(set) var operations: [String: AgentIntegrationOperation] = [:]
+    private let onboardingKey = "OMG.AgentIntegration.Onboarding.v1"
+    private let localSnapshotKey = "OMG.AgentIntegration.LocalSnapshot.v1"
     let registry: SSHHostRegistry
     private var registryObserver: AnyCancellable?
     private let defaults: UserDefaults
@@ -72,6 +92,7 @@ final class AgentIntegrationManager: ObservableObject {
     private var closeObserver: AnyCancellable?
     private var automaticTasks: [String: Task<Void, Never>] = [:]
     private var automaticTargets: Set<String> = []
+    private var checkedConnections: Set<String> = []
     private let storageKey = "OMG.AgentIntegration.Policies.v1"
     let integrationRevision: String
 
@@ -94,12 +115,19 @@ final class AgentIntegrationManager: ObservableObject {
         self.registry = registry
         self.defaults = defaults
         self.homeURL = homeURL
-        self.snapshots = Dictionary(uniqueKeysWithValues: registry.hosts.map { ($0.id, $0.snapshot) })
-            .merging(snapshots, uniquingKeysWith: { _, fresh in fresh })
         self.connectionTargets = connectionTargets
         self.connectedTargets = connectionTargets()
         policies = defaults.data(forKey: storageKey)
             .flatMap { try? JSONDecoder().decode([String: AgentIntegrationPolicy].self, from: $0) } ?? [:]
+        self.snapshots = Dictionary(uniqueKeysWithValues: registry.hosts.map { ($0.id, $0.snapshot) })
+            .merging(snapshots, uniquingKeysWith: { _, fresh in fresh })
+        if self.snapshots[Self.localID] == nil,
+           let data = defaults.data(forKey: localSnapshotKey),
+           let saved = try? JSONDecoder().decode(AgentIntegrationSnapshot.self, from: data) {
+            self.snapshots[Self.localID] = saved
+        }
+        onboarding = defaults.data(forKey: onboardingKey)
+            .flatMap { try? JSONDecoder().decode([String: AgentIntegrationOnboarding].self, from: $0) } ?? [:]
     }
 
     func start() {
@@ -109,7 +137,13 @@ final class AgentIntegrationManager: ObservableObject {
               ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
         registry.start()
         registryObserver = registry.$hosts.dropFirst().receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.checkDueTargets() }
+            .sink { [weak self] hosts in
+                guard let self else { return }
+                for host in hosts where onboarding[host.id]?.awaitingFirstInventory == true {
+                    loadCached(target: host.id)
+                }
+                checkDueTargets()
+            }
         timer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
             .sink { [weak self] _ in self?.checkDueTargets() }
         connectionObserver = NotificationCenter.default.publisher(for: .terminalPaneSessionContextsDidChange)
@@ -133,6 +167,7 @@ final class AgentIntegrationManager: ObservableObject {
     func checkDueTargets(at date: Date = Date()) {
         registry.reconcile()
         let currentConnections = connectionTargets().union(registry.connections.keys)
+        checkedConnections.subtract(connectedTargets.subtracting(currentConnections))
         if currentConnections != connectedTargets { connectedTargets = currentConnections }
         for (target, task) in automaticTasks where !allowsAutomaticWork(target) {
             task.cancel()
@@ -140,7 +175,7 @@ final class AgentIntegrationManager: ObservableObject {
         let targets = Set(policies.keys).union([Self.localID]).union(registry.hosts.map(\.id))
         for target in targets where shouldCheck(target, at: date) && !busy.contains(target)
             && automaticTasks[target] == nil {
-            let hooksOnly = !policy(for: target).isDue(at: date)
+            let hooksOnly = !policy(for: target).isDue(at: date) && !needsConnectionCheck(target)
             automaticTasks[target] = Task { [weak self] in
                 guard let self else { return }
                 await refresh(target: target, automatic: true, hooksOnly: hooksOnly)
@@ -152,7 +187,12 @@ final class AgentIntegrationManager: ObservableObject {
     func shouldCheck(_ target: String, at date: Date) -> Bool {
         let policy = policy(for: target)
         return allowsAutomaticWork(target) &&
-            (policy.isDue(at: date) || policy.needsIntegrationCheck(revision: integrationRevision))
+            (policy.isDue(at: date) || policy.needsIntegrationCheck(revision: integrationRevision) || needsConnectionCheck(target))
+    }
+
+    private func needsConnectionCheck(_ target: String) -> Bool {
+        let policy = policy(for: target)
+        return policy.checkAutomatically && policy.checkOnConnection == true && !checkedConnections.contains(target)
     }
 
     static func liveConnectionTargets() -> Set<String> {
@@ -163,9 +203,103 @@ final class AgentIntegrationManager: ObservableObject {
         target == Self.localID || (registry.host(target) != nil && (connectionTargets().contains(target) || registry.isConnected(target)))
     }
 
+    func snapshot(for target: String) -> AgentIntegrationSnapshot? {
+        target == Self.localID ? snapshots[target] : registry.host(target)?.snapshot ?? snapshots[target]
+    }
+
+    func acknowledgeOnboarding(target: String) {
+        var choice = AgentIntegrationOnboarding.choice(snapshot: snapshot(for: target))
+        choice.knownAgents.formUnion(onboarding[target]?.knownAgents ?? [])
+        onboarding[target] = choice
+        saveOnboarding()
+    }
+
+    func onboardingPrompt(target: String) -> SSHAgentHookOnboarding? {
+        let snapshot = snapshot(for: target)
+        if let choice = onboarding[target] {
+            let discovered = choice.newlyDetected(in: snapshot)
+            let newAgents = SupportedAgent.allCases.filter {
+                discovered.contains($0) && (target == Self.localID || $0.definition.hook.kind != .none)
+            }
+            return newAgents.isEmpty ? nil : .setupRequired(newAgents)
+        }
+        return SSHAgentHookOnboarding.prompt(snapshot: snapshot)
+    }
+
+    private func saveOnboarding() {
+        if let data = try? JSONEncoder().encode(onboarding) { defaults.set(data, forKey: onboardingKey) }
+    }
+
+    private func publish(_ snapshot: AgentIntegrationSnapshot, target: String) {
+        snapshots[target] = snapshot
+        registry.storeSnapshot(snapshot, target: target)
+        if var choice = onboarding[target], choice.awaitingFirstInventory {
+            choice.receive(snapshot)
+            onboarding[target] = choice
+            saveOnboarding()
+        }
+        if target == Self.localID, let data = try? JSONEncoder().encode(snapshot) {
+            defaults.set(data, forKey: localSnapshotKey)
+        }
+    }
+
     func loadCached(target: String) {
         guard let host = registry.host(target) else { return }
         snapshots[target] = host.snapshot
+        if var choice = onboarding[target], choice.awaitingFirstInventory {
+            choice.receive(host.snapshot)
+            onboarding[target] = choice
+            saveOnboarding()
+        }
+    }
+
+    /// Captures the target before any suspension; host switching never retargets work.
+    func beginSetup(target: String, installAll: Bool) {
+        acknowledgeOnboarding(target: target)
+        Task {
+            // Inventory already in flight is read-only. Wait without blocking navigation.
+            while registry.isCollecting(target) || busy.contains(target) {
+                try? await Task.sleep(for: .milliseconds(100))
+                guard !Task.isCancelled else { return }
+            }
+            if installAll {
+                await installDetectedHooks(target: target)
+            } else if snapshot(for: target)?.cli.isEmpty != false {
+                await refresh(target: target, checkLatest: false)
+            }
+        }
+    }
+
+    func installDetectedHooks(target: String) async {
+        guard !busy.contains(target), !registry.isCollecting(target) else { return }
+        busy.insert(target)
+        operations[target] = .init(kind: .checking)
+        defer { busy.remove(target); operations[target] = nil }
+        var snapshot = snapshot(for: target) ?? .init()
+        snapshot.error = nil
+        var errors: [String] = []
+        do {
+            if snapshot.cli.isEmpty { snapshot.cli = try await readCLI(target: target, checkLatest: false) }
+            snapshot.hooks = try await readHooks(target: target)
+            let agents = Self.hookSetupCandidates(snapshot: snapshot, local: target == Self.localID)
+            for (index, agent) in agents.enumerated() {
+                operations[target] = .init(kind: .hooks, agent: agent, completed: index, total: agents.count)
+                do {
+                    try await changeHook(agent, target: target, remove: false)
+                    snapshot.hooks[agent] = .current
+                    snapshot.hooksChanged = true
+                } catch { errors.append(agent.displayName + ": " + error.localizedDescription) }
+            }
+        } catch { errors.append(error.localizedDescription) }
+        snapshot.error = errors.isEmpty ? nil : errors.joined(separator: "\n")
+        publish(snapshot, target: target)
+    }
+
+    static func hookSetupCandidates(snapshot: AgentIntegrationSnapshot, local: Bool) -> [SupportedAgent] {
+        SupportedAgent.allCases.filter {
+            snapshot.cli[$0]?.path != nil && (local || $0.definition.hook.kind != .none) &&
+                snapshot.hooks[$0] != .current
+        }
     }
 
     func forget(_ target: String) {
@@ -176,33 +310,44 @@ final class AgentIntegrationManager: ObservableObject {
         if let data = try? JSONEncoder().encode(policies) { defaults.set(data, forKey: storageKey) }
     }
 
-    func refresh(target: String, automatic: Bool = false, hooksOnly: Bool = false) async {
+    func refresh(target: String, automatic: Bool = false, hooksOnly: Bool = false, checkLatest: Bool = true) async {
         guard !busy.contains(target), !registry.isCollecting(target) else { return }
         guard !automatic || policy(for: target).checkAutomatically else { return }
         guard !automatic || allowsAutomaticWork(target), !Task.isCancelled else { return }
         busy.insert(target)
+        operations[target] = .init(kind: .checking)
         if automatic { automaticTargets.insert(target) }
+        if !hooksOnly { checkedConnections.insert(target) }
         defer {
             busy.remove(target)
+            operations[target] = nil
             automaticTargets.remove(target)
+            if automatic, !Task.isCancelled, allowsAutomaticWork(target) {
+                var current = self.policy(for: target)
+                current.lastMaintenance = Date()
+                current.lastMaintenanceError = self.snapshot(for: target)?.error
+                setPolicy(current, for: target)
+            }
         }
         var policy = policy(for: target)
         if !hooksOnly { policy.lastAttempt = Date() }
         setPolicy(policy, for: target)
-        var snapshot = snapshots[target] ?? registry.host(target)?.snapshot ?? AgentIntegrationSnapshot()
+        var snapshot = snapshot(for: target) ?? AgentIntegrationSnapshot()
         snapshot.error = nil
-        var captured = false
         do {
             snapshot.hooks = try await readHooks(target: target)
-            captured = true
             if automatic {
                 for agent in SupportedAgent.allCases where snapshot.hooks[agent] == .updateAvailable {
                     guard !Task.isCancelled, allowsAutomaticWork(target), self.policy(for: target).checkAutomatically,
                           self.policy(for: target).updateHooksAutomatically else { break }
+                    operations[target] = .init(kind: .hooks, agent: agent)
                     do {
                         try await changeHook(agent, target: target, remove: false)
                         snapshot.hooksChanged = true
-                    } catch { snapshot.error = error.localizedDescription }
+                    } catch {
+                        snapshot.error = [snapshot.error, agent.displayName + ": " + error.localizedDescription]
+                            .compactMap { $0 }.joined(separator: "\n")
+                    }
                 }
                 snapshot.hooks = try await readHooks(target: target)
             }
@@ -214,38 +359,42 @@ final class AgentIntegrationManager: ObservableObject {
             if Task.isCancelled || (automatic && !allowsAutomaticWork(target)) { return }
             snapshot.error = error.localizedDescription
         }
-        snapshots[target] = snapshot
-        if captured { registry.storeSnapshot(snapshot, target: target) }
+        publish(snapshot, target: target)
         if hooksOnly { return }
-        if automatic && self.policy(for: target).automaticallyUpdatedAgents.isEmpty { return }
+        if automatic && !self.policy(for: target).updatesCLIs { return }
         // CLI discovery/network failures must not prevent Hook maintenance.
         do {
-            snapshot.cli = try await readCLI(target: target)
-            captured = true
+            snapshot.cli = try await readCLI(target: target, checkLatest: checkLatest)
             if automatic {
                 var updatedCLI = false
                 for agent in SupportedAgent.allCases where snapshot.cli[agent]?.needsUpdateCheck == true {
                     guard !Task.isCancelled, allowsAutomaticWork(target), self.policy(for: target).checkAutomatically else { break }
-                    guard self.policy(for: target).automaticallyUpdatedAgents.contains(agent) else { continue }
+                    guard self.policy(for: target).updatesCLI(agent),
+                          snapshot.cli[agent]?.canAutomaticallyUpdate == true else { continue }
+                    operations[target] = .init(kind: .cli, agent: agent)
                     do {
                         try await installCLI(agent, target: target)
                         updatedCLI = true
-                    } catch { snapshot.error = error.localizedDescription }
+                    } catch {
+                        snapshot.error = [snapshot.error, agent.displayName + ": " + error.localizedDescription]
+                            .compactMap { $0 }.joined(separator: "\n")
+                    }
                 }
                 if updatedCLI { snapshot.cli = try await readCLI(target: target) }
             }
         } catch {
             snapshot.error = [snapshot.error, error.localizedDescription].compactMap { $0 }.joined(separator: "\n")
         }
-        snapshots[target] = snapshot
-        if captured { registry.storeSnapshot(snapshot, target: target) }
+        publish(snapshot, target: target)
     }
 
     func update(_ agent: SupportedAgent, target: String, cli: Bool = false, remove: Bool = false) async {
         guard !busy.contains(target), !registry.isCollecting(target) else { return }
         busy.insert(target)
+        operations[target] = .init(kind: cli ? .cli : .hooks, agent: agent)
+        defer { busy.remove(target); operations[target] = nil }
+        snapshots[target] = snapshot(for: target) ?? .init()
         snapshots[target, default: .init()].error = nil
-        var captured = false
         do {
             if cli {
                 try await installCLI(agent, target: target)
@@ -254,13 +403,11 @@ final class AgentIntegrationManager: ObservableObject {
                 snapshots[target, default: .init()].hooksChanged = true
             }
             snapshots[target, default: .init()].hooks = try await readHooks(target: target)
-            captured = true
             if cli { snapshots[target, default: .init()].cli = try await readCLI(target: target) }
         } catch {
             snapshots[target, default: .init()].error = error.localizedDescription
         }
-        if captured, let snapshot = snapshots[target] { registry.storeSnapshot(snapshot, target: target) }
-        busy.remove(target)
+        if let snapshot = snapshots[target] { publish(snapshot, target: target) }
     }
 
     private func readHooks(target: String) async throws -> [SupportedAgent: AgentHookInstallationState] {
@@ -304,8 +451,8 @@ final class AgentIntegrationManager: ObservableObject {
         }
     }
 
-    private func readCLI(target: String) async throws -> [SupportedAgent: AgentCLIInstallation] {
-        let output = try await runPython(try Self.cliScript(), target: target, loginShell: true)
+    private func readCLI(target: String, checkLatest: Bool = true) async throws -> [SupportedAgent: AgentCLIInstallation] {
+        let output = try await runPython(try Self.cliScript(checkLatest: checkLatest), target: target, loginShell: true)
         let values = try JSONDecoder().decode([String: AgentCLIInstallation].self, from: output)
         return Dictionary(uniqueKeysWithValues: values.compactMap { key, value in
             SupportedAgent(rawValue: key).map { ($0, value) }

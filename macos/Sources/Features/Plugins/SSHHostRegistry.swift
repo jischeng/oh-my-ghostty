@@ -102,6 +102,22 @@ final class SSHHostRegistry: ObservableObject {
         return host(exact)?.id ?? hosts.first { matchesConfiguration($0, connection) }?.id ?? exact
     }
 
+    /// User-initiated setup must open immediately, before any network round trip.
+    /// Reserve the exact target locally; the manager owns the subsequent refresh.
+    @discardableResult
+    func prepareSetup(_ connection: GitSSHConnection) -> String {
+        let id = targetID(for: connection)
+        excluded.remove(id)
+        attempted.insert(id)
+        if host(id) == nil {
+            hosts.append(.init(id: id, name: connection.destination, connection: connection,
+                               snapshot: .init(), capturedAt: .distantPast))
+            hosts.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            save()
+        }
+        return id
+    }
+
     func host(_ id: String) -> RegisteredSSHHost? { hosts.first { $0.id == id } }
     func isCollecting(_ id: String) -> Bool { pending.contains(id) || tasks[id] != nil }
 

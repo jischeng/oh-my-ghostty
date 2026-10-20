@@ -194,6 +194,8 @@ struct OMGSettingsFormStyle: FormStyle {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) { configuration.content }
                 .toggleStyle(OMGSettingsToggleStyle())
+                .buttonStyle(OMGSettingsButtonStyle())
+                .textFieldStyle(OMGSettingsTextFieldStyle())
                 .controlSize(.small)
                 .padding(24)
                 .frame(maxWidth: .infinity, alignment: .topLeading)

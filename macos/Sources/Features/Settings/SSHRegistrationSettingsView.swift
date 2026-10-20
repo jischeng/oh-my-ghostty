@@ -13,7 +13,7 @@ struct SSHRegistrationSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Toggle(strings.sshAutomaticRegistration, isOn: $registry.automaticallyRegister)
-                .toggleStyle(.switch).controlSize(.small)
+                .toggleStyle(OMGSettingsToggleStyle()).controlSize(.small)
             HStack {
                 SSHHostPicker(items: choices.map { .init(id: $0.id, title: $0.title) }, selection: $selectedID) {
                     HStack(spacing: 8) {
@@ -23,8 +23,10 @@ struct SSHRegistrationSettingsView: View {
                         Spacer(minLength: 8)
                         Image(systemName: "chevron.down").font(.caption)
                     }
-                    .padding(.horizontal, 10).padding(.vertical, 8)
-                    .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 7))
+                    .font(.system(size: 12)).padding(.horizontal, 11).frame(height: OMGSettingsControlMetrics.height)
+                    .background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: OMGSettingsControlMetrics.radius))
+                    .overlay(RoundedRectangle(cornerRadius: OMGSettingsControlMetrics.radius).strokeBorder(.primary.opacity(0.09)))
+                    .contentShape(Rectangle())
                 }
                 .disabled(choices.isEmpty || loadingHosts)
                 Button(strings.sshRegister) { register() }
@@ -33,6 +35,7 @@ struct SSHRegistrationSettingsView: View {
             }.controlSize(.small)
             Text(strings.sshRegistrationCaption).font(.caption).foregroundStyle(.secondary)
             ForEach(registry.hosts) { host in
+                Divider()
                 HStack {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(host.name).fontWeight(.medium)

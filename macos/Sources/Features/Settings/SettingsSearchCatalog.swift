@@ -39,7 +39,7 @@ enum SettingsSearchCatalog {
             item(.editor, \.editorBehaviorSection, ["editor.keymap", "editor.autoClose", "editor.wordWrap"], "vim wrap pairs 自动换行 括号"),
             item(.editor, \.editorThemeSection, ["editor.background", "editor.syntax", "editor.theme", "editor.opacity", "editor.blur"], "主题 透明"),
             item(.editor, \.editorTypographySection, ["editor.font", "editor.tabWidth"], "字体 缩进 字号"),
-            item(.agents, \.agentIntegrationSection, ["agents.statusHooks"], "hook install cli update agent ssh 接入 安装 更新", anchor: "agentIntegrations"),
+            item(.agents, \.agentIntegrationSection, ["agents.statusHooks"], "hook install cli update agent integration ssh 集成 接入 安装 更新", anchor: "agentIntegrations"),
             item(.agents, \.agentBehaviorSection, ["agents.openQuickInput"], "start complete 开始 完成 快捷输入"),
             item(.agents, \.agentHistorySection, ["agents.history"], "sessions limit 历史 会话 上限"),
             item(.agents, \.notificationsSection, ["notifications."], "notification sound permission 通知 声音 等待"),

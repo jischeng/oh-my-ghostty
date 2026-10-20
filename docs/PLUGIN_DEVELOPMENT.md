@@ -39,12 +39,12 @@ Contributor checklist:
 ## Git AI commit messages and settings navigation
 
 Settings uses task-oriented navigation: **General**, **Shell & Sessions**,
-**Input & Controls**, **Editor**, **Agent Integration**, **Views & Tabs**,
-**Appearance**, **Shortcuts**, and **Advanced**. The expandable **Integrations**
-group keeps independent **Git**, **SSH**, and **Plugins** destinations. Existing
+**Input & Controls**, **Editor**, **Views & Tabs**, **Appearance**, **Shortcuts**,
+and **Advanced**. The expandable **Integrations** group keeps independent
+**Agent**, **Git**, **SSH**, and **Plugins** destinations. Existing
 navigation identifiers remain valid. Git auto-fetch and AI commit-message
 configuration live under Git; registered hosts live under SSH; Agent hooks, history,
-automatic Quick Input behavior and notifications live under Agent Integration.
+automatic Quick Input behavior and notifications live under Agent (formerly Agent Integration).
 Quick Input/history controls live under Input & Controls, with their shortcut under
 Shortcuts; startup recovery is under Shell & Sessions. Existing JSON keys are unchanged.
 

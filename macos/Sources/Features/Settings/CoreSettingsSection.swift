@@ -12,16 +12,12 @@ struct CoreSettingsSection: View {
                 if field.id != fields.first?.id { Divider() }
                 OMGSettingsRow(field.title(strings), subtitle: field.help(strings) +
                     (field.requiresNewTerminal ? " · " + strings.newTerminalRequired : "")) {
-                    Picker(field.title(strings), selection: Binding(
+                    OMGSettingsPicker(title: field.title(strings), selection: Binding(
                         get: { settings.coreOverrides[field.key] ?? "" },
                         set: { settings.setCoreOverride(field.key, value: $0) }
-                    )) {
-                        Text(strings.inheritCoreSetting).tag("")
-                        ForEach(field.values, id: \.self) { value in
-                            Text(field.valueTitle(value, strings: strings)).tag(value)
-                        }
-                    }
-                    .labelsHidden().frame(width: 180)
+                    ), options: [.init("", strings.inheritCoreSetting)] + field.values.map {
+                        .init($0, field.valueTitle($0, strings: strings))
+                    }, showsTitle: false)
                     .help(field.key + (field.requiresNewTerminal ? " · " + strings.newTerminalRequired : ""))
                 }
             }

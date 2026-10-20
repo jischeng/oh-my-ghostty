@@ -8,31 +8,19 @@ struct QuickInputHistorySettingsView: View {
 
     var body: some View {
         OMGSettingsRow(strings.quickInputHistoryScopeLabel) {
-            Picker(strings.quickInputHistoryScopeLabel, selection: $settings.quickInputHistoryScope) {
-                ForEach(QuickInputHistoryScope.allCases, id: \.self) { scope in Text(strings.quickInputHistoryScopeName(scope)).tag(scope) }
-            }.labelsHidden().frame(width: 180)
+            OMGSettingsPicker(title: strings.quickInputHistoryScopeLabel, selection: $settings.quickInputHistoryScope,
+                              options: QuickInputHistoryScope.allCases.map { .init($0, strings.quickInputHistoryScopeName($0)) }, showsTitle: false)
         }
         Divider()
         OMGSettingsRow(strings.quickInputHistoryInsertionLabel) {
-            Picker(strings.quickInputHistoryInsertionLabel, selection: $settings.quickInputHistoryInsertionMode) {
-                ForEach(QuickInputHistoryInsertionMode.allCases, id: \.self) { mode in Text(strings.quickInputHistoryInsertionName(mode)).tag(mode) }
-            }.labelsHidden().frame(width: 180)
+            OMGSettingsPicker(title: strings.quickInputHistoryInsertionLabel, selection: $settings.quickInputHistoryInsertionMode,
+                              options: QuickInputHistoryInsertionMode.allCases.map { .init($0, strings.quickInputHistoryInsertionName($0)) }, showsTitle: false)
         }
         Divider()
         OMGSettingsRow(strings.quickInputHistoryRetentionLabel) {
-            HStack(spacing: 6) {
-                TextField("", value: $settings.quickInputHistoryRetentionDays,
-                          format: .number.precision(.fractionLength(0)))
-                    .multilineTextAlignment(.trailing)
-                    .monospacedDigit()
-                    .frame(width: 48)
-                    .accessibilityLabel(strings.quickInputHistoryRetentionLabel)
-                Text(strings.quickInputHistoryDayUnit)
-                Stepper("", value: $settings.quickInputHistoryRetentionDays, in: 1...365, step: 1)
-                    .labelsHidden()
-                    .accessibilityLabel(strings.quickInputHistoryRetentionLabel)
-            }
-            .fixedSize()
+            OMGSettingsNumberControl(title: strings.quickInputHistoryRetentionLabel,
+                                     value: $settings.quickInputHistoryRetentionDays, range: 1...365,
+                                     suffix: strings.quickInputHistoryDayUnit)
         }
         Divider()
         OMGSettingsRow(strings.quickInputHistoryKeepLabel, subtitle: strings.quickInputHistoryPrivacyCaption) {

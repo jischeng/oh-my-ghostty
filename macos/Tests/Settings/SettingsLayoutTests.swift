@@ -104,16 +104,20 @@ struct SettingsLayoutTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let settings = OhMyGhosttySettings(fileURL: root.appendingPathComponent("settings.json"))
         settings.language = .simplifiedChinese
-        let tabs: [OhMyGhosttySettingsTab] = [.general, .terminal, .controls, .editor, .tabs, .appearance, .keyboard, .advanced]
-        for tab in tabs {
-            let host = NSHostingView(rootView: SettingsView(settings: settings, initialSelection: tab))
-            let window = makeWindow(host, width: 720)
-            defer { window.close() }
-            try await Task.sleep(for: .milliseconds(150))
-            host.layoutSubtreeIfNeeded()
-            #expect(host.bounds.width == 720, "\(tab.rawValue) must not widen the settings window")
-            try capture(host, name: "organized-" + tab.rawValue)
+        let tabs: [OhMyGhosttySettingsTab] = [.general, .terminal, .controls, .editor, .tabs, .appearance, .keyboard, .git, .plugins, .advanced]
+        for language in [OhMyGhosttyLanguage.simplifiedChinese, .english] {
+            settings.language = language
+            for tab in tabs {
+                let host = NSHostingView(rootView: SettingsView(settings: settings, initialSelection: tab))
+                let window = makeWindow(host, width: 720)
+                defer { window.close() }
+                try await Task.sleep(for: .milliseconds(150))
+                host.layoutSubtreeIfNeeded()
+                #expect(host.bounds.width == 720, "\(tab.rawValue) must not widen the settings window")
+                try capture(host, name: "organized-" + tab.rawValue + (language == .english ? "-en" : ""))
+            }
         }
+        settings.language = .simplifiedChinese
         let host = NSHostingView(rootView: SettingsView(settings: settings, initialSelection: .general, initialSearch: "剪贴板"))
         let window = makeWindow(host, width: 720)
         defer { window.close() }

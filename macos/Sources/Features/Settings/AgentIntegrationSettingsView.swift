@@ -264,11 +264,8 @@ struct AgentIntegrationSettingsView: View {
             Toggle(strings.agentCheckOnConnection, isOn: Binding(get: { policy.checkOnConnection == true }, set: {
                 var value = policy; value.checkOnConnection = $0; manager.setPolicy(value, for: target)
             }))
-            Picker(strings.agentCheckInterval, selection: binding(\.intervalHours)) {
-                Text(strings.agentEveryHour).tag(1)
-                Text(strings.agentEveryDay).tag(24)
-                Text(strings.agentEveryWeek).tag(168)
-            }
+            OMGSettingsPicker(title: strings.agentCheckInterval, selection: binding(\.intervalHours),
+                              options: [.init(1, strings.agentEveryHour), .init(24, strings.agentEveryDay), .init(168, strings.agentEveryWeek)], width: 150)
             Text(strings.agentScheduleBrief).font(.caption).foregroundStyle(.secondary)
             if policy.updatesCLIs && policy.updateAllCLIsAutomatically != true {
                 Text(strings.agentLegacyCLIScope).font(.caption).foregroundStyle(.secondary)
@@ -284,7 +281,8 @@ struct AgentIntegrationSettingsView: View {
                 Text(strings.agentLastChecked + " " + date.formatted(date: .abbreviated, time: .shortened)).font(.caption)
             }
         }
-        .toggleStyle(.switch).controlSize(.small).padding(20).frame(width: 370)
+        .toggleStyle(OMGSettingsToggleStyle()).buttonStyle(OMGSettingsButtonStyle())
+        .controlSize(.small).padding(20).frame(width: 370)
     }
 
     private var helpContent: some View {
@@ -293,7 +291,8 @@ struct AgentIntegrationSettingsView: View {
             Text(local ? strings.agentIntegrationExplanation : strings.sshAgentHookExplanation)
             Toggle(strings.agentStatusHooksLabel, isOn: $settings.agentStatusHooksEnabled)
             Button(strings.exportSSHInstallerButton, systemImage: "square.and.arrow.up", action: exportInstaller)
-        }.font(.callout).padding(20).frame(width: 380)
+        }.font(.callout).buttonStyle(OMGSettingsButtonStyle())
+            .toggleStyle(OMGSettingsToggleStyle()).padding(20).frame(width: 380)
     }
 
     private var scheduleSummary: String {

@@ -60,7 +60,7 @@ struct SettingsStrings: Equatable, Sendable {
         case .keyboard: t("Shortcuts", "快捷键")
         case .git: "Git"
         case .ssh: "SSH"
-        case .agents: t("Agent Integration", "Agent 集成")
+        case .agents: "Agent"
         case .plugins: t("Plugins", "插件")
         case .advanced: t("Advanced", "高级")
         }
@@ -518,8 +518,8 @@ struct SettingsStrings: Equatable, Sendable {
     var officialPluginsSection: String { t("Official Plugins", "官方插件") }
     var officialPluginsCaption: String {
         t(
-            "Official plugins are installed independently from the OMG app. SSH uses your existing OpenSSH configuration and credentials. Built-in agent hook adapters are configured below.",
-            "官方插件独立于 OMG 应用安装。SSH 使用你现有的 OpenSSH 配置与凭据。内置 Agent 状态适配器在下方配置。"
+            "Plugins are installed independently from OMG. SSH uses your existing OpenSSH configuration. Configure status Hooks in Integrations → Agent.",
+            "插件独立于 OMG 安装，SSH 沿用现有 OpenSSH 配置。状态 Hook 请前往“集成 → Agent”配置。"
         )
     }
     var installFromGitHubSection: String { t("Install from GitHub", "从 GitHub 安装") }
@@ -560,7 +560,7 @@ struct SettingsStrings: Equatable, Sendable {
     }
     var genericPluginCaption: String { t("OMG plugin", "OMG 插件") }
 
-    var agentIntegrationSection: String { t("Agent Integration", "Agent 集成") }
+    var agentIntegrationSection: String { "Agent" }
     var sshAutomaticRegistration: String { t("Register hosts after connecting in OMG", "连接成功后自动注册主机") }
     var sshRegistrationTarget: String { t("Choose an SSH host to register", "选择要注册的 SSH 主机") }
     var sshRegister: String { t("Register", "注册") }

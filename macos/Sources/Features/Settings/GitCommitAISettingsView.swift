@@ -47,7 +47,7 @@ struct GitCommitAISettingsView: View {
                 Button { showingPrompt = true } label: {
                     Label(GitL10n.text("Commit style…"), systemImage: "slider.horizontal.3")
                 }
-            }.controlSize(.small).buttonStyle(.borderless)
+            }.controlSize(.small).buttonStyle(OMGSettingsButtonStyle())
         }
         .sheet(isPresented: $showingPrompt) {
             GitCommitPromptEditor(prompt: settings.gitCommitAIPrompt) { settings.gitCommitAIPrompt = $0 }
@@ -91,7 +91,7 @@ private struct GitCommitPromptEditor: View {
                 Button(GitL10n.text("Cancel")) { dismiss() }.keyboardShortcut(.cancelAction)
                 Button(GitL10n.text("Save")) { save(prompt); dismiss() }.keyboardShortcut(.defaultAction)
             }
-        }.padding(20).frame(width: 540)
+        }.buttonStyle(OMGSettingsButtonStyle()).padding(20).frame(width: 540)
     }
 }
 
@@ -121,9 +121,8 @@ private struct GitCommitAIAddModels: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(GitL10n.text("Add Agent Models…")).font(.headline)
-            Picker("Agent", selection: $agent) {
-                ForEach(GitCommitAgent.allCases) { Text($0.title).tag($0) }
-            }.disabled(isUpdating)
+            OMGSettingsPicker(title: "Agent", selection: $agent,
+                              options: GitCommitAgent.allCases.map { .init($0, $0.title) }).disabled(isUpdating)
             if agent.canDiscoverModels {
                 HStack {
                     Text(GitL10n.text("Available models"))
@@ -156,7 +155,7 @@ private struct GitCommitAIAddModels: View {
                         Text(adapterNotice).font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                TextField(GitL10n.text("Search models…"), text: $query).textFieldStyle(.roundedBorder)
+                TextField(GitL10n.text("Search models…"), text: $query).textFieldStyle(OMGSettingsTextFieldStyle())
                 List(models.filter { query.isEmpty || $0.localizedCaseInsensitiveContains(query) }, id: \.self) { model in
                     Toggle(model, isOn: Binding(get: { selected.contains(model) }, set: {
                         if $0 { selected.insert(model) } else { selected.remove(model) }
@@ -177,7 +176,7 @@ private struct GitCommitAIAddModels: View {
                     .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(20).frame(width: 480)
+        .buttonStyle(OMGSettingsButtonStyle()).padding(20).frame(width: 480)
         .confirmationDialog(GitL10n.text("Update Codex ACP for OMG?"), isPresented: $showingUpdateConfirmation,
             titleVisibility: .visible) {
             Button(GitL10n.text("Update and reload")) { Task { await updateCodexAndReload() } }

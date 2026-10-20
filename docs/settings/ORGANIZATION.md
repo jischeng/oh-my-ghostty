@@ -9,7 +9,7 @@ Otty is a visual/information-architecture reference, not a feature-parity requir
 | Shell & Sessions | Shell integration, working-directory inheritance, startup/session restoration, terminal notifications |
 | Input & Controls | Quick Input size/history/privacy, terminal selection, clipboard permissions/paste safety, mouse focus, Option-as-Alt |
 | Editor | File/directory destination, editor keymap, wrapping/pairs, editor theme/font/tab width |
-| Agent Integration | Per-host Hook/CLI setup and maintenance, Agent history limit, automatic Quick Input opening, Agent notifications |
+| Integrations → Agent | Per-host Hook/CLI setup and maintenance, Agent history limit, automatic Quick Input opening, Agent notifications |
 | Views & Tabs | Horizontal/vertical tabs, sidebar geometry, grouping/order/path, tab density/icons, resize rendering |
 | Appearance | Terminal theme, fonts, opacity/blur, cursor and font inheritance |
 | Shortcuts | Quick Input and Inspector shortcut recorders; original Ghostty keybinding configuration access |
@@ -28,6 +28,17 @@ descriptor. `OMGSettingsRow` provides a label/caption with a trailing control;
 `OMGSettingsSection` gives sections stable scroll anchors and themed cards. Controls
 must remain usable at the 720-point minimum window width, in both languages and
 appearances. Long warnings and destructive actions retain their original semantics.
+
+Settings controls share a 32-point action height, subtle themed background/border,
+consistent corner radius and trailing alignment. `OMGSettingsPicker` draws a full-width
+trigger with a single trailing chevron; its transparent native button opens an `NSMenu`
+for keyboard/type-ahead and accessibility, with a checkmark on the current value.
+This avoids the macOS SwiftUI Menu bridge discarding custom label layouts. Menu
+selection uses captured values, not mutable list positions. Disabled controls cannot
+commit changes. Short choices use `OMGSettingsSegments`; numeric fields use direct
+editing plus minus/plus controls. Destructive buttons remain red and keep their
+existing confirmations. Agent navigation keeps its `.agents` identifier but is now
+labelled **Agent** inside the expandable **Integrations** group.
 
 ## Optional core behavior overrides
 

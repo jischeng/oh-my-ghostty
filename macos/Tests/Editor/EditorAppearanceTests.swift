@@ -313,5 +313,107 @@ struct EditorAppearanceTests {
         let visibleFragments = editor.subviews.filter { editor.visibleRect.intersects($0.frame) }
         #expect(!visibleFragments.isEmpty, "Editor content area must not become empty after scrolling")
     }
-}
 
+    /// Keys in JSON and YAML must be visually distinct from values. The stock
+    /// grammars collapse both into the same slot in OMG's theme; the JSON/YAML
+    /// provider should separate them.
+    @Test func jsonAndYamlKeysPaintDifferentlyFromValues() async throws {
+        let json = """
+        {
+          "id": "gpt-6-sol",
+          "name": "GPT-6 Sol (duck-codex-sale)",
+          "reasoning": true,
+          "contextWindow": 1050000
+        }
+        """
+        let yaml = """
+        id: gpt-6-sol
+        name: GPT-6 Sol (duck-codex-sale)
+        reasoning: true
+        contextWindow: 1050000
+        nested:
+          - minimal
+          - effort
+        """
+
+        for (language, source) in [("json", json), ("yaml", yaml)] {
+            let coordinator = EditorCoordinator()
+            let capture = CompletionTestCapture()
+            let view = EditorTestSupport.editor(
+                text: .constant(source),
+                language: language == "json" ? .json : .yaml,
+                highlightProviders: coordinator.highlightProviders,
+                coordinators: [coordinator, capture]
+            )
+            let host = NSHostingController(rootView: view)
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 400),
+                                  styleMask: [.titled], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentViewController = host
+            // The editor only highlights its visible text, so the window has to
+            // be laid out at a real size; a zero-height host yields visibleRect
+            // height 0 and the highlighter queries a two-character range.
+            window.setContentSize(NSSize(width: 700, height: 400))
+            window.makeKeyAndOrderFront(nil)
+            host.view.layoutSubtreeIfNeeded()
+            defer {
+                coordinator.destroy()
+                EditorTestSupport.unmount((host, window))
+            }
+            let controller = try #require(capture.controller)
+            let textView = try #require(controller.textView)
+            // Highlighting is asynchronous and coalesced per provider; give the
+            // style container time to apply every run before sampling colors.
+            try await Task.sleep(for: .milliseconds(800))
+
+            func color(_ word: String) -> NSColor? {
+                let range = (source as NSString).range(of: word)
+                guard range.location != NSNotFound else { return nil }
+                return textView.textStorage.attribute(.foregroundColor,
+                                                      at: range.location,
+                                                      effectiveRange: nil) as? NSColor
+            }
+
+            // Keys must differ from string values and numbers.
+            let keyColor = color("contextWindow")?.usingColorSpace(.deviceRGB)
+            let valueColor = color("gpt-6-sol")?.usingColorSpace(.deviceRGB)
+            let numberColor = color("1050000")?.usingColorSpace(.deviceRGB)
+            #expect(keyColor != nil, "key has no highlight for \(language)")
+            #expect(valueColor != nil, "value has no highlight for \(language)")
+            #expect(numberColor != nil, "number has no highlight for \(language)")
+            if let keyColor, let valueColor, let numberColor {
+                #expect(keyColor != valueColor,
+                        "key and value share a color for \(language): key=\(keyColor) value=\(valueColor)")
+                #expect(keyColor != numberColor, "key and number share a color for \(language)")
+            }
+        }
+    }
+
+    /// The bundled JSON and YAML grammars must produce non-empty highlights for
+    /// plain objects. If this returns empty, the tree-sitter query failed to
+    /// load or the grammar cannot parse the document — surface that as a
+    /// readable failure instead of silently dropping syntax coloring.
+    @Test(arguments: ["json", "yaml"])
+    @MainActor func structuredGrammarProducesHighlights(_ language: String) async throws {
+        let source = language == "json"
+            ? "{\n  \"id\": \"gpt-6-sol\",\n  \"n\": 42\n}\n"
+            : "id: gpt-6-sol\nn: 42\n"
+        let textView = TextView(string: source)
+        let provider = EditorSyntaxHighlightProvider()
+        let codeLanguage: CodeLanguage = language == "json" ? .json : .yaml
+        provider.setUp(textView: textView, codeLanguage: codeLanguage)
+        let highlights: [HighlightRange] = try await withCheckedThrowingContinuation { continuation in
+            provider.queryHighlightsFor(textView: textView,
+                                        range: NSRange(location: 0, length: source.utf16.count)) {
+                continuation.resume(with: $0)
+            }
+        }
+        #expect(!highlights.isEmpty, "grammar produced no highlights for \(language)")
+        func captures(_ word: String) -> [CaptureName?] {
+            let range = (source as NSString).range(of: word)
+            return highlights.filter { NSIntersectionRange($0.range, range).length > 0 }.map(\.capture)
+        }
+        #expect(captures("id").contains(.type), "json/yaml key must map to type slot for \(language)")
+        #expect(captures("42").contains(.number), "number must map to number slot for \(language)")
+    }
+}

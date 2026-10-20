@@ -506,9 +506,3 @@ struct EditorCompletionTests {
         #expect(theme.background.alphaComponent == 0)
     }
 }
-
-@MainActor
-private final class CompletionTestCapture: @preconcurrency TextViewCoordinator {
-    weak var controller: TextViewController?
-    func prepareCoordinator(controller: TextViewController) { self.controller = controller }
-}

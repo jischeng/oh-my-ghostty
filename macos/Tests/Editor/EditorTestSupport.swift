@@ -86,3 +86,10 @@ enum EditorTestSupport {
         return host
     }
 }
+
+/// Captures the `TextViewController` so tests can reach the native editor.
+@MainActor
+final class CompletionTestCapture: @preconcurrency TextViewCoordinator {
+    weak var controller: TextViewController?
+    func prepareCoordinator(controller: TextViewController) { self.controller = controller }
+}

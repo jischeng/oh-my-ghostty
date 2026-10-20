@@ -2,6 +2,7 @@ import AppKit
 import CodeEditLanguages
 import CodeEditSourceEditor
 import CodeEditTextView
+import SwiftTreeSitter
 
 /// Layers text colors so the pinned editor's limited capture slots keep OMG's
 /// command/variable distinction.
@@ -12,6 +13,19 @@ final class EditorSyntaxHighlightProvider: HighlightProviding {
     private static let pythonBuiltins = try? NSRegularExpression(
         pattern: #"\b(?:self|cls|int|float|bool|str|bytes|tuple|list|dict|set|frozenset|object|None|True|False)\b"#
     )
+
+    // Structural key detection for JSON and YAML.
+    private var structuralParser: Parser?
+    private var structuralLanguage: TreeSitterLanguage?
+    private var cachedKeyText: String?
+    private var cachedKeyRanges: [NSRange] = []
+
+    /// Node types whose `key` field should be painted as a key.
+    private static let keyedNodeTypes: Set<String> = [
+        "pair",                 // JSON
+        "block_mapping_pair",   // YAML
+        "flow_mapping",         // YAML
+    ]
 
     /// Normalizes a theme before it reaches the editor.
     ///
@@ -63,6 +77,28 @@ final class EditorSyntaxHighlightProvider: HighlightProviding {
     func setUp(textView: TextView, codeLanguage: CodeLanguage) {
         isPython = codeLanguage.id == .python
         parser.setUp(textView: textView, codeLanguage: codeLanguage)
+        // The JSON and YAML grammars capture keys as `string.special.key` and
+        // `property`, but `CaptureName.fromString` has no case for the former, so
+        // that capture is dropped and the grammar's plain `(string) @string` rule
+        // then paints the same node as a string value. Keys therefore had no way
+        // to look different from values. Keep a second parser so keys can be
+        // identified structurally and given their own slot.
+        if codeLanguage.id == .json || codeLanguage.id == .yaml,
+           let language = codeLanguage.language {
+            let structural = Parser()
+            if (try? structural.setLanguage(language)) != nil {
+                structuralParser = structural
+                structuralLanguage = codeLanguage.id
+            } else {
+                structuralParser = nil
+                structuralLanguage = nil
+            }
+        } else {
+            structuralParser = nil
+            structuralLanguage = nil
+        }
+        cachedKeyText = nil
+        cachedKeyRanges = []
     }
 
     func willApplyEdit(textView: TextView, range: NSRange) {
@@ -80,6 +116,29 @@ final class EditorSyntaxHighlightProvider: HighlightProviding {
         parser.queryHighlightsFor(textView: textView, range: range) { [self] result in
             completion(result.map { highlights in
                 var resolved = Self.resolvedHighlights(highlights)
+                // Give structural keys their own slot. The grammars report keys
+                // as plain `string` (JSON) or `property` (YAML), and `property`
+                // maps to the same color as values, so keys and values are
+                // indistinguishable without this pass.
+                if structuralLanguage != nil, NSMaxRange(range) <= source.length {
+                    // A key is also a string node, so the stock captures cover the
+                    // exact same ranges. Drop those first; the style container
+                    // resolves same-length runs by provider priority, not by the
+                    // capture we send, so leaving both would let `@string` win.
+                    let keyRanges = keyRanges(in: source).filter {
+                        NSIntersectionRange($0, range).length > 0
+                    }
+                    if !keyRanges.isEmpty {
+                        let keys = Set(keyRanges.map { NSValue(range: $0) })
+                        resolved.removeAll { highlight in
+                            keys.contains(NSValue(range: highlight.range))
+                                || keyRanges.contains { NSIntersectionRange($0, highlight.range).length > 0 }
+                        }
+                        resolved.append(contentsOf: keyRanges.map {
+                            HighlightRange(range: $0, capture: .type)
+                        })
+                    }
+                }
                 if isPython, NSMaxRange(range) <= source.length {
                     // The pinned capture enum drops constant.builtin. Add the
                     // Python builtins only outside strings and comments.
@@ -96,6 +155,30 @@ final class EditorSyntaxHighlightProvider: HighlightProviding {
                 }
                 return resolved.sorted { $0.range.location < $1.range.location }
             })
+        }
+    }
+
+    /// Structural key ranges for the current buffer, cached per document text.
+    private func keyRanges(in source: NSString) -> [NSRange] {
+        if let cachedKeyText, cachedKeyText == source as String {
+            return cachedKeyRanges
+        }
+        guard let structuralParser, let tree = structuralParser.parse(source as String) else { return [] }
+        var ranges: [NSRange] = []
+        Self.collectKeyRanges(node: tree.rootNode, into: &ranges)
+        cachedKeyText = source as String
+        cachedKeyRanges = ranges
+        return ranges
+    }
+
+    private static func collectKeyRanges(node: Node?, into ranges: inout [NSRange]) {
+        guard let node else { return }
+        if let type = node.nodeType, keyedNodeTypes.contains(type),
+           let key = node.child(byFieldName: "key"), key.isNamed, key.range.length > 0 {
+            ranges.append(key.range)
+        }
+        for index in 0..<node.childCount {
+            collectKeyRanges(node: node.child(at: index), into: &ranges)
         }
     }
 }

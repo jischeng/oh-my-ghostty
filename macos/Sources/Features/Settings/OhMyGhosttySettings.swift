@@ -537,7 +537,25 @@ final class OhMyGhosttySettings: ObservableObject {
             minimum: nil, maximum: nil,
             description: "Choose a fresh terminal, layout-only tabs, or full session restoration on next launch.",
             requiresNewWindow: false, category: "general"),
-    ]
+    ] + CoreSetting.all.map {
+        .init(id: $0.id, type: .enumeration, defaultValue: "",
+              allowedValues: [""] + $0.values, minimum: nil, maximum: nil,
+              description: $0.helpEnglish, requiresNewWindow: $0.requiresNewTerminal,
+              category: $0.group.tab.rawValue)
+    }
+
+    @Published private(set) var coreOverrides: [String: String] = [:]
+
+    /// Empty/nil removes only the OMG override, never the inherited Ghostty value.
+    @discardableResult
+    func setCoreOverride(_ key: String, value: String?) -> Bool {
+        guard let descriptor = CoreSetting.find(key) else { return false }
+        let value = value.flatMap { $0.isEmpty ? nil : $0 }
+        if let value, !descriptor.values.contains(value) { return false }
+        coreOverrides[key] = value
+        persistOptional(descriptor.id, value)
+        return true
+    }
 
     @Published var tabLayout: Ghostty.Config.MacOSTabLayout = .vertical {
         didSet { persist("tabs.layout", tabLayout.rawValue) }
@@ -1064,6 +1082,10 @@ final class OhMyGhosttySettings: ObservableObject {
 
     private func applyChosenValues() {
         applyWithoutPersisting {
+            coreOverrides = Dictionary(uniqueKeysWithValues: CoreSetting.all.compactMap { descriptor in
+                guard let value = chosen[descriptor.id] as? String, descriptor.values.contains(value) else { return nil }
+                return (descriptor.key, value)
+            })
             tabLayout = enumValue("tabs.layout", fallback: ghosttyTabLayout)
             defaultSidebarWidth = numberValue("tabs.sidebarWidth", fallback: 240, range: 176...480)
             groupingMode = enumValue("tabs.grouping", fallback: .none)
@@ -1318,6 +1340,11 @@ final class OhMyGhosttySettings: ObservableObject {
             }
             if let cursorStyleOverride {
                 lines.append("cursor-style = \(cursorStyleOverride.rawValue)")
+            }
+            for descriptor in CoreSetting.all {
+                if let value = coreOverrides[descriptor.key], descriptor.values.contains(value) {
+                    lines.append("\(descriptor.key) = \(value)")
+                }
             }
             let content = lines.joined(separator: "\n") + "\n"
             try content.write(to: appearanceOverlayURL, atomically: true, encoding: .utf8)

@@ -8,6 +8,7 @@ enum OhMyGhosttySettingsTab: String, CaseIterable, Identifiable {
     case appearance
     case tabs
     case terminal
+    case controls
     case editor
     case keyboard
     case git
@@ -15,6 +16,9 @@ enum OhMyGhosttySettingsTab: String, CaseIterable, Identifiable {
     case agents
     case plugins
     case advanced
+
+    static let primary: [Self] = [.general, .terminal, .controls, .editor, .agents, .tabs, .appearance, .keyboard]
+    static let integrations: [Self] = [.git, .ssh, .plugins]
 
     var id: String { rawValue }
     var title: String { rawValue.capitalized }
@@ -24,6 +28,7 @@ enum OhMyGhosttySettingsTab: String, CaseIterable, Identifiable {
         case .appearance: "paintbrush"
         case .tabs: "rectangle.split.3x1"
         case .terminal: "terminal"
+        case .controls: "cursorarrow"
         case .editor: "curlybraces.square"
         case .keyboard: "keyboard"
         case .git: "point.3.connected.trianglepath.dotted"
@@ -156,6 +161,9 @@ struct SettingsView: View {
     @State private var pluginError: String?
     @State private var agentHookError: String?
     @State private var palette: OMGThemePalette
+    @State private var searchText = ""
+    @State private var integrationsExpanded = true
+    @State private var jumpTarget: String?
 
     private var strings: SettingsStrings {
         SettingsStrings(language: settings.language)
@@ -164,8 +172,10 @@ struct SettingsView: View {
     init(
         settings: OhMyGhosttySettings,
         initialSelection: OhMyGhosttySettingsTab = .tabs,
-        palette: OMGThemePalette? = nil
+        palette: OMGThemePalette? = nil,
+        initialSearch: String = ""
     ) {
+        self._searchText = State(initialValue: initialSearch)
         self._palette = State(initialValue: palette ?? OMGThemeBackground.palette())
         self.settings = settings
         self._pluginManager = StateObject(wrappedValue: .shared)
@@ -174,42 +184,54 @@ struct SettingsView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            ScrollView {
-                VStack(spacing: 4) {
-                    ForEach(OhMyGhosttySettingsTab.allCases) { tab in
-                        Button { selection = tab } label: {
-                            Label(strings.tabTitle(tab), systemImage: tab.systemImage)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 9)
-                                .background {
-                                    if selection == tab {
-                                        RoundedRectangle(cornerRadius: 7)
-                                            .fill(Color(palette.foreground).opacity(0.14))
-                                    }
-                                }
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityAddTraits(selection == tab ? .isSelected : [])
+            VStack(spacing: 12) {
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    TextField(strings.settingsSearch, text: $searchText).textFieldStyle(.plain)
+                    if !searchText.isEmpty {
+                        Button { searchText = "" } label: { Image(systemName: "xmark.circle.fill") }
+                            .buttonStyle(.plain).foregroundStyle(.secondary)
                     }
                 }
-                .padding(10)
+                .padding(9).background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+                .padding(.horizontal, 12).padding(.top, 16)
+                ScrollView {
+                    VStack(spacing: 4) {
+                        ForEach(OhMyGhosttySettingsTab.primary) { navigationRow($0) }
+                        DisclosureGroup(isExpanded: $integrationsExpanded) {
+                            ForEach(OhMyGhosttySettingsTab.integrations) { navigationRow($0) }
+                        } label: {
+                            Text(strings.integrationsGroup).font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                        }.padding(.horizontal, 8).padding(.vertical, 10)
+                        navigationRow(.advanced)
+                    }.padding(.horizontal, 10).padding(.bottom, 12)
+                }
             }
-            .frame(width: 190)
+            .frame(width: 206)
             .background(Color(palette.sidebar).opacity(0.5))
 
             Divider()
 
             VStack(alignment: .leading, spacing: 0) {
-                Text(strings.tabTitle(selection))
+                Text(searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? strings.tabTitle(selection) : strings.settingsSearch)
                     .font(.title2.weight(.semibold))
                     .padding(.horizontal, 24)
                     .frame(height: 52)
                 Divider()
-                detail
-                    .formStyle(OMGSettingsFormStyle())
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                if searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    ScrollViewReader { proxy in
+                        detail
+                            .formStyle(OMGSettingsFormStyle())
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
+                            .task(id: jumpTarget) {
+                                guard let jumpTarget else { return }
+                                await Task.yield()
+                                proxy.scrollTo(jumpTarget, anchor: .top)
+                            }
+                    }
+                } else {
+                    searchResults
+                }
             }
         }
         .frame(minWidth: 720, minHeight: 480)
@@ -222,7 +244,62 @@ struct SettingsView: View {
             palette = OMGThemeBackground.palette(config: config)
         }
         .onReceive(NotificationCenter.default.publisher(for: .omgSelectSettingsTab)) { notification in
-            if let tab = notification.object as? OhMyGhosttySettingsTab { selection = tab }
+            if let tab = notification.object as? OhMyGhosttySettingsTab {
+                searchText = ""
+                jumpTarget = nil
+                if OhMyGhosttySettingsTab.integrations.contains(tab) { integrationsExpanded = true }
+                selection = tab
+            }
+        }
+    }
+
+    private func navigationRow(_ tab: OhMyGhosttySettingsTab) -> some View {
+        Button {
+            searchText = ""
+            jumpTarget = nil
+            selection = tab
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: tab.systemImage).frame(width: 20)
+                Text(strings.tabTitle(tab))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10).padding(.vertical, 10)
+            .background(selection == tab ? Color(palette.foreground).opacity(0.12) : .clear,
+                        in: RoundedRectangle(cornerRadius: 8))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selection == tab ? .isSelected : [])
+    }
+
+    private var searchResults: some View {
+        let matches = SettingsSearchCatalog.entries(strings: strings).filter { $0.matches(searchText) }
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                if matches.isEmpty { Text(strings.settingsNoResults).foregroundStyle(.secondary).padding(.vertical, 20) }
+                ForEach(matches) { entry in
+                    Button {
+                        selection = entry.tab
+                        if OhMyGhosttySettingsTab.integrations.contains(entry.tab) { integrationsExpanded = true }
+                        jumpTarget = entry.anchor
+                        searchText = ""
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: entry.tab.systemImage).frame(width: 24).foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(entry.title).fontWeight(.medium)
+                                Text(strings.tabTitle(entry.tab)).font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right").foregroundStyle(.tertiary)
+                        }
+                        .padding(14).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 10))
+                        .contentShape(Rectangle())
+                    }.buttonStyle(.plain)
+                }
+            }.padding(24)
         }
     }
 
@@ -232,54 +309,20 @@ struct SettingsView: View {
         case .general:
             Form {
                 OMGSettingsSection(strings.languageSection) {
-                    Picker(strings.languageLabel, selection: $settings.language) {
-                        Text(strings.languageSystem).tag(OhMyGhosttyLanguage.system)
-                        Text("English").tag(OhMyGhosttyLanguage.english)
-                        Text("简体中文").tag(OhMyGhosttyLanguage.simplifiedChinese)
+                    OMGSettingsRow(strings.languageLabel, subtitle: strings.languageCaption) {
+                        Picker(strings.languageLabel, selection: $settings.language) {
+                            Text(strings.languageSystem).tag(OhMyGhosttyLanguage.system)
+                            Text("English").tag(OhMyGhosttyLanguage.english)
+                            Text("简体中文").tag(OhMyGhosttyLanguage.simplifiedChinese)
+                        }.labelsHidden().frame(width: 180)
                     }
-                    Text(strings.languageCaption)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
-                OMGSettingsSection(strings.sessionsSection) {
-                    HStack {
-                        Text(strings.agentHistoryLimitLabel)
-                        Slider(
-                            value: $settings.agentHistoryLimit,
-                            in: 500...30000,
-                            step: 500
-                        )
-                        Text("\(Int(settings.agentHistoryLimit))")
-                            .monospacedDigit()
-                            .frame(width: 58, alignment: .trailing)
-                    }
-                    Text(strings.agentHistoryLimitCaption)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Picker(strings.startupModeLabel, selection: $settings.startupMode) {
-                        ForEach(OMGStartupMode.allCases) { mode in
-                            Text(strings.startupModeTitle(mode)).tag(mode)
-                        }
-                    }
-                    Text(strings.startupModeCaption)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                CoreSettingsSection(group: .lifecycle, settings: settings)
                 OMGSettingsSection(strings.quitSection) {
-                    Toggle(
-                        strings.quitWithoutConfirmationLabel,
-                        isOn: $settings.quitWithoutConfirmation
-                    )
-                    Text(strings.quitWithoutConfirmationCaption)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                OMGSettingsSection(strings.configurationSection) {
-                    LabeledContent(strings.settingsFileLabel, value: OhMyGhosttySettings.fileURL.path)
-                    LabeledContent(strings.precedenceLabel, value: strings.precedenceValue)
-                    Text(strings.configurationCaption)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    OMGSettingsRow(strings.quitWithoutConfirmationLabel, subtitle: strings.quitWithoutConfirmationCaption) {
+                        Toggle(strings.quitWithoutConfirmationLabel, isOn: $settings.quitWithoutConfirmation)
+                            .labelsHidden().toggleStyle(.switch)
+                    }
                 }
             }
 
@@ -308,23 +351,28 @@ struct SettingsView: View {
                     Toggle(strings.rememberSidebarWidthLabel, isOn: $settings.rememberSidebarWidth)
                 }
                 OMGSettingsSection(strings.organizationSection) {
-                    Picker(strings.groupingLabel, selection: $settings.groupingMode) {
-                        ForEach(GhosttyTabGroupingMode.allCases, id: \.self) { mode in
-                            Text(strings.groupingTitle(mode)).tag(mode)
-                        }
+                    OMGSettingsRow(strings.groupingLabel) {
+                        Picker(strings.groupingLabel, selection: $settings.groupingMode) {
+                            ForEach(GhosttyTabGroupingMode.allCases, id: \.self) { mode in Text(strings.groupingTitle(mode)).tag(mode) }
+                        }.labelsHidden().frame(width: 180)
                     }
-                    Picker(strings.pathDisplayLabel, selection: $settings.tabPathDisplay) {
-                        ForEach(OhMyGhosttyTabPathDisplay.allCases) { mode in
-                            Text(strings.pathDisplayTitle(mode)).tag(mode)
-                        }
+                    Divider()
+                    OMGSettingsRow(strings.pathDisplayLabel) {
+                        Picker(strings.pathDisplayLabel, selection: $settings.tabPathDisplay) {
+                            ForEach(OhMyGhosttyTabPathDisplay.allCases) { mode in Text(strings.pathDisplayTitle(mode)).tag(mode) }
+                        }.labelsHidden().frame(width: 180)
                     }
-                    Picker(strings.orderingLabel, selection: $settings.orderingMode) {
-                        ForEach(GhosttyTabOrderingMode.allCases, id: \.self) { mode in
-                            Text(strings.orderingTitle(mode)).tag(mode)
-                        }
+                    Divider()
+                    OMGSettingsRow(strings.orderingLabel) {
+                        Picker(strings.orderingLabel, selection: $settings.orderingMode) {
+                            ForEach(GhosttyTabOrderingMode.allCases, id: \.self) { mode in Text(strings.orderingTitle(mode)).tag(mode) }
+                        }.labelsHidden().frame(width: 180)
                     }
+                    Divider()
                     Toggle(strings.showShortcutLabelsLabel, isOn: $settings.showShortcutLabels)
                 }
+                tabAppearanceSection
+                resizeRenderingSection
                 HStack {
                     Spacer()
                     Button(strings.resetTabsButton) {
@@ -335,67 +383,63 @@ struct SettingsView: View {
 
         case .terminal:
             Form {
-                OMGSettingsSection(strings.resizeRenderingSection) {
-                    Picker(
-                        strings.terminalResizeRenderingLabel,
-                        selection: $settings.terminalResizeRendering
-                    ) {
-                        ForEach(TerminalResizeRenderingMode.allCases) { mode in
-                            Text(strings.terminalResizeRenderingTitle(mode))
-                                .tag(mode)
-                        }
-                    }
-                    Text(strings.terminalResizeRenderingCaption)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                OMGSettingsSection(strings.ghosttySection) {
-                    Button(strings.openGhosttyConfigButton) {
-                        (NSApp.delegate as? AppDelegate)?.ghostty.openConfig()
+                CoreSettingsSection(group: .shell, settings: settings)
+                OMGSettingsSection(strings.sessionRecoverySection) {
+                    OMGSettingsRow(strings.startupModeLabel, subtitle: strings.sessionRecoveryCaption) {
+                        Picker(strings.startupModeLabel, selection: $settings.startupMode) {
+                            ForEach(OMGStartupMode.allCases) { mode in Text(strings.startupModeTitle(mode)).tag(mode) }
+                        }.labelsHidden().frame(width: 190)
                     }
                 }
+                CoreSettingsSection(group: .notifications, settings: settings)
+            }
+
+        case .controls:
+            Form {
+                OMGSettingsSection(strings.quickInputSection) { QuickInputSettingsView(settings: settings) }
+                CoreSettingsSection(group: .selection, settings: settings)
+                CoreSettingsSection(group: .clipboard, settings: settings)
+                CoreSettingsSection(group: .mouse, settings: settings)
+                CoreSettingsSection(group: .keyboard, settings: settings)
             }
 
         case .editor:
             Form {
-                OMGSettingsSection(strings.quickInputSection) {
-                    QuickInputSettingsView(settings: settings)
-                }
                 OMGSettingsSection(strings.editorOpeningSection) {
-                    Picker(strings.editorFileOpenDestinationLabel, selection: $settings.editorFileOpenDestination) {
-                        ForEach(EditorOpenDestination.allCases, id: \.self) { destination in
-                            Text(strings.editorOpenDestinationTitle(destination)).tag(destination)
-                        }
+                    OMGSettingsRow(strings.editorFileOpenDestinationLabel) {
+                        Picker(strings.editorFileOpenDestinationLabel, selection: $settings.editorFileOpenDestination) {
+                            ForEach(EditorOpenDestination.allCases, id: \.self) { destination in Text(strings.editorOpenDestinationTitle(destination)).tag(destination) }
+                        }.labelsHidden().frame(width: 180)
                     }
-                    Picker(strings.editorDirectoryOpenDestinationLabel, selection: $settings.editorDirectoryOpenDestination) {
-                        ForEach(EditorOpenDestination.allCases, id: \.self) { destination in
-                            Text(strings.editorOpenDestinationTitle(destination)).tag(destination)
-                        }
+                    Divider()
+                    OMGSettingsRow(strings.editorDirectoryOpenDestinationLabel) {
+                        Picker(strings.editorDirectoryOpenDestinationLabel, selection: $settings.editorDirectoryOpenDestination) {
+                            ForEach(EditorOpenDestination.allCases, id: \.self) { destination in Text(strings.editorOpenDestinationTitle(destination)).tag(destination) }
+                        }.labelsHidden().frame(width: 180)
                     }
                     Text(strings.editorOpeningCaption).font(.caption).foregroundStyle(.secondary)
                 }
                 OMGSettingsSection(strings.editorBehaviorSection) {
-                    Picker(strings.editorKeymapPresetLabel, selection: $settings.editorKeymapPreset) {
-                        ForEach(EditorKeymapPreset.allCases) { preset in
-                            Text(strings.editorKeymapPresetTitle(preset)).tag(preset)
-                        }
+                    OMGSettingsRow(strings.editorKeymapPresetLabel, subtitle: strings.editorKeymapPresetCaption) {
+                        Picker(strings.editorKeymapPresetLabel, selection: $settings.editorKeymapPreset) {
+                            ForEach(EditorKeymapPreset.allCases) { preset in Text(strings.editorKeymapPresetTitle(preset)).tag(preset) }
+                        }.labelsHidden().pickerStyle(.segmented).frame(width: 180)
                     }
-                    .pickerStyle(.segmented)
-                    Text(strings.editorKeymapPresetCaption)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Divider()
                     Toggle(strings.editorWordWrapLabel, isOn: $settings.editorWordWrap)
+                    Divider()
                     Toggle(strings.editorAutoClosePairsLabel, isOn: $settings.editorAutoClosePairs)
                 }
                 OMGSettingsSection(strings.editorThemeSection) {
-                    Picker(strings.editorSyntaxThemeLabel, selection: editorThemeSelection) {
-                        Text(strings.editorSyntaxThemeTitle(.followTerminal)).tag("follow")
-                        ForEach(themeNames, id: \.self) { name in Text(name).tag("catalog:" + name) }
-                        ForEach(EditorSyntaxTheme.allCases.filter { $0 != .followTerminal }) { theme in
-                            Text(theme.title).tag("builtin:" + theme.rawValue)
-                        }
+                    OMGSettingsRow(strings.editorSyntaxThemeLabel, subtitle: strings.editorCatalogCaption) {
+                        Picker(strings.editorSyntaxThemeLabel, selection: editorThemeSelection) {
+                            Text(strings.editorSyntaxThemeTitle(.followTerminal)).tag("follow")
+                            ForEach(themeNames, id: \.self) { name in Text(name).tag("catalog:" + name) }
+                            ForEach(EditorSyntaxTheme.allCases.filter { $0 != .followTerminal }) { theme in
+                                Text(theme.title).tag("builtin:" + theme.rawValue)
+                            }
+                        }.labelsHidden().frame(width: 210)
                     }
-                    Text(strings.editorCatalogCaption).font(.caption).foregroundStyle(.secondary)
                     if !settings.editorSettings.followsOMG {
                         HStack {
                             Text(strings.backgroundOpacityLabel)
@@ -414,11 +458,12 @@ struct SettingsView: View {
                     }
                 }
                 OMGSettingsSection(strings.editorTypographySection) {
-                    Picker(strings.editorFontFamilyLabel, selection: $settings.editorFontFamily) {
-                        ForEach(EditorFontFamily.allCases) { family in
-                            Text(strings.editorFontFamilyTitle(family)).tag(family)
-                        }
+                    OMGSettingsRow(strings.editorFontFamilyLabel) {
+                        Picker(strings.editorFontFamilyLabel, selection: $settings.editorFontFamily) {
+                            ForEach(EditorFontFamily.allCases) { family in Text(strings.editorFontFamilyTitle(family)).tag(family) }
+                        }.labelsHidden().frame(width: 180)
                     }
+                    Divider()
                     HStack {
                         Text(strings.editorFontSizeLabel)
                         Slider(value: $settings.editorFontSize, in: 8...36, step: 0.5)
@@ -459,6 +504,7 @@ struct SettingsView: View {
 
         case .keyboard:
             Form {
+                OMGSettingsSection(strings.quickInputShortcutLabel) { QuickInputShortcutSettingsView(settings: settings) }
                 OMGSettingsSection(strings.rightSidebarShortcutsSection) {
                     Text(strings.rightSidebarShortcutsCaption)
                         .font(.caption)
@@ -505,23 +551,40 @@ struct SettingsView: View {
         case .git:
             Form {
                 OMGSettingsSection(strings.gitSection) {
-                    Picker(strings.gitAutoFetchLabel, selection: $settings.gitAutoFetchInterval) {
-                        ForEach([0, 1, 2, 5, 10, 15, 30, 60], id: \.self) { minutes in
-                            Text(strings.gitAutoFetchIntervalTitle(minutes)).tag(minutes)
-                        }
+                    OMGSettingsRow(strings.gitAutoFetchLabel, subtitle: strings.gitAutoFetchCaption) {
+                        Picker(strings.gitAutoFetchLabel, selection: $settings.gitAutoFetchInterval) {
+                            ForEach([0, 1, 2, 5, 10, 15, 30, 60], id: \.self) { minutes in Text(strings.gitAutoFetchIntervalTitle(minutes)).tag(minutes) }
+                        }.labelsHidden().frame(width: 180)
                     }
-                    Text(strings.gitAutoFetchCaption).font(.caption).foregroundStyle(.secondary)
                 }
-                GitCommitAISettingsView(settings: settings)
+                GitCommitAISettingsView(settings: settings).id("gitAI")
             }
         case .ssh:
-            Form { SSHRegistrationSettingsView(strings: strings) }
+            Form {
+                OMGSettingsSection(strings.sshSettingsTitle) {
+                    SSHRegistrationSettingsView(strings: strings)
+                }.id("sshRegistration")
+            }
         case .agents:
             Form {
                 AgentIntegrationSettingsView(
                     strings: strings, settings: settings,
                     exportInstaller: exportRemoteAgentInstaller, exportError: agentHookError
-                )
+                ).id("agentIntegrations")
+                OMGSettingsSection(strings.agentBehaviorSection) {
+                    Toggle(strings.openQuickInputOnAgentStartLabel, isOn: $settings.openQuickInputOnAgentStart)
+                        .help(strings.openQuickInputOnAgentStartCaption)
+                    Toggle(strings.openQuickInputOnAgentCompleteLabel, isOn: $settings.openQuickInputOnAgentComplete)
+                        .help(strings.openQuickInputOnAgentCompleteCaption)
+                }
+                OMGSettingsSection(strings.agentHistorySection) {
+                    OMGSettingsRow(strings.agentHistoryLimitLabel, subtitle: strings.agentHistoryLimitCaption) {
+                        HStack {
+                            Slider(value: $settings.agentHistoryLimit, in: 100...50000, step: 100)
+                            Text("\(Int(settings.agentHistoryLimit))").monospacedDigit().frame(width: 60, alignment: .trailing)
+                        }.frame(width: 220)
+                    }
+                }
                 OMGSettingsSection(strings.notificationsSection) {
                     Toggle(strings.notifyTaskCompleteLabel, isOn: $settings.notifyTaskComplete)
                     Toggle(strings.notifyAttentionLabel, isOn: $settings.notifyAttention)
@@ -533,8 +596,13 @@ struct SettingsView: View {
 
         case .advanced:
             Form {
-                OMGSettingsSection(strings.forkSettingsSection) {
+                OMGSettingsSection(strings.settingsLocationsSection) {
                     LabeledContent(strings.fileLabel, value: OhMyGhosttySettings.fileURL.path)
+                    LabeledContent(strings.precedenceLabel, value: strings.precedenceValue)
+                    Text(strings.coreInheritanceCaption).font(.caption).foregroundStyle(.secondary)
+                    Button(strings.openGhosttyConfigButton) {
+                        (NSApp.delegate as? AppDelegate)?.ghostty.openConfig()
+                    }
                     HStack {
                         Button(strings.openFileButton) {
                             settings.ensureFileExists()
@@ -555,7 +623,7 @@ struct SettingsView: View {
                             .foregroundStyle(.red)
                             .textSelection(.enabled)
                     }
-                }
+                }.id("settingsFiles")
             }
         }
     }
@@ -708,6 +776,29 @@ struct SettingsView: View {
         )
     }
 
+    private var tabAppearanceSection: some View {
+        OMGSettingsSection(strings.appearanceTabsSection) {
+            Picker(strings.rowDensityLabel, selection: $settings.tabRowDensity) {
+                ForEach(OhMyGhosttyTabRowDensity.allCases) { density in Text(strings.densityTitle(density)).tag(density) }
+            }
+            HStack {
+                Text(strings.tabIconSizeLabel)
+                Slider(value: $settings.tabIconSize, in: 12...20, step: 1)
+                Text("\(Int(settings.tabIconSize)) pt").monospacedDigit().frame(width: 52, alignment: .trailing)
+            }
+        }
+    }
+
+    private var resizeRenderingSection: some View {
+        OMGSettingsSection(strings.resizeRenderingSection) {
+            OMGSettingsRow(strings.terminalResizeRenderingLabel, subtitle: strings.terminalResizeRenderingCaption) {
+                Picker(strings.terminalResizeRenderingLabel, selection: $settings.terminalResizeRendering) {
+                    ForEach(TerminalResizeRenderingMode.allCases) { mode in Text(strings.terminalResizeRenderingTitle(mode)).tag(mode) }
+                }.labelsHidden().frame(width: 190)
+            }
+        }
+    }
+
     private var appearanceForm: some View {
         let appearance = settings.effectiveAppearance(using: inheritedGhosttyConfig)
         return Form {
@@ -797,20 +888,7 @@ struct SettingsView: View {
                 resolutionRow(appearance.cursorStyle)
             }
 
-            OMGSettingsSection(strings.appearanceTabsSection) {
-                Picker(strings.rowDensityLabel, selection: $settings.tabRowDensity) {
-                    ForEach(OhMyGhosttyTabRowDensity.allCases) { density in
-                        Text(strings.densityTitle(density)).tag(density)
-                    }
-                }
-                HStack {
-                    Text(strings.tabIconSizeLabel)
-                    Slider(value: $settings.tabIconSize, in: 12...20, step: 1)
-                    Text("\(Int(settings.tabIconSize)) pt")
-                        .monospacedDigit()
-                        .frame(width: 52, alignment: .trailing)
-                }
-            }
+            CoreSettingsSection(group: .cursor, settings: settings)
 
             HStack {
                 Text(strings.appearanceLiveCaption)

@@ -41,7 +41,7 @@ struct SettingsStrings: Equatable, Sendable {
         t("Select " + label.lowercased() + " · ⌘C to copy · " + value, "选择" + label + " · ⌘C 复制 · " + value)
     }
 
-    private func t(_ en: String, _ zh: String) -> String {
+    func t(_ en: String, _ zh: String) -> String {
         isChinese ? zh : en
     }
 
@@ -53,10 +53,11 @@ struct SettingsStrings: Equatable, Sendable {
         switch tab {
         case .general: t("General", "通用")
         case .appearance: t("Appearance", "外观")
-        case .tabs: t("Tabs", "标签页")
-        case .terminal: t("Terminal", "终端")
+        case .tabs: t("Views & Tabs", "视图与标签")
+        case .terminal: t("Shell & Sessions", "Shell 与会话")
+        case .controls: t("Input & Controls", "输入与控制")
         case .editor: t("Editor", "编辑器")
-        case .keyboard: t("Keyboard", "键盘")
+        case .keyboard: t("Shortcuts", "快捷键")
         case .git: "Git"
         case .ssh: "SSH"
         case .agents: t("Agent Integration", "Agent 集成")
@@ -67,6 +68,25 @@ struct SettingsStrings: Equatable, Sendable {
 
     // MARK: General
 
+    var settingsSearch: String { t("Search Settings", "搜索设置") }
+    var settingsNoResults: String { t("No matching settings", "没有找到匹配的设置") }
+    var integrationsGroup: String { t("Integrations", "集成") }
+    var gitAISettingsTitle: String { t("AI Commit Messages", "AI 提交信息") }
+    var sshSettingsTitle: String { t("SSH Hosts", "SSH 主机") }
+    var inheritCoreSetting: String { t("Follow Ghostty Config", "跟随 Ghostty 配置") }
+    var newTerminalRequired: String { t("Applies to new terminals", "新建终端后生效") }
+    var coreInheritanceCaption: String {
+        t("Unset options follow your Ghostty configuration. Changes are saved as OMG overrides; your original config is not modified.",
+          "未覆盖的选项跟随 Ghostty 配置。修改保存为 OMG 覆盖项，不改写原配置文件。")
+    }
+    var agentHistorySection: String { t("Agent History", "Agent 历史") }
+    var agentBehaviorSection: String { t("Agent Behavior", "Agent 行为") }
+    var sessionRecoverySection: String { t("Session Recovery", "会话恢复") }
+    var sessionRecoveryCaption: String {
+        t("Restore layout only, or restore terminal scrollback and supported Agent sessions at launch. This does not rerun arbitrary commands.",
+          "启动时可只恢复布局，或恢复终端滚屏内容及受支持的 Agent 会话；不会重新运行任意命令。")
+    }
+    var settingsLocationsSection: String { t("Configuration Files", "配置文件") }
     var languageSection: String { t("Language", "语言") }
     var languageLabel: String { t("Display Language", "显示语言") }
     var languageSystem: String { t("Follow System", "跟随系统") }

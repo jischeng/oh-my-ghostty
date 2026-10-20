@@ -38,10 +38,26 @@ Contributor checklist:
 
 ## Git AI commit messages and settings navigation
 
-Settings has independent **Git**, **SSH**, and **Agent Integration** sidebar entries.
-Git auto-fetch and AI commit-message configuration live under Git; registered SSH
-hosts live under SSH; Agent installation/update/hooks and notifications live under
-Agent Integration. Plugin installation remains under Plugins.
+Settings uses task-oriented navigation: **General**, **Shell & Sessions**,
+**Input & Controls**, **Editor**, **Agent Integration**, **Views & Tabs**,
+**Appearance**, **Shortcuts**, and **Advanced**. The expandable **Integrations**
+group keeps independent **Git**, **SSH**, and **Plugins** destinations. Existing
+navigation identifiers remain valid. Git auto-fetch and AI commit-message
+configuration live under Git; registered hosts live under SSH; Agent hooks, history,
+automatic Quick Input behavior and notifications live under Agent Integration.
+Quick Input/history controls live under Input & Controls, with their shortcut under
+Shortcuts; startup recovery is under Shell & Sessions. Existing JSON keys are unchanged.
+
+Sidebar search matches English/Chinese labels, aliases and persisted setting IDs,
+then navigates to the owning section. Every descriptor has one search destination.
+`CoreSetting` exposes a closed list of existing Ghostty behavior options as optional
+`core.<ghostty-key>` string values. Empty/unset inherits the user's Ghostty config;
+GUI changes use the existing app-owned `appearance.ghostty` final overlay and reload
+notification, never rewrite the baseline file. Only catalogued keys and allowed values
+reach the overlay; unknown/invalid hand-edited values are preserved in JSON but not
+executed. Shell integration, directory/font inheritance affect new terminals. Clipboard
+permissions and close confirmation remain inherited until explicitly changed. See
+`docs/settings/ORGANIZATION.md` for the navigation/coverage boundaries.
 
 The built-in Git changes composer has a single Generate button before Commit.
 `git.commitAI.routes` stores an ordered array of `{id, agent, model}` entries;

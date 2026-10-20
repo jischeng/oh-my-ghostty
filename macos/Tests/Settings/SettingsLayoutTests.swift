@@ -99,6 +99,30 @@ struct SettingsLayoutTests {
         }
     }
 
+    @Test func reorganizedSettingsPagesAndSearchFitMinimumWindow() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let settings = OhMyGhosttySettings(fileURL: root.appendingPathComponent("settings.json"))
+        settings.language = .simplifiedChinese
+        let tabs: [OhMyGhosttySettingsTab] = [.general, .terminal, .controls, .editor, .tabs, .appearance, .keyboard, .advanced]
+        for tab in tabs {
+            let host = NSHostingView(rootView: SettingsView(settings: settings, initialSelection: tab))
+            let window = makeWindow(host, width: 720)
+            defer { window.close() }
+            try await Task.sleep(for: .milliseconds(150))
+            host.layoutSubtreeIfNeeded()
+            #expect(host.bounds.width == 720, "\(tab.rawValue) must not widen the settings window")
+            try capture(host, name: "organized-" + tab.rawValue)
+        }
+        let host = NSHostingView(rootView: SettingsView(settings: settings, initialSelection: .general, initialSearch: "剪贴板"))
+        let window = makeWindow(host, width: 720)
+        defer { window.close() }
+        try await Task.sleep(for: .milliseconds(150))
+        host.layoutSubtreeIfNeeded()
+        #expect(host.bounds.width == 720)
+        try capture(host, name: "organized-search")
+    }
+
     @Test func themedSettingsRenderLightAndDarkWithoutSystemCanvas() async throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: home) }

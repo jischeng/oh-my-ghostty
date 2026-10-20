@@ -185,6 +185,7 @@ struct OMGSettingsSection<Content: View>: View {
                 .background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 10))
         }
         .fixedSize(horizontal: false, vertical: true)
+        .id(title)
     }
 }
 
@@ -192,6 +193,8 @@ struct OMGSettingsFormStyle: FormStyle {
     func makeBody(configuration: Configuration) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) { configuration.content }
+                .toggleStyle(OMGSettingsToggleStyle())
+                .controlSize(.small)
                 .padding(24)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
         }

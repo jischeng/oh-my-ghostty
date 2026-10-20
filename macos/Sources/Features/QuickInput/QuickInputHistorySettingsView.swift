@@ -7,17 +7,19 @@ struct QuickInputHistorySettingsView: View {
     private var strings: SettingsStrings { SettingsStrings(language: settings.language) }
 
     var body: some View {
-        Picker(strings.quickInputHistoryScopeLabel, selection: $settings.quickInputHistoryScope) {
-            ForEach(QuickInputHistoryScope.allCases, id: \.self) { scope in
-                Text(strings.quickInputHistoryScopeName(scope)).tag(scope)
-            }
+        OMGSettingsRow(strings.quickInputHistoryScopeLabel) {
+            Picker(strings.quickInputHistoryScopeLabel, selection: $settings.quickInputHistoryScope) {
+                ForEach(QuickInputHistoryScope.allCases, id: \.self) { scope in Text(strings.quickInputHistoryScopeName(scope)).tag(scope) }
+            }.labelsHidden().frame(width: 180)
         }
-        Picker(strings.quickInputHistoryInsertionLabel, selection: $settings.quickInputHistoryInsertionMode) {
-            ForEach(QuickInputHistoryInsertionMode.allCases, id: \.self) { mode in
-                Text(strings.quickInputHistoryInsertionName(mode)).tag(mode)
-            }
+        Divider()
+        OMGSettingsRow(strings.quickInputHistoryInsertionLabel) {
+            Picker(strings.quickInputHistoryInsertionLabel, selection: $settings.quickInputHistoryInsertionMode) {
+                ForEach(QuickInputHistoryInsertionMode.allCases, id: \.self) { mode in Text(strings.quickInputHistoryInsertionName(mode)).tag(mode) }
+            }.labelsHidden().frame(width: 180)
         }
-        LabeledContent(strings.quickInputHistoryRetentionLabel) {
+        Divider()
+        OMGSettingsRow(strings.quickInputHistoryRetentionLabel) {
             HStack(spacing: 6) {
                 TextField("", value: $settings.quickInputHistoryRetentionDays,
                           format: .number.precision(.fractionLength(0)))
@@ -32,10 +34,11 @@ struct QuickInputHistorySettingsView: View {
             }
             .fixedSize()
         }
-        Toggle(strings.quickInputHistoryKeepLabel, isOn: $settings.quickInputHistoryKeepAfterQuit)
-        Text(strings.quickInputHistoryPrivacyCaption)
-            .font(.caption)
-            .foregroundStyle(.secondary)
+        Divider()
+        OMGSettingsRow(strings.quickInputHistoryKeepLabel, subtitle: strings.quickInputHistoryPrivacyCaption) {
+            Toggle(strings.quickInputHistoryKeepLabel, isOn: $settings.quickInputHistoryKeepAfterQuit)
+                .labelsHidden().toggleStyle(.switch)
+        }
         Button(strings.quickInputHistoryClearButton, role: .destructive) {
             confirmingClear = true
         }

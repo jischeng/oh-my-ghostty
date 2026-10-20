@@ -127,6 +127,26 @@ struct SettingsLayoutTests {
         try capture(host, name: "organized-search")
     }
 
+    @Test func agentSetupAndCLIErrorFeedbackFitWithoutExpandingTracebacks() async throws {
+        let strings = SettingsStrings(language: .simplifiedChinese)
+        let messages: [AgentHookSetupState] = [.queued, .running, .finished(.init(detected: 2, installed: 2)),
+            .finished(.init(detected: 2, installed: 1, error: "Pi: fixture install failure"))]
+        for (index, state) in messages.enumerated() {
+            let host = NSHostingView(rootView: VStack(alignment: .leading, spacing: 16) {
+                AgentHookSetupStatusView(state: state,
+                    operation: .init(kind: .hooks, agent: .antigravity, completed: 1, total: 2), strings: strings)
+                AgentIntegrationErrorView(title: strings.agentCLIUpdateFailed,
+                    message: "Cursor Agent: Traceback (most recent call last):\\nRuntimeError: [unauthenticated] Error", strings: strings, cli: true)
+            }.padding(16).frame(maxWidth: .infinity, alignment: .leading).environment(\.colorScheme, .dark))
+            let window = makeWindow(host, width: 450)
+            defer { window.close() }
+            try await Task.sleep(for: .milliseconds(100))
+            host.layoutSubtreeIfNeeded()
+            #expect(host.bounds.width == 450)
+            try capture(host, name: "agent-setup-feedback-\(index)")
+        }
+    }
+
     @Test func themedSettingsRenderLightAndDarkWithoutSystemCanvas() async throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: home) }

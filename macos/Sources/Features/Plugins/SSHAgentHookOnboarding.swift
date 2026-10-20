@@ -26,6 +26,8 @@ struct SSHAgentHookOnboardingBanner: View {
     @ObservedObject var manager: AgentIntegrationManager = .shared
     @ObservedObject var settings: OhMyGhosttySettings = .shared
     @State private var sessionRevision: UInt64 = 0
+    @State private var hiddenStatus: Set<String> = []
+    @State private var startedHere: Set<String> = []
 
     private var strings: SettingsStrings { .init(language: settings.language) }
 
@@ -41,23 +43,39 @@ struct SSHAgentHookOnboardingBanner: View {
         Group {
             if settings.agentStatusHooksEnabled, let connection {
                 let target = registry.targetID(for: connection)
-                if let prompt = manager.onboardingPrompt(target: target) {
+                let prompt = manager.onboardingPrompt(target: target)
+                let status = hiddenStatus.contains(target) || !startedHere.contains(target) || prompt != nil
+                    ? nil : manager.setupStates[target]
+                if prompt != nil || status != nil {
                     HStack(alignment: .top, spacing: 10) {
                         Image(systemName: "sparkles").foregroundStyle(.secondary)
                         VStack(alignment: .leading, spacing: 6) {
                             Text(strings.sshAgentHookTitle + " · " + connection.destination).fontWeight(.medium)
-                            Text(strings.agentSetupBrief).foregroundStyle(.secondary)
-                            if case .setupRequired(let agents) = prompt {
-                                Text(agents.map(\.displayName).joined(separator: " · ")).foregroundStyle(.secondary)
+                            if let status {
+                                AgentHookSetupStatusView(state: status, operation: manager.operations[target], strings: strings)
+                            } else {
+                                Text(strings.agentSetupBrief).foregroundStyle(.secondary)
+                                if case .setupRequired(let agents) = prompt {
+                                    Text(agents.map(\.displayName).joined(separator: " · ")).foregroundStyle(.secondary)
+                                }
                             }
-                            HStack(spacing: 10) {
-                                Button(strings.agentSetupAll) { setup(connection, installAll: true) }
-                                    .buttonStyle(.borderedProminent)
-                                Button(strings.agentSetupCustom) { setup(connection, installAll: false) }
+                            if status?.isActive != true {
+                                HStack(spacing: 10) {
+                                    if status == nil || setupFailed(status) {
+                                        Button(status == nil ? strings.agentSetupAll : strings.agentRetrySetup) {
+                                            setup(connection, installAll: true)
+                                        }.buttonStyle(.borderedProminent)
+                                    }
+                                    Button(strings.agentSetupCustom) { setup(connection, installAll: false) }
+                                }
                             }
                         }
                         Spacer(minLength: 0)
-                        Button { manager.acknowledgeOnboarding(target: target) } label: { Image(systemName: "xmark") }
+                        Button {
+                            manager.acknowledgeOnboarding(target: target)
+                            hiddenStatus.insert(target)
+                            manager.dismissSetupResult(target: target)
+                        } label: { Image(systemName: "xmark") }
                             .buttonStyle(.plain).help(strings.agentSetupDismiss)
                             .accessibilityLabel(strings.agentSetupDismiss)
                     }
@@ -66,15 +84,26 @@ struct SSHAgentHookOnboardingBanner: View {
                 }
             }
         }
+        .onChange(of: connection) { _ in
+            startedHere.removeAll()
+            hiddenStatus.removeAll()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .terminalPaneSessionContextsDidChange)) { _ in
             sessionRevision &+= 1
         }
     }
 
+    private func setupFailed(_ state: AgentHookSetupState?) -> Bool {
+        if case .finished(let result) = state { return result.error != nil }
+        return false
+    }
+
     private func setup(_ connection: GitSSHConnection, installAll: Bool) {
         let target = registry.prepareSetup(connection)
+        hiddenStatus.remove(target)
+        if installAll { startedHere.insert(target) }
         manager.beginSetup(target: target, installAll: installAll)
-        // Navigation is synchronous with the click, never gated on SSH/CLI discovery.
-        SettingsNavigation.openAgentIntegration(target: target)
+        // One click means installation, not navigation and another click.
+        if !installAll { SettingsNavigation.openAgentIntegration(target: target) }
     }
 }

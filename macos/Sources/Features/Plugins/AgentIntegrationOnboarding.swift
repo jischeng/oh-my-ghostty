@@ -27,6 +27,25 @@ struct AgentIntegrationOnboarding: Codable, Equatable {
     }
 }
 
+struct AgentHookSetupResult: Equatable {
+    var detected = 0
+    var installed = 0
+    var error: String?
+}
+
+enum AgentHookSetupState: Equatable {
+    case queued
+    case running
+    case finished(AgentHookSetupResult)
+
+    var isActive: Bool {
+        switch self {
+        case .queued, .running: true
+        case .finished: false
+        }
+    }
+}
+
 struct AgentIntegrationOperation: Equatable {
     enum Kind { case checking, hooks, cli }
     var kind: Kind

@@ -109,6 +109,7 @@ final class SSHHostRegistry: ObservableObject {
         let id = targetID(for: connection)
         excluded.remove(id)
         attempted.insert(id)
+        if live().contains(connection) { connections[id] = connection }
         if host(id) == nil {
             hosts.append(.init(id: id, name: connection.destination, connection: connection,
                                snapshot: .init(), capturedAt: .distantPast))
@@ -122,13 +123,14 @@ final class SSHHostRegistry: ObservableObject {
     func isCollecting(_ id: String) -> Bool { pending.contains(id) || tasks[id] != nil }
 
     func isConnected(_ id: String) -> Bool {
-        live().contains { connection in
-            RegisteredSSHHost.id(for: connection) == id || host(id).map { matchesConfiguration($0, connection) } == true
-        }
+        live().contains { targetID(for: $0) == id }
     }
 
+    /// Plain `ssh host` uses the same account across local directories, whether
+    /// first registered from config or a live pane. Keep all explicit options
+    /// (especially relative -F/-i/ProxyCommand paths) on exact-identity matching.
     private func matchesConfiguration(_ record: RegisteredSSHHost, _ connection: GitSSHConnection) -> Bool {
-        record.fromConfiguration == true && record.connection.destination == connection.destination &&
+        record.connection.destination == connection.destination &&
             record.connection.workspaceID == connection.workspaceID && record.connection.options == connection.options &&
             record.connection.options.isEmpty && record.connection.executablePath == connection.executablePath
     }
@@ -150,7 +152,7 @@ final class SSHHostRegistry: ObservableObject {
             try Task.checkCancellation()
             guard !excluded.contains(id), !automatic || isConnected(id) else { return }
             guard !automatic || host(id) != nil || automaticallyRegister else { return }
-            if snapshot.error != nil, let previous = host(id)?.snapshot {
+            if snapshot.maintenanceError != nil, let previous = host(id)?.snapshot {
                 if snapshot.hooks.isEmpty { snapshot.hooks = previous.hooks }
                 if snapshot.cli.isEmpty { snapshot.cli = previous.cli }
             }
@@ -216,7 +218,7 @@ final class SSHHostRegistry: ObservableObject {
             })
         } catch {
             try Task.checkCancellation()
-            snapshot.error = [snapshot.error, error.localizedDescription].compactMap { $0 }.joined(separator: "\n")
+            snapshot.cliError = error.localizedDescription
         }
         guard captured else { throw GitExecutionError.executionFailed(snapshot.error ?? "SSH inventory unavailable") }
         return snapshot

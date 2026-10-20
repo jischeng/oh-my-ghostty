@@ -586,6 +586,25 @@ struct SettingsStrings: Equatable, Sendable {
           "SSH 内的 Agent 图标与任务状态依赖远端账户的 Hook。可检查后选择安装，不会自动修改远端配置。")
     }
     var agentSetupAll: String { t("Enable All Detected", "一键接入") }
+    var agentAlreadySetup: String { t("All Hooks Ready", "Hook 已全部接入") }
+    var agentSetupQueued: String { t("Waiting for the current check; setup will continue automatically…", "等待当前检查完成，将自动继续接入…") }
+    var agentSetupComplete: String { t("Status Hooks are ready. This setup did not upgrade any CLI.", "状态 Hook 已接入，本次接入未升级 CLI。") }
+    var agentSetupNoneFound: String { t("No supported Agents detected", "未发现可接入的 Agent") }
+    var agentSetupIncomplete: String { t("Some Hooks could not be installed. You can retry here.", "部分 Hook 未能接入，可在此重试。") }
+    var agentRetrySetup: String { t("Retry Setup", "重试接入") }
+    var agentSetupCheckFailed: String { t("Agent check or Hook setup did not complete", "Agent 检查或 Hook 接入未完成") }
+    var agentCLIUpdateFailed: String { t("CLI maintenance did not complete", "CLI 更新或检查未完成") }
+    var agentTechnicalDetails: String { t("Technical details", "技术详情") }
+    var agentCLIErrorIndependent: String { t("This does not mean status Hook installation failed.", "此错误不代表状态 Hook 接入失败。") }
+    var agentCLIAuthenticationHint: String {
+        t("The vendor updater requires authentication. Check that CLI's login on this host, then retry its update in the Agent details.",
+          "原生升级程序认证失败。请在对应主机检查该 CLI 的登录状态，再从 Agent 详情重试升级。")
+    }
+    var agentCLIPackageManagerHint: String {
+        t("This CLI must be upgraded through its package manager. Verified npm installations use npm, not the native updater.",
+          "此 CLI 需通过原包管理器升级；已验证的 npm 安装应走 npm，而不是原生升级程序。")
+    }
+    var agentSSHNotConnected: String { t("Not connected in OMG · cached", "OMG 内未连接 · 已缓存") }
     var agentSetupCustom: String { t("Customize…", "自定义…") }
     var agentSetupDismiss: String { t("Only notify me about new Agents", "仅在发现新 Agent 时提醒") }
     var agentSetupBrief: String {
@@ -625,7 +644,10 @@ struct SettingsStrings: Equatable, Sendable {
     var agentManualChecks: String { t("Manual checks", "手动检查") }
     var agentAutomaticHooksShort: String { t("Auto-update Hooks", "自动更新 Hooks") }
     var agentCheckOnly: String { t("Check for updates", "检查更新") }
-    var agentWaitingForConnection: String { t("Automatic updates pause until connected in OMG", "未在 OMG 中连接，自动更新已暂停") }
+    var agentWaitingForConnection: String {
+        t("Connect this SSH host in OMG to resume automatic maintenance. Manual checks remain available.",
+          "在 OMG 中连接此 SSH 主机后恢复自动维护；仍可手动检查。")
+    }
     var agentActions: String { t("Agent actions", "Agent 操作") }
     var agentCLIOptions: String { t("CLI Settings", "CLI 设置") }
     var agentIntegrationExplanation: String {

@@ -4,6 +4,30 @@ import Testing
 
 @MainActor
 struct SSHHostRegistryTests {
+    @Test func plainLiveHostReconnectsAcrossDirectoriesWithoutDuplicatingAccount() async throws {
+        let suite = "SSHRegistryTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let first = try GitSSHConnection(destination: "cloud", localWorkingDirectory: "/tmp/first")
+        let reconnected = try GitSSHConnection(destination: "cloud", localWorkingDirectory: "/tmp/second")
+        var live: [GitSSHConnection] = []
+        let registry = SSHHostRegistry(defaults: defaults, live: { live }, inventory: { _ in .init() })
+        let target = registry.prepareSetup(first)
+        #expect(registry.host(target)?.fromConfiguration != true)
+        live = [reconnected]
+        #expect(registry.isConnected(target))
+        #expect(registry.targetID(for: reconnected) == target)
+        #expect(registry.prepareSetup(reconnected) == target)
+        #expect(registry.hosts.count == 1)
+        live = [try GitSSHConnection(destination: "cloud", options: ["-F", "relative-config"], localWorkingDirectory: "/tmp/second")]
+        #expect(!registry.isConnected(target))
+        #expect(registry.targetID(for: live[0]) != target)
+        live = [try GitSSHConnection(destination: "other@cloud", localWorkingDirectory: "/tmp/second")]
+        #expect(!registry.isConnected(target))
+        live = []
+        #expect(!registry.isConnected(target))
+    }
+
     @Test func setupReservesExactHostImmediatelyWithoutNetworkOrInstallation() async throws {
         let suite = "SSHRegistryTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))

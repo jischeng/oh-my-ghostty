@@ -66,6 +66,13 @@ struct AgentIntegrationSnapshot: Codable, Sendable {
     var cli: [SupportedAgent: AgentCLIInstallation] = [:]
     var error: String?
     var hooksChanged: Bool?
+    /// CLI maintenance is independent of Hook setup. Never present it as a Hook failure.
+    var cliError: String?
+
+    var maintenanceError: String? {
+        let errors = [error, cliError].compactMap { $0 }
+        return errors.isEmpty ? nil : errors.joined(separator: "\n")
+    }
 }
 
 /// App-owned maintenance survives closing Settings. Each operation captures a
@@ -74,18 +81,22 @@ struct AgentIntegrationSnapshot: Codable, Sendable {
 final class AgentIntegrationManager: ObservableObject {
     static let shared = AgentIntegrationManager(registry: .shared)
     static let localID = "local"
+    typealias ScriptRunner = @Sendable (_ script: String, _ target: String, _ loginShell: Bool) async throws -> Data
     @Published private(set) var policies: [String: AgentIntegrationPolicy]
     @Published private(set) var snapshots: [String: AgentIntegrationSnapshot] = [:]
     @Published private(set) var busy: Set<String> = []
     @Published private(set) var connectedTargets: Set<String> = []
     @Published private(set) var onboarding: [String: AgentIntegrationOnboarding] = [:]
     @Published private(set) var operations: [String: AgentIntegrationOperation] = [:]
+    @Published private(set) var setupStates: [String: AgentHookSetupState] = [:]
+    private var setupTasks: [String: Task<Void, Never>] = [:]
     private let onboardingKey = "OMG.AgentIntegration.Onboarding.v1"
     private let localSnapshotKey = "OMG.AgentIntegration.LocalSnapshot.v1"
     let registry: SSHHostRegistry
     private var registryObserver: AnyCancellable?
     private let defaults: UserDefaults
     private let homeURL: URL
+    private let scriptRunner: ScriptRunner?
     private let connectionTargets: @MainActor () -> Set<String>
     private var timer: AnyCancellable?
     private var connectionObserver: AnyCancellable?
@@ -108,13 +119,15 @@ final class AgentIntegrationManager: ObservableObject {
         snapshots: [String: AgentIntegrationSnapshot] = [:],
         connectionTargets: @escaping @MainActor () -> Set<String> = AgentIntegrationManager.liveConnectionTargets,
         registry: SSHHostRegistry? = nil,
-        integrationRevision: String? = nil
+        integrationRevision: String? = nil,
+        scriptRunner: ScriptRunner? = nil
     ) {
         self.integrationRevision = integrationRevision ?? Self.bundledIntegrationRevision
         let registry = registry ?? SSHHostRegistry(defaults: defaults)
         self.registry = registry
         self.defaults = defaults
         self.homeURL = homeURL
+        self.scriptRunner = scriptRunner
         self.connectionTargets = connectionTargets
         self.connectedTargets = connectionTargets()
         policies = defaults.data(forKey: storageKey)
@@ -174,7 +187,7 @@ final class AgentIntegrationManager: ObservableObject {
         }
         let targets = Set(policies.keys).union([Self.localID]).union(registry.hosts.map(\.id))
         for target in targets where shouldCheck(target, at: date) && !busy.contains(target)
-            && automaticTasks[target] == nil {
+            && automaticTasks[target] == nil && setupTasks[target] == nil {
             let hooksOnly = !policy(for: target).isDue(at: date) && !needsConnectionCheck(target)
             automaticTasks[target] = Task { [weak self] in
                 guard let self else { return }
@@ -253,46 +266,78 @@ final class AgentIntegrationManager: ObservableObject {
         }
     }
 
-    /// Captures the target before any suspension; host switching never retargets work.
-    func beginSetup(target: String, installAll: Bool) {
+    /// Owns the full one-click job, independent of whether Settings is open.
+    /// Coalesce repeated clicks, publish queued state synchronously, and never
+    /// navigate here. Only the caller's explicit Customize action opens Settings.
+    @discardableResult
+    func beginSetup(target: String, installAll: Bool) -> Task<Void, Never> {
+        if let existing = setupTasks[target] { return existing }
         acknowledgeOnboarding(target: target)
-        Task {
-            // Inventory already in flight is read-only. Wait without blocking navigation.
+        if !installAll {
+            return Task {
+                while registry.isCollecting(target) || busy.contains(target) {
+                    try? await Task.sleep(for: .milliseconds(100))
+                    guard !Task.isCancelled else { return }
+                }
+                if snapshot(for: target)?.cli.isEmpty != false { await refresh(target: target, checkLatest: false) }
+            }
+        }
+        setupStates[target] = .queued
+        let task = Task { [self] in
+            defer { setupTasks[target] = nil }
             while registry.isCollecting(target) || busy.contains(target) {
                 try? await Task.sleep(for: .milliseconds(100))
                 guard !Task.isCancelled else { return }
             }
-            if installAll {
-                await installDetectedHooks(target: target)
-            } else if snapshot(for: target)?.cli.isEmpty != false {
-                await refresh(target: target, checkLatest: false)
-            }
+            guard !Task.isCancelled else { return }
+            setupStates[target] = .running
+            let result = await installDetectedHooks(target: target)
+            if !Task.isCancelled { setupStates[target] = .finished(result) }
         }
+        setupTasks[target] = task
+        return task
     }
 
-    func installDetectedHooks(target: String) async {
-        guard !busy.contains(target), !registry.isCollecting(target) else { return }
+    func dismissSetupResult(target: String) {
+        guard setupStates[target]?.isActive != true else { return }
+        setupStates[target] = nil
+    }
+
+    @discardableResult
+    func installDetectedHooks(target: String) async -> AgentHookSetupResult {
+        guard !busy.contains(target), !registry.isCollecting(target) else {
+            return .init(error: "Another operation is in progress.")
+        }
         busy.insert(target)
         operations[target] = .init(kind: .checking)
         defer { busy.remove(target); operations[target] = nil }
         var snapshot = snapshot(for: target) ?? .init()
         snapshot.error = nil
         var errors: [String] = []
+        var result = AgentHookSetupResult()
         do {
             if snapshot.cli.isEmpty { snapshot.cli = try await readCLI(target: target, checkLatest: false) }
             snapshot.hooks = try await readHooks(target: target)
+            result.detected = snapshot.cli.filter {
+                $0.value.path != nil && (target == Self.localID || $0.key.definition.hook.kind != .none)
+            }.count
             let agents = Self.hookSetupCandidates(snapshot: snapshot, local: target == Self.localID)
             for (index, agent) in agents.enumerated() {
+                try Task.checkCancellation()
                 operations[target] = .init(kind: .hooks, agent: agent, completed: index, total: agents.count)
                 do {
                     try await changeHook(agent, target: target, remove: false)
                     snapshot.hooks[agent] = .current
                     snapshot.hooksChanged = true
+                    result.installed += 1
                 } catch { errors.append(agent.displayName + ": " + error.localizedDescription) }
             }
         } catch { errors.append(error.localizedDescription) }
+        guard !Task.isCancelled else { return .init(error: "Cancelled.") }
         snapshot.error = errors.isEmpty ? nil : errors.joined(separator: "\n")
+        result.error = snapshot.error
         publish(snapshot, target: target)
+        return result
     }
 
     static func hookSetupCandidates(snapshot: AgentIntegrationSnapshot, local: Bool) -> [SupportedAgent] {
@@ -304,6 +349,8 @@ final class AgentIntegrationManager: ObservableObject {
 
     func forget(_ target: String) {
         automaticTasks[target]?.cancel()
+        setupTasks[target]?.cancel()
+        setupStates[target] = nil
         registry.unregister(target)
         snapshots[target] = nil
         policies[target] = nil
@@ -325,7 +372,7 @@ final class AgentIntegrationManager: ObservableObject {
             if automatic, !Task.isCancelled, allowsAutomaticWork(target) {
                 var current = self.policy(for: target)
                 current.lastMaintenance = Date()
-                current.lastMaintenanceError = self.snapshot(for: target)?.error
+                current.lastMaintenanceError = self.snapshot(for: target)?.maintenanceError
                 setPolicy(current, for: target)
             }
         }
@@ -363,6 +410,7 @@ final class AgentIntegrationManager: ObservableObject {
         if hooksOnly { return }
         if automatic && !self.policy(for: target).updatesCLIs { return }
         // CLI discovery/network failures must not prevent Hook maintenance.
+        snapshot.cliError = nil
         do {
             snapshot.cli = try await readCLI(target: target, checkLatest: checkLatest)
             if automatic {
@@ -376,14 +424,14 @@ final class AgentIntegrationManager: ObservableObject {
                         try await installCLI(agent, target: target)
                         updatedCLI = true
                     } catch {
-                        snapshot.error = [snapshot.error, agent.displayName + ": " + error.localizedDescription]
+                        snapshot.cliError = [snapshot.cliError, agent.displayName + ": " + error.localizedDescription]
                             .compactMap { $0 }.joined(separator: "\n")
                     }
                 }
                 if updatedCLI { snapshot.cli = try await readCLI(target: target) }
             }
         } catch {
-            snapshot.error = [snapshot.error, error.localizedDescription].compactMap { $0 }.joined(separator: "\n")
+            snapshot.cliError = [snapshot.cliError, error.localizedDescription].compactMap { $0 }.joined(separator: "\n")
         }
         publish(snapshot, target: target)
     }
@@ -394,18 +442,27 @@ final class AgentIntegrationManager: ObservableObject {
         operations[target] = .init(kind: cli ? .cli : .hooks, agent: agent)
         defer { busy.remove(target); operations[target] = nil }
         snapshots[target] = snapshot(for: target) ?? .init()
-        snapshots[target, default: .init()].error = nil
+        if cli {
+            snapshots[target, default: .init()].cliError = nil
+        } else {
+            snapshots[target, default: .init()].error = nil
+        }
         do {
             if cli {
                 try await installCLI(agent, target: target)
+                snapshots[target, default: .init()].cli = try await readCLI(target: target)
             } else {
                 try await changeHook(agent, target: target, remove: remove)
                 snapshots[target, default: .init()].hooksChanged = true
+                snapshots[target, default: .init()].hooks = try await readHooks(target: target)
             }
-            snapshots[target, default: .init()].hooks = try await readHooks(target: target)
-            if cli { snapshots[target, default: .init()].cli = try await readCLI(target: target) }
         } catch {
-            snapshots[target, default: .init()].error = error.localizedDescription
+            let message = agent.displayName + ": " + error.localizedDescription
+            if cli {
+                snapshots[target, default: .init()].cliError = message
+            } else {
+                snapshots[target, default: .init()].error = message
+            }
         }
         if let snapshot = snapshots[target] { publish(snapshot, target: target) }
     }
@@ -466,6 +523,7 @@ final class AgentIntegrationManager: ObservableObject {
     private func runPython(_ script: String, target: String, loginShell: Bool = false) async throws -> Data {
         try Task.checkCancellation()
         if automaticTargets.contains(target), !allowsAutomaticWork(target) { throw CancellationError() }
+        if let scriptRunner { return try await scriptRunner(script, target, loginShell) }
         let executable: String
         let arguments: [String]
         // Feed scripts through stdin, avoiding remote command/ARG_MAX limits.
@@ -567,9 +625,10 @@ for agent, command in COMMANDS.items():
             version = run([path, "--version"], timeout=8)
             if version.returncode == 0: item["version"] = version.stdout.strip()[:160]
         except (subprocess.TimeoutExpired, OSError): pass
-    # Droid's npm builds are pinned; Grok and Qwen self-update only standalone
-    # installs. Keep verified npm installations on their original source.
-    if agent in NATIVE_UPDATES and not (package and agent in ("droid", "grok", "qwen")):
+    # Reasonix refuses self-upgrade for package-manager installations. Droid's
+    # npm builds are pinned; Grok/Qwen self-update only standalone installs.
+    # Use npm only when the resolved executable matches a verified package bin.
+    if agent in NATIVE_UPDATES and not (package and agent in ("reasonix", "droid", "grok", "qwen")):
         item["updater"] = "native"
     installed[agent] = item
 

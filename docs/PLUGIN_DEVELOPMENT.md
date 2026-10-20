@@ -519,9 +519,12 @@ destination, options (including user, port and ProxyJump) and local launch direc
 `SSHHostRegistry` persists registered connections and Agent inventory in the app's
 UserDefaults domain under `OMG.SSH.Registry.v1`; identity is derived from the full
 connection, not just the display alias. Different launch parameters remain isolated.
-Matching live connections are preferred in the chooser. Config-only registrations
-retain their alias and are recognized when a later ordinary alias connection opens
-from another local directory; explicit option changes retain separate identities.
+Matching live connections are preferred in the chooser. Plain `ssh host` registrations
+(from config or a live pane) recognize the same account after a reconnect from another
+local directory. Destination, workspace alias and executable must still match and both
+option lists must be empty. Explicit options (especially relative `-F`/`-i` paths),
+user/port/jump changes retain exact identities. Only the selected matching record is
+marked connected; duplicate cached records cannot each schedule maintenance.
 No remote helper, cron job, or service is deployed.
 
 Registration collects installed CLI versions and Hook state, without npm registry
@@ -614,9 +617,14 @@ Detector-only Agents and CLIs absent from PATH do not trigger a missing-Hook hin
 The banner is hidden when normalized status events are disabled. Merely presenting it
 performs no SSH work or remote writes. **Enable All Detected** authorizes Hook setup
 for detected Agents; **Customize** authorizes only inventory discovery and navigation.
-Both reserve the pane's exact target locally (including config-host mapping) and open
-Settings immediately, before any SSH round trip. Network/installation progress stays
-beside the buttons in Settings; failures remain visible there and can be retried.
+Both reserve the pane's exact target locally (including plain-host mapping).
+**Enable All Detected** immediately queues a manager-owned job and stays in the terminal:
+it waits for any in-flight inventory, discovers CLIs when needed, installs missing/stale
+Hooks and shows progress, completion or retryable failure in the initiating banner.
+It neither opens Settings nor requires a second click. Repeated clicks coalesce into
+one job. **Customize** alone opens Settings immediately, before any SSH round trip.
+Transient completion feedback does not reappear in newly opened/reconnected panes.
+Settings also shows queued/progress status and explains when all Hooks are already ready.
 The choice (including dismissal) and known CLI IDs persist per account in
 `OMG.AgentIntegration.Onboarding.v1`. Reconnects, app restarts, Hook upgrades,
 manual removal and partial failures do not re-prompt; only a newly detected CLI does.
@@ -624,6 +632,12 @@ When inventory was unknown at the click, the first successful CLI inventory beco
 the baseline. Local inventory is cached in `OMG.AgentIntegration.LocalSnapshot.v1`.
 The UI explains that local Hooks are not copied to SSH accounts and affected Agents
 must restart after installation. Choosing setup does not enable automatic updates.
+Hook/check errors and `cliError` are independently recorded in the account snapshot.
+CLI upgrade failures are shown next to maintenance, not as Hook installation failures;
+long technical output is collapsed, with authentication/package-manager guidance.
+OMG does not log into vendor accounts or bypass updater authentication. “Not connected
+in OMG” describes the lack of a matching ready pane, not a failed network reachability
+probe; manual checks remain available and never unlock disconnected automatic work.
 
 CLI checks use the account's login/interactive shell PATH. An executable whose
 resolved path matches a global npm package's declared bin records npm metadata.
@@ -640,7 +654,7 @@ or parses help text to infer update support. The policy is:
 | Qoder | `qodercli update` |
 | OpenCode | `opencode upgrade` |
 | Pi | `pi update --all` |
-| Reasonix | `reasonix upgrade` |
+| Reasonix | `reasonix upgrade` (non-npm installations only) |
 | Antigravity | `agy update` |
 | Cursor | `cursor-agent update` |
 | Amp | `amp update` |
@@ -665,8 +679,9 @@ Kimi's flag skips its update confirmation, not Agent tool permissions. Hermes
 updates without interactive config prompts or restarting gateway services.
 Droid's npm builds intentionally pin their version; Grok documents self-update
 for script installs only; Qwen's updater only replaces standalone binaries and
-prints manual instructions for package-manager installs. Verified npm installations
-of these three keep the npm update path. Other unsupported installation forms
+prints manual instructions for package-manager installs. Reasonix refuses native
+self-upgrade when installed by a package manager. Verified npm installations of these
+four use the npm update path from the outset; this is not a fallback after native failure. Other unsupported installation forms
 remain owned by the vendor updater, which may require manual installation.
 Cline's native updater selects its own package manager and may also update Kanban
 according to vendor defaults. OMG does not execute vendor install scripts to

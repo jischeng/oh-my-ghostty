@@ -14,7 +14,7 @@ struct AgentIntegrationSettingsView: View {
     @State private var showingHelp = false
 
     private var snapshot: AgentIntegrationSnapshot { manager.snapshot(for: target) ?? .init() }
-    private var busy: Bool { manager.busy.contains(target) || registry.isCollecting(target) }
+    private var busy: Bool { manager.busy.contains(target) || registry.isCollecting(target) || manager.setupStates[target]?.isActive == true }
     private var local: Bool { target == AgentIntegrationManager.localID }
     private var hostName: String { local ? strings.agentLocalHost : registry.host(target)?.name ?? target }
     private var policy: AgentIntegrationPolicy { manager.policy(for: target) }
@@ -29,14 +29,17 @@ struct AgentIntegrationSettingsView: View {
             hostPicker
             VStack(spacing: 8) {
                 HStack(spacing: 0) {
-                    setupAction(strings.agentSetupAll, symbol: "puzzlepiece.extension",
+                    setupAction(setupLabel, symbol: candidates.isEmpty && !snapshot.cli.isEmpty ? "checkmark.circle" : "puzzlepiece.extension",
                                 enabled: !busy && (snapshot.cli.isEmpty || !candidates.isEmpty)) {
                         manager.beginSetup(target: target, installAll: true)
                     }
                     Divider().frame(height: 18).padding(.horizontal, 8)
                     setupAction(strings.agentCheckNow, symbol: "arrow.clockwise", enabled: !busy) { refresh() }
                 }
-                if busy {
+                if let state = manager.setupStates[target], state.isActive {
+                    AgentHookSetupStatusView(state: state, operation: manager.operations[target], strings: strings)
+                        .font(.caption).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 8)
+                } else if busy {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
                         Text(operationText).font(.caption).foregroundStyle(.secondary)
@@ -51,8 +54,7 @@ struct AgentIntegrationSettingsView: View {
                 Label(strings.agentRestartBrief, systemImage: "checkmark.circle").font(.caption).foregroundStyle(.secondary)
             }
             if let error = snapshot.error ?? registry.errors[target] ?? exportError {
-                Label(error, systemImage: "exclamationmark.triangle")
-                    .font(.caption).foregroundStyle(.red).textSelection(.enabled)
+                AgentIntegrationErrorView(title: strings.agentSetupCheckFailed, message: error, strings: strings)
             }
         } header: {
             HStack {
@@ -102,6 +104,9 @@ struct AgentIntegrationSettingsView: View {
             }
             .buttonStyle(.plain)
             .popover(isPresented: $showingSchedule) { scheduleContent }
+            if let error = snapshot.cliError {
+                AgentIntegrationErrorView(title: strings.agentCLIUpdateFailed, message: error, strings: strings, cli: true)
+            }
         } header: {
             Text(strings.agentUpdateSettings + " · " + hostName)
         }
@@ -116,6 +121,12 @@ struct AgentIntegrationSettingsView: View {
         } header: {
             Text(strings.agentListTitle)
         }
+    }
+
+    private var setupLabel: String {
+        guard !snapshot.cli.isEmpty, candidates.isEmpty else { return strings.agentSetupAll }
+        let supported = snapshot.cli.contains { $0.value.path != nil && (local || $0.key.definition.hook.kind != .none) }
+        return supported ? strings.agentAlreadySetup : strings.agentSetupNoneFound
     }
 
     private func setupAction(_ title: String, symbol: String, enabled: Bool, action: @escaping () -> Void) -> some View {
@@ -143,7 +154,7 @@ struct AgentIntegrationSettingsView: View {
                     }
                     Spacer(minLength: 10)
                     if !local {
-                        Text(registry.isConnected(target) ? strings.sshConnected : strings.sshCached)
+                        Text(registry.isConnected(target) ? strings.sshConnected : strings.agentSSHNotConnected)
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Image(systemName: "chevron.up.chevron.down").foregroundStyle(.secondary)

@@ -5,6 +5,107 @@ import Testing
 
 @MainActor
 struct AgentIntegrationManagerTests {
+    actor SetupFixture {
+        let home: URL
+        var installs = 0
+        var discoveries = 0
+        init(home: URL) { self.home = home }
+
+        func run(_ script: String, _ target: String, _ loginShell: Bool) async throws -> Data {
+            if script.contains("COMMANDS =") {
+                guard script.contains("UPDATE = \"\"") else {
+                    throw GitExecutionError.executionFailed("One-click Hook setup must never upgrade a CLI")
+                }
+                discoveries += 1
+                return Data(#"{"pi":{"path":"/bin/pi","version":"1.0.0"}}"#.utf8)
+            }
+            if script.contains("ACTION = \"install\"") { installs += 1 }
+            let result = try await GitProcessRunner().run(
+                executablePath: "/usr/bin/python3", arguments: ["-"], workingDirectory: "/tmp",
+                environment: ["HOME": home.path, "PATH": "/usr/bin:/bin"], stdin: Data(script.utf8), timeout: 30)
+            guard result.isSuccess else { throw GitExecutionError.executionFailed(result.stderrString) }
+            return result.stdout
+        }
+    }
+
+    @Test func oneClickInstallsRemoteHooksWithoutSettingsOrSecondClick() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let suite = "AgentIntegrationTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: home) }
+        let connection = try GitSSHConnection(destination: "setup-fixture")
+        let registry = SSHHostRegistry(defaults: defaults, live: { [] }, inventory: { _ in .init() })
+        let target = registry.prepareSetup(connection)
+        let fixture = SetupFixture(home: home)
+        let manager = AgentIntegrationManager(defaults: defaults, connectionTargets: { [] }, registry: registry,
+            scriptRunner: { try await fixture.run($0, $1, $2) })
+        let navigation = SettingsNavigation.pendingAgentTarget
+        let first = manager.beginSetup(target: target, installAll: true)
+        #expect(manager.setupStates[target] == .queued)
+        let repeated = manager.beginSetup(target: target, installAll: true)
+        await first.value
+        await repeated.value
+        #expect(await fixture.installs == 1)
+        #expect(await fixture.discoveries == 1)
+        #expect(manager.snapshot(for: target)?.hooks[.pi] == .current)
+        #expect(manager.setupStates[target] == .finished(.init(detected: 1, installed: 1)))
+        #expect(SettingsNavigation.pendingAgentTarget == navigation)
+        #expect(manager.onboardingPrompt(target: target) == nil)
+        #expect(FileManager.default.fileExists(atPath: home.appendingPathComponent(".pi/agent/extensions/omg-agent-status.ts").path))
+        #expect(!FileManager.default.fileExists(atPath: home.appendingPathComponent(".codex/hooks.json").path))
+        manager.dismissSetupResult(target: target)
+        #expect(manager.setupStates[target] == nil)
+    }
+
+    @Test func oneClickWaitsForInventoryThenInstallsWithoutAnotherAction() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let suite = "AgentIntegrationTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: home) }
+        let connection = try GitSSHConnection(destination: "setup-fixture")
+        let registry = SSHHostRegistry(defaults: defaults, live: { [] }, inventory: { _ in
+            try await Task.sleep(for: .milliseconds(80))
+            return .init(hooks: [.pi: .missing], cli: [.pi: .init(path: "/bin/pi")])
+        })
+        let target = registry.prepareSetup(connection)
+        let fixture = SetupFixture(home: home)
+        let manager = AgentIntegrationManager(defaults: defaults, connectionTargets: { [] }, registry: registry,
+            scriptRunner: { try await fixture.run($0, $1, $2) })
+        let inventory = Task { await registry.register(connection, endpoint: "fixture") }
+        for _ in 0..<50 where !registry.isCollecting(target) { await Task.yield() }
+        #expect(registry.isCollecting(target))
+        let setup = manager.beginSetup(target: target, installAll: true)
+        #expect(manager.setupStates[target] == .queued)
+        await inventory.value
+        await setup.value
+        #expect(await fixture.installs == 1)
+        #expect(await fixture.discoveries == 0)
+        #expect(manager.setupStates[target] == .finished(.init(detected: 1, installed: 1)))
+    }
+
+    @Test func cliFailureIsSeparateFromHookResultAndSurvivesHookSetup() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let suite = "AgentIntegrationTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: home) }
+        let installer = AgentHookInstaller(homeURL: home)
+        try installer.install(.pi)
+        let initial = AgentIntegrationSnapshot(hooks: [.pi: .current], cli: [.pi: .init(path: "/bin/pi")], error: "existing Hook failure")
+        let manager = AgentIntegrationManager(defaults: defaults, homeURL: home, snapshots: ["local": initial], connectionTargets: { [] },
+            scriptRunner: { _, _, _ in throw GitExecutionError.executionFailed("[unauthenticated] Error") })
+        await manager.update(.cursor, target: "local", cli: true)
+        #expect(manager.snapshots["local"]?.error == "existing Hook failure")
+        #expect(manager.snapshots["local"]?.cliError?.contains("unauthenticated") == true)
+        let result = await manager.installDetectedHooks(target: "local")
+        #expect(result.error == nil)
+        #expect(manager.snapshots["local"]?.error == nil)
+        #expect(manager.snapshots["local"]?.cliError?.contains("unauthenticated") == true)
+        #expect(installer.installationState(.pi) == .current)
+        let restored = AgentIntegrationManager(defaults: defaults, connectionTargets: { [] })
+        #expect(restored.snapshots["local"]?.cliError == manager.snapshots["local"]?.cliError)
+        #expect(AgentIntegrationErrorHint.isAuthenticationFailure(restored.snapshots["local"]?.cliError ?? ""))
+    }
+
     @Test func sshHookOnboardingUsesInventoryWithoutInstallingAnything() {
         #expect(SSHAgentHookOnboarding.prompt(snapshot: nil) == .checkRequired)
         #expect(SSHAgentHookOnboarding.prompt(snapshot: .init()) == .checkRequired)
@@ -427,7 +528,7 @@ pathlib.Path(os.environ["UPDATE_LOG"]).write_text(json.dumps(sys.argv[1:]))
         #expect(!FileManager.default.fileExists(atPath: home.appendingPathComponent(".config/oh-my-ghostty/agent-detectors").path))
     }
 
-    @Test(arguments: [SupportedAgent.crush, .qwen, .droid, .grok])
+    @Test(arguments: [SupportedAgent.crush, .qwen, .droid, .grok, .reasonix])
     func npmUpdateUsesVerifiedExecutableAndExactNewerVersion(agent: SupportedAgent) async throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: home) }

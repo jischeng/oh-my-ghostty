@@ -1107,7 +1107,7 @@
 			repositoryURL = "https://github.com/CodeEditApp/CodeEditSourceEditor.git";
 			requirement = {
 				kind = exactVersion;
-				version = 0.9.1;
+				version = 0.15.2;
 			};
 		};
 		A51BFC252B30F1B700E92F16 /* XCRemoteSwiftPackageReference "Sparkle" */ = {

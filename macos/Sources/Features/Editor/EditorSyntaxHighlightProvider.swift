@@ -3,9 +3,8 @@ import CodeEditLanguages
 import CodeEditSourceEditor
 import CodeEditTextView
 
-/// Adapts Tree-sitter captures to the pinned editor's limited color slots.
-/// Its function/method slot aliases variables; typeAlternate is the separate
-/// attributes slot. Keep this compatibility mapping at the OMG boundary.
+/// Layers text colors so the pinned editor's limited capture slots keep OMG's
+/// command/variable distinction.
 @MainActor
 final class EditorSyntaxHighlightProvider: HighlightProviding {
     private let parser = TreeSitterClient()
@@ -14,8 +13,16 @@ final class EditorSyntaxHighlightProvider: HighlightProviding {
         pattern: #"\b(?:self|cls|int|float|bool|str|bytes|tuple|list|dict|set|frozenset|object|None|True|False)\b"#
     )
 
+    /// Normalizes a theme before it reaches the editor.
+    ///
+    /// The editor derives minimap contrast from `background.brightnessComponent`,
+    /// which raises `NSInvalidArgumentException` for colors in the generic gray
+    /// space (notably `NSColor.clear`) and terminates the process. The workspace
+    /// paints one shared backdrop anyway, so pin a transparent sRGB background
+    /// here rather than trusting every theme source to pick a usable space.
     static func renderTheme(_ source: EditorTheme) -> EditorTheme {
         var theme = source
+        theme.background = EditorTheme.transparentBackground
         theme.attributes = source.commands
         theme.variables = source.text
         return theme
@@ -23,6 +30,8 @@ final class EditorSyntaxHighlightProvider: HighlightProviding {
 
     static func renderCapture(_ capture: CaptureName?) -> CaptureName? {
         switch capture {
+        // Function/method share the variable slot, so keep them distinct by
+        // routing them to the type-alt slot the theme maps to `attributes`.
         case .function, .method: return .typeAlternate
         case .constructor, .typeAlternate: return .type
         default: return capture

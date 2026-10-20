@@ -8,6 +8,9 @@ import Foundation
 import Testing
 @testable import Ghostty
 
+// Windowed editors cannot share a process concurrently; AppKit layout
+// re-enters and traps when several are mounted at once.
+@Suite(.serialized)
 struct EditorCompletionTests {
     @Test @MainActor func smallPopupStaysAdjacentToCaretNearBottom() {
         let caret = CGRect(x: 80, y: 370, width: 1, height: 20)
@@ -50,11 +53,9 @@ struct EditorCompletionTests {
         let state = CompletionState()
         coordinator.setCompletionState(state)
         _ = coordinator.language(fileURL: URL(fileURLWithPath: "/test.py"), text: source)
-        let view = CodeEditSourceEditor(
-            .constant(source), language: .python, theme: .oneDark,
-            font: .monospacedSystemFont(ofSize: 13, weight: .regular), tabWidth: 4,
-            lineHeight: 1.2, wrapLines: false, cursorPositions: .constant([]),
-            highlightProviders: [], coordinators: [coordinator, capture]
+        let view = EditorTestSupport.editor(
+            text: .constant(source), language: .python,
+            coordinators: [coordinator, capture]
         ).overlay(alignment: .topLeading) {
             EditorCompletionOverlay(state: state, onCommit: coordinator.commit)
         }
@@ -64,7 +65,10 @@ struct EditorCompletionTests {
         window.isReleasedWhenClosed = false
         window.contentViewController = host
         host.view.layoutSubtreeIfNeeded()
-        defer { coordinator.destroy(); window.close() }
+        defer {
+            coordinator.destroy()
+            EditorTestSupport.unmount((host, window))
+        }
         let textView = try #require(capture.controller?.textView)
         coordinator.setActive(true)
         coordinator.select(NSRange(location: source.utf16.count, length: 0))
@@ -316,11 +320,9 @@ struct EditorCompletionTests {
         let state = CompletionState()
         coordinator.setCompletionState(state)
         _ = coordinator.language(fileURL: URL(fileURLWithPath: "/test.py"), text: "")
-        let view = CodeEditSourceEditor(
-            .constant(""), language: .python, theme: .oneDark,
-            font: .monospacedSystemFont(ofSize: 13, weight: .regular), tabWidth: 4,
-            lineHeight: 1.2, wrapLines: false, cursorPositions: .constant([]),
-            highlightProviders: [], coordinators: [coordinator, capture]
+        let view = EditorTestSupport.editor(
+            text: .constant(""), language: .python,
+            coordinators: [coordinator, capture]
         )
         let host = NSHostingController(rootView: view)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
@@ -328,7 +330,10 @@ struct EditorCompletionTests {
         window.isReleasedWhenClosed = false
         window.contentViewController = host
         host.view.layoutSubtreeIfNeeded()
-        defer { coordinator.destroy(); window.close() }
+        defer {
+            coordinator.destroy()
+            EditorTestSupport.unmount((host, window))
+        }
         let controller = try #require(capture.controller)
         let textView = try #require(controller.textView)
         coordinator.setActive(true)
@@ -381,11 +386,9 @@ struct EditorCompletionTests {
         let state = CompletionState()
         coordinator.setCompletionState(state)
         _ = coordinator.language(fileURL: URL(fileURLWithPath: "/test.swift"), text: "gu")
-        let view = CodeEditSourceEditor(
-            .constant("gu"), language: .swift, theme: .oneDark,
-            font: .monospacedSystemFont(ofSize: 13, weight: .regular), tabWidth: 4,
-            lineHeight: 1.2, wrapLines: false, cursorPositions: .constant([]),
-            highlightProviders: [], coordinators: [coordinator, capture]
+        let view = EditorTestSupport.editor(
+            text: .constant("gu"), language: .swift,
+            coordinators: [coordinator, capture]
         )
         let host = NSHostingController(rootView: view)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
@@ -395,11 +398,14 @@ struct EditorCompletionTests {
         host.view.layoutSubtreeIfNeeded()
         defer {
             coordinator.destroy()
-            window.close()
+            EditorTestSupport.unmount((host, window))
         }
         let controller = try #require(capture.controller)
         let textView = try #require(controller.textView)
         let scrollView = try #require(textView.enclosingScrollView)
+        // The workspace backdrop is cleared on the next main-loop turn after
+        // mounting, so give that pass a chance to run.
+        try await Task.sleep(for: .milliseconds(100))
         #expect(scrollView.backgroundColor == .clear)
         coordinator.setActive(true)
         window.makeFirstResponder(textView)
@@ -497,7 +503,7 @@ struct EditorCompletionTests {
         let def = try JSONDecoder().decode(EditorThemeDefinition.self, from: data)
         #expect(def.name == "Tokyo Night")
         let theme = def.toEditorTheme()
-        #expect(theme.background == .clear)
+        #expect(theme.background.alphaComponent == 0)
     }
 }
 

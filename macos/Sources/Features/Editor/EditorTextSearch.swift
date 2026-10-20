@@ -15,14 +15,18 @@ private final class ProgrammaticReplaceDelegate: NSObject, TextViewDelegate {
     }
 
     func textView(_ textView: TextView, willReplaceContentsIn range: NSRange, with string: String) {
+        // Open the group before the first mutation is registered. The undo
+        // manager breaks a group that starts after a mutation has landed, so a
+        // late `beginUndoGrouping()` would leave the rest of the edits outside
+        // the group and turn one replace-all into several undo steps.
+        if groupMutations, !ownsUndoGroup, textView._undoManager?.isGrouping == false {
+            textView._undoManager?.beginUndoGrouping()
+            ownsUndoGroup = true
+        }
         upstream?.textView(textView, willReplaceContentsIn: range, with: string)
     }
 
     func textView(_ textView: TextView, didReplaceContentsIn range: NSRange, with string: String) {
-        if groupMutations, !ownsUndoGroup, textView._undoManager?.isGrouping == false {
-            textView._undoManager?.beginGrouping()
-            ownsUndoGroup = true
-        }
         upstream?.textView(textView, didReplaceContentsIn: range, with: string)
     }
 }
@@ -50,7 +54,7 @@ enum EditorTextEditing {
         bypass.groupMutations = edits.count > 1
         textView.delegate = bypass
         defer {
-            if bypass.ownsUndoGroup { textView._undoManager?.endGrouping() }
+            if bypass.ownsUndoGroup { textView._undoManager?.endUndoGrouping() }
             textView.delegate = originalDelegate
         }
         for edit in edits.reversed() {

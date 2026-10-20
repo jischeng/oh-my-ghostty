@@ -32,7 +32,7 @@ struct CodeEditorView: View {
     var onSaveAll: () -> Void = {}
     var onHide: () -> Void = {}
 
-    @State private var cursorPositions: [CursorPosition] = []
+    @State private var editorState = SourceEditorState()
     @State private var editorCoordinator = EditorCoordinator()
     // Only the popup observes completion changes. Rebuilding the native editor
     // for every candidate/selection update feeds cursor bindings back into it.
@@ -91,22 +91,12 @@ struct CodeEditorView: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            CodeEditSourceEditor(
+            SourceEditor(
                 $text,
                 language: editorCoordinator.language(fileURL: fileURL, text: text),
-                theme: resolvedTheme,
-                font: resolvedFont,
-                tabWidth: editorSettings.tabWidth,
-                indentOption: resolvedIndentOption,
-                lineHeight: 1.2,
-                wrapLines: editorSettings.wordWrap,
-                cursorPositions: $cursorPositions,
-                useThemeBackground: true,
+                configuration: editorConfiguration,
+                state: $editorState,
                 highlightProviders: editorCoordinator.highlightProviders,
-                contentInsets: NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0),
-                isEditable: isEditable && isActive && !isPreview,
-                isSelectable: isActive && !isPreview,
-                bracketPairHighlight: .flash,
                 coordinators: [editorCoordinator] + additionalCoordinators
             )
             .clipped()
@@ -336,6 +326,40 @@ struct CodeEditorView: View {
 
     private var editorSettings: EditorSettings { settings.editorSettings }
 
+    /// SourceEditor takes its whole presentation as one value type, so OMG
+    /// options are folded here instead of being threaded as loose parameters.
+    private var editorConfiguration: SourceEditorConfiguration {
+        SourceEditorConfiguration(
+            appearance: .init(
+                theme: resolvedTheme,
+                useThemeBackground: true,
+                font: resolvedFont,
+                lineHeightMultiple: 1.2,
+                letterSpacing: 1.0,
+                wrapLines: editorSettings.wordWrap,
+                useSystemCursor: true,
+                tabWidth: editorSettings.tabWidth,
+                bracketPairEmphasis: .flash
+            ),
+            behavior: .init(
+                isEditable: isEditable && isActive && !isPreview,
+                isSelectable: isActive && !isPreview,
+                indentOption: resolvedIndentOption
+            ),
+            layout: .init(
+                editorOverscroll: 0,
+                contentInsets: NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0),
+                additionalTextInsets: nil
+            ),
+            peripherals: .init(
+                showGutter: true,
+                showMinimap: false,
+                showReformattingGuide: false,
+                showFoldingRibbon: false
+            )
+        )
+    }
+
     private var resolvedIndentOption: IndentOption {
         if let name = fileURL?.lastPathComponent.lowercased(),
            name == "makefile" || name.hasSuffix(".mk") {
@@ -372,7 +396,7 @@ struct CodeEditorView: View {
             ? .adaptive(background: terminalBackground, foreground: terminalForeground)
             : editorSettings.syntaxTheme.preset)
         // The workspace paints one backdrop for toolbar, gutter and text.
-        theme.background = .clear
+        theme.background = EditorTheme.transparentBackground
         return EditorSyntaxHighlightProvider.renderTheme(theme)
     }
 
@@ -711,7 +735,7 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
                 self.editDepth = max(0, self.editDepth - 1)
                 guard self.editDepth == 0 else { return }
                 if self.startedUndoGroup {
-                    controller.textView._undoManager?.endGrouping()
+                    controller.textView._undoManager?.endUndoGrouping()
                     self.startedUndoGroup = false
                 }
                 self.groupsMultipleCarets = false
@@ -744,16 +768,27 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
         }
     }
 
+    func textView(_ textView: TextView, willReplaceContentsIn range: NSRange, with string: String) {
+        if string.contains("\n") || string.contains("\r") {
+            needsViewportReconciliation = true
+        }
+        // Open the group before the first mutation lands. The undo manager
+        // breaks a group opened after a mutation was registered, which would
+        // leave the remaining carets outside it and cost one undo per caret.
+        if groupsMultipleCarets, !startedUndoGroup, textView._undoManager?.isGrouping == false {
+            textView._undoManager?.beginUndoGrouping()
+            startedUndoGroup = true
+        }
+    }
+
     func textView(_ textView: TextView, didReplaceContentsIn range: NSRange, with string: String) {
         if string.contains("\n") || string.contains("\r") {
             needsViewportReconciliation = true
         }
-        // Begin after the first mutation has entered its own undo group, so
-        // the other carets join it without absorbing the preceding user action.
-        if groupsMultipleCarets, !startedUndoGroup, textView._undoManager?.isGrouping == false {
-            textView._undoManager?.beginGrouping()
-            startedUndoGroup = true
-        }
+        // Undo/redo replace text with selection updates skipped and then scroll
+        // the stale carets into view. Trim here: the storage has already shrunk,
+        // and the scroll happens right after this callback.
+        EditorSelectionClamp.trim(textView)
     }
 
     func textViewDidChangeText(controller: TextViewController) {
@@ -947,7 +982,7 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
         if let textWillChangeObserver { NotificationCenter.default.removeObserver(textWillChangeObserver) }
         textChangeObserver = nil
         textWillChangeObserver = nil
-        if startedUndoGroup { controller?.textView._undoManager?.endGrouping() }
+        if startedUndoGroup { controller?.textView._undoManager?.endUndoGrouping() }
         startedUndoGroup = false
         needsViewportReconciliation = false
         viewportReconciliationPending = false

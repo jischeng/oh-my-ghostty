@@ -6,7 +6,7 @@ import SwiftUI
 import Testing
 @testable import Ghostty
 
-@MainActor
+@Suite(.serialized) @MainActor
 struct EditorAppearanceTests {
     @Test func translucentBackdropCannotPaintAcrossPaneBoundariesAfterMoving() throws {
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
@@ -65,13 +65,14 @@ struct EditorAppearanceTests {
             textView.textStorage.attribute(.foregroundColor, at: (source as NSString).range(of: word).location,
                                            effectiveRange: nil) as? NSColor
         }
-        #expect(color("grouped_expert_linear") == EditorTheme.oneDark.commands)
-        #expect(color("QuantizedWeights") == EditorTheme.oneDark.types)
-        #expect(color("bool") == EditorTheme.oneDark.commands)
-        #expect(color("False") == EditorTheme.oneDark.numbers)
+        // EditorTheme stores text styles as `Attribute`; compare resolved colors.
+        #expect(color("grouped_expert_linear") == EditorTheme.oneDark.commands.color)
+        #expect(color("QuantizedWeights") == EditorTheme.oneDark.types.color)
+        #expect(color("bool") == EditorTheme.oneDark.commands.color)
+        #expect(color("False") == EditorTheme.oneDark.numbers.color)
         let quoted = (source as NSString).range(of: "\"False\"")
         #expect(textView.textStorage.attribute(.foregroundColor, at: quoted.location + 1,
-                                               effectiveRange: nil) as? NSColor == EditorTheme.oneDark.strings)
+                                               effectiveRange: nil) as? NSColor == EditorTheme.oneDark.strings.color)
         let bitmap = try #require(host.view.bitmapImageRepForCachingDisplay(in: host.view.bounds))
         host.view.cacheDisplay(in: host.view.bounds, to: bitmap)
         try bitmap.representation(using: .png, properties: [:])?.write(
@@ -131,8 +132,8 @@ struct EditorAppearanceTests {
         try "background = 123456\nforeground = abcdef\npalette = 5=#aabbcc\n".write(to: file, atomically: true, encoding: .utf8)
         let config = Ghostty.Config(at: file.path)
         let theme = config.editorTheme(background: NSColor(config.backgroundColor))
-        let text = try #require(theme.text.usingColorSpace(.deviceRGB))
-        let keyword = try #require(theme.keywords.usingColorSpace(.deviceRGB))
+        let text = try #require(theme.text.color.usingColorSpace(.deviceRGB))
+        let keyword = try #require(theme.keywords.color.usingColorSpace(.deviceRGB))
         #expect(abs(text.redComponent - 171.0 / 255) < 0.01)
         #expect(abs(keyword.blueComponent - 204.0 / 255) < 0.01)
     }
@@ -143,7 +144,7 @@ struct EditorAppearanceTests {
         let theme = try #require(EditorCatalogThemes.shared.theme(named: "Catppuccin Mocha"))
         #expect(theme.background.alphaComponent == 1)
         #expect(theme.strings != theme.keywords)
-        #expect(theme.text != theme.background)
+        #expect(theme.text.color != theme.background)
     }
 
     @Test func settingsWindowHandlesCommandW() throws {
@@ -170,12 +171,12 @@ struct EditorAppearanceTests {
     @Test func nativeEditorRendersOneSharedBackdrop() async throws {
         let color = NSColor(red: 0.12, green: 0.24, blue: 0.36, alpha: 1)
         var theme = EditorTheme.adaptive(background: color, foreground: .white)
-        theme.background = .clear
+        theme.background = EditorTheme.transparentBackground
         let coordinator = EditorCoordinator()
-        let editor = CodeEditSourceEditor(
-            .constant("from pathlib import Path\n\nprint(\"Hello\")\n"), language: .python,
-            theme: theme, font: .monospacedSystemFont(ofSize: 14, weight: .regular), tabWidth: 4,
-            lineHeight: 1.2, wrapLines: false, cursorPositions: .constant([]),
+        let editor = EditorTestSupport.editor(
+            text: .constant("from pathlib import Path\n\nprint(\"Hello\")\n"),
+            language: .python,
+            configuration: EditorTestSupport.configuration(theme: theme, fontSize: 14),
             coordinators: [coordinator]
         )
         let host = NSHostingController(rootView: editor.background(EditorBackdrop(color: color, opacity: 1, blur: .disabled)).frame(width: 860, height: 520))

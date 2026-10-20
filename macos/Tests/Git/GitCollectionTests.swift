@@ -263,7 +263,7 @@ struct GitCollectionTests {
             defer { try? FileManager.default.removeItem(at: file) }
             let config = Ghostty.Config(at: file.path)
             let colors = GitCollectionColors(config: config, background: NSColor(config.backgroundColor))
-            #expect(colors.text == config.editorTheme(background: colors.background).text)
+            #expect(colors.text == config.editorTheme(background: colors.background).text.color)
             #expect(colors.status(unstaged.last!).usingColorSpace(.deviceRGB) == colors.secondary.usingColorSpace(.deviceRGB))
             for mode in GitCollectionMode.allCases {
                 let content = VStack(spacing: 0) {

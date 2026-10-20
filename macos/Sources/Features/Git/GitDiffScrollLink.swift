@@ -50,7 +50,9 @@ final class GitDiffScrollLink {
               let targetLine = target.layoutManager.textLineForIndex(index) else { return }
         syncing = true
         defer { syncing = false }
-        target.layoutManager.ensureLayoutUntil(targetLine.range.location)
+        // CodeEditTextView removed `ensureLayoutUntil` because it destroyed
+        // layout information; `rectForOffset` lays out the line it resolves.
+        _ = target.layoutManager.rectForOffset(targetLine.range.location)
         let laidOut = target.layoutManager.textLineForIndex(index) ?? targetLine
         let fraction = max(0, min(1, (origin.y - line.yPos) / max(1, line.height)))
         let y = laidOut.yPos + fraction * laidOut.height
@@ -75,7 +77,7 @@ final class GitDiffScrollLink {
         guard let index = pendingLines[side], let endpoint = endpoints[side], let view = endpoint.view,
               let scrollView = view.enclosingScrollView,
               let line = view.layoutManager.textLineForIndex(index) else { return }
-        view.layoutManager.ensureLayoutUntil(line.range.location)
+        _ = view.layoutManager.rectForOffset(line.range.location)
         let resolved = view.layoutManager.textLineForIndex(index) ?? line
         let clip = scrollView.contentView
         let point = NSPoint(x: clip.bounds.origin.x,

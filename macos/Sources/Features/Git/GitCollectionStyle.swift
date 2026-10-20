@@ -31,9 +31,14 @@ struct GitCollectionColors: Equatable {
     init() {}
     init(config: Ghostty.Config, background: NSColor) {
         let theme = config.editorTheme(background: background)
-        text = theme.text; accent = theme.commands; selection = theme.selection
+        text = theme.text.color
+        accent = theme.commands.color
+        selection = theme.selection
         self.background = background
-        added = theme.strings; modified = theme.numbers; deleted = theme.variables; renamed = theme.commands
+        added = theme.strings.color
+        modified = theme.numbers.color
+        deleted = theme.variables.color
+        renamed = theme.commands.color
     }
 
     func status(_ file: GitDiffFile) -> NSColor {

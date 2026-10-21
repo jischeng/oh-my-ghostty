@@ -3,6 +3,7 @@
   "displayName": "Crush",
   "command": "crush",
   "iconAsset": "AgentCrush",
+  "iconGlyph": "AgentCrushGlyph",
   "opticalScale": 0.9,
   "process": {
     "executables": [

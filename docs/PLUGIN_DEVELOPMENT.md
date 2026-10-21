@@ -847,14 +847,32 @@ installed in the account where the agent executable runs.
 Settings can export an auditable Python 3 installer for explicit transfer and
 execution on that account; OMG does not log in or silently modify remote dotfiles.
 
-Agent glyphs use MIT-licensed assets from LobeHub `lobe-icons` 1.94.0,
-Termio, OMP/oh-my-pi, and Reasonix. Product names and marks remain trademarks
-of their respective owners; the assets do not imply vendor endorsement.
+Agent glyphs use assets from LobeHub `lobe-icons` (MIT) plus the projects' own
+published marks, including Termio, OMP/oh-my-pi, Reasonix, Charm Crush, and
+Factory Droid. Product names and marks remain trademarks of their respective
+owners; the assets do not imply vendor endorsement.
+
+An agent manifest declares icons in two roles:
+
+- `iconAsset` is the full-colour product artwork. Settings and the Inspector
+  render it unchanged, and it carries agent identity where no state tint is
+  applied.
+- `iconGlyph` is an optional monochrome silhouette used only for tab
+  presentation. Tab icons tint the glyph's alpha channel with the activity
+  colour (accent, orange, green, red), overlaid through `.mask(_:)`.
+
+Agents whose `iconAsset` is raster brand art on an opaque background cannot be
+used as a tab glyph: their alpha channel covers the whole square, so masking
+tints the entire tile into a solid colour block and erases the mark. Such an
+agent must declare a transparent `iconGlyph`; omitting it falls back to
+`iconAsset` and reintroduces the solid-block rendering. Glyphs are bundled as
+`Agent<Name>Glyph.imageset` vector assets with
+`template-rendering-intent: template`, so the host supplies all colour.
 
 ### Built-in agent manifests and restoration (Internal)
 
 Bundled `Agent*Manifest.dataset` JSON files are the single data source for each
-allowlisted agent's command, icon, optical scale, process markers, hook
+allowlisted agent's command, icon assets, optical scale, process markers, hook
 kind/dialect/path/events/identity fields, status rules, resume argv, and on-disk
 store/discovery mechanism. The roster covers Codex, Claude Code, Pi, Qoder CLI,
 Reasonix, OMP, OpenCode, Amp, Antigravity, Cline, Copilot, Crush, Cursor Agent,

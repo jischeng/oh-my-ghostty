@@ -22,7 +22,7 @@ struct AgentStatusPluginTests {
             #expect(idleActivity.state == .idle)
             #expect(idleActivity.icon == agent.icon)
             #expect(idleActivity.icon?.kind == .bundledAsset)
-            #expect(idleActivity.icon?.name == agent.assetName)
+            #expect(idleActivity.icon?.name == agent.glyphAssetName)
 
             let waitingUpdate = reducer.consume(signal(
                 agent: agent,
@@ -152,6 +152,18 @@ struct AgentStatusPluginTests {
         #expect(SupportedAgent.pi.definition.resume.seed == "pi-session-file")
         #expect(SupportedAgent.codex.definition.hook.conversationField == "session_id")
         #expect(SupportedAgent.claude.definition.hook.transcriptField == "transcript_path")
+    }
+
+    /// Identity surfaces (Settings, Inspector) keep the full-colour artwork, and
+    /// agents that need a tab glyph must not reuse the colour asset for it.
+    @Test func colorArtworkStaysSeparateFromTabGlyph() {
+        for agent in SupportedAgent.allCases {
+            let definition = agent.definition
+            #expect(definition.iconAsset.isEmpty == false)
+            if let glyph = definition.iconGlyph {
+                #expect(glyph != definition.iconAsset)
+            }
+        }
     }
 
     @Test func buildsOnlyAllowlistedAgentResumeCommands() throws {
@@ -494,12 +506,31 @@ struct AgentStatusPluginTests {
         ) == nil)
     }
 
+    /// Tab icons tint the glyph's alpha channel by activity state, so every agent
+    /// must resolve to a template silhouette. Full-colour brand art on an opaque
+    /// background would tint into a solid accent block; raster agents such as
+    /// reasonix/crush/droid/hermes therefore declare a separate `iconGlyph` while
+    /// keeping their colour artwork for Settings and the Inspector.
+    @Test @MainActor func tabGlyphsResolveToTintedTemplates() throws {
+        for agent in SupportedAgent.allCases {
+            let name = agent.glyphAssetName
+            let image = try #require(
+                NSImage(named: name),
+                "Missing tab glyph \(name) for \(agent.rawValue)"
+            )
+            #expect(image.isTemplate, "\(name) must be a template to tint by state")
+            #expect(renderedPixelCount(image) > 100)
+
+            if let glyph = agent.definition.iconGlyph {
+                #expect(glyph == name)
+                #expect(glyph != agent.assetName)
+            }
+        }
+    }
+
     @Test @MainActor func bundledAgentAssetsRenderVisiblePixels() throws {
         for agent in SupportedAgent.allCases {
             let image = try #require(NSImage(named: agent.assetName))
-            if ![.reasonix, .crush, .droid, .hermes].contains(agent) {
-                #expect(image.isTemplate)
-            }
             #expect(renderedPixelCount(image) > 100)
         }
     }

@@ -72,7 +72,7 @@ struct SplitTabIconView: View {
                 case .systemSymbol: icon = .systemSymbol(requested.name)
                 }
             } else if let agent {
-                icon = .asset(agent.assetName)
+                icon = .asset(agent.glyphAssetName)
             } else {
                 icon = session?.workspace?.icon ?? .systemSymbol(session?.tabIconSystemName ?? "terminal")
             }

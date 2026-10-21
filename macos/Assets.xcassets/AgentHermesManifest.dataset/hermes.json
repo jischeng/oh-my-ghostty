@@ -3,6 +3,7 @@
   "displayName": "Hermes",
   "command": "hermes",
   "iconAsset": "AgentHermes",
+  "iconGlyph": "AgentHermesGlyph",
   "opticalScale": 0.9,
   "process": {
     "executables": [

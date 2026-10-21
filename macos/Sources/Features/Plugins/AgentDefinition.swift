@@ -25,7 +25,10 @@ enum SupportedAgent: String, CaseIterable, Codable, Identifiable, Sendable {
     var definition: AgentDefinition { AgentCatalog.shared.definition(for: self) }
     var displayName: String { definition.displayName }
     var assetName: String { definition.iconAsset }
-    var icon: PluginTabIcon { .init(kind: .bundledAsset, name: assetName) }
+    /// Tab-only monochrome silhouette. Falls back to `assetName` when the
+    /// manifest declares no glyph, so every agent renders one uniform shape.
+    var glyphAssetName: String { definition.iconGlyph ?? definition.iconAsset }
+    var icon: PluginTabIcon { .init(kind: .bundledAsset, name: glyphAssetName) }
 
     func normalizedTitle(_ title: String) -> String {
         switch self {
@@ -269,7 +272,13 @@ struct AgentDefinition: Codable, Equatable, Sendable {
     let id: String
     let displayName: String
     let command: String
+    /// Full-colour product artwork for Settings and Inspector surfaces.
     let iconAsset: String
+    /// Optional monochrome silhouette for tab presentation, where the host
+    /// tints the alpha channel by activity state. Raster brand art with an
+    /// opaque background tints into a solid block, so those agents declare a
+    /// transparent glyph here and keep `iconAsset` for identity views.
+    let iconGlyph: String?
     let opticalScale: Double?
     let process: ProcessSpec
     let resume: ResumeSpec
@@ -291,6 +300,7 @@ struct AgentDefinition: Codable, Equatable, Sendable {
             displayName: agent.rawValue.capitalized,
             command: agent.rawValue,
             iconAsset: "AgentOpenAI",
+            iconGlyph: nil,
             opticalScale: 0.86,
             process: .init(executables: [agent.rawValue], runtimeMarkers: []),
             resume: .init(

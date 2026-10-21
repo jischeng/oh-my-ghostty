@@ -142,6 +142,61 @@ struct EditorCompletionTests {
         }
     }
 
+    @Test @MainActor func structuredLanguageUsesKnownSuffixesAndContentFallback() {
+        struct Case {
+            let path: String
+            let text: String
+            let expected: TreeSitterLanguage
+        }
+        let cases = [
+            Case(path: "/tmp/flake.lock", text: "{\n  \"nodes\": {}\n}\n", expected: .json),
+            Case(path: "/tmp/build.zig.zon.json", text: "{\n  \"name\": \"demo\"\n}\n", expected: .json),
+            Case(path: "/tmp/.prettierrc", text: "{\n  \"tabWidth\": 2\n}\n", expected: .json),
+            Case(path: "/tmp/clang-format", text: "BasedOnStyle: LLVM\nIndentWidth: 2\n", expected: .yaml),
+            Case(path: "/tmp/pixi.lock", text: "package:\n  name: demo\n", expected: .yaml),
+            Case(path: "/tmp/lockfile.unknown", text: "{\n  \"nodes\": {}\n}\n", expected: .json),
+            Case(path: "/tmp/lockfile.unknown", text: "provider: openai\nmodel: gpt-6\n", expected: .yaml),
+            Case(path: "/tmp/no-extension", text: "[package]\nname = \"demo\"\n", expected: .toml),
+            Case(path: "/tmp/no-extension", text: #"fn main() {"# + "\n" +
+                #"    println!("hi");"# + "\n" + "}", expected: .rust),
+            Case(path: "/tmp/no-extension", text: "SELECT id\nFROM users;", expected: .sql),
+            Case(path: "/tmp/no-extension", text: "# Heading\n\nSome **markdown** text.", expected: .markdown),
+            Case(path: "/tmp/no-extension", text: #"<?xml version="1.0"?><root/> "#, expected: .html),
+        ]
+        for testCase in cases {
+            let coordinator = EditorCoordinator()
+            let language = coordinator.language(fileURL: URL(fileURLWithPath: testCase.path), text: testCase.text)
+            #expect(language.id == testCase.expected,
+                    "\(testCase.path) got \(language.id.rawValue), expected \(testCase.expected.rawValue)")
+        }
+
+        // Preserve a language already determined from a supported source file
+        // type; structured-looking code should not be reclassified as JSON/YAML.
+        let swiftCoordinator = EditorCoordinator()
+        let swift = swiftCoordinator.language(fileURL: URL(fileURLWithPath: "/tmp/Config.swift"),
+                                              text: "let config = [\"key\": \"value\"]")
+        #expect(swift.id == .swift)
+
+        // Plain prose and empty buffers stay plain text. Large files that are
+        // already recognized by extension never enter the bounded fallback.
+        let proseCoordinator = EditorCoordinator()
+        #expect(proseCoordinator.language(fileURL: nil, text: "This is an ordinary sentence.").id == .plainText)
+        let scalarCoordinator = EditorCoordinator()
+        #expect(scalarCoordinator.language(fileURL: nil, text: "A short sentence with a colon: really?").id == .plainText)
+        let emptyCoordinator = EditorCoordinator()
+        #expect(emptyCoordinator.language(fileURL: nil, text: "").id == .plainText)
+        // A document can mount before its contents finish loading; a cached
+        // plain-text result must be replaced once the buffer arrives.
+        #expect(emptyCoordinator.language(
+            fileURL: URL(fileURLWithPath: "/tmp/flake.lock"),
+            text: "{\n  \"nodes\": {}\n}\n"
+        ).id == .json)
+        let arbitraryLockCoordinator = EditorCoordinator()
+        #expect(arbitraryLockCoordinator.language(
+            fileURL: URL(fileURLWithPath: "/tmp/database.lock"), text: "binary-ish lock contents"
+        ).id == .plainText)
+    }
+
     @Test func bufferWordProviderExtractsMatchingPrefixes() async {
         let text = """
         function calculateTotal(items) {

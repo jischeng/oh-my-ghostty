@@ -2,6 +2,7 @@ import AppKit
 import CodeEditLanguages
 import CodeEditSourceEditor
 import CodeEditTextView
+import SwiftTreeSitter
 import SwiftUI
 
 /// A lightweight native source editor surface for editable OMG documents.
@@ -464,28 +465,201 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
     }
 
     func language(fileURL: URL?, text: String) -> CodeLanguage {
-        if let cachedLanguage { return cachedLanguage }
+        if let cachedLanguage, cachedLanguage.id != .plainText { return cachedLanguage }
         if let fileURL, Self.usesXMLHighlighting(fileURL) {
             // The bundled grammars have no XML parser. HTML provides tag,
             // attribute, string and comment highlighting for XML-family files.
             cachedLanguage = .html
             return .html
         }
-        if let path = fileURL?.path.lowercased() {
-            if path.hasSuffix(".ghostty") || path.hasSuffix(".conf") || path.hasSuffix(".ini") || path.hasSuffix(".cfg") {
-                cachedLanguage = .toml
-                return .toml
+        if let fileURL, let language = Self.knownLanguage(for: fileURL) {
+            cachedLanguage = language
+            return language
+        }
+
+        // Prefer filename, shebang and modeline signals before content probing.
+        // A cached plain-text result is deliberately rechecked: editor panes can
+        // first mount before the document finishes loading.
+        let detected = CodeLanguage.detectLanguageFrom(
+            url: fileURL ?? URL(fileURLWithPath: ""),
+            prefixBuffer: String(text.prefix(2_048)),
+            suffixBuffer: String(text.suffix(2_048))
+        )
+        if detected.id != .plainText {
+            cachedLanguage = detected
+            return detected
+        }
+        let contentLanguage = Self.detectStructuredContent(text)
+        cachedLanguage = contentLanguage ?? .default
+        return cachedLanguage!
+    }
+
+    /// Resolves Zed's useful filename aliases and compound suffixes before
+    /// generic extension/content detection. `.lock` alone is ambiguous, so only
+    /// known JSON/YAML lockfile names are treated specially.
+    private static func knownLanguage(for url: URL) -> CodeLanguage? {
+        let name = url.lastPathComponent.lowercased()
+        let jsonNames: Set<String> = ["flake.lock", "deno.lock", "bun.lock", "bun.lockb"]
+        let yamlNames: Set<String> = ["pixi.lock", "clang-format", "clangd", "bst"]
+        if jsonNames.contains(name) || name.hasSuffix(".json") || name.hasSuffix(".jsonc") ||
+            name == ".prettierrc" || name.hasSuffix(".json.dist") || name.hasSuffix(".geojson") ||
+            name.hasSuffix(".topojson") {
+            return .json
+        }
+        if yamlNames.contains(name) || name.hasSuffix(".yml") || name.hasSuffix(".yaml") {
+            return .yaml
+        }
+        if [".ghostty", ".conf", ".ini", ".cfg", ".toml"].contains(where: name.hasSuffix) {
+            return .toml
+        }
+        return nil
+    }
+
+    /// Conservatively detects structured text when name, shebang and modeline
+    /// provide no language. Tree-sitter is used for recognition only on bounded
+    /// text and only when the root contains the expected data structure.
+    private static func detectStructuredContent(_ text: String) -> CodeLanguage? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, text.utf8.count <= 512_000 else { return nil }
+
+        // Prefer distinctive syntax before permissive data grammars such as YAML.
+        if looksLikeXML(trimmed), parsesStructured(strippingXMLProlog(text), as: .html) {
+            return .html
+        }
+        if looksLikePython(trimmed), parsesStructured(text, as: .python) { return .python }
+        if looksLikeJavaScript(trimmed), parsesStructured(text, as: .javascript) { return .javascript }
+        if looksLikeRust(trimmed), parsesStructured(text, as: .rust) { return .rust }
+        if looksLikeSQL(trimmed), parsesStructured(text, as: .sql) { return .sql }
+        if looksLikeMarkdown(trimmed), parsesStructured(text, as: .markdown) { return .markdown }
+
+        // Ordered signatures avoid asking permissive grammars to decide prose.
+        if trimmed.first == "{" || trimmed.first == "[" {
+            if parsesStructured(text, as: .json) { return .json }
+        }
+        if looksLikeYAML(trimmed), parsesStructured(text, as: .yaml) { return .yaml }
+        if looksLikeTOML(trimmed), parsesStructured(text, as: .toml) { return .toml }
+        return nil
+    }
+
+    private static func parsesStructured(_ text: String, as language: CodeLanguage) -> Bool {
+        guard let grammar = language.language else { return false }
+        let parser = Parser()
+        guard (try? parser.setLanguage(grammar)) != nil,
+              let tree = parser.parse(text),
+              let root = tree.rootNode else { return false }
+        switch language.id {
+        case .json:
+            return !root.hasError && root.childCount > 0 &&
+                (root.child(at: 0)?.nodeType == "object" || root.child(at: 0)?.nodeType == "array")
+        case .yaml:
+            // YAML accepts plain scalars and can mark a full stream as erroneous
+            // while still returning useful mapping/sequence nodes. Recognize by
+            // structure, then bound parser recovery errors.
+            return hasTreeStructure(root,
+                nodes: ["block_mapping_pair", "flow_pair", "block_sequence_item"], minimumCount: 2)
+        case .toml:
+            return hasTreeStructure(root,
+                nodes: ["pair", "table", "table_array_element"], minimumCount: 1)
+        default:
+            // Source languages: require a clean parse and at least one named
+            // node so a single stray token is not mistaken for a whole file.
+            return !root.hasError && root.namedChildCount > 0
+        }
+    }
+
+    private static func hasTreeStructure(_ root: Node, nodes: [String], minimumCount: Int) -> Bool {
+        let structureCount = nodes.reduce(0) { count, type in count + countNodes(type: type, in: root) }
+        return structureCount >= minimumCount
+    }
+
+    private static func countNodes(type: String, in node: Node) -> Int {
+        let own = node.nodeType == type ? 1 : 0
+        return (0..<node.childCount).reduce(own) { count, index in
+            guard let child = node.child(at: index) else { return count }
+            return count + countNodes(type: type, in: child)
+        }
+    }
+
+    private static func containsNode(type: String, in node: Node) -> Bool {
+        countNodes(type: type, in: node) > 0
+    }
+
+    private static func looksLikeXML(_ text: String) -> Bool {
+        return text.hasPrefix("<?xml") || text.hasPrefix("<!DOCTYPE") ||
+            (text.hasPrefix("<") && text.contains(">") && text.contains("</"))
+    }
+
+    /// Removes an XML prolog and DOCTYPE before parsing with the HTML grammar,
+    /// which treats `<?xml ... ?>` as an error even though the markup below it is
+    /// valid. XML-family files are already routed here because this checkout
+    /// ships no XML grammar.
+    private static func strippingXMLProlog(_ text: String) -> String {
+        var result = Substring(text)
+        while true {
+            let trimmed = result.drop { $0 == " " || $0 == "\n" || $0 == "\t" || $0 == "\r" }
+            if trimmed.hasPrefix("<?"), let end = trimmed.range(of: "?>") {
+                result = trimmed[end.upperBound...]
+            } else if trimmed.hasPrefix("<!--"), let end = trimmed.range(of: "-->") {
+                result = trimmed[end.upperBound...]
+            } else {
+                result = trimmed
+                break
             }
         }
-        let language: CodeLanguage = fileURL.map {
-            .detectLanguageFrom(
-                url: $0,
-                prefixBuffer: String(text.prefix(2_048)),
-                suffixBuffer: String(text.suffix(2_048))
-            )
-        } ?? .default
-        cachedLanguage = language
-        return language
+        return String(result)
+    }
+
+    private static func looksLikePython(_ text: String) -> Bool {
+        return ["def ", "class ", "from ", "import ", "if __name__ ==", "async def "]
+            .contains { text.hasPrefix($0) || text.contains("\n" + $0) }
+    }
+
+    private static func looksLikeJavaScript(_ text: String) -> Bool {
+        return ["import ", "export ", "const ", "let ", "function ", "=>"]
+            .contains { text.hasPrefix($0) || text.contains("\n" + $0) }
+    }
+
+    private static func looksLikeRust(_ text: String) -> Bool {
+        return ["fn main", "use std::", "pub struct ", "impl ", "fn "]
+            .contains { text.hasPrefix($0) || text.contains("\n" + $0) }
+    }
+
+    private static func looksLikeSQL(_ text: String) -> Bool {
+        let upper = text.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        return ["SELECT ", "INSERT INTO ", "CREATE TABLE ", "UPDATE ", "WITH "]
+            .contains { upper.hasPrefix($0) }
+    }
+
+    private static func looksLikeMarkdown(_ text: String) -> Bool {
+        return text.hasPrefix("# ") || text.hasPrefix("## ") || text.hasPrefix("```") ||
+            text.hasPrefix("---\n") || text.contains("\n```\n")
+    }
+
+    private static func looksLikeYAML(_ text: String) -> Bool {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
+        let mappingLines = lines.filter { line in
+            let line = line.trimmingCharacters(in: .whitespaces)
+            return !line.isEmpty && !line.hasPrefix("#") && !line.hasPrefix("-") &&
+                line.contains(":")
+        }
+        let sequenceLines = lines.filter { $0.trimmingCharacters(in: .whitespaces).hasPrefix("-") }
+        // A single YAML mapping-looking line is too ambiguous (`sentence: tail`
+        // is valid YAML syntax as well). Require multiple mappings, a sequence,
+        // an explicit document marker, or an indented nested block.
+        let hasNestedBlock = lines.dropFirst().contains { line in
+            let prefix = line.prefix { $0 == " " || $0 == "\t" }
+            return !prefix.isEmpty
+        }
+        return mappingLines.count >= 2 || sequenceLines.count >= 2 || hasNestedBlock ||
+            text.hasPrefix("---") || text.hasPrefix("%YAML")
+    }
+
+    private static func looksLikeTOML(_ text: String) -> Bool {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+        return lines.contains { $0.hasPrefix("[") && $0.hasSuffix("]") } ||
+            lines.contains { $0.contains("=") }
     }
 
     func setDiffLines(_ lines: [Int: Bool]) {

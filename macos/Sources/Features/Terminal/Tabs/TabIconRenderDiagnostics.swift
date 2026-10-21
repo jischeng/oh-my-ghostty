@@ -80,6 +80,19 @@ enum TabIconRenderDiagnostics {
         }
     }
 
+    /// Appends a report on demand, so a sample can be taken after the user has
+    /// clicked a tab and the icon has settled.
+    static func captureAppend() {
+        guard isEnabled else { return }
+        let directory = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        )[0].appendingPathComponent("OMG/TabIconDiagnostics", isDirectory: true)
+        let url = directory.appendingPathComponent("report.txt")
+        let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        write(url: url, text: existing + "\n=== manual ===\n" + capture())
+    }
+
     private static func write(url: URL, text: String) {
         let data = Data(text.utf8)
         try? data.write(to: url, options: .atomic)
@@ -99,21 +112,9 @@ enum TabIconRenderDiagnostics {
 
         for symbol in symbolNames {
             for variant in Variant.allCases {
-                guard let image = render(symbol: symbol, variant: variant),
-                      let stroke = strokeColor(of: image) else {
-                    lines.append(
-                        "symbol=\(symbol) variant=\(variant.rawValue) "
-                        + "status=\(renderNote(symbol: symbol, variant: variant))"
-                    )
-                    continue
-                }
-                let classification = Classification(
-                    red: stroke.red, green: stroke.green, blue: stroke.blue
-                )
                 lines.append(
                     "symbol=\(symbol) variant=\(variant.rawValue) "
-                    + "stroke=rgb(\(stroke.red),\(stroke.green),\(stroke.blue)) "
-                    + "class=\(classification.rawValue)"
+                    + describeVariant(symbol: symbol, variant: variant)
                 )
             }
         }
@@ -140,20 +141,42 @@ enum TabIconRenderDiagnostics {
 
     private static let iconSize: CGFloat = 18
 
-    private static func render(symbol: String, variant: Variant) -> NSImage? {
+    /// Renders a variant and describes it in one step, so a variant that
+    /// renders but yields no opaque pixel is reported as empty instead of
+    /// being skipped.
+    private static func describeVariant(symbol: String, variant: Variant) -> String {
         let renderer = ImageRenderer(content: variantView(symbol: symbol, variant: variant))
         renderer.scale = 2
-        guard let cgImage = renderer.cgImage else { return nil }
-        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
-    }
-
-    /// Reports a failure to render a variant, so a missing line is
-    /// distinguishable from a variant that rendered nothing.
-    private static func renderNote(symbol: String, variant: Variant) -> String {
-        let renderer = ImageRenderer(content: variantView(symbol: symbol, variant: variant))
-        renderer.scale = 2
-        guard renderer.cgImage != nil else { return "render_failed" }
-        return "rendered"
+        guard let cgImage = renderer.cgImage else { return "status=render_failed" }
+        let bitmap = NSBitmapImageRep(cgImage: cgImage)
+        var darkest: (red: Int, green: Int, blue: Int)?
+        var darkestLuminance = Double.greatestFiniteMagnitude
+        var opaquePixels = 0
+        for x in 0..<bitmap.pixelsWide {
+            for y in 0..<bitmap.pixelsHigh {
+                guard let color = bitmap.colorAt(x: x, y: y),
+                      color.alphaComponent > 0.5 else { continue }
+                opaquePixels += 1
+                let luminance = Double(
+                    color.redComponent + color.greenComponent + color.blueComponent
+                )
+                guard luminance < darkestLuminance else { continue }
+                darkestLuminance = luminance
+                darkest = (
+                    Int((color.redComponent * 255).rounded()),
+                    Int((color.greenComponent * 255).rounded()),
+                    Int((color.blueComponent * 255).rounded())
+                )
+            }
+        }
+        guard let darkest else {
+            return "status=empty size=\(cgImage.width)x\(cgImage.height)"
+        }
+        let classification = Classification(
+            red: darkest.red, green: darkest.green, blue: darkest.blue
+        )
+        return "stroke=rgb(\(darkest.red),\(darkest.green),\(darkest.blue)) "
+            + "class=\(classification.rawValue) opaque=\(opaquePixels)"
     }
 
     @ViewBuilder
@@ -185,33 +208,6 @@ enum TabIconRenderDiagnostics {
         }
     }
 
-    /// Returns the darkest opaque pixel of an image, which is the symbol
-    /// outline. A tinted symbol carries the tint colour; an untinted template
-    /// symbol is near-black.
-    private static func strokeColor(of image: NSImage) -> (red: Int, green: Int, blue: Int)? {
-        guard let tiff = image.tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: tiff) else { return nil }
-        var darkest: (red: Int, green: Int, blue: Int)?
-        var darkestLuminance = Double.greatestFiniteMagnitude
-        for x in 0..<bitmap.pixelsWide {
-            for y in 0..<bitmap.pixelsHigh {
-                guard let color = bitmap.colorAt(x: x, y: y),
-                      color.alphaComponent > 0.5 else { continue }
-                let luminance = Double(
-                    color.redComponent + color.greenComponent + color.blueComponent
-                )
-                guard luminance < darkestLuminance else { continue }
-                darkestLuminance = luminance
-                darkest = (
-                    Int((color.redComponent * 255).rounded()),
-                    Int((color.greenComponent * 255).rounded()),
-                    Int((color.blueComponent * 255).rounded())
-                )
-            }
-        }
-        return darkest
-    }
-
     /// Reports the icon column of the live windows so the measured variants can
     /// be compared against what is actually on screen.
     private static func liveWindowIconReport() -> [String] {
@@ -235,8 +231,8 @@ enum TabIconRenderDiagnostics {
         return lines
     }
 
-    /// Samples the leading column of the captured window and reports the
-    /// darkest pixel of each band. Tab icons sit in that column, so a band that
+    /// Samples the captured window and reports the darkest pixel of each band
+    /// in the leading column, where the sidebar tab icons sit. A band that
     /// holds a black icon reports an untinted stroke.
     private static func iconColumnStrokes(in rep: NSBitmapImageRep) -> [String] {
         let bandWidth = 80

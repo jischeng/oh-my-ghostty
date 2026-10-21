@@ -111,7 +111,7 @@ enum TabIconRenderDiagnostics {
         let image = NSImage(systemSymbolName: symbolNames[0], accessibilityDescription: nil)?
             .withSymbolConfiguration(
                 NSImage.SymbolConfiguration(paletteColors: [
-                    NSColor.secondaryLabelColor
+                    NSColor(white: 0.61, alpha: 1.0)
                 ])
             )
         return Group {

@@ -1955,9 +1955,20 @@ private struct AgentTabIconView: View {
     }
 
     var body: some View {
-        GhosttyTabIconView(icon: icon, color: color,
-                          size: TabIconMetrics.singleLogo(settings.tabIconSize))
-            .modifier(AgentLogoStatus(activity: agent != nil ? activity : nil, focused: focused))
+        let icon = GhosttyTabIconView(icon: icon, color: color,
+                                     size: TabIconMetrics.singleLogo(settings.tabIconSize))
+        // The activity tint only applies to an agent logo. A plain terminal or
+        // workspace icon has no activity, so the tint would be fully
+        // transparent, yet the overlay still moved the icon into a separate
+        // hosting view. That view does not carry the icon's foreground style,
+        // so a system symbol fell back to its untinted template black.
+        Group {
+            if agent != nil {
+                icon.modifier(AgentLogoStatus(activity: activity, focused: focused))
+            } else {
+                icon
+            }
+        }
         .frame(
             width: TabIconMetrics.footprint,
             height: TabIconMetrics.footprint

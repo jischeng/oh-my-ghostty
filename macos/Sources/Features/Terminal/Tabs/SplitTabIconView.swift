@@ -149,10 +149,24 @@ struct PaneLogoMark: View {
 
     var body: some View {
             ZStack {
-                logo
-                    .padding(0.5)
-                    .frame(width: size, height: size)
-                    .modifier(AgentLogoStatus(activity: showsActivity ? pane.activity : nil, focused: pane.focused))
+                // The activity tint only applies to an agent logo. A plain
+                // terminal or workspace icon has no activity, so the tint would
+                // be fully transparent, yet the overlay still moved the icon
+                // into a separate hosting view. That view does not carry the
+                // icon's foreground style, so a system symbol fell back to its
+                // untinted template black.
+                Group {
+                    if showsActivity && pane.activity != nil {
+                        logo
+                            .padding(0.5)
+                            .frame(width: size, height: size)
+                            .modifier(AgentLogoStatus(activity: pane.activity, focused: pane.focused))
+                    } else {
+                        logo
+                            .padding(0.5)
+                            .frame(width: size, height: size)
+                    }
+                }
             }
         .frame(width: size, height: size)
     }

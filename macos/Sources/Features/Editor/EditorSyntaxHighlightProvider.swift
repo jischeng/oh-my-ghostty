@@ -17,8 +17,8 @@ final class EditorSyntaxHighlightProvider: HighlightProviding {
     // Structural key detection for JSON and YAML.
     private var structuralParser: Parser?
     private var structuralLanguage: TreeSitterLanguage?
-    private var cachedKeyText: String?
-    private var cachedKeyRanges: [NSRange] = []
+    private var cachedStructuralText: String?
+    private var cachedStructuralCaptures: [HighlightRange] = []
 
     /// Node types whose `key` field should be painted as a key.
     private static let keyedNodeTypes: Set<String> = [
@@ -26,6 +26,17 @@ final class EditorSyntaxHighlightProvider: HighlightProviding {
         "block_mapping_pair",   // YAML
         "flow_mapping",         // YAML
     ]
+
+    /// Literal and escape nodes that `CaptureName` has no slot for.
+    ///
+    /// The grammars capture JSON/YAML `true`, `false` and `null` as
+    /// `constant.builtin`, and string escapes as `escape`. `fromString` returns
+    /// nil for both names, so those captures are silently dropped and the
+    /// tokens render as plain text.
+    /// JSON names these nodes after the literal itself; YAML uses `_scalar`.
+    private static let booleanNodeTypes: Set<String> = ["true", "false", "boolean", "boolean_scalar"]
+    private static let nullNodeTypes: Set<String> = ["null", "null_scalar"]
+    private static let escapeNodeTypes: Set<String> = ["escape_sequence"]
 
     /// Normalizes a theme before it reaches the editor.
     ///
@@ -97,8 +108,8 @@ final class EditorSyntaxHighlightProvider: HighlightProviding {
             structuralParser = nil
             structuralLanguage = nil
         }
-        cachedKeyText = nil
-        cachedKeyRanges = []
+        cachedStructuralText = nil
+        cachedStructuralCaptures = []
     }
 
     func willApplyEdit(textView: TextView, range: NSRange) {
@@ -115,29 +126,13 @@ final class EditorSyntaxHighlightProvider: HighlightProviding {
         let source = textView.string as NSString
         parser.queryHighlightsFor(textView: textView, range: range) { [self] result in
             completion(result.map { highlights in
-                var resolved = Self.resolvedHighlights(highlights)
-                // Give structural keys their own slot. The grammars report keys
+                var resolved = Self.resolvedHighlights(highlights)                // Give structural keys their own slot. The grammars report keys
                 // as plain `string` (JSON) or `property` (YAML), and `property`
                 // maps to the same color as values, so keys and values are
                 // indistinguishable without this pass.
                 if structuralLanguage != nil, NSMaxRange(range) <= source.length {
-                    // A key is also a string node, so the stock captures cover the
-                    // exact same ranges. Drop those first; the style container
-                    // resolves same-length runs by provider priority, not by the
-                    // capture we send, so leaving both would let `@string` win.
-                    let keyRanges = keyRanges(in: source).filter {
-                        NSIntersectionRange($0, range).length > 0
-                    }
-                    if !keyRanges.isEmpty {
-                        let keys = Set(keyRanges.map { NSValue(range: $0) })
-                        resolved.removeAll { highlight in
-                            keys.contains(NSValue(range: highlight.range))
-                                || keyRanges.contains { NSIntersectionRange($0, highlight.range).length > 0 }
-                        }
-                        resolved.append(contentsOf: keyRanges.map {
-                            HighlightRange(range: $0, capture: .type)
-                        })
-                    }
+                    resolved = Self.applyStructuralCaptures(resolved, from: structuralCaptures(in: source),
+                                                            in: range)
                 }
                 if isPython, NSMaxRange(range) <= source.length {
                     // The pinned capture enum drops constant.builtin. Add the
@@ -158,27 +153,55 @@ final class EditorSyntaxHighlightProvider: HighlightProviding {
         }
     }
 
-    /// Structural key ranges for the current buffer, cached per document text.
-    private func keyRanges(in source: NSString) -> [NSRange] {
-        if let cachedKeyText, cachedKeyText == source as String {
-            return cachedKeyRanges
+    /// Structural captures for the current buffer, cached per document text.
+    private func structuralCaptures(in source: NSString) -> [HighlightRange] {
+        if let cachedStructuralText, cachedStructuralText == source as String {
+            return cachedStructuralCaptures
         }
         guard let structuralParser, let tree = structuralParser.parse(source as String) else { return [] }
-        var ranges: [NSRange] = []
-        Self.collectKeyRanges(node: tree.rootNode, into: &ranges)
-        cachedKeyText = source as String
-        cachedKeyRanges = ranges
-        return ranges
+        var captured: [HighlightRange] = []
+        Self.collectStructuralCaptures(node: tree.rootNode, into: &captured)
+        cachedStructuralText = source as String
+        cachedStructuralCaptures = captured
+        return captured
     }
 
-    private static func collectKeyRanges(node: Node?, into ranges: inout [NSRange]) {
+    private static func collectStructuralCaptures(node: Node?, into captured: inout [HighlightRange]) {
         guard let node else { return }
-        if let type = node.nodeType, keyedNodeTypes.contains(type),
-           let key = node.child(byFieldName: "key"), key.isNamed, key.range.length > 0 {
-            ranges.append(key.range)
+        if let type = node.nodeType {
+            if keyedNodeTypes.contains(type),
+               let key = node.child(byFieldName: "key"), key.isNamed, key.range.length > 0 {
+                captured.append(HighlightRange(range: key.range, capture: .type))
+            } else if booleanNodeTypes.contains(type) {
+                captured.append(HighlightRange(range: node.range, capture: .boolean))
+            } else if nullNodeTypes.contains(type) {
+                captured.append(HighlightRange(range: node.range, capture: .variableBuiltin))
+            } else if escapeNodeTypes.contains(type) {
+                captured.append(HighlightRange(range: node.range, capture: .number))
+            }
         }
         for index in 0..<node.childCount {
-            collectKeyRanges(node: node.child(at: index), into: &ranges)
+            collectStructuralCaptures(node: node.child(at: index), into: &captured)
         }
+    }
+
+    /// Merges structural captures over the grammar's own results.
+    ///
+    /// A key is also a string node, so the stock captures cover the exact same
+    /// ranges. Those have to be dropped first: the style container resolves
+    /// same-length runs by provider priority, not by the capture we send, so
+    /// leaving both would let `@string` win.
+    private static func applyStructuralCaptures(_ resolved: [HighlightRange],
+                                                from structural: [HighlightRange],
+                                                in range: NSRange) -> [HighlightRange] {
+        let scoped = structural.filter { NSIntersectionRange($0.range, range).length > 0 }
+        guard !scoped.isEmpty else { return resolved }
+        let shadowed = Set(scoped.map { NSValue(range: $0.range) })
+        var merged = resolved.filter { highlight in
+            !shadowed.contains(NSValue(range: highlight.range))
+                && !scoped.contains { NSIntersectionRange($0.range, highlight.range).length > 0 }
+        }
+        merged.append(contentsOf: scoped)
+        return merged.sorted { $0.range.location < $1.range.location }
     }
 }

@@ -323,7 +323,8 @@ struct EditorAppearanceTests {
           "id": "gpt-6-sol",
           "name": "GPT-6 Sol (duck-codex-sale)",
           "reasoning": true,
-          "contextWindow": 1050000
+          "contextWindow": 1050000,
+          "empty": null
         }
         """
         let yaml = """
@@ -331,6 +332,7 @@ struct EditorAppearanceTests {
         name: GPT-6 Sol (duck-codex-sale)
         reasoning: true
         contextWindow: 1050000
+        empty: null
         nested:
           - minimal
           - effort
@@ -374,17 +376,23 @@ struct EditorAppearanceTests {
                                                       effectiveRange: nil) as? NSColor
             }
 
-            // Keys must differ from string values and numbers.
+            // Keys must differ from every literal kind, and literals must differ
+            // from plain text. The grammars report booleans and nulls through
+            // captures this editor cannot name, so they used to render unstyled.
             let keyColor = color("contextWindow")?.usingColorSpace(.deviceRGB)
             let valueColor = color("gpt-6-sol")?.usingColorSpace(.deviceRGB)
             let numberColor = color("1050000")?.usingColorSpace(.deviceRGB)
+            let booleanColor = color("true")?.usingColorSpace(.deviceRGB)
             #expect(keyColor != nil, "key has no highlight for \(language)")
             #expect(valueColor != nil, "value has no highlight for \(language)")
             #expect(numberColor != nil, "number has no highlight for \(language)")
-            if let keyColor, let valueColor, let numberColor {
+            #expect(booleanColor != nil, "boolean has no highlight for \(language)")
+            if let keyColor, let valueColor, let numberColor, let booleanColor {
                 #expect(keyColor != valueColor,
                         "key and value share a color for \(language): key=\(keyColor) value=\(valueColor)")
                 #expect(keyColor != numberColor, "key and number share a color for \(language)")
+                #expect(keyColor != booleanColor, "key and boolean share a color for \(language)")
+                #expect(booleanColor != valueColor, "boolean and value share a color for \(language)")
             }
         }
     }
@@ -396,8 +404,8 @@ struct EditorAppearanceTests {
     @Test(arguments: ["json", "yaml"])
     @MainActor func structuredGrammarProducesHighlights(_ language: String) async throws {
         let source = language == "json"
-            ? "{\n  \"id\": \"gpt-6-sol\",\n  \"n\": 42\n}\n"
-            : "id: gpt-6-sol\nn: 42\n"
+            ? "{\n  \"id\": \"gpt-6-sol\",\n  \"n\": 42,\n  \"ok\": true,\n  \"none\": null\n}\n"
+            : "id: gpt-6-sol\nn: 42\nok: true\nnone: null\n"
         let textView = TextView(string: source)
         let provider = EditorSyntaxHighlightProvider()
         let codeLanguage: CodeLanguage = language == "json" ? .json : .yaml
@@ -415,5 +423,9 @@ struct EditorAppearanceTests {
         }
         #expect(captures("id").contains(.type), "json/yaml key must map to type slot for \(language)")
         #expect(captures("42").contains(.number), "number must map to number slot for \(language)")
+        // Booleans and nulls arrive as captures this enum cannot name, so the
+        // provider has to recover them structurally.
+        #expect(captures("true").contains(.boolean), "boolean must map to boolean slot for \(language)")
+        #expect(!captures("null").isEmpty, "null must not render as plain text for \(language)")
     }
 }

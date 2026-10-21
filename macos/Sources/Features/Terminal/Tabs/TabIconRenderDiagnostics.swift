@@ -80,6 +80,16 @@ enum TabIconRenderDiagnostics {
                 writeSidebarCapture(directory: directory)
             }
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
+            MainActor.assumeIsolated {
+                write(
+                    url: url,
+                    text: "\n=== selection comparison ===\n"
+                        + captureBeforeAndAfterSelection()
+                )
+                writeSidebarCapture(directory: directory)
+            }
+        }
     }
 
     /// Saves the captured sidebar column as a PNG so the sampled bands can be
@@ -114,6 +124,9 @@ enum TabIconRenderDiagnostics {
         let url = directory.appendingPathComponent("report.txt")
         let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
         write(url: url, text: existing + "\n=== manual ===\n" + capture())
+        write(url: url, text: existing + "\n=== manual ===\n" + capture()
+            + "\n=== selection comparison ===\n" + captureBeforeAndAfterSelection())
+        writeSidebarCapture(directory: directory)
     }
 
     private static func write(url: URL, text: String) {
@@ -234,6 +247,51 @@ enum TabIconRenderDiagnostics {
     /// Reports the icon column of the live windows so the measured variants can
     /// be compared against what is actually on screen.
     private static func liveWindowIconReport() -> [String] {
+        var lines: [String] = []
+        for window in NSApp.windows {
+            guard let contentView = window.contentView,
+                  contentView.bounds.width > 0,
+                  contentView.bounds.height > 0 else { continue }
+            guard let rep = contentView.bitmapImageRepForCachingDisplay(
+                in: contentView.bounds
+            ) else { continue }
+            contentView.cacheDisplay(in: contentView.bounds, to: rep)
+            let strokes = iconColumnStrokes(in: rep)
+            guard !strokes.isEmpty else { continue }
+            lines.append(
+                "window=\(Int(contentView.bounds.width))x\(Int(contentView.bounds.height)) "
+                + "appearance=\(window.appearance?.name.rawValue ?? "nil")"
+            )
+            lines.append(contentsOf: strokes)
+        }
+        return lines
+    }
+
+    /// Samples the live window, then selects a different tab and samples
+    /// again. A stroke colour that differs between the two samples shows
+    /// whether selecting a tab is what restores the tint.
+    static func captureBeforeAndAfterSelection() -> String {
+        var lines: [String] = []
+        let controllers = NSApp.windows
+            .compactMap { $0.windowController as? TerminalController }
+        guard let controller = controllers.first,
+              controller.tabControllers.count > 1 else {
+            return "selection_comparison_unavailable"
+        }
+        let original = controller.selectedTabID
+        lines.append("=== before selection ===")
+        lines.append(contentsOf: iconStrokesInLiveWindows())
+        controller.selectVerticalTab(controller.tabControllers[1])
+        lines.append("=== after selection ===")
+        lines.append(contentsOf: iconStrokesInLiveWindows())
+        if let original {
+            controller.selectVerticalTab(controller.tabControllers[0])
+            _ = original
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private static func iconStrokesInLiveWindows() -> [String] {
         var lines: [String] = []
         for window in NSApp.windows {
             guard let contentView = window.contentView,

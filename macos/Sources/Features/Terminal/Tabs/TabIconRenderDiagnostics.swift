@@ -44,6 +44,12 @@ enum TabIconRenderDiagnostics {
         case hostPaletteSymbol = "9_host_palette_symbol"
         /// A palette symbol rendered into an image, without the host.
         case paletteSymbol = "10_palette_symbol"
+        /// A plain filled shape through the animation host. A shape that renders
+        /// normally proves the host itself is sound and only the symbol is
+        /// affected.
+        case hostPlainShape = "11_host_plain_shape"
+        /// A symbol rendered as an explicit template image through the host.
+        case hostTemplateImage = "12_host_template_image"
     }
 
     static var isEnabled: Bool {
@@ -100,10 +106,35 @@ enum TabIconRenderDiagnostics {
             )
         case .paletteSymbol:
             paletteSymbolView().frame(width: iconSize, height: iconSize)
+        case .hostPlainShape:
+            AgentLogoNativeBreath(
+                content: AnyView(
+                    Rectangle()
+                        .fill(Color.white)
+                        .frame(width: 12, height: 12)
+                ),
+                working: false
+            )
+        case .hostTemplateImage:
+            AgentLogoNativeBreath(
+                content: AnyView(
+                    Image(nsImage: templateSymbolImage())
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: iconSize, height: iconSize)
+                ),
+                working: false
+            )
         }
     }
 
     private static let iconSize: CGFloat = 18
+
+    /// The raw symbol image, still a template, rendered as a plain image.
+    private static func templateSymbolImage() -> NSImage {
+        NSImage(systemSymbolName: symbolNames[0], accessibilityDescription: nil)
+            ?? NSImage()
+    }
 
     /// A symbol rendered into an image with an explicit palette, so the colour
     /// does not depend on the surrounding SwiftUI environment.

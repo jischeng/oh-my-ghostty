@@ -397,6 +397,24 @@ struct EditorAppearanceTests {
         }
     }
 
+    /// Zed resolves captures by walking dot-separated prefixes from longest to
+    /// shortest, so a query can name `property.json_key` and still find the
+    /// `property` style. OMG inherits that rule; unknown names resolve to nil and
+    /// leave the grammar's own styling in place.
+    @Test func captureNamesFollowZedPrefixFallback() {
+        typealias Provider = EditorSyntaxHighlightProvider
+        #expect(Provider.slot(for: "property.json_key") == .type)
+        #expect(Provider.slot(for: "property") == .type)
+        #expect(Provider.slot(for: "string.escape") == .number)
+        #expect(Provider.slot(for: "string") == .string)
+        #expect(Provider.slot(for: "constant.builtin") == .variableBuiltin)
+        #expect(Provider.slot(for: "boolean") == .boolean)
+        // Slots the pinned theme cannot express must not be invented.
+        #expect(Provider.slot(for: "punctuation.delimiter") == nil)
+        #expect(Provider.slot(for: "punctuation.bracket") == nil)
+        #expect(Provider.slot(for: "unknown.deep.name") == nil)
+    }
+
     /// The bundled JSON and YAML grammars must produce non-empty highlights for
     /// plain objects. If this returns empty, the tree-sitter query failed to
     /// load or the grammar cannot parse the document — surface that as a

@@ -4,8 +4,20 @@ import CodeEditSourceEditor
 import CodeEditTextView
 import SwiftTreeSitter
 
-/// Layers text colors so the pinned editor's limited capture slots keep OMG's
-/// command/variable distinction.
+/// A Tree-sitter highlight provider that follows Zed's capture model.
+///
+/// Zed queries languages with dotted, hierarchy-aware capture names
+/// (`property.json_key`, `string.escape`, `punctuation.delimiter`) and resolves
+/// each name against the theme by walking dot-separated prefixes from longest to
+/// shortest. `CodeEditSourceEditor` instead funnels every capture through
+/// `CaptureName`, a fixed 21-case enum whose `fromString` returns nil for
+/// anything it does not know — so those captures are dropped and the tokens fall
+/// back to plain text.
+///
+/// This provider keeps the editor's pipeline but replaces the query and the
+/// name resolution for languages where the pinned grammars are too coarse. It
+/// runs the same query files Zed ships, keeps the dotted capture names intact,
+/// and maps them onto the slots the pinned theme can actually express.
 @MainActor
 final class EditorSyntaxHighlightProvider: HighlightProviding {
     private let parser = TreeSitterClient()
@@ -14,29 +26,130 @@ final class EditorSyntaxHighlightProvider: HighlightProviding {
         pattern: #"\b(?:self|cls|int|float|bool|str|bytes|tuple|list|dict|set|frozenset|object|None|True|False)\b"#
     )
 
-    // Structural key detection for JSON and YAML.
-    private var structuralParser: Parser?
-    private var structuralLanguage: TreeSitterLanguage?
-    private var cachedStructuralText: String?
-    private var cachedStructuralCaptures: [HighlightRange] = []
+    // Dotted-capture querying for languages whose stock highlighting is coarse.
+    private var dottedParser: Parser?
+    private var dottedQuery: Query?
+    private var cachedDottedText: String?
+    private var cachedDottedCaptures: [HighlightRange] = []
 
-    /// Node types whose `key` field should be painted as a key.
-    private static let keyedNodeTypes: Set<String> = [
-        "pair",                 // JSON
-        "block_mapping_pair",   // YAML
-        "flow_mapping",         // YAML
+    /// Capture names, in Zed's spelling, that this provider resolves itself.
+    ///
+    /// Keyed by the grammar this checkout ships, which is what the tree is
+    /// parsed with; the query text is copied from Zed's grammars so the two
+    /// stay comparable. Zed's own files also carry `@punctuation.*`, which the
+    /// pinned theme cannot express, so they are listed but mapped to nil.
+    private static let queries: [TreeSitterLanguage: String] = [
+        .json: """
+        (comment) @comment
+        (string) @string
+        (escape_sequence) @string.escape
+        (pair
+          key: (string) @property.json_key)
+        (number) @number
+        [
+          (true)
+          (false)
+        ] @boolean
+        (null) @constant.builtin
+        [
+          ","
+          ":"
+        ] @punctuation.delimiter
+        [
+          "{"
+          "}"
+          "["
+          "]"
+        ] @punctuation.bracket
+        """,
+        .yaml: """
+        (boolean_scalar) @boolean
+        (null_scalar) @constant.builtin
+        [
+          (double_quote_scalar)
+          (single_quote_scalar)
+          (block_scalar)
+          (string_scalar)
+        ] @string
+        (escape_sequence) @string.escape
+        [
+          (integer_scalar)
+          (float_scalar)
+        ] @number
+        (comment) @comment
+        [
+          (anchor_name)
+          (alias_name)
+          (tag)
+        ] @type
+        key: (flow_node
+          [
+            (plain_scalar
+              (string_scalar))
+            (double_quote_scalar)
+            (single_quote_scalar)
+          ] @property)
+        [
+          ","
+          "-"
+          ":"
+          ">"
+          "?"
+          "|"
+        ] @punctuation.delimiter
+        [
+          "["
+          "]"
+          "{"
+          "}"
+        ] @punctuation.bracket
+        [
+          "*"
+          "&"
+          "---"
+          "..."
+        ] @punctuation.special
+        """,
     ]
 
-    /// Literal and escape nodes that `CaptureName` has no slot for.
+    /// Adapts Zed's capture vocabulary to the editor's fixed slots.
     ///
-    /// The grammars capture JSON/YAML `true`, `false` and `null` as
-    /// `constant.builtin`, and string escapes as `escape`. `fromString` returns
-    /// nil for both names, so those captures are silently dropped and the
-    /// tokens render as plain text.
-    /// JSON names these nodes after the literal itself; YAML uses `_scalar`.
-    private static let booleanNodeTypes: Set<String> = ["true", "false", "boolean", "boolean_scalar"]
-    private static let nullNodeTypes: Set<String> = ["null", "null_scalar"]
-    private static let escapeNodeTypes: Set<String> = ["escape_sequence"]
+    /// Resolution walks the dotted prefixes longest-first, exactly as
+    /// `SyntaxTheme::highlight_id` does in Zed, so `property.json_key` finds
+    /// `property` and `string.escape` finds `string` when no more specific slot
+    /// exists. A nil result means the theme has nothing to say and the token
+    /// keeps whatever the grammar already gave it.
+    /// Exposed for tests; production callers go through the query path.
+    static func slot(for captureName: String) -> CaptureName? {
+        func lookup(_ name: String) -> CaptureName? {
+            switch name {
+            case "property", "property.json_key": return .type
+            case "string.escape": return .number
+            case "string": return .string
+            case "number": return .number
+            case "boolean": return .boolean
+            case "constant.builtin", "constant": return .variableBuiltin
+            case "comment": return .comment
+            case "type": return .type
+            case "keyword": return .keyword
+            case "function", "function.method": return .typeAlternate
+            case "variable": return .variable
+            default: return nil
+            }
+        }
+        var prefix = captureName
+        while true {
+            if let slot = lookup(prefix) { return slot }
+            guard let dot = prefix.lastIndex(of: ".") else { return nil }
+            prefix = String(prefix[prefix.startIndex..<dot])
+        }
+    }
+
+    /// Query result for one capture, or nil when the theme cannot express it.
+    private struct DottedCapture {
+        let range: NSRange
+        let capture: CaptureName?
+    }
 
     /// Normalizes a theme before it reaches the editor.
     ///
@@ -88,28 +201,17 @@ final class EditorSyntaxHighlightProvider: HighlightProviding {
     func setUp(textView: TextView, codeLanguage: CodeLanguage) {
         isPython = codeLanguage.id == .python
         parser.setUp(textView: textView, codeLanguage: codeLanguage)
-        // The JSON and YAML grammars capture keys as `string.special.key` and
-        // `property`, but `CaptureName.fromString` has no case for the former, so
-        // that capture is dropped and the grammar's plain `(string) @string` rule
-        // then paints the same node as a string value. Keys therefore had no way
-        // to look different from values. Keep a second parser so keys can be
-        // identified structurally and given their own slot.
-        if codeLanguage.id == .json || codeLanguage.id == .yaml,
-           let language = codeLanguage.language {
-            let structural = Parser()
-            if (try? structural.setLanguage(language)) != nil {
-                structuralParser = structural
-                structuralLanguage = codeLanguage.id
-            } else {
-                structuralParser = nil
-                structuralLanguage = nil
-            }
-        } else {
-            structuralParser = nil
-            structuralLanguage = nil
-        }
-        cachedStructuralText = nil
-        cachedStructuralCaptures = []
+        dottedParser = nil
+        dottedQuery = nil
+        cachedDottedText = nil
+        cachedDottedCaptures = []
+        guard let source = Self.queries[codeLanguage.id],
+              let language = codeLanguage.language,
+              let query = try? Query(language: language, data: Data(source.utf8)) else { return }
+        let dotted = Parser()
+        guard (try? dotted.setLanguage(language)) != nil else { return }
+        dottedParser = dotted
+        dottedQuery = query
     }
 
     func willApplyEdit(textView: TextView, range: NSRange) {
@@ -126,13 +228,9 @@ final class EditorSyntaxHighlightProvider: HighlightProviding {
         let source = textView.string as NSString
         parser.queryHighlightsFor(textView: textView, range: range) { [self] result in
             completion(result.map { highlights in
-                var resolved = Self.resolvedHighlights(highlights)                // Give structural keys their own slot. The grammars report keys
-                // as plain `string` (JSON) or `property` (YAML), and `property`
-                // maps to the same color as values, so keys and values are
-                // indistinguishable without this pass.
-                if structuralLanguage != nil, NSMaxRange(range) <= source.length {
-                    resolved = Self.applyStructuralCaptures(resolved, from: structuralCaptures(in: source),
-                                                            in: range)
+                var resolved = Self.resolvedHighlights(highlights)
+                if dottedQuery != nil, NSMaxRange(range) <= source.length {
+                    resolved = Self.mergeDottedCaptures(resolved, from: dottedCaptures(in: source), in: range)
                 }
                 if isPython, NSMaxRange(range) <= source.length {
                     // The pinned capture enum drops constant.builtin. Add the
@@ -153,55 +251,57 @@ final class EditorSyntaxHighlightProvider: HighlightProviding {
         }
     }
 
-    /// Structural captures for the current buffer, cached per document text.
-    private func structuralCaptures(in source: NSString) -> [HighlightRange] {
-        if let cachedStructuralText, cachedStructuralText == source as String {
-            return cachedStructuralCaptures
+    /// Runs the dotted query over the buffer, cached per document text.
+    private func dottedCaptures(in source: NSString) -> [DottedCapture] {
+        if let cachedDottedText, cachedDottedText == source as String {
+            return cachedDottedCaptures.map { DottedCapture(range: $0.range, capture: $0.capture) }
         }
-        guard let structuralParser, let tree = structuralParser.parse(source as String) else { return [] }
-        var captured: [HighlightRange] = []
-        Self.collectStructuralCaptures(node: tree.rootNode, into: &captured)
-        cachedStructuralText = source as String
-        cachedStructuralCaptures = captured
-        return captured
-    }
-
-    private static func collectStructuralCaptures(node: Node?, into captured: inout [HighlightRange]) {
-        guard let node else { return }
-        if let type = node.nodeType {
-            if keyedNodeTypes.contains(type),
-               let key = node.child(byFieldName: "key"), key.isNamed, key.range.length > 0 {
-                captured.append(HighlightRange(range: key.range, capture: .type))
-            } else if booleanNodeTypes.contains(type) {
-                captured.append(HighlightRange(range: node.range, capture: .boolean))
-            } else if nullNodeTypes.contains(type) {
-                captured.append(HighlightRange(range: node.range, capture: .variableBuiltin))
-            } else if escapeNodeTypes.contains(type) {
-                captured.append(HighlightRange(range: node.range, capture: .number))
+        guard let dottedParser, let dottedQuery,
+              let tree = dottedParser.parse(source as String) else { return [] }
+        // Zed's queries deliberately capture the same node twice: a JSON key is
+        // both `(string) @string` and `key: (string) @property.json_key`. Keep the
+        // most specific name per range so the key slot wins over the string slot,
+        // mirroring the prefix walk in `slot(for:)`.
+        var best: [NSRange: (depth: Int, capture: CaptureName?)] = [:]
+        for match in dottedQuery.execute(in: tree) {
+            for capture in match.captures {
+                guard let name = capture.name else { continue }
+                let depth = name.split(separator: ".").count
+                if let existing = best[capture.node.range], existing.depth >= depth { continue }
+                best[capture.node.range] = (depth, Self.slot(for: name))
             }
         }
-        for index in 0..<node.childCount {
-            collectStructuralCaptures(node: node.child(at: index), into: &captured)
+        let captures = best.map { DottedCapture(range: $0.key, capture: $0.value.capture) }
+            .sorted { $0.range.location < $1.range.location }
+        cachedDottedText = source as String
+        cachedDottedCaptures = captures.compactMap { capture in
+            capture.capture.map { HighlightRange(range: capture.range, capture: $0) }
         }
+        return captures
     }
 
-    /// Merges structural captures over the grammar's own results.
+    /// Overlays the dotted query's captures on the stock ones.
     ///
-    /// A key is also a string node, so the stock captures cover the exact same
-    /// ranges. Those have to be dropped first: the style container resolves
-    /// same-length runs by provider priority, not by the capture we send, so
-    /// leaving both would let `@string` win.
-    private static func applyStructuralCaptures(_ resolved: [HighlightRange],
-                                                from structural: [HighlightRange],
-                                                in range: NSRange) -> [HighlightRange] {
-        let scoped = structural.filter { NSIntersectionRange($0.range, range).length > 0 }
+    /// The dotted query is authoritative where it speaks: a key is also a string
+    /// node, so the stock run covers the same range and the style container
+    /// would otherwise resolve the tie by provider order, not by our intent.
+    /// Captures that map to no slot are skipped so the grammar keeps styling
+    /// those tokens.
+    private static func mergeDottedCaptures(_ resolved: [HighlightRange],
+                                            from dotted: [DottedCapture],
+                                            in range: NSRange) -> [HighlightRange] {
+        let scoped = dotted.filter {
+            $0.capture != nil && NSIntersectionRange($0.range, range).length > 0
+        }
         guard !scoped.isEmpty else { return resolved }
         let shadowed = Set(scoped.map { NSValue(range: $0.range) })
         var merged = resolved.filter { highlight in
-            !shadowed.contains(NSValue(range: highlight.range))
-                && !scoped.contains { NSIntersectionRange($0.range, highlight.range).length > 0 }
+            guard !shadowed.contains(NSValue(range: highlight.range)) else { return false }
+            return !scoped.contains { NSIntersectionRange($0.range, highlight.range).length > 0 }
         }
-        merged.append(contentsOf: scoped)
+        merged.append(contentsOf: scoped.map {
+            HighlightRange(range: $0.range, capture: $0.capture ?? .string)
+        })
         return merged.sorted { $0.range.location < $1.range.location }
     }
 }

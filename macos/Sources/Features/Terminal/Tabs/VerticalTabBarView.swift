@@ -1974,20 +1974,26 @@ private struct GhosttyTabIconView: View {
         Group {
             switch icon {
             case .systemSymbol(let name):
+                // The tint has to sit on the symbol itself. A foreground style
+                // applied to the enclosing group does not reach a resizable
+                // system symbol, which then draws its untinted template black
+                // instead of the requested colour.
                 Image(systemName: name)
                     .resizable()
                     .scaledToFit()
+                    .foregroundStyle(color)
             case .asset(let name):
                 Image(name)
                     .resizable()
                     .scaledToFit()
+                    .foregroundStyle(color)
             case .image(let image):
                 Image(nsImage: image)
                     .resizable()
                     .scaledToFit()
+                    .foregroundStyle(color)
             }
         }
-        .foregroundStyle(color)
         .frame(width: size ?? settings.tabIconSize, height: size ?? settings.tabIconSize)
     }
 }

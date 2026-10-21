@@ -742,7 +742,7 @@ class AppDelegate: NSObject,
 
     private func localEventKeyDown(_ event: NSEvent) -> NSEvent? {
         // Opt-in tab icon diagnostics take a sample of the live window.
-        if TabIconRenderDiagnostics.isEnabled,
+        if MainActor.assumeIsolated({ TabIconRenderDiagnostics.isEnabled }),
            event.keyCode == 0x21, // keypad 9
            event.modifierFlags.contains(.control) {
             MainActor.assumeIsolated { TabIconRenderDiagnostics.captureAppend() }

@@ -72,11 +72,34 @@ enum TabIconRenderDiagnostics {
         )
         let url = directory.appendingPathComponent("report.txt")
         write(url: url, text: "=== launch ===\n" + capture())
+        writeSidebarCapture(directory: directory)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
             MainActor.assumeIsolated {
                 write(url: url, text: "\n=== after 3s ===\n" + capture())
+                writeSidebarCapture(directory: directory)
             }
+        }
+    }
+
+    /// Saves the captured sidebar column as a PNG so the sampled bands can be
+    /// compared with what the user sees.
+    private static func writeSidebarCapture(directory: URL) {
+        for (index, window) in NSApp.windows.enumerated() {
+            guard let contentView = window.contentView,
+                  contentView.bounds.width > 0,
+                  contentView.bounds.height > 0 else { continue }
+            guard let rep = contentView.bitmapImageRepForCachingDisplay(
+                in: contentView.bounds
+            ) else { continue }
+            contentView.cacheDisplay(in: contentView.bounds, to: rep)
+            guard let data = rep.representation(using: .png, properties: [:]) else { continue }
+            let url = directory.appendingPathComponent("sidebar-\(index).png")
+            try? data.write(to: url, options: .atomic)
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: url.path
+            )
         }
     }
 

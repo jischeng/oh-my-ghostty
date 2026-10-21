@@ -1552,7 +1552,19 @@ extension Ghostty {
             default: return
             }
 
-            // If we're in the middle of a preedit, don't do anything with mods.
+            // Mouse modifiers must stay current even during IME preedit. Only
+            // terminal key events are suppressed; otherwise releasing Command
+            // leaves the core's link hover active until another modifier event.
+            defer {
+                if let surfaceModel {
+                    let pos = mouseLocationInSurface ?? NSPoint(x: -1, y: -1)
+                    surfaceModel.sendMousePos(.init(
+                        x: pos.x,
+                        y: pos.y >= 0 ? (frame.height - pos.y) : -1,
+                        mods: .init(nsFlags: event.modifierFlags)
+                    ))
+                }
+            }
             if hasMarkedText() { return }
 
             // The keyAction function will do this AGAIN below which sucks to repeat
@@ -1586,15 +1598,6 @@ extension Ghostty {
             }
 
             _ = keyAction(action, event: event)
-
-            if let surfaceModel {
-                let pos = mouseLocationInSurface ?? NSPoint(x: -1, y: -1)
-                surfaceModel.sendMousePos(.init(
-                    x: pos.x,
-                    y: pos.y >= 0 ? (frame.height - pos.y) : -1,
-                    mods: .init(nsFlags: event.modifierFlags)
-                ))
-            }
         }
 
         private func keyAction(

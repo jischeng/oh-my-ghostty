@@ -919,9 +919,12 @@ pub const Surface = struct {
         // mouse-hide-while-typing is enabled (commonly seen with TUI apps
         // like Zellij that frequently update the title). To prevent incorrect
         // behavior, we only continue with callback logic if the cursor has
-        // actually moved.
+        // actually moved or its modifiers changed. Modifier-only updates must
+        // reach the core so Command-link hover clears during IME preedit,
+        // when the host intentionally suppresses terminal key events.
         if (@abs(self.cursor_pos.x - pos.x) < 1 and
-            @abs(self.cursor_pos.y - pos.y) < 1) return;
+            @abs(self.cursor_pos.y - pos.y) < 1 and
+            self.core_surface.mouse.mods.equal(mods.binding())) return;
 
         self.cursor_pos = pos;
 

@@ -132,6 +132,48 @@ struct TerminalLinkHoverTests {
         try await Task.sleep(for: .milliseconds(100))
     }
 
+    @Test(arguments: [false, true])
+    func releasingCommandDuringPreeditClearsLinkHover(split: Bool) async throws {
+        // OSC8 requires Command independently of user-configured URL regexes.
+        let controller = try makeController(split: split,
+            command: "/bin/sh -c 'printf \"\\033]8;;https://example.com\\007hover-target\\033]8;;\\007\\n\"; sleep 30'")
+        defer { controller.window?.delegate = nil; controller.window?.close() }
+        let surface = try #require(controller.focusedSurface)
+        for _ in 0..<100 {
+            if surface.cachedScreenContents.get().contains("hover-target") { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try #require(surface.cachedScreenContents.get().contains("hover-target"))
+        surface.setMarkedText("zhong", selectedRange: NSRange(location: 5, length: 0),
+                              replacementRange: NSRange(location: NSNotFound, length: 0))
+        try #require(surface.hasMarkedText())
+        // Locate the rendered link without assuming the user's font or padding.
+        var location = NSPoint.zero
+        for offset in stride(from: 5.0, through: 150.0, by: 5.0) {
+            location = surface.convert(NSPoint(x: 80, y: surface.bounds.height - offset), to: nil)
+            let move = try #require(NSEvent.mouseEvent(with: .mouseMoved, location: location,
+                modifierFlags: .command, timestamp: 0, windowNumber: surface.window?.windowNumber ?? 0,
+                context: nil, eventNumber: 0, clickCount: 0, pressure: 0))
+            surface.mouseMoved(with: move)
+            try await Task.sleep(for: .milliseconds(20))
+            if surface.isHoveringLink { break }
+        }
+        try #require(surface.isHoveringLink)
+        let release = try #require(NSEvent.keyEvent(with: .flagsChanged, location: location,
+            modifierFlags: [], timestamp: 1, windowNumber: surface.window?.windowNumber ?? 0,
+            context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 0x37))
+        surface.flagsChanged(with: release)
+        for _ in 0..<100 {
+            if !surface.isHoveringLink && surface.hoverUrl == nil { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(!surface.isHoveringLink)
+        #expect(surface.hoverUrl == nil)
+        #expect(surface.hasMarkedText(), "Updating hover must not cancel IME composition")
+        surface.unmarkText()
+        #expect(!surface.isHoveringLink)
+    }
+
     @Test(.tags(.interactiveDesktop))
     func commandHoverRemainsStable() async throws {
         for split in [false, true] {

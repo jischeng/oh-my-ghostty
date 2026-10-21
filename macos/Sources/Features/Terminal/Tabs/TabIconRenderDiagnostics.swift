@@ -37,6 +37,9 @@ enum TabIconRenderDiagnostics {
         case fullGroupTint = "6_full_group_tint"
         /// The full production pipeline with the symbol tint.
         case fullSymbolTint = "7_full_symbol_tint"
+        /// The production host with the hosting view inheriting the window
+        /// appearance, so the symbol is drawn in the window's colour context.
+        case hostAppearance = "8_host_appearance"
     }
 
     static var isEnabled: Bool {
@@ -55,7 +58,6 @@ enum TabIconRenderDiagnostics {
             }
         }
         .frame(height: 22)
-        .accessibilityIdentifier("omg.tabIconDiagnostics.probe")
     }
 
     @ViewBuilder
@@ -68,11 +70,11 @@ enum TabIconRenderDiagnostics {
             .frame(width: 18, height: 18)
         let symbolTinted = symbolImage
             .foregroundStyle(Color.secondary)
-            .frame(width: 18, height: 18)
+            .frame(width: 18, height: iconSize)
 
         switch variant {
         case .bareSymbol:
-            symbolImage.frame(width: 18, height: 18)
+            symbolImage.frame(width: iconSize, height: iconSize)
         case .symbolTint:
             symbolTinted
         case .groupTint:
@@ -85,8 +87,12 @@ enum TabIconRenderDiagnostics {
             group.modifier(AgentLogoStatus(activity: nil, focused: false))
         case .fullSymbolTint:
             symbolTinted.modifier(AgentLogoStatus(activity: nil, focused: false))
+        case .hostAppearance:
+            AppearanceInheritingHost(content: AnyView(group))
         }
     }
+
+    private static let iconSize: CGFloat = 18
 
     /// Writes a report to the application support directory.
     static func start() {
@@ -113,26 +119,6 @@ enum TabIconRenderDiagnostics {
                 write(url: url, text: "\n=== after 4s ===\n" + capture())
                 writeSidebarCapture(directory: directory)
             }
-        }
-    }
-
-    /// Saves the captured window so the probe strip can be inspected.
-    private static func writeSidebarCapture(directory: URL) {
-        for (index, window) in NSApp.windows.enumerated() {
-            guard let contentView = window.contentView,
-                  contentView.bounds.width > 0,
-                  contentView.bounds.height > 0 else { continue }
-            guard let rep = contentView.bitmapImageRepForCachingDisplay(
-                in: contentView.bounds
-            ) else { continue }
-            contentView.cacheDisplay(in: contentView.bounds, to: rep)
-            guard let data = rep.representation(using: .png, properties: [:]) else { continue }
-            let url = directory.appendingPathComponent("sidebar-\(index).png")
-            try? data.write(to: url, options: .atomic)
-            try? FileManager.default.setAttributes(
-                [.posixPermissions: 0o600],
-                ofItemAtPath: url.path
-            )
         }
     }
 
@@ -274,6 +260,26 @@ enum TabIconRenderDiagnostics {
         return darkest
     }
 
+    /// Saves the captured window so the probe strip can be inspected.
+    private static func writeSidebarCapture(directory: URL) {
+        for (index, window) in NSApp.windows.enumerated() {
+            guard let contentView = window.contentView,
+                  contentView.bounds.width > 0,
+                  contentView.bounds.height > 0 else { continue }
+            guard let rep = contentView.bitmapImageRepForCachingDisplay(
+                in: contentView.bounds
+            ) else { continue }
+            contentView.cacheDisplay(in: contentView.bounds, to: rep)
+            guard let data = rep.representation(using: .png, properties: [:]) else { continue }
+            let url = directory.appendingPathComponent("sidebar-\(index).png")
+            try? data.write(to: url, options: .atomic)
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: url.path
+            )
+        }
+    }
+
     private static func write(url: URL, text: String) {
         let data = Data(text.utf8)
         try? data.write(to: url, options: .atomic)
@@ -289,4 +295,58 @@ enum TabIconRenderDiagnostics {
     static func capture() -> String { "" }
     @ViewBuilder static func probeStrip() -> some View { EmptyView() }
 #endif
+}
+
+/// A hosting view whose own hosting view inherits the window appearance, the
+/// candidate fix for a symbol that loses its tint inside the native
+/// animation host.
+private struct AppearanceInheritingHost: NSViewRepresentable {
+    let content: AnyView
+
+    func makeNSView(context: Context) -> AppearanceInheritingHostView {
+        AppearanceInheritingHostView()
+    }
+
+    func updateNSView(_ view: AppearanceInheritingHostView, context: Context) {
+        view.setContent(AnyView(content.environment(\.self, context.environment)))
+        view.inheritAppearance()
+    }
+
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        nsView: AppearanceInheritingHostView,
+        context: Context
+    ) -> CGSize? {
+        nsView.hostingView.fittingSize
+    }
+
+    static func dismantleNSView(_ view: AppearanceInheritingHostView, coordinator: Void) {}
+}
+
+private final class AppearanceInheritingHostView: NSView {
+    let hostingView = NSHostingView(rootView: AnyView(EmptyView()))
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        hostingView.frame = bounds
+        hostingView.autoresizingMask = [.width, .height]
+        addSubview(hostingView)
+    }
+
+    convenience init() { self.init(frame: .zero) }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func setContent(_ content: AnyView) {
+        hostingView.rootView = content
+    }
+
+    /// Copies the window appearance onto the hosting view so the symbol is
+    /// drawn in the window's colour context.
+    func inheritAppearance() {
+        guard let appearance = window?.appearance else { return }
+        if hostingView.appearance?.name != appearance.name {
+            hostingView.appearance = appearance
+        }
+    }
 }

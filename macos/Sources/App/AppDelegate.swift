@@ -231,6 +231,7 @@ class AppDelegate: NSObject,
         }
         super.init()
         MainActor.assumeIsolated { DevMemoryDiagnostics.start() }
+        MainActor.assumeIsolated { TabIconRenderDiagnostics.start() }
 
         ghostty.delegate = self
         let appearanceObservation = MainActor.assumeIsolated {

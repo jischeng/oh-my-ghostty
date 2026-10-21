@@ -106,11 +106,33 @@ enum TabIconRenderDiagnostics {
         )
         let url = directory.appendingPathComponent("report.txt")
         write(url: url, text: "=== launch ===\n" + capture())
+        writeSidebarCapture(directory: directory)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
             MainActor.assumeIsolated {
                 write(url: url, text: "\n=== after 4s ===\n" + capture())
+                writeSidebarCapture(directory: directory)
             }
+        }
+    }
+
+    /// Saves the captured window so the probe strip can be inspected.
+    private static func writeSidebarCapture(directory: URL) {
+        for (index, window) in NSApp.windows.enumerated() {
+            guard let contentView = window.contentView,
+                  contentView.bounds.width > 0,
+                  contentView.bounds.height > 0 else { continue }
+            guard let rep = contentView.bitmapImageRepForCachingDisplay(
+                in: contentView.bounds
+            ) else { continue }
+            contentView.cacheDisplay(in: contentView.bounds, to: rep)
+            guard let data = rep.representation(using: .png, properties: [:]) else { continue }
+            let url = directory.appendingPathComponent("sidebar-\(index).png")
+            try? data.write(to: url, options: .atomic)
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: url.path
+            )
         }
     }
 
@@ -157,37 +179,50 @@ enum TabIconRenderDiagnostics {
         return lines
     }
 
-    /// Locates the probe strip in the captured window and measures the darkest
-    /// pixel of each variant cell. The strip is drawn at the top of the
-    /// sidebar, so its cells are found by scanning for a row of small icons.
+    /// Locates the probe strip in the captured window and measures the
+    /// darkest pixel of each variant cell. The strip sits directly under the
+    /// sidebar header, so its row is found by scanning for a run of small
+    /// clusters near the top of the sidebar.
     private static func probeStrokes(in rep: NSBitmapImageRep) -> [String] {
         let cellWidth = 22
         let searchHeight = min(400, rep.pixelsHigh)
-        let searchWidth = min(200, rep.pixelsWide)
-        var bestRow = -1
-        var bestCount = 0
+        let searchWidth = min(240, rep.pixelsWide)
+        let background = sidebarBackground(in: rep)
+
+        // The probe row is the first row below the header that holds several
+        // separated clusters of non-background pixels.
+        var probeRow = -1
         for y in 0..<searchHeight {
-            var count = 0
+            var clusters = 0
+            var inCluster = false
             for x in 0..<searchWidth {
                 guard let color = rep.colorAt(x: x, y: y), color.alphaComponent > 0.5 else { continue }
-                // The probe sits on the sidebar background, so a cell is a
-                // small cluster of pixels that differ from the background.
-                if abs(color.redComponent - 0.133) + abs(color.greenComponent - 0.141)
-                    + abs(color.blueComponent - 0.165) > 0.05 {
-                    count += 1
+                let distance = abs(color.redComponent - background.red)
+                    + abs(color.greenComponent - background.green)
+                    + abs(color.blueComponent - background.blue)
+                if distance > 0.12 {
+                    if !inCluster { clusters += 1 }
+                    inCluster = true
+                } else {
+                    inCluster = false
                 }
             }
-            if count > bestCount {
-                bestCount = count
-                bestRow = y
+            if clusters >= Variant.allCases.count {
+                probeRow = y
+                break
             }
         }
-        guard bestRow >= 0, bestCount > 0 else { return [] }
-        var lines: [String] = ["probeRow=\(bestRow) cells=\(Variant.allCases.count)"]
+        guard probeRow >= 0 else { return [] }
+
+        var lines: [String] = ["probeRow=\(probeRow) cells=\(Variant.allCases.count)"]
         for (index, variant) in Variant.allCases.enumerated() {
             let x0 = index * cellWidth
+            guard x0 < rep.pixelsWide else { continue }
             guard let stroke = darkestPixel(
-                in: rep, xRange: x0..<min(x0 + cellWidth, rep.pixelsWide), y: bestRow
+                in: rep,
+                xRange: x0..<min(x0 + cellWidth, rep.pixelsWide),
+                y: probeRow,
+                background: background
             ) else { continue }
             lines.append(
                 "variant=\(variant.rawValue) stroke=rgb(\(stroke.red),\(stroke.green),"
@@ -197,16 +232,33 @@ enum TabIconRenderDiagnostics {
         return lines
     }
 
+    /// The sidebar background colour, sampled from a quiet corner.
+    private static func sidebarBackground(
+        in rep: NSBitmapImageRep
+    ) -> (red: CGFloat, green: CGFloat, blue: CGFloat) {
+        let x = min(4, max(0, rep.pixelsWide - 1))
+        let y = min(4, max(0, rep.pixelsHigh - 1))
+        if let color = rep.colorAt(x: x, y: y) {
+            return (color.redComponent, color.greenComponent, color.blueComponent)
+        }
+        return (0.133, 0.141, 0.165)
+    }
+
     private static func darkestPixel(
         in rep: NSBitmapImageRep,
         xRange: Range<Int>,
-        y: Int
+        y: Int,
+        background: (red: CGFloat, green: CGFloat, blue: CGFloat)
     ) -> (red: Int, green: Int, blue: Int)? {
         var darkest: (red: Int, green: Int, blue: Int)?
         var darkestLuminance = Double.greatestFiniteMagnitude
         for x in xRange {
             for yy in max(0, y - 12)...min(rep.pixelsHigh - 1, y + 12) {
                 guard let color = rep.colorAt(x: x, y: yy), color.alphaComponent > 0.5 else { continue }
+                let distance = abs(color.redComponent - background.red)
+                    + abs(color.greenComponent - background.green)
+                    + abs(color.blueComponent - background.blue)
+                guard distance > 0.12 else { continue }
                 let luminance = Double(
                     color.redComponent + color.greenComponent + color.blueComponent
                 )

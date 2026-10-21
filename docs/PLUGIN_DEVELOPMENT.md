@@ -848,9 +848,9 @@ Settings can export an auditable Python 3 installer for explicit transfer and
 execution on that account; OMG does not log in or silently modify remote dotfiles.
 
 Agent glyphs use assets from LobeHub `lobe-icons` (MIT) plus the projects' own
-published marks, including Termio, OMP/oh-my-pi, Reasonix, Charm Crush, and
-Factory Droid. Product names and marks remain trademarks of their respective
-owners; the assets do not imply vendor endorsement.
+published marks, including Termio, OMP/oh-my-pi, Reasonix, Charm Crush, Factory
+Droid, and Nous Research Hermes. Product names and marks remain trademarks of
+their respective owners; the assets do not imply vendor endorsement.
 
 An agent manifest declares icons in two roles:
 

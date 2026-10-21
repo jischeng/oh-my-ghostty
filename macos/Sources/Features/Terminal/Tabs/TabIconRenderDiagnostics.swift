@@ -40,6 +40,10 @@ enum TabIconRenderDiagnostics {
         /// The production host with the hosting view inheriting the window
         /// appearance, so the symbol is drawn in the window's colour context.
         case hostAppearance = "8_host_appearance"
+        /// A palette symbol rendered into an image, through the animation host.
+        case hostPaletteSymbol = "9_host_palette_symbol"
+        /// A palette symbol rendered into an image, without the host.
+        case paletteSymbol = "10_palette_symbol"
     }
 
     static var isEnabled: Bool {
@@ -89,10 +93,33 @@ enum TabIconRenderDiagnostics {
             symbolTinted.modifier(AgentLogoStatus(activity: nil, focused: false))
         case .hostAppearance:
             AppearanceInheritingHost(content: AnyView(group))
+        case .hostPaletteSymbol:
+            AgentLogoNativeBreath(
+                content: AnyView(paletteSymbolView().frame(width: iconSize, height: iconSize)),
+                working: false
+            )
+        case .paletteSymbol:
+            paletteSymbolView().frame(width: iconSize, height: iconSize)
         }
     }
 
     private static let iconSize: CGFloat = 18
+
+    /// A symbol rendered into an image with an explicit palette, so the colour
+    /// does not depend on the surrounding SwiftUI environment.
+    private static func paletteSymbolView() -> some View {
+        let image = NSImage(systemSymbolName: symbolNames[0], accessibilityDescription: nil)?
+            .withSymbolConfiguration(
+                NSImage.SymbolConfiguration(paletteColors: [
+                    NSColor.secondaryLabelColor
+                ])
+            )
+        return Group {
+            if let image {
+                Image(nsImage: image).resizable().scaledToFit()
+            }
+        }
+    }
 
     /// Writes a report to the application support directory.
     static func start() {

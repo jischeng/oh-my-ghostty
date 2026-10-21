@@ -21,6 +21,18 @@ struct TerminalPathOpenerTests {
         #expect(TerminalPathTarget.path("~/README.md", directory: "/remote", isRemote: true) == nil)
     }
 
+    @Test func standaloneFullStopIsNotAPathLink() {
+        for remote in [false, true] {
+            for value in [".", "'.'", "\".\"", ".:12"] {
+                #expect(TerminalPathTarget.path(value, directory: "/project", isRemote: remote) == nil)
+            }
+            for value in ["./", "./README.md", ".gitignore", "../README.md"] {
+                #expect(TerminalPathTarget.path(value, directory: "/project", isRemote: remote) != nil)
+            }
+            #expect(TerminalPathTarget.path("file:///project/", directory: "/project", isRemote: remote) == "/project")
+        }
+    }
+
     @Test func remoteLinksIgnoreLocalHistoryAndResolveChineseOSC8Targets() {
         let remote = "/home/user/deeproute/mapping.worktrees/trajectory_server_to_paimon"
         for history in [nil, "", "/Users/me/local", "file:///Users/me/local"] as [String?] {

@@ -30,6 +30,9 @@ enum TerminalPathTarget {
                 of: ":\\d+(?::\\d+)?$", with: "", options: .regularExpression
             )
             guard URLComponents(string: withoutLocation)?.scheme == nil else { return nil }
+            // A prose full stop must not become a link to the pane's cwd.
+            // Explicit paths such as ./ and ./README.md remain valid.
+            guard withoutLocation != "." else { return nil }
             path = withoutLocation
         }
         guard !path.isEmpty, !path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {

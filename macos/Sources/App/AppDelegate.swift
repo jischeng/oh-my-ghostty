@@ -231,7 +231,6 @@ class AppDelegate: NSObject,
         }
         super.init()
         MainActor.assumeIsolated { DevMemoryDiagnostics.start() }
-        MainActor.assumeIsolated { TabIconRenderDiagnostics.start() }
 
         ghostty.delegate = self
         let appearanceObservation = MainActor.assumeIsolated {
@@ -741,13 +740,6 @@ class AppDelegate: NSObject,
     }
 
     private func localEventKeyDown(_ event: NSEvent) -> NSEvent? {
-        // Opt-in tab icon diagnostics take a sample of the live window.
-        if MainActor.assumeIsolated({ TabIconRenderDiagnostics.isEnabled }),
-           event.keyCode == 0x21, // keypad 9
-           event.modifierFlags.contains(.control) {
-            MainActor.assumeIsolated { TabIconRenderDiagnostics.captureAppend() }
-            return nil
-        }
         if MainActor.assumeIsolated({ EditorCommandRouter.shared.handle(event) }) { return nil }
         // If the tab overview is visible and escape is pressed, close it.
         // This can't POSSIBLY be right and is probably a FirstResponder problem

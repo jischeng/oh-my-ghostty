@@ -734,11 +734,6 @@ struct TerminalTabSidebarView: View {
         VStack(spacing: 0) {
             header
 
-            if TabIconRenderDiagnostics.isEnabled {
-                TabIconRenderDiagnostics.probeStrip()
-                    .padding(.horizontal, 12)
-            }
-
             ScrollView {
                 LazyVStack(spacing: 2) {
                     ForEach(groups) { group in

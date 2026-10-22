@@ -411,6 +411,12 @@ final class AgentQuickInputModel: ObservableObject {
         requestFocus()
     }
 
+    /// Agent imports are snapshots, unlike explicit history insertion.
+    func importAgentDraft(_ text: String) {
+        guard !text.isEmpty, !draft.hasPrefix(text) else { return }
+        useHistoryText(text)
+    }
+
     func togglePinned() {
         if let globalPresentation { globalPresentation.togglePinned() } else { isPinned.toggle() }
     }
@@ -841,6 +847,10 @@ struct AgentQuickInputDock<Content: View>: View {
             .animation(AgentQuickInputMotion.queue, value: presentedQueueIDs)
         }
         .clipped()
+        // Keep the reservation and overlay in the same non-animated layout
+        // transaction. Otherwise a parent animation can move the bottom edge
+        // while the composer itself is already visible at its final height.
+        .animation(nil, value: model.isPresented)
     }
 
     private var presentedQueueSurfaceID: UUID? {

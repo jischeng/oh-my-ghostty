@@ -90,6 +90,9 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
             DispatchQueue.main.async { [weak editor, weak scrollView] in
                 guard let editor, let scrollView, !scrollView.isHidden,
                       let window = editor.window else { return }
+                // Resolve the dock's final reservation before AppKit scrolls
+                // the newly focused editor into view.
+                window.contentView?.layoutSubtreeIfNeeded()
                 window.makeFirstResponder(editor)
             }
         }

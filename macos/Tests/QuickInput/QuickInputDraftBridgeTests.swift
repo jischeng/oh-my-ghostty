@@ -83,6 +83,23 @@ struct QuickInputDraftBridgeTests {
         #expect(try String(contentsOf: root.appendingPathComponent("keys"), encoding: .utf8).contains("\u{1b}[103;5u"))
     }
 
+    @Test func agentSnapshotDoesNotAppendExistingPrefix() {
+        let model = AgentQuickInputModel()
+        model.present(for: UUID())
+        model.draft = "你好\ncontinued"
+        let focus = model.focusRequestID
+        for snapshot in ["", "你好", "你好\ncontinued"] {
+            model.importAgentDraft(snapshot)
+            #expect(model.draft == "你好\ncontinued")
+            #expect(model.focusRequestID == focus)
+        }
+        model.importAgentDraft("different")
+        #expect(model.draft == "你好\ncontinued\ndifferent")
+        model.draft = ""
+        model.importAgentDraft("first\nsecond")
+        #expect(model.draft == "first\nsecond")
+    }
+
     @Test func automaticallySelectsKnownAndGenericShortcuts() {
         for agent in [SupportedAgent.pi, .codex, .claude] {
             #expect(QuickInputDraftBridge.shortcut(setting: "auto", agent: agent) == "control+g")

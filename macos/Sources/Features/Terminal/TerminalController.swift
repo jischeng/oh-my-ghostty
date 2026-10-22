@@ -418,14 +418,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let shortcut = QuickInputDraftBridge.shortcut(setting: setting, agent: agent)
         // Auto mode must not send editor keys to an ordinary shell prompt.
         guard setting != "auto" || agent != nil || agentActivities[surface.id] != nil else {
-            presentQuickInput(for: surface, requestFocus: true)
             return
         }
         guard !SecureInput.shared.enabled,
               let keys = QuickInputDraftBridge.keys(shortcut),
               let terminal = surface.surfaceModel,
               let request = try? QuickInputDraftBridge.shared.begin(surfaceID: surface.id) else {
-            presentQuickInput(for: surface, requestFocus: true)
             return
         }
         quickInputDraftImportTask = Task { @MainActor [weak self, weak surface] in
@@ -442,7 +440,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                           self.surfaceTree.first(where: { $0.id == surface.id }) != nil else { return }
                     if let text = try QuickInputDraftBridge.shared.receive(request) {
                         guard !SecureInput.shared.enabled else { return }
-                        self.quickInputModel.useHistoryText(text)
+                        self.quickInputModel.importAgentDraft(text)
                         self.quickInputModel.setStatusMessage("Draft copied. Original agent input is still present.")
                         return
                     }

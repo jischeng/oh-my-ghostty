@@ -43,12 +43,14 @@ struct QuickInputDraftBridgeTests {
         import os, tty, subprocess
         from pathlib import Path
         tty.setraw(0)
+        # Pi requests Kitty's disambiguated keyboard encoding.
+        os.write(1, b"\x1b[>1u")
         root = Path(__file__).parent
         (root / "ready").touch()
         while True:
             data = os.read(0, 64)
             (root / "keys").write_bytes(data)
-            if b"\x07" in data:
+            if b"\x1b[103;5u" in data:
                 draft = root / "draft"
                 draft.write_text("中文 agent draft\nsecond line")
                 subprocess.run([os.environ["EDITOR"], str(draft)], check=True)
@@ -78,7 +80,7 @@ struct QuickInputDraftBridgeTests {
             try await Task.sleep(for: .milliseconds(100))
         }
         #expect(controller.quickInputModel.draft == "中文 agent draft\nsecond line")
-        #expect(try Data(contentsOf: root.appendingPathComponent("keys")).contains(7))
+        #expect(try String(contentsOf: root.appendingPathComponent("keys"), encoding: .utf8).contains("\u{1b}[103;5u"))
     }
 
     @Test func automaticallySelectsKnownAndGenericShortcuts() {

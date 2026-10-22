@@ -20,7 +20,8 @@ final class QuickInputDraftBridge {
             let value = part.trimmingCharacters(in: .whitespaces).lowercased()
             if index > 0, value.range(of: "^[a-z]$", options: .regularExpression) != nil,
                let key = Ghostty.Input.Key(rawValue: value) {
-                result.append(.init(key: key, text: value))
+                result.append(.init(key: key, text: value,
+                                    unshiftedCodepoint: value.unicodeScalars.first?.value ?? 0))
                 continue
             }
             guard let shortcut = OMGKeyboardShortcut(storageValue: value),
@@ -32,7 +33,8 @@ final class QuickInputDraftBridge {
             if shortcut.modifiers.contains(.control) { mods.insert(.ctrl) }
             if shortcut.modifiers.contains(.option) { mods.insert(.alt) }
             if shortcut.modifiers.contains(.shift) { mods.insert(.shift) }
-            result.append(.init(key: key, mods: mods))
+            result.append(.init(key: key, mods: mods,
+                                unshiftedCodepoint: shortcut.key.unicodeScalars.first?.value ?? 0))
         }
         return result
     }

@@ -458,7 +458,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
         for key in keys {
             terminal.sendKeyEvent(key)
-            terminal.sendKeyEvent(.init(key: key.key, action: .release, mods: key.mods))
+            terminal.sendKeyEvent(.init(key: key.key, action: .release, mods: key.mods,
+                                        unshiftedCodepoint: key.unshiftedCodepoint))
         }
     }
 

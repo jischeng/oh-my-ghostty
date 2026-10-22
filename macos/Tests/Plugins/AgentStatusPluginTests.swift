@@ -131,7 +131,7 @@ struct AgentStatusPluginTests {
             .cursor: ("cursor-agent", "AgentCursor", 5),
             .droid: ("droid", "AgentDroidGlyph", 5),
             .grok: ("grok", "AgentGrok", 5),
-            .hermes: ("hermes", "AgentHermesGlyph", 2),
+            .hermes: ("hermes", "AgentHermesGlyph", 4),
             .kimi: ("kimi", "AgentKimi", 3),
             .qwen: ("qwen", "AgentQwen", 5),
         ]
@@ -1137,18 +1137,20 @@ struct AgentStatusPluginTests {
         #expect(installed.contains("model: claude-sonnet-4"))
         #expect(installed.contains("telemetry: false"))
         #expect(installed.contains("# >>> OMG agent-status hooks"))
+        #expect(installed.contains("hooks_auto_accept: true"))
         // Exactly one top-level `hooks:` key must be emitted, never one per event.
         let hooksKeys = installed.split(separator: "\n").filter { $0 == "hooks:" }.count
         #expect(hooksKeys == 1)
-        for event in ["pre_llm_call", "post_llm_call"] {
+        for event in ["on_session_start", "pre_llm_call", "post_llm_call", "on_session_end"] {
             #expect(installed.contains("\(event):"))
         }
         #expect(installed.contains("_omg_agent_status_v\(AgentHookInstaller.hookVersion)"))
-        // The command must stay on one folded line so YAML cannot corrupt it.
+        // The command must be wrapped in `sh -c` and stay on one folded line so
+        // Hermes can invoke it via `subprocess.Popen(shell=False)`.
         let commandLine = try #require(
             installed.split(separator: "\n").first { $0.contains("/dev/$omg_tty") }
         )
-        #expect(commandLine.hasPrefix("        "))
+        #expect(commandLine.hasPrefix("        sh -c '"))
 
         // A stale version reports an update, and reinstalling is idempotent.
         try installed.replacingOccurrences(

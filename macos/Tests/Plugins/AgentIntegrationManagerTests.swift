@@ -540,8 +540,12 @@ pathlib.Path(os.environ["UPDATE_LOG"]).write_text(json.dumps(sys.argv[1:]))
         let installed = try String(contentsOf: config, encoding: .utf8)
         #expect(installed.contains("model: claude-sonnet-4"))
         #expect(installed.contains("telemetry: false"))
+        #expect(installed.contains("hooks_auto_accept: true"))
+        #expect(installed.contains("on_session_start:"))
         #expect(installed.contains("pre_llm_call:"))
         #expect(installed.contains("post_llm_call:"))
+        #expect(installed.contains("on_session_end:"))
+        #expect(installed.contains("sh -c '"))
         // The remote command must still target the controlling TTY so the event
         // reaches the local OMG pane over SSH.
         #expect(installed.contains("/dev/$omg_tty"))

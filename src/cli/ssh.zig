@@ -885,14 +885,11 @@ fn writeRemoteAgentInvocation(
     if (session_id) |session| {
         switch (agent) {
             .codex => try writer.writeAll(" resume "),
-            .claude => try writer.writeAll(" --resume "),
+            .claude, .grok, .hermes, .qoder, .qwen, .reasonix => try writer.writeAll(" --resume "),
             .pi => try writer.writeAll(" --session-id "),
-            .qoder => try writer.writeAll(" --resume "),
-            .reasonix => try writer.writeAll(" --resume "),
             .omp => try writer.writeAll(" --resume="),
             .opencode => try writer.writeAll(" --session "),
-            .grok, .qwen => try writer.writeAll(" --resume "),
-            .amp, .antigravity, .cline, .copilot, .crush, .cursor, .droid, .hermes, .kimi => return error.UnsupportedAgentResume,
+            .amp, .antigravity, .cline, .copilot, .crush, .cursor, .droid, .kimi => return error.UnsupportedAgentResume,
         }
         switch (quote_style) {
             .fish => try writer.print("\"{s}\"", .{session}),

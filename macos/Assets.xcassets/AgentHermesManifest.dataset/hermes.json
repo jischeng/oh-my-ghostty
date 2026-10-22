@@ -24,12 +24,19 @@
     "conversationField": "session_id",
     "events": [
       {
+        "name": "on_session_start",
+        "state": "idle"
+      },
+      {
         "name": "pre_llm_call",
         "state": "working"
       },
       {
         "name": "post_llm_call",
         "state": "done"
+      },
+      {
+        "name": "on_session_end"
       }
     ]
   }

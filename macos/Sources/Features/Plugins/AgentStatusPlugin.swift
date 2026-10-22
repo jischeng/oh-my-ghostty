@@ -13,7 +13,7 @@ enum LocalAgentProcessDetector {
             guard let executable = tokens.first else { continue }
             if let agent = exactAgent(executable) { return agent }
             let basename = URL(fileURLWithPath: executable).lastPathComponent.lowercased()
-            if ["login", "env", "sh", "bash", "zsh", "fish"].contains(basename),
+            if ["login", "env", "sh", "bash", "zsh", "fish", "python", "python3"].contains(basename),
                let agent = tokens.dropFirst().compactMap(exactAgent).last {
                 return agent
             }
@@ -256,9 +256,10 @@ struct AgentHookInstaller {
                     ])
                 case .toml, .scripts, .yaml:
                     let entries = hook.events.map { event in
-                        var item: [String: Any] = [
-                            "event": event.name,
-                            "command": hookCommand(
+                        let cmd: String = if hook.kind == .yaml {
+                            yamlHookCommand(agent: agent, state: event.state)
+                        } else {
+                            hookCommand(
                                 agent: agent,
                                 state: event.state,
                                 attentionKind: attentionKind(
@@ -266,7 +267,11 @@ struct AgentHookInstaller {
                                     matcher: event.matcher,
                                     state: event.state
                                 )
-                            ),
+                            )
+                        }
+                        var item: [String: Any] = [
+                            "event": event.name,
+                            "command": cmd,
                         ]
                         if let matcher = event.matcher { item["matcher"] = matcher }
                         return item
@@ -467,7 +472,11 @@ def install_auxiliary(item):
         base = strip_yaml_block(existing).strip("\n")
         if any(line.startswith("hooks:") for line in base.split("\n")):
             raise ValueError(str(path) + " already has a hooks: key")
-        lines = ["# >>> OMG agent-status hooks (managed; do not edit) >>>", "hooks:"]
+        lines = [
+            "# >>> OMG agent-status hooks (managed; do not edit) >>>",
+            "hooks_auto_accept: true",
+            "hooks:",
+        ]
         for entry in item["entries"]:
             lines.append("  " + entry["event"] + ":")
             lines.append("    - command: >-")
@@ -793,17 +802,18 @@ else:
         try validateYAMLHooks(existing)
         let base = Self.removingYAMLBlock(from: existing)
             .trimmingCharacters(in: .newlines)
-        var lines = [Self.yamlBlockBegin]
-        // Exactly one top-level `hooks:` key owns every event; repeating it per event
-        // is a duplicate-key error that makes the whole file unusable to the Agent.
-        lines.append("hooks:")
+        var lines = [
+            Self.yamlBlockBegin,
+            "hooks_auto_accept: true",
+            "hooks:",
+        ]
         for event in agent.definition.hook.events {
             // Hermes reads `hooks: { <event>: [ {command, timeout}, ... ] }`.
             // The nested list form keeps unrelated hooks on the same event intact.
             lines.append("  \(event.name):")
             lines.append("    - command: >-")
             let command = Self.yamlFoldedScalar(
-                Self.hookCommand(agent: agent, state: event.state)
+                Self.yamlHookCommand(agent: agent, state: event.state)
             )
             lines.append("        \(command)")
             lines.append("      timeout: 5")
@@ -816,6 +826,45 @@ else:
             withIntermediateDirectories: true
         )
         try writeText(base.isEmpty ? block + "\n" : base + "\n\n" + block + "\n", to: url)
+    }
+
+    /// Generates the shell command for a YAML-embedded hook (Hermes).
+    ///
+    /// Hermes executes hooks with `subprocess.Popen(argv, shell=False)`. A compound
+    /// shell command starting with `: _omg_agent_status` fails with `command not found`
+    /// unless wrapped with `sh -c '...'`. The command is authored without internal
+    /// single quotes (except the `tr` call, which is escaped to `'\''`), so YAML and
+    /// `sh` parse it identically.
+    private static func yamlHookCommand(
+        agent: SupportedAgent,
+        state: TabActivityState?
+    ) -> String {
+        let action = state == nil ? "end" : "start"
+        var metadata = "type=app;omg_agent=\(agent.rawValue);" +
+            "omg_scope=%s;omg_liveness=pgid"
+        if let state { metadata += ";omg_state=\(state.rawValue)" }
+        var setup = ""
+        var arguments = "\"$omg_pgid\" \"$omg_scope\""
+        if let field = agent.definition.hook.conversationField {
+            setup = "omg_conversation=$(python3 -c \"import json,sys,urllib.parse; " +
+                "value=json.load(sys.stdin).get(\\\"\(field)\\\",\\\"\\\"); " +
+                "print(urllib.parse.quote(str(value)[:128],safe=\\\"._~-\\\"),end=\\\"\\\")\" " +
+                "2>/dev/null || true); "
+            metadata += ";omg_conversation=%s"
+            arguments += " \"$omg_conversation\""
+        }
+        let inner = ": \(marker); : _omg_agent_status_v\(hookVersion); " + setup +
+            "omg_tty=$(ps -o tty= -p \"$PPID\" 2>/dev/null | tr -d ' '); " +
+            "omg_pgid=$(ps -o pgid= -p \"$PPID\" 2>/dev/null | tr -d ' '); " +
+            "[ -n \"$omg_pgid\" ] || exit 0; " +
+            "case \"$omg_pgid\" in *[!0-9]*) exit 0;; esac; " +
+            "case \"$omg_tty\" in \"\"|*[!A-Za-z0-9/._-]*) omg_tty=tty;; esac; " +
+            "omg_scope=local; test -n \"${SSH_CONNECTION-}\" && omg_scope=remote; " +
+            "printf \"\\033]3008;\(action)=omg-agent-\(agent.rawValue)-%s;" +
+            "\(metadata)\\007\" \(arguments) > \"/dev/$omg_tty\" " +
+            "2>/dev/null || true"
+        let escaped = inner.replacingOccurrences(of: "'", with: "'\\''")
+        return "sh -c '\(escaped)'"
     }
 
     /// Renders `command` as the single continuation line of a YAML block scalar.

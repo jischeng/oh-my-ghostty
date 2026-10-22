@@ -794,10 +794,12 @@ else:
         let base = Self.removingYAMLBlock(from: existing)
             .trimmingCharacters(in: .newlines)
         var lines = [Self.yamlBlockBegin]
+        // Exactly one top-level `hooks:` key owns every event; repeating it per event
+        // is a duplicate-key error that makes the whole file unusable to the Agent.
+        lines.append("hooks:")
         for event in agent.definition.hook.events {
             // Hermes reads `hooks: { <event>: [ {command, timeout}, ... ] }`.
             // The nested list form keeps unrelated hooks on the same event intact.
-            lines.append("hooks:")
             lines.append("  \(event.name):")
             lines.append("    - command: >-")
             let command = Self.yamlFoldedScalar(

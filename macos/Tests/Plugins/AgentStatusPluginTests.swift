@@ -1137,6 +1137,9 @@ struct AgentStatusPluginTests {
         #expect(installed.contains("model: claude-sonnet-4"))
         #expect(installed.contains("telemetry: false"))
         #expect(installed.contains("# >>> OMG agent-status hooks"))
+        // Exactly one top-level `hooks:` key must be emitted, never one per event.
+        let hooksKeys = installed.split(separator: "\n").filter { $0 == "hooks:" }.count
+        #expect(hooksKeys == 1)
         for event in ["pre_llm_call", "post_llm_call"] {
             #expect(installed.contains("\(event):"))
         }

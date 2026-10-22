@@ -13,11 +13,15 @@
     ]
   },
   "resume": {
-    "resumeArguments": []
+    "resumeArguments": [
+      "--resume",
+      "{id}"
+    ]
   },
   "hook": {
     "kind": "yaml",
     "path": "~/.hermes/config.yaml",
+    "conversationField": "session_id",
     "events": [
       {
         "name": "pre_llm_call",

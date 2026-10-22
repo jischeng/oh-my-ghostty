@@ -953,7 +953,6 @@ else:
             .appendingPathComponent("\(agent.rawValue).status")
     }
 
-
     /// Per-Agent record of an explicit removal. Dot-prefixed so it cannot collide
     /// with any `SupportedAgent.rawValue` marker file.
     private func detectorTombstoneURL(_ agent: String) -> URL {

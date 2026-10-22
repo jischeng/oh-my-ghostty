@@ -312,6 +312,12 @@
       "pattern": "^(control\\+|option\\+|shift\\+|command\\+)+[^+]$",
       "type": "string"
     },
+    "keyboard.quickInputImportShortcut": {
+      "category": "keyboard",
+      "default": "auto",
+      "description": "Agent draft import: auto selects the external-editor shortcut; empty disables; other values override it. Comma separates chords.",
+      "type": "string"
+    },
     "keyboard.quickInputHeight": {
       "category": "keyboard",
       "default": 252,

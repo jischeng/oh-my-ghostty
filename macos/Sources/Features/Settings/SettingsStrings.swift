@@ -423,6 +423,15 @@ struct SettingsStrings: Equatable, Sendable {
             "点击快捷键后按下新的组合键。默认快捷键为 Command-Shift-E。"
         )
     }
+    var quickInputImportLabel: String { t("Import Agent Draft", "导入 Agent 草稿") }
+    var quickInputImportCaption: String {
+        t("Automatically copy the agent's input when opening Quick Input. Enabled by default; original input is preserved. Open a new terminal after enabling.",
+          "打开 Quick Input 时自动复制 Agent 输入，默认开启，原输入会保留。重新启用后需新建终端。")
+    }
+    var quickInputImportInvalid: String {
+        t("Use up to four comma-separated shortcuts with control, option or shift and a letter or digit.",
+          "使用 control、option、shift 加字母或数字；多个按键组合用逗号分隔，最多四组。")
+    }
     var quickInputHeightLabel: String { t("Composer Height", "输入框高度") }
     var quickInputHeightCaption: String {
         t(

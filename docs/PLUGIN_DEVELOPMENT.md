@@ -461,6 +461,8 @@ hooks into a separate bounded, presentation-only OSC path owned by Core.
 | `terminalControl`      | built-in user-confirmed QuickInput writes work; no process-plugin wire messages    | Planned, high risk               |
 | `rawTerminalOutput`    | capability name only                                                               | Planned, high risk, default deny |
 
+The Host's optional `keyboard.quickInputImportShortcut` integration uses the standard external-editor file convention, independently of agent manifests or plugin wire messages. A user-configured chord triggers the CLI editor; a private helper copies up to 1 MiB of UTF-8 text into the requesting Surface's Quick Input draft without modifying the source file. Custom local agents may participate by honoring `VISUAL`/`EDITOR` and passing one file argument. Ordinary editor calls delegate to the previous editor. The bridge grants no new plugin capability, and it does not clear the CLI's original input; users must clear it before Quick Input submission to avoid duplicate text. See `docs/settings/configuration.md` for configuration and limitations.
+
 Quick Input presentation and focus remain Host-owned. The built-in composer participates in macOS `Option-Command` directional focus navigation, but this does not grant a plugin focus control. When the user enables `agents.openQuickInputOnStart`, the Host may expand Quick Input on the focused Pane's first Agent activity without changing first responder. `agents.openQuickInputOnComplete` applies the same Host-owned presentation policy to a newly completed focused Agent session. Plugin lifecycle messages cannot force focus or override either preference.
 
 Pin and History keyboard navigation are also Host-owned UI state. Pin only

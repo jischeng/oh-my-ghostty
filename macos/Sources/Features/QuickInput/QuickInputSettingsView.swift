@@ -12,6 +12,17 @@ struct QuickInputSettingsView: View {
                 Text("\(Int(settings.quickInputHeight)) pt").monospacedDigit().frame(width: 52, alignment: .trailing)
             }.frame(width: 200)
         }
+        OMGSettingsRow(strings.quickInputImportLabel, subtitle: strings.quickInputImportCaption) {
+            Toggle("", isOn: Binding(
+                get: { !settings.quickInputImportShortcut.isEmpty },
+                set: { settings.quickInputImportShortcut = $0 ? "auto" : "" }
+            )).labelsHidden()
+        }
+        if !settings.quickInputImportShortcut.isEmpty,
+           settings.quickInputImportShortcut != "auto",
+           QuickInputDraftBridge.keys(settings.quickInputImportShortcut) == nil {
+            Text(strings.quickInputImportInvalid).font(.caption).foregroundStyle(.orange)
+        }
         Divider()
         Text(strings.quickInputHistoryTitle).font(.headline)
         QuickInputHistorySettingsView(settings: settings)

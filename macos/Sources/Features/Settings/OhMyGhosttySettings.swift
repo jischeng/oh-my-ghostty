@@ -402,6 +402,11 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Shortcut to switch to or hide right sidebar panel 4.",
             requiresNewWindow: false, category: "keyboard"),
         .init(
+            id: "keyboard.quickInputImportShortcut", type: .string, defaultValue: "auto",
+            allowedValues: nil, minimum: nil, maximum: nil,
+            description: "Agent draft import: auto selects the external-editor shortcut; empty disables; other values override it. Comma separates chords.",
+            requiresNewWindow: true, category: "keyboard"),
+        .init(
             id: "keyboard.quickInputHeight", type: .number, defaultValue: "252",
             allowedValues: nil, minimum: 140, maximum: 480,
             description: "Last committed Agent Quick Input dock height in points.",
@@ -741,6 +746,9 @@ final class OhMyGhosttySettings: ObservableObject {
         case 4: inspectorPanel4Shortcut = value
         default: break
         }
+    }
+    @Published var quickInputImportShortcut = "auto" {
+        didSet { persist("keyboard.quickInputImportShortcut", quickInputImportShortcut) }
     }
     @Published var quickInputHeight = Double(AgentQuickInputMetrics.defaultHeight) {
         didSet {
@@ -1139,6 +1147,7 @@ final class OhMyGhosttySettings: ObservableObject {
                 "keyboard.inspectorPanel4",
                 fallback: OMGKeyboardShortcut.defaultInspectorPanel(slot: 4).storageValue
             )
+            quickInputImportShortcut = optionalStringValue("keyboard.quickInputImportShortcut") ?? "auto"
             quickInputHeight = numberValue(
                 "keyboard.quickInputHeight",
                 fallback: Double(AgentQuickInputMetrics.defaultHeight),

@@ -138,7 +138,9 @@ class SurfaceScrollView: NSView {
         scrollView = NSScrollView()
         scrollView.hasVerticalScroller = false
         scrollView.hasHorizontalScroller = false
-        scrollView.autohidesScrollers = false
+        // An overlay scroller must disappear when the document fits the viewport,
+        // including newly restored terminals with no scrollback.
+        scrollView.autohidesScrollers = true
         scrollView.usesPredominantAxisScrolling = true
         // Always use the overlay style. See mouseMoved for how we make
         // it usable without a scroll wheel or gestures.

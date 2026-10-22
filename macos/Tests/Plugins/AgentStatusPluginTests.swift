@@ -1144,19 +1144,31 @@ struct AgentStatusPluginTests {
         for event in ["on_session_start", "pre_llm_call", "post_llm_call", "on_session_end"] {
             #expect(installed.contains("\(event):"))
         }
-        #expect(installed.contains("_omg_agent_status_v\(AgentHookInstaller.hookVersion)"))
-        // The command must be wrapped in `sh -c` and stay on one folded line so
-        // Hermes can invoke it via `subprocess.Popen(shell=False)`.
-        let commandLine = try #require(
-            installed.split(separator: "\n").first { $0.contains("/dev/$omg_tty") }
+        // Hermes hooks run from a headless daemon, so each event delegates to the
+        // helper script instead of writing OSC from the hook process.
+        let hookLine = try #require(
+            installed.split(separator: "\n").first { $0.contains("-hook.sh") }
         )
-        #expect(commandLine.hasPrefix("        sh -c '"))
+        #expect(hookLine.contains("agent-status/hermes-hook.sh"))
+        let script = home.appendingPathComponent(
+            ".config/oh-my-ghostty/agent-status/hermes-hook.sh"
+        )
+        #expect(FileManager.default.fileExists(atPath: script.path))
+        let scriptText = try String(contentsOf: script, encoding: .utf8)
+        #expect(scriptText.contains("_omg_agent_status"))
+        #expect(scriptText.contains("conversation="))
+        let attributes = try FileManager.default.attributesOfItem(atPath: script.path)
+        #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o700)
 
-        // A stale version reports an update, and reinstalling is idempotent.
-        try installed.replacingOccurrences(
-            of: "_omg_agent_status_v\(AgentHookInstaller.hookVersion)",
-            with: "_omg_agent_status_v1"
-        ).write(to: url, atomically: true, encoding: .utf8)
+        // A stale helper script reports an update, and reinstalling is idempotent.
+        try scriptText.replacingOccurrences(
+            of: "_omg_agent_status v\(AgentHookInstaller.hookVersion)",
+            with: "_omg_agent_status v1"
+        ).write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: script.path
+        )
         #expect(installer.installationState(.hermes) == .updateAvailable)
         try installer.install(.hermes)
         #expect(installer.installationState(.hermes) == .current)
@@ -1166,6 +1178,7 @@ struct AgentStatusPluginTests {
 
         try installer.uninstall(.hermes)
         #expect(installer.installationState(.hermes) == .missing)
+        #expect(!FileManager.default.fileExists(atPath: script.path))
         let removed = try String(contentsOf: url, encoding: .utf8)
         #expect(!removed.contains("# >>> OMG agent-status hooks"))
         #expect(removed.contains("model: claude-sonnet-4"))

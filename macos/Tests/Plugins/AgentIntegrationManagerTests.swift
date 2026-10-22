@@ -545,10 +545,19 @@ pathlib.Path(os.environ["UPDATE_LOG"]).write_text(json.dumps(sys.argv[1:]))
         #expect(installed.contains("pre_llm_call:"))
         #expect(installed.contains("post_llm_call:"))
         #expect(installed.contains("on_session_end:"))
-        #expect(installed.contains("sh -c '"))
-        // The remote command must still target the controlling TTY so the event
-        // reaches the local OMG pane over SSH.
-        #expect(installed.contains("/dev/$omg_tty"))
+        // Hermes hooks may run from a headless daemon, so the remote installer also
+        // ships the helper script the YAML delegates to.
+        #expect(installed.contains("hermes-hook.sh"))
+        let script = home.appendingPathComponent(
+            ".config/oh-my-ghostty/agent-status/hermes-hook.sh"
+        )
+        #expect(FileManager.default.fileExists(atPath: script.path))
+        let scriptText = try String(contentsOf: script, encoding: .utf8)
+        #expect(scriptText.contains("_omg_agent_status"))
+        // The helper records the state instead of writing OSC: Hermes may run the
+        // hook from a daemon with no controlling terminal.
+        #expect(!scriptText.contains("> \"/dev/$omg_tty\""))
+        #expect(scriptText.contains(".status"))
 
         _ = try await python(
             AgentHookInstaller.remoteInstallerScript(action: .remove, agents: [.hermes]),

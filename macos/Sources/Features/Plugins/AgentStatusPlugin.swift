@@ -199,7 +199,10 @@ struct AgentHookInstaller {
             return current ? .current : .missing
         case .yaml:
             let url = hookURL(for: agent)
-            guard yamlHooksCurrent(at: url, agent: agent) else {
+            guard yamlHooksCurrent(at: url, agent: agent),
+                  FileManager.default.fileExists(
+                      atPath: yamlHookScriptURL(agent).path
+                  ) else {
                 return Self.yamlBlockPresent(at: url) ? .updateAvailable : .missing
             }
             return .current
@@ -276,11 +279,16 @@ struct AgentHookInstaller {
                         if let matcher = event.matcher { item["matcher"] = matcher }
                         return item
                     }
-                    return (agent.rawValue, [
+                    var payload: [String: Any] = [
                         "kind": hook.kind.rawValue,
                         "path": hook.path,
                         "entries": entries,
-                    ])
+                    ]
+                    if hook.kind == .yaml {
+                        payload["script"] = Self.yamlHookScriptPath(agent)
+                        payload["source"] = Self.yamlHookScriptSource(for: agent)
+                    }
+                    return (agent.rawValue, payload)
                 case .none, .json:
                     return nil
                 }
@@ -472,6 +480,18 @@ def install_auxiliary(item):
         base = strip_yaml_block(existing).strip("\n")
         if any(line.startswith("hooks:") for line in base.split("\n")):
             raise ValueError(str(path) + " already has a hooks: key")
+        # The hook command delegates to a helper script: Hermes may run shell hooks
+        # from a headless daemon that owns no TTY, so the script records the state
+        # instead of writing OSC from the hook process.
+        script_path = expand(item["script"])
+        script_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            script_path.parent.chmod(0o700)
+        except OSError:
+            pass
+        backup(script_path)
+        atomic_write(script_path, item["source"])
+        script_path.chmod(0o700)
         lines = [
             "# >>> OMG agent-status hooks (managed; do not edit) >>>",
             "hooks_auto_accept: true",
@@ -532,7 +552,10 @@ def state(agent):
         text = path.read_text(encoding="utf-8") if path.exists() else ""
         if item["kind"] == "yaml":
             if "# >>> OMG agent-status hooks" not in text: return "missing"
-            current = "_omg_agent_status_v" + str(VERSION) in text and all(
+            script = expand(item["script"]) if item.get("script") else None
+            if script is None or not script.is_file(): return "missing"
+            script_text = script.read_text(encoding="utf-8", errors="replace")
+            current = ("_omg_agent_status v" + str(VERSION)) in script_text and all(
                 (entry["event"] + ":") in text for entry in item["entries"])
             return "current" if current else "updateAvailable"
         if MARKER not in text and "# >>> OMG agent-status hooks" not in text: return "missing"
@@ -578,6 +601,13 @@ def remove(agent):
                 if "# >>> OMG agent-status hooks" in text:
                     backup(path)
                     atomic_write(path, strip_yaml_block(text).strip("\n") + ("\n" if strip_yaml_block(text).strip() else ""))
+                for extra in (item.get("script"), (item.get("script") or "").replace("-hook.sh", ".status")):
+                    if not extra: continue
+                    target = expand(extra)
+                    try:
+                        if target.is_file(): target.unlink()
+                    except OSError:
+                        pass
             elif "marker: " + MARKER in text:
                 backup(path)
                 path.unlink()
@@ -625,6 +655,7 @@ else:
             try installScriptHooks(at: url, agent: agent)
         case .yaml:
             try installYAMLHooks(at: url, agent: agent)
+            try installYAMLHookScript(for: agent)
         case .none:
             // An explicit Install overrides an earlier explicit Remove.
             try removeTombstone(agent)
@@ -648,6 +679,14 @@ else:
             try removeScriptHooks(at: url, agent: agent)
         case .yaml:
             try removeYAMLHooks(at: url)
+            let scriptURL = yamlHookScriptURL(agent)
+            if FileManager.default.fileExists(atPath: scriptURL.path) {
+                try FileManager.default.removeItem(at: scriptURL)
+            }
+            let statusURL = agentStatusURL(agent)
+            if FileManager.default.fileExists(atPath: statusURL.path) {
+                try FileManager.default.removeItem(at: statusURL)
+            }
         case .none:
             try removeDetectorMarker(agent)
         }
@@ -775,6 +814,43 @@ else:
         detectorDirectoryURL.appendingPathComponent("\(agent.rawValue).json")
     }
 
+    /// Path of the status line a YAML-hook Agent's helper script writes.
+    func agentStatusURL(_ agent: SupportedAgent) -> URL {
+        homeURL
+            .appendingPathComponent(".config/oh-my-ghostty/agent-status")
+            .appendingPathComponent("\(agent.rawValue).status")
+    }
+
+    /// Reads the latest status line written by a YAML-hook Agent's helper script.
+    ///
+    /// Returns `nil` when the file is absent, unreadable, or older than `maxAge`,
+    /// so a stale line cannot keep an exited Agent on screen.
+    func readAgentStatus(
+        _ agent: SupportedAgent,
+        maxAge: TimeInterval = 600
+    ) -> [String: String]? {
+        let url = agentStatusURL(agent)
+        guard let attributes = try? FileManager.default.attributesOfItem(
+            atPath: url.path
+        ),
+        attributes[.type] as? FileAttributeType == .typeRegular,
+        ((attributes[.size] as? NSNumber)?.intValue ?? 4_097) <= 4_096,
+        let modified = attributes[.modificationDate] as? Date,
+        Date().timeIntervalSince(modified) <= maxAge,
+        let text = try? String(contentsOf: url, encoding: .utf8) else {
+            return nil
+        }
+        var values: [String: String] = [:]
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard let separator = line.firstIndex(of: "=") else { continue }
+            let key = String(line[line.startIndex..<separator])
+            let value = String(line[line.index(after: separator)...])
+            guard !key.isEmpty, key.count <= 32, value.count <= 512 else { continue }
+            values[key] = value
+        }
+        return values.isEmpty ? nil : values
+    }
+
     /// Per-Agent record of an explicit removal. Dot-prefixed so it cannot collide
     /// with any `SupportedAgent.rawValue` marker file.
     private func detectorTombstoneURL(_ agent: String) -> URL {
@@ -828,43 +904,100 @@ else:
         try writeText(base.isEmpty ? block + "\n" : base + "\n\n" + block + "\n", to: url)
     }
 
-    /// Generates the shell command for a YAML-embedded hook (Hermes).
+    /// Generates the command for a YAML-embedded hook (Hermes).
     ///
-    /// Hermes executes hooks with `subprocess.Popen(argv, shell=False)`. A compound
-    /// shell command starting with `: _omg_agent_status` fails with `command not found`
-    /// unless wrapped with `sh -c '...'`. The command is authored without internal
-    /// single quotes (except the `tr` call, which is escaped to `'\''`), so YAML and
-    /// `sh` parse it identically.
+    /// Hermes runs shell hooks from its long-lived gateway process when one is
+    /// active: the hook's parent is that daemon, which owns no TTY and belongs to
+    /// its own process group. An OSC write from there reaches no pane, and any pgid
+    /// it reports is unrelated to the pane's foreground process group. The command
+    /// therefore records the event in a status file; the host resolves which pane
+    /// owns the session and writes the OSC itself.
     private static func yamlHookCommand(
         agent: SupportedAgent,
         state: TabActivityState?
     ) -> String {
-        let action = state == nil ? "end" : "start"
-        var metadata = "type=app;omg_agent=\(agent.rawValue);" +
-            "omg_scope=%s;omg_liveness=pgid"
-        if let state { metadata += ";omg_state=\(state.rawValue)" }
-        var setup = ""
-        var arguments = "\"$omg_pgid\" \"$omg_scope\""
-        if let field = agent.definition.hook.conversationField {
-            setup = "omg_conversation=$(python3 -c \"import json,sys,urllib.parse; " +
-                "value=json.load(sys.stdin).get(\\\"\(field)\\\",\\\"\\\"); " +
-                "print(urllib.parse.quote(str(value)[:128],safe=\\\"._~-\\\"),end=\\\"\\\")\" " +
-                "2>/dev/null || true); "
-            metadata += ";omg_conversation=%s"
-            arguments += " \"$omg_conversation\""
-        }
-        let inner = ": \(marker); : _omg_agent_status_v\(hookVersion); " + setup +
-            "omg_tty=$(ps -o tty= -p \"$PPID\" 2>/dev/null | tr -d ' '); " +
-            "omg_pgid=$(ps -o pgid= -p \"$PPID\" 2>/dev/null | tr -d ' '); " +
-            "[ -n \"$omg_pgid\" ] || exit 0; " +
-            "case \"$omg_pgid\" in *[!0-9]*) exit 0;; esac; " +
-            "case \"$omg_tty\" in \"\"|*[!A-Za-z0-9/._-]*) omg_tty=tty;; esac; " +
-            "omg_scope=local; test -n \"${SSH_CONNECTION-}\" && omg_scope=remote; " +
-            "printf \"\\033]3008;\(action)=omg-agent-\(agent.rawValue)-%s;" +
-            "\(metadata)\\007\" \(arguments) > \"/dev/$omg_tty\" " +
-            "2>/dev/null || true"
-        let escaped = inner.replacingOccurrences(of: "'", with: "'\\''")
-        return "sh -c '\(escaped)'"
+        let stateArg = state?.rawValue ?? "end"
+        // A single stable script keeps the YAML scalar short and free of quoting
+        // hazards; the script is rewritten on every install.
+        return "\(yamlHookScriptPath(agent)) \(stateArg)"
+    }
+
+    /// Absolute path of the helper script a YAML-hook Agent's config invokes.
+    private static func yamlHookScriptPath(_ agent: SupportedAgent) -> String {
+        "~/.config/oh-my-ghostty/agent-status/\(agent.rawValue)-hook.sh"
+    }
+
+    /// Resolves `yamlHookScriptPath` against this installer's home, so a test or
+    /// alternate home never writes into the real user's home directory.
+    private func yamlHookScriptURL(_ agent: SupportedAgent) -> URL {
+        homeURL
+            .appendingPathComponent(".config/oh-my-ghostty/agent-status")
+            .appendingPathComponent("\(agent.rawValue)-hook.sh")
+    }
+
+    /// Writes the helper script invoked from the Agent's YAML config.
+    ///
+    /// The script reads the hook payload from stdin for the conversation id and
+    /// writes one status line, so it never needs a TTY and behaves the same when
+    /// the Agent runs it from a pane-attached process or from its daemon.
+    private func installYAMLHookScript(for agent: SupportedAgent) throws {
+        let url = yamlHookScriptURL(agent)
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try writeText(Self.yamlHookScriptSource(for: agent), to: url)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: url.path
+        )
+    }
+
+    /// Body of the helper script a YAML-hook Agent invokes instead of an inline
+    /// command, shared by the local installer and the exported SSH installer.
+    static func yamlHookScriptSource(for agent: SupportedAgent) -> String {
+        let field = agent.definition.hook.conversationField ?? ""
+        let raw = agent.rawValue
+        let marker = Self.marker
+        let version = Self.hookVersion
+        var lines: [String] = [
+            "#!/bin/sh",
+            "# OMG agent-status reporter for \(raw) (managed; do not edit).",
+            "# Args: <state|end>. The hook payload (JSON) arrives on stdin.",
+            "# marker: \(marker) v\(version)",
+            "state=${1:-end}",
+            "payload=$(cat 2>/dev/null || true)",
+            "conversation=$(printf '%s' \"$payload\" | OMG_FIELD='\(field)' python3 -c '",
+        ]
+        lines += [
+            "import json, os, sys, urllib.parse",
+            "field = os.environ.get(\"OMG_FIELD\") or \"\"",
+            "try:",
+            "    data = json.load(sys.stdin)",
+            "except Exception:",
+            "    data = {}",
+            "value = data.get(field, \"\") if field else \"\"",
+            "if not isinstance(value, str):",
+            "    value = \"\"",
+            "sys.stdout.write(urllib.parse.quote(value[:128], safe=\"._~-\"))",
+            "' 2>/dev/null || true)",
+            "# The hook's parent owns a terminal only when the agent runs in a pane;",
+            "# it is empty when Hermes runs the hook from its headless daemon.",
+            "tty=$(ps -o tty= -p \"$PPID\" 2>/dev/null | tr -d ' ')",
+            "case \"$tty\" in ''|'??'|*[!A-Za-z0-9/._-]*) tty= ;; esac",
+            "dir=\"$HOME/.config/oh-my-ghostty/agent-status\"",
+            "mkdir -p \"$dir\" 2>/dev/null || exit 0",
+            "tmp=\"$dir/.s.$$.tmp\"",
+            "{",
+            "  echo \"agent=\(raw)\"",
+            "  echo \"state=$state\"",
+            "  echo \"conversation=$conversation\"",
+            "  echo \"tty=$tty\"",
+            "} > \"$tmp\" 2>/dev/null && mv -f \"$tmp\" \"$dir/\(raw).status\" 2>/dev/null",
+            "true",
+        ]
+        return lines.joined(separator: "\n") + "\n"
     }
 
     /// Renders `command` as the single continuation line of a YAML block scalar.
@@ -884,11 +1017,18 @@ else:
 
     private func yamlHooksCurrent(at url: URL, agent: SupportedAgent) -> Bool {
         guard let text = try? String(contentsOf: url, encoding: .utf8),
-              text.contains(Self.yamlBlockBegin) else { return false }
-        return text.contains("_omg_agent_status_v\(Self.hookVersion)")
-            && agent.definition.hook.events.allSatisfy {
-                text.contains("\($0.name):")
-            }
+              text.contains(Self.yamlBlockBegin),
+              text.contains("hooks_auto_accept: true") else { return false }
+        // Every declared event must delegate to the helper script.
+        guard agent.definition.hook.events.allSatisfy({ text.contains("\($0.name):") }),
+              text.contains("\(agent.rawValue)-hook.sh") else { return false }
+        // The helper script carries the hook version; a stale script means the
+        // integration needs rewriting even when the YAML block looks current.
+        guard let script = try? String(
+            contentsOf: yamlHookScriptURL(agent),
+            encoding: .utf8
+        ) else { return false }
+        return script.contains("_omg_agent_status v\(Self.hookVersion)")
     }
 
     private static func yamlBlockPresent(at url: URL) -> Bool {

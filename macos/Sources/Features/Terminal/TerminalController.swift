@@ -339,6 +339,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     private var conversationDiscoveryPending = Set<UUID>()
     private var agentScreenSignatures: [UUID: Int] = [:]
     private var agentScreenStableTicks: [UUID: Int] = [:]
+    /// Last applied status-file signature per pane, so the one-second poll does not
+    /// republish an unchanged YAML-hook Agent state.
+    private var agentStatusSignatures: [UUID: String] = [:]
 
     var focusedPaneSessionContext: PaneSessionContext? {
         paneSessionContext(for: focusedSurface ?? surfaceTree.first)
@@ -1209,6 +1212,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                     clearDetectedAgent(for: surface.id, force: true)
                 } else {
                     updateScreenFallback(for: surface, detected: detected)
+                    applyAgentStatusFile(
+                        agent: detected.agent,
+                        surfaceID: surface.id,
+                        processGroupID: detected.processGroupID
+                    )
                 }
             }
             guard observedForegroundProcessIDs[surface.id] != processGroupID else {
@@ -1324,6 +1332,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             processGroupID: processGroupID,
             launchedAt: launchedAt
         )
+        applyAgentStatusFile(
+            agent: agent,
+            surfaceID: surfaceID,
+            processGroupID: processGroupID
+        )
         // A previous Agent can terminate between foreground samples and leave
         // an error activity behind. Only suppress the synthesized idle event
         // when this exact context is already current; a newly detected process
@@ -1334,6 +1347,56 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             id: id,
             metadata: "type=app;omg_agent=\(agent.rawValue);" +
                 "omg_scope=local;omg_liveness=pgid;omg_state=idle"
+        ), for: surfaceID)
+    }
+
+    /// Applies the status line a YAML-hook Agent wrote from its own hook process.
+    ///
+    /// Agents such as Hermes run shell hooks from a long-lived daemon that owns no
+    /// TTY, so the hook cannot write OSC into the pane. The helper script records
+    /// the state instead, and the pane that owns the Agent process consumes it here
+    /// and synthesizes the same normalized event locally.
+    private func applyAgentStatusFile(
+        agent: SupportedAgent,
+        surfaceID: UUID,
+        processGroupID: Int
+    ) {
+        guard agent.definition.hook.kind == .yaml else { return }
+        let installer = AgentHookInstaller()
+        guard let status = installer.readAgentStatus(agent),
+              let rawState = status["state"],
+              !rawState.isEmpty else { return }
+        let identity = "omg-agent-\(agent.rawValue)-\(processGroupID)"
+        if rawState == "end" {
+            guard agentReducers[surfaceID]?.currentContextID == identity else { return }
+            updateAgentActivity(.init(
+                action: .end,
+                id: identity,
+                metadata: "type=app"
+            ), for: surfaceID)
+            return
+        }
+        // Only accept states the manifest declares, so the file cannot drive an
+        // arbitrary presentation state.
+        guard agent.definition.hook.events.contains(where: {
+            $0.state?.rawValue == rawState
+        }) else { return }
+        var metadata = "type=app;omg_agent=\(agent.rawValue);" +
+            "omg_scope=local;omg_liveness=pgid;omg_state=\(rawState)"
+        if let conversation = status["conversation"],
+           !conversation.isEmpty,
+           conversation.count <= 128 {
+            metadata += ";omg_conversation=\(conversation)"
+        }
+        // The poll runs once per second; skip an unchanged state so the reducer is
+        // not asked to republish identical activity on every tick.
+        let signature = "\(identity)|\(rawState)|\(status["conversation"] ?? "")"
+        guard agentStatusSignatures[surfaceID] != signature else { return }
+        agentStatusSignatures[surfaceID] = signature
+        updateAgentActivity(.init(
+            action: .start,
+            id: identity,
+            metadata: metadata
         ), for: surfaceID)
     }
 
@@ -1429,6 +1492,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
         agentScreenSignatures.removeValue(forKey: surfaceID)
         agentScreenStableTicks.removeValue(forKey: surfaceID)
+        agentStatusSignatures.removeValue(forKey: surfaceID)
         updateAgentActivity(.init(
             action: .end,
             id: detected.id,

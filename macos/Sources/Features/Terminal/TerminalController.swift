@@ -406,7 +406,15 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         presentQuickInput(for: surface, requestFocus: true)
         guard quickInputDraftImportTask == nil else { return }
         let setting = OhMyGhosttySettings.shared.quickInputImportShortcut
-        let agent = agentResumeDescriptor(for: surface)?.agent
+        // Draft import must work independently of Agent Status hooks and
+        // conversation discovery, including a freshly started agent.
+        let foregroundAgent = surface.surfaceModel?.foregroundPID.flatMap { processGroupID in
+            Self.processGroupCommandLines(processGroupID).flatMap {
+                LocalAgentProcessDetector.detect(in: $0)
+            }
+        }
+        let agent = foregroundAgent ?? detectedAgentInstances[surface.id]?.agent
+            ?? agentResumeDescriptor(for: surface)?.agent
         let shortcut = QuickInputDraftBridge.shortcut(setting: setting, agent: agent)
         // Auto mode must not send editor keys to an ordinary shell prompt.
         guard setting != "auto" || agent != nil || agentActivities[surface.id] != nil else {

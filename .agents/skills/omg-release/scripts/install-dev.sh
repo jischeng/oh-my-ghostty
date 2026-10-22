@@ -175,7 +175,15 @@ else
   tag_scope=local
 fi
 
-open "$target_app"
+# LaunchServices can retain the installer's inherited environment for the app.
+# Agent harnesses use short-lived TMPDIR directories that disappear after the
+# tool call; terminal children need the user's persistent macOS temporary root.
+launch_tmpdir=$(getconf DARWIN_USER_TEMP_DIR)
+[[ -d "$launch_tmpdir" ]] || {
+  echo "missing macOS user temporary directory" >&2
+  exit 1
+}
+TMPDIR="$launch_tmpdir" open "$target_app"
 printf 'installed=%s\nbundle_id=%s\nomg_version=%s\nbundle_version=%s\ndev_tag=%s\ntag_created=%s\ntag_scope=%s\ncommit=%s\nbuild_mode=%s\nsigning_identity=%s\nsource_sha=%s\ninstalled_sha=%s\nlaunched=yes\n' \
   "$target_app" "$installed_bundle_id" "$installed_version" "$installed_build" \
   "$dev_tag" "$tag_created" "$tag_scope" "$head_commit" "$build_mode" \

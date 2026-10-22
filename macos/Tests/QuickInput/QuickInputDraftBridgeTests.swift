@@ -32,6 +32,55 @@ struct QuickInputDraftBridgeTests {
         #expect(!controller.quickInputModel.isPresented)
     }
 
+    @Test func terminalEditorShortcutActuallyImportsDraft() async throws {
+        let app = try #require(NSApp.delegate as? AppDelegate)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let script = root.appendingPathComponent("agent.py")
+        let ready = root.appendingPathComponent("ready")
+        try #"""
+        import os, tty, subprocess
+        from pathlib import Path
+        tty.setraw(0)
+        root = Path(__file__).parent
+        (root / "ready").touch()
+        while True:
+            data = os.read(0, 64)
+            (root / "keys").write_bytes(data)
+            if b"\x07" in data:
+                draft = root / "draft"
+                draft.write_text("中文 agent draft\nsecond line")
+                subprocess.run([os.environ["EDITOR"], str(draft)], check=True)
+        """#.write(to: script, atomically: true, encoding: .utf8)
+        var configuration = Ghostty.SurfaceConfiguration()
+        configuration.command = "/usr/bin/python3 \(script.path)"
+        let controller = TerminalController(app.ghostty, withBaseConfig: configuration, tabLayout: .vertical)
+        defer {
+            controller.dismissQuickInput()
+            controller.window?.delegate = nil
+            controller.window?.close()
+        }
+        let surface = try #require(controller.focusedSurface)
+        controller.adoptAgentResumeDescriptor(
+            AgentResumeDescriptor(agent: .pi, scope: .local, workingDirectory: "/tmp"), for: surface
+        )
+        for _ in 0..<40 {
+            if FileManager.default.fileExists(atPath: ready.path) { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(FileManager.default.fileExists(atPath: ready.path))
+        controller.quickInputModel.dismiss()
+        controller.toggleQuickInput()
+        #expect(controller.quickInputModel.isPresented)
+        for _ in 0..<50 {
+            if !controller.quickInputModel.draft.isEmpty { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(controller.quickInputModel.draft == "中文 agent draft\nsecond line")
+        #expect(try Data(contentsOf: root.appendingPathComponent("keys")).contains(7))
+    }
+
     @Test func automaticallySelectsKnownAndGenericShortcuts() {
         for agent in [SupportedAgent.pi, .codex, .claude] {
             #expect(QuickInputDraftBridge.shortcut(setting: "auto", agent: agent) == "control+g")

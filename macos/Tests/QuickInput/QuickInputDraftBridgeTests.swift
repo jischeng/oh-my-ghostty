@@ -1,9 +1,37 @@
+import AppKit
 import Foundation
 import Testing
 @testable import Ghostty
 
-@MainActor
+@Suite(.serialized) @MainActor
 struct QuickInputDraftBridgeTests {
+    @Test func unresponsiveAgentCannotDelayComposerPresentation() throws {
+        let app = try #require(NSApp.delegate as? AppDelegate)
+        let settings = OhMyGhosttySettings.shared
+        let previous = settings.quickInputImportShortcut
+        settings.quickInputImportShortcut = "auto"
+        defer { settings.quickInputImportShortcut = previous }
+        var configuration = Ghostty.SurfaceConfiguration()
+        configuration.command = "/bin/sleep 30"
+        configuration.workingDirectory = "/tmp"
+        let controller = TerminalController(app.ghostty, withBaseConfig: configuration, tabLayout: .vertical)
+        defer {
+            controller.dismissQuickInput()
+            controller.window?.delegate = nil
+            controller.window?.close()
+        }
+        let surface = try #require(controller.focusedSurface)
+        controller.adoptAgentResumeDescriptor(
+            AgentResumeDescriptor(agent: .pi, scope: .local, workingDirectory: "/tmp"), for: surface
+        )
+        controller.quickInputModel.dismiss()
+        controller.toggleQuickInput()
+        #expect(controller.quickInputModel.isPresented)
+        #expect(controller.quickInputModel.targetSurfaceID == surface.id)
+        controller.toggleQuickInput()
+        #expect(!controller.quickInputModel.isPresented)
+    }
+
     @Test func automaticallySelectsKnownAndGenericShortcuts() {
         for agent in [SupportedAgent.pi, .codex, .claude] {
             #expect(QuickInputDraftBridge.shortcut(setting: "auto", agent: agent) == "control+g")

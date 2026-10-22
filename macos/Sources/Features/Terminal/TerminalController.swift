@@ -402,6 +402,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return
         }
         guard let surface = focusedSurface ?? surfaceTree.first else { return }
+        // Presentation must never depend on the CLI's editor handshake.
+        presentQuickInput(for: surface, requestFocus: true)
         guard quickInputDraftImportTask == nil else { return }
         let setting = OhMyGhosttySettings.shared.quickInputImportShortcut
         let agent = agentResumeDescriptor(for: surface)?.agent
@@ -426,12 +428,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             for _ in 0..<40 {
                 do {
                     try await Task.sleep(for: .milliseconds(100))
-                    guard let self, let surface, self.window?.isKeyWindow == true,
-                          self.focusedSurface?.id == surface.id,
+                    guard let self, let surface,
+                          self.quickInputModel.isPresented,
+                          self.quickInputModel.targetSurfaceID == surface.id,
                           self.surfaceTree.first(where: { $0.id == surface.id }) != nil else { return }
                     if let text = try QuickInputDraftBridge.shared.receive(request) {
                         guard !SecureInput.shared.enabled else { return }
-                        self.presentQuickInput(for: surface, requestFocus: true)
                         self.quickInputModel.useHistoryText(text)
                         self.quickInputModel.setStatusMessage("Draft copied. Original agent input is still present.")
                         return
@@ -442,9 +444,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                     break
                 }
             }
-            guard let self, let surface, self.window?.isKeyWindow == true,
-                  self.focusedSurface?.id == surface.id else { return }
-            self.presentQuickInput(for: surface, requestFocus: true)
+            guard let self, let surface, self.quickInputModel.isPresented,
+                  self.quickInputModel.targetSurfaceID == surface.id else { return }
             self.quickInputModel.setStatusMessage("No draft received. Check the external-editor shortcut and open a new terminal after configuring it.")
         }
         for key in keys {
@@ -508,6 +509,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     func dismissQuickInput() {
+        quickInputDraftImportTask?.cancel()
         let surfaceID = quickInputModel.targetSurfaceID
         beginQuickInputResizeDeferral()
         quickInputModel.dismiss()

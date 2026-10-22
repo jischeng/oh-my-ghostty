@@ -41,6 +41,138 @@ enum LocalAgentProcessDetector {
     }
 }
 
+/// Hermes' gateway owns hooks, while the terminal client owns the pane. Resolve
+/// identity from a live client and its per-TTY breadcrumb before accepting events.
+enum HermesPaneStatus {
+    struct Snapshot: Decodable, Equatable, Sendable {
+        let pgid: Int
+        let conversation: String?
+        let cwd: String?
+        let state: String
+        let revision: String
+    }
+
+    static func script(tty: String) throws -> String {
+        let data = try JSONEncoder().encode(tty)
+        let encoded = data.base64EncodedString()
+        return probe + "\nprint(json.dumps(snapshot(json.loads(base64.b64decode(\"\(encoded)\")))))\n"
+    }
+
+    static let reporter = #"""
+import hashlib, json, os, re, stat, sys, tempfile, time
+from pathlib import Path
+
+def report():
+    state = sys.argv[1] if len(sys.argv) == 2 else ""
+    if state not in {"idle", "working", "done", "error", "needsAttention", "end"}:
+        return
+    payload = json.loads(sys.stdin.read(65537))
+    sid = payload.get("session_id")
+    if not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", sid):
+        return
+    if sid.startswith("test-"):
+        return
+    directory = Path.home() / ".config/oh-my-ghostty/agent-status/hermes"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if directory.is_symlink() or directory.stat().st_uid != os.getuid():
+        return
+    directory.chmod(0o700)
+    key = hashlib.sha256(sid.encode()).hexdigest()
+    fd, temporary = tempfile.mkstemp(prefix=".event-", dir=directory)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            json.dump({"session_id": sid, "state": state, "time": time.time()}, stream)
+        os.replace(temporary, directory / (key + ".json"))
+    finally:
+        if os.path.exists(temporary): os.unlink(temporary)
+
+try:
+    report()
+except (ValueError, OSError, TypeError):
+    pass
+"""#
+
+    // Executed locally or through the existing bounded SSH transport. Never infer
+    // ownership from cwd or from the latest event on the host (both are ambiguous).
+    static let probe = #"""
+import base64, hashlib, json, os, re, stat, subprocess, time
+from pathlib import Path
+
+def read_object(path):
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > 4096:
+        raise ValueError("invalid metadata file")
+    with path.open() as stream:
+        obj = json.load(stream)
+    if not isinstance(obj, dict): raise ValueError("invalid object")
+    return obj
+
+def elapsed_seconds(text):
+    days, _, rest = text.rpartition("-")
+    values = [int(part) for part in rest.split(":")]
+    seconds = sum(value * (60 ** index) for index, value in enumerate(reversed(values)))
+    return seconds + (int(days) * 86400 if days else 0)
+
+def snapshot(tty):
+    try:
+        if not re.fullmatch(r"/dev/(?:ttys[0-9]+|pts/[0-9]+)", tty): return {}
+        result = subprocess.run(["ps", "-t", tty[5:], "-o", "pid=,pgid=,stat=,args="],
+                                capture_output=True, text=True, timeout=2)
+        candidates = []
+        for line in result.stdout.splitlines():
+            fields = line.split(None, 3)
+            if len(fields) != 4: continue
+            pid, pgid, flags, command = fields
+            if "+" not in flags: continue
+            # Match the actual TUI entry, never an arbitrary mention of Hermes in
+            # a Python -c string, a shell argument, or a background gateway process.
+            argv = command.split()
+            if not argv: continue
+            runtime = Path(argv[0]).name.lower()
+            node_client = runtime in {"node", "bun"} and any(
+                re.search(r"/(?:ui-tui/(?:dist|src)|hermes_cli/tui_dist)/entry\.(?:js|tsx?)$", arg)
+                and "hermes" in arg.lower() for arg in argv[1:6])
+            python_client = (runtime.startswith("python") and "/.hermes/" in argv[0]
+                             and "from hermes_cli.main import main" in command
+                             and "sys.exit(main())" in command)
+            if not (node_client or python_client): continue
+            candidates.append((int(pid), int(pgid)))
+        groups = {pgid for _, pgid in candidates}
+        if len(groups) != 1: return {}
+        pid, pgid = candidates[0]
+        age = subprocess.run(["ps", "-p", str(pid), "-o", "etime="],
+                             capture_output=True, text=True, timeout=2).stdout.strip()
+        started = time.time() - elapsed_seconds(age)
+        output = {"pgid": pgid, "state": "idle", "revision": "client:" + str(pid)}
+        home = Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
+        key = "tty-" + re.sub(r"[^A-Za-z0-9._-]", "-", tty.strip("/"))[:120]
+        crumb = read_object(home / "terminal-sessions" / key)
+        sid, timestamp = crumb.get("session_id"), crumb.get("ts")
+        if (not isinstance(sid, str) or sid.startswith("test-")
+            or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", sid)
+            or not isinstance(timestamp, (int, float)) or timestamp < started - 5):
+            return output
+        output["conversation"] = sid
+        cwd = crumb.get("cwd")
+        if isinstance(cwd, str) and cwd.startswith("/") and len(cwd) <= 4096 and "\0" not in cwd:
+            output["cwd"] = cwd
+        output["revision"] += ":" + sid
+        status_path = Path.home() / ".config/oh-my-ghostty/agent-status/hermes"
+        event = read_object(status_path / (hashlib.sha256(sid.encode()).hexdigest() + ".json"))
+        stamp = event.get("time")
+        state = event.get("state")
+        if (event.get("session_id") == sid and isinstance(stamp, (int, float))
+            and started - 5 <= stamp <= time.time() + 5
+            and state in {"idle", "working", "done", "error", "needsAttention"}):
+            output["state"] = state
+            output["revision"] += ":" + str(stamp)
+        return output
+    except (ValueError, OSError, TypeError, subprocess.SubprocessError):
+        return locals().get("output", {})
+"""#
+}
+
 enum AgentHookInstallerError: LocalizedError {
     case invalidConfiguration
     case invalidHooks(String)
@@ -77,7 +209,7 @@ enum AgentHookRemoteAction: String {
 
 struct AgentHookInstaller {
     static let marker = "_omg_agent_status"
-    static let hookVersion = 9
+    static let hookVersion = 10
     static let detectorMarkerVersion = 1
     static let didChangeNotification = Notification.Name(
         "com.oh-my-ghostty.agentIntegrationDidChange"
@@ -821,35 +953,6 @@ else:
             .appendingPathComponent("\(agent.rawValue).status")
     }
 
-    /// Reads the latest status line written by a YAML-hook Agent's helper script.
-    ///
-    /// Returns `nil` when the file is absent, unreadable, or older than `maxAge`,
-    /// so a stale line cannot keep an exited Agent on screen.
-    func readAgentStatus(
-        _ agent: SupportedAgent,
-        maxAge: TimeInterval = 600
-    ) -> [String: String]? {
-        let url = agentStatusURL(agent)
-        guard let attributes = try? FileManager.default.attributesOfItem(
-            atPath: url.path
-        ),
-        attributes[.type] as? FileAttributeType == .typeRegular,
-        ((attributes[.size] as? NSNumber)?.intValue ?? 4_097) <= 4_096,
-        let modified = attributes[.modificationDate] as? Date,
-        Date().timeIntervalSince(modified) <= maxAge,
-        let text = try? String(contentsOf: url, encoding: .utf8) else {
-            return nil
-        }
-        var values: [String: String] = [:]
-        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
-            guard let separator = line.firstIndex(of: "=") else { continue }
-            let key = String(line[line.startIndex..<separator])
-            let value = String(line[line.index(after: separator)...])
-            guard !key.isEmpty, key.count <= 32, value.count <= 512 else { continue }
-            values[key] = value
-        }
-        return values.isEmpty ? nil : values
-    }
 
     /// Per-Agent record of an explicit removal. Dot-prefixed so it cannot collide
     /// with any `SupportedAgent.rawValue` marker file.
@@ -957,47 +1060,8 @@ else:
     /// Body of the helper script a YAML-hook Agent invokes instead of an inline
     /// command, shared by the local installer and the exported SSH installer.
     static func yamlHookScriptSource(for agent: SupportedAgent) -> String {
-        let field = agent.definition.hook.conversationField ?? ""
-        let raw = agent.rawValue
-        let marker = Self.marker
-        let version = Self.hookVersion
-        var lines: [String] = [
-            "#!/bin/sh",
-            "# OMG agent-status reporter for \(raw) (managed; do not edit).",
-            "# Args: <state|end>. The hook payload (JSON) arrives on stdin.",
-            "# marker: \(marker) v\(version)",
-            "state=${1:-end}",
-            "payload=$(cat 2>/dev/null || true)",
-            "conversation=$(printf '%s' \"$payload\" | OMG_FIELD='\(field)' python3 -c '",
-        ]
-        lines += [
-            "import json, os, sys, urllib.parse",
-            "field = os.environ.get(\"OMG_FIELD\") or \"\"",
-            "try:",
-            "    data = json.load(sys.stdin)",
-            "except Exception:",
-            "    data = {}",
-            "value = data.get(field, \"\") if field else \"\"",
-            "if not isinstance(value, str):",
-            "    value = \"\"",
-            "sys.stdout.write(urllib.parse.quote(value[:128], safe=\"._~-\"))",
-            "' 2>/dev/null || true)",
-            "# The hook's parent owns a terminal only when the agent runs in a pane;",
-            "# it is empty when Hermes runs the hook from its headless daemon.",
-            "tty=$(ps -o tty= -p \"$PPID\" 2>/dev/null | tr -d ' ')",
-            "case \"$tty\" in ''|'??'|*[!A-Za-z0-9/._-]*) tty= ;; esac",
-            "dir=\"$HOME/.config/oh-my-ghostty/agent-status\"",
-            "mkdir -p \"$dir\" 2>/dev/null || exit 0",
-            "tmp=\"$dir/.s.$$.tmp\"",
-            "{",
-            "  echo \"agent=\(raw)\"",
-            "  echo \"state=$state\"",
-            "  echo \"conversation=$conversation\"",
-            "  echo \"tty=$tty\"",
-            "} > \"$tmp\" 2>/dev/null && mv -f \"$tmp\" \"$dir/\(raw).status\" 2>/dev/null",
-            "true",
-        ]
-        return lines.joined(separator: "\n") + "\n"
+        "#!/usr/bin/env python3\n# marker: \(marker) v\(hookVersion)\n" +
+            HermesPaneStatus.reporter
     }
 
     /// Renders `command` as the single continuation line of a YAML block scalar.

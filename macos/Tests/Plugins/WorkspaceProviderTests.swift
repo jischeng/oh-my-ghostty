@@ -4,6 +4,24 @@ import Testing
 @testable import Ghostty
 
 struct WorkspaceProviderTests {
+    @Test func sshPromptTracksOnlyValidatedRemoteTTY() throws {
+        var context = PaneSessionContext(workingDirectory: "/tmp", terminalTitle: "shell")
+        func apply(_ tty: String) {
+            context.apply(.init(action: .start, id: "omg-ssh-tty",
+                                metadata: "type=remote;targethost=cloud;cwd=/work;tty=\(tty)"),
+                          currentWorkingDirectory: "/tmp", currentTerminalTitle: "shell")
+        }
+        apply("/dev/pts/7")
+        guard case .sshReady(let ssh, _) = context.state else {
+            Issue.record("SSH prompt did not establish a session")
+            return
+        }
+        #expect(ssh.remoteTTY == "/dev/pts/7")
+        apply("/tmp/arbitrary-file")
+        guard case .sshReady(let updated, _) = context.state else { return }
+        #expect(updated.remoteTTY == "/dev/pts/7")
+    }
+
     @Test func titleDependencyRespectsPathDisplayAndRemoteState() {
         let local = PaneSessionContext(workingDirectory: "/work/repo", terminalTitle: "title")
         #expect(local.displaysTerminalTitle(pathDisplay: .fullPath))

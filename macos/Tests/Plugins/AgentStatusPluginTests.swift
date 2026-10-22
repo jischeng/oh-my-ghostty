@@ -1141,7 +1141,7 @@ struct AgentStatusPluginTests {
         // Exactly one top-level `hooks:` key must be emitted, never one per event.
         let hooksKeys = installed.split(separator: "\n").filter { $0 == "hooks:" }.count
         #expect(hooksKeys == 1)
-        for event in ["on_session_start", "pre_llm_call", "post_llm_call", "on_session_end"] {
+        for event in ["on_session_start", "pre_llm_call", "post_llm_call", "on_session_finalize"] {
             #expect(installed.contains("\(event):"))
         }
         // Hermes hooks run from a headless daemon, so each event delegates to the
@@ -1156,7 +1156,7 @@ struct AgentStatusPluginTests {
         #expect(FileManager.default.fileExists(atPath: script.path))
         let scriptText = try String(contentsOf: script, encoding: .utf8)
         #expect(scriptText.contains("_omg_agent_status"))
-        #expect(scriptText.contains("conversation="))
+        #expect(scriptText.contains("session_id"))
         let attributes = try FileManager.default.attributesOfItem(atPath: script.path)
         #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o700)
 

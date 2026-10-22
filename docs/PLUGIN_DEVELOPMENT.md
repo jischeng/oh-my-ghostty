@@ -721,12 +721,31 @@ beside each existing file. Removal deletes only OMG-owned commands or blocks.
 
 Hermes exposes lifecycle shell hooks in `~/.hermes/config.yaml` (`hooks: { <event>:
 [{ command, timeout }] }`) rather than a plugin API, so its manifest selects the
-`yaml` mechanism with `pre_llm_call`/`post_llm_call`. The OMG block declares its own
-top-level `hooks:` key, so installation fails closed when the user already owns that
-key instead of rewriting their YAML, and the generated command is folded onto one
-line because YAML would otherwise convert newlines to spaces. Hermes also works over
-SSH: the generated command writes OSC 3008 to the controlling TTY, so the remote
-Agent is recognized without OMG logging in to the remote account.
+`yaml` mechanism. Hooks may execute in Hermes' headless shared gateway, so OMG
+installs a Python reporter instead of writing OSC from the hook process. It stores
+bounded metadata (`session_id`, state, timestamp) in separate SHA-256-named JSON
+files under `~/.config/oh-my-ghostty/agent-status/hermes/` (directory 0700, files
+0600). Synthetic `test-*` sessions are ignored. The local and SSH installers ship
+the same reporter; an OMG-owned YAML block is replaced without changing unrelated
+configuration, and an existing user-owned top-level `hooks:` key fails closed.
+
+Every two seconds, OMG checks for a foreground Hermes terminal client on the pane's
+exact TTY, then reads that TTY's `~/.hermes/terminal-sessions/tty-*` breadcrumb and
+only the matching session event. A stale breadcrumb from before the client's start,
+a background/exited client, and a synthetic test session cannot supply restoration
+identity. A live client appears idle even before the first hook runs. No prompt or
+message content is recorded. `on_session_end` is turn-scoped and must not be treated
+as client exit; `on_session_finalize` reports finalization, while client liveness is
+validated separately.
+
+For SSH, `omg +ssh` prompt metadata includes a validated `/dev/pts/N` or
+`/dev/ttysN` terminal name. OMG reads the same metadata through its existing exact
+SSH connection with a bounded five-second probe and revalidates pane/connection
+identity after the result arrives. Existing panes need a fresh SSH prompt from the
+updated `+ssh` bootstrap to supply their remote TTY. Plain SSH panes without this
+metadata do not guess ownership by working directory or most-recent session.
+The executable reporter and multi-pane isolation contract is checked with
+`python3 -m unittest discover -s dist -p 'test_hermes_pane_status.py'`.
 
 Crush remains detector-only: OMG has no vendor Hook adapter for it. Its
 Install action therefore creates a Host-owned, versioned detector marker under

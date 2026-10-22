@@ -29,6 +29,7 @@ struct PaneSessionContext: Equatable, Sendable {
         /// process from the Surface foreground process group. Typed `omg +ssh`
         /// lifecycles keep this nil and remain authoritative.
         let localProcessGroupID: Int?
+        var remoteTTY: String?
     }
 
     enum State: Equatable, Sendable {
@@ -295,7 +296,11 @@ struct PaneSessionContext: Equatable, Sendable {
                 transferTarget: sshReplay?.transferTarget
                     ?? activeSSH?.transferTarget
                     ?? alias,
-                localProcessGroupID: nil
+                localProcessGroupID: nil,
+                remoteTTY: metadata["tty"].flatMap { value in
+                    value.range(of: #"^/dev/(?:ttys[0-9]+|pts/[0-9]+)$"#,
+                                options: .regularExpression) != nil ? value : nil
+                } ?? activeSSH?.remoteTTY
             )
             let isCurrentConnection = activeSSH != nil
             if !isCurrentConnection, case .local = state {

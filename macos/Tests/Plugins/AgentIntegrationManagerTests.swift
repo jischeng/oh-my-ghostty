@@ -544,7 +544,7 @@ pathlib.Path(os.environ["UPDATE_LOG"]).write_text(json.dumps(sys.argv[1:]))
         #expect(installed.contains("on_session_start:"))
         #expect(installed.contains("pre_llm_call:"))
         #expect(installed.contains("post_llm_call:"))
-        #expect(installed.contains("on_session_end:"))
+        #expect(installed.contains("on_session_finalize:"))
         // Hermes hooks may run from a headless daemon, so the remote installer also
         // ships the helper script the YAML delegates to.
         #expect(installed.contains("hermes-hook.sh"))
@@ -557,7 +557,7 @@ pathlib.Path(os.environ["UPDATE_LOG"]).write_text(json.dumps(sys.argv[1:]))
         // The helper records the state instead of writing OSC: Hermes may run the
         // hook from a daemon with no controlling terminal.
         #expect(!scriptText.contains("> \"/dev/$omg_tty\""))
-        #expect(scriptText.contains(".status"))
+        #expect(scriptText.contains("hashlib.sha256"))
 
         _ = try await python(
             AgentHookInstaller.remoteInstallerScript(action: .remove, agents: [.hermes]),

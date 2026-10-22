@@ -342,6 +342,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// Last applied status-file signature per pane, so the one-second poll does not
     /// republish an unchanged YAML-hook Agent state.
     private var agentStatusSignatures: [UUID: String] = [:]
+    private var hermesPollTasks: [UUID: Task<Void, Never>] = [:]
+    private var hermesPollDates: [UUID: Date] = [:]
+    private var hermesPaneContexts: [UUID: String] = [:]
 
     var focusedPaneSessionContext: PaneSessionContext? {
         paneSessionContext(for: focusedSurface ?? surfaceTree.first)
@@ -1120,6 +1123,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         ).autoconnect().sink { [weak self] _ in
             self?.pollSSHReconnectProcesses()
             self?.pollLocalAgentProcesses()
+            self?.pollHermesPanes()
         }
     }
 
@@ -1212,11 +1216,6 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                     clearDetectedAgent(for: surface.id, force: true)
                 } else {
                     updateScreenFallback(for: surface, detected: detected)
-                    applyAgentStatusFile(
-                        agent: detected.agent,
-                        surfaceID: surface.id,
-                        processGroupID: detected.processGroupID
-                    )
                 }
             }
             guard observedForegroundProcessIDs[surface.id] != processGroupID else {
@@ -1332,11 +1331,6 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             processGroupID: processGroupID,
             launchedAt: launchedAt
         )
-        applyAgentStatusFile(
-            agent: agent,
-            surfaceID: surfaceID,
-            processGroupID: processGroupID
-        )
         // A previous Agent can terminate between foreground samples and leave
         // an error activity behind. Only suppress the synthesized idle event
         // when this exact context is already current; a newly detected process
@@ -1350,54 +1344,101 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         ), for: surfaceID)
     }
 
-    /// Applies the status line a YAML-hook Agent wrote from its own hook process.
-    ///
-    /// Agents such as Hermes run shell hooks from a long-lived daemon that owns no
-    /// TTY, so the hook cannot write OSC into the pane. The helper script records
-    /// the state instead, and the pane that owns the Agent process consumes it here
-    /// and synthesizes the same normalized event locally.
-    private func applyAgentStatusFile(
-        agent: SupportedAgent,
-        surfaceID: UUID,
-        processGroupID: Int
+    /// Probe the terminal client, then resolve its exact session via the TTY
+    /// breadcrumb. Remote panes use the same probe on the connected SSH account.
+    private func pollHermesPanes() {
+        guard AgentStatusPlugin.isEnabled else { return }
+        let activeIDs = Set(surfaceTree.map(\.id))
+        for (id, task) in hermesPollTasks where !activeIDs.contains(id) {
+            task.cancel()
+            hermesPollTasks.removeValue(forKey: id)
+            hermesPollDates.removeValue(forKey: id)
+            hermesPaneContexts.removeValue(forKey: id)
+            agentStatusSignatures.removeValue(forKey: id)
+        }
+        for surface in surfaceTree {
+            let id = surface.id
+            guard hermesPollTasks[id] == nil,
+                  Date().timeIntervalSince(hermesPollDates[id] ?? .distantPast) >= 2,
+                  let context = paneSessionContexts[id],
+                  let foreground = surface.surfaceModel?.foregroundPID else { continue }
+            let connection: GitSSHConnection?
+            let tty: String?
+            switch context.state {
+            case .local:
+                guard AgentHookInstaller().isInstalled(.hermes) else { continue }
+                connection = nil
+                tty = surface.surfaceModel?.ttyName
+            case .sshReady(let ssh, _):
+                connection = try? GitSSHConnection(session: context)
+                tty = ssh.remoteTTY
+                guard connection != nil else { continue }
+            case .sshConnecting:
+                continue
+            }
+            guard let tty, let script = try? HermesPaneStatus.script(tty: tty) else { continue }
+            hermesPollDates[id] = Date()
+            hermesPollTasks[id] = Task { [weak self] in
+                guard let self else { return }
+                defer { hermesPollTasks.removeValue(forKey: id) }
+                do {
+                    let data: Data
+                    if let connection {
+                        // This probe reads only metadata on the exact connected account.
+                        let result = try await SSHSessionTransport.run(
+                            connection: connection, command: "exec python3 -",
+                            stdin: Data(script.utf8), limit: 8192, timeout: 5
+                        )
+                        guard result.isSuccess else { return }
+                        data = result.stdout
+                    } else {
+                        let result = try await GitProcessRunner().run(
+                            executablePath: "/usr/bin/python3", arguments: ["-"],
+                            workingDirectory: "/tmp", stdin: Data(script.utf8),
+                            maxOutputBytes: 8192, timeout: 5
+                        )
+                        guard result.isSuccess else { return }
+                        data = result.stdout
+                    }
+                    guard !Task.isCancelled,
+                          surfaceTree.contains(where: { $0.id == id }),
+                          paneSessionContexts[id]?.state == context.state,
+                          surface.surfaceModel?.foregroundPID == foreground else { return }
+                    let snapshot = try? JSONDecoder().decode(HermesPaneStatus.Snapshot.self, from: data)
+                    applyHermesSnapshot(snapshot, surfaceID: id, remote: connection != nil)
+                } catch {
+                    // A failed transport probe does not prove the client exited.
+                }
+            }
+        }
+    }
+
+    private func applyHermesSnapshot(
+        _ snapshot: HermesPaneStatus.Snapshot?, surfaceID: UUID, remote: Bool
     ) {
-        guard agent.definition.hook.kind == .yaml else { return }
-        let installer = AgentHookInstaller()
-        guard let status = installer.readAgentStatus(agent),
-              let rawState = status["state"],
-              !rawState.isEmpty else { return }
-        let identity = "omg-agent-\(agent.rawValue)-\(processGroupID)"
-        if rawState == "end" {
-            guard agentReducers[surfaceID]?.currentContextID == identity else { return }
-            updateAgentActivity(.init(
-                action: .end,
-                id: identity,
-                metadata: "type=app"
-            ), for: surfaceID)
+        guard let snapshot else {
+            if let previous = hermesPaneContexts.removeValue(forKey: surfaceID) {
+                updateAgentActivity(.init(action: .end, id: previous, metadata: "type=app"), for: surfaceID)
+            }
+            agentStatusSignatures.removeValue(forKey: surfaceID)
             return
         }
-        // Only accept states the manifest declares, so the file cannot drive an
-        // arbitrary presentation state.
-        guard agent.definition.hook.events.contains(where: {
-            $0.state?.rawValue == rawState
-        }) else { return }
-        var metadata = "type=app;omg_agent=\(agent.rawValue);" +
-            "omg_scope=local;omg_liveness=pgid;omg_state=\(rawState)"
-        if let conversation = status["conversation"],
-           !conversation.isEmpty,
-           conversation.count <= 128 {
-            metadata += ";omg_conversation=\(conversation)"
-        }
-        // The poll runs once per second; skip an unchanged state so the reducer is
-        // not asked to republish identical activity on every tick.
-        let signature = "\(identity)|\(rawState)|\(status["conversation"] ?? "")"
+        let identity = "omg-agent-hermes-\(snapshot.pgid)"
+        let signature = "\(identity)|\(snapshot.revision)|\(remote)"
         guard agentStatusSignatures[surfaceID] != signature else { return }
         agentStatusSignatures[surfaceID] = signature
-        updateAgentActivity(.init(
-            action: .start,
-            id: identity,
-            metadata: metadata
-        ), for: surfaceID)
+        hermesPaneContexts[surfaceID] = identity
+        if agentResumeDescriptors[surfaceID]?.conversationID?.rawValue.hasPrefix("test-") == true {
+            clearAgentResumeDescriptor(for: surfaceID)
+        }
+        var metadata = "type=app;omg_agent=hermes;omg_scope=\(remote ? "remote" : "local");" +
+            "omg_liveness=pgid;omg_state=\(snapshot.state)"
+        if let sid = snapshot.conversation { metadata += ";omg_conversation=\(sid)" }
+        if let cwd = snapshot.cwd,
+           let encoded = cwd.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(
+               CharacterSet(charactersIn: ";=%")
+           )) { metadata += ";omg_cwd=\(encoded)" }
+        updateAgentActivity(.init(action: .start, id: identity, metadata: metadata), for: surfaceID)
     }
 
     private func updateScreenFallback(

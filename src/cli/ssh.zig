@@ -813,7 +813,7 @@ fn remoteFishCommand(
         ) catch return null;
     }
     fish_command.writer.print(
-        "function __omg_report_pwd --on-event fish_prompt; set -l __omg_cwd (string escape --style=url \"$PWD\"); printf \"\\e]3008;start={s};type=remote;targethost={s};serverid=%s;cwd=%s\\a\\e]7;file://localhost%s\\a\" \"$OMG_SSH_SERVER_ID\" \"$__omg_cwd\" \"$__omg_cwd\"; end",
+        "function __omg_report_pwd --on-event fish_prompt; set -l __omg_cwd (string escape --style=url \"$PWD\"); set -l __omg_tty (tty); printf \"\\e]3008;start={s};type=remote;targethost={s};serverid=%s;cwd=%s;tty=%s\\a\\e]7;file://localhost%s\\a\" \"$OMG_SSH_SERVER_ID\" \"$__omg_cwd\" \"$__omg_tty\" \"$__omg_cwd\"; end",
         .{ context_id, label },
     ) catch return null;
     fish_command.writer.writeByte('\n') catch return null;
@@ -920,7 +920,7 @@ fn writeRemotePromptFunction(
     try writer.writeAll(";type=remote;targethost=");
     try writer.writeAll(label);
     try writer.writeAll(
-        \\;serverid=%s;cwdhex=%s\007\033]7;file://localhost%s\007' "$OMG_SSH_SERVER_ID" "$__omg_hex" "$__omg_uri"
+        \\;serverid=%s;cwdhex=%s;tty=%s\007\033]7;file://localhost%s\007' "$OMG_SSH_SERVER_ID" "$__omg_hex" "$(tty)" "$__omg_uri"
         \\}
         \\
     );
@@ -1189,6 +1189,7 @@ test remoteShellCommand {
     try testing.expect(std.mem.indexOf(u8, bash_command, "133;C") != null);
     try testing.expect(std.mem.indexOf(u8, bash_command, "cwdhex=%s") != null);
     try testing.expect(std.mem.indexOf(u8, bash_command, "serverid=%s") != null);
+    try testing.expect(std.mem.indexOf(u8, bash_command, "tty=%s") != null);
     try testing.expect(std.mem.indexOf(u8, bash_command, "targethost=vps-jump") != null);
     try testing.expect(std.mem.indexOf(u8, bash_command, "codex resume") != null);
     try testing.expect(std.mem.indexOf(u8, bash_command, "project'\\''s code") != null);

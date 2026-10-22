@@ -36,7 +36,7 @@
         "state": "done"
       },
       {
-        "name": "on_session_end"
+        "name": "on_session_finalize"
       }
     ]
   }

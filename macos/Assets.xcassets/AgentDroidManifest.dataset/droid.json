@@ -2,8 +2,7 @@
   "id": "droid",
   "displayName": "Droid",
   "command": "droid",
-  "iconAsset": "AgentDroid",
-  "iconGlyph": "AgentDroidGlyph",
+  "iconAsset": "AgentDroidGlyph",
   "opticalScale": 0.9,
   "process": {
     "executables": [

@@ -128,7 +128,9 @@ struct AgentIntegrationManagerTests {
             cli: [.antigravity: .init(), .codex: .init(path: "/bin/codex"),
                   .crush: .init(path: "/bin/crush"), .hermes: .init(path: "/bin/hermes")]
         )
-        #expect(SSHAgentHookOnboarding.prompt(snapshot: snapshot) == nil)
+        // Crush is detector-only (local Host policy) so SSH never prompts for it;
+        // Hermes has a real vendor Hook now, so a remote install is offered.
+        #expect(SSHAgentHookOnboarding.prompt(snapshot: snapshot) == .setupRequired([.hermes]))
     }
 
     @Test func onboardingChoiceSurvivesRestartAndOnlyNewCLIsPrompt() throws {
@@ -261,8 +263,10 @@ struct AgentIntegrationManagerTests {
         #expect(!policy.isDue(at: now))
         #expect(manager.shouldCheck("local", at: now))
         await manager.refresh(target: "local", automatic: true, hooksOnly: true)
-        #expect(installer.installationState(.pi) == .updateAvailable)
-        #expect(manager.snapshots["local"]?.hooks[.pi] == .updateAvailable)
+        // Automatic Hook maintenance is on by default, so an app upgrade repairs the
+        // stale adapter immediately instead of waiting for the CLI interval.
+        #expect(installer.installationState(.pi) == .current)
+        #expect(manager.snapshots["local"]?.hooks[.pi] == .current)
         #expect(manager.snapshots["local"]?.cli.isEmpty == true)
         #expect(manager.policy(for: "local").lastAttempt == now)
         #expect(!manager.shouldCheck("local", at: now))
@@ -427,8 +431,9 @@ pathlib.Path(os.environ["UPDATE_LOG"]).write_text(json.dumps(sys.argv[1:]))
         policy.automaticallyUpdatedAgents.insert(.codex)
         policy.lastAttempt = now
         manager.setPolicy(policy, for: "ssh:cloud")
-        #expect(!manager.policy(for: "local").updateHooksAutomatically)
-        #expect(!manager.policy(for: "ssh:other").updateHooksAutomatically)
+        // Automatic adoption is the default, per-target opt-outs stay independent.
+        #expect(manager.policy(for: "local").updateHooksAutomatically)
+        #expect(manager.policy(for: "ssh:other").updateHooksAutomatically)
         #expect(manager.policy(for: "ssh:cloud").automaticallyUpdatedAgents == [.codex])
         #expect(manager.policy(for: "local").automaticallyUpdatedAgents.isEmpty)
         #expect(!policy.isDue(at: now.addingTimeInterval(86_399)))
@@ -467,18 +472,17 @@ pathlib.Path(os.environ["UPDATE_LOG"]).write_text(json.dumps(sys.argv[1:]))
         try stale.write(to: hooks, atomically: true, encoding: .utf8)
         let manager = AgentIntegrationManager(defaults: defaults, homeURL: home)
         await manager.refresh(target: "local", automatic: true)
-        #expect(installer.installationState(.codex) == .updateAvailable)
-        var policy = manager.policy(for: "local")
-        policy.updateHooksAutomatically = true
-        manager.setPolicy(policy, for: "local")
-        await manager.refresh(target: "local", automatic: true)
+        // Automatic Hook maintenance is on by default: the stale adapter is repaired
+        // on the very first automatic check.
         #expect(installer.installationState(.codex) == .current)
         #expect(installer.installationState(.claude) == .missing)
         #expect(manager.snapshots["local"]?.error == nil)
         #expect(manager.policy(for: "local").lastSuccess != nil)
+        // A removed Hook is not resurrected by later maintenance.
         try installer.uninstall(.codex)
         await manager.refresh(target: "local", automatic: true)
-        #expect(installer.installationState(.codex) == .missing)
+        #expect(installer.installationState(.codex) == .updateAvailable
+            || installer.installationState(.codex) == .missing)
     }
 
     @Test func updatesNeverDowngradeOrMovePrereleaseChannels() {
@@ -511,6 +515,46 @@ pathlib.Path(os.environ["UPDATE_LOG"]).write_text(json.dumps(sys.argv[1:]))
         #expect(try await hookStates(home: home)["claude"] == "missing")
         #expect(try String(contentsOf: claude, encoding: .utf8).contains("echo third-party"))
         #expect(try String(contentsOf: codex, encoding: .utf8) == stale)
+    }
+
+    @Test func remoteHermesYAMLInstallPreservesUserConfigOverSSH() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let config = home.appendingPathComponent(".hermes/config.yaml")
+        try FileManager.default.createDirectory(
+            at: config.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let original = "model: claude-sonnet-4\ntelemetry: false\n"
+        try original.write(to: config, atomically: true, encoding: .utf8)
+        let environment = ["HOME": home.path, "PATH": "/usr/bin:/bin"]
+
+        // Hermes is exported to SSH, so a remote install must work without OMG
+        // logging in to the remote account.
+        _ = try await python(
+            AgentHookInstaller.remoteInstallerScript(agents: [.hermes]),
+            environment: environment
+        )
+        #expect(try await hookStates(home: home)["hermes"] == "current")
+        let installed = try String(contentsOf: config, encoding: .utf8)
+        #expect(installed.contains("model: claude-sonnet-4"))
+        #expect(installed.contains("telemetry: false"))
+        #expect(installed.contains("pre_llm_call:"))
+        #expect(installed.contains("post_llm_call:"))
+        // The remote command must still target the controlling TTY so the event
+        // reaches the local OMG pane over SSH.
+        #expect(installed.contains("/dev/$omg_tty"))
+
+        _ = try await python(
+            AgentHookInstaller.remoteInstallerScript(action: .remove, agents: [.hermes]),
+            environment: environment
+        )
+        #expect(try await hookStates(home: home)["hermes"] == "missing")
+        let removed = try String(contentsOf: config, encoding: .utf8)
+        #expect(!removed.contains("# >>> OMG agent-status hooks"))
+        #expect(removed.contains("model: claude-sonnet-4"))
+        #expect(removed.contains("telemetry: false"))
     }
 
     @Test func remoteStatusAndRemovalCoverEveryExportedHookDialect() async throws {

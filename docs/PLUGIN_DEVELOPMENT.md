@@ -712,13 +712,23 @@ probes during discovery, and nonzero update failures.
 
 `AgentHookInstaller` installs only the closed mechanism selected by each bundled
 manifest: Antigravity named JSON, nested JSON, Cursor/Copilot/Reasonix flat JSON, Pi-compatible or
-OpenCode/Amp plugins, marker-delimited Kimi TOML, and event-named Cline scripts.
-It never removes unrelated JSON/TOML entries, never overwrites a non-OMG Cline
-script, rejects malformed config rather than replacing it, uses atomic
+OpenCode/Amp plugins, marker-delimited Kimi TOML, event-named Cline scripts, and
+marker-delimited Hermes YAML.
+It never removes unrelated JSON/TOML/YAML entries, never overwrites a non-OMG
+Cline script, rejects malformed config rather than replacing it, uses atomic
 mode-preserving writes (0600 for new files), and keeps a one-time `.omg-backup`
 beside each existing file. Removal deletes only OMG-owned commands or blocks.
 
-OMG currently has no vendor Hook adapter for Crush or Hermes. Their
+Hermes exposes lifecycle shell hooks in `~/.hermes/config.yaml` (`hooks: { <event>:
+[{ command, timeout }] }`) rather than a plugin API, so its manifest selects the
+`yaml` mechanism with `pre_llm_call`/`post_llm_call`. The OMG block declares its own
+top-level `hooks:` key, so installation fails closed when the user already owns that
+key instead of rewriting their YAML, and the generated command is folded onto one
+line because YAML would otherwise convert newlines to spaces. Hermes also works over
+SSH: the generated command writes OSC 3008 to the controlling TTY, so the remote
+Agent is recognized without OMG logging in to the remote account.
+
+Crush remains detector-only: OMG has no vendor Hook adapter for it. Its
 Install action therefore creates a Host-owned, versioned detector marker under
 `~/.config/oh-my-ghostty/agent-detectors/<agent>.json`; the directory is mode
 0700 and each exact allowlisted marker is mode 0600. The host enables process and
@@ -728,13 +738,26 @@ periods never imply task start/completion. Settings explicitly identifies these
 agents as having no separate status Hook: detection fixes ship with the OMG app,
 while reinstalling a detector only enables its local marker. Agents without patterns retain idle
 identity until their process exits.
-Remove deletes only a regular marker whose owner/agent fields match OMG, and
-Update replaces stale marker content. A one-time global sentinel migrates the
-remaining previously implicit detectors to Installed; after that, a user removal is
-never auto-installed again. Conflicting or non-file content fails closed. These
-markers are local Host policy and are intentionally excluded from
-the exported remote hook installer; OMG does not claim to install an adapter
-that it does not yet implement.
+
+Detector markers are reconciled per Agent on every launch instead of once. Each
+launch installs a marker for every detector-only Agent that has none, and refreshes
+an OMG-owned marker whose version is stale. An explicit Remove writes a per-Agent
+tombstone (`.removed-<agent>.json`, mode 0600, same owner/agent validation) so
+reconciliation never resurrects a detector the user turned off; an explicit Install
+deletes that tombstone. Content that is not an OMG-owned regular marker is never
+overwritten, and conflicting content fails closed. Because a global sentinel could
+not distinguish "removed by the user" from "bundled later", removals recorded by
+the earlier one-shot migration are not carried over: such a detector is re-enabled
+once and can be removed again. These markers are local Host policy and are
+intentionally excluded from the exported remote hook installer.
+
+Automatic Hook maintenance installs an integration for any Agent CLI it discovers
+but has not integrated yet, in addition to repairing stale integrations, so
+installing an Agent CLI is enough for OMG to recognize it. This runs only while
+`updateHooksAutomatically` is enabled (the default; a one-time migration enables it
+for policies stored before adoption existed, and a later opt-out is preserved).
+Detector-only adoption is local-only because those markers are Host policy, and a
+tombstoned detector is skipped.
 
 The locally inspected `agy` 1.2.17 binary includes a Hooks Guide documenting
 named hooks in a customization root's `hooks.json` (for example,
@@ -854,20 +877,21 @@ their respective owners; the assets do not imply vendor endorsement.
 
 An agent manifest declares icons in two roles:
 
-- `iconAsset` is the full-colour product artwork. Settings and the Inspector
-  render it unchanged, and it carries agent identity where no state tint is
-  applied.
-- `iconGlyph` is an optional monochrome silhouette used only for tab
+- `iconAsset` is the agent's identity mark, rendered by Settings and the
+  Inspector. It must be a monochrome template so those surfaces follow the
+  system foreground colour; a raster brand image on an opaque background would
+  render as a fixed colour block and break the uniform identity treatment.
+- `iconGlyph` is an optional additional silhouette used only for tab
   presentation. Tab icons tint the glyph's alpha channel with the activity
   colour (accent, orange, green, red), overlaid through `.mask(_:)`.
 
-Agents whose `iconAsset` is raster brand art on an opaque background cannot be
-used as a tab glyph: their alpha channel covers the whole square, so masking
-tints the entire tile into a solid colour block and erases the mark. Such an
-agent must declare a transparent `iconGlyph`; omitting it falls back to
-`iconAsset` and reintroduces the solid-block rendering. Glyphs are bundled as
-`Agent<Name>Glyph.imageset` vector assets with
-`template-rendering-intent: template`, so the host supplies all colour.
+Both roles resolve to bundled vector assets with
+`template-rendering-intent: template`, so the host supplies all colour. An agent
+whose identity mark is already a template reuses it for tabs; one that needs a
+separate tab silhouette declares `iconGlyph` and keeps `iconAsset` for identity
+surfaces. A raster asset is never valid in either role: its alpha channel covers
+the whole square, so masking tints the entire tile into a solid colour block and
+erases the mark.
 
 ### Built-in agent manifests and restoration (Internal)
 

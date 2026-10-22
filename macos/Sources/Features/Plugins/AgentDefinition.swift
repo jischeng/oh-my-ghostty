@@ -233,6 +233,10 @@ struct AgentDefinition: Codable, Equatable, Sendable {
             case plugin
             case toml
             case scripts
+            /// Marker-delimited YAML block holding shell commands, used by Agents
+            /// whose lifecycle hooks live in a YAML config but offer no programmatic
+            /// API (Hermes `hooks:`).
+            case yaml
         }
 
         enum Dialect: String, CaseIterable, Codable, Sendable {
@@ -272,12 +276,13 @@ struct AgentDefinition: Codable, Equatable, Sendable {
     let id: String
     let displayName: String
     let command: String
-    /// Full-colour product artwork for Settings and Inspector surfaces.
+    /// The agent's identity mark, rendered by Settings and the Inspector. Must be a
+    /// monochrome template so those surfaces follow the system foreground colour.
     let iconAsset: String
-    /// Optional monochrome silhouette for tab presentation, where the host
-    /// tints the alpha channel by activity state. Raster brand art with an
-    /// opaque background tints into a solid block, so those agents declare a
-    /// transparent glyph here and keep `iconAsset` for identity views.
+    /// Optional additional silhouette for tab presentation, where the host tints
+    /// the alpha channel by activity state. Raster brand art with an opaque
+    /// background tints into a solid block, so an agent that needs a different tab
+    /// shape declares a transparent glyph here; otherwise tabs reuse `iconAsset`.
     let iconGlyph: String?
     let opticalScale: Double?
     let process: ProcessSpec

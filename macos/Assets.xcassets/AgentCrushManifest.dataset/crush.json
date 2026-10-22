@@ -2,8 +2,7 @@
   "id": "crush",
   "displayName": "Crush",
   "command": "crush",
-  "iconAsset": "AgentCrush",
-  "iconGlyph": "AgentCrushGlyph",
+  "iconAsset": "AgentCrushGlyph",
   "opticalScale": 0.9,
   "process": {
     "executables": [

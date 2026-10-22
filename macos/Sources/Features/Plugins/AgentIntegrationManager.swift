@@ -4,7 +4,11 @@ import Foundation
 
 struct AgentIntegrationPolicy: Codable, Equatable {
     var checkAutomatically = true
-    var updateHooksAutomatically = false
+    /// Automatic Hook maintenance: repairs stale integrations and adopts
+    /// integrations for newly installed Agent CLIs. Enabled by default so that
+    /// installing an Agent CLI is enough for OMG to recognize it; a user can still
+    /// turn it off, and detector-only Agents removed by the user stay removed.
+    var updateHooksAutomatically = true
     var automaticallyUpdatedAgents: Set<SupportedAgent> = []
     var intervalHours = 24
     var lastAttempt: Date?
@@ -105,6 +109,8 @@ final class AgentIntegrationManager: ObservableObject {
     private var automaticTargets: Set<String> = []
     private var checkedConnections: Set<String> = []
     private let storageKey = "OMG.AgentIntegration.Policies.v1"
+    /// One-shot flag for enabling automatic Hook adoption on stored policies.
+    private static let automaticHookAdoptionKey = "OMG.AgentIntegration.AutomaticHookAdoption.v1"
     let integrationRevision: String
 
     static var bundledIntegrationRevision: String {
@@ -132,6 +138,20 @@ final class AgentIntegrationManager: ObservableObject {
         self.connectedTargets = connectionTargets()
         policies = defaults.data(forKey: storageKey)
             .flatMap { try? JSONDecoder().decode([String: AgentIntegrationPolicy].self, from: $0) } ?? [:]
+        if !defaults.bool(forKey: Self.automaticHookAdoptionKey) {
+            // Policies saved before automatic Hook adoption existed carry the old
+            // `false` default, which suppressed the feature entirely. Adopting is
+            // now the default, so enable it once for those stored policies too.
+            // Running once (not on every launch) keeps a later opt-out effective.
+            for (target, var stored) in policies where !stored.updateHooksAutomatically {
+                stored.updateHooksAutomatically = true
+                policies[target] = stored
+            }
+            defaults.set(true, forKey: Self.automaticHookAdoptionKey)
+            if let data = try? JSONEncoder().encode(policies) {
+                defaults.set(data, forKey: storageKey)
+            }
+        }
         self.snapshots = Dictionary(uniqueKeysWithValues: registry.hosts.map { ($0.id, $0.snapshot) })
             .merging(snapshots, uniquingKeysWith: { _, fresh in fresh })
         if self.snapshots[Self.localID] == nil,
@@ -384,19 +404,12 @@ final class AgentIntegrationManager: ObservableObject {
         do {
             snapshot.hooks = try await readHooks(target: target)
             if automatic {
-                for agent in SupportedAgent.allCases where snapshot.hooks[agent] == .updateAvailable {
-                    guard !Task.isCancelled, allowsAutomaticWork(target), self.policy(for: target).checkAutomatically,
-                          self.policy(for: target).updateHooksAutomatically else { break }
-                    operations[target] = .init(kind: .hooks, agent: agent)
-                    do {
-                        try await changeHook(agent, target: target, remove: false)
-                        snapshot.hooksChanged = true
-                    } catch {
-                        snapshot.error = [snapshot.error, agent.displayName + ": " + error.localizedDescription]
-                            .compactMap { $0 }.joined(separator: "\n")
-                    }
+                // Stale integrations are repaired on every automatic pass. No CLI
+                // lookup is needed for that, which is why it does not wait for the
+                // discovery step below.
+                if await repairStaleHooks(target: target, snapshot: &snapshot) {
+                    snapshot.hooks = try await readHooks(target: target)
                 }
-                snapshot.hooks = try await readHooks(target: target)
             }
             var current = self.policy(for: target)
             current.lastSuccess = Date()
@@ -413,6 +426,9 @@ final class AgentIntegrationManager: ObservableObject {
         snapshot.cliError = nil
         do {
             snapshot.cli = try await readCLI(target: target, checkLatest: checkLatest)
+            if automatic, await adoptDiscoveredAgents(target: target, snapshot: &snapshot) {
+                snapshot.hooks = try await readHooks(target: target)
+            }
             if automatic {
                 var updatedCLI = false
                 for agent in SupportedAgent.allCases where snapshot.cli[agent]?.needsUpdateCheck == true {
@@ -434,6 +450,70 @@ final class AgentIntegrationManager: ObservableObject {
             snapshot.cliError = [snapshot.cliError, error.localizedDescription].compactMap { $0 }.joined(separator: "\n")
         }
         publish(snapshot, target: target)
+    }
+
+    /// Repairs integrations that exist but are stale. Runs whenever automatic
+    /// checks are enabled, independent of the opt-in new-CLI adoption below, so a
+    /// Hook version bump always reaches already-enabled integrations.
+    private func repairStaleHooks(
+        target: String,
+        snapshot: inout AgentIntegrationSnapshot
+    ) async -> Bool {
+        guard policy(for: target).updateHooksAutomatically else { return false }
+        var changed = false
+        for agent in SupportedAgent.allCases where snapshot.hooks[agent] == .updateAvailable {
+            guard !Task.isCancelled, allowsAutomaticWork(target),
+                  policy(for: target).checkAutomatically else { break }
+            operations[target] = .init(kind: .hooks, agent: agent)
+            do {
+                try await changeHook(agent, target: target, remove: false)
+                snapshot.hooks[agent] = .current
+                snapshot.hooksChanged = true
+                changed = true
+            } catch {
+                snapshot.error = [snapshot.error, agent.displayName + ": " + error.localizedDescription]
+                    .compactMap { $0 }.joined(separator: "\n")
+            }
+        }
+        return changed
+    }
+
+    /// Adopts integrations for Agent CLIs that are installed but not yet integrated.
+    ///
+    /// This is what makes "install the Agent CLI, then open OMG" enough for the
+    /// Agent to be recognized instead of requiring a manual Install. It only ever
+    /// touches a `.missing` state, so it can never overwrite an existing Hook, and
+    /// it stays behind the `updateHooksAutomatically` opt-in because it writes
+    /// vendor configuration files. Detector-only Agents are adopted on the local
+    /// host only: their markers are Host policy and are never exported remotely.
+    private func adoptDiscoveredAgents(
+        target: String,
+        snapshot: inout AgentIntegrationSnapshot
+    ) async -> Bool {
+        guard policy(for: target).updateHooksAutomatically else { return false }
+        var changed = false
+        let local = target == Self.localID
+        let installer = AgentHookInstaller(homeURL: homeURL)
+        for agent in Self.hookSetupCandidates(
+            snapshot: snapshot,
+            local: local
+        ) where snapshot.hooks[agent] == .missing {
+            // A detector the user removed stays removed until they re-enable it.
+            guard !(local && installer.isDetectorRemovedByUser(agent)) else { continue }
+            guard !Task.isCancelled, allowsAutomaticWork(target),
+                  policy(for: target).checkAutomatically else { break }
+            operations[target] = .init(kind: .hooks, agent: agent)
+            do {
+                try await changeHook(agent, target: target, remove: false)
+                snapshot.hooks[agent] = .current
+                snapshot.hooksChanged = true
+                changed = true
+            } catch {
+                snapshot.error = [snapshot.error, agent.displayName + ": " + error.localizedDescription]
+                    .compactMap { $0 }.joined(separator: "\n")
+            }
+        }
+        return changed
     }
 
     func update(_ agent: SupportedAgent, target: String, cli: Bool = false, remove: Bool = false) async {

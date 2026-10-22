@@ -120,18 +120,18 @@ struct AgentStatusPluginTests {
             .claude: ("claude", "AgentClaude", 8),
             .pi: ("pi", "AgentPi", 7),
             .qoder: ("qodercli", "AgentQoder", 7),
-            .reasonix: ("reasonix", "AgentReasonix", 8),
+            .reasonix: ("reasonix", "AgentReasonixGlyph", 8),
             .omp: ("omp", "AgentOMP", 4),
             .opencode: ("opencode", "AgentOpenCode", 4),
             .amp: ("amp", "AgentAmp", 2),
             .antigravity: ("agy", "AgentAntigravity", 3),
             .cline: ("cline", "AgentCline", 7),
             .copilot: ("copilot", "AgentCopilot", 5),
-            .crush: ("crush", "AgentCrush", 0),
+            .crush: ("crush", "AgentCrushGlyph", 0),
             .cursor: ("cursor-agent", "AgentCursor", 5),
-            .droid: ("droid", "AgentDroid", 5),
+            .droid: ("droid", "AgentDroidGlyph", 5),
             .grok: ("grok", "AgentGrok", 5),
-            .hermes: ("hermes", "AgentHermes", 0),
+            .hermes: ("hermes", "AgentHermesGlyph", 2),
             .kimi: ("kimi", "AgentKimi", 3),
             .qwen: ("qwen", "AgentQwen", 5),
         ]
@@ -154,12 +154,23 @@ struct AgentStatusPluginTests {
         #expect(SupportedAgent.claude.definition.hook.transcriptField == "transcript_path")
     }
 
-    /// Identity surfaces (Settings, Inspector) keep the full-colour artwork, and
-    /// agents that need a tab glyph must not reuse the colour asset for it.
-    @Test func colorArtworkStaysSeparateFromTabGlyph() {
+    /// Every Agent identity asset must be a monochrome template so Settings and the
+    /// Inspector follow the system foreground colour, exactly like tab glyphs. A
+    /// raster brand image on an opaque background rendered as a fixed colour block
+    /// and was the only agent-to-agent inconsistency in those surfaces.
+    @Test @MainActor func identityAssetsAreTintedTemplates() throws {
         for agent in SupportedAgent.allCases {
             let definition = agent.definition
             #expect(definition.iconAsset.isEmpty == false)
+            let image = try #require(
+                NSImage(named: definition.iconAsset),
+                "Missing identity asset \(definition.iconAsset) for \(agent.rawValue)"
+            )
+            #expect(
+                image.isTemplate,
+                "\(definition.iconAsset) must be a template so it follows the system appearance"
+            )
+            #expect(renderedPixelCount(image) > 100)
             if let glyph = definition.iconGlyph {
                 #expect(glyph != definition.iconAsset)
             }
@@ -508,9 +519,9 @@ struct AgentStatusPluginTests {
 
     /// Tab icons tint the glyph's alpha channel by activity state, so every agent
     /// must resolve to a template silhouette. Full-colour brand art on an opaque
-    /// background would tint into a solid accent block; raster agents such as
-    /// reasonix/crush/droid/hermes therefore declare a separate `iconGlyph` while
-    /// keeping their colour artwork for Settings and the Inspector.
+    /// background would tint into a solid accent block, so an agent that needs one
+    /// declares a separate `iconGlyph`; agents whose identity asset is already a
+    /// template reuse it for tabs.
     @Test @MainActor func tabGlyphsResolveToTintedTemplates() throws {
         for agent in SupportedAgent.allCases {
             let name = agent.glyphAssetName
@@ -523,7 +534,6 @@ struct AgentStatusPluginTests {
 
             if let glyph = agent.definition.iconGlyph {
                 #expect(glyph == name)
-                #expect(glyph != agent.assetName)
             }
         }
     }
@@ -990,9 +1000,10 @@ struct AgentStatusPluginTests {
         defer { try? FileManager.default.removeItem(at: home) }
         let installer = AgentHookInstaller(homeURL: home)
         let detectors = SupportedAgent.allCases.filter {
-            $0.definition.hook.kind == .none
+            AgentHookInstaller.supportsDetector(for: $0)
         }
-        #expect(Set(detectors) == [.crush, .hermes])
+        // Hermes has a vendor shell-hook adapter now, so only Crush is detector-only.
+        #expect(Set(detectors) == [.crush])
 
         for agent in detectors {
             #expect(installer.installationState(agent) == .missing)
@@ -1033,30 +1044,182 @@ struct AgentStatusPluginTests {
         }
     }
 
-    @Test func implicitDetectorMigrationRunsOnceAndRespectsLaterRemoval() throws {
+    @Test func detectorReconciliationInstallsEveryRunAndRespectsRemoval() throws {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: home) }
         let installer = AgentHookInstaller(homeURL: home)
+        let detectors = SupportedAgent.allCases.filter {
+            AgentHookInstaller.supportsDetector(for: $0)
+        }
 
+        // A detector-only Agent bundled after any previous release must still be
+        // adopted; the old global sentinel short-circuited this.
         try installer.migrateImplicitDetectorsIfNeeded()
-        for agent in [SupportedAgent.crush, .hermes] {
+        for agent in detectors {
             #expect(installer.installationState(agent) == .current)
         }
-        let migrationURL = home
-            .appendingPathComponent(".config/oh-my-ghostty/agent-detectors")
-            .appendingPathComponent(".implicit-detectors-v1.json")
-        let attributes = try FileManager.default.attributesOfItem(
-            atPath: migrationURL.path
-        )
-        #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
 
-        try installer.uninstall(.crush)
-        #expect(installer.installationState(.crush) == .missing)
+        // Reconciliation is idempotent.
         try installer.migrateImplicitDetectorsIfNeeded()
-        #expect(installer.installationState(.crush) == .missing)
+        for agent in detectors {
+            #expect(installer.installationState(agent) == .current)
+        }
+
+        // An explicit Remove survives later reconciliation.
+        let removed = try #require(detectors.first)
+        try installer.uninstall(removed)
+        #expect(installer.installationState(removed) == .missing)
+        #expect(installer.isDetectorRemovedByUser(removed))
+        try installer.migrateImplicitDetectorsIfNeeded()
+        #expect(installer.installationState(removed) == .missing)
+
+        // An explicit Install clears the removal record.
+        try installer.install(removed)
+        #expect(installer.installationState(removed) == .current)
+        #expect(!installer.isDetectorRemovedByUser(removed))
+        try installer.migrateImplicitDetectorsIfNeeded()
+        #expect(installer.installationState(removed) == .current)
+
+        // Detector-only reconciliation never touches vendor Hook agents.
         #expect(installer.installationState(.antigravity) == .missing)
+    }
+
+    @Test func detectorReconciliationRefreshesStaleMarkers() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let installer = AgentHookInstaller(homeURL: home)
+        let agent = try #require(
+            SupportedAgent.allCases.first { AgentHookInstaller.supportsDetector(for: $0) }
+        )
+        try installer.install(agent)
+        let url = home
+            .appendingPathComponent(".config/oh-my-ghostty/agent-detectors")
+            .appendingPathComponent("\(agent.rawValue).json")
+        var stale = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+        )
+        stale["version"] = 0
+        try JSONSerialization.data(withJSONObject: stale).write(to: url, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: url.path
+        )
+        #expect(installer.installationState(agent) == .updateAvailable)
+
+        try installer.migrateImplicitDetectorsIfNeeded()
+        #expect(installer.installationState(agent) == .current)
+    }
+
+    @Test func hermesYAMLHookInstallsUpdatesAndRemoves() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let installer = AgentHookInstaller(homeURL: home)
+        let url = home.appendingPathComponent(".hermes/config.yaml")
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        // Unrelated top-level YAML must survive byte-for-byte.
+        try "model: claude-sonnet-4\ntelemetry: false\n".write(
+            to: url,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        #expect(installer.installationState(.hermes) == .missing)
+        try installer.install(.hermes)
         #expect(installer.installationState(.hermes) == .current)
+
+        let installed = try String(contentsOf: url, encoding: .utf8)
+        #expect(installed.contains("model: claude-sonnet-4"))
+        #expect(installed.contains("telemetry: false"))
+        #expect(installed.contains("# >>> OMG agent-status hooks"))
+        for event in ["pre_llm_call", "post_llm_call"] {
+            #expect(installed.contains("\(event):"))
+        }
+        #expect(installed.contains("_omg_agent_status_v\(AgentHookInstaller.hookVersion)"))
+        // The command must stay on one folded line so YAML cannot corrupt it.
+        let commandLine = try #require(
+            installed.split(separator: "\n").first { $0.contains("/dev/$omg_tty") }
+        )
+        #expect(commandLine.hasPrefix("        "))
+
+        // A stale version reports an update, and reinstalling is idempotent.
+        try installed.replacingOccurrences(
+            of: "_omg_agent_status_v\(AgentHookInstaller.hookVersion)",
+            with: "_omg_agent_status_v1"
+        ).write(to: url, atomically: true, encoding: .utf8)
+        #expect(installer.installationState(.hermes) == .updateAvailable)
+        try installer.install(.hermes)
+        #expect(installer.installationState(.hermes) == .current)
+        let reinstalled = try String(contentsOf: url, encoding: .utf8)
+        let blocks = reinstalled.components(separatedBy: "# >>> OMG agent-status hooks").count - 1
+        #expect(blocks == 1)
+
+        try installer.uninstall(.hermes)
+        #expect(installer.installationState(.hermes) == .missing)
+        let removed = try String(contentsOf: url, encoding: .utf8)
+        #expect(!removed.contains("# >>> OMG agent-status hooks"))
+        #expect(removed.contains("model: claude-sonnet-4"))
+        #expect(removed.contains("telemetry: false"))
+    }
+
+    @Test func hermesYAMLHookRefusesForeignConfig() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let installer = AgentHookInstaller(homeURL: home)
+        let url = home.appendingPathComponent(".hermes/config.yaml")
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        // A user-owned top-level `hooks:` cannot be merged without rewriting their
+        // YAML, so installation must fail closed instead of duplicating the key.
+        try "hooks:\n  pre_llm_call:\n    - command: echo hi\n".write(
+            to: url,
+            atomically: true,
+            encoding: .utf8
+        )
+        #expect(throws: AgentHookInstallerError.self) {
+            try installer.install(.hermes)
+        }
+        let untouched = try String(contentsOf: url, encoding: .utf8)
+        #expect(untouched.contains("command: echo hi"))
+        #expect(!untouched.contains("# >>> OMG agent-status hooks"))
+    }
+
+    @Test func detectorReconciliationLeavesUnownedMarkersUntouched() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let installer = AgentHookInstaller(homeURL: home)
+        let agent = try #require(
+            SupportedAgent.allCases.first { AgentHookInstaller.supportsDetector(for: $0) }
+        )
+        let directory = home
+            .appendingPathComponent(".config/oh-my-ghostty/agent-detectors")
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let url = directory.appendingPathComponent("\(agent.rawValue).json")
+        try #"{"owner":"someone-else","version":1,"agent":"\(agent.rawValue)"}"#.write(
+            to: url,
+            atomically: true,
+            encoding: .utf8
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: url.path
+        )
+        let before = try Data(contentsOf: url)
+
+        try installer.migrateImplicitDetectorsIfNeeded()
+        #expect(try Data(contentsOf: url) == before)
     }
 
     @Test func detectorRemovalPreservesUnownedOrNonFileContent() throws {

@@ -100,30 +100,62 @@ struct AgentHookInstaller {
         installationState(agent).isInstalled
     }
 
-    /// Preserves the pre-marker behavior exactly once. Detector-only agents were
-    /// implicitly enabled before explicit Install/Remove controls existed, so
-    /// the first upgraded launch records them as installed. The global sentinel
-    /// prevents a later launch from reinstalling a detector the user removed.
+    /// Whether the user explicitly removed this Agent's detector integration.
+    ///
+    /// Automatic adoption consults this so a removed detector is never silently
+    /// reinstalled; an explicit Install clears the record and re-enables it.
+    func isDetectorRemovedByUser(_ agent: SupportedAgent) -> Bool {
+        Self.supportsDetector(for: agent) && hasTombstone(agent)
+    }
+
+    /// Reconciles detector-only Agent markers on every launch.
+    ///
+    /// Detector-only agents (`hook.kind == .none`) were implicitly enabled before
+    /// explicit Install/Remove controls existed. A single global sentinel used to
+    /// record that one-time migration and then short-circuit forever, which meant
+    /// a detector-only Agent bundled after the sentinel was written could never be
+    /// installed, and a detector version bump could never reach existing users.
+    /// Reconciliation is per Agent and idempotent instead:
+    ///
+    /// - a current marker is left untouched;
+    /// - a missing marker is installed unless the user explicitly removed it;
+    /// - a stale OMG-owned marker is refreshed;
+    /// - a marker that is not OMG-owned is never overwritten.
+    ///
+    /// An explicit Remove writes a per-Agent tombstone, so reconciliation can never
+    /// resurrect a detector the user turned off. Removals recorded by the legacy
+    /// global sentinel cannot be distinguished from detectors that simply did not
+    /// exist yet, so those are not carried over: a detector removed before this
+    /// version is re-enabled once and can be removed again, whereas guessing would
+    /// permanently hide every detector-only Agent added since the sentinel.
+    /// `supportsDetector(for:)` is the capability check; detectors that grew a real
+    /// vendor Hook adapter are skipped.
     func migrateImplicitDetectorsIfNeeded() throws {
-        let migrationURL = detectorMigrationURL
-        if FileManager.default.fileExists(atPath: migrationURL.path) {
-            guard let marker = validDetectorMarker(
-                at: migrationURL,
-                expectedAgent: "implicit-detectors"
-            ), marker.version == Self.detectorMarkerVersion else {
-                throw AgentHookInstallerError.invalidDetectorMarker("migration")
+        for agent in SupportedAgent.allCases where Self.supportsDetector(for: agent) {
+            guard !hasTombstone(agent) else { continue }
+            let url = detectorMarkerURL(agent)
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                try installDetectorMarker(agent)
+                continue
             }
-            return
+            // Content that is not an OMG marker (or is malformed) is left alone so
+            // reconciliation can never clobber a file it does not own.
+            guard let marker = validDetectorMarker(
+                at: url,
+                expectedAgent: agent.rawValue
+            ) else { continue }
+            if marker.version != Self.detectorMarkerVersion {
+                try installDetectorMarker(agent)
+            }
         }
-        for agent in SupportedAgent.allCases
-        where agent.definition.hook.kind == .none &&
-            !FileManager.default.fileExists(atPath: detectorMarkerURL(agent).path) {
-            try installDetectorMarker(agent)
-        }
-        try writeDetectorMarker(
-            agent: "implicit-detectors",
-            to: migrationURL
-        )
+    }
+
+    /// Whether a detector marker is the only way to observe this Agent.
+    ///
+    /// Kept as a single predicate so reconciliation, install and status agree on
+    /// which Agents are detector-only as manifests migrate to real Hook adapters.
+    static func supportsDetector(for agent: SupportedAgent) -> Bool {
+        agent.definition.hook.kind == .none
     }
 
     func installationState(
@@ -165,6 +197,12 @@ struct AgentHookInstaller {
                     .contains("_omg_agent_status_v\(Self.hookVersion)") == true
             }
             return current ? .current : .missing
+        case .yaml:
+            let url = hookURL(for: agent)
+            guard yamlHooksCurrent(at: url, agent: agent) else {
+                return Self.yamlBlockPresent(at: url) ? .updateAvailable : .missing
+            }
+            return .current
         case .none:
             return detectorInstallationState(agent)
         }
@@ -216,7 +254,7 @@ struct AgentHookInstaller {
                     return (agent.rawValue, [
                         "kind": "plugin", "path": hook.path, "source": source,
                     ])
-                case .toml, .scripts:
+                case .toml, .scripts, .yaml:
                     let entries = hook.events.map { event in
                         var item: [String: Any] = [
                             "event": event.name,
@@ -399,6 +437,10 @@ def strip_toml_block(text):
     return text if start < 0 or finish < 0 else text[:start] + text[finish + len(end):]
 
 
+def strip_yaml_block(text):
+    return strip_toml_block(text)
+
+
 def install_auxiliary(item):
     path = expand(item["path"])
     kind = item["kind"]
@@ -416,6 +458,21 @@ def install_auxiliary(item):
                 lines.append('matcher = "' + entry["matcher"] + '"')
             lines.extend(["command = '''" + entry["command"] + "'''", "timeout = 5", ""])
         if lines[-1] == "": lines.pop()
+        lines.append("# <<< OMG agent-status hooks <<<")
+        backup(path)
+        atomic_write(path, (base + "\n\n" if base else "") + "\n".join(lines) + "\n")
+        return
+    if kind == "yaml":
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        base = strip_yaml_block(existing).strip("\n")
+        if any(line.startswith("hooks:") for line in base.split("\n")):
+            raise ValueError(str(path) + " already has a hooks: key")
+        lines = ["# >>> OMG agent-status hooks (managed; do not edit) >>>", "hooks:"]
+        for entry in item["entries"]:
+            lines.append("  " + entry["event"] + ":")
+            lines.append("    - command: >-")
+            lines.append("        " + entry["command"].replace("\n", " "))
+            lines.append("      timeout: 5")
         lines.append("# <<< OMG agent-status hooks <<<")
         backup(path)
         atomic_write(path, (base + "\n\n" if base else "") + "\n".join(lines) + "\n")
@@ -464,6 +521,11 @@ def state(agent):
             if not any(MARKER in text for text in texts): return "missing"
             return "current" if all("_omg_agent_status_v" + str(VERSION) in text for text in texts) else "updateAvailable"
         text = path.read_text(encoding="utf-8") if path.exists() else ""
+        if item["kind"] == "yaml":
+            if "# >>> OMG agent-status hooks" not in text: return "missing"
+            current = "_omg_agent_status_v" + str(VERSION) in text and all(
+                (entry["event"] + ":") in text for entry in item["entries"])
+            return "current" if current else "updateAvailable"
         if MARKER not in text and "# >>> OMG agent-status hooks" not in text: return "missing"
         current = text == item["source"] if item["kind"] == "plugin" else "_omg_agent_status_v" + str(VERSION) in text
         return "current" if current else "updateAvailable"
@@ -503,6 +565,10 @@ def remove(agent):
             if item["kind"] == "toml":
                 backup(path)
                 atomic_write(path, strip_toml_block(text))
+            elif item["kind"] == "yaml":
+                if "# >>> OMG agent-status hooks" in text:
+                    backup(path)
+                    atomic_write(path, strip_yaml_block(text).strip("\n") + ("\n" if strip_yaml_block(text).strip() else ""))
             elif "marker: " + MARKER in text:
                 backup(path)
                 path.unlink()
@@ -548,7 +614,11 @@ else:
             try installTOMLHooks(at: url, agent: agent)
         case .scripts:
             try installScriptHooks(at: url, agent: agent)
+        case .yaml:
+            try installYAMLHooks(at: url, agent: agent)
         case .none:
+            // An explicit Install overrides an earlier explicit Remove.
+            try removeTombstone(agent)
             try installDetectorMarker(agent)
         }
         notifyChanged(agent)
@@ -567,6 +637,8 @@ else:
             try removeTOMLHooks(at: url)
         case .scripts:
             try removeScriptHooks(at: url, agent: agent)
+        case .yaml:
+            try removeYAMLHooks(at: url)
         case .none:
             try removeDetectorMarker(agent)
         }
@@ -633,6 +705,32 @@ else:
 
     private func removeDetectorMarker(_ agent: SupportedAgent) throws {
         let url = detectorMarkerURL(agent)
+        if FileManager.default.fileExists(atPath: url.path) {
+            guard validDetectorMarker(
+                at: url,
+                expectedAgent: agent.rawValue
+            ) != nil else {
+                throw AgentHookInstallerError.invalidDetectorMarker(agent.rawValue)
+            }
+            try FileManager.default.removeItem(at: url)
+        }
+        // Record the removal before returning so reconciliation cannot reinstall it.
+        try writeTombstone(agent.rawValue)
+    }
+
+    private func writeTombstone(_ agent: String) throws {
+        try writeDetectorMarker(agent: agent, to: detectorTombstoneURL(agent))
+    }
+
+    private func hasTombstone(_ agent: SupportedAgent) -> Bool {
+        validDetectorMarker(
+            at: detectorTombstoneURL(agent.rawValue),
+            expectedAgent: agent.rawValue
+        ) != nil
+    }
+
+    private func removeTombstone(_ agent: SupportedAgent) throws {
+        let url = detectorTombstoneURL(agent.rawValue)
         guard FileManager.default.fileExists(atPath: url.path) else { return }
         guard validDetectorMarker(
             at: url,
@@ -664,17 +762,121 @@ else:
         homeURL.appendingPathComponent(".config/oh-my-ghostty/agent-detectors")
     }
 
-    private var detectorMigrationURL: URL {
-        detectorDirectoryURL.appendingPathComponent(".implicit-detectors-v1.json")
-    }
-
     private func detectorMarkerURL(_ agent: SupportedAgent) -> URL {
         detectorDirectoryURL.appendingPathComponent("\(agent.rawValue).json")
+    }
+
+    /// Per-Agent record of an explicit removal. Dot-prefixed so it cannot collide
+    /// with any `SupportedAgent.rawValue` marker file.
+    private func detectorTombstoneURL(_ agent: String) -> URL {
+        detectorDirectoryURL.appendingPathComponent(".removed-\(agent).json")
     }
 
     private static let tomlBlockBegin =
         "# >>> OMG agent-status hooks (managed; do not edit) >>>"
     private static let tomlBlockEnd = "# <<< OMG agent-status hooks <<<"
+
+    private static let yamlBlockBegin =
+        "# >>> OMG agent-status hooks (managed; do not edit) >>>"
+    private static let yamlBlockEnd = "# <<< OMG agent-status hooks <<<"
+
+    /// Marker-delimited YAML block: the commands OMG owns inside a YAML config.
+    /// Kept free of anchors and nested user content so a plain block replace is
+    /// safe and unrelated configuration is preserved byte-for-byte.
+    private func installYAMLHooks(
+        at url: URL,
+        agent: SupportedAgent
+    ) throws {
+        let existing = FileManager.default.fileExists(atPath: url.path)
+            ? try String(contentsOf: url, encoding: .utf8)
+            : ""
+        try validateYAMLHooks(existing)
+        let base = Self.removingYAMLBlock(from: existing)
+            .trimmingCharacters(in: .newlines)
+        var lines = [Self.yamlBlockBegin]
+        for event in agent.definition.hook.events {
+            // Hermes reads `hooks: { <event>: [ {command, timeout}, ... ] }`.
+            // The nested list form keeps unrelated hooks on the same event intact.
+            lines.append("hooks:")
+            lines.append("  \(event.name):")
+            lines.append("    - command: >-")
+            let command = Self.yamlFoldedScalar(
+                Self.hookCommand(agent: agent, state: event.state)
+            )
+            lines.append("        \(command)")
+            lines.append("      timeout: 5")
+        }
+        lines.append(Self.yamlBlockEnd)
+        let block = lines.joined(separator: "\n")
+        try backupIfNeeded(url)
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try writeText(base.isEmpty ? block + "\n" : base + "\n\n" + block + "\n", to: url)
+    }
+
+    /// Renders `command` as the single continuation line of a YAML block scalar.
+    /// YAML folds newlines into spaces, so an embedded newline would silently
+    /// corrupt the command; the generated commands never contain one.
+    private static func yamlFoldedScalar(_ command: String) -> String {
+        command.replacingOccurrences(of: "\n", with: " ")
+    }
+
+    private func removeYAMLHooks(at url: URL) throws {
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        let existing = try String(contentsOf: url, encoding: .utf8)
+        let base = Self.removingYAMLBlock(from: existing)
+            .trimmingCharacters(in: .newlines)
+        try writeText(base.isEmpty ? "" : base + "\n", to: url)
+    }
+
+    private func yamlHooksCurrent(at url: URL, agent: SupportedAgent) -> Bool {
+        guard let text = try? String(contentsOf: url, encoding: .utf8),
+              text.contains(Self.yamlBlockBegin) else { return false }
+        return text.contains("_omg_agent_status_v\(Self.hookVersion)")
+            && agent.definition.hook.events.allSatisfy {
+                text.contains("\($0.name):")
+            }
+    }
+
+    private static func yamlBlockPresent(at url: URL) -> Bool {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+            return false
+        }
+        return text.contains(yamlBlockBegin)
+    }
+
+    private func validateYAMLHooks(_ text: String) throws {
+        // Refuse an unbalanced OMG block: removal would leave half a block behind.
+        let begins = text.components(separatedBy: Self.yamlBlockBegin).count - 1
+        let ends = text.components(separatedBy: Self.yamlBlockEnd).count - 1
+        guard begins == ends else {
+            throw AgentHookInstallerError.invalidHooks("yaml")
+        }
+        // A top-level `hooks:` owned by the user cannot be merged without
+        // re-serializing their YAML, which would rewrite unrelated content.
+        let base = Self.removingYAMLBlock(from: text)
+        let foreignHooksKey = base
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .contains { line in
+                line.hasPrefix("hooks:")
+            }
+        guard !foreignHooksKey else {
+            throw AgentHookInstallerError.invalidHooks("hooks")
+        }
+    }
+
+    private static func removingYAMLBlock(from text: String) -> String {
+        guard let begin = text.range(of: yamlBlockBegin),
+              let end = text.range(
+                  of: yamlBlockEnd,
+                  range: begin.upperBound..<text.endIndex
+              ) else { return text }
+        var result = text
+        result.removeSubrange(begin.lowerBound..<end.upperBound)
+        return result
+    }
 
     private func installTOMLHooks(
         at url: URL,

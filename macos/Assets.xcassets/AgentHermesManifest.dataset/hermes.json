@@ -2,8 +2,7 @@
   "id": "hermes",
   "displayName": "Hermes",
   "command": "hermes",
-  "iconAsset": "AgentHermes",
-  "iconGlyph": "AgentHermesGlyph",
+  "iconAsset": "AgentHermesGlyph",
   "opticalScale": 0.9,
   "process": {
     "executables": [
@@ -17,8 +16,17 @@
     "resumeArguments": []
   },
   "hook": {
-    "kind": "none",
-    "path": "",
-    "events": []
+    "kind": "yaml",
+    "path": "~/.hermes/config.yaml",
+    "events": [
+      {
+        "name": "pre_llm_call",
+        "state": "working"
+      },
+      {
+        "name": "post_llm_call",
+        "state": "done"
+      }
+    ]
   }
 }

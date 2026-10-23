@@ -108,9 +108,7 @@ pub fn stringMap(alloc: Allocator, screen: *terminal.Screen, line: terminal.Sele
                 // Editors without padding reserve their final column for
                 // the cursor (e.g. pi-tui's layoutWidth = contentWidth - 1).
                 const right_inset = @max(inset, 1);
-                const explicit_space = inset == 0 and tail > 0 and
-                    source.map.get(i - 1).?.rowAndCell().cell.codepoint() == ' ';
-                if (!explicit_space and tail <= right_inset and next_pin.x == inset and
+                if (tail <= right_inset and next_pin.x == inset and
                     prev_pin.rowAndCell().cell.semantic_content != .prompt and
                     next_pin.rowAndCell().cell.semantic_content != .prompt)
                 {
@@ -182,11 +180,12 @@ test "OMG hard wrapped URL retains target from either row" {
     try testing.expect(cells.contains(.{ .x = 0, .y = 1 }));
     try testing.expect(!cells.contains(.{ .x = 8, .y = 1 }));
 
-    // A closing Markdown delimiter or whitespace ends the link even at
-    // the right edge. A shorter physical row is not a continuation either.
+    // A closing Markdown delimiter ends the link even at the right edge.
+    // Two trailing columns are outside the unpadded cursor-reserve heuristic;
+    // short rows and whitespace inside text still terminate candidates.
     for ([_][]const u8{
         "https://example.com/abcdefghijklmnopqrs)",
-        "https://example.com/abcdefghijklmnopqrs ",
+        "https://example.com/abcdefghijklmnopqr  ",
         "https://example.com/short",
     }) |head| {
         stream.nextSlice("\x1b[2J\x1b[H");
@@ -225,6 +224,8 @@ test "OMG inset agent URL and image path normalize before existence checks" {
                 const width = 40 - inset - @max(inset, 1);
                 const end = @min(offset + width, target.len);
                 stream.nextSlice(target[offset..end]);
+                // Editors paint the cursor reserve/right padding as spaces.
+                stream.nextSlice(" ");
                 offset = end;
             }
             const screen = t.screens.active;

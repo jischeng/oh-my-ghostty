@@ -581,6 +581,17 @@ struct SettingsStrings: Equatable, Sendable {
           "可从 SSH config 或当前连接中选择主机。点击注册后按需连接，并将 Agent 版本与 Hook 状态缓存在本机；自动注册仍仅在 OMG 建立连接后进行。")
     }
     var sshAgentHookTitle: String { t("Set up SSH Agent status", "接入 SSH Agent 状态") }
+    var sshRecoveryTitle: String { t("SSH disconnected", "SSH 连接已断开") }
+    var sshRecoveryReconnect: String { t("Reconnect in New Tab", "在新标签页重连") }
+    var sshRecoveryKeepLocal: String { t("Keep Local", "保留为本地终端") }
+    var sshRecoveryReconnectHelp: String {
+        t("Reconnect with the saved SSH arguments in a new tab. This tab keeps its current contents.",
+          "使用已保存的 SSH 参数在新标签页中重新连接；当前标签页内容保持不变。")
+    }
+    var sshRecoveryKeepLocalHelp: String {
+        t("Stop offering to reconnect and keep using this tab as a local terminal.",
+          "不再提示重连，将此标签页作为本地终端继续使用。")
+    }
     var sshAgentHookExplanation: String {
         t("Remote Agents need their own OMG status Hooks; installing or upgrading OMG does not copy this Mac’s Hooks to SSH accounts. Check this host, then choose Install Extension for the Agents you use. This does not upgrade any CLI. Restart the affected Agent after installation.",
           "远端 Agent 需要单独安装 OMG 状态 Hook；安装或升级 OMG 不会将本机 Hook 同步到 SSH 账户。检查此主机后，为使用的 Agent 选择“安装状态扩展”，不会升级 CLI。安装后请重启对应 Agent。")

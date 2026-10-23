@@ -32,21 +32,38 @@ extension TerminalController {
 
 struct SSHRecoveryBanner: View {
     @ObservedObject var controller: TerminalController
+    @ObservedObject var settings: OhMyGhosttySettings = .shared
     let surface: Ghostty.SurfaceView
+
+    private var strings: SettingsStrings { .init(language: settings.language) }
 
     var body: some View {
         if let recovery = controller.pendingSSHRecovery(for: surface) {
-            HStack(spacing: 8) {
-                Image(systemName: "network.slash")
-                Text("SSH disconnected · \(recovery.displayDestination)")
-                    .lineLimit(1)
-                    .help(recovery.remoteWorkingDirectory ?? recovery.displayDestination)
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "network.slash").foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(strings.sshRecoveryTitle + " · " + recovery.displayDestination)
+                        .fontWeight(.medium)
+                        .lineLimit(1)
+                        .help(recovery.remoteWorkingDirectory ?? recovery.displayDestination)
+                    Text(strings.sshRecoveryReconnectHelp)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 10) {
+                        Button(strings.sshRecoveryReconnect) {
+                            controller.reconnectSSH(for: surface)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .help(strings.sshRecoveryReconnectHelp)
+                        Button(strings.sshRecoveryKeepLocal) {
+                            controller.dismissSSHRecovery(for: surface)
+                        }
+                        .help(strings.sshRecoveryKeepLocalHelp)
+                    }
+                }
                 Spacer(minLength: 0)
-                Button("Reconnect in New Tab") { controller.reconnectSSH(for: surface) }
-                Button("Keep Local") { controller.dismissSSHRecovery(for: surface) }
             }
             .font(.callout)
-            .padding(8)
+            .padding(10)
             .background(.regularMaterial)
             .accessibilityIdentifier("sshRecoveryBanner")
         }

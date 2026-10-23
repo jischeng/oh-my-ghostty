@@ -12,6 +12,22 @@ struct SSHRecoveryTests {
         return TerminalController(app.ghostty, withBaseConfig: config)
     }
 
+    @Test func recoveryBannerTextFollowsTheSettingsLanguage() {
+        let en = SettingsStrings(language: .english)
+        let zh = SettingsStrings(language: .simplifiedChinese)
+        #expect(en.sshRecoveryTitle == "SSH disconnected")
+        #expect(zh.sshRecoveryTitle == "SSH 连接已断开")
+        #expect(en.sshRecoveryReconnect == "Reconnect in New Tab")
+        #expect(zh.sshRecoveryReconnect == "在新标签页重连")
+        #expect(en.sshRecoveryKeepLocal == "Keep Local")
+        #expect(zh.sshRecoveryKeepLocal == "保留为本地终端")
+        for text in [en.sshRecoveryReconnectHelp, zh.sshRecoveryReconnectHelp,
+                     en.sshRecoveryKeepLocalHelp, zh.sshRecoveryKeepLocalHelp] {
+            #expect(!text.isEmpty)
+        }
+        #expect(en.sshRecoveryKeepLocalHelp != zh.sshRecoveryKeepLocalHelp)
+    }
+
     @Test func disconnectClearsLiveAgentButPreservesOfflineConversation() throws {
         let controller = try controller()
         defer { controller.window?.delegate = nil; controller.window?.close() }

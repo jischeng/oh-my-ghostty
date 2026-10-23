@@ -45,6 +45,31 @@ struct TerminalLinkCheckBatcherTests {
         #expect(await filesystem.calls.count == 3)
     }
 
+    @Test func cachedLinksDoNotWaitForUnrelatedColdPaths() async throws {
+        let filesystem = CountingLinkFilesystem()
+        let batcher = TerminalLinkCheckBatcher()
+        let scope = TerminalLinkCheckBatcher.Scope(revision: 0, filesystemID: "ssh:test", directory: "/repo")
+        batcher.enqueue(path: "/repo/f0", scope: scope, filesystem: filesystem, reply: { _ in }, refresh: {})
+        await batcher.flush()
+        await filesystem.delayNext()
+        var warmAnswered = false
+        var coldAnswered = false
+        batcher.enqueue(path: "/repo/f0", scope: scope, filesystem: filesystem,
+                        reply: { warmAnswered = $0 }, refresh: {})
+        batcher.enqueue(path: "/repo/f1", scope: scope, filesystem: filesystem,
+                        reply: { coldAnswered = $0 }, refresh: {})
+        let flushing = Task { await batcher.flush() }
+        for _ in 0..<100 {
+            if await filesystem.calls.count == 2 { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        #expect(warmAnswered)
+        #expect(!coldAnswered)
+        await flushing.value
+        #expect(coldAnswered)
+        #expect(await filesystem.calls.last == ["/repo/f1"])
+    }
+
     @Test func transportFailuresAreRetriedRatherThanNegativeCached() async {
         let filesystem = CountingLinkFilesystem()
         let batcher = TerminalLinkCheckBatcher()

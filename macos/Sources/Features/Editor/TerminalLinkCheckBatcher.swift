@@ -45,7 +45,7 @@ final class TerminalLinkCheckBatcher {
         guard !scheduled, !draining else { return }
         scheduled = true
         Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(12))
+            await Task.yield()
             await self?.flush()
         }
     }
@@ -62,7 +62,15 @@ final class TerminalLinkCheckBatcher {
             pending.removeAll(keepingCapacity: true)
             cache = cache.filter { $0.value.expires > now() }
             if cache.count > 512 { cache.removeAll(keepingCapacity: true) }
-            for group in Dictionary(grouping: requests, by: { $0.key.scope }).values {
+            // Warm candidates must not wait for unrelated cold filesystem
+            // work. Apply their replies together before starting any I/O.
+            let warm = requests.filter { cache[$0.key] != nil }
+            let cold = requests.filter { cache[$0.key] == nil }
+            for request in warm {
+                request.reply(cache[request.key]!.exists)
+            }
+            if !warm.isEmpty { warm.first?.refresh() }
+            for group in Dictionary(grouping: cold, by: { $0.key.scope }).values {
                 guard let first = group.first else { continue }
                 let missing = Set(group.filter { cache[$0.key] == nil }.map { $0.key.path }).sorted()
                 if !missing.isEmpty {
@@ -85,7 +93,7 @@ final class TerminalLinkCheckBatcher {
             }
             // Every request belongs to the same surface. All cache entries are
             // applied before this single refresh, even when some were misses.
-            requests.first?.refresh()
+            if !cold.isEmpty { cold.first?.refresh() }
         }
     }
 }

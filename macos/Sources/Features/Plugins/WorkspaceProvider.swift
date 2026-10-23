@@ -927,9 +927,10 @@ struct LocalWorkspaceFilesystem: WorkspaceFilesystem {
             var result: [String: WorkspaceItemType] = [:]
             for path in Set(paths) {
                 try Task.checkCancellation()
-                let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+                // fileExists follows symlinks itself. Resolving every path
+                // component first adds redundant filesystem work to hover.
                 var isDir: ObjCBool = false
-                if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) {
+                if FileManager.default.fileExists(atPath: path, isDirectory: &isDir) {
                     result[path] = isDir.boolValue ? .directory : .file
                 }
             }

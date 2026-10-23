@@ -13,6 +13,9 @@ const Link = @import("link.zig").Link;
 pub const FrameCache = struct {
     signature: ?u64 = null,
     cells: terminal.RenderState.CellSet = .empty,
+    /// Changes only when the actual decoration changes, including async path
+    /// answers. The renderer must invalidate every affected GPU row together.
+    revision: u64 = 0,
 
     pub fn deinit(self: *FrameCache, alloc: std.mem.Allocator) void {
         self.cells.deinit(alloc);
@@ -54,6 +57,16 @@ pub const FrameCache = struct {
         const signature = hash.final();
         if (self.signature == null or self.signature.? != signature) {
             var fresh = try collect(storage_alloc, cache_alloc, screen, frame, links, cache, mods);
+            var changed = fresh.count() != self.cells.count();
+            if (!changed) {
+                for (fresh.keys()) |cell| {
+                    if (!self.cells.contains(cell)) {
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+            if (changed) self.revision +%= 1;
             std.mem.swap(terminal.RenderState.CellSet, &self.cells, &fresh);
             fresh.deinit(storage_alloc);
             self.signature = signature;
@@ -140,6 +153,48 @@ pub fn collect(
         }
     }
     return result;
+}
+
+test "OMG link decoration revision updates all rows after async verification" {
+    const alloc = std.testing.allocator;
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 12, .rows = 4 });
+    defer t.deinit(alloc);
+    try t.setPwd("/repo");
+    var stream = t.vtStream();
+    defer stream.deinit();
+    const path = "/tmp/long-image-name.png";
+    stream.nextSlice(path);
+    var config = try @import("link.zig").Set.fromConfig(alloc, &.{.{
+        .regex = @import("../config/url.zig").no_space_regex,
+        .action = .{ .open = {} },
+        .highlight = .{ .hover_mods = input.ctrlOrSuper(.{}) },
+    }});
+    defer config.deinit(alloc);
+    var cache: Cache = .{};
+    defer cache.deinit(alloc);
+    var frame: terminal.RenderState = .empty;
+    defer frame.deinit(alloc);
+    try frame.update(alloc, &t);
+    var cached: FrameCache = .{};
+    defer cached.deinit(alloc);
+    const mods = input.ctrlOrSuper(.{});
+    var pending = try cached.get(alloc, alloc, alloc, t.screens.active, &frame, config.links, &cache, mods);
+    defer pending.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 0), pending.count());
+    const before = cached.revision;
+    cache.clear(alloc);
+    _ = try cache.putPending(alloc, "/repo", path);
+    try std.testing.expect(cache.resolve("/repo", path, true));
+    var verified = try cached.get(alloc, alloc, alloc, t.screens.active, &frame, config.links, &cache, mods);
+    defer verified.deinit(alloc);
+    try std.testing.expect(cached.revision != before);
+    try std.testing.expectEqual(path.len, verified.count());
+    try std.testing.expect(verified.contains(.{ .x = 0, .y = 0 }));
+    try std.testing.expect(verified.contains(.{ .x = 0, .y = 1 }));
+    const unchanged = cached.revision;
+    var reused = try cached.get(alloc, alloc, alloc, t.screens.active, &frame, config.links, &cache, mods);
+    defer reused.deinit(alloc);
+    try std.testing.expectEqual(unchanged, cached.revision);
 }
 
 test "OMG viewport links reveal multiple verified paths without hover and follow content" {

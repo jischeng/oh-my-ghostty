@@ -148,6 +148,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         search_matches_dirty: bool,
         omg_link_frame: @import("omg_link.zig").FrameCache = .{},
         omg_links_visible: bool = false,
+        omg_link_revision: u64 = 0,
 
         /// The current set of cells to render. This is rebuilt on every frame
         /// but we keep this around so that we don't reallocate. Each set of
@@ -1384,8 +1385,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // with a stationary pointer (no mouse-move event to dirty rows).
             if (comptime builtin.os.tag == .macos) {
                 const visible = critical.mouse.mods.equal(inputpkg.ctrlOrSuper(.{}));
-                if (visible != self.omg_links_visible) {
+                if (visible != self.omg_links_visible or
+                    self.omg_link_revision != self.omg_link_frame.revision)
+                {
                     self.omg_links_visible = visible;
+                    self.omg_link_revision = self.omg_link_frame.revision;
                     self.terminal_state.dirty = .full;
                     for (self.terminal_state.row_data.items(.dirty)) |*dirty| dirty.* = true;
                 }

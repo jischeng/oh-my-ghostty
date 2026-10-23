@@ -105,7 +105,12 @@ pub fn stringMap(alloc: Allocator, screen: *terminal.Screen, line: terminal.Sele
                 const prev_pin = pins.get(end - 1).?;
                 const next_pin = source.map.get(next).?;
                 const tail = prev_pin.node.cols() - 1 - prev_pin.x;
-                if (tail <= inset and next_pin.x == inset and
+                // Editors without padding reserve their final column for
+                // the cursor (e.g. pi-tui's layoutWidth = contentWidth - 1).
+                const right_inset = @max(inset, 1);
+                const explicit_space = inset == 0 and tail > 0 and
+                    source.map.get(i - 1).?.rowAndCell().cell.codepoint() == ' ';
+                if (!explicit_space and tail <= right_inset and next_pin.x == inset and
                     prev_pin.rowAndCell().cell.semantic_content != .prompt and
                     next_pin.rowAndCell().cell.semantic_content != .prompt)
                 {
@@ -202,68 +207,71 @@ test "OMG hard wrapped URL retains target from either row" {
 test "OMG inset agent URL and image path normalize before existence checks" {
     const alloc = std.testing.allocator;
     const mods = @import("input.zig").ctrlOrSuper(.{});
-    for ([_][]const u8{
-        "https://github.com/lance-format/lance/pull/10239",
-        "/var/folders/2z/zl8wrct518v_n3zcgjmc07200000gn/T/omg-paste/omg-paste-6FF04F2F-370F-4063-9DAE-F110F639E9307.png",
-    }) |target| {
-        var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 40, .rows = 8 });
-        defer t.deinit(alloc);
-        try t.setPwd("/repo");
-        var stream = t.vtStream();
-        defer stream.deinit();
-        var offset: usize = 0;
-        var row: usize = 1;
-        while (offset < target.len) : (row += 1) {
-            var buf: [32]u8 = undefined;
-            stream.nextSlice(try std.fmt.bufPrint(&buf, "\x1b[{d};2H", .{row}));
-            const end = @min(offset + 38, target.len);
-            stream.nextSlice(target[offset..end]);
-            offset = end;
+    for (0..2) |inset| {
+        for ([_][]const u8{
+            "https://github.com/lance-format/lance/pull/10239",
+            "/var/folders/2z/zl8wrct518v_n3zcgjmc07200000gn/T/omg-paste/omg-paste-6FF04F2F-370F-4063-9DAE-F110F639E9307.png",
+        }) |target| {
+            var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 40, .rows = 8 });
+            defer t.deinit(alloc);
+            try t.setPwd("/repo");
+            var stream = t.vtStream();
+            defer stream.deinit();
+            var offset: usize = 0;
+            var row: usize = 1;
+            while (offset < target.len) : (row += 1) {
+                var buf: [32]u8 = undefined;
+                stream.nextSlice(try std.fmt.bufPrint(&buf, "\x1b[{d};{d}H", .{ row, inset + 1 }));
+                const width = 40 - inset - @max(inset, 1);
+                const end = @min(offset + width, target.len);
+                stream.nextSlice(target[offset..end]);
+                offset = end;
+            }
+            const screen = t.screens.active;
+            var config = try @import("renderer/link.zig").Set.fromConfig(alloc, &.{.{
+                .regex = @import("config/url.zig").no_space_regex,
+                .action = .{ .open = {} },
+                .highlight = .{ .hover_mods = mods },
+            }});
+            defer config.deinit(alloc);
+            for (0..row - 1) |y| {
+                const pin = screen.pages.pin(.{ .active = .{ .x = 2, .y = @intCast(y) } }).?;
+                const line = screen.selectLine(.{ .pin = pin, .whitespace = null }).?;
+                const map = try stringMap(alloc, screen, line);
+                defer map.deinit(alloc);
+                var it = map.searchIterator(config.links[0].regex);
+                var match = (try it.next()).?;
+                defer match.deinit();
+                const detected = try Result.fromMatch(alloc, match);
+                defer detected.deinit(alloc);
+                try std.testing.expect(detected.contains(screen, pin));
+                try std.testing.expectEqualStrings(target, detected.target);
+                try std.testing.expectEqual(row - 1, detected.spans.len);
+                try std.testing.expectEqual(.inferred_continuation, detected.source);
+                try std.testing.expectEqual(target[0] == '/', detected.kind == .path);
+                const margin = screen.pages.pin(.{ .active = .{ .x = 39, .y = @intCast(y) } }).?;
+                try std.testing.expect(!detected.contains(screen, margin));
+            }
+            var cache: @import("omg_link_check.zig") = .{};
+            defer cache.deinit(alloc);
+            var frame: terminal.RenderState = .empty;
+            defer frame.deinit(alloc);
+            try frame.update(alloc, &t);
+            var pending = try @import("renderer/omg_link.zig").collect(alloc, alloc, screen, &frame, config.links, &cache, mods);
+            defer pending.deinit(alloc);
+            if (target[0] == '/') {
+                try std.testing.expectEqual(@import("omg_link_check.zig").Status.queued, cache.get("/repo", target).?);
+                cache.clear(alloc);
+                _ = try cache.putPending(alloc, "/repo", target);
+                try std.testing.expect(cache.resolve("/repo", target, true));
+            }
+            var cells = try @import("renderer/omg_link.zig").collect(alloc, alloc, screen, &frame, config.links, &cache, mods);
+            defer cells.deinit(alloc);
+            try std.testing.expectEqual(target.len, cells.count());
+            try std.testing.expect(cells.contains(.{ .x = 1, .y = 1 }));
+            if (inset > 0) try std.testing.expect(!cells.contains(.{ .x = 0, .y = 1 }));
+            try std.testing.expect(!cells.contains(.{ .x = 39, .y = 0 }));
         }
-        const screen = t.screens.active;
-        var config = try @import("renderer/link.zig").Set.fromConfig(alloc, &.{.{
-            .regex = @import("config/url.zig").no_space_regex,
-            .action = .{ .open = {} },
-            .highlight = .{ .hover_mods = mods },
-        }});
-        defer config.deinit(alloc);
-        for (0..row - 1) |y| {
-            const pin = screen.pages.pin(.{ .active = .{ .x = 2, .y = @intCast(y) } }).?;
-            const line = screen.selectLine(.{ .pin = pin, .whitespace = null }).?;
-            const map = try stringMap(alloc, screen, line);
-            defer map.deinit(alloc);
-            var it = map.searchIterator(config.links[0].regex);
-            var match = (try it.next()).?;
-            defer match.deinit();
-            const detected = try Result.fromMatch(alloc, match);
-            defer detected.deinit(alloc);
-            try std.testing.expect(detected.contains(screen, pin));
-            try std.testing.expectEqualStrings(target, detected.target);
-            try std.testing.expectEqual(row - 1, detected.spans.len);
-            try std.testing.expectEqual(.inferred_continuation, detected.source);
-            try std.testing.expectEqual(target[0] == '/', detected.kind == .path);
-            const margin = screen.pages.pin(.{ .active = .{ .x = 0, .y = @intCast(y) } }).?;
-            try std.testing.expect(!detected.contains(screen, margin));
-        }
-        var cache: @import("omg_link_check.zig") = .{};
-        defer cache.deinit(alloc);
-        var frame: terminal.RenderState = .empty;
-        defer frame.deinit(alloc);
-        try frame.update(alloc, &t);
-        var pending = try @import("renderer/omg_link.zig").collect(alloc, alloc, screen, &frame, config.links, &cache, mods);
-        defer pending.deinit(alloc);
-        if (target[0] == '/') {
-            try std.testing.expectEqual(@import("omg_link_check.zig").Status.queued, cache.get("/repo", target).?);
-            cache.clear(alloc);
-            _ = try cache.putPending(alloc, "/repo", target);
-            try std.testing.expect(cache.resolve("/repo", target, true));
-        }
-        var cells = try @import("renderer/omg_link.zig").collect(alloc, alloc, screen, &frame, config.links, &cache, mods);
-        defer cells.deinit(alloc);
-        try std.testing.expectEqual(target.len, cells.count());
-        try std.testing.expect(cells.contains(.{ .x = 1, .y = 1 }));
-        try std.testing.expect(!cells.contains(.{ .x = 0, .y = 1 }));
-        try std.testing.expect(!cells.contains(.{ .x = 39, .y = 0 }));
     }
 }
 

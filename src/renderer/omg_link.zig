@@ -87,7 +87,7 @@ pub fn collect(
         // Filter prompt cells below rather than dropping output after a prompt.
         const line = screen.selectLine(.{ .pin = pin, .whitespace = null, .semantic_prompt_boundary = false }) orelse continue;
         previous_end = line.end();
-        const text = try screen.selectionStringMap(alloc, .{ .sel = line, .trim = false });
+        const text = try @import("../omg_wrapped_link.zig").stringMap(alloc, screen, line);
         defer text.deinit(alloc);
         for (links) |link| {
             switch (link.highlight) {
@@ -98,14 +98,15 @@ pub fn collect(
             while (try it.next()) |found| {
                 var match = found;
                 defer match.deinit();
-                const sel = match.selection();
+                const detected = try @import("../omg_wrapped_link.zig").Result.fromMatch(alloc, match);
+                defer detected.deinit(alloc);
+                const sel = detected.selection;
                 const first = screen.pages.pointFromPin(.screen, sel.start()) orelse continue;
                 const last = screen.pages.pointFromPin(.screen, sel.end()) orelse continue;
                 if (last.coord().y < top or first.coord().y >= top + pins.len) continue;
-                const value = try screen.selectionString(alloc, .{ .sel = sel, .trim = false });
-                defer alloc.free(value);
+                const value = detected.target;
                 if (Cache.isBareRoot(value)) continue;
-                if (Cache.needsCheck(value)) {
+                if (detected.kind == .path) {
                     const cwd = screen.omg_cwd_history.cwdAt(sel.start()) orelse "";
                     if (cache.get(cwd, value)) |status| {
                         if (status != .exists) continue;
@@ -114,18 +115,17 @@ pub fn collect(
                         continue;
                     }
                 }
-                const lo = first.coord();
-                const hi = last.coord();
-                const y0 = @max(lo.y, top);
-                const y1 = @min(hi.y + 1, top + pins.len);
-                for (y0..y1) |y| {
-                    const row = y - top;
+                for (detected.spans) |span| {
+                    const pt = (screen.pages.pointFromPin(.screen, span.start()) orelse continue).coord();
+                    if (pt.y < top or pt.y >= top + pins.len) continue;
+                    const row = pt.y - top;
                     const cells = rows.items(.cells)[row].items(.raw);
-                    const x0 = if (y == lo.y) lo.x else 0;
-                    const x1 = @min(if (y == hi.y) @as(usize, hi.x) + 1 else cells.len, cells.len);
-                    for (x0..x1) |x| {
+                    const end_x = @min(@as(usize, span.end().x) + 1, cells.len);
+                    for (pt.x..end_x) |x| {
                         if (cells[x].semantic_content == .prompt) continue;
                         try result.put(alloc, .{ .x = @intCast(x), .y = @intCast(row) }, {});
+                        if (cells[x].wide == .wide and x + 1 < cells.len)
+                            try result.put(alloc, .{ .x = @intCast(x + 1), .y = @intCast(row) }, {});
                     }
                 }
             }

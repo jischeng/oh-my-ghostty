@@ -294,3 +294,35 @@ test "StringMap searchIterator URL with click position" {
     }
     try testing.expect(found_url);
 }
+
+test "StringMap URL detection preserves soft wrapped target" {
+    if (comptime !build_options.oniguruma) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const url = @import("../config/url.zig");
+    try oni.testing.ensureInit();
+    var re = try oni.Regex.init(url.no_space_regex, .{}, oni.Encoding.utf8, oni.Syntax.default, null);
+    defer re.deinit();
+    var s = try Screen.init(testing.io, alloc, .{ .cols = 60, .rows = 12, .max_scrollback_bytes = 0 });
+    defer s.deinit();
+    try s.testWriteString("- DeepMine锁清理：[DeepMine\n!31](https://code.deeproute.ai/deeproute-org/perception/vision-prediction/prediction_group/deepmine/-/merge_requests/31) merge\n`044fcf1b33ab1e63f81c3f70b8c386cfc3e45c7`。");
+    var matches: usize = 0;
+    var y: usize = 0;
+    while (y < 8) : (y += 1) {
+        const pin = s.pages.pin(.{ .active = .{ .x = 0, .y = @intCast(y) } }) orelse continue;
+        const line = s.selectLine(.{ .pin = pin, .whitespace = null, .semantic_prompt_boundary = true }) orelse continue;
+        const map = try s.selectionStringMap(alloc, .{ .sel = line, .trim = false });
+        defer map.deinit(alloc);
+
+        var it = map.searchIterator(re);
+        while (try it.next()) |found| {
+            var m = found;
+            defer m.deinit();
+            const value = try s.selectionString(alloc, .{ .sel = m.selection(), .trim = false });
+            defer alloc.free(value);
+            try testing.expectEqualStrings("https://code.deeproute.ai/deeproute-org/perception/vision-prediction/prediction_group/deepmine/-/merge_requests/31", value);
+            matches += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 3), matches);
+}

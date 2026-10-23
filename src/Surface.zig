@@ -1686,12 +1686,10 @@ fn mouseRefreshLinks(
         }
 
         const link = (try self.linkAtPos(pos)) orelse break :link .{ null, false };
+        defer link.deinit(self.alloc);
         switch (link.action) {
             .open => {
-                const str = try self.io.terminal.screens.active.selectionString(alloc, .{
-                    .sel = link.selection,
-                    .trim = false,
-                });
+                const str = try alloc.dupeZ(u8, link.detected.?.target);
                 // OMG: keep raw text and source cwd separate so the host can
                 // resolve SSH paths without accidentally using a local base.
                 break :link .{
@@ -4184,6 +4182,7 @@ pub fn mouseButtonCallback(
                     null,
                 )) |result_| {
                     if (result_) |result| {
+                        defer result.deinit(self.alloc);
                         press_selection = result.selection;
                     }
                 } else |_| {
@@ -4272,6 +4271,7 @@ pub fn mouseButtonCallback(
                 // If there is a link at this position, we want to
                 // select the link. Otherwise, select the word.
                 if (try self.linkAtPos(pos)) |link| {
+                    defer link.deinit(self.alloc);
                     try self.setSelectionAndCopy(link.selection);
                 } else {
                     const sel = screen.selectWord(
@@ -4460,6 +4460,11 @@ fn maybePromptClick(self: *Surface) !bool {
 const Link = struct {
     action: input.Link.Action,
     selection: terminal.Selection,
+    detected: ?@import("omg_wrapped_link.zig").Result = null,
+
+    fn deinit(self: Link, alloc: Allocator) void {
+        if (self.detected) |result| result.deinit(alloc);
+    }
 };
 
 /// Returns the link at the given cursor position, if any.
@@ -4523,10 +4528,7 @@ fn linkAtPin(
         .semantic_prompt_boundary = true,
     }) orelse return null;
 
-    const strmap = try screen.selectionStringMap(self.alloc, .{
-        .sel = line,
-        .trim = false,
-    });
+    const strmap = try @import("omg_wrapped_link.zig").stringMap(self.alloc, screen, line);
     defer strmap.deinit(self.alloc);
 
     for (self.config.links) |link| {
@@ -4540,20 +4542,25 @@ fn linkAtPin(
         while (true) {
             var match = (try it.next()) orelse break;
             defer match.deinit();
-            const sel = match.selection();
-            if (!sel.contains(screen, mouse_pin)) continue;
+            const detected = try @import("omg_wrapped_link.zig").Result.fromMatch(self.alloc, match);
+            var retained = false;
+            defer if (!retained) detected.deinit(self.alloc);
+            const sel = detected.selection;
+            if (!detected.contains(screen, mouse_pin)) continue;
             // OMG: Cmd-hover/click paths must exist in the source pane's
             // filesystem; otherwise try the next candidate (e.g. a shorter
             // path inside an overlong match). Double-click word selection
             // (mouse_mods == null) keeps the plain regex behavior.
             if (comptime builtin.target.os.tag == .macos) {
                 if (mouse_mods != null and link.action == .open) {
-                    if (!try self.omgLinkExists(sel)) continue;
+                    if (!try self.omgLinkExists(detected)) continue;
                 }
             }
+            retained = true;
             return .{
                 .action = link.action,
                 .selection = sel,
+                .detected = detected,
             };
         }
     }
@@ -4565,10 +4572,10 @@ fn linkAtPin(
 /// requested from the host and treated as absent until it answers.
 ///
 /// Requires the renderer state mutex is held.
-fn omgLinkExists(self: *Surface, sel: terminal.Selection) !bool {
+fn omgLinkExists(self: *Surface, detected: @import("omg_wrapped_link.zig").Result) !bool {
     const screen = self.renderer_state.terminal.screens.active;
-    const value = try screen.selectionString(self.alloc, .{ .sel = sel, .trim = false });
-    defer self.alloc.free(value);
+    const sel = detected.selection;
+    const value = detected.target;
     if (OmgLinkCheck.isBareRoot(value)) return false;
     if (!OmgLinkCheck.needsCheck(value)) return true;
     const cwd = screen.omg_cwd_history.cwdAt(sel.start()) orelse "";
@@ -4648,13 +4655,10 @@ fn mouseModsWithCapture(self: *Surface, mods: input.Mods) input.Mods {
 /// Requires the renderer state mutex is held.
 fn processLinks(self: *Surface, pos: apprt.CursorPos) !bool {
     const link = try self.linkAtPos(pos) orelse return false;
+    defer link.deinit(self.alloc);
     switch (link.action) {
         .open => {
-            const str = try self.io.terminal.screens.active.selectionString(self.alloc, .{
-                .sel = link.selection,
-                .trim = false,
-            });
-            defer self.alloc.free(str);
+            const str = link.detected.?.target;
 
             // OMG resolves paths with the source pane's local/SSH filesystem.
             // Resolving here would expand remote paths against the host's cwd.
@@ -5371,13 +5375,11 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             self.renderer_state.mutex.lockUncancelable(global.io());
             defer self.renderer_state.mutex.unlock(global.io());
             if (try self.linkAtPos(pos)) |link_info| {
+                defer link_info.deinit(self.alloc);
                 const url_text = switch (link_info.action) {
                     .open => url_text: {
                         // For regex links, get the text from selection
-                        break :url_text (self.io.terminal.screens.active.selectionString(self.alloc, .{
-                            .sel = link_info.selection,
-                            .trim = self.config.clipboard_trim_trailing_spaces,
-                        })) catch |err| {
+                        break :url_text self.alloc.dupeZ(u8, link_info.detected.?.target) catch |err| {
                             log.err("error reading url string err={}", .{err});
                             return false;
                         };

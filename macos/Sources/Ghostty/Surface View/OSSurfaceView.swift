@@ -34,6 +34,10 @@ extension Ghostty {
         // have an active agent resume descriptor.
         var sshResumeDescriptor: SSHResumeDescriptor?
 
+        // One-shot host launch handoff; survives a CLI replay file being removed
+        // before its queued start signal reaches AppKit after a fast failure.
+        var pendingSSHLaunchReplay: SSHReplayDescriptor?
+
         // The cell size of this surface. This is set by the core when the
         // surface is first created and any time the cell size changes (i.e.
         // when the font size changes). This is used to allow windows to be

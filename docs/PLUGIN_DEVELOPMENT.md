@@ -839,9 +839,10 @@ conservatively recognize a foreground interactive OpenSSH client (`ssh host`,
 excluding forwarding/control/no-command modes and explicit remote commands) as
 the pane transport. The destination becomes an inferred SSH context, a validated
 remote Agent `omg_cwd` can complete its remote workspace, and a foreground
-process-group transition back to the local shell atomically clears all remote
-Agent presentation and resume state. A matching typed `omg +ssh` end performs
-the same cleanup; the next authenticated remote Fish/bash/zsh prompt remains an
+process-group transition back to the local shell atomically clears live remote
+Agent presentation and resume state. Recoverable disconnects first retain an
+exact conversation in the separate, inactive SSH recovery descriptor. A matching
+typed `omg +ssh` end performs the same cleanup; the next authenticated remote Fish/bash/zsh prompt remains an
 additional orphan-recovery signal (`cwd` and bash/zsh `cwdhex` are both accepted).
 The transient `+ssh` Fish/bash/zsh startup installs identity-only wrappers for
 `agy` and `codex` unless a user function or alias already owns that name. Normal
@@ -956,10 +957,28 @@ last ready remote cwd, and pre-SSH local cwd) whenever an `omg +ssh` connection
 is active, independent of any Agent session. On restore, panes without a
 usable Agent resume descriptor replay `+ssh` with the recorded remote cwd and
 survival wrapper, so agent-free `omg +ssh` tabs reconnect instead of degrading
-to a local shell. The descriptor clears when the connection ends, matching the
-split replay lifecycle. A directly typed ordinary `ssh host` is recognized at
-runtime from its foreground process group but has no validated replay argv, so
-it is deliberately not made restorable or silently rewritten through `+ssh`.
+to a local shell. A typed exit with status 255 retains an inactive recovery
+descriptor; other typed exit statuses clear it. This is an OpenSSH error signal,
+not proof of a network outage (authentication/configuration errors also use 255).
+Ordinary interactive `ssh host` can supply exact argv through the foreground
+process observer. When available, those panes also retain a recovery offer after
+the process exits; inference cannot distinguish intentional logout from failure.
+Without validated argv no replay command is invented.
+
+The optional `awaitingReconnect` and `interruptedAgent` fields remain compatible
+with existing archives. Offline panes reopen a local shell with a recovery banner,
+without initiating SSH or periodically retrying. Local Agent restoration remains
+independent. **Reconnect in New Tab** launches the original argv, last known remote
+cwd and, when available, exact interrupted Agent conversation in a fresh PTY;
+the old pane keeps its output and any local processes. The destination receives
+the recovery descriptor before lifecycle callbacks and owns subsequent retries.
+**Keep Local** discards pending recovery. Failed attempts before a remote prompt
+retain cwd/conversation across repeated app restarts. A new host never inherits
+another host's directory or Agent. Inactive recovery does not authorize Files,
+Git, background remote work, or plugin terminal input. No remote daemon, workspace
+UI, credential store, or automatic retry loop is introduced. SSH reconnection and
+Agent conversation resume do not preserve arbitrary remote processes; those need
+a separately managed remote multiplexer such as tmux.
 
 Conversation identity comes from hook stdin (`session_id`), Pi-compatible
 `sessionManager.getSessionId()`, OpenCode events, Reasonix's bounded machine JSON

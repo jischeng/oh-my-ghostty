@@ -44,7 +44,10 @@ struct EditorWorkspaceHost<Terminal: View>: View {
 
     var body: some View {
         ZStack {
-            terminal
+            VStack(spacing: 0) {
+                SSHRecoveryBanner(controller: controller, surface: surfaceView)
+                terminal
+            }
                 .opacity(workspace.isVisible ? 0 : 1)
                 .allowsHitTesting(!workspace.isVisible)
                 .accessibilityHidden(workspace.isVisible)

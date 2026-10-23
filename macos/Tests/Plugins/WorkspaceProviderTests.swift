@@ -4,6 +4,90 @@ import Testing
 @testable import Ghostty
 
 struct WorkspaceProviderTests {
+    @Test func disconnectedSSHRecoverySurvivesFailedRetriesAndArchive() throws {
+        let replay = SSHReplayDescriptor(version: 1, ssh: "/usr/bin/ssh", forwardEnv: true,
+            terminfo: true, cache: true, args: ["-J", "jump", "user@cloud"])
+        var context = PaneSessionContext(workingDirectory: "/tmp", terminalTitle: "local")
+        func signal(_ action: Ghostty.ContextSignal.Action, _ id: String, _ metadata: String) -> Ghostty.ContextSignal {
+            .init(action: action, id: id, metadata: metadata)
+        }
+        context.apply(signal(.start, "omg-ssh-one", "type=remote;targethost=cloud;cwd=/remote/my%20project"),
+                      currentWorkingDirectory: "/tmp", currentTerminalTitle: "local", sshReplay: replay)
+        let live = try #require(context.sshResumeDescriptor(previous: nil))
+        #expect(!live.isAwaitingReconnect)
+        context.apply(signal(.end, "omg-ssh-one", "status=255;cwd=/tmp"),
+                      currentWorkingDirectory: "/remote/my project", currentTerminalTitle: "remote")
+        var pending = try #require(context.sshResumeDescriptor(previous: live))
+        #expect(pending.isAwaitingReconnect)
+        #expect(context.state == .local)
+        #expect(context.workspace == nil)
+        #expect(pending.remoteWorkingDirectory == "/remote/my project")
+        pending.interruptedAgent = AgentResumeDescriptor(agent: .pi,
+            conversationID: try #require(AgentConversationID("conversation-123")),
+            scope: .remote, workingDirectory: "/remote/my project", sshReplay: replay)
+        let archived = try JSONDecoder().decode(SSHResumeDescriptor.self, from: JSONEncoder().encode(pending))
+        #expect(archived == pending)
+        #expect(archived.command(executablePath: "/app/omg")?.contains("--remote-agent-session=conversation-123") == true)
+
+        // +ssh does not serialize the inferred process's local cwd into argv.
+        var inferredReplay = replay
+        inferredReplay.localWorkingDirectory = "/tmp"
+        var previous = pending
+        for index in 0..<3 {
+            let id = "omg-ssh-retry-\(index)"
+            context.apply(signal(.start, id, "type=remote;targethost=cloud"),
+                          currentWorkingDirectory: "/tmp", currentTerminalTitle: "local", sshReplay: inferredReplay)
+            previous = try #require(context.sshResumeDescriptor(previous: previous))
+            #expect(!previous.isAwaitingReconnect)
+            context.apply(signal(.end, id, "status=255"), currentWorkingDirectory: "/tmp", currentTerminalTitle: "local")
+            previous = try #require(context.sshResumeDescriptor(previous: previous))
+            #expect(previous.isAwaitingReconnect)
+            #expect(previous.remoteWorkingDirectory == "/remote/my project")
+            #expect(previous.interruptedAgent?.conversationID == pending.interruptedAgent?.conversationID)
+        }
+        context.dismissSSHRecovery()
+        #expect(context.sshResumeDescriptor(previous: previous) == nil)
+    }
+
+    @Test(arguments: [0, 1, 130, 255]) func onlyTransportFailureOffersTypedSSHRecovery(status: Int) throws {
+        let replay = SSHReplayDescriptor(version: 1, ssh: "/usr/bin/ssh", forwardEnv: false,
+            terminfo: false, cache: false, args: ["cloud"])
+        var context = PaneSessionContext(workingDirectory: "/tmp", terminalTitle: "local")
+        context.apply(.init(action: .start, id: "omg-ssh-exit", metadata: "type=remote;targethost=cloud"),
+                      currentWorkingDirectory: "/tmp", currentTerminalTitle: "local", sshReplay: replay)
+        context.apply(.init(action: .end, id: "omg-ssh-exit", metadata: "status=\(status)"),
+                      currentWorkingDirectory: "/tmp", currentTerminalTitle: "local")
+        #expect((context.sshResumeDescriptor(previous: nil) != nil) == (status == 255))
+    }
+
+    @Test func inferredSSHOffersRecoveryButDoesNotCarryOldHostIntoNewConnection() throws {
+        let replay = SSHReplayDescriptor(version: 1, ssh: "/usr/bin/ssh", forwardEnv: false,
+            terminfo: false, cache: false, args: ["cloud"])
+        var context = PaneSessionContext(workingDirectory: "/tmp", terminalTitle: "local")
+        context.observeForegroundSSH(alias: "cloud", transferTarget: "cloud", processGroupID: 42,
+            currentWorkingDirectory: "/tmp", currentTerminalTitle: "local", remoteWorkingDirectory: "/work", replay: replay)
+        let ended = context.finishForegroundSSH(processGroupID: 42, currentWorkingDirectory: "/tmp", currentTerminalTitle: "remote")
+        #expect(ended)
+        let pending = try #require(context.sshResumeDescriptor(previous: nil))
+        #expect(pending.isAwaitingReconnect)
+        let other = SSHReplayDescriptor(version: 1, ssh: "/usr/bin/ssh", forwardEnv: false,
+            terminfo: false, cache: false, args: ["build"])
+        context.observeForegroundSSH(alias: "build", transferTarget: "build", processGroupID: 43,
+            currentWorkingDirectory: "/tmp", currentTerminalTitle: "local", replay: other)
+        let next = try #require(context.sshResumeDescriptor(previous: pending))
+        #expect(next.remoteWorkingDirectory == nil)
+        #expect(next.interruptedAgent == nil)
+        #expect(!next.isAwaitingReconnect)
+        #expect(context.disconnectedSSH == nil)
+    }
+
+    @Test func oldSSHArchiveDefaultsToActiveRestoration() throws {
+        let data = Data(#"{"sshReplay":{"version":1,"ssh":"/usr/bin/ssh","forward_env":false,"terminfo":false,"cache":false,"args":["cloud"]},"remoteWorkingDirectory":"/work","localWorkingDirectory":"/tmp"}"#.utf8)
+        let descriptor = try JSONDecoder().decode(SSHResumeDescriptor.self, from: data)
+        #expect(!descriptor.isAwaitingReconnect)
+        #expect(descriptor.interruptedAgent == nil)
+    }
+
     @Test func sshPromptTracksOnlyValidatedRemoteTTY() throws {
         var context = PaneSessionContext(workingDirectory: "/tmp", terminalTitle: "shell")
         func apply(_ tty: String) {

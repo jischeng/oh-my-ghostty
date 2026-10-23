@@ -43,6 +43,7 @@ struct PaneSessionContext: Equatable, Sendable {
     private(set) var state: State = .local
     private(set) var disconnectedSSH: SSH?
     private(set) var disconnectedRemoteWorkingDirectory: String?
+    private(set) var offersSSHRecovery = false
     private var staleRemoteTerminalTitle: String?
 
     init(workingDirectory: String?, terminalTitle: String) {
@@ -227,6 +228,9 @@ struct PaneSessionContext: Equatable, Sendable {
         }
         guard state != next else { return }
         state = next
+        disconnectedSSH = nil
+        disconnectedRemoteWorkingDirectory = nil
+        offersSSHRecovery = false
         revision &+= 1
     }
 
@@ -261,6 +265,10 @@ struct PaneSessionContext: Equatable, Sendable {
         if let currentWorkingDirectory, !currentWorkingDirectory.isEmpty {
             local.workingDirectory = currentWorkingDirectory
         }
+        rememberDisconnectedSSH()
+        // Foreground inference has no child exit status. Offer explicit recovery
+        // without claiming a network failure or reconnecting automatically.
+        offersSSHRecovery = true
         staleRemoteTerminalTitle = currentTerminalTitle
         state = .local
         revision &+= 1
@@ -321,6 +329,7 @@ struct PaneSessionContext: Equatable, Sendable {
             }
             disconnectedSSH = nil
             disconnectedRemoteWorkingDirectory = nil
+            offersSSHRecovery = false
             revision &+= 1
 
         case .end:
@@ -331,15 +340,10 @@ struct PaneSessionContext: Equatable, Sendable {
                 ssh.connectionID
             }
             guard activeID == signal.id else { return }
-            switch state {
-            case .local:
-                break
-            case .sshConnecting(let ssh):
-                disconnectedSSH = ssh
-            case .sshReady(let ssh, let workingDirectory):
-                disconnectedSSH = ssh
-                disconnectedRemoteWorkingDirectory = workingDirectory
-            }
+            rememberDisconnectedSSH()
+            // OpenSSH reserves 255 for transport/setup errors. A remote shell
+            // exiting with another nonzero status is still an intentional exit.
+            offersSSHRecovery = metadata["status"] == "255"
             if let workingDirectory = metadata["cwd"]?.removingPercentEncoding,
                !workingDirectory.isEmpty {
                 local.workingDirectory = workingDirectory
@@ -374,8 +378,63 @@ struct PaneSessionContext: Equatable, Sendable {
         case .local: return
         }
         guard ssh.connectionID == "omg-ssh-detected-\(processGroupID)" else { return }
+        rememberDisconnectedSSH()
+        offersSSHRecovery = true
         state = .local
         revision &+= 1
+    }
+
+    private mutating func rememberDisconnectedSSH() {
+        switch state {
+        case .local:
+            break
+        case .sshConnecting(let ssh):
+            disconnectedSSH = ssh
+        case .sshReady(let ssh, let directory):
+            disconnectedSSH = ssh
+            disconnectedRemoteWorkingDirectory = directory
+        }
+    }
+
+    mutating func dismissSSHRecovery() {
+        disconnectedSSH = nil
+        disconnectedRemoteWorkingDirectory = nil
+        offersSSHRecovery = false
+        revision &+= 1
+    }
+
+    /// Keeps offline intent separate from live remote capabilities. A local
+    /// prompt must never expose the old host's Files/Git provider as connected.
+    func sshResumeDescriptor(previous: SSHResumeDescriptor?) -> SSHResumeDescriptor? {
+        let ssh: SSH
+        let directory: String?
+        let pending: Bool
+        switch state {
+        case .local:
+            guard offersSSHRecovery, let disconnectedSSH else { return nil }
+            ssh = disconnectedSSH
+            directory = disconnectedRemoteWorkingDirectory
+            pending = true
+        case .sshConnecting(let active):
+            ssh = active
+            directory = nil
+            pending = false
+        case .sshReady(let active, let cwd):
+            ssh = active
+            directory = cwd
+            pending = false
+        }
+        guard let replay = ssh.replay ?? SSHReplayStore.load(connectionID: ssh.connectionID) else {
+            return nil
+        }
+        let sameDestination = previous?.sshReplay.hasSameInvocation(as: replay) == true
+        return .init(
+            sshReplay: replay,
+            remoteWorkingDirectory: directory ?? (sameDestination ? previous?.remoteWorkingDirectory : nil),
+            localWorkingDirectory: local.workingDirectory,
+            awaitingReconnect: pending,
+            interruptedAgent: sameDestination ? previous?.interruptedAgent : nil
+        )
     }
 
     static func isSSHReconnectCommand(_ commandLines: String, alias: String) -> Bool {
@@ -526,6 +585,14 @@ struct SSHReplayDescriptor: Codable, Equatable, Sendable {
         case localWorkingDirectory = "local_working_directory"
     }
 
+    func hasSameInvocation(as other: Self) -> Bool {
+        var lhs = self
+        var rhs = other
+        lhs.localWorkingDirectory = nil
+        rhs.localWorkingDirectory = nil
+        return lhs == rhs
+    }
+
     var transferTarget: String? {
         guard version == 1 else { return nil }
         return ForegroundSSHProcessDetector.interactiveDestination(args)
@@ -589,9 +656,20 @@ struct SSHResumeDescriptor: Codable, Equatable, Sendable {
     let sshReplay: SSHReplayDescriptor
     let remoteWorkingDirectory: String?
     let localWorkingDirectory: String?
+    // Optional fields keep existing restoration archives readable.
+    var awaitingReconnect: Bool?
+    var interruptedAgent: AgentResumeDescriptor?
+
+    var isAwaitingReconnect: Bool { awaitingReconnect == true }
+    var displayDestination: String { sshReplay.transferTarget ?? "SSH" }
 
     func command(executablePath: String) -> String? {
-        sshReplay.command(
+        if let agent = interruptedAgent, agent.scope == .remote,
+           agent.sshReplay?.hasSameInvocation(as: sshReplay) == true, agent.conversationID != nil,
+           let command = agent.restorationCommand(executablePath: executablePath) {
+            return command
+        }
+        return sshReplay.command(
             executablePath: executablePath,
             remoteWorkingDirectory: remoteWorkingDirectory
         )

@@ -2039,7 +2039,7 @@ extension Ghostty {
                     SSHResumeDescriptor.self, forKey: .sshResumeDescriptor
                 )
             }
-            if startupMode == .restoreTabs {
+            if startupMode == .restoreTabs || sshResume?.isAwaitingReconnect == true {
                 config.workingDirectory = TerminalStartupRestorationPolicy.localWorkingDirectory(
                     saved: config.workingDirectory, agent: resume, ssh: sshResume
                 )
@@ -2050,10 +2050,11 @@ extension Ghostty {
                 nil
             }
             if startupMode.restoresSessions {
-                if sshResume == nil, let shellSnapshot {
+                if sshResume == nil || sshResume?.isAwaitingReconnect == true, let shellSnapshot {
                     config.environmentVariables[ShellScrollbackRestoreStore.environmentKey] = shellSnapshot.path
                 }
-                if let executablePath = Bundle.main.executablePath {
+                if sshResume?.isAwaitingReconnect != true || resume?.scope == .local,
+                   let executablePath = Bundle.main.executablePath {
                     if let resume, resume.isValid,
                        let command = resume.restorationCommand(
                            executablePath: executablePath
@@ -2062,7 +2063,7 @@ extension Ghostty {
                             ? resume.workingDirectory ?? config.workingDirectory
                             : nil
                         config.command = TerminalController.replaySurvivalCommand(command)
-                    } else if let sshResume,
+                    } else if let sshResume, !sshResume.isAwaitingReconnect,
                        let command = sshResume.command(executablePath: executablePath) {
                         config.workingDirectory = sshResume.localWorkingDirectory
                         let replay = ShellScrollbackRestoreStore.sshReplayCommand(
@@ -2078,6 +2079,9 @@ extension Ghostty {
             self.init(app, baseConfig: config, uuid: uuid)
             self.agentResumeDescriptor = startupMode.restoresSessions ? resume : nil
             self.sshResumeDescriptor = startupMode.restoresSessions ? sshResume : nil
+            if startupMode.restoresSessions, sshResume?.isAwaitingReconnect != true {
+                self.pendingSSHLaunchReplay = sshResume?.sshReplay ?? resume?.sshReplay
+            }
 
             // Restore the saved title after initialization
             if let title = savedTitle {

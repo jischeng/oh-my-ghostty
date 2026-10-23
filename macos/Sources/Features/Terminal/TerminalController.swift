@@ -1138,9 +1138,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                     let wasSSHSession = context.isSSHSession
                     let sshReplay: SSHReplayDescriptor? = if signal.action == .start,
                        signal.id.hasPrefix("omg-ssh-") {
-                        SSHReplayStore.load(connectionID: signal.id)
+                        SSHReplayStore.load(connectionID: signal.id) ?? surface.pendingSSHLaunchReplay
                     } else {
                         nil
+                    }
+                    if signal.action == .start, signal.id.hasPrefix("omg-ssh-"), sshReplay != nil {
+                        surface.pendingSSHLaunchReplay = nil
                     }
                     context.apply(
                         signal,
@@ -1200,6 +1203,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 }
                 context.endDetectedSSHReconnect(processGroupID: detected)
                 updatePaneSessionContext(context, for: surfaceID)
+                updateSSHResumeDescriptor(context, for: surfaceID)
+                clearRemoteAgentState(for: surfaceID)
                 detectedSSHReconnectProcessIDs.removeValue(forKey: surfaceID)
                 observedSSHReconnectProcessIDs.removeValue(forKey: surfaceID)
                 continue
@@ -1723,36 +1728,46 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
     }
 
+    func adoptSSHRecoveryDescriptor(_ descriptor: SSHResumeDescriptor, for surface: Ghostty.SurfaceView) {
+        guard surfaceTree.contains(surface) else { return }
+        surface.sshResumeDescriptor = descriptor
+        objectWillChange.send()
+        enableRestorationForResumableSession()
+        invalidateRestorableState()
+    }
+
+    func dismissSSHRecovery(for surface: Ghostty.SurfaceView) {
+        guard pendingSSHRecovery(for: surface) != nil else { return }
+        if var context = paneSessionContexts[surface.id] {
+            context.dismissSSHRecovery()
+            updatePaneSessionContext(context, for: surface.id)
+        }
+        surface.sshResumeDescriptor = nil
+        objectWillChange.send()
+        invalidateRestorableState()
+    }
+
     private func updateSSHResumeDescriptor(
         _ context: PaneSessionContext,
         for surfaceID: UUID
     ) {
         guard let surface = surfaceTree.first(where: { $0.id == surfaceID }) else { return }
-        // The remote cwd is only known once the first remote prompt reports
-        // it; during .sshConnecting `context.workingDirectory` is still the
-        // local pre-SSH directory and must not be replayed remotely.
-        let remoteWorkingDirectory: String? = switch context.state {
-        case .sshReady(_, let workingDirectory):
-            workingDirectory
-        case .local, .sshConnecting:
-            nil
+        // A restored offline pane starts a local shell. Unrelated shell/Agent
+        // signals must not erase its pending destination before the user acts.
+        if case .local = context.state, context.disconnectedSSH == nil { return }
+        var next = context.sshResumeDescriptor(previous: surface.sshResumeDescriptor)
+        if next?.isAwaitingReconnect == true,
+           let agent = agentResumeDescriptors[surfaceID], agent.scope == .remote,
+           agent.conversationID != nil, let replay = next?.sshReplay,
+           agent.sshReplay?.hasSameInvocation(as: replay) == true {
+            next?.interruptedAgent = agent
         }
-        let next: SSHResumeDescriptor? = switch context.state {
-        case .local:
-            nil
-        case .sshConnecting(let ssh), .sshReady(let ssh, _):
-            if let replay = ssh.replay ?? SSHReplayStore.load(connectionID: ssh.connectionID) {
-                .init(
-                    sshReplay: replay,
-                    remoteWorkingDirectory: remoteWorkingDirectory,
-                    localWorkingDirectory: context.local.workingDirectory
-                )
-            } else {
-                nil
-            }
-        }
+        // A fresh remote prompt is authoritative: the previous Agent has not
+        // been proven live on this connection. New hooks will establish it.
+        if case .sshReady = context.state { next?.interruptedAgent = nil }
         guard surface.sshResumeDescriptor != next else { return }
         surface.sshResumeDescriptor = next
+        objectWillChange.send()
         if next != nil { enableRestorationForResumableSession() }
         invalidateRestorableState()
     }

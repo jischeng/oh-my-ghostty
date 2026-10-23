@@ -17,15 +17,48 @@ struct SSHRecoveryTests {
         let zh = SettingsStrings(language: .simplifiedChinese)
         #expect(en.sshRecoveryTitle == "SSH disconnected")
         #expect(zh.sshRecoveryTitle == "SSH 连接已断开")
+        #expect(en.sshRecoveryReconnectHere == "Reconnect Here")
+        #expect(zh.sshRecoveryReconnectHere == "在当前面板重连")
         #expect(en.sshRecoveryReconnect == "Reconnect in New Tab")
         #expect(zh.sshRecoveryReconnect == "在新标签页重连")
-        #expect(en.sshRecoveryKeepLocal == "Keep Local")
-        #expect(zh.sshRecoveryKeepLocal == "保留为本地终端")
-        for text in [en.sshRecoveryReconnectHelp, zh.sshRecoveryReconnectHelp,
-                     en.sshRecoveryKeepLocalHelp, zh.sshRecoveryKeepLocalHelp] {
+        for text in [en.sshRecoveryReconnectHereHelp, zh.sshRecoveryReconnectHereHelp,
+                     en.sshRecoveryReconnectHelp, zh.sshRecoveryReconnectHelp,
+                     en.sshRecoveryDismissHelp, zh.sshRecoveryDismissHelp] {
             #expect(!text.isEmpty)
         }
-        #expect(en.sshRecoveryKeepLocalHelp != zh.sshRecoveryKeepLocalHelp)
+        #expect(en.sshRecoveryReconnectHereHelp != zh.sshRecoveryReconnectHereHelp)
+    }
+
+    @Test func recoveryBannerNamesTheAgentItWillResume() {
+        #expect(SettingsStrings(language: .english)
+            .sshRecoveryResumesAgent("Pi") == "Will also resume the Pi conversation.")
+        #expect(SettingsStrings(language: .simplifiedChinese)
+            .sshRecoveryResumesAgent("Pi") == "同时会恢复 Pi 的会话。")
+    }
+
+    @Test func inPlaceReconnectReplacesOnlyTheOwningPane() throws {
+        let controller = try controller()
+        defer { controller.window?.delegate = nil; controller.window?.close() }
+        let surface = try #require(controller.focusedSurface)
+        _ = try #require(controller.newSplit(at: surface, direction: .right))
+        let originalIDs = Set(controller.surfaceTree.map(\.id))
+        let replay = SSHReplayDescriptor(version: 1, ssh: "/usr/bin/ssh", forwardEnv: false,
+            terminfo: false, cache: false, args: ["cloud"])
+        controller.adoptSSHRecoveryDescriptor(.init(sshReplay: replay,
+            remoteWorkingDirectory: "/remote/work", localWorkingDirectory: "/tmp",
+            awaitingReconnect: true), for: surface)
+        controller.reconnectSSHHere(for: surface)
+        let remainingIDs = Set(controller.surfaceTree.map(\.id))
+        #expect(remainingIDs.count == originalIDs.count)
+        #expect(remainingIDs.subtracting(originalIDs).count == 1)
+        #expect(originalIDs.subtracting(remainingIDs) == [surface.id])
+        let replacement = try #require(controller.surfaceTree.first {
+            !originalIDs.contains($0.id)
+        })
+        #expect(replacement.sshResumeDescriptor?.isAwaitingReconnect == true)
+        #expect(replacement.pendingSSHLaunchReplay == replay)
+        #expect(controller.focusedSurface === replacement)
+        #expect(!controller.surfaceTree.contains(where: { $0 === surface }))
     }
 
     @Test func disconnectClearsLiveAgentButPreservesOfflineConversation() throws {

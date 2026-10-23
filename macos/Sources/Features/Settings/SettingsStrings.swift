@@ -582,15 +582,22 @@ struct SettingsStrings: Equatable, Sendable {
     }
     var sshAgentHookTitle: String { t("Set up SSH Agent status", "接入 SSH Agent 状态") }
     var sshRecoveryTitle: String { t("SSH disconnected", "SSH 连接已断开") }
+    var sshRecoveryReconnectHere: String { t("Reconnect Here", "在当前面板重连") }
+    var sshRecoveryReconnectHereHelp: String {
+        t("Replace this pane's terminal with a new SSH connection using the saved arguments. Output from the interrupted session is discarded.",
+          "用已保存的参数在这个面板里重新连接，替换当前终端；断线前的输出会被丢弃。")
+    }
     var sshRecoveryReconnect: String { t("Reconnect in New Tab", "在新标签页重连") }
-    var sshRecoveryKeepLocal: String { t("Keep Local", "保留为本地终端") }
+    var sshRecoveryDismissHelp: String {
+        t("Dismiss this prompt and keep using this pane as a local terminal.",
+          "关闭提示，将此面板作为本地终端继续使用。")
+    }
     var sshRecoveryReconnectHelp: String {
         t("Reconnect with the saved SSH arguments in a new tab. This tab keeps its current contents.",
           "使用已保存的 SSH 参数在新标签页中重新连接；当前标签页内容保持不变。")
     }
-    var sshRecoveryKeepLocalHelp: String {
-        t("Stop offering to reconnect and keep using this tab as a local terminal.",
-          "不再提示重连，将此标签页作为本地终端继续使用。")
+    func sshRecoveryResumesAgent(_ name: String) -> String {
+        t("Will also resume the \(name) conversation.", "同时会恢复 \(name) 的会话。")
     }
     var sshAgentHookExplanation: String {
         t("Remote Agents need their own OMG status Hooks; installing or upgrading OMG does not copy this Mac’s Hooks to SSH accounts. Check this host, then choose Install Extension for the Agents you use. This does not upgrade any CLI. Restart the affected Agent after installation.",

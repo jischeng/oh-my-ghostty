@@ -21,6 +21,11 @@ runtime yet. There is no public SDK, socket listener, or hot reload command.
 
 ## Built-in Git review and commit actions
 
+Local Git filesystem events wake the visible Inspector after a short coalescing
+window, rather than waiting for the periodic poll. Events received during an
+active read remain dirty and trigger a follow-up read; mutations keep their
+existing serialized refresh path. The periodic fallback remains enabled.
+
 The built-in Git Inspector accepts `submitCommit(stageAll:amend:)` in addition to
 `commitStaged`. These are internal host actions, not new plugin wire messages.
 The commit menu offers staged commit, stage all and commit, amend, and stage all

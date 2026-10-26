@@ -62,7 +62,12 @@ struct GitHistoryScopePicker: NSViewRepresentable {
             return GitRefPopoverStyle.content(GitRefBrowser(branches: content.branches, worktrees: content.worktrees, isBusy: content.isBusy,
                 branchesError: content.enabled ? nil : GitL10n.text("Branch status unavailable"), worktreesError: content.worktreesError,
                 isPicker: true, state: content.state, stateKey: content.stateKey, selectedID: selected, tags: content.tags,
-                close: { [weak self] in self?.popover?.performClose(nil) }, perform: content.perform), colors: content.colors)
+                close: { [weak self] in self?.popover?.performClose(nil) }, perform: content.perform), colors: content.colors,
+                size: pickerSize)
+        }
+        private var pickerSize: NSSize {
+            GitRefPopoverStyle.pickerSize(branchCount: content?.branches.count ?? 0,
+                worktreeCount: content?.worktrees.count ?? 0, tagCount: content?.tags.count ?? 0)
         }
         @objc func showPicker() {
             guard window != nil else { return }
@@ -72,7 +77,7 @@ struct GitHistoryScopePicker: NSViewRepresentable {
             popover.behavior = .transient
             popover.animates = false
             popover.contentViewController = host
-            popover.contentSize = GitRefPopoverStyle.size
+            popover.contentSize = pickerSize
             self.host = host
             self.popover = popover
             popover.show(relativeTo: bounds, of: self, preferredEdge: .minX)

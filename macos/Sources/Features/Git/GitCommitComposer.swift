@@ -90,8 +90,6 @@ struct GitCommitComposer: View {
                 .font(.system(size: 11, weight: .medium))
 
             }
-            Text(GitL10n.format("{0} staged", String(stagedCount)))
-                .font(.system(size: 10)).foregroundStyle(.secondary)
         }
         .confirmationDialog(GitL10n.text("Replace the existing commit message?"), isPresented: $confirmReplace) {
             Button(GitL10n.text("Generate and Replace")) { startGeneration() }

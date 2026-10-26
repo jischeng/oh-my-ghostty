@@ -34,8 +34,9 @@ struct GitHistoryPickerTests {
             let view = try #require(popover.contentViewController?.view)
             let search = try #require(find(GitCollectionSearchField.Field.self, in: view).first)
             let table = try #require(find(GitCollectionTableView.self, in: view).first)
-            #expect(table.visibleRect.height > 200 && search.bounds.width > 150)
-            #expect(table.visibleRect.minY <= 1, "Initial scope rows must not be clipped")
+            #expect(table.visibleRect.height > 120 && search.bounds.width > 150)
+            #expect(popover.contentSize.height <= 340 && popover.contentSize.width == 340)
+            #expect(table.visibleRect.minY <= 1, "Initial branch rows must not be clipped")
             let editor = try #require(search.currentEditor() as? NSTextView)
             let textRect = search.convert(editor.bounds, from: editor)
             #expect(textRect.minX + editor.textContainerInset.width + (editor.textContainer?.lineFragmentPadding ?? 0) >= 16,

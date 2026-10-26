@@ -445,7 +445,8 @@ final class BuiltInGitInspectorProvider {
                 if self.localChangeMonitors[context.tabID]?.repository != repository {
                     let paths = [repository.worktreePath, repository.gitDirPath, repository.commonGitDirPath]
                     self.localChangeMonitors[context.tabID] = GitRepositoryChangeMonitor(
-                        paths: paths, gitDirectories: [repository.gitDirPath, repository.commonGitDirPath]
+                        paths: paths, gitDirectories: [repository.gitDirPath, repository.commonGitDirPath],
+                        onChange: { [weak self] in self?.refreshChangedRepository(tabID: context.tabID) }
                     ).map {
                         (repository, $0)
                     }
@@ -478,6 +479,7 @@ final class BuiltInGitInspectorProvider {
             content.workingTree = workingTree
             self.publish(content, tabID: context.tabID)
             if repo != nil, content.activeTab == .history || force { self.loadHistory(context: context, force: force, refreshing: true) }
+            self.refreshChangedRepository(tabID: context.tabID)
         }
     }
 
@@ -732,6 +734,14 @@ final class BuiltInGitInspectorProvider {
                 }
             }
         }
+    }
+
+    private func refreshChangedRepository(tabID: UUID) {
+        guard let context = presentedContexts[tabID], loadTasks[tabID] == nil,
+              let entry = localChangeMonitors[tabID],
+              mutationTasks[entry.repository.stateKey] == nil,
+              entry.monitor.needsRefresh() else { return }
+        load(context: context)
     }
 
     func pollPresentedTabs() {

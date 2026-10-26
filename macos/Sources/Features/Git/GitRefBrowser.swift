@@ -22,6 +22,7 @@ struct GitRefBrowser: View {
     var pasteboard = NSPasteboard.general
     var close: () -> Void = {}
     let perform: (InspectorGitAction) -> Void
+    @Environment(\.gitCollectionColors) private var colors
     @State private var query = ""
     @ObservedObject private var settings = OhMyGhosttySettings.shared
     @State private var copied: String?
@@ -42,7 +43,15 @@ struct GitRefBrowser: View {
                 }
             }.padding(.horizontal, 10)
             }
-            GitCollectionView(source: decorations.map(GitCollectionSource.decorations) ?? .refs(branches: branches, worktrees: worktrees, scopes: isPicker,
+            if isPicker {
+                HStack(spacing: 0) {
+                    scopeButton(.currentBranch)
+                    scopeButton(.allBranches)
+                }
+                .modifier(GitToolbarSegmentedStyle(colors: colors))
+                .padding(.horizontal, 10)
+            }
+            GitCollectionView(source: decorations.map(GitCollectionSource.decorations) ?? .refs(branches: branches, worktrees: worktrees, scopes: false,
                                             branchesError: branchesError, worktreesError: worktreesError),
                 mode: externalMode ?? mode, query: externalQuery ?? query, canWrite: !isBusy,
                 interaction: decorations != nil ? .references : isPicker ? .picker : .branches, state: state, stateKey: stateKey,
@@ -58,6 +67,14 @@ struct GitRefBrowser: View {
             }
         }.environment(\.locale, Locale(identifier: SettingsStrings(language: settings.language).languageCode))
     }
+    private func scopeButton(_ scope: GitHistoryScope) -> some View {
+        Button { close(); perform(.selectHistoryScope(scope)) } label: {
+            Text(scope.displayName).font(.system(size: 11, weight: .medium))
+                .frame(maxWidth: .infinity).frame(height: 24)
+        }
+        .buttonStyle(GitToolbarButtonStyle(colors: colors, selected: selectedID == "scope:" + scope.rawValue))
+    }
+
     private func cancel() {
         if let externalCancel { externalCancel() } else if isPicker || decorations != nil { close() } else { query = "" }
     }

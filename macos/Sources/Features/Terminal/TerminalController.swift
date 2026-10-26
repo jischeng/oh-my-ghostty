@@ -803,6 +803,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     private weak var observedVerticalTabGroup: NSWindowTabGroup?
     private var verticalTabWindowsObservation: NSKeyValueObservation?
     private var verticalTabSelectionObservation: NSKeyValueObservation?
+    private weak var initialTabParent: NSWindow?
 
     init(_ ghostty: Ghostty.App,
          withBaseConfig base: Ghostty.SurfaceConfiguration? = nil,
@@ -847,7 +848,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let sessionBase = tree == nil
             ? Self.injectingSessionID(self.tabSessionID, into: base)
             : base
-        let initialLayoutState = VerticalTabWindowLayoutState(
+        initialTabParent = parent
+        let initialLayoutState = (parent?.windowController as? TerminalController)?.tabLayoutState ?? VerticalTabWindowLayoutState(
             isSidebarVisible: self.tabLayout == .vertical &&
                 OhMyGhosttySettings.shared.sidebarVisible,
             isInspectorVisible: false
@@ -2922,8 +2924,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         if let tabGroup {
             Self.refreshTabs(in: tabGroup)
         } else {
+            if let owner = tabLayoutState.nativeTabGroup, !owner.windows.contains(window) {
+                tabLayoutState = tabLayoutState.detachedCopy()
+            }
             applyTabSnapshot(controllers, selectedID: ObjectIdentifier(self))
             tabLayoutState.updateTabs(controllers, selectedID: ObjectIdentifier(self))
+            tabLayoutState.sidebarHost.presentSelectedWindow()
         }
     }
 
@@ -2978,6 +2984,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // selection. Every native tab's sidebar reads this same group snapshot.
         sharedState.updateTabs(controllers, selectedID: selectedID)
         sharedState.reconcileTabSelection(selectedID)
+        sharedState.sidebarHost.presentSelectedWindow()
     }
 
     // MARK: Terminal Creation
@@ -3229,13 +3236,29 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             nil
         }
 
+        // A key-repeat burst can still target the old key window while the
+        // latest tab awaits presentation. Insert after that latest intent, not
+        // repeatedly after the stale event source (which reverses the new tabs).
+        let insertionParent: NSWindow = if parentController.tabLayout == .vertical,
+            surfaceTree == nil,
+            let pendingID = parentController.tabLayoutState.pendingSelectedTabID,
+            let pendingWindow = parent.tabGroup?.windows.first(where: {
+                ($0.windowController as? TerminalController).map(ObjectIdentifier.init) == pendingID
+            }) {
+            pendingWindow
+        } else {
+            parent
+        }
+
         // Create a new window and add it to the parent
         let controller = TerminalController.init(
             ghostty,
             withBaseConfig: resolvedBaseConfig,
             withSurfaceTree: surfaceTree,
+            parent: parent,
             tabLayout: parentController.tabLayout
         )
+        defer { controller.initialTabParent = nil }
         controller.isBackgroundOpaque = parentController.isBackgroundOpaque
         controller.tabLayoutState = parentController.tabLayoutState
         guard let window = controller.window else { return nil }
@@ -3278,7 +3301,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
             case "current": fallthrough
             default:
-                addedToTabGroup = parent.addTabbedWindowSafely(
+                addedToTabGroup = insertionParent.addTabbedWindowSafely(
                     window,
                     ordered: .above
                 )
@@ -4080,8 +4103,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         window.contentView = container
 
-        // If we have a default size, we want to apply it.
-        if let defaultSize {
+        // A tab must join at the group's current frame. Applying a fresh
+        // window's default size makes AppKit resize every inactive tab on attach.
+        if let initialTabParent {
+            window.setFrame(initialTabParent.frame, display: false)
+        } else if let defaultSize {
             defaultSize.apply(to: window)
 
             if case .contentIntrinsicSize = defaultSize {
@@ -4133,7 +4159,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // apply this based on the root config but change it later based on surface
         // config (see focused surface change callback).
         syncAppearance(.init(config))
-        setupTabObservation()
+        // newTab installs observation after attachment. Reading tabGroup here
+        // otherwise builds a temporary native stack and a second sidebar host.
+        if initialTabParent == nil { setupTabObservation() }
     }
 
     /// Setup correct window frame before showing the window
@@ -4203,6 +4231,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         Self.scheduleTabRefresh(in: window?.tabGroup)
         DevMemoryDiagnostics.tabClosed()
         DevMemoryDiagnostics.windowClosing()
+        if let window, let group = window.tabGroup {
+            let remaining = group.windows.filter { $0 !== window }
+            let successor = remaining.first(where: {
+                ($0.windowController as? TerminalController).map(ObjectIdentifier.init) == tabLayoutState.tabSnapshot.selectedID
+            }) ?? remaining.first
+            tabLayoutState.sidebarHost.windowWillClose(window, successor: successor)
+        }
         super.windowWillClose(notification)
         EditorWorkspaceStore.shared.remove(tabID: tabSessionID)
         (NSApp.delegate as? AppDelegate)?.releaseInspectorState(tabID: tabSessionID)
@@ -4774,6 +4809,7 @@ extension NSWindowTabGroup {
     func setGhosttyTerminalShellLayoutState(
         _ state: VerticalTabWindowLayoutState
     ) {
+        state.nativeTabGroup = self
         objc_setAssociatedObject(
             self,
             &verticalTabLayoutStateAssociationKey,
@@ -4791,14 +4827,23 @@ extension NSWindowTabGroup {
             return state
         }
 
-        let state = windows
+        let existing = windows
             .compactMap { $0.windowController as? TerminalController }
-            .first?
-            .tabLayoutState ?? VerticalTabWindowLayoutState(
+            .first?.tabLayoutState
+        let state: VerticalTabWindowLayoutState
+        if let existing {
+            if let owner = existing.nativeTabGroup, owner !== self {
+                state = existing.detachedCopy()
+            } else {
+                state = existing
+            }
+        } else {
+            state = VerticalTabWindowLayoutState(
                 isSidebarVisible: OhMyGhosttySettings.shared.tabLayout == .vertical &&
                     OhMyGhosttySettings.shared.sidebarVisible,
                 isInspectorVisible: false
             )
+        }
         setGhosttyTerminalShellLayoutState(state)
         return state
     }

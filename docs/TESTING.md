@@ -71,6 +71,13 @@ macos/build.nu --action test \
   --include-desktop-tests
 ```
 
+Test actions set `ENABLE_TESTABILITY=YES` and `ONLY_ACTIVE_ARCH=YES`, including
+`--configuration Release`, so optimized app-hosted tests can use `@testable`
+imports and a native-only GhosttyKit build. Normal build/archive actions retain
+the configuration's original settings. Pointer-posting desktop tests additionally
+require macOS event-posting permission; a failed permission prerequisite is not a
+hover-latency result.
+
 Use exactly one of `--test-modules`, `--changed-since`, and `--only-testing`.
 `--test-plan-only` emits JSON without invoking Xcode. Invalid modules, unknown
 suites, conflicting scopes, and invalid Git refs fail before a build. An explicit

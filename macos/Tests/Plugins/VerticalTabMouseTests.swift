@@ -9,6 +9,90 @@ import Testing
 @MainActor
 struct VerticalTabMouseTests {
     private final class MonitorOwner { var received = 0 }
+
+    @Test func repeatedKeyboardCreationAndPointerTracking() async throws {
+        let app = try #require(NSApp.delegate as? AppDelegate)
+        let settings = OhMyGhosttySettings.shared
+        let oldGrouping = settings.groupingMode
+        let oldOrdering = settings.orderingMode
+        defer { settings.groupingMode = oldGrouping; settings.orderingMode = oldOrdering }
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let first = TerminalController(app.ghostty, withBaseConfig: config, tabLayout: .vertical)
+        let window = try #require(first.window)
+        var controllers = [first]
+        defer {
+            for controller in controllers { controller.window?.delegate = nil; controller.window?.close() }
+        }
+        first.showWindow(nil)
+        first.setTabGroupingMode(.none)
+        first.setTabOrderingMode(.manual)
+        first.setSidebarVisible(true)
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+        try String(ProcessInfo.processInfo.processIdentifier).write(
+            toFile: "/tmp/omg-sidebar-desktop-test.pid", atomically: true, encoding: .utf8
+        )
+        for _ in 0..<100 {
+            if NSApp.isActive && window.isKeyWindow { break }
+            if NSApp.isActive { window.makeKeyAndOrderFront(nil) }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try #require(NSApp.isActive && window.isKeyWindow, "Requires the foreground test window")
+        try #require(CGPreflightPostEventAccess(), "Optional pointer test requires permission to post system mouse events")
+        let group = try #require(window.tabGroup)
+        for index in 0..<20 {
+            let source = try #require(group.selectedWindow ?? window)
+            let event = try #require(NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: .command,
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: source.windowNumber,
+                context: nil, characters: "t", charactersIgnoringModifiers: "t", isARepeat: index > 0, keyCode: 17
+            ))
+            NSApp.sendEvent(event)
+            for _ in 0..<60 {
+                if group.windows.count > controllers.count { break }
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            controllers.append(try #require(group.windows.compactMap { $0.windowController as? TerminalController }
+                .first { candidate in !controllers.contains { $0 === candidate } }))
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        let last = try #require(controllers.last)
+        let selectedWindow = try #require(group.selectedWindow)
+        #expect(selectedWindow === last.window)
+        #expect(first.tabLayoutState.sidebarHost.mountCount == 1)
+        let live = try #require(first.tabLayoutState.sidebarHost.liveView)
+        func scrollView(_ view: NSView) -> NSScrollView? {
+            if let scroll = view as? NSScrollView { return scroll }
+            return view.subviews.lazy.compactMap(scrollView).first
+        }
+        let scroll = try #require(scrollView(live))
+        let document = try #require(scroll.documentView)
+        let rowHeight = settings.tabRowDensity.rowHeight
+        // Use the visible rows after auto-scrolling to the selected tab.
+        let firstVisibleRow = Int(ceil(scroll.contentView.bounds.minY / (rowHeight + 2)))
+        var latencies: [Double] = []
+        for index in 0..<24 {
+            let row = firstVisibleRow + index % 8
+            let point = document.convert(NSPoint(x: 80, y: 2 + CGFloat(row) * (rowHeight + 2) + rowHeight / 2), to: nil)
+            let screen = selectedWindow.convertPoint(toScreen: point)
+            let cgPoint = CGPoint(x: screen.x, y: (NSScreen.screens.first?.frame.maxY ?? 0) - screen.y)
+            let event = try #require(CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: cgPoint, mouseButton: .left))
+            let start = ContinuousClock.now
+            event.post(tap: .cghidEventTap)
+            let target = ObjectIdentifier(controllers[row])
+            for _ in 0..<40 {
+                if last.hoveredTabID == target { break }
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            let duration = start.duration(to: .now).components
+            latencies.append(Double(duration.seconds) + Double(duration.attoseconds) / 1e18)
+            #expect(last.hoveredTabID == target, "Pointer movement \(index) must reach row \(row)")
+        }
+        print("TAB_POINTER max=\(latencies.max() ?? 0) count=\(latencies.count)")
+    }
     @Test func mouseSelectionKeepsWorkingAcrossNativeWindows() async throws {
         let app = try #require(NSApp.delegate as? AppDelegate)
         let settings = OhMyGhosttySettings.shared

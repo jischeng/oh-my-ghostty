@@ -73,6 +73,11 @@ def main [
         [$"MARKETING_VERSION=($marketing_version)"]
     }
     let selected_tests = ($plan.only_testing | each {|test| ["-only-testing" $test] } | flatten)
+    # Optimized configurations still need @testable imports for app-hosted
+    # performance/regression tests. This does not change normal release builds.
+    let test_build_settings = if $action == "test" {
+        ["ENABLE_TESTABILITY=YES" "ONLY_ACTIVE_ARCH=YES"]
+    } else { [] }
 
     (^env -i
         $"HOME=($env.HOME)"
@@ -89,5 +94,6 @@ def main [
         ...$version_override
         ...$skip_testing
         ...$selected_tests
+        ...$test_build_settings
         $action)
 }

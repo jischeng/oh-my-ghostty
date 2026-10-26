@@ -509,7 +509,7 @@ struct TerminalShellLayoutContainer<Content: View>: View {
                     background: chromeBackground
                 ) {
                     HStack(spacing: 0) {
-                        TerminalTabSidebarView(
+                        SharedTerminalTabSidebar(
                             controller: controller,
                             layoutState: layoutState,
                             statusStore: statusStore,

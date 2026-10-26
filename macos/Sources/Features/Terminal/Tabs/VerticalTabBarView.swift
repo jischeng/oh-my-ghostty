@@ -98,6 +98,26 @@ final class VerticalTabPresentationState: ObservableObject {
 final class VerticalTabWindowLayoutState: ObservableObject {
     // Frequent tab/hover changes must not invalidate shell geometry or inspector views.
     let tabPresentation = VerticalTabPresentationState()
+    let sidebarHost = VerticalTabSidebarHost()
+    weak var nativeTabGroup: NSWindowTabGroup?
+
+    func detachedCopy() -> VerticalTabWindowLayoutState {
+        let copy = VerticalTabWindowLayoutState(
+            isSidebarVisible: isSidebarVisible,
+            sidebarWidth: sidebarWidth,
+            isInspectorVisible: isInspectorVisible,
+            settings: settings,
+            inspectorPresentation: inspectorPresentation
+        )
+        copy.committedSidebarWidth = committedSidebarWidth
+        copy.groupingMode = groupingMode
+        copy.orderingMode = orderingMode
+        copy.collapsedGroupIDs = collapsedGroupIDs
+        copy.inspectorWidth = inspectorWidth
+        copy.committedInspectorWidth = committedInspectorWidth
+        copy.selectedInspectorPaneID = selectedInspectorPaneID
+        return copy
+    }
     var tabSnapshot: VerticalTabSnapshot { tabPresentation.tabSnapshot }
     var hoveredTabID: ObjectIdentifier? {
         get { tabPresentation.hoveredTabID }
@@ -827,6 +847,7 @@ struct TerminalTabSidebarView: View {
         VStack(spacing: 0) {
             header
 
+            ScrollViewReader { scroll in
             ScrollView {
                 LazyVStack(spacing: 2) {
                     ForEach(groups) { group in
@@ -848,6 +869,7 @@ struct TerminalTabSidebarView: View {
                                     canClose: canClose
                                 )
                                 .padding(.leading, group.title == nil ? 0 : 12)
+                                .id(organizedTab.id)
                             }
                         }
                     }
@@ -882,6 +904,13 @@ struct TerminalTabSidebarView: View {
                 .padding(.horizontal, 8)
                 .padding(.top, 2)
                 .padding(.bottom, 8)
+            }
+            .onChange(of: selectedTabID) { id in
+                if let id { scroll.scrollTo(id) }
+            }
+            .onAppear {
+                if let id = selectedTabID { scroll.scrollTo(id) }
+            }
             }
         }
         .background(backgroundColor.opacity(backgroundOpacity))
@@ -923,6 +952,10 @@ struct TerminalTabSidebarView: View {
             return surface.$pwd.dropFirst().map { _ in () }.eraseToAnyPublisher()
         }
         return Publishers.MergeMany(activation + paths).eraseToAnyPublisher()
+    }
+
+    private var selectedTabID: ObjectIdentifier? {
+        layoutState.pendingSelectedTabID ?? layoutState.tabSnapshot.selectedID
     }
 
     private func groupIsCollapsed(_ group: GhosttyTabGroupPresentation) -> Bool {
@@ -1568,7 +1601,7 @@ struct VerticalTabLayoutContainer<Content: View>: View {
     var body: some View {
         HStack(spacing: 0) {
             if layoutState.isSidebarVisible {
-                TerminalTabSidebarView(
+                SharedTerminalTabSidebar(
                     controller: controller,
                     layoutState: layoutState,
                     statusStore: statusStore,

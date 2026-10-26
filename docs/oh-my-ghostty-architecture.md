@@ -150,6 +150,8 @@ Vertical Tabs 不是独立 Sidebar 产品，而是 Ghostty tab bar 的另一种 
 
 两种 layout 共享 `TerminalController`/`NSWindowTabGroup` 的新建、关闭、选择、恢复、顺序、标题和快捷键路径。Vertical presentation 消费统一的 title/shortcut/icon/selected/hovered metadata；插件未来只能提供可选 icon/metadata override，不能控制 tab bar view。split 继续由 terminal 内容区管理，不生成额外 tab 行。
 
+每个原生 tab group 只保留一份 live vertical sidebar hosting view。各 NSWindow 的 shell 预留 sidebar 容器，提交选择或关闭当前 tab 时移动同一份 view，保留行身份与滚动状态；旧窗口最多保留上一帧静态图像，不能以清空/重建行树优化后台开销。拖出新窗口会复制布局偏好并建立独立 presentation，合并后回到目标组。连续新建按最新待显示 tab 计算插入位置，过期显示任务不能重新抢焦点；选中变化把对应行滚入可见区域。
+
 Layout 配置只对新窗口生效。运行时更换 orientation 需要替换 NSWindow class/titlebar hierarchy，当前不安全，因此不会重建已有 PTY、surface 或 scrollback。
 
 ### 6.3 Pi

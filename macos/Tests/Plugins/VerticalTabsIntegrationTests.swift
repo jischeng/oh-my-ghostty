@@ -170,6 +170,117 @@ struct VerticalTabsIntegrationTests {
         #expect(first.tabLayoutState.tabSnapshot.controllers.count == 7)
     }
 
+    @Test func repeatedNewTabEventsShareOneSidebarAndRevealSelection() async throws {
+        let appDelegate = try #require(NSApp.delegate as? AppDelegate)
+        let settings = OhMyGhosttySettings.shared
+        let oldGrouping = settings.groupingMode
+        let oldOrdering = settings.orderingMode
+        defer { settings.groupingMode = oldGrouping; settings.orderingMode = oldOrdering }
+        var configuration = Ghostty.SurfaceConfiguration()
+        configuration.command = "sleep 60"
+        let first = TerminalController(appDelegate.ghostty, withBaseConfig: configuration, tabLayout: .vertical)
+        var controllers = [first]
+        defer {
+            for controller in controllers {
+                controller.window?.delegate = nil
+                controller.window?.close()
+            }
+        }
+        first.showWindow(nil)
+        first.setTabGroupingMode(.none)
+        first.setTabOrderingMode(.manual)
+        first.setSidebarVisible(true)
+        first.window?.setContentSize(NSSize(width: 900, height: 480))
+        let group = try #require(first.window?.tabGroup)
+        let start = ContinuousClock.now
+        var creationDurations: [Double] = []
+        for index in 0..<20 {
+            let source = try #require((group.selectedWindow?.windowController as? TerminalController) ?? controllers.last)
+            let surface = try #require(source.focusedSurface ?? source.surfaceTree.first)
+            let event = try #require(NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: .command,
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: source.window!.windowNumber,
+                context: nil, characters: "t", charactersIgnoringModifiers: "t", isARepeat: index > 0, keyCode: 17
+            ))
+            let step = ContinuousClock.now
+            _ = surface.becomeFirstResponder()
+            surface.keyDown(with: event)
+            // ghosttyNewTab is queued by the core action callback.
+            for _ in 0..<50 {
+                if group.windows.count > controllers.count { break }
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            let created = try #require(group.windows.compactMap { $0.windowController as? TerminalController }
+                .first { candidate in !controllers.contains { $0 === candidate } })
+            controllers.append(created)
+            let duration = step.duration(to: .now).components
+            creationDurations.append(Double(duration.seconds) + Double(duration.attoseconds) / 1e18)
+            // No arbitrary presentation settling delay between repeat events.
+        }
+        try await Task.sleep(for: .milliseconds(200))
+        let last = try #require(controllers.last)
+        #expect(group.selectedWindow === last.window)
+        #expect(group.windows == controllers.compactMap(\.window))
+        #expect(first.tabLayoutState.tabSnapshot.selectedID == ObjectIdentifier(last))
+        #expect(first.tabLayoutState.pendingSelectedTabID == nil)
+        let host = first.tabLayoutState.sidebarHost
+        #expect(host.mountCount == 1)
+        let liveView = try #require(host.liveView)
+        #expect(liveView.window === last.window)
+        func scrollView(_ view: NSView) -> NSScrollView? {
+            if let scroll = view as? NSScrollView { return scroll }
+            return view.subviews.lazy.compactMap(scrollView).first
+        }
+        liveView.layoutSubtreeIfNeeded()
+        let scroll = try #require(scrollView(liveView))
+        let document = try #require(scroll.documentView)
+        #expect(document.bounds.height > scroll.contentView.bounds.height)
+        print("TAB_SCROLL selectedIndex=\(group.windows.firstIndex(of: last.window!) ?? -1) flipped=\(document.isFlipped) clip=\(scroll.contentView.bounds) document=\(document.bounds)")
+        #expect(scroll.contentView.bounds.maxY >= document.bounds.maxY - 60)
+        try capture(window: try #require(last.window), path: "/tmp/omg-shared-sidebar-21.png")
+        var hoverTime: [Double] = []
+        for index in 0..<40 {
+            let begin = ContinuousClock.now
+            last.setVerticalTabHovered(controllers[index % controllers.count], hovered: true)
+            liveView.layoutSubtreeIfNeeded()
+            liveView.displayIfNeeded()
+            let duration = begin.duration(to: .now).components
+            hoverTime.append(Double(duration.seconds) + Double(duration.attoseconds) / 1e18)
+        }
+        print("TAB_REPEAT total=\(start.duration(to: .now)) createMax=\(creationDurations.max() ?? 0) hoverMax=\(hoverTime.max() ?? 0)")
+        for target in [first, controllers[8], last] {
+            last.selectVerticalTab(target)
+            try await Task.sleep(for: .milliseconds(40))
+            #expect(host.liveView === liveView)
+            #expect(liveView.window === target.window)
+        }
+        last.closeTabImmediately(registerRedo: false)
+        try await Task.sleep(for: .milliseconds(80))
+        #expect(host.liveView === liveView)
+        #expect(host.mountCount == 1)
+        #expect(liveView.window === group.selectedWindow)
+        // A detached tab is a separate window group and needs its own host.
+        let detached = controllers[8]
+        let detachedWindow = try #require(detached.window)
+        group.removeWindow(detachedWindow)
+        detachedWindow.makeKeyAndOrderFront(nil)
+        detached.refreshTabState()
+        first.refreshTabState()
+        try await Task.sleep(for: .milliseconds(80))
+        #expect(detached.tabLayoutState !== first.tabLayoutState)
+        let detachedView = try #require(detached.tabLayoutState.sidebarHost.liveView)
+        #expect(detachedView !== liveView)
+        #expect(detachedView.window === detachedWindow)
+        #expect(first.tabLayoutState.sidebarHost.liveView === liveView)
+        first.window?.addTabbedWindow(detachedWindow, ordered: .above)
+        first.refreshTabState()
+        first.selectVerticalTab(detached)
+        try await Task.sleep(for: .milliseconds(80))
+        #expect(detached.tabLayoutState === first.tabLayoutState)
+        #expect(first.tabLayoutState.sidebarHost.liveView === liveView)
+        #expect(liveView.window === detachedWindow)
+    }
+
     @Test func rapidTabLifecycle() async throws {
         let appDelegate = try #require(NSApp.delegate as? AppDelegate)
         var configuration = Ghostty.SurfaceConfiguration()

@@ -418,7 +418,7 @@ final class AgentQuickInputModel: ObservableObject {
         var state = paneStates[targetSurfaceID] ?? .init()
         state.importedAgentPrefix = text
         paneStates[targetSurfaceID] = state
-        guard !text.isEmpty, !draft.hasPrefix(text) else { return }
+        guard !text.isEmpty, !draft.hasPrefix(text), !draft.hasSuffix(text) else { return }
         useHistoryText(text)
     }
 

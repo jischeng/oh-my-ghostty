@@ -2,7 +2,8 @@ import Foundation
 
 extension TerminalController {
     func importRemoteQuickInputDraft(
-        for surface: Ghostty.SurfaceView, context: PaneSessionContext, setting: String
+        for surface: Ghostty.SurfaceView, context: PaneSessionContext, setting: String,
+        snapshot: QuickInputTerminalSnapshot
     ) {
         guard !setting.isEmpty, !SecureInput.shared.enabled,
               case .sshReady(let ssh, _) = context.state,
@@ -14,9 +15,8 @@ extension TerminalController {
         let hasAgentActivity = agentActivity(for: surface) != nil
         let request = UUID().uuidString
         quickInputDraftImportTask = Task { @MainActor [weak self, weak surface] in
-            var snapshot: QuickInputTerminalSnapshot?
             defer {
-                snapshot?.remove()
+                snapshot.removeAfterRedraw()
                 self?.quickInputDraftImportTask = nil
             }
             do {
@@ -38,7 +38,6 @@ extension TerminalController {
                     await QuickInputRemoteDraftBridge.finish(connection: connection, session: ssh.connectionID, request: request)
                     return
                 }
-                snapshot = QuickInputTerminalSnapshot(surface: surface)
                 for key in keys {
                     terminal.sendKeyEvent(key)
                     terminal.sendKeyEvent(.init(key: key.key, action: .release, mods: key.mods,
@@ -55,10 +54,6 @@ extension TerminalController {
                     return
                 }
                 self.quickInputModel.importAgentDraft(text)
-                // The file response can arrive just before the CLI redraws its
-                // alternate screen. Give that redraw a bounded grace interval.
-                try await Task.sleep(for: .milliseconds(150))
-                snapshot?.remove()
                 self.quickInputModel.setStatusMessage("Draft imported. Sending will append only text after the original prefix.")
             } catch {
                 if !Task.isCancelled, let self, let surface, self.quickInputModel.isPresented,

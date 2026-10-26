@@ -155,6 +155,19 @@ struct QuickInputDraftBridgeTests {
         #expect(model.draft == "first\nsecond")
     }
 
+    @Test func agentSnapshotDoesNotAppendExistingSuffix() {
+        let model = AgentQuickInputModel()
+        model.present(for: UUID())
+        model.draft = "123456\n1234567"
+        let focus = model.focusRequestID
+        model.importAgentDraft("1234567")
+        #expect(model.draft == "123456\n1234567")
+        #expect(model.focusRequestID == focus)
+        model.draft = "prefix 1234567 middle"
+        model.importAgentDraft("1234567")
+        #expect(model.draft == "prefix 1234567 middle\n1234567")
+    }
+
     @Test func remoteSnapshotIsRemovedAfterDeadline() async throws {
         let app = try #require(NSApp.delegate as? AppDelegate)
         var configuration = Ghostty.SurfaceConfiguration()
@@ -165,12 +178,16 @@ struct QuickInputDraftBridgeTests {
             controller.window?.close()
         }
         let surface = try #require(controller.focusedSurface)
-        let count = surface.subviews.count
-        let snapshot = QuickInputTerminalSnapshot(surface: surface)
-        try await Task.sleep(for: .milliseconds(2200))
-        #expect(surface.subviews.count == count)
+        controller.showWindow(nil)
+        let parent = try #require(surface.superview)
+        let count = parent.subviews.count
+        let snapshot = QuickInputTerminalSnapshot(surface: surface, maximumDuration: .milliseconds(200))
+        #expect(parent.subviews.count == count + 1)
+        #expect(parent.subviews.last is NSImageView)
+        try await Task.sleep(for: .milliseconds(350))
+        #expect(parent.subviews.count == count)
         snapshot.remove()
-        #expect(surface.subviews.count == count)
+        #expect(parent.subviews.count == count)
     }
 
     @Test func sendingImportedPrefixAppendsOnlySuffixAndRecordsFullMessage() {

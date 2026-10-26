@@ -402,12 +402,17 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return
         }
         guard let surface = focusedSurface ?? surfaceTree.first else { return }
+        // Capture before the dock resizes the PTY, for both local and SSH CLIs.
+        let snapshot = QuickInputTerminalSnapshot(surface: surface)
+        defer {
+            if quickInputDraftImportTask == nil { snapshot.removeAfterRedraw() }
+        }
         // Presentation must never depend on the CLI's editor handshake.
         presentQuickInput(for: surface, requestFocus: true)
         guard quickInputDraftImportTask == nil else { return }
         let setting = OhMyGhosttySettings.shared.quickInputImportShortcut
         if let context = paneSessionContext(for: surface), context.isSSHSession {
-            importRemoteQuickInputDraft(for: surface, context: context, setting: setting)
+            importRemoteQuickInputDraft(for: surface, context: context, setting: setting, snapshot: snapshot)
             return
         }
         let foregroundCommands = surface.surfaceModel?.foregroundPID.flatMap {
@@ -435,6 +440,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         quickInputDraftImportTask = Task { @MainActor [weak self, weak surface] in
             defer {
                 QuickInputDraftBridge.shared.finish(request)
+                snapshot.removeAfterRedraw()
                 self?.quickInputDraftImportTask = nil
             }
             for _ in 0..<40 {

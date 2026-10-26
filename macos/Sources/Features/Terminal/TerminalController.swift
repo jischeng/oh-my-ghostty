@@ -319,7 +319,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     @Published private(set) var tabPaneFocusHistory = TabPaneFocusHistory()
     @Published private(set) var agentResumeDescriptors: [UUID: AgentResumeDescriptor] = [:]
     let quickInputModel = AgentQuickInputModel(historyStore: .shared, globalPresentation: .shared)
-    private var quickInputDraftImportTask: Task<Void, Never>?
+    var quickInputDraftImportTask: Task<Void, Never>?
     private var quickInputEventMonitor: Any?
     private var quickInputSecureInputCancellable: AnyCancellable?
     private var quickInputLastTerminalSurfaceID: UUID?
@@ -406,12 +406,20 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         presentQuickInput(for: surface, requestFocus: true)
         guard quickInputDraftImportTask == nil else { return }
         let setting = OhMyGhosttySettings.shared.quickInputImportShortcut
+        if let context = paneSessionContext(for: surface), context.isSSHSession {
+            importRemoteQuickInputDraft(for: surface, context: context, setting: setting)
+            return
+        }
+        let foregroundCommands = surface.surfaceModel?.foregroundPID.flatMap {
+            Self.processGroupCommandLines($0)
+        }
+        // Also cover plain SSH before the asynchronous session poll catches up.
+        if let foregroundCommands,
+           ForegroundSSHProcessDetector.observe(in: foregroundCommands) != .none { return }
         // Draft import must work independently of Agent Status hooks and
         // conversation discovery, including a freshly started agent.
-        let foregroundAgent = surface.surfaceModel?.foregroundPID.flatMap { processGroupID in
-            Self.processGroupCommandLines(processGroupID).flatMap {
-                LocalAgentProcessDetector.detect(in: $0)
-            }
+        let foregroundAgent = foregroundCommands.flatMap {
+            LocalAgentProcessDetector.detect(in: $0)
         }
         let agent = foregroundAgent ?? detectedAgentInstances[surface.id]?.agent
             ?? agentResumeDescriptor(for: surface)?.agent

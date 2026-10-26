@@ -755,6 +755,7 @@ fn remoteShellCommand(
         writeShellSingleQuoted(&script.writer, cwd) catch return null;
         script.writer.writeAll("\nexport OMG_REMOTE_CWD\n") catch return null;
     }
+    @import("ssh_shell_integration.zig").writeRemoteOMG(&script.writer, context_id) catch return null;
     script.writer.writeAll(
         \\__omg_server_id=''
         \\if command -v ssh-keygen >/dev/null 2>&1 && command -v awk >/dev/null 2>&1; then
@@ -817,6 +818,7 @@ fn remoteFishCommand(
         .{ context_id, label },
     ) catch return null;
     fish_command.writer.writeByte('\n') catch return null;
+    fish_command.writer.writeAll(@import("ssh_shell_integration.zig").fish_remote_setup) catch return null;
     fish_command.writer.writeAll(@import("ssh_shell_integration.zig").fish) catch return null;
     // Same deferred point as local Fish: initialize after the user's theme,
     // before the first prompt, with an event that preserves status/pipestatus.
@@ -1011,6 +1013,7 @@ fn remoteStartupFileCommand(
             \\
         ) catch return null;
     }
+    startup.writer.writeAll(@import("ssh_shell_integration.zig").shell_remote_setup) catch return null;
     writeRemoteAgentWrappers(&startup.writer, .shell) catch return null;
     if (remote_agent) |agent| {
         startup.writer.writeAll("__omg_report_pwd\n") catch return null;

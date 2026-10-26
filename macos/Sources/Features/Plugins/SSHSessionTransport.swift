@@ -13,8 +13,16 @@ enum SSHSessionTransport {
                     executable: String? = nil, multiplexing: Bool = true) async throws -> GitExecutionResult {
         let executable = executable ?? connection.executablePath
         let socket = multiplexing ? try GitSSHControlSocket.path(for: connection, executablePath: executable) : nil
+        // All auxiliary shell tasks enter through the same remote OMG runtime.
+        // Plain SSH hosts without bootstrap retain their existing behavior.
+        let routedCommand = shellCommand("""
+        if [ -f "$HOME/.local/share/oh-my-ghostty/remote/omg" ] && command -v python3 >/dev/null 2>&1; then
+          exec python3 "$HOME/.local/share/oh-my-ghostty/remote/omg" exec \(Ghostty.Shell.quote(command))
+        fi
+        exec /bin/sh -c \(Ghostty.Shell.quote(command))
+        """)
         return try await GitProcessRunner().run(executablePath: executable,
-            arguments: connection.arguments(controlSocket: socket) + [command],
+            arguments: connection.arguments(controlSocket: socket) + [routedCommand],
             workingDirectory: connection.localWorkingDirectory, stdin: stdin, maxOutputBytes: limit, timeout: timeout)
     }
 

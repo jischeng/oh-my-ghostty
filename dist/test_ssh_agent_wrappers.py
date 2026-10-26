@@ -141,6 +141,71 @@ class RemoteAgentWrappersTests(unittest.TestCase):
         return subprocess.run([executable, *flags, "-c", script], env=env,
                               capture_output=True, text=True, timeout=15)
 
+    def test_remote_omg_draft_bridge_in_real_pty(self):
+        import pty
+        agent = self.bin / "agy"
+        original = agent.read_text()
+        agent.write_text('''#!/usr/bin/env python3
+import os, subprocess, sys
+from pathlib import Path
+omg = os.environ["OMG_REMOTE_COMMAND"]
+session = os.environ["OMG_REMOTE_SESSION"]
+request = "12345678-1234-1234-1234-123456789ABC"
+draft = Path(os.environ["HOME"]) / "draft.md"
+text = "中文 draft\\nsecond line\\n"
+draft.write_text(text)
+subprocess.run(["python3", omg, "draft-begin", session, request, os.ttyname(0)], check=True)
+subprocess.run([os.environ["EDITOR"], str(draft)], check=True)
+result = subprocess.check_output(["python3", omg, "draft-read", session, request])
+assert result == b"OMG_REMOTE_DRAFT_V1\\n" + text.encode(), result
+assert draft.read_text() == text
+subprocess.run(["python3", omg, "draft-finish", session, request], check=True)
+print("OMG_PTY_DRAFT_OK", flush=True)
+''')
+        fish_shim = self.bin / "fish"
+        real_fish = shutil.which("fish")
+        if real_fish:
+            fish_shim.write_text('#!/bin/sh\nexec ' + real_fish + ' --no-config -c "$3"\n')
+            fish_shim.chmod(0o700)
+        try:
+            for shell in ("bash", "zsh", "fish"):
+                executable = shutil.which(shell)
+                if not executable:
+                    continue
+                with self.subTest(shell=shell):
+                    master, slave = pty.openpty()
+                    try:
+                        env = dict(os.environ, TMPDIR="/tmp", HOME=str(self.directory), ZDOTDIR=str(self.directory),
+                                   XDG_CONFIG_HOME=str(self.directory), SHELL=executable,
+                                   PATH=f"{self.bin}:/usr/bin:/bin:/opt/homebrew/bin")
+                        import time
+                        with tempfile.TemporaryFile() as output:
+                            bootstrap = decoded_bootstrap(self.bootstrap)
+                            bootstrap = bootstrap.replace('exec bash --rcfile "$__omg_rc" -i',
+                                                          'exec bash --noprofile --norc -c \'source "$OMG_SSH_RC"\'')
+                            bootstrap = bootstrap.replace('exec zsh -l',
+                                                          'exec zsh -f -c \'source "$ZDOTDIR/.zshrc"\'')
+                            process = subprocess.Popen(["/bin/sh", "-c", bootstrap], env=env,
+                                                       stdin=slave, stdout=output, stderr=output,
+                                                       start_new_session=True)
+                            try:
+                                deadline = time.monotonic() + 12
+                                while time.monotonic() < deadline:
+                                    output.seek(0)
+                                    captured = output.read()
+                                    if b"OMG_PTY_DRAFT_OK" in captured:
+                                        break
+                                    time.sleep(0.05)
+                                self.assertIn(b"OMG_PTY_DRAFT_OK", captured, captured.decode(errors="replace")[-3000:])
+                            finally:
+                                process.wait(timeout=10)
+                    finally:
+                        os.close(master)
+                        os.close(slave)
+        finally:
+            agent.write_text(original)
+            fish_shim.unlink(missing_ok=True)
+
     def test_identity_arguments_cleanup_and_exit_status(self):
         for shell, wrapper in self.scripts.items():
             for command, agent in (("agy", "antigravity"), ("codex", "codex")):

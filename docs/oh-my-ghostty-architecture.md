@@ -227,6 +227,12 @@ OMG 基本不基于内部 `libghostty-internal` 或尚未稳定的 `libghostty-v
 
 退出条件：两种 orientation 的新建、关闭、选择、重排、恢复和数字快捷键与 `NSWindowTabGroup` 一致；Vertical tab bar 的显隐/宽度不重建 surface、改变 tab 顺序或在切换 tab 时改变 terminal rows/columns。
 
+### 统一远端 OMG 入口
+
+`omg +ssh` 的 bootstrap 下发统一的 Python 3 远端命令到 `~/.local/share/oh-my-ghostty/remote/omg`。入口按需执行，不增加常驻 daemon；初始 protocol v1 管理会话启动/退出和 Quick Input 草稿导入。Bash/Zsh/Fish 在用户启动配置之后设置当前会话的 `VISUAL`/`EDITOR`，普通 editor 调用仍委托用户原有 editor。Host 使用保存的 exact SSH connection 创建短时请求，绑定 SSH context ID、request UUID 和远端 TTY，确认就绪后才发送 Agent 的外部编辑快捷键；草稿经 SSH 返回，限制为 1 MiB UTF-8 且拒绝 NUL，Agent 原文件不修改。旧 Agent 需重启或恢复会话才能继承 editor 入口。正常退出清除会话文件，异常退出的遗留目录在后续启动时按七天期限清理。
+
+`SSHSessionTransport.run` 也把文件、Git、inventory、Hook 的既有辅助 shell 任务路由到该入口的 `exec` 子命令，保留各自协议、stdin、超时和输出上限；SFTP subsystem 继续使用 OpenSSH 原生 transport。未安装远端入口的普通 SSH 主机仍执行原有任务路径。具体业务脚本继续由各模块维护，统一的是远端执行入口与会话管理。普通 SSH 或未准备好的会话保持安全回退，不触发 editor 快捷键。
+
 ### 阶段 3：QuickInput 与 Pi CLI
 
 交付：原生 QuickInput、逐次确认、审计、官方 Pi CLI 插件/适配器。

@@ -14,7 +14,11 @@ extension TerminalController {
         let hasAgentActivity = agentActivity(for: surface) != nil
         let request = UUID().uuidString
         quickInputDraftImportTask = Task { @MainActor [weak self, weak surface] in
-            defer { self?.quickInputDraftImportTask = nil }
+            var snapshot: QuickInputTerminalSnapshot?
+            defer {
+                snapshot?.remove()
+                self?.quickInputDraftImportTask = nil
+            }
             do {
                 let foregroundAgent = try await QuickInputRemoteDraftBridge.foregroundAgent(
                     connection: connection, session: ssh.connectionID, tty: tty
@@ -34,6 +38,7 @@ extension TerminalController {
                     await QuickInputRemoteDraftBridge.finish(connection: connection, session: ssh.connectionID, request: request)
                     return
                 }
+                snapshot = QuickInputTerminalSnapshot(surface: surface)
                 for key in keys {
                     terminal.sendKeyEvent(key)
                     terminal.sendKeyEvent(.init(key: key.key, action: .release, mods: key.mods,
@@ -50,7 +55,11 @@ extension TerminalController {
                     return
                 }
                 self.quickInputModel.importAgentDraft(text)
-                self.quickInputModel.setStatusMessage("Draft copied. Original agent input is still present.")
+                // The file response can arrive just before the CLI redraws its
+                // alternate screen. Give that redraw a bounded grace interval.
+                try await Task.sleep(for: .milliseconds(150))
+                snapshot?.remove()
+                self.quickInputModel.setStatusMessage("Draft imported. Sending will append only text after the original prefix.")
             } catch {
                 if !Task.isCancelled, let self, let surface, self.quickInputModel.isPresented,
                    self.quickInputModel.targetSurfaceID == surface.id {

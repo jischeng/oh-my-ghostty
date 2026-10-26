@@ -447,7 +447,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                     if let text = try QuickInputDraftBridge.shared.receive(request) {
                         guard !SecureInput.shared.enabled else { return }
                         self.quickInputModel.importAgentDraft(text)
-                        self.quickInputModel.setStatusMessage("Draft copied. Original agent input is still present.")
+                        self.quickInputModel.setStatusMessage("Draft imported. Sending will append only text after the original prefix.")
                         return
                     }
                 } catch is CancellationError {
@@ -707,8 +707,17 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return false
         }
 
-        terminal.sendText(text)
+        guard quickInputDraftImportTask == nil else {
+            quickInputModel.setStatusMessage("Wait for the agent draft to finish importing.")
+            return false
+        }
+        guard let suffix = quickInputModel.submissionSuffix(text, for: surfaceID) else {
+            quickInputModel.setStatusMessage("The imported prefix changed. Clear the agent input and reopen Quick Input before sending.")
+            return false
+        }
+        if !suffix.isEmpty { terminal.sendText(suffix) }
         terminal.sendKeyEvent(.init(key: .enter))
+        quickInputModel.didSubmitAgentDraft(for: surfaceID)
         quickInputModel.recordSentText(text, for: surfaceID)
         acknowledgeTerminalAgentState(for: surface)
         quickInputModel.setStatusMessage(nil)

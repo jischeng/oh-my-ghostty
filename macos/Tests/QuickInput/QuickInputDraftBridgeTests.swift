@@ -155,6 +155,40 @@ struct QuickInputDraftBridgeTests {
         #expect(model.draft == "first\nsecond")
     }
 
+    @Test func remoteSnapshotIsRemovedAfterDeadline() async throws {
+        let app = try #require(NSApp.delegate as? AppDelegate)
+        var configuration = Ghostty.SurfaceConfiguration()
+        configuration.command = "/bin/sleep 30"
+        let controller = TerminalController(app.ghostty, withBaseConfig: configuration, tabLayout: .vertical)
+        defer {
+            controller.window?.delegate = nil
+            controller.window?.close()
+        }
+        let surface = try #require(controller.focusedSurface)
+        let count = surface.subviews.count
+        let snapshot = QuickInputTerminalSnapshot(surface: surface)
+        try await Task.sleep(for: .milliseconds(2200))
+        #expect(surface.subviews.count == count)
+        snapshot.remove()
+        #expect(surface.subviews.count == count)
+    }
+
+    @Test func sendingImportedPrefixAppendsOnlySuffixAndRecordsFullMessage() {
+        let model = AgentQuickInputModel()
+        let pane = UUID()
+        model.present(for: pane)
+        model.importAgentDraft("你好\noriginal")
+        #expect(model.submissionSuffix("你好\noriginal，继续", for: pane) == "，继续")
+        #expect(model.submissionSuffix("你好\noriginal", for: pane) == "")
+        #expect(model.submissionSuffix("changed prefix", for: pane) == nil)
+        #expect(model.submissionSuffix("independent", for: UUID()) == "independent")
+        model.didSubmitAgentDraft(for: pane)
+        #expect(model.submissionSuffix("next message", for: pane) == "next message")
+        model.importAgentDraft("old")
+        model.importAgentDraft("")
+        #expect(model.submissionSuffix("after clearing agent", for: pane) == "after clearing agent")
+    }
+
     @Test func automaticallySelectsKnownAndGenericShortcuts() {
         for agent in [SupportedAgent.pi, .codex, .claude] {
             #expect(QuickInputDraftBridge.shortcut(setting: "auto", agent: agent) == "control+g")

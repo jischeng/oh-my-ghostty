@@ -287,6 +287,7 @@ struct AgentQuickInputQueueItem: Identifiable, Equatable, Sendable {
 
 struct AgentQuickInputPaneState: Equatable, Sendable {
     var draft = ""
+    var importedAgentPrefix: String?
     var queue: [AgentQuickInputQueueItem] = []
 }
 
@@ -413,8 +414,27 @@ final class AgentQuickInputModel: ObservableObject {
 
     /// Agent imports are snapshots, unlike explicit history insertion.
     func importAgentDraft(_ text: String) {
+        guard let targetSurfaceID, !isEditingQueuedItem else { return }
+        var state = paneStates[targetSurfaceID] ?? .init()
+        state.importedAgentPrefix = text
+        paneStates[targetSurfaceID] = state
         guard !text.isEmpty, !draft.hasPrefix(text) else { return }
         useHistoryText(text)
+    }
+
+    /// The CLI still owns the imported prefix. Append only the new suffix.
+    /// A changed prefix needs a fresh import rather than guessing how to erase
+    /// an arbitrary CLI's multiline input.
+    func submissionSuffix(_ text: String, for surfaceID: UUID) -> String? {
+        guard let prefix = paneStates[surfaceID]?.importedAgentPrefix, !prefix.isEmpty else { return text }
+        guard text.hasPrefix(prefix) else { return nil }
+        return String(text.dropFirst(prefix.count))
+    }
+
+    func didSubmitAgentDraft(for surfaceID: UUID) {
+        guard var state = paneStates[surfaceID] else { return }
+        state.importedAgentPrefix = nil
+        paneStates[surfaceID] = state
     }
 
     func togglePinned() {

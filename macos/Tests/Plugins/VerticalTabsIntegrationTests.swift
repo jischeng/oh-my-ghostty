@@ -36,6 +36,79 @@ struct VerticalTabsIntegrationTests {
         #expect(publications > 0)
     }
 
+    @Test func sidebarRetainsRenderedRowsAcrossSelectionHandoff() async throws {
+        let appDelegate = try #require(NSApp.delegate as? AppDelegate)
+        var configuration = Ghostty.SurfaceConfiguration()
+        configuration.command = "sleep 30"
+        var controllers: [TerminalController] = []
+        let previewWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 240, height: 640),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        previewWindow.isReleasedWhenClosed = false
+        defer {
+            previewWindow.close()
+            for controller in controllers {
+                controller.window?.delegate = nil
+                controller.window?.close()
+            }
+        }
+        for index in 0..<12 {
+            let controller = TerminalController(
+                appDelegate.ghostty, withBaseConfig: configuration, tabLayout: .vertical
+            )
+            controller.titleOverride = "Stable row \(index)"
+            controllers.append(controller)
+        }
+        let first = try #require(controllers.first)
+        let last = try #require(controllers.last)
+        let settings = OhMyGhosttySettings.shared
+        let previousGrouping = settings.groupingMode
+        let previousOrdering = settings.orderingMode
+        defer {
+            settings.groupingMode = previousGrouping
+            settings.orderingMode = previousOrdering
+        }
+        let state = VerticalTabWindowLayoutState(isSidebarVisible: true)
+        state.applyPreferences(grouping: .none, ordering: .manual)
+        state.updateTabs(controllers, selectedID: ObjectIdentifier(first))
+        let host = NSHostingView(rootView: TerminalTabSidebarView(
+            controller: first, layoutState: state, statusStore: appDelegate.tabActivities,
+            backgroundColor: .black
+        ).environment(\.colorScheme, .dark))
+        previewWindow.contentView = host
+        previewWindow.orderFront(nil)
+
+        func renderedTextPixels() async throws -> Int {
+            try await Task.sleep(for: .milliseconds(80))
+            host.layoutSubtreeIfNeeded()
+            host.displayIfNeeded()
+            let image = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+            host.cacheDisplay(in: host.bounds, to: image)
+            let scale = CGFloat(image.pixelsWide) / host.bounds.width
+            var pixels = 0
+            // Exclude the header, icons, shortcut labels and selection background.
+            for y in Int(60 * scale)..<Int(400 * scale) {
+                for x in Int(65 * scale)..<Int(180 * scale) {
+                    guard let color = image.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                    if min(color.redComponent, color.greenComponent, color.blueComponent) > 0.6 {
+                        pixels += 1
+                    }
+                }
+            }
+            return pixels
+        }
+        let before = try await renderedTextPixels()
+        #expect(before > 100)
+        state.anticipateTabSelection(ObjectIdentifier(last), from: ObjectIdentifier(first))
+        #expect(try await renderedTextPixels() > before / 2)
+        state.updateTabs(controllers, selectedID: ObjectIdentifier(last))
+        state.reconcileTabSelection(ObjectIdentifier(last))
+        #expect(try await renderedTextPixels() > before / 2)
+        state.updateTabs(controllers, selectedID: ObjectIdentifier(first))
+        #expect(try await renderedTextPixels() > before / 2)
+    }
+
     @Test func rapidTabLifecycle() async throws {
         let appDelegate = try #require(NSApp.delegate as? AppDelegate)
         var configuration = Ghostty.SurfaceConfiguration()

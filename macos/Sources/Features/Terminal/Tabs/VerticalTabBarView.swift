@@ -794,18 +794,18 @@ struct TerminalTabSidebarView: View {
     }
 
     var body: some View {
-        // Every native tab owns a hosting tree. Only the selected window needs
-        // rows; otherwise N tabs keep N copies of the N-row list live.
-        let selectedID = layoutState.tabSnapshot.selectedID
-        let presentsRows = selectedID == nil || selectedID == ObjectIdentifier(controller) ||
-            layoutState.pendingSelectedTabID == ObjectIdentifier(controller)
-        let groups = presentsRows ? organizedGroups : []
+        // AppKit commits selection before it finishes swapping native windows.
+        // Keep row identities and scroll geometry intact throughout that handoff;
+        // emptying the outgoing list exposes a blank frame and rebuilds it later.
+        let groups = organizedGroups
+        let canClose = tabs.count > 1
         VStack(spacing: 0) {
             header
 
             ScrollView {
                 LazyVStack(spacing: 2) {
                     ForEach(groups) { group in
+                        let groupSessionIDs = Set(group.tabs.map { $0.controller.tabSessionID })
                         if let title = group.title, let icon = group.icon {
                             VerticalTabGroupHeader(
                                 title: title,
@@ -819,9 +819,8 @@ struct TerminalTabSidebarView: View {
                                 tabRow(
                                     organizedTab,
                                     groupID: group.id,
-                                    groupSessionIDs: Set(group.tabs.map {
-                                        $0.controller.tabSessionID
-                                    })
+                                    groupSessionIDs: groupSessionIDs,
+                                    canClose: canClose
                                 )
                                 .padding(.leading, group.title == nil ? 0 : 12)
                             }
@@ -891,10 +890,10 @@ struct TerminalTabSidebarView: View {
     }
 
     private var metadataChanges: AnyPublisher<Void, Never> {
-        let activation = tabs.map {
-            $0.$tabLastActivatedAt.dropFirst().map { _ in () }.eraseToAnyPublisher()
-        }
-        let paths = tabs.compactMap { tab -> AnyPublisher<Void, Never>? in
+        let activation: [AnyPublisher<Void, Never>] = layoutState.orderingMode == .recentlyUsed
+            ? tabs.map { $0.$tabLastActivatedAt.dropFirst().map { _ in () }.eraseToAnyPublisher() }
+            : []
+        let paths = (layoutState.groupingMode == .project ? tabs : []).compactMap { tab -> AnyPublisher<Void, Never>? in
             guard let surface = tab.focusedSurface ?? tab.surfaceTree.first else { return nil }
             return surface.$pwd.dropFirst().map { _ in () }.eraseToAnyPublisher()
         }
@@ -912,7 +911,8 @@ struct TerminalTabSidebarView: View {
     private func tabRow(
         _ organizedTab: GhosttyOrganizedTab,
         groupID: String,
-        groupSessionIDs: Set<UUID>
+        groupSessionIDs: Set<UUID>,
+        canClose: Bool
     ) -> some View {
         let tab = organizedTab.controller
         let tabID = ObjectIdentifier(tab)
@@ -935,7 +935,7 @@ struct TerminalTabSidebarView: View {
                 ),
                 hoverChanges: tabPresentation.hoverChanges,
                 hoverEnabled: !dragIsActive,
-                canClose: tabs.count > 1,
+                canClose: canClose,
                 select: { controller.selectVerticalTab(tab) },
                 close: { controller.closeVerticalTab(tab) },
                 hoverChanged: {

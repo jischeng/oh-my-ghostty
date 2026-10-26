@@ -66,7 +66,16 @@ struct VerticalTabSnapshot {
 final class VerticalTabPresentationState: ObservableObject {
     @Published var pendingSelectedTabID: ObjectIdentifier?
     @Published private(set) var tabSnapshot = VerticalTabSnapshot()
-    @Published var hoveredTabID: ObjectIdentifier?
+    // Pointer movement is row-local: do not broadcast objectWillChange to
+    // every sidebar in the native tab group.
+    let hoverChanges = CurrentValueSubject<ObjectIdentifier?, Never>(nil)
+    var hoveredTabID: ObjectIdentifier? {
+        get { hoverChanges.value }
+        set {
+            guard hoverChanges.value != newValue else { return }
+            hoverChanges.send(newValue)
+        }
+    }
 
     func updateTabs(_ controllers: [TerminalController], selectedID: ObjectIdentifier?) {
         let current = tabSnapshot.controllers
@@ -785,7 +794,12 @@ struct TerminalTabSidebarView: View {
     }
 
     var body: some View {
-        let groups = organizedGroups
+        // Every native tab owns a hosting tree. Only the selected window needs
+        // rows; otherwise N tabs keep N copies of the N-row list live.
+        let selectedID = layoutState.tabSnapshot.selectedID
+        let presentsRows = selectedID == nil || selectedID == ObjectIdentifier(controller) ||
+            layoutState.pendingSelectedTabID == ObjectIdentifier(controller)
+        let groups = presentsRows ? organizedGroups : []
         VStack(spacing: 0) {
             header
 
@@ -919,6 +933,8 @@ struct TerminalTabSidebarView: View {
                     hovered: hovered,
                     activity: activity
                 ),
+                hoverChanges: tabPresentation.hoverChanges,
+                hoverEnabled: !dragIsActive,
                 canClose: tabs.count > 1,
                 select: { controller.selectVerticalTab(tab) },
                 close: { controller.closeVerticalTab(tab) },
@@ -1755,11 +1771,14 @@ private struct VerticalTabRow: View {
     @ObservedObject var surface: Ghostty.SurfaceView
     @ObservedObject private var settings = OhMyGhosttySettings.shared
     let presentation: GhosttyTabPresentation
+    let hoverChanges: CurrentValueSubject<ObjectIdentifier?, Never>
+    let hoverEnabled: Bool
     let canClose: Bool
     let select: () -> Void
     let close: () -> Void
     let hoverChanged: (Bool) -> Void
     @State private var observedTitle = ""
+    @State private var isHovered = false
 
     private var livePresentation: GhosttyTabPresentation {
         _ = observedTitle
@@ -1801,7 +1820,7 @@ private struct VerticalTabRow: View {
             icon: icon,
             activity: activity,
             selected: presentation.selected,
-            hovered: presentation.hovered
+            hovered: hoverEnabled && isHovered
         )
     }
 
@@ -1864,6 +1883,7 @@ private struct VerticalTabRow: View {
                         .allowsHitTesting(false)
                 }
 
+                ZStack(alignment: .trailing) {
                 if presentation.hovered && canClose {
                     TerminalTitlebarIconButton(
                         systemName: "xmark",
@@ -1882,6 +1902,8 @@ private struct VerticalTabRow: View {
                         .frame(width: 28, height: 1)
                         .allowsHitTesting(false)
                 }
+                }
+                .frame(width: 28)
             }
             .padding(.horizontal, GhosttyTabStyle.horizontalPadding)
         }
@@ -1898,6 +1920,9 @@ private struct VerticalTabRow: View {
                 .transaction { $0.animation = nil }
         )
         .onHover(perform: hoverChanged)
+        .onReceive(hoverChanges.map { $0 == ObjectIdentifier(controller) }.removeDuplicates()) {
+            if isHovered != $0 { isHovered = $0 }
+        }
         .onReceive(surface.$title.receive(on: DispatchQueue.main)) { _ in
             guard controller.titleOverride == nil,
                   controller.agentActivity(for: surface) == nil,

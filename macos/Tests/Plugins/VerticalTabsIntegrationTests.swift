@@ -50,15 +50,17 @@ struct VerticalTabsIntegrationTests {
         }
         first.showWindow(nil)
         let start = ContinuousClock.now
-        for _ in 0..<10 {
+        for index in 0..<15 {
+            let stepStart = ContinuousClock.now
             let next = try #require(TerminalController.newTab(
                 appDelegate.ghostty, from: controllers.last?.window, withBaseConfig: configuration
             ))
             controllers.append(next)
             await Task.yield()
+            print("TAB_STEP count=\(index + 2) elapsed=\(stepStart.duration(to: .now))")
         }
         let created = ContinuousClock.now
-        #expect(first.tabLayoutState.tabSnapshot.controllers.count == 11)
+        #expect(first.tabLayoutState.tabSnapshot.controllers.count == 16)
         for controller in controllers.dropFirst().reversed() {
             controller.closeTabImmediately(registerRedo: false)
             await Task.yield()
@@ -158,6 +160,14 @@ struct VerticalTabsIntegrationTests {
         var shellInvalidations = 0
         let shellObserver = state.objectWillChange.sink { shellInvalidations += 1 }
         defer { shellObserver.cancel() }
+        var sidebarInvalidations = 0
+        let sidebarObserver = state.tabPresentation.objectWillChange.sink { sidebarInvalidations += 1 }
+        for _ in 0..<100 {
+            state.hoveredTabID = firstID
+            state.hoveredTabID = secondID
+        }
+        #expect(sidebarInvalidations == 0)
+        sidebarObserver.cancel()
         state.hoveredTabID = firstID
         state.updateTabs([second], selectedID: secondID)
         #expect(shellInvalidations == 0)

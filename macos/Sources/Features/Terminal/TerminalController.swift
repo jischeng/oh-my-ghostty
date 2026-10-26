@@ -3304,10 +3304,25 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             }
         }
 
-        // We're dispatching this async because otherwise the lastCascadePoint doesn't
-        // take effect. Our best theory is there is some next-event-loop-tick logic
-        // that Cocoa is doing that we need to be after.
+        let selectionState = controller.tabLayoutState
+        let selectionTarget = ObjectIdentifier(controller)
+        let selectionGeneration = parentController.tabLayout == .vertical
+            ? selectionState.beginDeferredTabSelection(selectionTarget) : nil
+
+        // Native presentation must wait a turn, but only the latest group intent
+        // may focus a window. Earlier creations remain valid background tabs.
         controller.scheduleInitialPresentation {
+            if let selectionGeneration {
+                guard controller.tabLayoutState === selectionState,
+                      selectionState.permitsDeferredTabSelection(
+                        selectionTarget, generation: selectionGeneration
+                      ) else { return }
+            }
+            defer {
+                if let selectionGeneration {
+                    selectionState.finishDeferredTabSelection(selectionTarget, generation: selectionGeneration)
+                }
+            }
             // Only cascade if we aren't fullscreen and are alone in the tab group.
             if !window.styleMask.contains(.fullScreen) &&
                 window.tabGroup?.windows.count ?? 1 == 1 {
@@ -4180,6 +4195,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     override func windowWillClose(_ notification: Notification) {
         tabPresentationIsClosing = true
+        tabLayoutState.cancelPendingTabSelection(ObjectIdentifier(self))
         verticalTabWindowsObservation?.invalidate()
         verticalTabSelectionObservation?.invalidate()
         // Native close/window-close paths also need to transfer the group's
@@ -4647,6 +4663,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         guard finalIndex >= 0 else { return }
         let targetWindow = tabbedWindows[finalIndex]
+        if tabLayout == .vertical, let target = targetWindow.windowController as? TerminalController {
+            selectVerticalTab(target)
+            return
+        }
         tabGroup.selectedWindow = targetWindow
         (targetWindow.windowController as? TerminalController)?.markTabActivated()
         targetWindow.makeKeyAndOrderFront(nil)
@@ -4661,6 +4681,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let targetIndex = digit == 9 ? (tabbedWindows.count - 1) : (digit - 1)
         guard targetIndex >= 0, targetIndex < tabbedWindows.count else { return false }
         let targetWindow = tabbedWindows[targetIndex]
+        if let target = targetWindow.windowController as? TerminalController, target.tabLayout == .vertical {
+            target.selectVerticalTab(target)
+            return true
+        }
         tabGroup.selectedWindow = targetWindow
         (targetWindow.windowController as? TerminalController)?.markTabActivated()
         targetWindow.makeKeyAndOrderFront(nil)

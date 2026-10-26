@@ -109,6 +109,67 @@ struct VerticalTabsIntegrationTests {
         #expect(try await renderedTextPixels() > before / 2)
     }
 
+    @Test func queuedTabCreationsHonorLatestSelection() async throws {
+        let appDelegate = try #require(NSApp.delegate as? AppDelegate)
+        var configuration = Ghostty.SurfaceConfiguration()
+        configuration.command = "sleep 30"
+        let first = TerminalController(appDelegate.ghostty, withBaseConfig: configuration, tabLayout: .vertical)
+        var controllers = [first]
+        defer {
+            for controller in controllers {
+                controller.window?.delegate = nil
+                controller.window?.close()
+            }
+        }
+        first.showWindow(nil)
+        // Deliberately do not yield: all presentation callbacks are pending.
+        let creationStart = ContinuousClock.now
+        for _ in 0..<5 {
+            controllers.append(try #require(TerminalController.newTab(
+                appDelegate.ghostty, from: first.window, withBaseConfig: configuration
+            )))
+        }
+        let creationEnd = ContinuousClock.now
+        let latest = try #require(controllers.last)
+        var committedAt: ContinuousClock.Instant?
+        var selections: [ObjectIdentifier] = []
+        let observer = first.tabLayoutState.tabPresentation.$tabSnapshot.dropFirst().sink {
+            if let id = $0.selectedID {
+                selections.append(id)
+                if id == ObjectIdentifier(latest), committedAt == nil { committedAt = .now }
+            }
+        }
+        try await Task.sleep(for: .milliseconds(300))
+        let committed = try #require(committedAt)
+        print("TAB_QUEUE create=\(creationStart.duration(to: creationEnd)) commitWait=\(creationEnd.duration(to: committed))")
+        observer.cancel()
+        #expect(first.tabLayoutState.tabSnapshot.controllers.count == 6)
+        #expect(first.tabLayoutState.tabSnapshot.selectedID == ObjectIdentifier(latest))
+        #expect(selections.allSatisfy { $0 == ObjectIdentifier(latest) })
+
+        let background = try #require(TerminalController.newTab(
+            appDelegate.ghostty, from: latest.window, withBaseConfig: configuration
+        ))
+        controllers.append(background)
+        #expect(TerminalController.selectTab(digit: 1, in: latest.window))
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(first.tabLayoutState.tabSnapshot.selectedID == ObjectIdentifier(first))
+        #expect(first.tabLayoutState.tabSnapshot.controllers.count == 7)
+        // Skipped presentations must leave usable tabs, not orphaned windows.
+        first.selectVerticalTab(background)
+        #expect(first.tabLayoutState.tabSnapshot.selectedID == ObjectIdentifier(background))
+
+        let closing = try #require(TerminalController.newTab(
+            appDelegate.ghostty, from: background.window, withBaseConfig: configuration
+        ))
+        controllers.append(closing)
+        closing.closeTabImmediately(registerRedo: false)
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(first.tabLayoutState.pendingSelectedTabID == nil)
+        #expect(first.tabLayoutState.tabSnapshot.selectedID != ObjectIdentifier(closing))
+        #expect(first.tabLayoutState.tabSnapshot.controllers.count == 7)
+    }
+
     @Test func rapidTabLifecycle() async throws {
         let appDelegate = try #require(NSApp.delegate as? AppDelegate)
         var configuration = Ghostty.SurfaceConfiguration()

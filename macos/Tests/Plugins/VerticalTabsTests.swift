@@ -734,6 +734,27 @@ struct VerticalTabsTests {
         #expect(updates[1].1 == true)
     }
 
+    @Test @MainActor func deferredSelectionRejectsOlderCreationsAndExplicitOverrides() {
+        let state = VerticalTabWindowLayoutState(isSidebarVisible: true)
+        let objects = [NSObject(), NSObject(), NSObject()]
+        let ids = objects.map(ObjectIdentifier.init)
+        state.anticipateTabSelection(ids[1], from: ids[0])
+        let first = state.beginDeferredTabSelection(ids[1])
+        state.anticipateTabSelection(ids[2], from: ids[0])
+        let latest = state.beginDeferredTabSelection(ids[2])
+        #expect(!state.permitsDeferredTabSelection(ids[1], generation: first))
+        state.reconcileTabSelection(ids[1])
+        #expect(state.pendingSelectedTabID == ids[2])
+        #expect(state.permitsDeferredTabSelection(ids[2], generation: latest))
+        state.anticipateTabSelection(ids[0], from: ids[1])
+        #expect(!state.permitsDeferredTabSelection(ids[2], generation: latest))
+        state.anticipateTabSelection(ids[2], from: ids[0])
+        let closing = state.beginDeferredTabSelection(ids[2])
+        state.cancelPendingTabSelection(ids[2])
+        #expect(!state.permitsDeferredTabSelection(ids[2], generation: closing))
+        #expect(state.pendingSelectedTabID == nil)
+    }
+
     @Test @MainActor func pendingSelectionSurvivesOldWindowNotifications() {
         let state = VerticalTabWindowLayoutState(isSidebarVisible: true)
         let oldObject = NSObject()

@@ -127,6 +127,24 @@ final class VerticalTabWindowLayoutState: ObservableObject {
     @Published private(set) var selectedInspectorPaneID: String?
 
     private var pendingSelectionSourceID: ObjectIdentifier?
+    private(set) var selectionGeneration: UInt64 = 0
+    private var deferredSelectionTarget: ObjectIdentifier?
+
+    func beginDeferredTabSelection(_ target: ObjectIdentifier) -> UInt64 {
+        // The intent was registered by anticipateTabSelection. A generation
+        // outlives its acknowledgement so a late callback cannot regain focus.
+        deferredSelectionTarget = target
+        return selectionGeneration
+    }
+
+    func permitsDeferredTabSelection(_ target: ObjectIdentifier, generation: UInt64) -> Bool {
+        selectionGeneration == generation && deferredSelectionTarget == target
+    }
+
+    func finishDeferredTabSelection(_ target: ObjectIdentifier, generation: UInt64) {
+        guard permitsDeferredTabSelection(target, generation: generation) else { return }
+        deferredSelectionTarget = nil
+    }
     private var pendingSidebarWidth: CGFloat?
     private var resizeWorkItem: DispatchWorkItem?
     private var sidebarPersistenceWorkItem: DispatchWorkItem?
@@ -194,6 +212,8 @@ final class VerticalTabWindowLayoutState: ObservableObject {
     }
 
     func anticipateTabSelection(_ target: ObjectIdentifier, from source: ObjectIdentifier?) {
+        selectionGeneration &+= 1
+        deferredSelectionTarget = nil
         pendingSelectionSourceID = source
         pendingSelectedTabID = target
     }
@@ -202,6 +222,7 @@ final class VerticalTabWindowLayoutState: ObservableObject {
         guard let pendingSelectedTabID else { return }
         // Ignore observations of the old window during AppKit's tab switch.
         // A different selection means an external action superseded ours.
+        guard deferredSelectionTarget == nil || selected == pendingSelectedTabID else { return }
         guard selected == pendingSelectedTabID ||
                 (selected != nil && selected != pendingSelectionSourceID) else { return }
         pendingSelectionSourceID = nil
@@ -209,6 +230,10 @@ final class VerticalTabWindowLayoutState: ObservableObject {
     }
 
     func cancelPendingTabSelection(_ target: ObjectIdentifier) {
+        if deferredSelectionTarget == target {
+            selectionGeneration &+= 1
+            deferredSelectionTarget = nil
+        }
         guard pendingSelectedTabID == target else { return }
         pendingSelectionSourceID = nil
         pendingSelectedTabID = nil

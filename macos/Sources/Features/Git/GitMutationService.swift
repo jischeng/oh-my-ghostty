@@ -18,7 +18,7 @@ enum GitMutation: Equatable, Sendable {
     case discardBatch(GitStageBatch)
     case stage([String])
     case unstage([String])
-    case commit(String)
+    case commit(String, stageAll: Bool = false, amend: Bool = false)
     case checkout(String)
     case create(name: String, start: String)
     case push(branch: String, remote: String, destination: String)
@@ -182,11 +182,18 @@ struct GitMutationService: Sendable {
                 _ = try await run(["--literal-pathspecs", "reset", "--quiet", "--pathspec-from-file=-", "--pathspec-file-nul"],
                     in: repository, stdin: Data((paths.joined(separator: "\0") + "\0").utf8))
             } else { _ = try await run(["--literal-pathspecs", "reset", "--quiet", "--"] + paths, in: repository) }
-        case .commit(let message):
-            guard !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        case .commit(let message, let stageAll, let amend):
+            let hasMessage = !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            guard hasMessage || amend else {
                 throw GitDiffServiceError.gitFailed(GitL10n.text("Enter a commit message."))
             }
-            _ = try await run(["commit", "--file=-"], in: repository, stdin: Data(message.utf8))
+            // Validate amend before staging: an unborn branch has no commit to replace.
+            if amend { _ = try await run(["rev-parse", "--verify", "HEAD"], in: repository) }
+            if stageAll { _ = try await run(["add", "--all", "--", "."], in: repository) }
+            var arguments = ["commit"]
+            if amend { arguments.append("--amend") }
+            arguments.append(hasMessage ? "--file=-" : "--no-edit")
+            _ = try await run(arguments, in: repository, stdin: hasMessage ? Data(message.utf8) : nil)
         case .checkout(let name):
             try await validateBranch(name, in: repository)
             _ = try await run(["switch", "--no-guess", name, "--"], in: repository)

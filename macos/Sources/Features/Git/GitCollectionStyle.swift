@@ -142,6 +142,7 @@ final class GitStageCheckbox: NSButton {
     private var colors = GitCollectionColors()
     private var tracking: NSTrackingArea?
     var activate: () -> Void = {}
+    var actionSymbol: String? { didSet { updateImage() } }
     override init(frame: NSRect) {
         super.init(frame: frame)
         isBordered = false
@@ -166,7 +167,7 @@ final class GitStageCheckbox: NSButton {
         updateImage()
     }
     private func updateImage() {
-        image = NSImage(systemSymbolName: state == .mixed ? "minus.square.fill" : state == .on ? "checkmark.square.fill" : "square", accessibilityDescription: nil)?
+        image = NSImage(systemSymbolName: actionSymbol ?? (state == .mixed ? "minus.square.fill" : state == .on ? "checkmark.square.fill" : "square"), accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 11, weight: .regular))
         contentTintColor = state != .off || (hovered && isEnabled) ? colors.accent : colors.secondary
         alphaValue = isEnabled ? 1 : 0.4

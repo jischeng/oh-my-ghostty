@@ -32,7 +32,9 @@ struct GitEditorDiffView: View {
     var actions = GitDiffEditorActions()
     let close: () -> Void
     @StateObject private var model: GitEditorDiffModel
-    @AppStorage("git.diff.viewMode") private var mode = GitL10n.text("Side by Side")
+    @AppStorage("git.diff.viewMode") private var mode = GitL10n.text("Inline")
+    @AppStorage("git.diff.review") private var review = true
+    @State private var reviewRow: Int?
     @State private var scroll = GitDiffScrollLink()
     @State private var linkedScrolling = true
     @State private var navigator = GitDiffReviewNavigator()
@@ -92,21 +94,13 @@ struct GitEditorDiffView: View {
                     Color.clear.frame(width: 28, height: 24).accessibilityHidden(true)
                 }
                 fileMenu
+                Picker(GitL10n.text("Review"), selection: $review) {
+                    Text(GitL10n.text("Review")).tag(true)
+                    Text(GitL10n.text("Full Source")).tag(false)
+                }.pickerStyle(.segmented).frame(width: 140)
                 HStack(spacing: 0) {
-                    toolbarButton("rectangle.split.2x1", help: GitL10n.text("Side-by-side Diff"),
-                                  selected: mode == GitL10n.text("Side by Side"),
-                                  accessibilityValue: mode == GitL10n.text("Side by Side") ? GitL10n.text("Selected") : "",
-                                  width: 24) {
-                        clearHint()
-                        mode = GitL10n.text("Side by Side")
-                    }
-                    toolbarButton("text.alignleft", help: GitL10n.text("Unified / Inline Diff"),
-                                  selected: mode == GitL10n.text("Inline"),
-                                  accessibilityValue: mode == GitL10n.text("Inline") ? GitL10n.text("Selected") : "",
-                                  width: 24) {
-                        clearHint()
-                        mode = GitL10n.text("Inline")
-                    }
+                    modeButton("Unified", value: GitL10n.text("Inline"))
+                    modeButton("Split", value: GitL10n.text("Side by Side"))
                 }
                 .modifier(GitToolbarSegmentedStyle(colors: colors))
                 toolbarButton("pencil", help: GitL10n.text("Open in Editor"),
@@ -135,7 +129,21 @@ struct GitEditorDiffView: View {
                     Text(sourceError).foregroundStyle(.secondary).padding()
                     GitDiffTextView(text: document.text)
                 } else if let presentation = content.presentation {
-                    if mode == GitL10n.text("Side by Side") {
+                    HStack(spacing: 8) {
+                        Image(systemName: "doc.text").foregroundStyle(.secondary)
+                        Text(document.file.displayPath).lineLimit(1).truncationMode(.middle)
+                        Spacer()
+                        Text("−\(presentation.rows.filter { $0.added == false }.count)").foregroundStyle(Color(colors.deleted))
+                        Text("+\(presentation.rows.filter { $0.added == true }.count)").foregroundStyle(Color(colors.added))
+                    }
+                    .font(.system(size: 12)).padding(.horizontal, 14).frame(height: 36)
+                    .background(toolbarSurface)
+                    if review {
+                        GitDiffReviewView(presentation: presentation, before: content.before, after: content.after,
+                                          path: document.file.path, theme: theme,
+                                          split: mode == GitL10n.text("Side by Side"), selectedRow: reviewRow)
+                            .id(model.selected?.id)
+                    } else if mode == GitL10n.text("Side by Side") {
                         HSplitView {
                             sourcePane(GitL10n.text("Before"), text: content.before, path: document.file.oldPath ?? document.file.path,
                                        highlights: presentation.beforeHighlights, side: 0)
@@ -169,7 +177,7 @@ struct GitEditorDiffView: View {
             }
         }
         .background(GitDiffFallbackCommands(
-            isActive: isActive && (model.content?.presentation == nil || model.content?.sourceError != nil),
+            isActive: isActive && (review || model.content?.presentation == nil || model.content?.sourceError != nil),
             actions: actions, close: close
         ))
         .onAppear { model.reload() }
@@ -235,6 +243,7 @@ struct GitEditorDiffView: View {
     }
 
     private func jump(to anchor: (before: Int?, after: Int?, inline: Int), afterEditorReplacement: Bool = false) {
+        reviewRow = anchor.inline
         var lines: [Int: Int] = [:]
         if mode == GitL10n.text("Side by Side") {
             if let before = anchor.before { lines[0] = before }
@@ -283,6 +292,15 @@ struct GitEditorDiffView: View {
         .accessibilityLabel(help)
         .accessibilityValue(accessibilityValue)
         .disabled(disabled)
+    }
+
+    private func modeButton(_ title: String, value: String) -> some View {
+        Button { clearHint(); mode = value } label: {
+            Text(GitL10n.text(title)).font(.system(size: 11, weight: .medium))
+                .padding(.horizontal, 9).frame(height: 24)
+        }
+        .buttonStyle(GitToolbarButtonStyle(colors: colors, selected: mode == value))
+        .accessibilityValue(mode == value ? GitL10n.text("Selected") : "")
     }
 
     private var toolbarDivider: some View {

@@ -19,6 +19,19 @@ The Experimental `PluginInstallationManager` can download a GitHub repository's
 Support Plugins directory, but no installed package is launched or connected to
 runtime yet. There is no public SDK, socket listener, or hot reload command.
 
+## Built-in Git review and commit actions
+
+The built-in Git Inspector accepts `submitCommit(stageAll:amend:)` in addition to
+`commitStaged`. These are internal host actions, not new plugin wire messages.
+The commit menu offers staged commit, stage all and commit, amend, and stage all
+and amend. Operations share the repository mutation queue; amend validates HEAD
+before staging, and an empty amend message preserves the previous message.
+Failed operations retain the draft; a failed commit after staging leaves the
+index staged for retry. Stage-all includes untracked files, respects Git ignores,
+and does not push. Category plus/minus controls stage/unstage the entire category,
+independent of file-search filtering. The review diff folds unchanged source
+ranges while retaining original line numbers and supports unified/split views.
+
 ## Documentation maintenance rule
 
 Plugin behavior is a public compatibility boundary even before the public

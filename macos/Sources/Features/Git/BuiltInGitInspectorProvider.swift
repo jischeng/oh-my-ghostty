@@ -390,6 +390,12 @@ final class BuiltInGitInspectorProvider {
                   content.workingTree.stagedError == nil,
                   !content.workingTree.staged.isEmpty else { return }
             mutate(.commit(content.commitDraft), repository: repository, context: action.context)
+        case .submitCommit(let stageAll, let amend):
+            guard let content = lastPublishedContent[action.context.tabID], let repository = content.repository,
+                  content.workingTree.stagedError == nil,
+                  !stageAll || content.workingTree.unstagedError == nil,
+                  amend || !content.workingTree.staged.isEmpty || (stageAll && !content.workingTree.unstaged.isEmpty) else { return }
+            mutate(.commit(content.commitDraft, stageAll: stageAll, amend: amend), repository: repository, context: action.context)
         case .sendHistoryToTerminal(let commitID):
             guard let content = lastPublishedContent[action.context.tabID],
                   let repository = content.repository else { return }
@@ -1060,7 +1066,7 @@ final class BuiltInGitInspectorProvider {
                     try GitWorktreeActions.open(GitWorktreeInfo(path: path, head: nil, branchRef: nil, isMain: false, isCurrent: false),
                                                 repository: repository, context: context)
                 }
-                if case .commit(let submitted) = mutation {
+                if case .commit(let submitted, _, _) = mutation {
                     var state = self.state(for: context.tabID, worktreeKey: key)
                     if state.commitDraft == submitted { state.commitDraft = "" }
                     self.save(state, tabID: context.tabID, worktreeKey: key)

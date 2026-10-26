@@ -60,7 +60,13 @@ final class GitCollectionCell: NSTableCellView {
         toolTip = item.tooltip
         setAccessibilityIdentifier(item.id)
         setAccessibilityLabel(item.tooltip)
+        checkbox.actionSymbol = nil
+        checkbox.setAccessibilityRole(.checkBox)
         if let batch = item.stageBatch {
+            if item.isCategory {
+                checkbox.actionSymbol = batch.shouldStage ? "plus" : "minus"
+                checkbox.setAccessibilityRole(.button)
+            }
             checkbox.configure(state: batch.isMixed ? .mixed : batch.allStaged ? .on : .off, enabled: item.enabled, colors: colors)
             checkbox.activate = stage
             checkbox.setAccessibilityIdentifier(item.id + "/checkbox")

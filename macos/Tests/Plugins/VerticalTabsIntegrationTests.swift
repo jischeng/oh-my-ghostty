@@ -36,6 +36,42 @@ struct VerticalTabsIntegrationTests {
         #expect(publications > 0)
     }
 
+    @Test func sharedSidebarSnapshotPublishesMembershipAndSelectionTogether() throws {
+        let appDelegate = try #require(NSApp.delegate as? AppDelegate)
+        var configuration = Ghostty.SurfaceConfiguration()
+        configuration.command = "sleep 30"
+        let first = TerminalController(appDelegate.ghostty, withBaseConfig: configuration)
+        let second = TerminalController(appDelegate.ghostty, withBaseConfig: configuration)
+        defer {
+            for controller in [first, second] {
+                controller.window?.delegate = nil
+                controller.window?.close()
+            }
+        }
+        let state = first.tabLayoutState
+        second.tabLayoutState = state
+        let firstID = ObjectIdentifier(first)
+        let secondID = ObjectIdentifier(second)
+        state.updateTabs([first], selectedID: firstID)
+        state.anticipateTabSelection(secondID, from: firstID)
+        var snapshots: [VerticalTabSnapshot] = []
+        let observer = state.$tabSnapshot.dropFirst().sink { snapshots.append($0) }
+        defer { observer.cancel() }
+        state.updateTabs([first, second], selectedID: secondID)
+        state.reconcileTabSelection(secondID)
+        #expect(state.pendingSelectedTabID == nil)
+        #expect(second.tabLayoutState.tabSnapshot.selectedID == secondID)
+        #expect(first.tabLayoutState.tabSnapshot.selectedID == secondID)
+        state.hoveredTabID = firstID
+        state.updateTabs([second], selectedID: secondID)
+        #expect(state.hoveredTabID == nil)
+        #expect(snapshots.count == 2)
+        #expect(snapshots[0].controllers.map(ObjectIdentifier.init) == [firstID, secondID])
+        #expect(snapshots[0].selectedID == secondID)
+        #expect(snapshots[1].controllers.map(ObjectIdentifier.init) == [secondID])
+        #expect(snapshots[1].selectedID == secondID)
+    }
+
     private let hoverScreenshotPath = "/tmp/oh-my-ghostty-vertical-tabs-hover.png"
     private let hiddenScreenshotPath = "/tmp/oh-my-ghostty-vertical-tabs-hidden.png"
     private let lightScreenshotPath = "/tmp/oh-my-ghostty-vertical-tabs-light.png"

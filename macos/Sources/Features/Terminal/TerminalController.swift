@@ -275,7 +275,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     @Published private(set) var selectedTabID: ObjectIdentifier?
 
     /// The tab currently under the pointer. This is independent from selection.
-    @Published private(set) var hoveredTabID: ObjectIdentifier?
+    var hoveredTabID: ObjectIdentifier? { tabLayoutState.hoveredTabID }
 
     /// Actual background used by the focused terminal, including runtime color changes.
     @Published private(set) var terminalBackgroundColor: Color
@@ -2766,14 +2766,14 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     func setVerticalTabHovered(_ controller: TerminalController, hovered: Bool) {
         let id = ObjectIdentifier(controller)
         if hovered {
-            hoveredTabID = id
-        } else if hoveredTabID == id {
-            hoveredTabID = nil
+            tabLayoutState.hoveredTabID = id
+        } else if tabLayoutState.hoveredTabID == id {
+            tabLayoutState.hoveredTabID = nil
         }
     }
 
     func clearVerticalTabHover() {
-        hoveredTabID = nil
+        tabLayoutState.hoveredTabID = nil
     }
 
     func updateSidebarWidth(_ proposedWidth: CGFloat, persist: Bool) {
@@ -2819,10 +2819,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     func closeVerticalTab(_ controller: TerminalController) {
         guard tabControllers.contains(where: { $0 === controller }) else { return }
-        selectVerticalTab(controller)
-        DispatchQueue.main.async {
-            controller.closeTab(nil)
-        }
+        // Closing a background row must not first select it. closeTab operates
+        // on the target controller and handles its own confirmation UI.
+        controller.closeTab(nil)
     }
 
     func setSidebarVisible(_ visible: Bool) {
@@ -2905,7 +2904,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         if selectedTabID != selectedID {
             selectedTabID = selectedID
         }
-        tabLayoutState.reconcileTabSelection(selectedID)
+        // Publish membership and selection together before releasing the optimistic
+        // selection. Every native tab's sidebar reads this same group snapshot.
+        sharedState.updateTabs(controllers, selectedID: selectedID)
+        sharedState.reconcileTabSelection(selectedID)
     }
 
     private static func refreshTabs(in tabGroup: NSWindowTabGroup?) {
@@ -3578,6 +3580,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
 
         window.close()
+        // Do not leave the newly visible window rendering the pre-close rows
+        // until the asynchronous KVO callbacks run.
+        Self.refreshTabs(in: tabGroup)
     }
 
     private func closeOtherTabsImmediately() {

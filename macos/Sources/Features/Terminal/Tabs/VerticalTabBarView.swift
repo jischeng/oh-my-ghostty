@@ -50,8 +50,38 @@ enum GhosttyTabOrderingMode: String, CaseIterable {
     }
 }
 
+/// Shared by every native window in a tab group. Weak references avoid a
+/// controller -> layout state -> controller ownership cycle.
+struct VerticalTabSnapshot {
+    struct Tab {
+        weak var controller: TerminalController?
+    }
+
+    var tabs: [Tab] = []
+    var selectedID: ObjectIdentifier?
+    var controllers: [TerminalController] { tabs.compactMap(\.controller) }
+}
+
 @MainActor
 final class VerticalTabWindowLayoutState: ObservableObject {
+    @Published private(set) var tabSnapshot = VerticalTabSnapshot()
+    @Published var hoveredTabID: ObjectIdentifier?
+
+    func updateTabs(_ controllers: [TerminalController], selectedID: ObjectIdentifier?) {
+        let current = tabSnapshot.controllers
+        guard current.map(ObjectIdentifier.init) != controllers.map(ObjectIdentifier.init) ||
+                tabSnapshot.selectedID != selectedID else { return }
+        // Tracking rectangles will re-evaluate the pointer after layout. Never
+        // carry a hover from the old row geometry into a different native window.
+        if current.map(ObjectIdentifier.init) != controllers.map(ObjectIdentifier.init) {
+            hoveredTabID = nil
+        }
+        tabSnapshot = VerticalTabSnapshot(
+            tabs: controllers.map { VerticalTabSnapshot.Tab(controller: $0) },
+            selectedID: selectedID
+        )
+    }
+
     @Published private(set) var isSidebarVisible: Bool
     @Published private(set) var sidebarWidth: CGFloat
     @Published private(set) var committedSidebarWidth: CGFloat
@@ -724,9 +754,9 @@ struct TerminalTabSidebarView: View {
     }
 
     private var tabs: [TerminalController] {
-        controller.tabControllers.isEmpty
+        layoutState.tabSnapshot.controllers.isEmpty
             ? [controller]
-            : controller.tabControllers
+            : layoutState.tabSnapshot.controllers
     }
 
     var body: some View {
@@ -834,7 +864,7 @@ struct TerminalTabSidebarView: View {
 
     private func groupIsCollapsed(_ group: GhosttyTabGroupPresentation) -> Bool {
         let containsSelected = group.tabs.contains {
-            ObjectIdentifier($0.controller) == controller.selectedTabID
+            ObjectIdentifier($0.controller) == (layoutState.pendingSelectedTabID ?? layoutState.tabSnapshot.selectedID)
         }
         return layoutState.collapsedGroupIDs.contains(group.id) && !containsSelected
     }
@@ -847,9 +877,9 @@ struct TerminalTabSidebarView: View {
     ) -> some View {
         let tab = organizedTab.controller
         let tabID = ObjectIdentifier(tab)
-        let selected = (layoutState.pendingSelectedTabID ?? controller.selectedTabID) == tabID
+        let selected = (layoutState.pendingSelectedTabID ?? layoutState.tabSnapshot.selectedID) == tabID
         let dragIsActive = tabDropActivity != .idle || surfaceDropActivity != .idle
-        let hovered = !dragIsActive && controller.hoveredTabID == tabID
+        let hovered = !dragIsActive && layoutState.hoveredTabID == tabID
         if let surface = tab.focusedSurface ?? tab.surfaceTree.first {
             let activity = tab.focusedAgentActivity() ??
                 statusStore.activity(for: tab.tabSessionID)

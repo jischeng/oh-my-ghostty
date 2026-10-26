@@ -66,7 +66,7 @@ struct GitCommitComposer: View {
                     }
                     .buttonStyle(GitCommitActionStyle(colors: colors, prominent: true))
                     .disabled(!allowsSubmit(stageAll: false, amend: false))
-                    Color.clear.frame(width: 4)
+                    Color.clear.frame(width: 4, height: 28)
                     Menu {
                         commitOption("Commit Staged", stageAll: false, amend: false)
                         commitOption("Stage All and Commit", stageAll: true, amend: false)
@@ -78,6 +78,7 @@ struct GitCommitComposer: View {
                             .frame(width: 28, height: 28)
                     }
                     .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                    .frame(width: 28, height: 28)
                     .foregroundStyle(Color(menuEnabled ? colors.accent : colors.secondary))
                     .background(Color(colors.text).opacity(menuEnabled ? 0.10 : 0.035), in: RoundedRectangle(cornerRadius: 6))
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(colors.text).opacity(menuEnabled ? 0.22 : 0.06)))

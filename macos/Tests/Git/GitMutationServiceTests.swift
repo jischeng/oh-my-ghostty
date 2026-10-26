@@ -27,6 +27,28 @@ struct GitMutationServiceTests {
         try Data(text.utf8).write(to: URL(fileURLWithPath: repo.worktreePath).appendingPathComponent(name))
     }
 
+    @Test func commitMenuStagesUntrackedAndAmendsWithoutReplacingMessage() async throws {
+        let repo = try await repository()
+        defer { try? FileManager.default.removeItem(atPath: repo.worktreePath) }
+        let service = GitMutationService()
+        try write("first", "new.txt", repo)
+        await #expect(throws: (any Error).self) {
+            try await service.perform(.commit("", stageAll: true, amend: true), in: repo)
+        }
+        #expect(try await git(["diff", "--cached", "--name-only"], repo).isEmpty)
+        try await service.perform(.commit("initial", stageAll: true), in: repo)
+        try write("second", "new.txt", repo)
+        try write("untracked", "another.txt", repo)
+        try await service.perform(.commit("", stageAll: true, amend: true), in: repo)
+        #expect(try await git(["log", "-1", "--format=%s"], repo) == "initial")
+        #expect(try await git(["rev-list", "--count", "HEAD"], repo) == "1")
+        #expect(try await git(["show", "HEAD:new.txt"], repo) == "second")
+        #expect(try await git(["show", "HEAD:another.txt"], repo) == "untracked")
+        #expect(try await git(["status", "--porcelain"], repo).isEmpty)
+        try await service.perform(.commit("renamed", amend: true), in: repo)
+        #expect(try await git(["log", "-1", "--format=%s"], repo) == "renamed")
+    }
+
     @Test func batchDiscardHandlesMixedSectionsAndDuplicatePaths() async throws {
         let repo = try await repository()
         defer { try? FileManager.default.removeItem(atPath: repo.worktreePath) }

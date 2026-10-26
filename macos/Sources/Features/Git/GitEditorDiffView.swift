@@ -32,7 +32,10 @@ struct GitEditorDiffView: View {
     var actions = GitDiffEditorActions()
     let close: () -> Void
     @StateObject private var model: GitEditorDiffModel
-    @AppStorage("git.diff.viewMode") private var mode = GitL10n.text("Side by Side")
+    @AppStorage("git.diff.viewMode") private var mode = GitL10n.text("Inline")
+    @AppStorage("git.diff.review") private var review = true
+    @State private var reviewRow: Int?
+    @State private var fileMenuHovered = false
     @State private var scroll = GitDiffScrollLink()
     @State private var linkedScrolling = true
     @State private var navigator = GitDiffReviewNavigator()
@@ -79,7 +82,18 @@ struct GitEditorDiffView: View {
                     .truncationMode(.middle)
                     .help(model.selected?.displayPath ?? request.repository.worktreePath)
                     .layoutPriority(1)
+                if let presentation = model.content?.presentation {
+                    Text("−\(presentation.rows.filter { $0.added == false }.count)")
+                        .foregroundStyle(Color(colors.deleted)).font(.caption.monospacedDigit()).fixedSize()
+                    Text("+\(presentation.rows.filter { $0.added == true }.count)")
+                        .foregroundStyle(Color(colors.added)).font(.caption.monospacedDigit()).fixedSize()
+                }
                 Spacer()
+                HStack(spacing: 0) {
+                    reviewButton("Review", selected: true)
+                    reviewButton("Full Source", selected: false)
+                }
+                .modifier(GitToolbarSegmentedStyle(colors: colors))
                 if mode == GitL10n.text("Side by Side") {
                     toolbarButton("link",
                                   help: linkedScrolling ? GitL10n.text("Disable linked scrolling") : GitL10n.text("Enable linked scrolling"),
@@ -88,24 +102,16 @@ struct GitEditorDiffView: View {
                         clearHint()
                         linkedScrolling.toggle()
                     }
-                } else {
-                    Color.clear.frame(width: 28, height: 24).accessibilityHidden(true)
                 }
                 fileMenu
                 HStack(spacing: 0) {
                     toolbarButton("rectangle.split.2x1", help: GitL10n.text("Side-by-side Diff"),
-                                  selected: mode == GitL10n.text("Side by Side"),
-                                  accessibilityValue: mode == GitL10n.text("Side by Side") ? GitL10n.text("Selected") : "",
-                                  width: 24) {
-                        clearHint()
-                        mode = GitL10n.text("Side by Side")
+                                  selected: mode == GitL10n.text("Side by Side"), width: 24) {
+                        clearHint(); mode = GitL10n.text("Side by Side")
                     }
                     toolbarButton("text.alignleft", help: GitL10n.text("Unified / Inline Diff"),
-                                  selected: mode == GitL10n.text("Inline"),
-                                  accessibilityValue: mode == GitL10n.text("Inline") ? GitL10n.text("Selected") : "",
-                                  width: 24) {
-                        clearHint()
-                        mode = GitL10n.text("Inline")
+                                  selected: mode == GitL10n.text("Inline"), width: 24) {
+                        clearHint(); mode = GitL10n.text("Inline")
                     }
                 }
                 .modifier(GitToolbarSegmentedStyle(colors: colors))
@@ -135,7 +141,12 @@ struct GitEditorDiffView: View {
                     Text(sourceError).foregroundStyle(.secondary).padding()
                     GitDiffTextView(text: document.text)
                 } else if let presentation = content.presentation {
-                    if mode == GitL10n.text("Side by Side") {
+                    if review {
+                        GitDiffReviewView(presentation: presentation, before: content.before, after: content.after,
+                                          path: document.file.path, theme: theme,
+                                          split: mode == GitL10n.text("Side by Side"), selectedRow: reviewRow)
+                            .id(model.selected?.id)
+                    } else if mode == GitL10n.text("Side by Side") {
                         HSplitView {
                             sourcePane(GitL10n.text("Before"), text: content.before, path: document.file.oldPath ?? document.file.path,
                                        highlights: presentation.beforeHighlights, side: 0)
@@ -169,7 +180,7 @@ struct GitEditorDiffView: View {
             }
         }
         .background(GitDiffFallbackCommands(
-            isActive: isActive && (model.content?.presentation == nil || model.content?.sourceError != nil),
+            isActive: isActive && (review || model.content?.presentation == nil || model.content?.sourceError != nil),
             actions: actions, close: close
         ))
         .onAppear { model.reload() }
@@ -235,6 +246,7 @@ struct GitEditorDiffView: View {
     }
 
     private func jump(to anchor: (before: Int?, after: Int?, inline: Int), afterEditorReplacement: Bool = false) {
+        reviewRow = anchor.inline
         var lines: [Int: Int] = [:]
         if mode == GitL10n.text("Side by Side") {
             if let before = anchor.before { lines[0] = before }
@@ -285,6 +297,16 @@ struct GitEditorDiffView: View {
         .disabled(disabled)
     }
 
+    private func reviewButton(_ title: String, selected: Bool) -> some View {
+        Button { clearHint(); review = selected } label: {
+            Text(GitL10n.text(title)).font(.system(size: 11, weight: .medium))
+                .padding(.horizontal, 9).frame(height: 24)
+        }
+        .foregroundStyle(Color(review == selected ? colors.accent : colors.secondary))
+        .buttonStyle(GitToolbarButtonStyle(colors: colors, selected: review == selected))
+        .accessibilityValue(review == selected ? GitL10n.text("Selected") : "")
+    }
+
     private var toolbarDivider: some View {
         Divider().frame(height: 14).padding(.horizontal, 2)
     }
@@ -316,12 +338,21 @@ struct GitEditorDiffView: View {
                 Button(GitL10n.text("Copy Relative Path")) { InspectorCopyMenu.copy(file.path, to: .general) }
             }
         } label: {
-            GitToolbarMenuLabel(image: "list.bullet", colors: colors)
+            Image(systemName: "list.bullet")
+                .font(.system(size: 12, weight: .medium))
         }
         .menuStyle(.borderlessButton)
         .buttonStyle(GitToolbarButtonStyle(colors: colors, selected: false))
         .menuIndicator(.hidden)
         .fixedSize()
+        .frame(width: 28, height: 24)
+        .foregroundStyle(Color(fileMenuHovered ? colors.text : colors.secondary))
+        .background(Color(colors.text).opacity(fileMenuHovered && !model.files.isEmpty ? 0.09 : 0),
+                    in: RoundedRectangle(cornerRadius: 4))
+        .overlay(RoundedRectangle(cornerRadius: 4)
+            .stroke(Color(colors.text).opacity(fileMenuHovered && !model.files.isEmpty ? 0.4 : 0), lineWidth: 0.75))
+        .contentShape(Rectangle())
+        .onHover { fileMenuHovered = $0 }
         .help(GitL10n.text("Select file"))
         .accessibilityLabel(GitL10n.text("Select file"))
         .disabled(model.files.isEmpty)
@@ -340,24 +371,6 @@ struct GitEditorDiffView: View {
                                 isActive: isActive, theme: theme, link: scroll, side: side, actions: actions, close: close)
                 .id("\(model.selected?.id ?? "")-\(side)")
         }.frame(minWidth: 120)
-    }
-}
-
-private struct GitToolbarMenuLabel: View {
-    let image: String
-    let colors: GitCollectionColors
-    @State private var hovered = false
-
-    var body: some View {
-        Image(systemName: image)
-            .font(.system(size: 12, weight: .medium))
-            .foregroundStyle(Color(colors.secondary))
-            .frame(width: 28, height: 24)
-            .background(Color(colors.text).opacity(hovered ? 0.09 : 0), in: RoundedRectangle(cornerRadius: 4))
-            .overlay(RoundedRectangle(cornerRadius: 4)
-                .stroke(Color(colors.text).opacity(hovered ? 0.4 : 0), lineWidth: 0.75))
-            .contentShape(Rectangle())
-            .onHover { hovered = $0 }
     }
 }
 

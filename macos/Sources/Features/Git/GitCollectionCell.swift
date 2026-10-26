@@ -60,7 +60,13 @@ final class GitCollectionCell: NSTableCellView {
         toolTip = item.tooltip
         setAccessibilityIdentifier(item.id)
         setAccessibilityLabel(item.tooltip)
+        checkbox.actionSymbol = nil
+        checkbox.setAccessibilityRole(.checkBox)
         if let batch = item.stageBatch {
+            if item.isCategory {
+                checkbox.actionSymbol = batch.shouldStage ? "plus" : "minus"
+                checkbox.setAccessibilityRole(.button)
+            }
             checkbox.configure(state: batch.isMixed ? .mixed : batch.allStaged ? .on : .off, enabled: item.enabled, colors: colors)
             checkbox.activate = stage
             checkbox.setAccessibilityIdentifier(item.id + "/checkbox")
@@ -130,7 +136,11 @@ final class GitCollectionCell: NSTableCellView {
         let x = InspectorTreeLayout.leading + CGFloat(row.depth) * InspectorTreeLayout.indent
         var textX = x
         let center = subtitle.isHidden ? bounds.height / 2 : 12
-        if row.item.isFolder {
+        let categoryActionWidth: CGFloat = row.item.isCategory && row.item.stageBatch != nil ? 28 : 0
+        if row.item.isCategory {
+            checkbox.frame = .init(x: bounds.width - 32, y: center - 12, width: 22, height: 24)
+            progress.frame = .init(x: bounds.width - 27, y: center - 6, width: 12, height: 12)
+        } else if row.item.isFolder {
             disclosure.frame = .init(x: x - 5, y: 0, width: 18, height: bounds.height)
             let hasCheckbox = row.item.stageBatch != nil
             checkbox.frame = .init(x: x + 14, y: center - 12, width: 22, height: 24)
@@ -151,8 +161,8 @@ final class GitCollectionCell: NSTableCellView {
             textX = iconX + 19
         }
         let badgeWidth = badge.isHidden ? 0 : min(100, ceil(badge.intrinsicContentSize.width) + 5)
-        badge.frame = .init(x: max(textX, bounds.width - badgeWidth - 10), y: center - 7, width: badgeWidth, height: 14)
-        let textWidth = max(1, bounds.width - textX - 10 - badgeWidth)
+        badge.frame = .init(x: max(textX, bounds.width - badgeWidth - 10 - categoryActionWidth), y: center - 7, width: badgeWidth, height: 14)
+        let textWidth = max(1, bounds.width - textX - 10 - badgeWidth - categoryActionWidth)
         if !subtitle.isHidden {
             name.frame = .init(x: textX, y: 4, width: textWidth, height: 15)
             subtitle.frame = .init(x: textX, y: 21, width: max(1, bounds.width - textX - 10), height: 13)

@@ -432,12 +432,12 @@ struct InspectorGitView: View {
                 .opacity(content.activeTab == .history ? 1 : 0)
                 .allowsHitTesting(content.activeTab == .history)
                 .accessibilityHidden(content.activeTab != .history)
-            nonHistoryTabContent
+            nonHistoryTabContent(headCommitID: headCommitID)
         }
     }
 
     @ViewBuilder
-    private var nonHistoryTabContent: some View {
+    private func nonHistoryTabContent(headCommitID: String?) -> some View {
         switch content.activeTab {
         case .history:
             EmptyView()
@@ -454,7 +454,10 @@ struct InspectorGitView: View {
                 GitCommitComposer(message: Binding(get: { content.commitDraft }, set: { perform(.gitAction(.updateCommitDraft($0))) }),
                     stagedCount: content.workingTree.staged.count, isBusy: content.operation != nil,
                     canCommit: content.workingTree.stagedError == nil, isUpdatingIndex: content.isUpdatingIndex,
-                    commit: { perform(.gitAction(.commitStaged)) }, repository: content.repository)
+                    commit: { perform(.gitAction(.commitStaged)) }, repository: content.repository,
+                    unstagedCount: content.workingTree.unstaged.count,
+                    canStageAll: content.workingTree.unstagedError == nil, hasHead: headCommitID != nil,
+                    submit: { perform(.gitAction(.submitCommit(stageAll: $0, amend: $1))) })
                 .id(collectionKey)
                 .padding(10)
             }

@@ -390,6 +390,12 @@ final class BuiltInGitInspectorProvider {
                   content.workingTree.stagedError == nil,
                   !content.workingTree.staged.isEmpty else { return }
             mutate(.commit(content.commitDraft), repository: repository, context: action.context)
+        case .submitCommit(let stageAll, let amend):
+            guard let content = lastPublishedContent[action.context.tabID], let repository = content.repository,
+                  content.workingTree.stagedError == nil,
+                  !stageAll || content.workingTree.unstagedError == nil,
+                  amend || !content.workingTree.staged.isEmpty || (stageAll && !content.workingTree.unstaged.isEmpty) else { return }
+            mutate(.commit(content.commitDraft, stageAll: stageAll, amend: amend), repository: repository, context: action.context)
         case .sendHistoryToTerminal(let commitID):
             guard let content = lastPublishedContent[action.context.tabID],
                   let repository = content.repository else { return }
@@ -439,7 +445,8 @@ final class BuiltInGitInspectorProvider {
                 if self.localChangeMonitors[context.tabID]?.repository != repository {
                     let paths = [repository.worktreePath, repository.gitDirPath, repository.commonGitDirPath]
                     self.localChangeMonitors[context.tabID] = GitRepositoryChangeMonitor(
-                        paths: paths, gitDirectories: [repository.gitDirPath, repository.commonGitDirPath]
+                        paths: paths, gitDirectories: [repository.gitDirPath, repository.commonGitDirPath],
+                        onChange: { [weak self] in self?.refreshChangedRepository(tabID: context.tabID) }
                     ).map {
                         (repository, $0)
                     }
@@ -472,6 +479,7 @@ final class BuiltInGitInspectorProvider {
             content.workingTree = workingTree
             self.publish(content, tabID: context.tabID)
             if repo != nil, content.activeTab == .history || force { self.loadHistory(context: context, force: force, refreshing: true) }
+            self.refreshChangedRepository(tabID: context.tabID)
         }
     }
 
@@ -726,6 +734,14 @@ final class BuiltInGitInspectorProvider {
                 }
             }
         }
+    }
+
+    private func refreshChangedRepository(tabID: UUID) {
+        guard let context = presentedContexts[tabID], loadTasks[tabID] == nil,
+              let entry = localChangeMonitors[tabID],
+              mutationTasks[entry.repository.stateKey] == nil,
+              entry.monitor.needsRefresh() else { return }
+        load(context: context)
     }
 
     func pollPresentedTabs() {
@@ -1060,7 +1076,7 @@ final class BuiltInGitInspectorProvider {
                     try GitWorktreeActions.open(GitWorktreeInfo(path: path, head: nil, branchRef: nil, isMain: false, isCurrent: false),
                                                 repository: repository, context: context)
                 }
-                if case .commit(let submitted) = mutation {
+                if case .commit(let submitted, _, _) = mutation {
                     var state = self.state(for: context.tabID, worktreeKey: key)
                     if state.commitDraft == submitted { state.commitDraft = "" }
                     self.save(state, tabID: context.tabID, worktreeKey: key)

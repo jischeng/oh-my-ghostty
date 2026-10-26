@@ -9,8 +9,11 @@ final class GitRepositoryChangeMonitor {
     private var dirty = true
     private var lastRefresh = Date.distantPast
     private let ignoredPaths: [String]
+    private let onChange: () -> Void
+    private var notificationTask: Task<Void, Never>?
 
-    init?(paths: [String], gitDirectories: [String] = []) {
+    init?(paths: [String], gitDirectories: [String] = [], onChange: @escaping () -> Void = {}) {
+        self.onChange = onChange
         ignoredPaths = gitDirectories.flatMap { directory in
             ["fsmonitor--daemon", "fsmonitor--daemon.ipc", "fsmonitor--daemon.ipc.lock"].map {
                 URL(fileURLWithPath: directory).appendingPathComponent($0).resolvingSymlinksInPath().path
@@ -31,7 +34,7 @@ final class GitRepositoryChangeMonitor {
                 Task { @MainActor in
                     if mustRescan || names.contains(where: { path in
                         !monitor.ignoredPaths.contains { path == $0 || path.hasPrefix($0 + "/") }
-                    }) { monitor.dirty = true }
+                    }) { monitor.markDirty() }
                 }
             }, &context, Array(Set(paths)) as CFArray,
             FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.2,
@@ -42,6 +45,18 @@ final class GitRepositoryChangeMonitor {
         guard FSEventStreamStart(stream) else { return nil }
     }
 
+    private func markDirty() {
+        dirty = true
+        // Coalesce bursts without postponing indefinitely during continuous writes.
+        guard notificationTask == nil else { return }
+        notificationTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled, let self else { return }
+            self.notificationTask = nil
+            self.onChange()
+        }
+    }
+
     func needsRefresh(now: Date = Date()) -> Bool {
         guard dirty || now.timeIntervalSince(lastRefresh) >= 30 else { return false }
         dirty = false
@@ -50,6 +65,7 @@ final class GitRepositoryChangeMonitor {
     }
 
     deinit {
+        notificationTask?.cancel()
         if let stream {
             FSEventStreamStop(stream)
             FSEventStreamInvalidate(stream)

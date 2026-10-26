@@ -137,8 +137,15 @@ enum GitCollectionBuilder {
                     }
                 }
                 configureFolders(children)
-                return category(key, title: section.title, count: files.count, children: children, error: error,
-                                empty: query.isEmpty ? GitL10n.text("No changes") : GitL10n.text("No matching files"))
+                let node = category(key, title: section.title, count: files.count, children: children, error: error,
+                                    empty: query.isEmpty ? GitL10n.text("No changes") : GitL10n.text("No matching files"))
+                if !files.isEmpty {
+                    let batch = GitStageBatch(entries: files.map { .init(file: $0, section: section) })
+                    node.item.stageBatch = batch
+                    node.item.pending = !batch.paths.isDisjoint(with: pending)
+                    node.item.enabled = writable && !node.item.pending
+                }
+                return node
             }
             return sections
         case .refs(let branches, let worktrees, let scopes, let branchesError, let worktreesError):

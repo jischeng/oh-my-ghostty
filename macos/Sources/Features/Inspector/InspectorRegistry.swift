@@ -122,6 +122,7 @@ enum InspectorGitAction: Equatable, Sendable {
     case setFilesStaged([GitDiffFile], Bool)
     case updateCommitDraft(String)
     case commitStaged
+    case submitCommit(stageAll: Bool, amend: Bool)
     case clearOperationError
     case clearOperationNotice
 }

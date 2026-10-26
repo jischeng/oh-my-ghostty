@@ -6,6 +6,21 @@ import Testing
 
 @MainActor
 struct GitCollectionTests {
+    @Test func categoryActionsIncludeFilesHiddenBySearch() throws {
+        let files = [GitDiffFile(path: "visible.swift", status: "M"), GitDiffFile(path: "hidden.swift", status: "M")]
+        let nodes = GitCollectionBuilder.nodes(
+            source: .changes(staged: files, unstaged: files, stagedError: nil, unstagedError: nil),
+            mode: .list, query: "visible")
+        #expect(nodes.count == 2)
+        for node in nodes {
+            let batch = try #require(node.item.stageBatch)
+            #expect(batch.paths == Set(files.map(\.path)))
+            #expect(node.children.count == 1)
+        }
+        #expect(nodes[0].item.stageBatch?.shouldStage == false)
+        #expect(nodes[1].item.stageBatch?.shouldStage == true)
+    }
+
     @Test func pickerKeepsKeyboardCandidateDuringRefRefreshAndModeChanges() async throws {
         let branches = [branch("main"), branch("feature/query"), branch("feature/quota")]
         let state = GitCollectionState()

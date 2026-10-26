@@ -3,7 +3,11 @@ import SwiftUI
 
 enum GitRefPopoverStyle {
     static let size = NSSize(width: 380, height: 380)
-    static func content<V: View>(_ view: V, colors: GitCollectionColors) -> AnyView {
+    static func pickerSize(branchCount: Int, worktreeCount: Int, tagCount: Int) -> NSSize {
+        let rows = branchCount + worktreeCount + tagCount
+        return NSSize(width: 340, height: min(340, max(220, 100 + CGFloat(rows) * 26)))
+    }
+    static func content<V: View>(_ view: V, colors: GitCollectionColors, size: NSSize = size) -> AnyView {
         AnyView(view.padding(.vertical, 10).frame(width: size.width, height: size.height)
             .background(Color(colors.background)).environment(\.gitCollectionColors, colors))
     }

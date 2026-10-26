@@ -16,6 +16,24 @@ struct GitRepositoryChangeMonitorTests {
         #expect(monitor.needsRefresh(now: now.addingTimeInterval(30)))
     }
 
+    @Test func filesystemChangesWakeRefreshWithoutPolling() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var wakes = 0
+        let monitor = try #require(GitRepositoryChangeMonitor(paths: [root.path], onChange: { wakes += 1 }))
+        _ = monitor.needsRefresh()
+        try await Task.sleep(for: .milliseconds(500))
+        wakes = 0
+        try Data("changed".utf8).write(to: root.appendingPathComponent("new.txt"))
+        for _ in 0..<20 {
+            if wakes > 0 { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(wakes > 0)
+        #expect(monitor.needsRefresh())
+    }
+
     @Test func nestedFilesAndExternalGitMetadataTriggerRefresh() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let worktree = root.appendingPathComponent("worktree/nested/deep")

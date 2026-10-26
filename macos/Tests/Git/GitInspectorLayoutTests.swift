@@ -258,6 +258,15 @@ struct GitInspectorLayoutTests {
     }
 
     @Test func deletedCRLFFileOpensNativeBeforeAndAfterEditors() async throws {
+        let defaults = UserDefaults.standard
+        let savedReview = defaults.object(forKey: "git.diff.review")
+        let savedMode = defaults.object(forKey: "git.diff.viewMode")
+        defaults.set(false, forKey: "git.diff.review")
+        defaults.set(GitL10n.text("Side by Side"), forKey: "git.diff.viewMode")
+        defer {
+            defaults.set(savedReview, forKey: "git.diff.review")
+            defaults.set(savedMode, forKey: "git.diff.viewMode")
+        }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("git-deleted-view-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }

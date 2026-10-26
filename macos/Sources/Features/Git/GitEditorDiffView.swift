@@ -35,6 +35,7 @@ struct GitEditorDiffView: View {
     @AppStorage("git.diff.viewMode") private var mode = GitL10n.text("Inline")
     @AppStorage("git.diff.review") private var review = true
     @State private var reviewRow: Int?
+    @State private var fileMenuHovered = false
     @State private var scroll = GitDiffScrollLink()
     @State private var linkedScrolling = true
     @State private var navigator = GitDiffReviewNavigator()
@@ -101,8 +102,6 @@ struct GitEditorDiffView: View {
                         clearHint()
                         linkedScrolling.toggle()
                     }
-                } else {
-                    Color.clear.frame(width: 28, height: 24).accessibilityHidden(true)
                 }
                 fileMenu
                 HStack(spacing: 0) {
@@ -339,12 +338,21 @@ struct GitEditorDiffView: View {
                 Button(GitL10n.text("Copy Relative Path")) { InspectorCopyMenu.copy(file.path, to: .general) }
             }
         } label: {
-            GitToolbarMenuLabel(image: "list.bullet", colors: colors)
+            Image(systemName: "list.bullet")
+                .font(.system(size: 12, weight: .medium))
         }
         .menuStyle(.borderlessButton)
         .buttonStyle(GitToolbarButtonStyle(colors: colors, selected: false))
         .menuIndicator(.hidden)
         .fixedSize()
+        .frame(width: 28, height: 24)
+        .foregroundStyle(Color(fileMenuHovered ? colors.text : colors.secondary))
+        .background(Color(colors.text).opacity(fileMenuHovered && !model.files.isEmpty ? 0.09 : 0),
+                    in: RoundedRectangle(cornerRadius: 4))
+        .overlay(RoundedRectangle(cornerRadius: 4)
+            .stroke(Color(colors.text).opacity(fileMenuHovered && !model.files.isEmpty ? 0.4 : 0), lineWidth: 0.75))
+        .contentShape(Rectangle())
+        .onHover { fileMenuHovered = $0 }
         .help(GitL10n.text("Select file"))
         .accessibilityLabel(GitL10n.text("Select file"))
         .disabled(model.files.isEmpty)
@@ -363,24 +371,6 @@ struct GitEditorDiffView: View {
                                 isActive: isActive, theme: theme, link: scroll, side: side, actions: actions, close: close)
                 .id("\(model.selected?.id ?? "")-\(side)")
         }.frame(minWidth: 120)
-    }
-}
-
-private struct GitToolbarMenuLabel: View {
-    let image: String
-    let colors: GitCollectionColors
-    @State private var hovered = false
-
-    var body: some View {
-        Image(systemName: image)
-            .font(.system(size: 12, weight: .medium))
-            .foregroundStyle(Color(colors.secondary))
-            .frame(width: 28, height: 24)
-            .background(Color(colors.text).opacity(hovered ? 0.09 : 0), in: RoundedRectangle(cornerRadius: 4))
-            .overlay(RoundedRectangle(cornerRadius: 4)
-                .stroke(Color(colors.text).opacity(hovered ? 0.4 : 0), lineWidth: 0.75))
-            .contentShape(Rectangle())
-            .onHover { hovered = $0 }
     }
 }
 

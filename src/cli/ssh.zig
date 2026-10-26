@@ -853,7 +853,7 @@ const RemoteQuoteStyle = enum { fish, shell };
 /// Do not replace user aliases/functions. Native hooks remain authoritative for
 /// task state; returning to the shell clears all remote agent contexts.
 fn writeRemoteAgentWrappers(writer: *std.Io.Writer, style: RemoteQuoteStyle) !void {
-    inline for (.{ RemoteAgent.antigravity, RemoteAgent.codex }) |agent| {
+    inline for (std.meta.tags(RemoteAgent)) |agent| {
         const name = agent.commandName();
         const id = @tagName(agent);
         switch (style) {

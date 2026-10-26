@@ -168,6 +168,20 @@ struct QuickInputDraftBridgeTests {
         #expect(QuickInputDraftBridge.shortcut(setting: "control+x,control+e", agent: .pi) == "control+x,control+e")
     }
 
+    @Test func sharedImportPolicyCoversEveryAgentAndCustomBindings() {
+        for agent in SupportedAgent.allCases {
+            let keys = QuickInputDraftBridge.importKeys(setting: "auto", agent: agent, hasAgentActivity: false)
+            #expect(keys != nil)
+            #expect(keys?.map(\.key) == (agent == .opencode ? [.x, .e] : [.g]))
+            #expect(QuickInputDraftBridge.importKeys(setting: "", agent: agent, hasAgentActivity: true) == nil)
+        }
+        #expect(QuickInputDraftBridge.importKeys(setting: "auto", agent: nil, hasAgentActivity: false) == nil)
+        #expect(QuickInputDraftBridge.importKeys(setting: "auto", agent: nil, hasAgentActivity: true)?.first?.key == .g)
+        #expect(QuickInputDraftBridge.importKeys(
+            setting: "control+x,control+e", agent: nil, hasAgentActivity: false
+        )?.map(\.key) == [.x, .e])
+    }
+
     @Test func remoteDraftResponsePreservesTextAndRejectsInvalidPayloads() throws {
         let text = "中文 draft\nsecond line\n"
         let valid = GitExecutionResult(exitCode: 0,

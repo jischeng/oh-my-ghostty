@@ -11,8 +11,9 @@ extension TerminalController {
               let connection = try? GitSSHConnection(session: context) else { return }
         let agent = agentActivity(for: surface).flatMap { SupportedAgent(rawValue: $0.source) }
             ?? agentResumeDescriptor(for: surface)?.agent
-        guard setting != "auto" || agent != nil || agentActivity(for: surface) != nil,
-              let keys = QuickInputDraftBridge.keys(QuickInputDraftBridge.shortcut(setting: setting, agent: agent)) else {
+        guard let keys = QuickInputDraftBridge.importKeys(
+            setting: setting, agent: agent, hasAgentActivity: agentActivity(for: surface) != nil
+        ) else {
             return
         }
         let request = UUID().uuidString

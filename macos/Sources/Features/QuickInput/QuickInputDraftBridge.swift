@@ -44,6 +44,15 @@ final class QuickInputDraftBridge {
         return agent == .opencode ? "control+x,e" : "control+g"
     }
 
+    /// Shared by local and SSH imports: custom chords work without a known
+    /// agent, while auto mode must never invoke an editor at a shell prompt.
+    static func importKeys(
+        setting: String, agent: SupportedAgent?, hasAgentActivity: Bool
+    ) -> [Ghostty.Input.KeyEvent]? {
+        guard setting != "auto" || agent != nil || hasAgentActivity else { return nil }
+        return keys(shortcut(setting: setting, agent: agent))
+    }
+
     func configure(_ configuration: inout Ghostty.SurfaceConfiguration, surfaceID: UUID) {
         let setting = OhMyGhosttySettings.shared.quickInputImportShortcut
         guard Self.keys(Self.shortcut(setting: setting, agent: nil)) != nil else { return }

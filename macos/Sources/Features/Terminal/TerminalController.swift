@@ -422,14 +422,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             LocalAgentProcessDetector.detect(in: $0)
         }
         let agent = foregroundAgent ?? detectedAgentInstances[surface.id]?.agent
+            ?? agentActivities[surface.id].flatMap { SupportedAgent(rawValue: $0.source) }
             ?? agentResumeDescriptor(for: surface)?.agent
-        let shortcut = QuickInputDraftBridge.shortcut(setting: setting, agent: agent)
-        // Auto mode must not send editor keys to an ordinary shell prompt.
-        guard setting != "auto" || agent != nil || agentActivities[surface.id] != nil else {
-            return
-        }
         guard !SecureInput.shared.enabled,
-              let keys = QuickInputDraftBridge.keys(shortcut),
+              let keys = QuickInputDraftBridge.importKeys(
+                setting: setting, agent: agent, hasAgentActivity: agentActivities[surface.id] != nil
+              ),
               let terminal = surface.surfaceModel,
               let request = try? QuickInputDraftBridge.shared.begin(surfaceID: surface.id) else {
             return

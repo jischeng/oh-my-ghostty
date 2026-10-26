@@ -218,6 +218,16 @@ print("OMG_PTY_DRAFT_OK", flush=True)
                     self.assertTrue(result.stdout.endswith("ARG:<two words>\nARG:<;literal>\nPROMPT\n"), result.stdout)
                     self.assertNotIn("omg_state=done", result.stdout)
 
+    def test_all_builtin_agents_have_remote_identity_without_hooks(self):
+        source = (ROOT / "src/cli/ssh.zig").read_text()
+        body = source.split("const RemoteAgent = enum {", 1)[1].split("fn commandName", 1)[0]
+        agents = re.findall(r"^    ([a-z]+),$", body, re.MULTILINE)
+        self.assertGreater(len(agents), 10)
+        for shell, wrapper in self.scripts.items():
+            for agent in agents:
+                with self.subTest(shell=shell, agent=agent):
+                    self.assertIn(f"omg_agent={agent};omg_scope=remote;omg_state=idle", wrapper)
+
     def test_existing_user_function_is_preserved(self):
         for shell, wrapper in self.scripts.items():
             with self.subTest(shell=shell):

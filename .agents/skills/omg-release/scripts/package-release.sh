@@ -120,6 +120,8 @@ rm -rf "$appcast_work"
 mkdir -p "$appcast_work"
 cp "$artifacts/appcast.xml" "$appcast_work/appcast.xml"
 cp "$artifacts/OMG-$omg_version-macos-universal.dmg" "$appcast_work/"
+cp "$repo_root/docs/RELEASE_NOTES_$omg_version.md" \
+  "$appcast_work/OMG-$omg_version-macos-universal.md"
 
 "$appcast_tool" \
   --account com.jischeng.omg \
@@ -138,6 +140,11 @@ item = root.find("./channel/item")
 if item is None:
     raise SystemExit("appcast has no update items")
 values = {child.tag.split("}")[-1]: (child.text or "").strip() for child in item}
+description = item.find("description")
+if description is None or not (description.text or "").strip():
+    raise SystemExit("missing embedded release notes")
+if f"OMG {expected_version}" not in description.text:
+    raise SystemExit("embedded release notes do not match the OMG version")
 enclosure = item.find("enclosure")
 if enclosure is None:
     raise SystemExit("latest appcast item has no enclosure")

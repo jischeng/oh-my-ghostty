@@ -1,4 +1,5 @@
 {
+  "Wrap diff lines": { "en": "Wrap diff lines", "zh-Hans": "Diff 自动换行" },
   "Commit Staged": { "en": "Commit Staged", "zh-Hans": "提交暂存" },
   "Stage All and Commit": { "en": "Stage All and Commit", "zh-Hans": "全部暂存并提交" },
   "Amend Last Commit": { "en": "Amend Last Commit", "zh-Hans": "修订上次提交" },

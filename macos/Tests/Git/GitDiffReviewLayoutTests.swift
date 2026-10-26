@@ -56,6 +56,40 @@ struct GitDiffReviewLayoutTests {
         #expect(host.fittingSize.width >= 1000)
     }
 
+    @Test @MainActor func longLinesStayInsideNarrowSplitViewport() async throws {
+        let defaults = UserDefaults.standard
+        let saved = defaults.object(forKey: "git.diff.wordWrap")
+        defer { defaults.set(saved, forKey: "git.diff.wordWrap") }
+        let source = String(repeating: "long_identifier + ", count: 40)
+        let presentation = GitDiffPresentation(before: "", after: source + "\n", patch: "@@ -0,0 +1 @@\n+" + source + "\n")
+        for wrap in [true, false] {
+            defaults.set(wrap, forKey: "git.diff.wordWrap")
+            let host = NSHostingView(rootView: GitDiffReviewView(presentation: presentation, before: "", after: source + "\n",
+                path: "Long.swift", theme: .oneDark, split: true).frame(width: 300, height: 260))
+            host.sizingOptions = []
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 260),
+                                  styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = host
+            defer { window.contentView = nil; window.close() }
+            try await Task.sleep(for: .milliseconds(400))
+            host.layoutSubtreeIfNeeded()
+            #expect(host.bounds.width == 300)
+            func scrolls(_ view: NSView) -> [NSScrollView] {
+                if let scroll = view as? NSScrollView { return [scroll] }
+                return view.subviews.flatMap(scrolls)
+            }
+            let scroll = try #require(scrolls(host).first)
+            let document = try #require(scroll.documentView)
+            if wrap {
+                #expect(document.bounds.width <= 301)
+                #expect(document.bounds.height > 260)
+            } else {
+                #expect(document.bounds.width > 1000)
+            }
+        }
+    }
+
     @Test func emptyAndEntirelyChangedFilesHaveNoSpuriousFold() {
         #expect(GitDiffReviewLayout(rows: [], expanded: []).items.isEmpty)
         let row = GitDiffPresentation.Row(text: "new", beforeLine: nil, afterLine: 1, added: true)

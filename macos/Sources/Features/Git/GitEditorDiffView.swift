@@ -34,6 +34,7 @@ struct GitEditorDiffView: View {
     @StateObject private var model: GitEditorDiffModel
     @AppStorage("git.diff.viewMode") private var mode = GitL10n.text("Inline")
     @AppStorage("git.diff.review") private var review = true
+    @AppStorage("git.diff.wordWrap") private var wordWrap = true
     @State private var reviewRow: Int?
     @State private var fileMenuHovered = false
     @State private var scroll = GitDiffScrollLink()
@@ -55,6 +56,8 @@ struct GitEditorDiffView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            GeometryReader { toolbarGeometry in
+            ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 4) {
                 toolbarButton("chevron.left", help: GitL10n.text("Previous file"),
                               disabled: selectedFileIndex < 0 || model.files.count < 2) {
@@ -65,7 +68,7 @@ struct GitEditorDiffView: View {
                     selectAdjacentFile(offset: 1)
                 }
                 Text(fileCounter)
-                    .font(.caption.monospacedDigit())
+                    .font(.system(size: 11).monospacedDigit())
                     .foregroundStyle(.secondary)
                     .fixedSize()
                 toolbarDivider
@@ -77,16 +80,16 @@ struct GitEditorDiffView: View {
                 }
                 Spacer()
                 Text(model.selected?.displayPath ?? GitL10n.text("Select file"))
-                    .font(.callout)
+                    .font(.system(size: 11))
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .help(model.selected?.displayPath ?? request.repository.worktreePath)
                     .layoutPriority(1)
                 if let presentation = model.content?.presentation {
                     Text("−\(presentation.rows.filter { $0.added == false }.count)")
-                        .foregroundStyle(Color(colors.deleted)).font(.caption.monospacedDigit()).fixedSize()
+                        .foregroundStyle(Color(colors.deleted)).font(.system(size: 11).monospacedDigit()).fixedSize()
                     Text("+\(presentation.rows.filter { $0.added == true }.count)")
-                        .foregroundStyle(Color(colors.added)).font(.caption.monospacedDigit()).fixedSize()
+                        .foregroundStyle(Color(colors.added)).font(.system(size: 11).monospacedDigit()).fixedSize()
                 }
                 Spacer()
                 HStack(spacing: 0) {
@@ -101,6 +104,11 @@ struct GitEditorDiffView: View {
                                   accessibilityValue: GitL10n.text(linkedScrolling ? "On" : "Off")) {
                         clearHint()
                         linkedScrolling.toggle()
+                    }
+                }
+                if review {
+                    toolbarButton("arrow.turn.down.left", help: GitL10n.text("Wrap diff lines"), selected: wordWrap) {
+                        wordWrap.toggle()
                     }
                 }
                 fileMenu
@@ -128,7 +136,11 @@ struct GitEditorDiffView: View {
             .buttonStyle(.borderless)
             .controlSize(.small)
             .padding(.horizontal, 8)
+            .frame(minWidth: toolbarGeometry.size.width, minHeight: 32)
+            }
+            }
             .frame(height: 32)
+            .clipped()
             .background(toolbarSurface)
             Divider()
             if model.isLoading { ProgressView().padding() }
@@ -165,6 +177,7 @@ struct GitEditorDiffView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .clipped()
         .overlay(alignment: .top) {
             if let navigationHint {
                 Text(navigationHint)

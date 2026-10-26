@@ -44,6 +44,8 @@ struct GitDiffReviewView: View {
     let theme: EditorTheme
     let split: Bool
     var selectedRow: Int?
+    @AppStorage("git.diff.wordWrap") private var wordWrap = true
+    @State private var measuredLineWidth: CGFloat = 0
     @Environment(\.gitCollectionColors) private var colors
     @State private var expanded: Set<Int> = []
     @State private var oldLines: [AttributedString] = []
@@ -52,7 +54,12 @@ struct GitDiffReviewView: View {
     var body: some View {
         ScrollViewReader { proxy in
             GeometryReader { geometry in
-                ScrollView([.vertical, .horizontal]) {
+                let columnWidth = wordWrap
+                    ? max(1, split ? (geometry.size.width - 1) / 2 : geometry.size.width)
+                    : max(split ? (geometry.size.width - 1) / 2 : geometry.size.width,
+                          measuredLineWidth + (split ? 72 : 148))
+                let documentWidth = split ? columnWidth * 2 + 1 : columnWidth
+                ScrollView(wordWrap ? .vertical : [.vertical, .horizontal]) {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(Array(layout.items.enumerated()), id: \.offset) { _, item in
                             switch item {
@@ -70,13 +77,15 @@ struct GitDiffReviewView: View {
                                     .contentShape(Rectangle())
                                 }.buttonStyle(.plain)
                             case .row(let index):
-                                line(presentation.rows[index]).id(index)
+                                line(presentation.rows[index], width: columnWidth).id(index)
                             }
                         }
                     }
-                    .frame(minWidth: geometry.size.width, alignment: .leading)
+                    .frame(width: documentWidth, alignment: .leading)
                     .padding(.vertical, 6)
                 }
+                .frame(width: geometry.size.width, height: geometry.size.height)
+                .clipped()
             }
             .onChange(of: selectedRow) { row in
                 if let row { proxy.scrollTo(row, anchor: .center) }
@@ -85,6 +94,10 @@ struct GitDiffReviewView: View {
         .task(id: before + "\0" + after) {
             expanded = []
             oldLines = []; newLines = []
+            let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+            measuredLineWidth = presentation.rows.reduce(CGFloat(0)) { width, row in
+                max(width, ceil((row.text as NSString).size(withAttributes: [.font: font]).width))
+            }
             let old = await highlighted(before)
             let new = await highlighted(after)
             guard !Task.isCancelled else { return }
@@ -96,39 +109,46 @@ struct GitDiffReviewView: View {
         GitDiffReviewLayout(rows: presentation.rows, expanded: expanded)
     }
 
-    private func line(_ row: GitDiffPresentation.Row) -> some View {
-        HStack(spacing: 0) {
+    private func line(_ row: GitDiffPresentation.Row, width: CGFloat) -> some View {
+        HStack(alignment: .top, spacing: 0) {
             if split {
-                source(row, old: true).frame(minWidth: 320, maxWidth: .infinity, alignment: .leading)
-                Rectangle().fill(Color(colors.separator)).frame(width: 1)
-                source(row, old: false).frame(minWidth: 320, maxWidth: .infinity, alignment: .leading)
+                source(row, old: true, width: width)
+                source(row, old: false, width: width)
+                    .padding(.leading, 1)
+                    .overlay(alignment: .leading) { Color(colors.separator).frame(width: 1) }
             } else {
                 number(row.beforeLine)
                 number(row.afterLine)
                 Text(row.added.map { $0 ? "+" : "−" } ?? " ")
                     .foregroundStyle(tint(row)).frame(width: 18)
                 Text(attributed(row, old: row.added == false))
-                    .textSelection(.enabled).fixedSize(horizontal: true, vertical: false)
+                    .textSelection(.enabled)
+                    .frame(width: max(1, width - 148), alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(.trailing, 18)
-                Spacer(minLength: 0)
             }
         }
         .font(.system(size: 12, design: .monospaced))
-        .frame(height: 21)
+        .frame(width: split ? width * 2 + 1 : width, alignment: .leading)
+        .frame(minHeight: 21, alignment: .top)
         .background(split ? Color.clear : tint(row).opacity(row.added == nil ? 0 : 0.12))
+        .clipped()
     }
 
-    private func source(_ row: GitDiffPresentation.Row, old: Bool) -> some View {
+    private func source(_ row: GitDiffPresentation.Row, old: Bool, width: CGFloat) -> some View {
         let present = old ? row.beforeLine != nil : row.afterLine != nil
-        return HStack(spacing: 0) {
+        return HStack(alignment: .top, spacing: 0) {
             number(old ? row.beforeLine : row.afterLine)
             Text(present ? attributed(row, old: old) : AttributedString(" "))
-                .textSelection(.enabled).fixedSize(horizontal: true, vertical: false)
+                .textSelection(.enabled)
+                .frame(width: max(1, width - 72), alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 8)
-            Spacer(minLength: 0)
         }
-        .frame(height: 21)
+        .frame(width: width, alignment: .leading)
+        .frame(minHeight: 21, alignment: .top)
         .background(tint(row).opacity(present && row.added != nil ? 0.12 : 0))
+        .clipped()
     }
 
     private func number(_ value: Int?) -> some View {

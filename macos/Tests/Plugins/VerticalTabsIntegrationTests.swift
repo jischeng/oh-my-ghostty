@@ -36,6 +36,60 @@ struct VerticalTabsIntegrationTests {
         #expect(publications > 0)
     }
 
+    @Test func nativeTabCreationKeepsSharedSidebarMembership() async throws {
+        let appDelegate = try #require(NSApp.delegate as? AppDelegate)
+        var configuration = Ghostty.SurfaceConfiguration()
+        configuration.command = "sleep 30"
+        let first = TerminalController(appDelegate.ghostty, withBaseConfig: configuration, tabLayout: .vertical)
+        var controllers = [first]
+        defer {
+            for controller in controllers {
+                controller.window?.delegate = nil
+                controller.window?.close()
+            }
+        }
+        first.showWindow(nil)
+        for _ in 0..<3 {
+            let parent = try #require(controllers.last?.window)
+            let next = try #require(TerminalController.newTab(
+                appDelegate.ghostty, from: parent, withBaseConfig: configuration
+            ))
+            controllers.append(next)
+            try await Task.sleep(for: .milliseconds(250))
+            for controller in controllers {
+                #expect(controller.tabLayoutState === first.tabLayoutState)
+                #expect(controller.tabLayoutState.tabSnapshot.controllers.count == controllers.count)
+            }
+        }
+        try capture(window: try #require(controllers.last?.window), path: "/tmp/omg-native-tab-membership.png")
+        let closingID = ObjectIdentifier(try #require(controllers.last))
+        var closeSnapshots: [VerticalTabSnapshot] = []
+        let closeObserver = first.tabLayoutState.$tabSnapshot.dropFirst().sink {
+            closeSnapshots.append($0)
+        }
+        controllers.last?.closeTabImmediately(registerRedo: false)
+        try await Task.sleep(for: .milliseconds(250))
+        closeObserver.cancel()
+        #expect(!closeSnapshots.isEmpty)
+        #expect(closeSnapshots.allSatisfy {
+            $0.controllers.count == 3 && $0.selectedID != closingID &&
+                !$0.controllers.contains(where: { ObjectIdentifier($0) == closingID })
+        })
+        #expect(first.tabLayoutState.tabSnapshot.controllers.count == 3)
+        // A closed native window can still receive queued KVO refreshes while
+        // its controller is retained by undo or other lifecycle work.
+        controllers.last?.refreshTabState()
+        #expect(first.tabLayoutState.tabSnapshot.controllers.count == 3)
+        let reopened = try #require(TerminalController.newTab(
+            appDelegate.ghostty, from: first.window, withBaseConfig: configuration
+        ))
+        controllers.append(reopened)
+        try await Task.sleep(for: .milliseconds(250))
+        #expect(reopened.tabLayoutState.tabSnapshot.controllers.count == 4)
+        #expect(reopened.tabLayoutState.tabSnapshot.selectedID == ObjectIdentifier(reopened))
+        try capture(window: try #require(reopened.window), path: "/tmp/omg-native-tab-reopened.png")
+    }
+
     @Test func sharedSidebarSnapshotPublishesMembershipAndSelectionTogether() throws {
         let appDelegate = try #require(NSApp.delegate as? AppDelegate)
         var configuration = Ghostty.SurfaceConfiguration()

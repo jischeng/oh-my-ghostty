@@ -2867,7 +2867,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         refreshTabs()
     }
 
+    private var tabPresentationIsClosing = false
+
     private func refreshTabs() {
+        guard !tabPresentationIsClosing else { return }
         guard let window else {
             if !tabControllers.isEmpty { tabControllers = [] }
             if selectedTabID != nil { selectedTabID = nil }
@@ -2878,7 +2881,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let windows = tabGroup?.windows ?? [window]
         let controllers = windows.compactMap {
             $0.windowController as? TerminalController
-        }
+        }.filter { !$0.tabPresentationIsClosing }
         let sameControllers = tabControllers.count == controllers.count &&
             zip(tabControllers, controllers).allSatisfy { $0 === $1 }
         if !sameControllers {
@@ -2896,7 +2899,14 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             controller.tabLayoutState = sharedState
         }
 
-        let selectedWindow = tabGroup?.selectedWindow ?? window
+        let nativeSelectedWindow = tabGroup?.selectedWindow ?? window
+        let selectedWindow = if (nativeSelectedWindow.windowController as? TerminalController)?
+            .tabPresentationIsClosing == true {
+            controllers.first(where: { ObjectIdentifier($0) == sharedState.tabSnapshot.selectedID })?.window
+                ?? controllers.first?.window ?? window
+        } else {
+            nativeSelectedWindow
+        }
         let selectedID = (selectedWindow.windowController as? TerminalController)
             .map(ObjectIdentifier.init)
         if selectedTabID != selectedID {
@@ -3577,6 +3587,19 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             }
         }
 
+        // Remove the row before AppKit exposes the successor window. Otherwise
+        // its sidebar first selects the successor at the old row position.
+        let remaining = tabGroup.windows.filter { $0 !== window }
+        let nextWindow: NSWindow? = if tabGroup.selectedWindow === window {
+            remaining[min(tabGroup.windows.firstIndex(of: window) ?? 0, remaining.count - 1)]
+        } else {
+            tabGroup.selectedWindow
+        }
+        tabPresentationIsClosing = true
+        tabLayoutState.updateTabs(
+            remaining.compactMap { $0.windowController as? TerminalController },
+            selectedID: (nextWindow?.windowController as? TerminalController).map(ObjectIdentifier.init)
+        )
         window.close()
         // Do not leave the newly visible window rendering the pre-close rows
         // until the asynchronous KVO callbacks run.
@@ -4101,6 +4124,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     override func windowWillClose(_ notification: Notification) {
+        tabPresentationIsClosing = true
+        verticalTabWindowsObservation?.invalidate()
+        verticalTabSelectionObservation?.invalidate()
         DevMemoryDiagnostics.tabClosed()
         DevMemoryDiagnostics.windowClosing()
         super.windowWillClose(notification)

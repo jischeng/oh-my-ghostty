@@ -786,7 +786,10 @@ pub const Surface = struct {
     }
 
     pub fn draw(self: *Surface) void {
-        self.core_surface.draw() catch |err| {
+        // An explicit embedder draw also prepares an occluded window that is
+        // about to be presented. Automatic display/renderer callbacks continue
+        // to skip hidden surfaces via the ordinary drawFrame entry point.
+        self.core_surface.renderer.drawFrameForPresentation() catch |err| {
             log.err("error in draw err={}", .{err});
             return;
         };
@@ -1839,8 +1842,8 @@ pub const CAPI = struct {
         surface.refresh();
     }
 
-    /// Tell the surface that it needs to schedule a render
-    /// call as soon as possible (NOW if possible).
+    /// Synchronously draw the current frame, even if still occluded. Hosts use
+    /// this to prepare resized content before presenting a tab/window.
     export fn ghostty_surface_draw(surface: *Surface) void {
         surface.draw();
     }

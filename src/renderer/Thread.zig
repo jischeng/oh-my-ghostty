@@ -385,19 +385,22 @@ fn drainMailbox(self: *Thread) !void {
                 // Visibility affects our QoS class
                 self.setQosClass();
 
-                // If we became visible then we immediately rebuild cells
-                // (renderCallback skips updateFrame while invisible) and draw.
+                // Publish visibility before drawing. drawFrame checks the
+                // renderer's own visibility as well as the thread flag, so
+                // drawing first silently drops the initial foreground frame.
+                self.renderer.setVisible(v);
+
+                // Rebuild cells skipped while hidden, then draw immediately.
+                // Do not wait for a restarted display link: its next callback
+                // can expose the old, smaller IOSurface after a tab handoff.
                 if (v) {
                     self.renderer.updateFrame(
                         self.state,
                         self.flags.cursor_blink_visible,
                     ) catch |err|
                         log.warn("error rendering on visibility regain err={}", .{err});
-                    self.drawFrame(false);
+                    self.drawFrame(true);
                 }
-
-                // Notify the renderer so it can update any state.
-                self.renderer.setVisible(v);
 
                 // Note that we're explicitly today not stopping any
                 // cursor timers, draw timers, etc. These things have very

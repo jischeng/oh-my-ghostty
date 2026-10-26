@@ -1170,6 +1170,8 @@ GHOSTTY_API void ghostty_surface_update_config(ghostty_surface_t, ghostty_config
 GHOSTTY_API bool ghostty_surface_needs_confirm_quit(ghostty_surface_t);
 GHOSTTY_API bool ghostty_surface_process_exited(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_refresh(ghostty_surface_t);
+// Draw synchronously on the app thread, including an occluded surface being
+// prepared for presentation. Normal hidden surfaces do not redraw automatically.
 GHOSTTY_API void ghostty_surface_draw(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_set_content_scale(ghostty_surface_t, double, double);
 GHOSTTY_API void ghostty_surface_set_focus(ghostty_surface_t, bool);

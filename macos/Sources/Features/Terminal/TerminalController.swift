@@ -2229,6 +2229,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 .map(ObjectIdentifier.init)
             tabLayoutState.anticipateTabSelection(ObjectIdentifier(controller), from: sourceID)
         }
+        if let outgoingWindow = tabGroup?.selectedWindow {
+            controller.prepareTabPresentation(from: outgoingWindow)
+        }
         tabGroup?.selectedWindow = targetWindow
         controller.markTabActivated()
         // Key status alone does not guarantee native tab/front ordering.
@@ -3693,6 +3696,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             remaining.compactMap { $0.windowController as? TerminalController },
             selectedID: (nextWindow?.windowController as? TerminalController).map(ObjectIdentifier.init)
         )
+        if tabGroup.selectedWindow === window {
+            (nextWindow?.windowController as? TerminalController)?.prepareTabPresentation(from: window)
+        }
         window.close()
         // Do not leave the newly visible window rendering the pre-close rows
         // until the asynchronous KVO callbacks run.
@@ -4233,9 +4239,16 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         DevMemoryDiagnostics.windowClosing()
         if let window, let group = window.tabGroup {
             let remaining = group.windows.filter { $0 !== window }
+            let nextIndex = min(group.windows.firstIndex(of: window) ?? 0, max(0, remaining.count - 1))
             let successor = remaining.first(where: {
                 ($0.windowController as? TerminalController).map(ObjectIdentifier.init) == tabLayoutState.tabSnapshot.selectedID
-            }) ?? remaining.first
+            }) ?? (remaining.isEmpty ? nil : remaining[nextIndex])
+            // closeTabImmediately already prepares its successor before closing.
+            // Cover native window-close paths while their old selection is still
+            // published, without redrawing every background tab on each resize.
+            if tabLayoutState.tabSnapshot.selectedID == ObjectIdentifier(self) {
+                (successor?.windowController as? TerminalController)?.prepareTabPresentation(from: window)
+            }
             tabLayoutState.sidebarHost.windowWillClose(window, successor: successor)
         }
         super.windowWillClose(notification)

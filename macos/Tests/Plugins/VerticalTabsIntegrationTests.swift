@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import IOSurface
 import SwiftUI
 import Testing
 @testable import Ghostty
@@ -34,6 +35,70 @@ struct VerticalTabsIntegrationTests {
         surface.pwd = "/tmp/omg-title-location-test"
         #expect(controller.paneSessionContext(for: surface)?.workingDirectory == "/tmp/omg-title-location-test")
         #expect(publications > 0)
+    }
+
+    @Test func enlargedTabClosePreparesIncomingFramebuffer() async throws {
+        let appDelegate = try #require(NSApp.delegate as? AppDelegate)
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let first = TerminalController(appDelegate.ghostty, withBaseConfig: config, tabLayout: .vertical)
+        var controllers = [first]
+        defer {
+            for controller in controllers {
+                controller.window?.delegate = nil
+                controller.window?.close()
+            }
+        }
+        first.showWindow(nil)
+        first.window?.setContentSize(NSSize(width: 640, height: 400))
+        for _ in 0..<3 {
+            let next = try #require(TerminalController.newTab(
+                appDelegate.ghostty, from: controllers.last?.window, withBaseConfig: config
+            ))
+            controllers.append(next)
+            try await Task.sleep(for: .milliseconds(60))
+        }
+        let last = try #require(controllers.last)
+        let outgoing = try #require(last.window)
+        let group = try #require(outgoing.tabGroup)
+        last.selectVerticalTab(last)
+        outgoing.setContentSize(NSSize(width: 1_000, height: 680))
+        outgoing.contentView?.superview?.layoutSubtreeIfNeeded()
+
+        // Model the exact retained image from an occluded small window. Do not
+        // wait for a visibility render after close: its FIRST displayed image
+        // must already cover the enlarged layer.
+        for incoming in controllers.dropLast().reversed() {
+            let incomingWindow = try #require(incoming.window)
+            incomingWindow.contentView?.superview?.layoutSubtreeIfNeeded()
+            let view = try #require(incoming.focusedSurface ?? incoming.surfaceTree.first)
+            let surface = try #require(view.surface)
+            ghostty_surface_set_occlusion(surface, false)
+            try await Task.sleep(for: .milliseconds(60))
+            let layer = try #require(view.layer)
+            let oldImage = try #require(IOSurface(properties: [
+                .width: 64, .height: 40, .bytesPerElement: 4,
+                .bytesPerRow: 256, .allocSize: 10_240
+            ]))
+            layer.contents = oldImage
+            let closing = try #require(group.selectedWindow?.windowController as? TerminalController)
+            let frame = try #require(closing.window?.frame)
+            closing.closeTabImmediately(registerRedo: false)
+            #expect(group.selectedWindow === incomingWindow)
+            #expect(incomingWindow.frame == frame)
+            let image = try #require(layer.contents as? IOSurface)
+            #expect(image.width == Int((layer.bounds.width * layer.contentsScale).rounded(.down)))
+            #expect(image.height == Int((layer.bounds.height * layer.contentsScale).rounded(.down)))
+            #expect(image.width > oldImage.width && image.height > oldImage.height)
+
+            // Matching dimensions are already prepared; don't allocate another
+            // synchronous frame on each handoff/selection notification.
+            if let remaining = group.windows.first(where: { $0 !== incomingWindow }) {
+                remaining.setFrame(incomingWindow.frame, display: false)
+                incoming.prepareTabPresentation(from: remaining)
+                #expect((layer.contents as? IOSurface) === image)
+            }
+        }
     }
 
     @Test func sidebarRetainsRenderedRowsAcrossSelectionHandoff() async throws {

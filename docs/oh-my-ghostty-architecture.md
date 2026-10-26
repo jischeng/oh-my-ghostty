@@ -152,6 +152,8 @@ Vertical Tabs 不是独立 Sidebar 产品，而是 Ghostty tab bar 的另一种 
 
 每个原生 tab group 只保留一份 live vertical sidebar hosting view。各 NSWindow 的 shell 预留 sidebar 容器，提交选择或关闭当前 tab 时移动同一份 view，保留行身份与滚动状态；旧窗口最多保留上一帧静态图像，不能以清空/重建行树优化后台开销。拖出新窗口会复制布局偏好并建立独立 presentation，合并后回到目标组。连续新建按最新待显示 tab 计算插入位置，过期显示任务不能重新抢焦点；选中变化把对应行滚入可见区域。
 
+后台 tab 可以保留旧尺寸的 IOSurface 并停止自动重绘。窗口放大后关闭或切换 tab 时，Host 先同步即将显示窗口的尺寸和布局；仅当该 tab 的保留图像尺寸不匹配时，通过 app-thread 的显式 `ghostty_surface_draw` 同步准备一帧，再交给 AppKit 显示。普通隐藏层的 display 回调仍跳过绘制，不在 resize 时刷新整组后台 tab；恢复可见时先更新 renderer visibility，再立即重建并绘制，避免首帧被 hidden guard 丢弃。该准备路径沿用 renderer 的背景色和透明度，不叠加不透明兜底层。
+
 Layout 配置只对新窗口生效。运行时更换 orientation 需要替换 NSWindow class/titlebar hierarchy，当前不安全，因此不会重建已有 PTY、surface 或 scrollback。
 
 ### 6.3 Pi

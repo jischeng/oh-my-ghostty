@@ -1649,18 +1649,33 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self: *Self,
             sync: bool,
         ) !void {
+            try self.drawFrameWithVisibility(sync, false);
+        }
+
+        /// Explicit host preparation for an imminent tab/window presentation.
+        /// The host can still report occluded until AppKit commits the switch.
+        /// Keep ordinary hidden display callbacks cheap, but let this one draw
+        /// resize the retained front image before the window is exposed.
+        pub fn drawFrameForPresentation(self: *Self) !void {
+            try self.drawFrameWithVisibility(true, true);
+        }
+
+        fn drawFrameWithVisibility(
+            self: *Self,
+            sync: bool,
+            prepare_hidden: bool,
+        ) !void {
             // Hidden-layer callbacks must not block AppKit behind GPU cleanup.
-            if (!self.visible.load(.acquire)) return;
+            if (!prepare_hidden and !self.visible.load(.acquire)) return;
 
             // We hold a the draw mutex to prevent changes to any
             // data we access while we're in the middle of drawing.
             self.draw_mutex.lockUncancelable(global.io());
             defer self.draw_mutex.unlock(global.io());
 
-            // CoreAnimation can request a synchronous display even for a
-            // hidden tab after a layout change. Keep its last image instead of
-            // reallocating the spare GPU resources we just released.
-            if (!self.visible.load(.acquire)) return;
+            // Recheck after acquiring the lock. CoreAnimation display requests
+            // still skip hidden tabs; only explicit host preparation may draw.
+            if (!prepare_hidden and !self.visible.load(.acquire)) return;
 
             // After the graphics API is complete (so we defer) we want to
             // update our scrollbar state.

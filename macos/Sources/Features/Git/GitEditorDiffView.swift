@@ -81,7 +81,18 @@ struct GitEditorDiffView: View {
                     .truncationMode(.middle)
                     .help(model.selected?.displayPath ?? request.repository.worktreePath)
                     .layoutPriority(1)
+                if let presentation = model.content?.presentation {
+                    Text("−\(presentation.rows.filter { $0.added == false }.count)")
+                        .foregroundStyle(Color(colors.deleted)).font(.caption.monospacedDigit()).fixedSize()
+                    Text("+\(presentation.rows.filter { $0.added == true }.count)")
+                        .foregroundStyle(Color(colors.added)).font(.caption.monospacedDigit()).fixedSize()
+                }
                 Spacer()
+                HStack(spacing: 0) {
+                    reviewButton("Review", selected: true)
+                    reviewButton("Full Source", selected: false)
+                }
+                .modifier(GitToolbarSegmentedStyle(colors: colors))
                 if mode == GitL10n.text("Side by Side") {
                     toolbarButton("link",
                                   help: linkedScrolling ? GitL10n.text("Disable linked scrolling") : GitL10n.text("Enable linked scrolling"),
@@ -94,13 +105,15 @@ struct GitEditorDiffView: View {
                     Color.clear.frame(width: 28, height: 24).accessibilityHidden(true)
                 }
                 fileMenu
-                Picker(GitL10n.text("Review"), selection: $review) {
-                    Text(GitL10n.text("Review")).tag(true)
-                    Text(GitL10n.text("Full Source")).tag(false)
-                }.pickerStyle(.segmented).frame(width: 140)
                 HStack(spacing: 0) {
-                    modeButton("Unified", value: GitL10n.text("Inline"))
-                    modeButton("Split", value: GitL10n.text("Side by Side"))
+                    toolbarButton("rectangle.split.2x1", help: GitL10n.text("Side-by-side Diff"),
+                                  selected: mode == GitL10n.text("Side by Side"), width: 24) {
+                        clearHint(); mode = GitL10n.text("Side by Side")
+                    }
+                    toolbarButton("text.alignleft", help: GitL10n.text("Unified / Inline Diff"),
+                                  selected: mode == GitL10n.text("Inline"), width: 24) {
+                        clearHint(); mode = GitL10n.text("Inline")
+                    }
                 }
                 .modifier(GitToolbarSegmentedStyle(colors: colors))
                 toolbarButton("pencil", help: GitL10n.text("Open in Editor"),
@@ -129,15 +142,6 @@ struct GitEditorDiffView: View {
                     Text(sourceError).foregroundStyle(.secondary).padding()
                     GitDiffTextView(text: document.text)
                 } else if let presentation = content.presentation {
-                    HStack(spacing: 8) {
-                        Image(systemName: "doc.text").foregroundStyle(.secondary)
-                        Text(document.file.displayPath).lineLimit(1).truncationMode(.middle)
-                        Spacer()
-                        Text("−\(presentation.rows.filter { $0.added == false }.count)").foregroundStyle(Color(colors.deleted))
-                        Text("+\(presentation.rows.filter { $0.added == true }.count)").foregroundStyle(Color(colors.added))
-                    }
-                    .font(.system(size: 12)).padding(.horizontal, 14).frame(height: 36)
-                    .background(toolbarSurface)
                     if review {
                         GitDiffReviewView(presentation: presentation, before: content.before, after: content.after,
                                           path: document.file.path, theme: theme,
@@ -294,13 +298,14 @@ struct GitEditorDiffView: View {
         .disabled(disabled)
     }
 
-    private func modeButton(_ title: String, value: String) -> some View {
-        Button { clearHint(); mode = value } label: {
+    private func reviewButton(_ title: String, selected: Bool) -> some View {
+        Button { clearHint(); review = selected } label: {
             Text(GitL10n.text(title)).font(.system(size: 11, weight: .medium))
                 .padding(.horizontal, 9).frame(height: 24)
         }
-        .buttonStyle(GitToolbarButtonStyle(colors: colors, selected: mode == value))
-        .accessibilityValue(mode == value ? GitL10n.text("Selected") : "")
+        .foregroundStyle(Color(review == selected ? colors.accent : colors.secondary))
+        .buttonStyle(GitToolbarButtonStyle(colors: colors, selected: review == selected))
+        .accessibilityValue(review == selected ? GitL10n.text("Selected") : "")
     }
 
     private var toolbarDivider: some View {

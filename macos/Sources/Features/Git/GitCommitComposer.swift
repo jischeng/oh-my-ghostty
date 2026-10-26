@@ -51,9 +51,7 @@ struct GitCommitComposer: View {
                     Image(systemName: generationID == nil ? "sparkles" : "stop.fill")
                         .frame(width: 28, height: 28)
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(Color(colors.accent))
-                .background(Color(colors.text).opacity(0.05), in: RoundedRectangle(cornerRadius: 6))
+                .buttonStyle(GitCommitActionStyle(colors: colors, prominent: false))
                 .disabled(generationID == nil && (isBusy || isUpdatingIndex || !canCommit || stagedCount == 0 || repository == nil))
                 .help(GitL10n.text(generationID == nil ? "Generate a commit message using your configured agents" : "Cancel"))
                 .accessibilityLabel(GitL10n.text(generationID == nil ? "Generate" : "Cancel"))
@@ -66,8 +64,9 @@ struct GitCommitComposer: View {
                         .frame(maxWidth: .infinity).frame(height: 28)
                         .contentShape(Rectangle())
                     }
+                    .buttonStyle(GitCommitActionStyle(colors: colors, prominent: true))
                     .disabled(!allowsSubmit(stageAll: false, amend: false))
-                    Rectangle().fill(Color(colors.accent).opacity(0.2)).frame(width: 1, height: 16)
+                    Color.clear.frame(width: 4)
                     Menu {
                         commitOption("Commit Staged", stageAll: false, amend: false)
                         commitOption("Stage All and Commit", stageAll: true, amend: false)
@@ -79,13 +78,16 @@ struct GitCommitComposer: View {
                             .frame(width: 28, height: 28)
                     }
                     .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                    .foregroundStyle(Color(menuEnabled ? colors.accent : colors.secondary))
+                    .background(Color(colors.text).opacity(menuEnabled ? 0.10 : 0.035), in: RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(colors.text).opacity(menuEnabled ? 0.22 : 0.06)))
+                    .disabled(!menuEnabled)
                     .help(GitL10n.text("Commit options"))
                     .accessibilityLabel(GitL10n.text("Commit options"))
                 }
                 .buttonStyle(.plain)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(Color(colors.accent))
-                .background(Color(colors.accent).opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+
             }
             Text(GitL10n.format("{0} staged", String(stagedCount)))
                 .font(.system(size: 10)).foregroundStyle(.secondary)
@@ -103,6 +105,11 @@ struct GitCommitComposer: View {
             guard !Task.isCancelled else { return }
             notice = nil
         }
+    }
+
+    private var menuEnabled: Bool {
+        allowsSubmit(stageAll: false, amend: false) || allowsSubmit(stageAll: true, amend: false) ||
+        allowsSubmit(stageAll: false, amend: true) || allowsSubmit(stageAll: true, amend: true)
     }
 
     private func allowsSubmit(stageAll: Bool, amend: Bool) -> Bool {
@@ -160,6 +167,28 @@ struct GitCommitComposer: View {
                 } else { notice = error.localizedDescription }
             }
         }
+    }
+}
+
+private struct GitCommitActionStyle: ButtonStyle {
+    let colors: GitCollectionColors
+    let prominent: Bool
+    @Environment(\.isEnabled) private var enabled
+    @State private var hovered = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(enabled ? (prominent ? Color.white : Color(colors.accent)) : Color(colors.secondary).opacity(0.55))
+            .background(background(pressed: configuration.isPressed), in: RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6)
+                .stroke(Color(enabled ? colors.accent : colors.text).opacity(enabled ? 0.55 : 0.06)))
+            .onHover { hovered = $0 }
+    }
+
+    private func background(pressed: Bool) -> Color {
+        guard enabled else { return Color(colors.text).opacity(0.035) }
+        if prominent { return Color(colors.accent).opacity(pressed ? 0.65 : hovered ? 0.95 : 0.82) }
+        return Color(colors.accent).opacity(pressed ? 0.28 : hovered ? 0.20 : 0.10)
     }
 }
 

@@ -113,6 +113,31 @@ struct SSHRecoveryTests {
         #expect(controller.pendingSSHRecovery(for: surface)?.remoteWorkingDirectory == "/remote/work")
     }
 
+    @Test func sessionRestoreAttemptsSSHBeforeOfferingManualRecovery() throws {
+        let settings = OhMyGhosttySettings.shared
+        let previousMode = settings.startupMode
+        settings.startupMode = .restoreSessions
+        defer { settings.startupMode = previousMode }
+        let controller = try controller()
+        defer { controller.window?.delegate = nil; controller.window?.close() }
+        let surface = try #require(controller.surfaceTree.first)
+        // Force any real child launched by decoding to fail locally, without
+        // contacting a host or requesting credentials.
+        let replay = SSHReplayDescriptor(version: 1, ssh: "/usr/bin/ssh", forwardEnv: false,
+            terminfo: false, cache: false, args: ["-o", "ProxyCommand=/usr/bin/false", "cloud"])
+        let agent = AgentResumeDescriptor(agent: .pi,
+            conversationID: try #require(AgentConversationID("conversation-123")),
+            scope: .remote, workingDirectory: "/remote/work", sshReplay: replay)
+        controller.adoptSSHRecoveryDescriptor(.init(sshReplay: replay,
+            remoteWorkingDirectory: "/remote/work", localWorkingDirectory: "/tmp",
+            awaitingReconnect: true, interruptedAgent: agent), for: surface)
+        let restored = try JSONDecoder().decode(Ghostty.SurfaceView.self, from: JSONEncoder().encode(surface))
+        #expect(restored.sshResumeDescriptor?.isAwaitingReconnect == false)
+        #expect(restored.pendingSSHLaunchReplay == replay)
+        #expect(restored.sshResumeDescriptor?.interruptedAgent == agent)
+        #expect(restored.sshResumeDescriptor?.remoteWorkingDirectory == "/remote/work")
+    }
+
     @Test func restoredOfflineIntentSurvivesLocalSignalsAndReencodes() throws {
         let controller = try controller()
         defer { controller.window?.delegate = nil; controller.window?.close() }
@@ -129,11 +154,6 @@ struct SSHRecoveryTests {
         let saved = try #require(archive["sshResumeDescriptor"] as? [String: Any])
         #expect(saved["awaitingReconnect"] as? Bool == true)
         #expect(saved["remoteWorkingDirectory"] as? String == "/remote/work")
-        if OhMyGhosttySettings.shared.startupMode.restoresSessions {
-            let restored = try JSONDecoder().decode(Ghostty.SurfaceView.self, from: data)
-            #expect(restored.sshResumeDescriptor == descriptor)
-            #expect(restored.agentResumeDescriptor == nil)
-        }
         controller.dismissSSHRecovery(for: surface)
         #expect(controller.pendingSSHRecovery(for: surface) == nil)
     }

@@ -986,9 +986,12 @@ the process exits; inference cannot distinguish intentional logout from failure.
 Without validated argv no replay command is invented.
 
 The optional `awaitingReconnect` and `interruptedAgent` fields remain compatible
-with existing archives. Offline panes reopen a local shell with a recovery banner,
-without initiating SSH or periodically retrying. Local Agent restoration remains
-independent. **Reconnect in New Tab** launches the original argv, last known remote
+with existing archives. In Sessions startup mode, saved SSH panes get one fresh
+connection attempt before manual recovery, including panes marked `awaitingReconnect`
+by the previous app process. The launch clears that marker and seeds the one-shot
+replay handoff before lifecycle callbacks; a fresh status-255 failure restores the
+recovery banner. There is no periodic retry. Tabs startup mode opens local shells
+without launching SSH. A saved local Agent retains priority over offline SSH intent. **Reconnect in New Tab** launches the original argv, last known remote
 cwd and, when available, exact interrupted Agent conversation in a fresh PTY;
 the old pane keeps its output and any local processes. The destination receives
 the recovery descriptor before lifecycle callbacks and owns subsequent retries.

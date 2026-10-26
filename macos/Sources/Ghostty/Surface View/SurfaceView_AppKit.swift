@@ -2023,7 +2023,7 @@ extension Ghostty {
             // Layout-only recovery must not fail just because a stale Agent or
             // SSH descriptor cannot be decoded; it never launches that program.
             let resume: AgentResumeDescriptor?
-            let sshResume: SSHResumeDescriptor?
+            var sshResume: SSHResumeDescriptor?
             if startupMode.restoresSessions {
                 resume = try container.decodeIfPresent(
                     AgentResumeDescriptor.self, forKey: .agentResumeDescriptor
@@ -2038,6 +2038,13 @@ extension Ghostty {
                 sshResume = try? container.decodeIfPresent(
                     SSHResumeDescriptor.self, forKey: .sshResumeDescriptor
                 )
+            }
+            // Session restoration gets one fresh SSH attempt before offering
+            // manual recovery. An offline marker from the previous process
+            // (including update teardown) must not suppress that launch.
+            // A saved local Agent still owns its pane's startup command.
+            if startupMode.restoresSessions, resume?.scope != .local {
+                sshResume?.awaitingReconnect = false
             }
             if startupMode == .restoreTabs || sshResume?.isAwaitingReconnect == true {
                 config.workingDirectory = TerminalStartupRestorationPolicy.localWorkingDirectory(

@@ -2836,10 +2836,16 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         setupTabObservation()
     }
 
-    private func setupTabObservation() {
+    private func setupTabObservation(refresh: Bool = true, observationOwner: TerminalController? = nil) {
+        guard !tabPresentationIsClosing else { return }
         let currentGroup = window?.tabGroup
-        if observedVerticalTabGroup === currentGroup {
-            refreshTabs()
+        let owner = observationOwner ?? currentGroup?.windows.compactMap {
+            $0.windowController as? TerminalController
+        }.first(where: { !$0.tabPresentationIsClosing })
+        let ownsObservation = owner === self
+        if observedVerticalTabGroup === currentGroup,
+           (verticalTabWindowsObservation != nil) == ownsObservation {
+            if refresh { refreshTabs() }
             return
         }
 
@@ -2847,24 +2853,40 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         verticalTabSelectionObservation?.invalidate()
         observedVerticalTabGroup = currentGroup
 
-        guard let currentGroup else {
-            refreshTabs()
+        verticalTabWindowsObservation = nil
+        verticalTabSelectionObservation = nil
+        guard let currentGroup, ownsObservation else {
+            if refresh { refreshTabs() }
             return
         }
 
         verticalTabWindowsObservation = currentGroup.observe(
             \.windows,
             options: [.new]
-        ) { [weak self] _, _ in
-            DispatchQueue.main.async { self?.refreshTabs() }
+        ) { [weak currentGroup] _, _ in
+            Self.scheduleTabRefresh(in: currentGroup)
         }
         verticalTabSelectionObservation = currentGroup.observe(
             \.selectedWindow,
             options: [.new]
-        ) { [weak self] _, _ in
-            DispatchQueue.main.async { self?.refreshTabs() }
+        ) { [weak currentGroup] _, _ in
+            Self.scheduleTabRefresh(in: currentGroup)
         }
-        refreshTabs()
+        if refresh { refreshTabs() }
+    }
+
+    private static var pendingTabRefreshes: [ObjectIdentifier: DispatchWorkItem] = [:]
+
+    private static func scheduleTabRefresh(in group: NSWindowTabGroup?) {
+        guard let group else { return }
+        let id = ObjectIdentifier(group)
+        guard pendingTabRefreshes[id] == nil else { return }
+        let work = DispatchWorkItem { [weak group] in
+            pendingTabRefreshes.removeValue(forKey: id)
+            refreshTabs(in: group)
+        }
+        pendingTabRefreshes[id] = work
+        DispatchQueue.main.async(execute: work)
     }
 
     private var tabPresentationIsClosing = false
@@ -2882,11 +2904,22 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let controllers = windows.compactMap {
             $0.windowController as? TerminalController
         }.filter { !$0.tabPresentationIsClosing }
-        let sameControllers = tabControllers.count == controllers.count &&
-            zip(tabControllers, controllers).allSatisfy { $0 === $1 }
-        if !sameControllers {
+        if let tabGroup {
+            Self.refreshTabs(in: tabGroup)
+        } else {
+            applyTabSnapshot(controllers, selectedID: ObjectIdentifier(self))
+            tabLayoutState.updateTabs(controllers, selectedID: ObjectIdentifier(self))
+        }
+    }
+
+    private func applyTabSnapshot(
+        _ controllers: [TerminalController],
+        selectedID: ObjectIdentifier?,
+        membershipChanged: Bool = true
+    ) {
+        if membershipChanged {
             tabControllers = controllers
-            if tabGroup?.selectedWindow === window,
+            if selectedID == ObjectIdentifier(self),
                tabLayoutState.orderingMode != .manual {
                 DispatchQueue.main.async { [weak self] in
                     self?.reconcileTabOrganization()
@@ -2894,12 +2927,19 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             }
         }
 
-        let sharedState = tabGroup?.ghosttyTerminalShellLayoutState ?? tabLayoutState
-        for controller in controllers where controller.tabLayoutState !== sharedState {
-            controller.tabLayoutState = sharedState
-        }
+        if selectedTabID != selectedID { selectedTabID = selectedID }
+    }
 
-        let nativeSelectedWindow = tabGroup?.selectedWindow ?? window
+    private static func refreshTabs(in tabGroup: NSWindowTabGroup?) {
+        guard let tabGroup else { return }
+        pendingTabRefreshes.removeValue(forKey: ObjectIdentifier(tabGroup))?.cancel()
+        let controllers = tabGroup.windows.compactMap { $0.windowController as? TerminalController }
+            .filter { !$0.tabPresentationIsClosing }
+        guard let window = controllers.first?.window else { return }
+        let sharedState = tabGroup.ghosttyTerminalShellLayoutState
+        let membershipChanged = sharedState.tabSnapshot.controllers.map(ObjectIdentifier.init) !=
+            controllers.map(ObjectIdentifier.init)
+        let nativeSelectedWindow = tabGroup.selectedWindow ?? window
         let selectedWindow = if (nativeSelectedWindow.windowController as? TerminalController)?
             .tabPresentationIsClosing == true {
             controllers.first(where: { ObjectIdentifier($0) == sharedState.tabSnapshot.selectedID })?.window
@@ -2909,20 +2949,20 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
         let selectedID = (selectedWindow.windowController as? TerminalController)
             .map(ObjectIdentifier.init)
-        if selectedTabID != selectedID {
-            selectedTabID = selectedID
+        for controller in controllers {
+            let changedGroup = controller.tabLayoutState !== sharedState
+            if changedGroup { controller.tabLayoutState = sharedState }
+            controller.setupTabObservation(refresh: false, observationOwner: controllers.first)
+            controller.applyTabSnapshot(
+                controllers,
+                selectedID: selectedID,
+                membershipChanged: membershipChanged || changedGroup || controller.tabControllers.count != controllers.count
+            )
         }
         // Publish membership and selection together before releasing the optimistic
         // selection. Every native tab's sidebar reads this same group snapshot.
         sharedState.updateTabs(controllers, selectedID: selectedID)
         sharedState.reconcileTabSelection(selectedID)
-    }
-
-    private static func refreshTabs(in tabGroup: NSWindowTabGroup?) {
-        guard let tabGroup else { return }
-        for case let controller as TerminalController in tabGroup.windows.compactMap(\.windowController) {
-            controller.setupTabObservation()
-        }
     }
 
     // MARK: Terminal Creation
@@ -4127,6 +4167,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         tabPresentationIsClosing = true
         verticalTabWindowsObservation?.invalidate()
         verticalTabSelectionObservation?.invalidate()
+        // Native close/window-close paths also need to transfer the group's
+        // single observer after AppKit removes this window.
+        Self.scheduleTabRefresh(in: window?.tabGroup)
         DevMemoryDiagnostics.tabClosed()
         DevMemoryDiagnostics.windowClosing()
         super.windowWillClose(notification)

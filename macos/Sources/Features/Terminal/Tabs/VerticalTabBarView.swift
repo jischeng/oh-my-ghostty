@@ -63,7 +63,8 @@ struct VerticalTabSnapshot {
 }
 
 @MainActor
-final class VerticalTabWindowLayoutState: ObservableObject {
+final class VerticalTabPresentationState: ObservableObject {
+    @Published var pendingSelectedTabID: ObjectIdentifier?
     @Published private(set) var tabSnapshot = VerticalTabSnapshot()
     @Published var hoveredTabID: ObjectIdentifier?
 
@@ -82,6 +83,29 @@ final class VerticalTabWindowLayoutState: ObservableObject {
         )
     }
 
+}
+
+@MainActor
+final class VerticalTabWindowLayoutState: ObservableObject {
+    // Frequent tab/hover changes must not invalidate shell geometry or inspector views.
+    let tabPresentation = VerticalTabPresentationState()
+    var tabSnapshot: VerticalTabSnapshot { tabPresentation.tabSnapshot }
+    var hoveredTabID: ObjectIdentifier? {
+        get { tabPresentation.hoveredTabID }
+        set {
+            guard tabPresentation.hoveredTabID != newValue else { return }
+            tabPresentation.hoveredTabID = newValue
+        }
+    }
+    var pendingSelectedTabID: ObjectIdentifier? {
+        get { tabPresentation.pendingSelectedTabID }
+        set { tabPresentation.pendingSelectedTabID = newValue }
+    }
+
+    func updateTabs(_ controllers: [TerminalController], selectedID: ObjectIdentifier?) {
+        tabPresentation.updateTabs(controllers, selectedID: selectedID)
+    }
+
     @Published private(set) var isSidebarVisible: Bool
     @Published private(set) var sidebarWidth: CGFloat
     @Published private(set) var committedSidebarWidth: CGFloat
@@ -92,7 +116,6 @@ final class VerticalTabWindowLayoutState: ObservableObject {
     @Published private(set) var inspectorWidth = RightInspectorMetrics.defaultWidth
     @Published private(set) var committedInspectorWidth = RightInspectorMetrics.defaultWidth
     @Published private(set) var selectedInspectorPaneID: String?
-    @Published private(set) var pendingSelectedTabID: ObjectIdentifier?
 
     private var pendingSelectionSourceID: ObjectIdentifier?
     private var pendingSidebarWidth: CGFloat?
@@ -719,6 +742,7 @@ final class VerticalTabDragLifecycleMonitor: ObservableObject {
 }
 
 struct TerminalTabSidebarView: View {
+    @ObservedObject private var tabPresentation: VerticalTabPresentationState
     @ObservedObject var controller: TerminalController
     @ObservedObject var layoutState: VerticalTabWindowLayoutState
     @ObservedObject var statusStore: TabActivityStore
@@ -751,6 +775,7 @@ struct TerminalTabSidebarView: View {
         self.backgroundColor = backgroundColor
         self.backgroundOpacity = backgroundOpacity
         self.iconProvider = iconProvider
+        self.tabPresentation = layoutState.tabPresentation
     }
 
     private var tabs: [TerminalController] {

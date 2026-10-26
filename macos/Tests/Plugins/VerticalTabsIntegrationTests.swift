@@ -36,6 +36,38 @@ struct VerticalTabsIntegrationTests {
         #expect(publications > 0)
     }
 
+    @Test func rapidTabLifecycle() async throws {
+        let appDelegate = try #require(NSApp.delegate as? AppDelegate)
+        var configuration = Ghostty.SurfaceConfiguration()
+        configuration.command = "sleep 30"
+        let first = TerminalController(appDelegate.ghostty, withBaseConfig: configuration, tabLayout: .vertical)
+        var controllers = [first]
+        defer {
+            for controller in controllers {
+                controller.window?.delegate = nil
+                controller.window?.close()
+            }
+        }
+        first.showWindow(nil)
+        let start = ContinuousClock.now
+        for _ in 0..<10 {
+            let next = try #require(TerminalController.newTab(
+                appDelegate.ghostty, from: controllers.last?.window, withBaseConfig: configuration
+            ))
+            controllers.append(next)
+            await Task.yield()
+        }
+        let created = ContinuousClock.now
+        #expect(first.tabLayoutState.tabSnapshot.controllers.count == 11)
+        for controller in controllers.dropFirst().reversed() {
+            controller.closeTabImmediately(registerRedo: false)
+            await Task.yield()
+        }
+        let closed = ContinuousClock.now
+        #expect(first.tabLayoutState.tabSnapshot.controllers.count == 1)
+        print("TAB_BURST create=\(start.duration(to: created)) close=\(created.duration(to: closed))")
+    }
+
     @Test func nativeTabCreationKeepsSharedSidebarMembership() async throws {
         let appDelegate = try #require(NSApp.delegate as? AppDelegate)
         var configuration = Ghostty.SurfaceConfiguration()
@@ -64,7 +96,7 @@ struct VerticalTabsIntegrationTests {
         try capture(window: try #require(controllers.last?.window), path: "/tmp/omg-native-tab-membership.png")
         let closingID = ObjectIdentifier(try #require(controllers.last))
         var closeSnapshots: [VerticalTabSnapshot] = []
-        let closeObserver = first.tabLayoutState.$tabSnapshot.dropFirst().sink {
+        let closeObserver = first.tabLayoutState.tabPresentation.$tabSnapshot.dropFirst().sink {
             closeSnapshots.append($0)
         }
         controllers.last?.closeTabImmediately(registerRedo: false)
@@ -88,6 +120,13 @@ struct VerticalTabsIntegrationTests {
         #expect(reopened.tabLayoutState.tabSnapshot.controllers.count == 4)
         #expect(reopened.tabLayoutState.tabSnapshot.selectedID == ObjectIdentifier(reopened))
         try capture(window: try #require(reopened.window), path: "/tmp/omg-native-tab-reopened.png")
+        first.closeTabImmediately(registerRedo: false)
+        try await Task.sleep(for: .milliseconds(100))
+        let successor = controllers[1]
+        successor.window?.tabGroup?.selectedWindow = successor.window
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(successor.tabLayoutState.tabSnapshot.controllers.count == 3)
+        #expect(successor.tabLayoutState.tabSnapshot.selectedID == ObjectIdentifier(successor))
     }
 
     @Test func sharedSidebarSnapshotPublishesMembershipAndSelectionTogether() throws {
@@ -109,15 +148,19 @@ struct VerticalTabsIntegrationTests {
         state.updateTabs([first], selectedID: firstID)
         state.anticipateTabSelection(secondID, from: firstID)
         var snapshots: [VerticalTabSnapshot] = []
-        let observer = state.$tabSnapshot.dropFirst().sink { snapshots.append($0) }
+        let observer = state.tabPresentation.$tabSnapshot.dropFirst().sink { snapshots.append($0) }
         defer { observer.cancel() }
         state.updateTabs([first, second], selectedID: secondID)
         state.reconcileTabSelection(secondID)
         #expect(state.pendingSelectedTabID == nil)
         #expect(second.tabLayoutState.tabSnapshot.selectedID == secondID)
         #expect(first.tabLayoutState.tabSnapshot.selectedID == secondID)
+        var shellInvalidations = 0
+        let shellObserver = state.objectWillChange.sink { shellInvalidations += 1 }
+        defer { shellObserver.cancel() }
         state.hoveredTabID = firstID
         state.updateTabs([second], selectedID: secondID)
+        #expect(shellInvalidations == 0)
         #expect(state.hoveredTabID == nil)
         #expect(snapshots.count == 2)
         #expect(snapshots[0].controllers.map(ObjectIdentifier.init) == [firstID, secondID])

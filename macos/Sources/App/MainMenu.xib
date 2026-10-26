@@ -345,13 +345,13 @@
                                     <action selector="toggleCommandPalette:" target="-1" id="FcT-XD-gM1"/>
                                 </connections>
                             </menuItem>
-                            <menuItem title="Toggle Sidebar" keyEquivalent="s" id="OMG-SB-Tgl">
-                                <modifierMask key="keyEquivalentModifierMask" shift="YES" command="YES"/>
+                            <menuItem title="Toggle Sidebar" keyEquivalent="b" id="OMG-SB-Tgl">
+                                <modifierMask key="keyEquivalentModifierMask" command="YES"/>
                                 <connections>
                                     <action selector="toggleSidebar:" target="bbz-4X-AYv" id="OMG-SB-Act"/>
                                 </connections>
                             </menuItem>
-                            <menuItem title="Toggle Inspector" keyEquivalent="i" id="OMG-IN-Tgl">
+                            <menuItem title="Toggle Inspector" keyEquivalent="b" id="OMG-IN-Tgl">
                                 <modifierMask key="keyEquivalentModifierMask" shift="YES" command="YES"/>
                                 <connections>
                                     <action selector="toggleInspector:" target="bbz-4X-AYv" id="OMG-IN-Act"/>

@@ -423,7 +423,7 @@ private struct InspectorTitlebarControls: View {
 
             TerminalTitlebarIconButton(
                 systemName: "sidebar.right",
-                help: inspectorVisible ? "Hide Inspector" : "Show Inspector",
+                help: inspectorVisible ? "Hide Inspector · ⌘⇧B" : "Show Inspector · ⌘⇧B",
                 action: toggleInspector
             )
             .frame(width: TerminalTitlebarMetrics.inspectorCollapsedWidth)

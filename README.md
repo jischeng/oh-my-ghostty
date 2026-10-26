@@ -150,6 +150,8 @@ app; see [configuration and storage](docs/settings/configuration.md).
 
 | Shortcut | Action |
 | --- | --- |
+| ⌘B | Toggle the left tab sidebar |
+| ⌘⇧B | Toggle the right Inspector sidebar |
 | ⌘⇧E | Toggle Quick Input (configurable) |
 | ⌘↩ | Send the draft; save when editing a queued message |
 | ⌥⌘↩ | Queue the draft; move a queued edit to the queue end |

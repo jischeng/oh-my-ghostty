@@ -102,6 +102,7 @@ struct TerminalCommandPaletteView: View {
         if sidebarIsSupported {
             options.append(CommandOption(
                 title: "Toggle Sidebar",
+                symbols: ["⌘", "B"],
                 leadingIcon: "sidebar.left",
                 action: onToggleSidebar
             ))
@@ -109,6 +110,7 @@ struct TerminalCommandPaletteView: View {
         if inspectorIsSupported {
             options.append(CommandOption(
                 title: "Toggle Inspector",
+                symbols: ["⇧", "⌘", "B"],
                 leadingIcon: "sidebar.right",
                 action: onToggleInspector
             ))

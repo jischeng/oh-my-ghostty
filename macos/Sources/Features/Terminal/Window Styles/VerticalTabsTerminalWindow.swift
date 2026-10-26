@@ -115,7 +115,7 @@ private struct VerticalTabsTitlebarControls: View {
         HStack(spacing: TerminalTitlebarControlStyle.itemSpacing) {
             TerminalTitlebarIconButton(
                 systemName: "sidebar.left",
-                help: layoutState.isSidebarVisible ? "Hide Tabs" : "Show Tabs",
+                help: layoutState.isSidebarVisible ? "Hide Tabs · ⌘B" : "Show Tabs · ⌘B",
                 action: toggleSidebar
             )
             TerminalTitlebarIconButton(

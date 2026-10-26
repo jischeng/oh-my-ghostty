@@ -11,15 +11,18 @@ extension TerminalController {
               let connection = try? GitSSHConnection(session: context) else { return }
         let agent = agentActivity(for: surface).flatMap { SupportedAgent(rawValue: $0.source) }
             ?? agentResumeDescriptor(for: surface)?.agent
-        guard let keys = QuickInputDraftBridge.importKeys(
-            setting: setting, agent: agent, hasAgentActivity: agentActivity(for: surface) != nil
-        ) else {
-            return
-        }
+        let hasAgentActivity = agentActivity(for: surface) != nil
         let request = UUID().uuidString
         quickInputDraftImportTask = Task { @MainActor [weak self, weak surface] in
             defer { self?.quickInputDraftImportTask = nil }
             do {
+                let foregroundAgent = try await QuickInputRemoteDraftBridge.foregroundAgent(
+                    connection: connection, session: ssh.connectionID, tty: tty
+                )
+                guard !Task.isCancelled,
+                      let keys = QuickInputDraftBridge.importKeys(
+                        setting: setting, agent: foregroundAgent ?? agent, hasAgentActivity: hasAgentActivity
+                      ) else { return }
                 try await QuickInputRemoteDraftBridge.begin(
                     connection: connection, session: ssh.connectionID, request: request, tty: tty
                 )

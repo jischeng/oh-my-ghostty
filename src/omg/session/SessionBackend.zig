@@ -11,6 +11,7 @@ const c = @cImport({
     @cInclude("sys/un.h");
     @cInclude("unistd.h");
     @cInclude("sys/time.h");
+    @cInclude("errno.h");
 });
 alloc: std.mem.Allocator,
 path: [:0]u8,
@@ -18,6 +19,7 @@ pane_id: ?[]u8 = null,
 fd: c_int = -1,
 write_mutex: std.Io.Mutex = .init,
 ready: std.atomic.Value(bool) = .init(false),
+stopping: std.atomic.Value(bool) = .init(false),
 requested_size: std.atomic.Value(u32) = .init((80 << 16) | 24),
 
 pub fn init(alloc: std.mem.Allocator, path: []const u8, pane_id: ?[]const u8) !Self {
@@ -51,13 +53,12 @@ pub fn threadEnter(self: *Self, _: std.mem.Allocator, io: *HostIO, td: *HostIO.T
     }
     var timeout = c.struct_timeval{ .tv_sec = 1, .tv_usec = 0 };
     _ = c.setsockopt(self.fd, c.SOL_SOCKET, c.SO_SNDTIMEO, &timeout, @sizeOf(@TypeOf(timeout)));
-    if (c.connect(self.fd, @ptrCast(&address), @sizeOf(@TypeOf(address))) != 0) return error.ConnectFailed;
-    if (self.pane_id) |id| try self.send('H', 0, id);
     const grid = io.size.grid();
     self.requested_size.store((@as(u32, grid.columns) << 16) | grid.rows, .release);
     td.backend = .{ .omg_session = .{ .thread = try std.Thread.spawn(.{}, reader, .{ self, io }) } };
 }
 pub fn threadExit(self: *Self, td: *HostIO.ThreadData) void {
+    self.stopping.store(true, .release);
     _ = c.shutdown(self.fd, c.SHUT_RDWR);
     td.backend.omg_session.thread.join();
     _ = c.close(self.fd);
@@ -116,6 +117,19 @@ fn reader(self: *Self, io: *HostIO) void {
     self.readLoop(io) catch |err| std.log.warn("OMG session disconnected: {s}", .{@errorName(err)});
 }
 fn readLoop(self: *Self, io: *HostIO) !void {
+    var address: c.struct_sockaddr_un = std.mem.zeroes(c.struct_sockaddr_un);
+    address.sun_family = c.AF_UNIX;
+    @memcpy(@as([*]u8, @ptrCast(&address.sun_path))[0..self.path.len], self.path);
+    // Deployment may upload the runtime before publishing the local socket.
+    // This runs on the dedicated reader, never the AppKit thread.
+    var attempts: usize = 0;
+    while (c.connect(self.fd, @ptrCast(&address), @sizeOf(@TypeOf(address))) != 0) {
+        if (self.stopping.load(.acquire)) return error.Disconnected;
+        attempts += 1;
+        if (attempts >= 600) return error.ConnectFailed;
+        _ = c.usleep(100_000);
+    }
+    if (self.pane_id) |id| try self.send('H', 0, id);
     var sequence: ?u64 = null;
     while (true) {
         var h: [13]u8 = undefined;
@@ -159,6 +173,15 @@ fn readLoop(self: *Self, io: *HostIO) !void {
                 try io.renderer_wakeup.notify();
             },
             'B' => {}, // Writer is occupied; remain attached as an observer.
+            'E' => {
+                io.processOutput("\r\n[OMG Session] ");
+                // Error text is presentation only, never interpret it as VT.
+                for (bytes) |byte| {
+                    if (byte >= 0x20 and byte != 0x7f) io.processOutput(&.{byte});
+                }
+                io.processOutput("\r\n");
+                return;
+            },
             'X' => return,
             else => return error.InvalidFrame,
         }

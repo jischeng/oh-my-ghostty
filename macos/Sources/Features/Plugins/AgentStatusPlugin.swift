@@ -209,7 +209,7 @@ enum AgentHookRemoteAction: String {
 
 struct AgentHookInstaller {
     static let marker = "_omg_agent_status"
-    static let hookVersion = 10
+    static let hookVersion = 11
     static let detectorMarkerVersion = 1
     static let didChangeNotification = Notification.Name(
         "com.oh-my-ghostty.agentIntegrationDidChange"
@@ -1630,12 +1630,16 @@ else:
             metadata += ";omg_conversation=%s"
             arguments += " \"$omg_conversation\""
         }
-        return ": \(marker); : _omg_agent_status_v\(hookVersion); " + setup +
+        let runtimeReport: String = if agent == .codex || agent == .claude {
+            "if [ -n \"${OMG_RUNTIME_BIN-}\" ] && [ -n \"${omg_conversation-}\" ]; then " +
+                "\"$OMG_RUNTIME_BIN\" report \(agent.rawValue) \(state?.rawValue ?? "end") \"$omg_conversation\" \"$PWD\" >/dev/null 2>&1 || true; fi; "
+        } else { "" }
+        return ": \(marker); : _omg_agent_status_v\(hookVersion); " + setup + runtimeReport +
             "omg_tty=$(ps -o tty= -p \"$PPID\" 2>/dev/null | tr -d ' '); " +
             "omg_pgid=$(ps -o pgid= -p \"$PPID\" 2>/dev/null | tr -d ' '); " +
             "case \"$omg_pgid\" in ''|*[!0-9]*) exit 0;; esac; " +
             "case \"$omg_tty\" in ''|*[!A-Za-z0-9/._-]*) omg_tty=tty;; esac; " +
-            "omg_scope=local; test -n \"${SSH_CONNECTION-}\" && omg_scope=remote; " +
+            "omg_scope=local; test -n \"${SSH_CONNECTION-}${OMG_RUNTIME_REMOTE-}\" && omg_scope=remote; " +
             "printf '\\033]3008;\(action)=omg-agent-\(agent.rawValue)-%s;" +
             "\(metadata)\\007' \(arguments) > \"/dev/$omg_tty\" " +
             "2>/dev/null || true"
@@ -1689,9 +1693,10 @@ print(json.dumps(response))
 // OMG agent status integration for Pi.
 // marker: _omg_agent_status
 import { closeSync, openSync, writeSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 
 const contextId = `omg-agent-pi-${process.pid}`;
-const scope = process.env.SSH_CONNECTION ? "remote" : "local";
+const scope = process.env.SSH_CONNECTION || process.env.OMG_RUNTIME_REMOTE ? "remote" : "local";
 function report(state?: string, end = false, context?: any, attention?: string, phase?: string) {
   let fd: number | undefined;
   try {
@@ -1705,6 +1710,11 @@ function report(state?: string, end = false, context?: any, attention?: string, 
     const sessionCwd = rawCwd && String(rawCwd).startsWith("/") &&
         String(rawCwd).length <= 4096 && !String(rawCwd).includes("\0")
       ? `;omg_cwd=${encodeURIComponent(String(rawCwd))}` : "";
+    if (process.env.OMG_RUNTIME_BIN && conversation && sessionCwd) {
+      spawnSync(process.env.OMG_RUNTIME_BIN,
+        ["report", "pi", end ? "end" : String(state), String(raw), String(rawCwd)],
+        { stdio: "ignore", timeout: 1000 });
+    }
     const attentionKind = attention ? `;omg_attention=${attention}` : "";
     const activityPhase = phase ? `;omg_phase=${phase};message=Background%20work%20running` : "";
     fd = openSync("/dev/tty", "w");

@@ -81,11 +81,16 @@ xcodebuild \
   OBJROOT="$build_root/obj-universal" \
   build
 
+# Package all supported remote runtimes and a universal local relay. No remote
+# compilation/download is required when a released client opens its first host.
+python3 dist/macos/build-session-runtime.py --output "$build_root/session-runtime" --macos all
+
 bundle_version=""
 for arch in arm64 x86_64 universal; do
   app="$build_root/$arch/Release/OMG.app"
   bin="$app/Contents/MacOS/omg"
   [[ -x "$bin" ]] || { echo "missing $app" >&2; exit 1; }
+  ditto "$build_root/session-runtime" "$app/Contents/Resources/session-runtime"
 
   actual_archs=$(lipo -archs "$bin")
   if [[ "$arch" == universal ]]; then

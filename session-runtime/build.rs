@@ -32,10 +32,14 @@ fn main() {
     println!("cargo:rustc-link-lib=static=omg_vt");
     println!("cargo:rustc-link-search=native={}", lib.display());
     println!("cargo:rustc-link-lib=dylib=ghostty-vt");
-    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib.display());
     if env::var("CARGO_CFG_TARGET_OS").unwrap() == "linux" {
         println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+    } else {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path");
     }
+    // Development tests use the build directory; packaged artifacts find their
+    // sibling library first and never depend on the checkout being present.
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib.display());
     println!("cargo:rerun-if-changed=src/vt.c");
     println!("cargo:rerun-if-changed={}", lib.display());
 }

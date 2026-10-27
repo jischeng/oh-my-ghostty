@@ -54,6 +54,20 @@ struct PaneSessionContext: Equatable, Sendable {
         self.staleRemoteTerminalTitle = nil
     }
 
+    mutating func applyRuntimeConnection(_ descriptor: SessionRuntimeDescriptor, workingDirectory: String?) {
+        let connection = descriptor.connection
+        let ssh = SSH(connectionID: "omg-runtime-" + descriptor.identity,
+                      alias: connection.destination, serverID: nil,
+                      replay: .init(version: 1, ssh: connection.executablePath, forwardEnv: true,
+                                    terminfo: true, cache: true, args: connection.options + [connection.destination],
+                                    localWorkingDirectory: connection.localWorkingDirectory),
+                      transferTarget: connection.destination, localProcessGroupID: nil)
+        let next: State = if let workingDirectory, workingDirectory.hasPrefix("/") {
+            .sshReady(ssh, workingDirectory: workingDirectory)
+        } else { .sshConnecting(ssh) }
+        if state != next { state = next; revision &+= 1 }
+    }
+
     var workingDirectory: String? {
         switch state {
         case .local, .sshConnecting:

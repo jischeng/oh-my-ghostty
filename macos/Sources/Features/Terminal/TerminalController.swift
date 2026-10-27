@@ -1144,6 +1144,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 workingDirectory: surface.pwd,
                 terminalTitle: surface.title
             )
+            if let runtime = surface.runtimeDescriptor {
+                paneSessionContexts[surface.id]?.applyRuntimeConnection(runtime, workingDirectory: surface.pwd)
+            }
             // Establish the local epoch before any SSH transition, even if
             // Info has never been opened and no title/PWD event was emitted.
             if let context = paneSessionContexts[surface.id] {
@@ -1163,10 +1166,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                         workingDirectory: pwd,
                         terminalTitle: title
                     )
-                    context.updateLocalMetadata(
-                        workingDirectory: pwd,
-                        terminalTitle: title
-                    )
+                    if let runtime = surface.runtimeDescriptor {
+                        context.applyRuntimeConnection(runtime, workingDirectory: pwd)
+                    } else {
+                        context.updateLocalMetadata(workingDirectory: pwd, terminalTitle: title)
+                    }
                     updatePaneSessionContext(context, for: surface.id)
                     updateAgentTitleActivity(title, for: surface.id)
                 }
@@ -2069,6 +2073,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         inherited config: Ghostty.SurfaceConfiguration?,
         from source: Ghostty.SurfaceView
     ) -> Ghostty.SurfaceConfiguration? {
+        if let runtime = source.runtimeDescriptor {
+            var result = config ?? .init()
+            try? runtime.configure(&result)
+            result.workingDirectory = nil
+            return result
+        }
         guard let session = paneSessionContext(for: source) else { return config }
         return Self.tabConfiguration(
             inherited: config,
@@ -2117,6 +2127,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         inherited config: Ghostty.SurfaceConfiguration?,
         from source: Ghostty.SurfaceView
     ) -> Ghostty.SurfaceConfiguration? {
+        if let runtime = source.runtimeDescriptor {
+            var result = config ?? .init()
+            try? runtime.configure(&result)
+            result.workingDirectory = nil
+            return result
+        }
         guard let session = paneSessionContext(for: source) else { return config }
         let replay: SSHReplayDescriptor? = switch session.state {
         case .local:

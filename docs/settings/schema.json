@@ -372,6 +372,34 @@
       "description": "Allow completion events to request a notification.",
       "type": "boolean"
     },
+    "sessions.runtimeDetachedHours": {
+      "category": "general",
+      "default": 24,
+      "minimum": 0,
+      "maximum": 8760,
+      "description": "Maximum detached SSH session lifetime; zero explicitly means unlimited.",
+      "type": "number"
+    },
+    "sessions.runtimeExpiration": {
+      "category": "general",
+      "default": "",
+      "description": "Optional ISO-8601 deadline for detached sessions; empty disables it.",
+      "type": "string"
+    },
+    "sessions.runtimeCloseOnAgentDone": {
+      "category": "general",
+      "default": false,
+      "description": "Close detached Agent sessions only after verified completion and durable recovery metadata.",
+      "type": "boolean"
+    },
+    "sessions.runtimeDoneGraceSeconds": {
+      "category": "general",
+      "default": 60,
+      "minimum": 1,
+      "maximum": 86400,
+      "description": "Grace period before closing a completed detached Agent session.",
+      "type": "number"
+    },
     "sessions.startupMode": {
       "category": "general",
       "default": "restoreSessions",

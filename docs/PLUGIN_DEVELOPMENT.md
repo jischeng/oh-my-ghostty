@@ -19,6 +19,27 @@ The Experimental `PluginInstallationManager` can download a GitHub repository's
 Support Plugins directory, but no installed package is launched or connected to
 runtime yet. There is no public SDK, socket listener, or hot reload command.
 
+## Native Session Runtime hooks (Experimental)
+
+The SSH runtime is an independent PTY owner, not a third-party plugin loader.
+Managed hook generation version 11 additionally reports Codex/Claude/Pi activity
+through `OMG_RUNTIME_BIN report` when that variable is present. The runtime injects
+`OMG_RUNTIME_EVENT_SOCKET`, `OMG_RUNTIME_EVENT_TOKEN` and `OMG_RUNTIME_GENERATION`
+into the child environment. Events go to a private Unix datagram socket; the daemon
+checks the capability, generation, reporter's OS session and typed Agent recovery
+descriptor. Tokens are not terminal output or persistent metadata. Ordinary terminal
+OSC 3008 status behavior remains available without this runtime.
+
+A `done` event is task completion, not process exit. Optional completion cleanup
+applies only while detached, after a grace period, with an existing conversation
+store. New activity/input cancels it. `end` clears completion eligibility but does
+not erase the daemon's last durable conversation recovery record. Detached TTL and
+UTC deadline decisions are made remotely even while the Mac App is closed.
+Recovery launches allowlisted manifest-equivalent arguments for the original
+conversation ID and project directory; it does not replay arbitrary hook commands.
+The new process gets a new generation and PID. No-ID or unsupported Agents do not
+qualify for completion-driven cleanup; process TTL can still end their session.
+
 ## Built-in Git review and commit actions
 
 Local Git filesystem events wake the visible Inspector after a short coalescing

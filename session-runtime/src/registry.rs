@@ -1,0 +1,230 @@
+//! Host session registry with durable tombstones, bounded retention and safe resume.
+use crate::{
+    host::valid_id,
+    lifecycle::{unix_time, EndReason, Policy},
+    record::{nonce, Record},
+    server::{self, ManagedSession},
+};
+use std::{
+    collections::HashMap,
+    fs, io,
+    os::unix::net::UnixStream,
+    path::PathBuf,
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
+};
+const MAX_RUNNING: usize = 64;
+const MAX_RECORDS: usize = 2048;
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenRequest {
+    pub id: String,
+    pub policy: Policy,
+    pub create: bool,
+}
+
+pub struct Registry {
+    pub root: PathBuf,
+    pub command: Vec<String>,
+    pub policy: Policy,
+    workers: HashMap<String, JoinHandle<()>>,
+    last_maintenance: Instant,
+}
+impl Registry {
+    pub fn new(root: PathBuf, command: Vec<String>, policy: Policy) -> Self {
+        Self {
+            root,
+            command,
+            policy,
+            workers: HashMap::new(),
+            last_maintenance: Instant::now() - Duration::from_secs(30),
+        }
+    }
+    pub fn maintenance(&mut self) {
+        let finished: Vec<_> = self
+            .workers
+            .iter()
+            .filter(|(_, h)| h.is_finished())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in finished {
+            if let Some(h) = self.workers.remove(&id) {
+                let _ = h.join();
+            }
+        }
+        if self.last_maintenance.elapsed() < Duration::from_secs(30) {
+            return;
+        }
+        self.last_maintenance = Instant::now();
+        let now = unix_time();
+        if let Ok(entries) = fs::read_dir(&self.root) {
+            for entry in entries.flatten() {
+                if entry.path().extension().is_some_and(|s| s == "json") {
+                    if let Ok(record) = Record::load(&entry.path()) {
+                        if !self.workers.contains_key(&record.id)
+                            && record.ended.is_some()
+                            && now.saturating_sub(record.updated_at)
+                                > record.policy.record_retention_seconds
+                        {
+                            let _ = fs::remove_file(entry.path());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.workers.is_empty()
+    }
+    pub fn list(&self) -> io::Result<Vec<Record>> {
+        let mut records = vec![];
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            if entry.path().extension().is_some_and(|s| s == "json") {
+                if let Ok(r) = Record::load(&entry.path()) {
+                    records.push(r);
+                }
+            }
+        }
+        Ok(records)
+    }
+    pub fn connect(&mut self, id: &str, resume_generation: Option<&str>) -> io::Result<UnixStream> {
+        self.connect_with(id, resume_generation, None, true)
+    }
+    pub fn open(&mut self, request: &OpenRequest) -> io::Result<UnixStream> {
+        request.policy.validate()?;
+        let first = self.connect_with(
+            &request.id,
+            None,
+            Some(request.policy.clone()),
+            request.create,
+        );
+        if first.is_err() && valid_id(&request.id) {
+            if let Ok(record) = Record::load(&self.root.join(format!("{}.json", request.id))) {
+                if record.ended.is_some_and(EndReason::resumable) && record.resume.is_some() {
+                    return self.connect_with(&request.id, Some(&record.generation), None, false);
+                }
+            }
+        }
+        first
+    }
+    fn connect_with(
+        &mut self,
+        id: &str,
+        resume_generation: Option<&str>,
+        policy: Option<Policy>,
+        create: bool,
+    ) -> io::Result<UnixStream> {
+        if !valid_id(id) {
+            return Err(io::Error::other("invalid session identity"));
+        }
+        self.maintenance();
+        use sha2::{Digest, Sha256};
+        let key = format!("{:x}", Sha256::digest(id.as_bytes()));
+        let socket = self
+            .root
+            .parent()
+            .unwrap()
+            .join(format!("{}.sock", &key[..16]));
+        let path = self.root.join(format!("{id}.json"));
+        if self.workers.contains_key(id) {
+            return UnixStream::connect(socket);
+        }
+        if self.workers.len() >= MAX_RUNNING {
+            return Err(io::Error::other("active session quota exceeded"));
+        }
+        let mut argv = self.command.clone();
+        let mut record = if path.exists() {
+            let mut record = Record::load(&path)?;
+            if record.ended.is_none() {
+                record.pid = None;
+                record.ended = Some(EndReason::Lost);
+                record.save(&path)?;
+            }
+            if resume_generation != Some(record.generation.as_str())
+                || !record.ended.is_some_and(EndReason::resumable)
+            {
+                return Err(io::Error::other(format!(
+                    "session ended: {:?}; inspect its record before resuming",
+                    record.ended
+                )));
+            }
+            let resume = record
+                .resume
+                .as_ref()
+                .ok_or_else(|| io::Error::other("session has no Agent recovery descriptor"))?;
+            if !resume.store_exists() {
+                return Err(io::Error::other(
+                    "Agent conversation store unavailable; refusing new conversation",
+                ));
+            }
+            let args = resume.arguments()?;
+            let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+            let script = format!(
+                "exec {}",
+                args.iter().map(|s| quote(s)).collect::<Vec<_>>().join(" ")
+            );
+            let shell = self
+                .command
+                .first()
+                .ok_or_else(|| io::Error::other("missing shell"))?
+                .clone();
+            argv = vec![shell, "-l".into(), "-i".into(), "-c".into(), script];
+            record.generation = nonce()?;
+            record.ended = None;
+            record.pid = None;
+            record
+        } else {
+            if resume_generation.is_some() || !create {
+                return Err(io::Error::other("unknown session; cannot resume"));
+            }
+            if self.list()?.len() >= MAX_RECORDS {
+                return Err(io::Error::other("session metadata quota exceeded"));
+            }
+            // A compact permanent marker distinguishes a new pane from an
+            // expired/deleted recovery record, avoiding silent recreation.
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(self.root.join(format!("{id}.created")))?;
+            Record::new(id, policy.unwrap_or_else(|| self.policy.clone()))?
+        };
+        record.save(&path)?;
+        // This host owns the runtime directory exclusively; stale sockets cannot
+        // be a still-running worker. Remove only our validated session paths.
+        let _ = fs::remove_file(&socket);
+        let _ = fs::remove_file(socket.with_extension("evt"));
+        let p = socket.clone();
+        let record_path = path.clone();
+        let worker = thread::Builder::new()
+            .name(format!("session-{id}"))
+            .spawn(move || {
+                if let Err(error) = server::serve_managed(
+                    &p,
+                    &argv,
+                    Some(ManagedSession {
+                        path: record_path.clone(),
+                        record,
+                    }),
+                ) {
+                    if let Ok(mut r) = Record::load(&record_path) {
+                        r.pid = None;
+                        r.ended = Some(EndReason::Lost);
+                        let _ = r.save(&record_path);
+                    }
+                    eprintln!("session worker failed: {error}");
+                }
+            })?;
+        self.workers.insert(id.into(), worker);
+        let start = Instant::now();
+        loop {
+            match UnixStream::connect(&socket) {
+                Ok(s) => return Ok(s),
+                Err(_) if start.elapsed() < Duration::from_secs(2) => {
+                    thread::sleep(Duration::from_millis(5))
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}

@@ -1300,6 +1300,39 @@ struct AgentStatusPluginTests {
         #expect(command.contains("> \"/dev/$omg_tty\""))
     }
 
+    @Test func installedCodexHookReportsConversationToRuntimeWithoutUsingShellInput() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        try AgentHookInstaller(homeURL: home).install(.codex)
+        let root = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: home.appendingPathComponent(".codex/hooks.json"))) as? [String: Any])
+        let hooks = try #require(root["hooks"] as? [String: Any])
+        let starts = try #require(hooks["SessionStart"] as? [[String: Any]])
+        let owned = try #require(starts.first { $0[AgentHookInstaller.marker] != nil })
+        let commands = try #require(owned["hooks"] as? [[String: Any]])
+        let command = try #require(commands.first?["command"] as? String)
+        let helper = home.appendingPathComponent("runtime helper")
+        let capture = home.appendingPathComponent("arguments")
+        try "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$OMG_TEST_REPORT\"\n".write(to: helper, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", command]
+        process.currentDirectoryURL = home
+        process.environment = ["PATH": "/opt/homebrew/bin:/usr/bin:/bin", "OMG_RUNTIME_BIN": helper.path, "OMG_TEST_REPORT": capture.path]
+        let input = Pipe()
+        process.standardInput = input
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        try input.fileHandleForWriting.write(contentsOf: Data("{\"session_id\":\"test-conversation\"}".utf8))
+        try input.fileHandleForWriting.close()
+        process.waitUntilExit()
+        let arguments = try String(contentsOf: capture, encoding: .utf8).split(separator: "\n").map(String.init)
+        #expect(arguments.prefix(2) == ["report", "codex"])
+        #expect(arguments[3] == "test-conversation")
+        #expect(URL(fileURLWithPath: arguments[4]).resolvingSymlinksInPath() == home.resolvingSymlinksInPath())
+    }
+
     @Test func oldOwnerVersionRequiresHookCommandUpgrade() throws {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)

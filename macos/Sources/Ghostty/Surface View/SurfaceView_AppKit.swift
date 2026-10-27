@@ -19,6 +19,9 @@ extension Ghostty {
             }
         }
 
+        var runtimeDescriptor: SessionRuntimeDescriptor?
+        @Published var runtimeConnectionError: String?
+
         // The progress report (if any)
         override var progressReport: Action.ProgressReport? {
             didSet {
@@ -395,7 +398,21 @@ extension Ghostty {
 
             // Setup our surface. This will also initialize all the terminal IO.
             var surface_cfg = baseConfig ?? SurfaceConfiguration()
-            if ProcessInfo.processInfo.environment["OMG_EXPERIMENTAL_SESSION_ROUTED"] == "1" {
+            if let encoded = surface_cfg.environmentVariables[SessionRuntimeDescriptor.environmentKey] {
+                do {
+                    let descriptor = try JSONDecoder().decode(SessionRuntimeDescriptor.self, from: Data(encoded.utf8))
+                    runtimeDescriptor = descriptor
+                    let socket = try SessionRuntimeConnections.shared.prepare(descriptor)
+                    surface_cfg.environmentVariables["OMG_RUNTIME_SOCKET"] = socket.path
+                    surface_cfg.environmentVariables["OMG_RUNTIME_PANE_ID"] = try descriptor.openRequest(pane: id, restoring: uuid != nil)
+                } catch {
+                    self.runtimeConnectionError = error.localizedDescription
+                    self.error = Ghostty.Error.apiFailed
+                    Ghostty.logger.error("Session runtime connection setup failed: \(error.localizedDescription, privacy: .public)")
+                    return
+                }
+            }
+            if runtimeDescriptor == nil, ProcessInfo.processInfo.environment["OMG_EXPERIMENTAL_SESSION_ROUTED"] == "1" {
                 // Surface UUID is fresh for a split/tab and retained by restoration.
                 surface_cfg.environmentVariables["OMG_RUNTIME_PANE_ID"] = id.uuidString.lowercased()
             }
@@ -2004,6 +2021,7 @@ extension Ghostty {
             case isUserSetTitle
             case agentResumeDescriptor
             case sshResumeDescriptor
+            case runtimeDescriptor
         }
 
         required convenience init(from decoder: Decoder) throws {
@@ -2023,6 +2041,14 @@ extension Ghostty {
             config.environmentVariables["OH_MY_GHOSTTY_CHANNEL"] =
                 OMGApplicationEnvironment.channel()
             config.workingDirectory = try container.decode(String?.self, forKey: .pwd)
+            if let runtime = try container.decodeIfPresent(SessionRuntimeDescriptor.self, forKey: .runtimeDescriptor) {
+                try runtime.configure(&config)
+                // Runtime attach owns the process; don't replay shell/Agent launch commands.
+                config.workingDirectory = nil
+                self.init(app, baseConfig: config, uuid: uuid)
+                if let title = try container.decodeIfPresent(String.self, forKey: .title) { self.title = title }
+                return
+            }
             let startupMode: OMGStartupMode = decoder.userInfo[TerminalWorkspaceSessionStore.restoreSessionsKey] as? Bool == true
                 ? .restoreSessions : OhMyGhosttySettings.shared.startupMode
             // Layout-only recovery must not fail just because a stale Agent or
@@ -2109,6 +2135,7 @@ extension Ghostty {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode(pwd, forKey: .pwd)
             try container.encode(id.uuidString, forKey: .uuid)
+            try container.encodeIfPresent(runtimeDescriptor, forKey: .runtimeDescriptor)
             try container.encode(title, forKey: .title)
             try container.encode(titleFromTerminal != nil, forKey: .isUserSetTitle)
             try container.encodeIfPresent(

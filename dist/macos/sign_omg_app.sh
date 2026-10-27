@@ -51,6 +51,25 @@ components=(
   "$app_path/Contents/PlugIns/DockTilePlugin.plugin"
 )
 
+# Native runtime helpers/libraries are nested code too. Linux artifacts remain
+# data inside the signed bundle; refresh manifest hashes after Mach-O signing.
+runtime="$app_path/Contents/Resources/session-runtime"
+if [[ -d "$runtime" ]]; then
+  while IFS= read -r -d '' component; do
+    if file -b "$component" | grep -q 'Mach-O'; then
+      codesign "${sign_options[@]}" "$component"
+    fi
+  done < <(find "$runtime" -type f -print0)
+  python3 - "$runtime" <<'PY'
+import hashlib, json, pathlib, sys
+for path in pathlib.Path(sys.argv[1]).glob('*/manifest.json'):
+    manifest = json.loads(path.read_text())
+    for entry in manifest['files']:
+        entry['sha256'] = hashlib.sha256((path.parent / entry['name']).read_bytes()).hexdigest()
+    path.write_text(json.dumps(manifest, indent=2) + '\n')
+PY
+fi
+
 for component in "${components[@]}"; do
   [[ -e "$component" ]] || continue
   codesign "${sign_options[@]}" "$component"

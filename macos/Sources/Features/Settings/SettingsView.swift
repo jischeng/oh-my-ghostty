@@ -385,6 +385,9 @@ struct SettingsView: View {
                                           options: OMGStartupMode.allCases.map { .init($0, strings.startupModeTitle($0)) }, showsTitle: false, width: 190)
                     }
                 }
+                OMGSettingsSection("Session Runtime") {
+                    SessionRuntimeSettingsView(settings: settings)
+                }
                 CoreSettingsSection(group: .notifications, settings: settings)
             }
 

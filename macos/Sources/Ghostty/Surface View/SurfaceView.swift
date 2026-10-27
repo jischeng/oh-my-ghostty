@@ -148,7 +148,11 @@ extension Ghostty {
                     SurfaceRendererUnhealthyView()
                 } else if surfaceView.error != nil {
                     Rectangle().fill(ghostty.config.backgroundColor)
-                    SurfaceErrorView()
+                    if let message = surfaceView.runtimeConnectionError {
+                        Text(message).padding().textSelection(.enabled)
+                    } else {
+                        SurfaceErrorView()
+                    }
                 }
 
                 // If we're part of a split view and don't have focus, we put a semi-transparent

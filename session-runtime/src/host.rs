@@ -1,19 +1,44 @@
 //! One host daemon owns all session actors; transport connections multiplex
 //! framed pane streams. Session workers are threads, never daemon subprocesses.
 use crate::*;
+use crate::{lifecycle::Policy, registry::Registry};
 use std::{
-    collections::HashSet,
     fs,
     os::unix::{
         fs::{MetadataExt, PermissionsExt},
         net::UnixListener,
     },
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
-const MAX_SESSIONS: usize = 64;
 const MAX_STREAMS: usize = 64;
+struct HostLock(fs::File);
+impl HostLock {
+    fn acquire(directory: &Path) -> io::Result<Self> {
+        use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(directory.join("host.lock"))?;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(io::Error::other("host daemon already running"));
+        }
+        Ok(Self(file))
+    }
+}
+impl Drop for HostLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        unsafe {
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
 fn inner_frame(data: &[u8]) -> io::Result<Frame> {
     let mut input = data;
     let frame = Frame::read(&mut input)?;
@@ -41,50 +66,19 @@ pub fn valid_id(id: &str) -> bool {
             }
         })
 }
-struct Registry {
-    root: PathBuf,
-    ids: HashSet<String>,
-    command: Vec<String>,
-}
-impl Registry {
-    fn connect(&mut self, id: &str) -> io::Result<UnixStream> {
-        if !valid_id(id) {
-            return Err(io::Error::other("invalid identity"));
-        }
-        let path = self.root.join(format!("{id}.sock"));
-        if !self.ids.contains(id) {
-            if self.ids.len() >= MAX_SESSIONS {
-                return Err(io::Error::other("session quota exceeded"));
-            }
-            // Mark before spawn. A daemon restart cannot silently resurrect a PID.
-            fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(self.root.join(format!("{id}.created")))?;
-            self.ids.insert(id.to_owned());
-            let p = path.clone();
-            let argv = self.command.clone();
-            std::thread::Builder::new()
-                .name(format!("session-{id}"))
-                .spawn(move || {
-                    if let Err(e) = crate::server::serve(&p, &argv) {
-                        eprintln!("session {id}: {e}", id = p.display());
-                    }
-                })?;
-            for _ in 0..100 {
-                if path.exists() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-        }
-        UnixStream::connect(path)
-    }
-}
 /// Outer protocol: H(stream, UUID), D(stream, encoded inner frame), E(stream,error),
 /// Q(stream) detach. Outer stream IDs are local to one transport connection.
 pub fn serve(directory: &Path, command: Vec<String>) -> io::Result<()> {
     private(directory)?;
+    let policy_path = directory.join("policy.json");
+    let policy: Policy = if policy_path.exists() {
+        serde_json::from_slice(&fs::read(&policy_path)?)?
+    } else {
+        Policy::default()
+    };
+    policy.validate()?;
+    let _lock = HostLock::acquire(directory)?;
+    let _ = fs::remove_file(directory.join("host.sock"));
     let root = directory.join("sessions");
     fs::create_dir_all(&root)?;
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
@@ -94,14 +88,29 @@ pub fn serve(directory: &Path, command: Vec<String>) -> io::Result<()> {
         directory.join("host.sock"),
         fs::Permissions::from_mode(0o600),
     )?;
-    let registry = Arc::new(Mutex::new(Registry {
-        root,
-        ids: HashSet::new(),
-        command,
-    }));
+    listener.set_nonblocking(true)?;
+    let registry = Arc::new(Mutex::new(Registry::new(root, command, policy.clone())));
     let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    for conn in listener.incoming() {
-        let socket = conn?;
+    let mut idle_since = Instant::now();
+    loop {
+        {
+            let mut state = registry.lock().unwrap();
+            state.maintenance();
+            if !state.is_empty() || active.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                idle_since = Instant::now();
+            } else if idle_since.elapsed() > Duration::from_secs(policy.host_idle_seconds) {
+                let _ = fs::remove_file(directory.join("host.sock"));
+                return Ok(());
+            }
+        }
+        let socket = match listener.accept() {
+            Ok((s, _)) => s,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
         if active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 8 {
             active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             continue;
@@ -113,21 +122,92 @@ pub fn serve(directory: &Path, command: Vec<String>) -> io::Result<()> {
             active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         });
     }
-    Ok(())
 }
 fn host_connection(socket: UnixStream, registry: Arc<Mutex<Registry>>) -> io::Result<()> {
     let mut transport = Peer::new(socket, 0)?;
     let mut streams: std::collections::HashMap<u64, Peer> = Default::default();
+    let mut last_heartbeat = Instant::now();
     loop {
+        if last_heartbeat.elapsed() > Duration::from_secs(45) {
+            return Err(io::Error::other("host connection lease expired"));
+        }
         for f in transport.read()? {
             match f.kind {
+                b'P' if f.seq == 0 => {
+                    last_heartbeat = Instant::now();
+                    transport.push(Frame::new(b'P', 0, &[]));
+                }
+                b'L' if f.seq == 0 => {
+                    let list = registry.lock().unwrap().list()?;
+                    transport.push(Frame::new(b'L', 0, &serde_json::to_vec(&list)?));
+                }
+                b'U' if f.seq != 0
+                    && !streams.contains_key(&f.seq)
+                    && streams.len() < MAX_STREAMS =>
+                {
+                    #[derive(serde::Deserialize)]
+                    struct Request {
+                        id: String,
+                        generation: String,
+                    }
+                    let req: Request = serde_json::from_slice(&f.data)?;
+                    match registry
+                        .lock()
+                        .unwrap()
+                        .connect(&req.id, Some(&req.generation))
+                    {
+                        Ok(s) => {
+                            streams.insert(f.seq, Peer::new(s, f.seq)?);
+                        }
+                        Err(e) => transport.push(Frame::new(b'E', f.seq, e.to_string().as_bytes())),
+                    }
+                }
+                b'C' if f.seq != 0
+                    && !streams.contains_key(&f.seq)
+                    && streams.len() < MAX_STREAMS =>
+                {
+                    let request: crate::registry::OpenRequest = serde_json::from_slice(&f.data)?;
+                    let result = registry.lock().unwrap().open(&request);
+                    match result {
+                        Ok(s) => {
+                            streams.insert(f.seq, Peer::new(s, f.seq)?);
+                        }
+                        Err(e) => transport.push(Frame::new(b'E', f.seq, e.to_string().as_bytes())),
+                    }
+                }
                 b'H' if f.seq != 0
                     && !streams.contains_key(&f.seq)
                     && streams.len() < MAX_STREAMS =>
                 {
                     let result = std::str::from_utf8(&f.data)
                         .map_err(io::Error::other)
-                        .and_then(|id| registry.lock().unwrap().connect(id));
+                        .and_then(|id| {
+                            let mut state = registry.lock().unwrap();
+                            if let Some(root) = state.root.parent() {
+                                if let Ok(bytes) = fs::read(root.join("policy.json")) {
+                                    if let Ok(policy) = serde_json::from_slice::<Policy>(&bytes) {
+                                        if policy.validate().is_ok() {
+                                            state.policy = policy;
+                                        }
+                                    }
+                                }
+                            }
+                            let connected = state.connect(id, None);
+                            if connected.is_err() && valid_id(id) {
+                                if let Ok(record) = crate::record::Record::load(
+                                    &state.root.join(format!("{id}.json")),
+                                ) {
+                                    if record
+                                        .ended
+                                        .is_some_and(crate::lifecycle::EndReason::resumable)
+                                        && record.resume.is_some()
+                                    {
+                                        return state.connect(id, Some(&record.generation));
+                                    }
+                                }
+                            }
+                            connected
+                        });
                     match result {
                         Ok(s) => {
                             streams.insert(f.seq, Peer::new(s, f.seq)?);
@@ -171,7 +251,7 @@ fn host_connection(socket: UnixStream, registry: Arc<Mutex<Registry>>) -> io::Re
         std::thread::sleep(Duration::from_millis(2));
     }
 }
-pub fn relay(local: &Path, socket: UnixStream) -> io::Result<()> {
+pub fn relay(local: &Path, socket: UnixStream, lease: bool) -> io::Result<()> {
     private(
         local
             .parent()
@@ -183,7 +263,16 @@ pub fn relay(local: &Path, socket: UnixStream) -> io::Result<()> {
     let mut transport = Peer::new(socket, 0)?;
     let mut peers: std::collections::HashMap<u64, (Peer, bool, bool)> = Default::default();
     let mut next = 1;
+    let mut heartbeat = Instant::now() - Duration::from_secs(10);
+    let mut pong = Instant::now();
     loop {
+        if lease && heartbeat.elapsed() >= Duration::from_secs(10) {
+            transport.push(Frame::new(b'P', 0, &[]));
+            heartbeat = Instant::now();
+        }
+        if lease && pong.elapsed() > Duration::from_secs(45) {
+            return Err(io::Error::other("host heartbeat timed out"));
+        }
         for _ in 0..8 {
             match listener.accept() {
                 Ok((s, _)) => {
@@ -197,12 +286,17 @@ pub fn relay(local: &Path, socket: UnixStream) -> io::Result<()> {
             }
         }
         for f in transport.read()? {
+            if f.kind == b'P' && f.seq == 0 {
+                pong = Instant::now();
+                continue;
+            }
             if let Some((p, _, closing)) = peers.get_mut(&f.seq) {
                 match f.kind {
                     b'D' => p.push(inner_frame(&f.data)?),
                     b'Q' | b'E' => {
                         if f.kind == b'E' {
                             eprintln!("session {}: {}", f.seq, String::from_utf8_lossy(&f.data));
+                            p.push(Frame::new(b'E', 0, &f.data));
                         }
                         // Drain already queued final output/Exit before closing.
                         *closing = true;
@@ -217,11 +311,29 @@ pub fn relay(local: &Path, socket: UnixStream) -> io::Result<()> {
                 Ok(frames) => {
                     for f in frames {
                         if !*opened {
-                            if f.kind != b'H' || !std::str::from_utf8(&f.data).is_ok_and(valid_id) {
+                            if f.kind != b'H' {
                                 p.dead = true;
                                 break;
                             }
-                            transport.push(Frame::new(b'H', id, &f.data));
+                            let kind = if std::str::from_utf8(&f.data).is_ok_and(valid_id) {
+                                b'H'
+                            } else {
+                                match serde_json::from_slice::<crate::registry::OpenRequest>(
+                                    &f.data,
+                                ) {
+                                    Ok(request)
+                                        if valid_id(&request.id)
+                                            && request.policy.validate().is_ok() =>
+                                    {
+                                        b'C'
+                                    }
+                                    _ => {
+                                        p.dead = true;
+                                        break;
+                                    }
+                                }
+                            };
+                            transport.push(Frame::new(kind, id, &f.data));
                             *opened = true;
                         } else {
                             transport.push(Frame::new(b'D', id, &f.encode()));

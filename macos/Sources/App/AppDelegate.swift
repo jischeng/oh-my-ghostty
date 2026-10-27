@@ -561,6 +561,7 @@ class AppDelegate: NSObject,
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated {
             TerminalWorkspaceSessionStore.shared.capture()
+            SessionRuntimeConnections.shared.shutdown()
             TerminalWorkspaceCoordinator.shared.savePresentation()
             TerminalWorkspaceStore.shared.flush()
             QuickInputHistoryStore.shared.pruneExpired()

@@ -18,6 +18,8 @@ macos/build.nu --configuration Debug --action build --pty-app --marketing-versio
 source_app="$repo_root/macos/build-pty/Debug/OMG.app"
 target_app='/Applications/OMG Dev PTY.app'
 [[ "$(plutil -extract CFBundleIdentifier raw "$source_app/Contents/Info.plist")" == 'com.jischeng.omg.debug.pty' ]]
+python3 dist/macos/build-session-runtime.py --output "$source_app/Contents/Resources/session-runtime"
+[[ "$(git rev-parse HEAD)" == "$commit" && -z "$(git status --porcelain=v1 --untracked-files=all)" ]] || { echo 'Source changed while packaging runtime.' >&2; exit 1; }
 python3 - "$source_app/Contents/Info.plist" <<'PY'
 import plistlib, sys
 path = sys.argv[1]

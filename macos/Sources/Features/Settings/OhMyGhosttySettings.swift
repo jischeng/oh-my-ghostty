@@ -549,6 +549,26 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Maximum number of historical agent sessions to index and display.",
             requiresNewWindow: false, category: "general"),
         .init(
+            id: "sessions.runtimeDetachedHours", type: .number, defaultValue: "24",
+            allowedValues: nil, minimum: 0, maximum: 8760,
+            description: "Maximum detached SSH session lifetime in hours; zero explicitly keeps it indefinitely.",
+            requiresNewWindow: true, category: "general"),
+        .init(
+            id: "sessions.runtimeExpiration", type: .string, defaultValue: "",
+            allowedValues: nil, minimum: nil, maximum: nil,
+            description: "Optional ISO-8601 deadline for detached sessions; empty disables the absolute deadline.",
+            requiresNewWindow: true, category: "general"),
+        .init(
+            id: "sessions.runtimeCloseOnAgentDone", type: .boolean, defaultValue: "false",
+            allowedValues: nil, minimum: nil, maximum: nil,
+            description: "Close detached sessions after a verified Agent completion and durable recovery record.",
+            requiresNewWindow: true, category: "general"),
+        .init(
+            id: "sessions.runtimeDoneGraceSeconds", type: .number, defaultValue: "60",
+            allowedValues: nil, minimum: 1, maximum: 86400,
+            description: "Grace period before closing a completed detached Agent session.",
+            requiresNewWindow: true, category: "general"),
+        .init(
             id: "sessions.startupMode", type: .enumeration,
             defaultValue: OMGStartupMode.restoreSessions.rawValue,
             allowedValues: OMGStartupMode.allCases.map(\.rawValue),
@@ -882,6 +902,24 @@ final class OhMyGhosttySettings: ObservableObject {
             }
         }
     }
+    @Published var runtimeDetachedHours: Double = 24 {
+        didSet { persist("sessions.runtimeDetachedHours", min(max(runtimeDetachedHours, 0), 8760)) }
+    }
+    @Published var runtimeExpiration = "" {
+        didSet { persist("sessions.runtimeExpiration", runtimeExpiration) }
+    }
+    @Published var runtimeCloseOnAgentDone = false {
+        didSet { persist("sessions.runtimeCloseOnAgentDone", runtimeCloseOnAgentDone) }
+    }
+    @Published var runtimeDoneGraceSeconds: Double = 60 {
+        didSet { persist("sessions.runtimeDoneGraceSeconds", min(max(runtimeDoneGraceSeconds, 1), 86400)) }
+    }
+    var runtimePolicy: SessionRuntimePolicy {
+        .init(detachedTTLSeconds: Int(min(max(runtimeDetachedHours, 0), 8760) * 3600),
+              expiresAt: ISO8601DateFormatter().date(from: runtimeExpiration).map { Int($0.timeIntervalSince1970) },
+              closeOnAgentDone: runtimeCloseOnAgentDone,
+              agentDoneGraceSeconds: Int(min(max(runtimeDoneGraceSeconds, 1), 86400)))
+    }
     @Published var startupMode: OMGStartupMode = .restoreSessions {
         didSet { persist("sessions.startupMode", startupMode.rawValue) }
     }
@@ -1199,6 +1237,10 @@ final class OhMyGhosttySettings: ObservableObject {
                 range: 100...50_000
             )
             startupMode = enumValue("sessions.startupMode", fallback: .restoreSessions)
+            runtimeDetachedHours = min(max(chosen["sessions.runtimeDetachedHours"] as? Double ?? 24, 0), 8760)
+            runtimeExpiration = chosen["sessions.runtimeExpiration"] as? String ?? ""
+            runtimeCloseOnAgentDone = chosen["sessions.runtimeCloseOnAgentDone"] as? Bool ?? false
+            runtimeDoneGraceSeconds = min(max(chosen["sessions.runtimeDoneGraceSeconds"] as? Double ?? 60, 1), 86400)
             quitWithoutConfirmation = boolValue(
                 "general.quitWithoutConfirmation",
                 fallback: OMGApplicationEnvironment.quitWithoutConfirmationDefault()

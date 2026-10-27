@@ -220,7 +220,11 @@ impl Peer {
         Ok(out)
     }
 }
+pub mod deploy;
 pub mod host;
+pub mod lifecycle;
+pub mod record;
+pub mod registry;
 pub mod server;
 
 #[cfg(test)]

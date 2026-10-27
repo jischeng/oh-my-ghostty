@@ -22,6 +22,26 @@ appearance overlay, plugin package/data, and SSH replay directories are
 isolated. Vendor Agent hooks are the sole intentionally shared integration and
 must only be changed through the versioned owner-marker installer.
 
+## Native Session Runtime artifacts
+
+`dist/macos/build-session-runtime.py` builds the local relay and matching remote
+runtime artifacts serially. PTY development installs include native macOS plus
+Linux x86_64/aarch64 (glibc 2.28 baseline). Release builds use `--macos all` to
+include both macOS architectures and a universal local relay. The artifact revision
+is content-derived; a signed manifest carries SHA-256 hashes for remote upload.
+`sign_omg_app.sh` signs nested Mach-O runtime code and refreshes artifact hashes
+before signing the enclosing App. Linux files remain signed-bundle resources.
+
+Artifacts live in `Contents/Resources/session-runtime`; the app caches each used
+revision under its own Application Support directory so an app update can retain
+connections to that revision. Remote deployment uses version directories and must
+never overwrite/restart a daemon owning live PTYs. Unsupported hosts fail clearly;
+SSH-only/SFTP appliances and noexec user homes are not supported session hosts.
+Real Agent recovery, password authentication, both CPU architectures, automatic
+first deployment/reuse and expiry are release acceptance gates, not established
+solely by a successful cross-build. The current development implementation is not
+an authorization to publish a release.
+
 ## Current automation status
 
 OMG releases are currently a **maintainer-run macOS workflow**. The inherited

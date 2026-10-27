@@ -24,13 +24,19 @@ def main [
     --list-test-modules                 # List modules and direct dependents without building
     --marketing-version: string         # Optional local build version override
     --workspace-app                    # Build the isolated OMG Dev Workspace app
+    --pty-app                          # Build the isolated OMG Dev PTY app
 ] {
     let project = ($env.FILE_PWD | path join "Ghostty.xcodeproj")
-    let build_dir = ($env.FILE_PWD | path join (if $workspace_app { "build-workspace" } else { "build" }))
-    if $workspace_app and $configuration != "Debug" {
-        error make {msg: "--workspace-app requires Debug configuration"}
+    if $workspace_app and $pty_app { error make {msg: "Select only one isolated app"} }
+    let build_dir = ($env.FILE_PWD | path join (if $workspace_app { "build-workspace" } else if $pty_app { "build-pty" } else { "build" }))
+    if ($workspace_app or $pty_app) and $configuration != "Debug" {
+        error make {msg: "Isolated apps require Debug configuration"}
     }
-    let workspace_settings = if $workspace_app {
+    let workspace_settings = if $pty_app {
+        ["PRODUCT_BUNDLE_IDENTIFIER=com.jischeng.omg.debug.pty"
+         "INFOPLIST_KEY_CFBundleDisplayName=OMG Dev PTY"
+         "INFOPLIST_KEY_CFBundleName=OMG Dev PTY"]
+    } else if $workspace_app {
         ["PRODUCT_BUNDLE_IDENTIFIER=com.jischeng.omg.debug.workspace"
          "INFOPLIST_KEY_CFBundleDisplayName=OMG Dev Workspace"
          "INFOPLIST_KEY_CFBundleName=OMG Dev Workspace"]

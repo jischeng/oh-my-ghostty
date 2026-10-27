@@ -651,7 +651,8 @@ pub fn init(
             log.warn("error getting env map for surface err={}", .{err});
             break :env global.environMap() catch std.process.Environ.Map.init(alloc);
         };
-        errdefer env.deinit();
+        var env_owned = true;
+        errdefer if (env_owned) env.deinit();
 
         // don't leak GHOSTTY_LOG to any subprocesses
         _ = env.orderedRemove("GHOSTTY_LOG");
@@ -663,7 +664,10 @@ pub fn init(
         );
 
         // Initialize our IO backend
-        var io_exec = try termio.Exec.init(alloc, .{
+        const session_socket = env.get("OMG_EXPERIMENTAL_SESSION_SOCKET");
+        var io_backend: termio.Backend = if (session_socket) |path| .{
+            .omg_session = try termio.OmgSession.init(alloc, path, config.env.map.get("OMG_RUNTIME_PANE_ID")),
+        } else .{ .exec = try termio.Exec.init(alloc, .{
             .command = command,
             .env = env,
             .env_override = config.env,
@@ -675,8 +679,10 @@ pub fn init(
             .term = config.term,
             .rt_pre_exec_info = .init(config),
             .rt_post_fork_info = .init(config),
-        });
-        errdefer io_exec.deinit();
+        }) };
+        if (session_socket != null) env.deinit();
+        env_owned = false; // Exec owns it, or the daemon backend released it.
+        errdefer io_backend.deinit();
 
         // Initialize our IO mailbox
         var io_mailbox = try termio.Mailbox.initSPSC(alloc);
@@ -686,7 +692,7 @@ pub fn init(
             .size = size,
             .full_config = config,
             .config = try termio.Termio.DerivedConfig.init(alloc, config),
-            .backend = .{ .exec = io_exec },
+            .backend = io_backend,
             .mailbox = io_mailbox,
             .renderer_state = &self.renderer_state,
             .renderer_wakeup = render_thread.wakeup,
@@ -1385,6 +1391,7 @@ fn childExitedAbnormally(
     // Build up our command for the error message
     const command = try std.mem.join(alloc, " ", switch (self.io.backend) {
         .exec => |*exec| exec.subprocess.args,
+        .omg_session => &.{"OMG session"},
     });
     const runtime_str = try std.fmt.allocPrint(alloc, "{d} ms", .{info.runtime_ms});
 

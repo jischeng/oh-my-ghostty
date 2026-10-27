@@ -22,6 +22,8 @@ const log = std.log.scoped(.io_handler);
 /// unless all of the member fields are copied.
 pub const StreamHandler = struct {
     alloc: Allocator,
+    /// The daemon owns terminal query replies for native session surfaces.
+    remote_session: bool = false,
     size: *renderer.Size,
     terminal: *terminal.Terminal,
 
@@ -126,6 +128,13 @@ pub const StreamHandler = struct {
     }
 
     inline fn messageWriter(self: *StreamHandler, msg: termio.Message) void {
+        if (self.remote_session) switch (msg) {
+            .write_small, .write_stable, .write_alloc, .size_report, .color_scheme_report, .visibility_report => {
+                msg.deinit();
+                return;
+            },
+            else => {},
+        };
         self.termio_mailbox.send(msg, self.renderer_state.mutex);
         self.termio_messaged = true;
     }

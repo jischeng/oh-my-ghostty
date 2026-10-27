@@ -6,12 +6,18 @@ enum OMGApplicationEnvironment {
         Bundle.main.bundleIdentifier == "com.jischeng.omg.debug.workspace"
     }
 
+    static var isPTYDevelopment: Bool {
+        Bundle.main.bundleIdentifier == "com.jischeng.omg.debug.pty"
+    }
+
     static var isDevelopment: Bool {
-        Bundle.main.bundleIdentifier == "com.jischeng.omg.debug" || isWorkspaceDevelopment
+        Bundle.main.bundleIdentifier == "com.jischeng.omg.debug" || isWorkspaceDevelopment || isPTYDevelopment
     }
 
     static func channel(development: Bool = isDevelopment) -> String {
-        development ? (isWorkspaceDevelopment ? "debug-workspace" : "debug") : "release"
+        guard development else { return "release" }
+        if isPTYDevelopment { return "debug-pty" }
+        return isWorkspaceDevelopment ? "debug-workspace" : "debug"
     }
 
     static func quitWithoutConfirmationDefault(
@@ -24,13 +30,12 @@ enum OMGApplicationEnvironment {
         homeURL: URL = FileManager.default.homeDirectoryForCurrentUser,
         development: Bool = isDevelopment
     ) -> URL {
-        homeURL.appendingPathComponent(
-            development
-                ? (isWorkspaceDevelopment
-                    ? ".config/oh-my-ghostty-dev-workspace/settings.json"
-                    : ".config/oh-my-ghostty-dev/settings.json")
-                : ".config/oh-my-ghostty/settings.json"
-        )
+        let name = if !development { "oh-my-ghostty" } else if isPTYDevelopment {
+            "oh-my-ghostty-dev-pty"
+        } else if isWorkspaceDevelopment {
+            "oh-my-ghostty-dev-workspace"
+        } else { "oh-my-ghostty-dev" }
+        return homeURL.appendingPathComponent(".config/\(name)/settings.json")
     }
 
     static func applicationSupportURL(
@@ -41,10 +46,12 @@ enum OMGApplicationEnvironment {
             for: .applicationSupportDirectory,
             in: .userDomainMask
         )[0]
-        return base.appendingPathComponent(
-            development ? (isWorkspaceDevelopment ? "OMG Dev Workspace" : "OMG Dev") : "OMG",
-            isDirectory: true
-        )
+        let name = if !development { "OMG" } else if isPTYDevelopment {
+            "OMG Dev PTY"
+        } else if isWorkspaceDevelopment {
+            "OMG Dev Workspace"
+        } else { "OMG Dev" }
+        return base.appendingPathComponent(name, isDirectory: true)
     }
 }
 

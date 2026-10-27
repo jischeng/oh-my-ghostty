@@ -578,6 +578,7 @@ fn replaySupportName(channel: ?[]const u8) []const u8 {
     if (channel) |value| {
         if (std.mem.eql(u8, value, "debug")) return "OMG Dev";
         if (std.mem.eql(u8, value, "debug-workspace")) return "OMG Dev Workspace";
+        if (std.mem.eql(u8, value, "debug-pty")) return "OMG Dev PTY";
     }
     return "OMG";
 }
@@ -1311,6 +1312,7 @@ test "replay support directory is isolated by application channel" {
     try std.testing.expectEqualStrings("OMG", replaySupportName("release"));
     try std.testing.expectEqualStrings("OMG Dev", replaySupportName("debug"));
     try std.testing.expectEqualStrings("OMG Dev Workspace", replaySupportName("debug-workspace"));
+    try std.testing.expectEqualStrings("OMG Dev PTY", replaySupportName("debug-pty"));
 
     try std.testing.expect(shouldWriteReplayDescriptor("tab-id", null));
     try std.testing.expect(shouldWriteReplayDescriptor(null, "debug"));

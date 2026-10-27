@@ -279,6 +279,7 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
     // isn't safe to use until self.* is set.
     const handler: StreamHandler = .{
         .alloc = alloc,
+        .remote_session = backend == .omg_session,
         .termio_mailbox = &self.mailbox,
         .surface_mailbox = opts.surface_mailbox,
         .renderer_state = opts.renderer_state,
@@ -494,7 +495,7 @@ pub fn resizeVisual(
         self.renderer_state.mutex.lockUncancelable(global.io());
         defer self.renderer_state.mutex.unlock(global.io());
 
-        try self.terminal.resize(
+        if (self.backend != .omg_session) try self.terminal.resize(
             self.alloc,
             .{
                 .cols = grid_size.columns,
@@ -532,7 +533,7 @@ pub fn commitResize(
 
     self.renderer_state.mutex.lockUncancelable(global.io());
     defer self.renderer_state.mutex.unlock(global.io());
-    if (self.terminal.modes.get(.in_band_size_reports)) {
+    if (self.backend != .omg_session and self.terminal.modes.get(.in_band_size_reports)) {
         try self.sizeReportLocked(td, .mode_2048);
     }
 }

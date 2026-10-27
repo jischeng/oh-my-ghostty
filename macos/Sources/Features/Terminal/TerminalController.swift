@@ -2243,6 +2243,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     func selectVerticalTab(_ controller: TerminalController) {
         guard let targetWindow = controller.window,
               NSApp.windows.contains(where: { $0 === targetWindow }) else { return }
+        // Native selection can expose the destination before refreshTabs moves
+        // the shared sidebar into it. Commit both within one screen update.
+        NSDisableScreenUpdates()
+        defer { NSEnableScreenUpdates() }
         // The row's controller identifies the target. UI projections and the
         // source's group can lag behind native reorder/restore notifications.
         let tabGroup = targetWindow.tabGroup

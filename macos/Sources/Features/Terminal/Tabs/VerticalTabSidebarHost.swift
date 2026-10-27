@@ -45,6 +45,11 @@ final class VerticalTabSidebarHost {
         if let hostingView {
             let moved = hostingView.superview !== destination
             if moved {
+                // Reparenting a hosting view crosses two native window backing
+                // stores. Layout alone does not paint the incoming store; keep
+                // the handoff atomic until its first display is prepared.
+                NSDisableScreenUpdates()
+                defer { NSEnableScreenUpdates() }
                 outgoingContainer?.discardLastFrame()
                 outgoingContainer = hostingView.superview as? VerticalTabSidebarContainer
                 outgoingContainer?.retainLastFrame(of: hostingView)
@@ -129,9 +134,17 @@ final class VerticalTabSidebarContainer: NSView {
         host.frame = bounds
         host.autoresizingMask = [.width, .height]
         addSubview(host)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            context.allowsImplicitAnimation = false
+            host.layoutSubtreeIfNeeded()
+            host.needsDisplay = true
+            host.displayIfNeeded()
+        }
+        // Keep the fallback until the incoming host has actually displayed,
+        // rather than exposing an empty backing store during layout.
         lastFrame.isHidden = true
         lastFrame.image = nil
-        host.layoutSubtreeIfNeeded()
     }
 
     func discardLastFrame() {

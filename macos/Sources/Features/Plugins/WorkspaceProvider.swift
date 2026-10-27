@@ -122,6 +122,8 @@ struct PaneSessionContext: Equatable, Sendable {
         pathDisplay: OhMyGhosttyTabPathDisplay
     ) -> String {
         switch state {
+        case .sshConnecting(let ssh) where ssh.connectionID.hasPrefix("omg-runtime-"):
+            return ssh.alias
         case .local, .sshConnecting:
             if pathDisplay == .folderName, let workingDirectory = local.workingDirectory {
                 return WorkspacePathPresentation.folderName(workingDirectory)

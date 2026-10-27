@@ -30,31 +30,6 @@ fn bridge(path: &str) -> io::Result<()> {
     }
     copy(&socket, unsafe { std::fs::File::from_raw_fd(fd) })
 }
-fn relay(local: &str, host: &str, remote: &str) -> io::Result<()> {
-    if host.starts_with('-')
-        || remote.is_empty()
-        || !remote
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b))
-    {
-        return Err(io::Error::other("invalid endpoint"));
-    }
-    let command = format!("{remote}/omg-sessiond bridge {remote}/host.sock");
-    let mut ssh_command = Command::new("/usr/bin/ssh");
-    ssh_command.args([
-        "-T",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ServerAliveInterval=10",
-        "-o",
-        "ServerAliveCountMax=2",
-        "--",
-        host,
-        &command,
-    ]);
-    relay_command(local, ssh_command, false)
-}
 fn relay_command(local: &str, mut command: Command, lease: bool) -> io::Result<()> {
     let mut ssh = command
         .stdin(Stdio::piped())
@@ -214,9 +189,8 @@ fn main() -> io::Result<()> {
             println!("omg-session-runtime/2 snapshot/1");
             Ok(())
         }
-        Some("ssh-relay") if a.len() == 5 => relay(&a[2], &a[3], &a[4]),
         _ => {
-            eprintln!("usage: omg-sessiond host DIRECTORY -- SHELL... | serve SOCKET -- COMMAND... | bridge SOCKET | ssh-relay LOCAL_SOCKET HOST REMOTE_DIRECTORY");
+            eprintln!("usage: omg-sessiond host DIRECTORY -- SHELL... | serve SOCKET -- COMMAND... | bridge SOCKET | connect LOCAL_SOCKET CONNECTION_JSON");
             std::process::exit(2)
         }
     }

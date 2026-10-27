@@ -172,6 +172,16 @@ fn readLoop(self: *Self, io: *HostIO) !void {
                 try io.terminal.resize(self.alloc, .{ .cols = std.mem.readInt(u16, bytes[0..2], .big), .rows = std.mem.readInt(u16, bytes[2..4], .big) });
                 try io.renderer_wakeup.notify();
             },
+            'M' => {
+                const Metadata = struct { cwd: ?[]const u8 = null };
+                const metadata = try std.json.parseFromSlice(Metadata, self.alloc, bytes, .{});
+                defer metadata.deinit();
+                const path = metadata.value.cwd orelse "";
+                if (path.len > 4096 or (path.len > 0 and path[0] != '/') or std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidMetadata;
+                const Message = @import("../../apprt.zig").surface.Message;
+                const req = try Message.WriteReq.init(self.alloc, path);
+                _ = io.surface_mailbox.push(.{ .pwd_change = req }, .{ .forever = {} });
+            },
             'B' => {}, // Writer is occupied; remain attached as an observer.
             'E' => {
                 io.processOutput("\r\n[OMG Session] ");

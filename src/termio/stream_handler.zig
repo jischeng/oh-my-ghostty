@@ -1116,7 +1116,7 @@ pub const StreamHandler = struct {
                 return;
             },
         };
-        if (!host_valid) {
+        if (!host_valid and !self.remote_session) {
             log.warn("OSC 7 host ({s}) must be local", .{host.bytes});
             return;
         }

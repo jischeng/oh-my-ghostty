@@ -664,7 +664,7 @@ pub fn init(
         );
 
         // Initialize our IO backend
-        const session_socket = config.env.map.get("OMG_RUNTIME_SOCKET") orelse env.get("OMG_EXPERIMENTAL_SESSION_SOCKET");
+        const session_socket = config.env.map.get("OMG_RUNTIME_SOCKET");
         var io_backend: termio.Backend = if (session_socket) |path| .{
             .omg_session = try termio.OmgSession.init(alloc, path, config.env.map.get("OMG_RUNTIME_PANE_ID")),
         } else .{ .exec = try termio.Exec.init(alloc, .{

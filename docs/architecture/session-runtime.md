@@ -96,4 +96,4 @@ Linux systemd user 服务必须验证 logout 后生命周期；是否需要 ling
 
 验收矩阵：Codex/Pi/Claude 与普通 shell；GUI 退出、Mac sleep、SSH kill/反复断连后 PID 与 session ID 不变；当前 TUI 和交互正确。覆盖 alternate screen、宽字符/emoji、括号粘贴、鼠标、键盘模式、跨块 escape sequence、频繁 resize、慢 observer、大量输出、输出与 attach 竞态、无人连接时的查询响应，以及 daemon kill 后明确报告会话丢失。
 
-原型已执行真实 PTY 断连重连、PID 保持、原生快照 continuation、无人连接查询响应和 resize 测试；GhosttyKit 与 Debug App 已编译通过。GUI backend 仅由 `OMG_EXPERIMENTAL_SESSION_SOCKET` 显式启用。桌面视觉验收、真实 Agent 与 Linux/SSH 验收尚未完成。验证细节见 `session-runtime/README.md`。正式实现需要依据 `docs/TESTING.md` 选择相关 Zig/Swift 测试并串行执行；若改动插件 API、生命周期或 Inspector 契约，同时更新插件文档与测试。
+原型已执行真实 PTY 断连重连、PID 保持、原生快照 continuation、无人连接查询响应和 resize 测试；GhosttyKit 与 Debug App 已编译通过。GUI backend 仅通过逐 pane 的连接描述启用，全局实验 socket 与固定主机入口已经删除。桌面视觉验收、真实 Agent 与 Linux/SSH 验收尚未完成。验证细节见 `session-runtime/README.md`。正式实现需要依据 `docs/TESTING.md` 选择相关 Zig/Swift 测试并串行执行；若改动插件 API、生命周期或 Inspector 契约，同时更新插件文档与测试。

@@ -173,7 +173,7 @@ impl Peer {
                 break;
             }
             // Snapshot and metadata may leave before ACK; live data waits.
-            if self.ack.is_some() && matches!(front[0], OUTPUT | RESIZE | EXIT) {
+            if self.ack.is_some() && matches!(front[0], OUTPUT | RESIZE | EXIT | b'M') {
                 break;
             }
             let end = front.len().min(self.offset + budget);
@@ -223,6 +223,7 @@ impl Peer {
 pub mod deploy;
 pub mod host;
 pub mod lifecycle;
+pub mod location;
 pub mod record;
 pub mod registry;
 pub mod server;

@@ -1,6 +1,18 @@
 #include <ghostty/vt.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __APPLE__
+#include <libproc.h>
+int omg_process_cwd(int pid, unsigned char *buffer, size_t capacity) {
+    struct proc_vnodepathinfo info;
+    int result = proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, sizeof(info));
+    if (result != sizeof(info)) return -1;
+    size_t len = strnlen(info.pvi_cdir.vip_path, sizeof(info.pvi_cdir.vip_path));
+    if (len >= capacity) return -1;
+    memcpy(buffer, info.pvi_cdir.vip_path, len);
+    return (int)len;
+}
+#endif
 
 typedef void (*Reply)(void *, const unsigned char *, size_t);
 typedef struct { GhosttyTerminal terminal; Reply reply; void *context; } Vt;

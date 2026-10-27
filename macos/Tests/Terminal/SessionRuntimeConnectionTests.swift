@@ -47,6 +47,19 @@ struct SessionRuntimeConnectionTests {
         #expect(settings.runtimePolicy.detachedTTLSeconds == 0)
     }
 
+    @Test func runtimeSidebarUsesSSHIdentityAndRemoteDirectory() throws {
+        let descriptor = SessionRuntimeDescriptor(connection: try GitSSHConnection(destination: "user@devbox"),
+            revision: "test", policy: .init())
+        var context = PaneSessionContext(workingDirectory: "/Users/test/code", terminalTitle: "local")
+        context.applyRuntimeConnection(descriptor, workingDirectory: nil)
+        #expect(context.isSSHSession)
+        #expect(context.presentationTitle == "user@devbox")
+        context.applyRuntimeConnection(descriptor, workingDirectory: "/srv/project")
+        #expect(context.workingDirectory == "/srv/project")
+        #expect(context.remoteTabBreadcrumb?.host == "user@devbox")
+        #expect(context.remoteTabBreadcrumb?.directory == "project")
+    }
+
     @Test func existingSessionPoliciesKeepTheirExplicitValues() throws {
         let old = SessionRuntimeDescriptor(connection: try GitSSHConnection(destination: "devbox"),
             revision: "previous", policy: .init(detachedTTLSeconds: 86400, closeOnAgentDone: false))

@@ -1,4 +1,4 @@
-"""Opt-in real SSH check: OMG_SSH_TEST=1 python3 .../test_ssh_mux.py."""
+"""Opt-in SSH check: set OMG_SSH_TEST_CONFIG to a deployment connection JSON."""
 import json
 import os
 from pathlib import Path
@@ -11,7 +11,7 @@ import uuid
 from test_sessions import encode, frame
 
 
-@unittest.skipUnless(os.environ.get('OMG_SSH_TEST') == '1', 'requires deployed vps-jump test host')
+@unittest.skipUnless(os.environ.get('OMG_SSH_TEST_CONFIG'), 'requires explicit SSH deployment configuration')
 class SSHMultiplexTests(unittest.TestCase):
     def test_two_panes_share_ssh_and_survive_transport_restart(self):
         binary = Path(__file__).resolve().parents[1] / 'target/debug/omg-sessiond'
@@ -21,8 +21,8 @@ class SSHMultiplexTests(unittest.TestCase):
             clients = []
             relay = None
             def start():
-                p = subprocess.Popen([str(binary), 'ssh-relay', path, 'vps-jump', '/root/.local/share/omg-host-test'], stderr=subprocess.DEVNULL)
-                for _ in range(100):
+                p = subprocess.Popen([str(binary), 'connect', path, os.environ['OMG_SSH_TEST_CONFIG']], stderr=subprocess.DEVNULL)
+                for _ in range(1500):
                     if os.path.exists(path):
                         return p
                     time.sleep(.02)

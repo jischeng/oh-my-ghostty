@@ -412,10 +412,6 @@ extension Ghostty {
                     return
                 }
             }
-            if runtimeDescriptor == nil, ProcessInfo.processInfo.environment["OMG_EXPERIMENTAL_SESSION_ROUTED"] == "1" {
-                // Surface UUID is fresh for a split/tab and retained by restoration.
-                surface_cfg.environmentVariables["OMG_RUNTIME_PANE_ID"] = id.uuidString.lowercased()
-            }
             QuickInputDraftBridge.shared.configure(&surface_cfg, surfaceID: self.id)
             // A restored command can launch an agent before any shell prompt
             // reports OSC 7. Seed the known launch directory for all consumers.

@@ -239,7 +239,20 @@ pub fn serve_managed(
     let mut eof = false;
     let mut closing = None;
     let mut draining = None;
+    let mut last_cwd = crate::location::session_cwd(master, child.id());
+    let mut cwd_checked = Instant::now();
     loop {
+        if exited.is_none() && cwd_checked.elapsed() >= Duration::from_millis(500) {
+            let cwd = crate::location::session_cwd(master, child.id());
+            if cwd != last_cwd {
+                last_cwd = cwd;
+                let metadata = serde_json::to_vec(&serde_json::json!({"cwd":last_cwd}))?;
+                for peer in &mut peers {
+                    peer.push(Frame::new(b'M', seq, &metadata));
+                }
+            }
+            cwd_checked = Instant::now();
+        }
         // Hooks use an inherited per-session capability, never terminal text.
         let mut event_bytes = [0u8; 16384];
         for _ in 0..16 {
@@ -299,6 +312,11 @@ pub fn serve_managed(
                         Ok(bytes) if bytes.len() <= MAX_FRAME => {
                             peer.push(Frame::new(SNAPSHOT, seq, &bytes));
                             peer.ack = Some(seq);
+                            peer.push(Frame::new(
+                                b'M',
+                                seq,
+                                &serde_json::to_vec(&serde_json::json!({"cwd":last_cwd}))?,
+                            ));
                         }
                         _ => {
                             continue;

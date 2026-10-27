@@ -12,6 +12,7 @@ identity, disables updater/URL registration, and only replaces the PTY app.
 - Build output: `macos/build-pty/Debug/OMG.app`
 
 The PTY app is independent from OMG Dev, OMG Dev Workspace and release OMG.
-For the experimental VPS session transport, run `bash session-runtime/test-vps-jump.sh`
-after installation. Its single-host runtime and current limitations are documented
-in `session-runtime/HOST_RUNTIME.md`.
+Open the app normally. New windows are local; persistent SSH sessions are created
+through Settings → Shell & Sessions → Session Runtime. Never add a fixed-host
+launcher or global socket environment override. Current acceptance steps are in
+`session-runtime/TEST_RELEASE_PATH.md`.

@@ -5,8 +5,8 @@ restarted. New deployment tests use content-versioned runtime directories.
 
 Implemented in this change:
 
-- Host-managed per-session policy: detached TTL (24h default), optional UTC deadline,
-  opt-in Agent completion grace, bounded termination, idle-host exit, closed record
+- Host-managed per-session policy: detached TTL (72h / 3 days by default), optional UTC deadline,
+  default-enabled Agent completion grace, bounded termination, idle-host exit, closed record
   retention, active-worker quota release and persistent tombstones.
 - Host connection heartbeat (45s lease) detaches abandoned transports. PTY output
   does not extend detached lifetime. Child exit releases the PTY after bounded drain.

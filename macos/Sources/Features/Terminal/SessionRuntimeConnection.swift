@@ -3,9 +3,9 @@ import CryptoKit
 import Foundation
 
 struct SessionRuntimePolicy: Codable, Equatable, Sendable {
-    var detachedTTLSeconds = 86_400
+    var detachedTTLSeconds = 259_200
     var expiresAt: Int?
-    var closeOnAgentDone = false
+    var closeOnAgentDone = true
     var agentDoneGraceSeconds = 60
     var terminateGraceSeconds = 5
     var hostIdleSeconds = 300

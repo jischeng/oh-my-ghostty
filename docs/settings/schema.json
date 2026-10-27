@@ -374,7 +374,7 @@
     },
     "sessions.runtimeDetachedHours": {
       "category": "general",
-      "default": 24,
+      "default": 72,
       "minimum": 0,
       "maximum": 8760,
       "description": "Maximum detached SSH session lifetime; zero explicitly means unlimited.",
@@ -388,7 +388,7 @@
     },
     "sessions.runtimeCloseOnAgentDone": {
       "category": "general",
-      "default": false,
+      "default": true,
       "description": "Close detached Agent sessions only after verified completion and durable recovery metadata.",
       "type": "boolean"
     },

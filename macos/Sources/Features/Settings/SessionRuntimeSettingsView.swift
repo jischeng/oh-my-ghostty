@@ -20,10 +20,10 @@ struct SessionRuntimeSettingsView: View {
             HStack {
                 Text(text("Keep disconnected sessions (hours)", "断开后最长保留（小时）"))
                 Spacer()
-                TextField("24", value: $settings.runtimeDetachedHours, format: .number).frame(width: 80)
+                TextField("72", value: $settings.runtimeDetachedHours, format: .number).frame(width: 80)
             }
-            Text(text("0 means unlimited. Output does not extend the deadline. Changes apply to new sessions.",
-                      "0 表示无限期。持续输出不会延长期限；修改对新会话生效。"))
+            Text(text("Defaults to 72 hours (3 days). 0 disables only this time limit, not completion cleanup. Output does not extend it. Changes apply to new sessions.",
+                      "默认 72 小时（3 天）。0 仅关闭此时间上限，不影响任务完成后回收。持续输出不会延长期限；修改对新会话生效。"))
                 .font(.caption).foregroundStyle(.secondary)
             TextField(text("Optional deadline, e.g. 2026-12-01T18:00:00Z", "可选截止时间，例如 2026-12-01T18:00:00Z"), text: $settings.runtimeExpiration)
             Toggle(text("Close after Agent task completion", "Agent 任务完成后回收"), isOn: $settings.runtimeCloseOnAgentDone)
@@ -36,7 +36,13 @@ struct SessionRuntimeSettingsView: View {
                     Spacer()
                     TextField("60", value: $settings.runtimeDoneGraceSeconds, format: .number).frame(width: 80)
                 }
+                Text(text("Wait after both disconnection and verified completion. Reconnecting or new work cancels this pending cleanup; the maximum detached lifetime still applies independently.",
+                          "断开连接且确认任务完成后，再等待这段时间。重连或新任务会取消本次完成回收；最长保留期限仍独立生效。"))
+                    .font(.caption).foregroundStyle(.secondary)
             }
+            Text(text("The remote manager exits after 5 minutes with no active sessions or client connections. Running or waiting Agent sessions are not an idle manager.",
+                      "远端管理进程在没有活跃会话和客户端连接达 5 分钟后退出。仍有 Agent 运行或等待输入时，不属于管理进程空闲。"))
+                .font(.caption).foregroundStyle(.secondary)
             if let error { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
         }
     }

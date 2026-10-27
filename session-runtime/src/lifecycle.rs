@@ -21,9 +21,9 @@ pub struct Policy {
 impl Default for Policy {
     fn default() -> Self {
         Self {
-            detached_ttl_seconds: 24 * 3600,
+            detached_ttl_seconds: 3 * 24 * 3600,
             expires_at: None,
-            close_on_agent_done: false,
+            close_on_agent_done: true,
             agent_done_grace_seconds: 60,
             terminate_grace_seconds: 5,
             host_idle_seconds: 300,
@@ -179,6 +179,65 @@ mod tests {
             None
         );
     }
+    #[test]
+    fn ttl_and_completion_are_independent_retirement_conditions() {
+        let defaults: Policy = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaults.detached_ttl_seconds, 3 * 24 * 3600);
+        assert!(defaults.close_on_agent_done);
+        let now = Instant::now();
+        let mut state = Lifetime::new(now);
+        state.activity(true, now);
+        let after_grace = now + Duration::from_secs(defaults.agent_done_grace_seconds);
+        assert_eq!(
+            state.reason(&defaults, after_grace, 0, true),
+            Some(EndReason::AgentCompleted)
+        );
+        let unlimited = Policy {
+            detached_ttl_seconds: 0,
+            ..defaults.clone()
+        };
+        assert_eq!(
+            state.reason(&unlimited, after_grace, 0, true),
+            Some(EndReason::AgentCompleted)
+        );
+        let completion_disabled = Policy {
+            close_on_agent_done: false,
+            ..defaults.clone()
+        };
+        assert_eq!(
+            state.reason(&completion_disabled, after_grace, 0, true),
+            None
+        );
+        let expiry = now + Duration::from_secs(defaults.detached_ttl_seconds);
+        state.activity(false, now);
+        assert_eq!(
+            state.reason(&defaults, expiry, 0, false),
+            Some(EndReason::DetachedTimeout)
+        );
+        assert_eq!(
+            state.reason(&completion_disabled, expiry, 0, true),
+            Some(EndReason::DetachedTimeout)
+        );
+    }
+
+    #[test]
+    fn completion_grace_starts_after_both_detach_and_completion() {
+        let now = Instant::now();
+        let policy = Policy::default();
+        let mut state = Lifetime::new(now);
+        state.attached(1, now);
+        state.activity(true, now + Duration::from_secs(10));
+        state.attached(0, now + Duration::from_secs(100));
+        assert_eq!(
+            state.reason(&policy, now + Duration::from_secs(159), 0, true),
+            None
+        );
+        assert_eq!(
+            state.reason(&policy, now + Duration::from_secs(160), 0, true),
+            Some(EndReason::AgentCompleted)
+        );
+    }
+
     #[test]
     fn deadline_only_expires_detached_sessions() {
         let now = Instant::now();

@@ -24,13 +24,16 @@ codec. No claim of arbitrary cross-version snapshot compatibility.
 
 ## Lifecycle defaults and controls
 
-- Maximum detached lifetime: 24 hours; configurable, 0 explicitly means unlimited.
+- Maximum detached lifetime: 72 hours (3 days); configurable, 0 disables only this limit.
 - Optional UTC expiration deadline: applies while detached, even if output continues.
 - No heartbeat for a bounded lease: considered detached even on half-open links.
 - Last child exit: reap PTY/process resources immediately; retain reason/metadata.
-- Close after Agent task completion: off by default. When enabled, only detached
+- Close after Agent task completion: on by default. When enabled, only detached
   sessions with a validated durable conversation resume record; grace period 60s.
   New input, working/attention/error events or reattach cancels pending completion.
+  The grace period starts after both completion and detach. Completion and detached
+  TTL are independent retirement conditions: either can retire a session first;
+  disabling one does not disable the other.
 - Graceful process termination then bounded kill escalation; PTY foreground process
   group and owned session leader are handled, never unrelated reused PIDs.
 - Empty host daemon exits after 5 minutes; closed session metadata expires after

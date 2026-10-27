@@ -7,9 +7,12 @@ required on this path. SSH config carries ports/jump hosts/keys. Password and ho
 key prompts use SSH askpass. Unsupported platforms or setup errors are visible.
 
 Lifecycle settings apply to newly created Sessions. Default detached lifetime is
-24 hours; 0 explicitly disables it. An optional ISO-8601 cutoff applies only while
-detached. Completion cleanup is off by default; enable it with a grace period only
-for supported Agent hooks and conversation stores. Connections install the current
+72 hours (3 days); 0 disables only that time limit. An optional ISO-8601 cutoff applies
+only while detached. Completion cleanup is on by default, with a 60-second grace
+period and validated Agent hooks/conversation stores. It is independent of the TTL:
+completion can retire a session early, while an unfinished session still expires
+at the maximum detached lifetime. Grace begins when both detach and completion
+have occurred; new work or reattach cancels that completion cleanup. Connections install the current
 OMG Codex/Claude/Pi hooks when remote Python 3 is available. No Python means terminal
 persistence still works, but completion cleanup/recovery cannot be assumed.
 

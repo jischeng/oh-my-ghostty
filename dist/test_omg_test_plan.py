@@ -16,6 +16,7 @@ LINK_HOVER_DESKTOP_TEST = "GhosttyTests/TerminalLinkHoverTests/commandHoverRemai
 QUICK_INPUT_DESKTOP_TEST = "GhosttyTests/QuickInputFooterMouseTests"
 DESKTOP_TESTS = {
     "GhosttyTests/VerticalTabMouseTests",
+    "GhosttyTests/VerticalTabFullscreenTests",
     QUICK_INPUT_DESKTOP_TEST,
     VISUAL_DESKTOP_TEST,
     LINK_HOVER_DESKTOP_TEST,
@@ -89,6 +90,7 @@ class PlannerTests(unittest.TestCase):
 
     def test_native_suite_or_method_requires_explicit_opt_in(self):
         for test in ["GhosttyTests/VerticalTabMouseTests", "GhosttyTests/VerticalTabMouseTests/mouseSelectionKeepsWorkingAcrossNativeWindows",
+                     "GhosttyTests/VerticalTabFullscreenTests",
                      VISUAL_DESKTOP_TEST, VISUAL_DESKTOP_TEST[:-2],
                      LINK_HOVER_DESKTOP_TEST, LINK_HOVER_DESKTOP_TEST[:-2], QUICK_INPUT_DESKTOP_TEST]:
             with self.subTest(test=test), self.assertRaisesRegex(ValueError, "requires --include-desktop-tests"):

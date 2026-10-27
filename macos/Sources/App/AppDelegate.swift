@@ -287,6 +287,7 @@ class AppDelegate: NSObject,
     // MARK: - NSApplicationDelegate
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        TerminalWorkspaceSessionStore.shared.prepare()
         MainActor.assumeIsolated { applyMenuLocalization() }
         AgentIntegrationManager.shared.start()
         do {
@@ -469,6 +470,7 @@ class AppDelegate: NSObject,
                 NSApp.arrangeInFront(nil)
             }
         }
+        TerminalWorkspaceSessionStore.shared.start(ghostty)
         TerminalTabSelectionRestoration.shared.finishLaunching()
     }
 
@@ -489,7 +491,7 @@ class AppDelegate: NSObject,
             // is possible to have other windows in a few scenarios:
             //   - if we're opening a URL since `application(_:openFile:)` is called before this.
             //   - if we're restoring from persisted state
-            if TerminalController.all.isEmpty &&
+            if TerminalController.all.isEmpty && !TerminalWorkspaceSessionStore.shared.ownsRestoration &&
                 (derivedConfig.initialWindow || OhMyGhosttySettings.shared.startupMode == .newTerminal) {
                 undoManager.disableUndoRegistration()
                 _ = TerminalController.newWindow(ghostty)
@@ -557,6 +559,9 @@ class AppDelegate: NSObject,
 
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated {
+            TerminalWorkspaceSessionStore.shared.capture()
+            TerminalWorkspaceCoordinator.shared.savePresentation()
+            TerminalWorkspaceStore.shared.flush()
             QuickInputHistoryStore.shared.pruneExpired()
             QuickInputHistoryStore.shared.flushPendingWrites()
             if OhMyGhosttySettings.shared.startupMode.restoresSessions {

@@ -482,6 +482,9 @@ struct SettingsView: View {
 
         case .keyboard:
             Form {
+                OMGSettingsSection(WorkspaceL10n.text("Workspaces", "工作区")) {
+                    WorkspaceShortcutSettingsView()
+                }
                 OMGSettingsSection(strings.quickInputShortcutLabel) { QuickInputShortcutSettingsView(settings: settings) }
                 OMGSettingsSection(strings.rightSidebarShortcutsSection) {
                     Text(strings.rightSidebarShortcutsCaption)

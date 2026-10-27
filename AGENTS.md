@@ -2,6 +2,13 @@
 
 A file for [guiding coding agents](https://agents.md/).
 
+## Workspace checkout development target
+
+For this `omg-workspace` checkout, install development builds with
+`bash dist/macos/install-workspace-dev.sh` to `/Applications/OMG Dev Workspace.app`.
+Future development installs overwrite that dedicated app, never OMG or OMG Dev.
+See [.agents/WORKSPACE_DEV.md](.agents/WORKSPACE_DEV.md) for identity and data paths.
+
 ## Commands
 
 - **Build:** `zig build`

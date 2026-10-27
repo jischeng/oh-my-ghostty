@@ -156,6 +156,14 @@ Vertical Tabs 不是独立 Sidebar 产品，而是 Ghostty tab bar 的另一种 
 
 Layout 配置只对新窗口生效。运行时更换 orientation 需要替换 NSWindow class/titlebar hierarchy，当前不安全，因此不会重建已有 PTY、surface 或 scrollback。
 
+### 6.2.1 Named terminal workspaces
+
+工作区是原生 Tab 之上的宿主归属层，默认创建 Personal；左上角原 TABS 标题替换为图标、名称和下拉入口。入口支持搜索、新建、改名、图标/低饱和颜色选择和移动当前完整 Tab。左侧栏隐藏或使用 horizontal tabs 时，内容区顶部保留紧凑入口。默认 `⌃⌘W` 打开切换器、`⌃⌘1…9` 按固定目录顺序切换，Settings > Shortcuts 支持修改并提示工作区、OMG 面板、菜单及 Ghostty binding 冲突；第三方全局快捷键不保证能检测。切换器默认选中上一个工作区，确认后才切换。
+
+运行期切换保留 TerminalController、Surface、PTY、SSH 与 Agent，不通过序列化重建。目标成员先加入当前原生标签组并准备画面，然后才移走旧成员，避免先隐藏全屏窗口造成容器空洞；成员列表在交接前冻结，不从临时混合组反推归属。原生窗口 orderOut 可能拆散 NSWindowTabGroup，因此后台保存有序成员，返回时重建原生分组并选中原 Tab。已经在另一可见窗口打开的目标只聚焦已有窗口。后台会话继续占用进程资源。完整 Tab 移动保留 Surface/tab 身份，原工作区最后一个 Tab 被移走后创建空终端。窗口 tabbingIdentifier 使用工作区 UUID，避免系统自动合并不同工作区。
+
+工作区元数据放在 channel-specific Application Support 的 `workspaces/catalog.json`，使用私有目录/文件和串行原子写入；运行期另外维护 `workspaces/sessions.json`，保存可编码的 tab/split 状态与 typed Agent/SSH 恢复描述，结构变化时保存并每秒检查其他状态变化。有效非空快照优先于 AppKit 启动归档；窗口关闭保留、显式 tab 关闭删除。kill 后恢复最后成功落盘状态，不承诺尚未写入的变更或任意进程内存。恢复选中 Tab 完成后再隐藏后台工作区；目录中保存成员顺序以处理 AppKit 对隐藏标签组的拆分。工作区只隔离标签组织和窗口展示，不隔离 shell 环境、磁盘、凭据或网络。首次升级通过稳定 tab-session UUID 将已有窗口归入默认工作区。
+
 ### 6.3 Pi
 
 Pi 不依赖 Sidebar 或状态插件，但依赖 IPC、QuickInput 和 Terminal Control。

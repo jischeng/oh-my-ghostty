@@ -265,6 +265,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     private var surfaceAppearanceCancellables: Set<AnyCancellable> = []
 
     let tabSessionID: UUID
+    @Published var workspaceID: UUID
+    @Published var workspaceSwitcherIsPresented = false
     let tabCreatedAt: Date
     @Published private(set) var tabLastActivatedAt: Date
 
@@ -601,6 +603,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return event
         }
 
+        if TerminalWorkspaceCoordinator.shared.handle(event, in: self) { return nil }
         let settings = OhMyGhosttySettings.shared
         if OMGKeyboardShortcut.quickInputHistory.matches(event) {
             toggleQuickInputHistory()
@@ -812,7 +815,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
          parent: NSWindow? = nil,
          tabLayout: Ghostty.Config.MacOSTabLayout? = nil,
          tabSessionID: UUID? = nil,
-         tabCreatedAt: Date? = nil
+         tabCreatedAt: Date? = nil,
+         workspaceID: UUID? = nil
     ) {
         // The window we manage is not restorable if we've specified a command
         // to execute. We do this because the restored window is meaningless at the
@@ -842,6 +846,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         )
         self.tabLayout = tabLayout ?? OhMyGhosttySettings.shared.tabLayout
         self.tabSessionID = tabSessionID ?? UUID()
+        self.workspaceID = TerminalWorkspaceStore.shared.workspaceID(
+            for: self.tabSessionID,
+            inheriting: workspaceID ?? (parent?.windowController as? TerminalController)?.workspaceID
+        )
         let now = Date()
         self.tabCreatedAt = tabCreatedAt ?? now
         self.tabLastActivatedAt = now
@@ -943,6 +951,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             }
         synchronizePaneSessionContexts()
         startAgentProcessPolling()
+        TerminalWorkspaceCoordinator.shared.register(self)
+        DispatchQueue.main.async { TerminalWorkspaceSessionStore.shared.capture() }
     }
 
     required init?(coder: NSCoder) {
@@ -964,6 +974,17 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // Remove all of our notificationcenter subscriptions
         let center = NotificationCenter.default
         center.removeObserver(self)
+    }
+
+    func cancelWorkspacePendingPresentation() {
+        cancelPendingInitialPresentation()
+        tabLayoutState.cancelPendingTabSelection(ObjectIdentifier(self))
+    }
+
+    func refreshWorkspaceTabs() {
+        window?.tabbingIdentifier = "omg.workspace.\(workspaceID.uuidString)"
+        invalidateRestorableState()
+        setupTabObservation()
     }
 
     private func cancelPendingInitialPresentation() {
@@ -2185,6 +2206,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // we want to invalidate our state.
         invalidateRestorableState()
         synchronizePaneSessionContexts()
+        TerminalWorkspaceSessionStore.shared.capture()
 
         // Update our zoom state
         if let window = window as? TerminalWindow {
@@ -2222,6 +2244,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     func selectVerticalTab(_ controller: TerminalController) {
         guard let targetWindow = controller.window,
               NSApp.windows.contains(where: { $0 === targetWindow }) else { return }
+        // Native selection can expose the destination before refreshTabs moves
+        // the shared sidebar into it. Commit both within one screen update.
+        NSDisableScreenUpdates()
+        defer { NSEnableScreenUpdates() }
         // The row's controller identifies the target. UI projections and the
         // source's group can lag behind native reorder/restore notifications.
         let tabGroup = targetWindow.tabGroup
@@ -3655,11 +3681,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return
         }
 
-        // 1 window, closing the window
+        // Closing the final terminal is still an explicit tab removal, unlike
+        // closing its containing window with the traffic-light/window action.
         if withConfirmation {
-            closeWindow(nil)
+            closeTab(nil)
         } else {
-            closeWindowImmediately()
+            closeTabImmediately()
         }
     }
 
@@ -3668,6 +3695,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         guard EditorWorkspaceStore.shared.prepareToClose(tabIDs: [tabSessionID], window: window, retry: { [weak self] in
             self?.closeTabImmediately(registerRedo: registerRedo)
         }) else { return }
+        TerminalWorkspaceSessionStore.shared.forget(self)
         guard let tabGroup = window.tabGroup,
                 tabGroup.windows.count > 1 else {
             closeWindowImmediately()
@@ -3811,6 +3839,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// Closes the current window (including any other tabs) immediately and without
     /// confirmation. This will setup proper undo state so the action can be undone.
     func closeWindowImmediately() {
+        TerminalWorkspaceSessionStore.shared.capture()
         guard let window = window else { return }
         let editorTabIDs = (window.tabGroup?.windows ?? [window]).compactMap {
             ($0.windowController as? TerminalController)?.tabSessionID
@@ -4088,6 +4117,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         super.windowDidLoad()
         guard let window else { return }
         DevMemoryDiagnostics.windowOpened()
+        window.tabbingIdentifier = "omg.workspace.\(workspaceID.uuidString)"
 
         // I copy this because we may change the source in the future but also because
         // I regularly audit our codebase for "ghostty.config" access because generally
@@ -4251,6 +4281,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     override func windowWillClose(_ notification: Notification) {
+        TerminalWorkspaceSessionStore.shared.capture()
+        TerminalWorkspaceCoordinator.shared.didClose(self)
         tabPresentationIsClosing = true
         tabLayoutState.cancelPendingTabSelection(ObjectIdentifier(self))
         verticalTabWindowsObservation?.invalidate()
@@ -4348,6 +4380,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // Remember our last main and invalidate the app-level selected-tab
         // snapshot as well as the window's own focused-Surface state.
         Self.lastMain = self
+        TerminalWorkspaceCoordinator.shared.didActivate(self)
         NSApp.invalidateRestorableState()
     }
 
@@ -4372,10 +4405,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     @IBAction func closeTab(_ sender: Any?) {
         guard let window = window else { return }
-        guard window.tabGroup?.windows.count ?? 0 > 1 else {
-            closeWindow(sender)
-            return
-        }
+        guard window.attachedSheet == nil else { return }
 
         guard surfaceTree.contains(where: { $0.needsConfirmQuit }) else {
             closeTabImmediately()

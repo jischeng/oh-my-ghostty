@@ -217,9 +217,12 @@ struct GitHistoryService: Sendable {
                 "--format=%H%x00%P%x00%an%x00%ae%x00%aI%x00%" + (includeMessage ? "B" : "s"),
                 "--skip=\(offset)",
                 "--max-count=\(requestedCount)",
-            ] + snapshot.tipCommitIDs.map(\.rawValue),
+                "--stdin",
+            ],
             workingDirectory: repository.worktreePath,
-            stdin: nil,
+            // Keep frozen revisions out of argv: SSH wraps/encodes its command
+            // and large all-branch snapshots can exceed the remote shell limit.
+            stdin: Data((snapshot.tipCommitIDs.map(\.rawValue).joined(separator: "\n") + "\n").utf8),
             maxOutputBytes: max(512 * 1024, requestedCount * 512)
         )
         guard result.isSuccess else {

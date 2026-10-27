@@ -317,6 +317,37 @@ struct SSHGitExecutorTests {
         }
     }
 
+    @Test func largeFrozenHistorySnapshotStreamsRevisionsOverSSH() async throws {
+        let server = try await GitSSHTestServer()
+        defer { server.stop() }
+        let path = server.root.appendingPathComponent("large history")
+        try FileManager.default.createDirectory(at: path, withIntermediateDirectories: true)
+        let remote = SSHGitExecutor(connection: server.connection)
+        for args in [["init", "-b", "main"], ["config", "user.name", "SSH Test"],
+                     ["config", "user.email", "ssh@example.com"], ["config", "commit.gpgSign", "false"],
+                     ["commit", "--allow-empty", "-m", "frozen history"]] {
+            #expect(try await remote.execute(arguments: args, workingDirectory: path.path).isSuccess)
+        }
+        let status = await GitRepositoryService().resolveStatus(
+            workingDirectory: path.path, session: server.session(directory: path.path))
+        let repository = try #require(status.repository)
+        let service = GitHistoryService()
+        let original = try await service.captureSnapshot(for: repository, scope: .allBranches)
+        let head = try #require(original.headCommitID)
+        // Repeated valid revisions exercise the real SSH byte-size boundary
+        // without creating thousands of objects. This is >1 MiB before wrapping.
+        let snapshot = GitHistorySnapshot(scope: .allBranches, branchName: "main",
+            headCommitID: head, tipCommitIDs: Array(repeating: head, count: 30_000),
+            decorationsByCommitID: original.decorationsByCommitID)
+        #expect(try await remote.execute(arguments: ["commit", "--allow-empty", "-m", "after snapshot"],
+            workingDirectory: path.path).isSuccess)
+        let page = try await service.loadPage(snapshot: snapshot, repository: repository, offset: 0, pageSize: 1)
+        #expect(page.commits.map(\.subject) == ["frozen history"])
+        #expect(!page.hasMore)
+        let next = try await service.loadPage(snapshot: snapshot, repository: repository, offset: 1, pageSize: 1)
+        #expect(next.commits.isEmpty)
+    }
+
     @Test func realSSHProvidesReadWriteAndDiffParityWithoutLocalPathFallback() async throws {
         let server = try await GitSSHTestServer()
         defer { server.stop() }

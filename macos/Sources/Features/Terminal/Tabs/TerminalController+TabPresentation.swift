@@ -3,6 +3,47 @@ import GhosttyKit
 import IOSurface
 
 extension TerminalController {
+    /// AppKit gives a newly attached tab its fullscreen content rect only when
+    /// selecting it. Keep that selection, the sidebar handoff, and the first
+    /// correctly sized terminal frame in one nonanimated presentation update.
+    func withNewTabPresentation(from outgoingWindow: NSWindow?, show: () -> Bool) -> Bool {
+        guard let targetWindow = window, let outgoingWindow,
+              targetWindow !== outgoingWindow,
+              outgoingWindow.styleMask.contains(.fullScreen),
+              targetWindow.tabGroup === outgoingWindow.tabGroup else {
+            let shown = show()
+            if shown, tabLayout == .vertical { Self.refreshTabs(in: window?.tabGroup) }
+            return shown
+        }
+
+        // This is a tab replacement inside an existing fullscreen space, not
+        // an independently opening window. Restore the normal behavior afterward.
+        let animationBehavior = targetWindow.animationBehavior
+        targetWindow.animationBehavior = .none
+        defer { targetWindow.animationBehavior = animationBehavior }
+
+        var shown = false
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            context.allowsImplicitAnimation = false
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            defer { CATransaction.commit() }
+
+            // A hidden window has not run TerminalWindow.syncAppearance yet.
+            // Give AppKit the group's background before it exposes the window.
+            targetWindow.backgroundColor = outgoingWindow.backgroundColor
+            targetWindow.isOpaque = outgoingWindow.isOpaque
+            shown = show()
+            guard shown else { return }
+            syncTabPresentationAppearance()
+            if tabLayout == .vertical { Self.refreshTabs(in: targetWindow.tabGroup) }
+            prepareTabPresentation(from: outgoingWindow)
+            targetWindow.contentView?.displayIfNeeded()
+        }
+        return shown
+    }
+
     /// Prepare only the tab about to replace the closing/selected window. Hidden
     /// tabs retain their last IOSurface, which may predate a window enlargement.
     /// Its top-left gravity leaves the newly exposed area transparent until a

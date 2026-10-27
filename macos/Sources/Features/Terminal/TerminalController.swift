@@ -304,6 +304,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     /// Opaque semantic separator derived from the current terminal background.
     @Published private(set) var sidebarDividerColor: Color
+    private var chromeAppearanceGeneration: UInt64 = 0
 
     /// Canonical pane session state. Tab title/icon and Inspector/Files all
     /// consume this map rather than independently inferring SSH from titles.
@@ -2954,7 +2955,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         if selectedTabID != selectedID { selectedTabID = selectedID }
     }
 
-    private static func refreshTabs(in tabGroup: NSWindowTabGroup?) {
+    static func refreshTabs(in tabGroup: NSWindowTabGroup?) {
         guard let tabGroup else { return }
         pendingTabRefreshes.removeValue(forKey: ObjectIdentifier(tabGroup))?.cancel()
         let controllers = tabGroup.windows.compactMap { $0.windowController as? TerminalController }
@@ -3356,14 +3357,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 Self.applyCascade(to: window, hasFixedPos: hasFixedPos)
             }
 
-            // showWindow makes regular windows key and ordered front. AppKit can
-            // throw while selecting a tab if its fullscreen stack is inconsistent,
-            // so this must cross the Objective-C exception bridge.
-            if controller.showWindowSafely(self) {
-                if parentController.tabLayout == .vertical {
-                    Self.refreshTabs(in: window.tabGroup)
-                }
-            } else {
+            // AppKit establishes fullscreen content geometry during selection.
+            // Finish layout and drawing within the same presentation update.
+            let shown = controller.withNewTabPresentation(from: window.tabGroup?.selectedWindow) {
+                // Native tab selection must cross the Objective-C exception bridge.
+                controller.showWindowSafely(self)
+            }
+            if !shown {
                 parentController.tabLayoutState.cancelPendingTabSelection(
                     ObjectIdentifier(controller)
                 )
@@ -3497,7 +3497,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         syncAppearance(focusedSurface.derivedConfig)
     }
 
-    private func syncAppearance(_ surfaceConfig: Ghostty.SurfaceView.DerivedConfig) {
+    func syncTabPresentationAppearance() {
+        guard let focusedSurface else { return }
+        syncAppearance(focusedSurface.derivedConfig, immediately: true)
+    }
+
+    private func syncAppearance(_ surfaceConfig: Ghostty.SurfaceView.DerivedConfig, immediately: Bool = false) {
         // Let our window handle its own appearance
         guard let window = window as? TerminalWindow else { return }
         let backgroundColor = focusedSurface?.backgroundColor ?? surfaceConfig.backgroundColor
@@ -3513,12 +3518,14 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             colorspaceIsDisplayP3: ghostty.config.windowColorspaceIsDisplayP3
         )
         let dividerColor = ghostty.config.splitDividerColor(for: backgroundColor)
+        chromeAppearanceGeneration &+= 1
+        let appearanceGeneration = chromeAppearanceGeneration
         if terminalBackgroundColor != backgroundColor ||
             terminalBackgroundOpacity != backgroundOpacity ||
             terminalChromeBackground != chromeBackground ||
             sidebarDividerColor != dividerColor {
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
+            let update = { [weak self] in
+                guard let self, self.chromeAppearanceGeneration == appearanceGeneration else { return }
                 if self.terminalBackgroundColor != backgroundColor {
                     self.terminalBackgroundColor = backgroundColor
                 }
@@ -3531,6 +3538,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 if self.sidebarDividerColor != dividerColor {
                     self.sidebarDividerColor = dividerColor
                 }
+            }
+            // Presentation runs outside SwiftUI's update pass and must paint
+            // the fullscreen chrome before the native window becomes visible.
+            if immediately {
+                update()
+            } else {
+                DispatchQueue.main.async(execute: update)
             }
         }
 
@@ -4173,6 +4187,15 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// Setup correct window frame before showing the window
     override func showWindow(_ sender: Any?) {
         guard let terminalWindow = window as? TerminalWindow else { return }
+
+        // Fullscreen tabs already inherit their group's frame. Restoring or
+        // centering one can move the native fullscreen stack during selection.
+        if let group = terminalWindow.tabGroup, group.windows.count > 1,
+           group.windows.contains(where: { $0.styleMask.contains(.fullScreen) }) {
+            super.showWindow(sender)
+            syncAppearance()
+            return
+        }
 
         // Set the initial window position. This must happen after the window
         // is fully set up (content view, toolbar, default size) so that

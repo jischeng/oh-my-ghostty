@@ -28,6 +28,7 @@ final class TerminalWorkspaceSessionStore {
     private var timer: AnyCancellable?
     private var started = false
     private var restoring = false
+    private var quitting = false
     private var removed = Set<UUID>()
     private(set) var ownsRestoration = false
 
@@ -94,8 +95,22 @@ final class TerminalWorkspaceSessionStore {
         return anchors
     }
 
+    /// Freeze the catalog before AppKit starts removing/reordering tab windows.
+    /// Confirmation dialogs and windowWillClose callbacks must not replace the
+    /// user's layout with an intermediate teardown order.
+    func prepareToQuit() {
+        guard started, !quitting else { return }
+        capture()
+        quitting = true
+    }
+
+    func cancelQuit() {
+        quitting = false
+        capture()
+    }
+
     func forget(_ controller: TerminalController) {
-        guard started else { return }
+        guard started, !quitting else { return }
         removed.insert(controller.tabSessionID)
         saved.tabs.removeAll { $0.id == controller.tabSessionID }
         persist()
@@ -103,7 +118,7 @@ final class TerminalWorkspaceSessionStore {
 
     /// Retain a window-close snapshot; only explicit tab close removes it.
     func capture() {
-        guard started, !restoring else { return }
+        guard started, !restoring, !quitting else { return }
         for controller in TerminalController.all where !controller.surfaceTree.isEmpty && !removed.contains(controller.tabSessionID) {
             guard let data = try? JSONEncoder().encode(TerminalRestorableState(from: controller)) else { continue }
             let tab = Tab(id: controller.tabSessionID, workspace: controller.workspaceID, state: data)

@@ -509,6 +509,7 @@ class AppDelegate: NSObject,
             return .terminateCancel
         }
         MainActor.assumeIsolated {
+            TerminalWorkspaceSessionStore.shared.prepareToQuit()
             if OhMyGhosttySettings.shared.startupMode.restoresTabs {
                 TerminalTabSelectionRestoration.shared.prepareToQuit()
             } else {
@@ -1568,6 +1569,7 @@ extension AppDelegate {
                     await NSApp.reply(toApplicationShouldTerminate: true)
                 } else {
                     await TerminalTabSelectionRestoration.shared.cancelQuit()
+                    await TerminalWorkspaceSessionStore.shared.cancelQuit()
                     await NSApp.reply(toApplicationShouldTerminate: false)
                 }
             }
@@ -1589,7 +1591,10 @@ extension AppDelegate {
             case .alertSecondButtonReturn:
                 return .terminateNow
             default:
-                MainActor.assumeIsolated { TerminalTabSelectionRestoration.shared.cancelQuit() }
+                MainActor.assumeIsolated {
+                    TerminalTabSelectionRestoration.shared.cancelQuit()
+                    TerminalWorkspaceSessionStore.shared.cancelQuit()
+                }
                 return .terminateCancel
             }
         }
@@ -1610,6 +1615,7 @@ extension AppDelegate {
                     continue
                 } else {
                     await TerminalTabSelectionRestoration.shared.cancelQuit()
+                    await TerminalWorkspaceSessionStore.shared.cancelQuit()
                     await NSApp.reply(toApplicationShouldTerminate: false)
                     // Cancel the review
                     return

@@ -127,6 +127,110 @@ struct TerminalWorkspaceIntegrationTests {
         #expect(Set(savedAgain.tabs.map(\.id)).isSuperset(of: tabIDs))
     }
 
+    @Test func startupPreservesSavedManualTabOrderAfterPresentation() async throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let nativeApp = try #require(app.app)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let url = directory.appendingPathComponent("sessions.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let ids = (0..<4).map { _ in UUID() }
+        var snapshot = TerminalWorkspaceSessionStore.Snapshot()
+        for (index, id) in ids.enumerated() {
+            let view = Ghostty.SurfaceView(nativeApp, baseConfig: config)
+            let state = TerminalRestorableState.InternalState(
+                focusedSurface: view.id.uuidString, surfaceTree: SplitTree(view: view),
+                effectiveFullscreenMode: nil, tabColor: nil, titleOverride: "Order \(index)",
+                tabSessionID: id.uuidString, tabCreatedAt: Date(timeIntervalSince1970: Double(4 - index))
+            )
+            snapshot.tabs.append(.init(id: id, workspace: TerminalWorkspace.defaultID,
+                state: try JSONEncoder().encode(state)))
+        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try JSONEncoder().encode(snapshot).write(to: url)
+        let store = TerminalWorkspaceSessionStore(url: url, testing: true)
+        store.prepare()
+        store.start(app)
+        let restored = TerminalController.all.filter { ids.contains($0.tabSessionID) }
+        defer {
+            for controller in restored {
+                controller.window?.delegate = nil
+                controller.window?.close()
+            }
+        }
+        let first = try #require(restored.first { $0.tabSessionID == ids[0] })
+        let group = try #require(first.window?.tabGroup)
+        func nativeOrder() -> [UUID] {
+            group.windows.compactMap { ($0.windowController as? TerminalController)?.tabSessionID }
+        }
+        #expect(nativeOrder() == ids)
+        try await Task.sleep(for: .milliseconds(250))
+        #expect(nativeOrder() == ids)
+        #expect(first.tabControllers.map(\.tabSessionID) == ids)
+        store.capture()
+        let captured = try JSONDecoder().decode(TerminalWorkspaceSessionStore.Snapshot.self, from: Data(contentsOf: url))
+        #expect(captured.tabs.filter { ids.contains($0.id) }.map(\.id) == ids)
+    }
+
+    @Test func quitKeepsManualOrderAndCancelResumesLayoutChanges() throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let url = directory.appendingPathComponent("sessions.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let controllers = (0..<4).map { _ in TerminalController(app, withBaseConfig: config) }
+        let windows = try controllers.map { try #require($0.window) }
+        defer {
+            for window in windows {
+                window.delegate = nil
+                window.close()
+            }
+        }
+        for index in 1..<windows.count {
+            #expect(windows[index - 1].addTabbedWindowSafely(windows[index], ordered: .above))
+        }
+        let group = try #require(windows[0].tabGroup)
+        // An explicit drag order must survive, independently of creation time.
+        let manual = [windows[2], windows[0], windows[3], windows[1]]
+        func reorder(_ order: [NSWindow]) {
+            for (index, window) in order.enumerated() where group.windows[index] !== window {
+                group.removeWindow(window)
+                group.insertWindow(window, at: index)
+            }
+        }
+        reorder(manual)
+        let ids = Set(controllers.map(\.tabSessionID))
+        func savedOrder() throws -> [UUID] {
+            let snapshot = try JSONDecoder().decode(TerminalWorkspaceSessionStore.Snapshot.self, from: Data(contentsOf: url))
+            return snapshot.tabs.filter { ids.contains($0.id) }.map(\.id)
+        }
+        let expected = manual.compactMap { ($0.windowController as? TerminalController)?.tabSessionID }
+        let store = TerminalWorkspaceSessionStore(url: url, testing: true)
+        store.start(app)
+        store.prepareToQuit()
+        #expect(try savedOrder() == expected)
+        let beforeTeardown = try Data(contentsOf: url)
+        // AppKit changes the live group order as it closes tab windows. Timer,
+        // window-close, explicit-close and termination callbacks must freeze it.
+        reorder(Array(manual.reversed()))
+        store.capture()
+        store.forget(controllers[0])
+        store.prepareToQuit()
+        #expect(try Data(contentsOf: url) == beforeTeardown)
+        #expect(try savedOrder() == expected)
+
+        store.cancelQuit()
+        #expect(try savedOrder() == Array(expected.reversed()))
+        store.forget(controllers[0])
+        #expect(try savedOrder() == Array(expected.reversed()).filter { $0 != controllers[0].tabSessionID })
+        store.prepareToQuit()
+        reorder(manual)
+        store.capture()
+        #expect(try savedOrder() == Array(expected.reversed()).filter { $0 != controllers[0].tabSessionID })
+    }
+
     @Test func switchingRetainsSurfacesAndNativeTabMembership() async throws {
         let appDelegate = try #require(NSApp.delegate as? AppDelegate)
         let store = TerminalWorkspaceStore(fileURL: nil)

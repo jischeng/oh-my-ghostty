@@ -4,6 +4,30 @@ import Testing
 
 @MainActor
 struct TerminalWorkspaceIntegrationTests {
+    @Test func sessionSnapshotSurvivesStoreRecreationAndExplicitTabDeletion() throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let url = directory.appendingPathComponent("sessions.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let controller = TerminalController(app, withBaseConfig: config)
+        _ = controller.window
+        defer { controller.window?.delegate = nil; controller.window?.close() }
+        let store = TerminalWorkspaceSessionStore(url: url, testing: true)
+        store.start(app)
+        store.capture()
+        let snapshot = try JSONDecoder().decode(TerminalWorkspaceSessionStore.Snapshot.self, from: Data(contentsOf: url))
+        #expect(snapshot.tabs.contains { $0.id == controller.tabSessionID })
+        let recreated = TerminalWorkspaceSessionStore(url: url, testing: true)
+        recreated.prepare()
+        #expect(recreated.ownsRestoration)
+        store.forget(controller)
+        store.capture()
+        let deleted = try JSONDecoder().decode(TerminalWorkspaceSessionStore.Snapshot.self, from: Data(contentsOf: url))
+        #expect(!deleted.tabs.contains { $0.id == controller.tabSessionID })
+    }
+
     @Test func switchingRetainsSurfacesAndNativeTabMembership() async throws {
         let appDelegate = try #require(NSApp.delegate as? AppDelegate)
         let store = TerminalWorkspaceStore(fileURL: nil)

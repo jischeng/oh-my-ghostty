@@ -151,6 +151,11 @@ class TerminalWindowRestoration: NSObject, NSWindowRestoration {
             return
         }
 
+        if TerminalWorkspaceSessionStore.shared.ownsRestoration {
+            completionHandler(nil, nil)
+            return
+        }
+
         // Decode the state. If we can't decode the state, then we can't restore.
         guard let state = TerminalRestorableState(coder: state) else {
             completionHandler(nil, TerminalRestoreError.stateDecodeFailed)

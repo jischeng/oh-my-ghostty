@@ -1052,8 +1052,13 @@ The host stores names, symbol/color choices, shortcut slots, tab membership and
 parked-group order in the channel-specific `workspaces/catalog.json` under
 Application Support (0700 directory, 0600 file, atomic writes). Terminal output,
 SSH credentials and Agent transcripts are not stored in this catalog. Restart
-restoration still follows `sessions.startupMode` and existing typed SSH/Agent
-resume policies; a named workspace does not keep a process alive after app exit.
+restoration uses a host-owned runtime `workspaces/sessions.json` checkpoint when
+available, with existing typed SSH/Agent resume policies. The checkpoint records
+serialized tab/split state and resume descriptors during runtime, independently
+of AppKit's clean-exit archive. Window close retains records; explicit tab close
+removes them. The last successfully written snapshot survives forced termination,
+but unsaved changes and arbitrary process memory do not. Legacy restoration without
+a checkpoint follows `sessions.startupMode`. This adds no plugin control capability.
 
 `WorkspaceDescriptor` and `WorkspaceFilesystem` are generic boundaries for
 local and remote workspace providers. `LocalWorkspaceFilesystem` is the local

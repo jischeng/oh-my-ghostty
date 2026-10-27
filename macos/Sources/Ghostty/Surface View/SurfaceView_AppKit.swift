@@ -2019,7 +2019,8 @@ extension Ghostty {
             config.environmentVariables["OH_MY_GHOSTTY_CHANNEL"] =
                 OMGApplicationEnvironment.channel()
             config.workingDirectory = try container.decode(String?.self, forKey: .pwd)
-            let startupMode = OhMyGhosttySettings.shared.startupMode
+            let startupMode: OMGStartupMode = decoder.userInfo[TerminalWorkspaceSessionStore.restoreSessionsKey] as? Bool == true
+                ? .restoreSessions : OhMyGhosttySettings.shared.startupMode
             // Layout-only recovery must not fail just because a stale Agent or
             // SSH descriptor cannot be decoded; it never launches that program.
             let resume: AgentResumeDescriptor?

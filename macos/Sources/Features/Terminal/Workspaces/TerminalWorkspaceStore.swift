@@ -10,12 +10,23 @@ struct TerminalWorkspace: Codable, Equatable, Identifiable {
     var symbol: String
     var color: String
 
-    static let symbols = ["house", "briefcase", "terminal", "folder", "hammer", "sparkles"]
-    static let colors = ["sage", "blue", "purple", "amber", "rose", "gray"]
+    static let symbols = [
+        "house", "briefcase", "person.crop.circle", "terminal", "folder", "hammer",
+        "sparkles", "star", "heart", "book", "graduationcap", "globe",
+        "airplane", "leaf", "cup.and.saucer", "gamecontroller", "music.note", "camera",
+        "paintbrush", "lightbulb", "bolt", "server.rack", "cloud", "shippingbox",
+    ]
+    static let colors = ["sage", "green", "mint", "teal", "blue", "indigo", "purple", "rose", "red", "orange", "amber", "gray"]
     static let initial = TerminalWorkspace(id: defaultID, name: "Personal", symbol: "house", color: "sage")
 
     var tint: Color {
         switch color {
+        case "green": Color.green
+        case "mint": Color.mint
+        case "teal": Color.teal
+        case "indigo": Color.indigo
+        case "red": Color.red
+        case "orange": Color.orange
         case "blue": Color(red: 0.57, green: 0.68, blue: 0.79)
         case "purple": Color(red: 0.69, green: 0.63, blue: 0.81)
         case "amber": Color(red: 0.80, green: 0.67, blue: 0.46)

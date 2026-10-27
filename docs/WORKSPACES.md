@@ -34,7 +34,17 @@ A network failure can still disconnect SSH independently of workspace switching.
 Returning restores the saved tab order and selected tab. A workspace already
 visible in another window is focused there instead of duplicated.
 
-Restart recovery follows **Settings > Sessions > Startup Mode**:
+Named workspace sessions are now checkpointed independently to
+`workspaces/sessions.json` while the app runs. A valid nonempty checkpoint takes
+precedence over AppKit restoration and resumes supported Agent/SSH descriptors.
+Closing a window retains its saved tabs; explicitly closing a tab removes it.
+Snapshots are written on structural changes and checked once per second for
+changed directory/title/resume data. A forced kill restores the last successful
+checkpoint; changes not yet written at the instant of termination may be lost.
+This is process reconstruction, not a process checkpoint: arbitrary running
+commands and remote jobs cannot be resurrected by OMG.
+
+Without a named-workspace checkpoint, legacy recovery follows **Settings > Sessions > Startup Mode**:
 
 - Restore Sessions uses existing supported Agent and SSH resume descriptors and
   shell restoration behavior.

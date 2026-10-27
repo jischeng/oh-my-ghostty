@@ -98,7 +98,7 @@ struct TerminalWorkspacePicker: View {
                         }
                     }
                 }
-                .frame(maxHeight: 330)
+                .frame(height: min(330, CGFloat(max(1, filtered.count)) * 53))
                 Divider().padding(.horizontal, 6)
                 action("plus", WorkspaceL10n.text("New Workspace…", "新建工作区…")) { beginEditing(create: true) }
                 action("pencil", WorkspaceL10n.text("Edit Current Workspace…", "编辑当前工作区…")) {
@@ -127,7 +127,8 @@ struct TerminalWorkspacePicker: View {
             }
         }
         .padding(7)
-        .frame(width: 290)
+        .frame(width: 310)
+        .fixedSize(horizontal: false, vertical: true)
         .onAppear {
             selectedID = coordinator.previousWorkspaceID ?? controller.workspaceID
             searchFocused = true
@@ -193,7 +194,7 @@ struct TerminalWorkspacePicker: View {
             Label(title, systemImage: icon).font(.system(size: 12))
                 .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10).padding(.vertical, 6)
                 .contentShape(Rectangle())
-        }.buttonStyle(.plain)
+        }.buttonStyle(WorkspaceHoverButtonStyle())
     }
 
     private func step(_ delta: Int) {
@@ -222,7 +223,7 @@ struct TerminalWorkspacePicker: View {
                     WorkspaceL10n.text("Edit Workspace", "编辑工作区")).font(.headline)
             TextField(WorkspaceL10n.text("Name", "名称"), text: $name)
                 .textFieldStyle(.roundedBorder)
-            HStack(spacing: 7) {
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 6), spacing: 6) {
                 ForEach(TerminalWorkspace.symbols, id: \.self) { item in
                     Button { symbol = item } label: {
                         Image(systemName: item).frame(width: 29, height: 28)
@@ -231,7 +232,7 @@ struct TerminalWorkspacePicker: View {
                     }.buttonStyle(.plain).accessibilityLabel(item)
                 }
             }
-            HStack(spacing: 12) {
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 6), spacing: 10) {
                 ForEach(TerminalWorkspace.colors, id: \.self) { item in
                     Button { color = item } label: {
                         Circle().fill(TerminalWorkspace(id: UUID(), name: "", symbol: symbol, color: item).tint)
@@ -259,6 +260,23 @@ struct TerminalWorkspacePicker: View {
             store.update(id: controller.workspaceID, name: name, symbol: symbol, color: color)
             editing = false
             searchFocused = true
+        }
+    }
+}
+
+private struct WorkspaceHoverButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HoverBody(configuration: configuration)
+    }
+
+    private struct HoverBody: View {
+        let configuration: ButtonStyle.Configuration
+        @State private var hovered = false
+        var body: some View {
+            configuration.label
+                .background(Color.primary.opacity(configuration.isPressed ? 0.12 : hovered ? 0.07 : 0))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .onHover { hovered = $0 }
         }
     }
 }

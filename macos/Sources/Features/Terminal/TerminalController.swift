@@ -951,6 +951,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         synchronizePaneSessionContexts()
         startAgentProcessPolling()
         TerminalWorkspaceCoordinator.shared.register(self)
+        DispatchQueue.main.async { TerminalWorkspaceSessionStore.shared.capture() }
     }
 
     required init?(coder: NSCoder) {
@@ -2204,6 +2205,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // we want to invalidate our state.
         invalidateRestorableState()
         synchronizePaneSessionContexts()
+        TerminalWorkspaceSessionStore.shared.capture()
 
         // Update our zoom state
         if let window = window as? TerminalWindow {
@@ -3661,11 +3663,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return
         }
 
-        // 1 window, closing the window
+        // Closing the final terminal is still an explicit tab removal, unlike
+        // closing its containing window with the traffic-light/window action.
         if withConfirmation {
-            closeWindow(nil)
+            closeTab(nil)
         } else {
-            closeWindowImmediately()
+            closeTabImmediately()
         }
     }
 
@@ -3674,6 +3677,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         guard EditorWorkspaceStore.shared.prepareToClose(tabIDs: [tabSessionID], window: window, retry: { [weak self] in
             self?.closeTabImmediately(registerRedo: registerRedo)
         }) else { return }
+        TerminalWorkspaceSessionStore.shared.forget(self)
         guard let tabGroup = window.tabGroup,
                 tabGroup.windows.count > 1 else {
             closeWindowImmediately()
@@ -3817,6 +3821,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// Closes the current window (including any other tabs) immediately and without
     /// confirmation. This will setup proper undo state so the action can be undone.
     func closeWindowImmediately() {
+        TerminalWorkspaceSessionStore.shared.capture()
         guard let window = window else { return }
         let editorTabIDs = (window.tabGroup?.windows ?? [window]).compactMap {
             ($0.windowController as? TerminalController)?.tabSessionID
@@ -4249,6 +4254,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     override func windowWillClose(_ notification: Notification) {
+        TerminalWorkspaceSessionStore.shared.capture()
         TerminalWorkspaceCoordinator.shared.didClose(self)
         tabPresentationIsClosing = true
         tabLayoutState.cancelPendingTabSelection(ObjectIdentifier(self))
@@ -4372,10 +4378,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     @IBAction func closeTab(_ sender: Any?) {
         guard let window = window else { return }
-        guard window.tabGroup?.windows.count ?? 0 > 1 else {
-            closeWindow(sender)
-            return
-        }
+        guard window.attachedSheet == nil else { return }
 
         guard surfaceTree.contains(where: { $0.needsConfirmQuit }) else {
             closeTabImmediately()

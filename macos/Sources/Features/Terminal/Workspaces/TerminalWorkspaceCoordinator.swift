@@ -107,19 +107,39 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
             member.cancelWorkspacePendingPresentation()
             parked[member.tabSessionID] = member
         }
-        activate(destination, matching: sourceWindow)
-        // Order out only after the incoming window is ready, preserving the
-        // native group's ordering and all live terminal/SSH/agent objects.
-        for member in outgoing { member.window?.orderOut(nil) }
+        // Keep the native fullscreen container alive across the handoff. The
+        // incoming tab joins it before any outgoing tab is detached.
+        NSDisableScreenUpdates()
+        defer { NSEnableScreenUpdates() }
+        let destinationGroupID = parkedGroups.first { $0.value.contains { $0 === destination } }?.key
+        let incoming = destinationGroupID.flatMap { parkedGroups[$0] } ?? groupControllers(destination)
+        var anchor = sourceWindow
+        for member in incoming {
+            guard let window = member.window else { continue }
+            window.setFrame(sourceWindow.frame, display: false)
+            if window.tabGroup !== sourceWindow.tabGroup {
+                guard anchor.addTabbedWindowSafely(window, ordered: .above) else { return nil }
+            }
+            anchor = window
+        }
+        destination.prepareTabPresentation(from: sourceWindow)
+        activate(destination, matching: sourceWindow, members: incoming)
+        for member in outgoing {
+            guard let window = member.window else { continue }
+            window.tabGroup?.removeWindow(window)
+            window.orderOut(nil)
+        }
+        destination.refreshWorkspaceTabs()
         selectedTabs[id] = destination.tabSessionID
         savePresentation()
         return destination
     }
 
-    private func activate(_ target: TerminalController, matching source: NSWindow?) {
+    private func activate(_ target: TerminalController, matching source: NSWindow?, members explicitMembers: [TerminalController]? = nil) {
         guard let window = target.window else { return }
         let groupID = parkedGroups.first { $0.value.contains { $0 === target } }?.key
-        let members = groupID.flatMap { parkedGroups.removeValue(forKey: $0) } ?? groupControllers(target)
+        let storedMembers = groupID.flatMap { parkedGroups.removeValue(forKey: $0) }
+        let members = explicitMembers ?? storedMembers ?? groupControllers(target)
         if let anchor = members.first?.window {
             var previous = anchor
             for member in members.dropFirst() {
@@ -225,6 +245,7 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
             groups: parkedGroups.mapValues { $0.map(\.tabSessionID) }
         )
         revision &+= 1
+        TerminalWorkspaceSessionStore.shared.capture()
     }
 
     private func groupControllers(_ controller: TerminalController) -> [TerminalController] {

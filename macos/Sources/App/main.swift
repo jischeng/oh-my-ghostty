@@ -30,4 +30,24 @@ if ghostty_init(UInt(CommandLine.argc), CommandLine.unsafeArgv) != GHOSTTY_SUCCE
 // action is a command starting with a `+`, such as `ghostty +boo`.
 ghostty_cli_try_action()
 
-_ = NSApplicationMain(CommandLine.argc, CommandLine.unsafeArgv)
+// CLI actions above remain usable while the GUI runs. Only the PTY GUI owns
+// the profile lock, before AppDelegate can load or save workspace state.
+let ptyInstance: PTYApplicationInstance?
+do {
+    ptyInstance = try MainActor.assumeIsolated {
+        try PTYApplicationInstance.acquireForCurrentApplication()
+    }
+} catch PTYApplicationInstance.Failure.alreadyRunning {
+    FileHandle.standardError.write(Data(
+        "OMG Dev PTY is already running. Quit its existing instance before starting the session launcher.\n".utf8
+    ))
+    exit(1)
+} catch {
+    FileHandle.standardError.write(Data(
+        "OMG Dev PTY could not lock its restoration profile: \(error).\n".utf8
+    ))
+    exit(1)
+}
+withExtendedLifetime(ptyInstance) {
+    _ = NSApplicationMain(CommandLine.argc, CommandLine.unsafeArgv)
+}

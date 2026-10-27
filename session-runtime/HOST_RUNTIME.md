@@ -44,6 +44,13 @@ backend are first-time sessions on this host, so their old PIDs do not migrate.
 Subsequent restore on this host preserves their PIDs. Keep the startup preference
 set to restore tabs/sessions; use Cmd-Q rather than closing panes to test restore.
 
+The launcher refuses to start if OMG Dev PTY is already running. Start this
+experiment through the script, not by opening another copy from Finder first.
+The PTY GUI also holds a profile lock before AppDelegate loads restoration data,
+so simultaneous launches cannot overwrite each other's workspace/session catalog.
+The lock is released automatically at process exit and is not inherited by shell
+children. Other OMG bundle IDs use separate profiles and remain independent.
+
 ## Validation
 
 - Rust 6 tests pass (PTY persistence, snapshots, framing, permissions, bounded

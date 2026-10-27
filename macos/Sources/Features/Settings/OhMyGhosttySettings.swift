@@ -2,12 +2,16 @@ import Combine
 import Foundation
 
 enum OMGApplicationEnvironment {
+    static var isWorkspaceDevelopment: Bool {
+        Bundle.main.bundleIdentifier == "com.jischeng.omg.debug.workspace"
+    }
+
     static var isDevelopment: Bool {
-        Bundle.main.bundleIdentifier == "com.jischeng.omg.debug"
+        Bundle.main.bundleIdentifier == "com.jischeng.omg.debug" || isWorkspaceDevelopment
     }
 
     static func channel(development: Bool = isDevelopment) -> String {
-        development ? "debug" : "release"
+        development ? (isWorkspaceDevelopment ? "debug-workspace" : "debug") : "release"
     }
 
     static func quitWithoutConfirmationDefault(
@@ -22,7 +26,9 @@ enum OMGApplicationEnvironment {
     ) -> URL {
         homeURL.appendingPathComponent(
             development
-                ? ".config/oh-my-ghostty-dev/settings.json"
+                ? (isWorkspaceDevelopment
+                    ? ".config/oh-my-ghostty-dev-workspace/settings.json"
+                    : ".config/oh-my-ghostty-dev/settings.json")
                 : ".config/oh-my-ghostty/settings.json"
         )
     }
@@ -36,7 +42,7 @@ enum OMGApplicationEnvironment {
             in: .userDomainMask
         )[0]
         return base.appendingPathComponent(
-            development ? "OMG Dev" : "OMG",
+            development ? (isWorkspaceDevelopment ? "OMG Dev Workspace" : "OMG Dev") : "OMG",
             isDirectory: true
         )
     }

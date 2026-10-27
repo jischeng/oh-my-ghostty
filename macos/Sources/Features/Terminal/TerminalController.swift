@@ -265,6 +265,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     private var surfaceAppearanceCancellables: Set<AnyCancellable> = []
 
     let tabSessionID: UUID
+    @Published var workspaceID: UUID
+    @Published var workspaceSwitcherIsPresented = false
     let tabCreatedAt: Date
     @Published private(set) var tabLastActivatedAt: Date
 
@@ -600,6 +602,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return event
         }
 
+        if TerminalWorkspaceCoordinator.shared.handle(event, in: self) { return nil }
         let settings = OhMyGhosttySettings.shared
         if OMGKeyboardShortcut.quickInputHistory.matches(event) {
             toggleQuickInputHistory()
@@ -811,7 +814,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
          parent: NSWindow? = nil,
          tabLayout: Ghostty.Config.MacOSTabLayout? = nil,
          tabSessionID: UUID? = nil,
-         tabCreatedAt: Date? = nil
+         tabCreatedAt: Date? = nil,
+         workspaceID: UUID? = nil
     ) {
         // The window we manage is not restorable if we've specified a command
         // to execute. We do this because the restored window is meaningless at the
@@ -841,6 +845,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         )
         self.tabLayout = tabLayout ?? OhMyGhosttySettings.shared.tabLayout
         self.tabSessionID = tabSessionID ?? UUID()
+        self.workspaceID = TerminalWorkspaceStore.shared.workspaceID(
+            for: self.tabSessionID,
+            inheriting: workspaceID ?? (parent?.windowController as? TerminalController)?.workspaceID
+        )
         let now = Date()
         self.tabCreatedAt = tabCreatedAt ?? now
         self.tabLastActivatedAt = now
@@ -942,6 +950,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             }
         synchronizePaneSessionContexts()
         startAgentProcessPolling()
+        TerminalWorkspaceCoordinator.shared.register(self)
     }
 
     required init?(coder: NSCoder) {
@@ -963,6 +972,17 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // Remove all of our notificationcenter subscriptions
         let center = NotificationCenter.default
         center.removeObserver(self)
+    }
+
+    func cancelWorkspacePendingPresentation() {
+        cancelPendingInitialPresentation()
+        tabLayoutState.cancelPendingTabSelection(ObjectIdentifier(self))
+    }
+
+    func refreshWorkspaceTabs() {
+        window?.tabbingIdentifier = "omg.workspace.\(workspaceID.uuidString)"
+        invalidateRestorableState()
+        setupTabObservation()
     }
 
     private func cancelPendingInitialPresentation() {
@@ -4074,6 +4094,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         super.windowDidLoad()
         guard let window else { return }
         DevMemoryDiagnostics.windowOpened()
+        window.tabbingIdentifier = "omg.workspace.\(workspaceID.uuidString)"
 
         // I copy this because we may change the source in the future but also because
         // I regularly audit our codebase for "ghostty.config" access because generally
@@ -4228,6 +4249,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     override func windowWillClose(_ notification: Notification) {
+        TerminalWorkspaceCoordinator.shared.didClose(self)
         tabPresentationIsClosing = true
         tabLayoutState.cancelPendingTabSelection(ObjectIdentifier(self))
         verticalTabWindowsObservation?.invalidate()
@@ -4325,6 +4347,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // Remember our last main and invalidate the app-level selected-tab
         // snapshot as well as the window's own focused-Surface state.
         Self.lastMain = self
+        TerminalWorkspaceCoordinator.shared.didActivate(self)
         NSApp.invalidateRestorableState()
     }
 

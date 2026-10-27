@@ -23,9 +23,18 @@ def main [
     --test-plan-only                    # Print the selection as JSON without building/running tests
     --list-test-modules                 # List modules and direct dependents without building
     --marketing-version: string         # Optional local build version override
+    --workspace-app                    # Build the isolated OMG Dev Workspace app
 ] {
     let project = ($env.FILE_PWD | path join "Ghostty.xcodeproj")
-    let build_dir = ($env.FILE_PWD | path join "build")
+    let build_dir = ($env.FILE_PWD | path join (if $workspace_app { "build-workspace" } else { "build" }))
+    if $workspace_app and $configuration != "Debug" {
+        error make {msg: "--workspace-app requires Debug configuration"}
+    }
+    let workspace_settings = if $workspace_app {
+        ["PRODUCT_BUNDLE_IDENTIFIER=com.jischeng.omg.debug.workspace"
+         "INFOPLIST_KEY_CFBundleDisplayName=OMG Dev Workspace"
+         "INFOPLIST_KEY_CFBundleName=OMG Dev Workspace"]
+    } else { [] }
 
     if $list_test_modules {
         print (test-plan [--list-modules] | to json)
@@ -92,6 +101,7 @@ def main [
         -skipPackagePluginValidation
         $"SYMROOT=($build_dir)"
         ...$version_override
+        ...$workspace_settings
         ...$skip_testing
         ...$selected_tests
         ...$test_build_settings

@@ -1038,6 +1038,23 @@ plugin path; the built-in hook bridge is correlated directly by Surface.
 
 ## Workspace and SSH provider (Experimental)
 
+Named terminal workspaces (Personal, Work, etc.) are host-owned collections of
+native terminal tabs. They are distinct from the filesystem `WorkspaceDescriptor`
+below. Switching parks live windows without closing Surface/PTY objects; returning
+reassembles native tab membership if AppKit detached ordered-out windows. Agent
+and SSH state stays attached to the original Surface identity. Moving a whole tab
+between named workspaces preserves its tab and Surface IDs and does not grant new
+plugin capabilities or change the pane's local/remote filesystem context. Inspector
+providers continue consuming the selected pane's existing context. No public
+workspace-control wire message or plugin permission is introduced.
+
+The host stores names, symbol/color choices, shortcut slots, tab membership and
+parked-group order in the channel-specific `workspaces/catalog.json` under
+Application Support (0700 directory, 0600 file, atomic writes). Terminal output,
+SSH credentials and Agent transcripts are not stored in this catalog. Restart
+restoration still follows `sessions.startupMode` and existing typed SSH/Agent
+resume policies; a named workspace does not keep a process alive after app exit.
+
 `WorkspaceDescriptor` and `WorkspaceFilesystem` are generic boundaries for
 local and remote workspace providers. `LocalWorkspaceFilesystem` is the local
 implementation used by the Files provider. `SSHPlugin` reads non-wildcard

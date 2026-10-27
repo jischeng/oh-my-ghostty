@@ -533,6 +533,15 @@ struct TerminalShellLayoutContainer<Content: View>: View {
                     backgroundOpacity: backgroundOpacity
                 ) {
                     VStack(spacing: 0) {
+                        if !leftVisible {
+                            HStack {
+                                TerminalWorkspaceButton(controller: controller)
+                                Spacer()
+                            }
+                            .padding(.horizontal, 8)
+                            .frame(height: 32)
+                            .background(chromeBackground)
+                        }
                         SSHAgentHookOnboardingBanner(controller: controller)
                         content
                     }

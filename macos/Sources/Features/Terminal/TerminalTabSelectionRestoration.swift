@@ -94,6 +94,7 @@ final class TerminalTabSelectionRestoration {
     func finishLaunching() {
         launchFinished = true
         beginSelectionRestore()
+        if pending == nil { TerminalWorkspaceCoordinator.shared.finishRestoring() }
     }
 
     private func beginSelectionRestore() {
@@ -111,6 +112,7 @@ final class TerminalTabSelectionRestoration {
         pending = nil
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
+        TerminalWorkspaceCoordinator.shared.finishRestoring()
     }
 
     private func apply(token: UUID, attempt: Int) {

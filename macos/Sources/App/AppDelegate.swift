@@ -557,6 +557,8 @@ class AppDelegate: NSObject,
 
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated {
+            TerminalWorkspaceCoordinator.shared.savePresentation()
+            TerminalWorkspaceStore.shared.flush()
             QuickInputHistoryStore.shared.pruneExpired()
             QuickInputHistoryStore.shared.flushPendingWrites()
             if OhMyGhosttySettings.shared.startupMode.restoresSessions {

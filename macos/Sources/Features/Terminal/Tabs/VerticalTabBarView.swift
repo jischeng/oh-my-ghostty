@@ -924,9 +924,7 @@ struct TerminalTabSidebarView: View {
 
     private var header: some View {
         HStack {
-            Text("TABS")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
+            TerminalWorkspaceButton(controller: controller)
             Spacer()
             TabOrganizationMenu(controller: controller, layoutState: layoutState)
         }

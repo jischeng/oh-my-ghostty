@@ -55,7 +55,9 @@ final class GitHeaderReferencesView: NSView {
         fields = refs.map { ref in
             let field = InspectorCopyableTextField(wrappingLabelWithString: "")
             field.attributedStringValue = GitRefBadgesView.attributed(ref)
-            field.isSelectable = true
+            // The shared field editor flattens symbol attachments on selection.
+            // Keep this a display label; the context menu copies the full ref.
+            field.isSelectable = false
             field.lineBreakMode = .byCharWrapping
             field.maximumNumberOfLines = 0
             field.copyValue = ref.name

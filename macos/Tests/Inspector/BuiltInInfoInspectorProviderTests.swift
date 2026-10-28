@@ -4,6 +4,21 @@ import Testing
 
 @MainActor
 struct BuiltInInfoInspectorProviderTests {
+    @Test func infoSurvivesSSHPluginDisconnection() throws {
+        let registry = InspectorRegistry()
+        let provider = BuiltInInfoInspectorProvider(registry: registry,
+            persistenceURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        try provider.setEnabled(true)
+        defer { provider.shutdown() }
+        registry.disconnectPlugin("builtin.ssh")
+        #expect(registry.descriptor(id: BuiltInInfoInspectorProvider.paneID)?.source == .coreFeature("builtin.info"))
+        let context = InspectorPaneContext(tabID: UUID(), surfaceID: nil, title: "Local", workingDirectory: "/tmp")
+        registry.presentationDidChange(to: BuiltInInfoInspectorProvider.paneID, context: context)
+        guard case .info = registry.content(for: BuiltInInfoInspectorProvider.paneID, context: context) else {
+            Issue.record("Local Info must be available without an installed plugin"); return
+        }
+    }
+
     @Test func forwardsOncePerAliasAndRestoresPersistedIntent() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("omg-ssh-forward-test-\(UUID().uuidString)")

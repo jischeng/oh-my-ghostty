@@ -6,6 +6,16 @@ import CodeEditTextView
 
 @MainActor
 struct GitHistoryInteractionTests {
+    @Test func headerReferencesCannotEnterPlainTextFieldEditor() throws {
+        let view = GitHeaderReferencesView(frame: NSRect(x: 0, y: 0, width: 240, height: 40))
+        view.configure([.init(name: "feature/long-branch", kind: .currentBranch)])
+        let field = try #require(view.subviews.first as? InspectorCopyableTextField)
+        #expect(!field.isSelectable)
+        #expect(!field.isEditable)
+        #expect(field.copyValue == "feature/long-branch")
+        #expect(field.attributedStringValue.attribute(.attachment, at: 1, effectiveRange: nil) != nil)
+    }
+
     @Test func historyFolderModeGroupsFilesAndOpensOriginalPath() async throws {
         let item = commit("tree")
         let file = GitDiffFile(path: "Sources/Feature/a-long-file-name-for-truncation.swift", status: "M")

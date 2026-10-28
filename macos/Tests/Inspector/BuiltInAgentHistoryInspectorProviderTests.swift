@@ -5,6 +5,32 @@ import SQLite3
 
 @MainActor
 struct AgentHistoryInspectorTests {
+    @Test func refreshKeepsRowsAndPublishesLoadingState() async throws {
+        let registry = InspectorRegistry()
+        let gate = AgentHistoryTranscriptGate()
+        let session = AgentHistorySession(agent: .pi, conversationID: AgentConversationID("refresh")!,
+            title: "Existing", workingDirectory: "/tmp", updatedAt: Date(), sourcePath: "/tmp/session", isActive: false)
+        var loads = 0
+        let provider = BuiltInAgentHistoryInspectorProvider(registry: registry, cachedSessionLoader: { [] }, sessionLoader: {
+            loads += 1
+            if loads > 1 { await gate.wait() }
+            return [session]
+        })
+        try provider.register()
+        let context = InspectorPaneContext(tabID: UUID(), surfaceID: nil, title: "Test", workingDirectory: "/tmp")
+        registry.presentationDidChange(to: BuiltInAgentHistoryInspectorProvider.paneID, context: context)
+        for _ in 0..<50 { await Task.yield() }
+        registry.performAction(paneID: BuiltInAgentHistoryInspectorProvider.paneID,
+            action: .init(context: context, kind: .refreshAgentHistory))
+        guard case .agentHistory(let content) = registry.content(for: BuiltInAgentHistoryInspectorProvider.paneID, context: context) else {
+            Issue.record("Missing content"); return
+        }
+        #expect(content.sessions == [session])
+        #expect(content.isLoadingSessions)
+        for _ in 0..<50 { await Task.yield() }
+        await gate.resume()
+    }
+
     @Test func hostSessionStorageIsSharedAcrossTabs() async throws {
         let sessions = (0..<1000).map { index in
             AgentHistorySession(agent: .codex, conversationID: AgentConversationID("session-\(index)")!,

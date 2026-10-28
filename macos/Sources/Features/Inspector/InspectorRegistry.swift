@@ -365,6 +365,33 @@ final class InspectorRegistry: ObservableObject {
         try register(descriptor, content: content, lifecycle: lifecycle)
     }
 
+    /// Registers a built-in pane with asynchronously published typed content.
+    func registerCorePane(
+        _ descriptor: InspectorPaneDescriptor,
+        lifecycle: LifecycleHandler? = nil,
+        action: ActionHandler? = nil
+    ) throws {
+        guard case .coreFeature = descriptor.source else { throw RegistryError.ownerMismatch }
+        try register(descriptor, content: { [weak self] context in
+            self?.pluginContent[.init(paneID: descriptor.id, tabID: context.tabID)] ??
+                .empty(title: descriptor.title, message: "")
+        }, lifecycle: lifecycle, action: action)
+    }
+
+    func updateCoreContent(paneID: String, featureID: String, tabID: UUID, content: InspectorPaneContent) throws {
+        guard let descriptor = descriptor(id: paneID) else { throw RegistryError.paneNotFound }
+        guard descriptor.source == .coreFeature(featureID) else { throw RegistryError.ownerMismatch }
+        guard !closedTabIDs.contains(tabID) else { return }
+        let key = PluginContentKey(paneID: paneID, tabID: tabID)
+        guard pluginContent[key] != content else { return }
+        pluginContent[key] = content
+        contentRevision &+= 1
+    }
+
+    func updateCorePaneTitle(paneID: String, featureID: String, title: String) throws {
+        try updatePaneTitle(paneID: paneID, source: .coreFeature(featureID), title: title)
+    }
+
     /// Registers a data-only plugin pane. Plugins update typed content and never
     /// receive an NSWindow, NSSplitView, NSView, or SwiftUI View capability.
     func registerPluginPane(
@@ -399,11 +426,15 @@ final class InspectorRegistry: ObservableObject {
         pluginID: String,
         title: String
     ) throws {
+        try updatePaneTitle(paneID: paneID, source: .plugin(pluginID), title: title)
+    }
+
+    private func updatePaneTitle(paneID: String, source: InspectorPaneDescriptor.Source, title: String) throws {
         guard let index = entries.firstIndex(where: { $0.id == paneID }) else {
             throw RegistryError.paneNotFound
         }
         let descriptor = entries[index].descriptor
-        guard descriptor.source == .plugin(pluginID) else {
+        guard descriptor.source == source else {
             throw RegistryError.ownerMismatch
         }
         let updated = InspectorPaneDescriptor(

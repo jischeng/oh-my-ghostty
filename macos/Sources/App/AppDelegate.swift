@@ -139,8 +139,6 @@ class AppDelegate: NSObject,
         builtInAgentHistoryInspector.forgetTab(tabID)
     }
 
-    @MainActor private var pluginManagementCancellables = Set<AnyCancellable>()
-
     /// The global undo manager for app-level state such as window restoration.
     lazy var undoManager = ExpiringUndoManager()
 
@@ -343,10 +341,10 @@ class AppDelegate: NSObject,
             try builtInFilesInspector.register()
             try builtInAgentHistoryInspector.register()
             try builtInGitInspector.register()
+            try builtInInfoInspector.setEnabled(true)
         } catch {
             Self.logger.error("failed to register built-in Inspector provider: \(error)")
         }
-        observeSSHPluginState()
 
         // Start our update checker.
         updateController.startUpdater()
@@ -577,25 +575,6 @@ class AppDelegate: NSObject,
         // so remove them all now. In the future we may want to be
         // more selective and only remove surface-targeted notifications.
         UNUserNotificationCenter.current().removeAllDeliveredNotifications()
-    }
-
-    @MainActor
-    private func observeSSHPluginState() {
-        let manager = PluginInstallationManager.shared
-        Publishers.CombineLatest(manager.$installed, manager.$disabledIDs)
-            .sink { [weak self] installed, disabledIDs in
-                guard let self else { return }
-                let enabled = installed.contains { $0.id == SSHPlugin.pluginID } &&
-                    !disabledIDs.contains(SSHPlugin.pluginID)
-                do {
-                    try builtInInfoInspector.setEnabled(enabled)
-                } catch {
-                    Self.logger.error(
-                        "failed to update built-in SSH Inspector: \(error.localizedDescription, privacy: .public)"
-                    )
-                }
-            }
-            .store(in: &pluginManagementCancellables)
     }
 
     /// This is called when the application is already open and someone double-clicks the icon

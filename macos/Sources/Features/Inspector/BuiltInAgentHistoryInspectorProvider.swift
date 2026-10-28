@@ -329,7 +329,7 @@ final class BuiltInAgentHistoryInspectorProvider {
             }
             presentedSessionCache[hostKey] = (activeIDs, presentedSessions)
         }
-        let isLoading = hostSessions == nil && loadingHosts.contains(hostKey)
+        let isLoading = loadingHosts.contains(hostKey)
         let hostLabel: String? = if case .sshReady(let ssh, _) = context.session.state {
             ssh.alias
         } else {

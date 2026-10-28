@@ -21,7 +21,8 @@ runtime yet. There is no public SDK, socket listener, or hot reload command.
 
 ## Agent history discovery
 
-Agent History retains the currently displayed list during manual refresh and
+Agent History retains the currently displayed list during manual refresh, shows
+its loading indicator even when cached rows are present, and
 reconciles deleted local JSONL files out of its disk cache. Remote discovery uses
 Python 3 over SSH, globally sorts file modification timestamps, and transfers
 numeric Unix timestamps and bounded JSON metadata instead of parsing `ls` dates.
@@ -1225,8 +1226,14 @@ the pre-SSH local cwd) so app restoration can reconnect plain SSH tabs after a
 relaunch, not only Agent and split panes. This is an internal first-party launch handoff,
 not plugin storage or a public plugin API.
 
-The installed/enabled official SSH entry registers `builtin.info` beside Files
-in the Right Inspector. Info is an extensible host-rendered surface with
+The application always registers `builtin.info` as a core feature in the fourth
+Right Inspector slot (Option-4 by default). It does not depend on an installed or
+enabled SSH plugin; disconnecting or uninstalling that plugin does not remove
+Info or stop its forwards. Info owns `Info/port-forwards.json` in channel-specific
+Application Support and copies the legacy `PluginData/builtin.ssh/port-forwards.json`
+on first use when the new file does not exist. Core pane content, actions and
+localized titles use ownership-checked core registry APIs.
+Info is a host-rendered surface with
 optional machine-status and typed machine/session sections (both currently
 hidden), a Shell-only command timeline with exact jump-to-position actions, and
 the SSH port-forwarding section. The forwarding header uses the antenna/radio-tower

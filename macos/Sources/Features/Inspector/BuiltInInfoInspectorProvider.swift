@@ -121,7 +121,7 @@ final class BuiltInInfoInspectorProvider {
         category: "ssh-port-forwarding"
     )
 
-    static let pluginID = SSHPlugin.pluginID
+    static let featureID = "builtin.info"
     static let paneID = "builtin.info"
 
     struct DesiredForward: Codable, Equatable, Hashable, Sendable {
@@ -230,9 +230,17 @@ final class BuiltInInfoInspectorProvider {
         copyAddress: @escaping AddressCopier = BuiltInInfoInspectorProvider.copyToPasteboard,
         historyService: TerminalHistoryService? = nil
     ) {
-        let resolvedPersistenceURL = persistenceURL ?? PluginInstallationManager.shared
-            .dataURL(for: SSHPlugin.pluginID)
-            .appendingPathComponent("port-forwards.json")
+        let support = OMGApplicationEnvironment.applicationSupportURL()
+        let resolvedPersistenceURL = persistenceURL ?? support.appendingPathComponent("Info/port-forwards.json")
+        // Preserve existing forwards without depending on plugin installation.
+        if persistenceURL == nil, !FileManager.default.fileExists(atPath: resolvedPersistenceURL.path) {
+            let legacy = support.appendingPathComponent("PluginData/builtin.ssh/port-forwards.json")
+            if FileManager.default.fileExists(atPath: legacy.path) {
+                try? FileManager.default.createDirectory(at: resolvedPersistenceURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+                try? FileManager.default.copyItem(at: legacy, to: resolvedPersistenceURL)
+            }
+        }
         self.registry = registry
         self.persistenceURL = resolvedPersistenceURL
         self.processLauncher = processLauncher
@@ -303,11 +311,11 @@ final class BuiltInInfoInspectorProvider {
                 id: Self.paneID,
                 title: InfoStrings.current.infoTitle,
                 systemImage: "info.circle",
-                source: .plugin(Self.pluginID),
+                source: .coreFeature(Self.featureID),
                 preferredWidth: RightInspectorMetrics.defaultWidth,
                 minimumWidth: 240
             )
-            try registry.registerPluginPane(
+            try registry.registerCorePane(
                 descriptor,
                 lifecycle: { [weak self] event in self?.handle(event) },
                 action: { [weak self] action in self?.handle(action) }
@@ -317,7 +325,7 @@ final class BuiltInInfoInspectorProvider {
         } else {
             shutdown()
             presentedContexts.removeAll()
-            registry.unregister(source: .plugin(Self.pluginID))
+            registry.unregister(source: .coreFeature(Self.featureID))
             isRegistered = false
         }
     }
@@ -325,9 +333,9 @@ final class BuiltInInfoInspectorProvider {
     private func refreshLocalization() {
         guard isRegistered else { return }
         do {
-            try registry.updatePluginPaneTitle(
+            try registry.updateCorePaneTitle(
                 paneID: Self.paneID,
-                pluginID: Self.pluginID,
+                featureID: Self.featureID,
                 title: InfoStrings.current.infoTitle
             )
         } catch {
@@ -704,9 +712,9 @@ final class BuiltInInfoInspectorProvider {
                                  historyState: historyInfo.state))
         }
         do {
-            try registry.updatePluginContent(
+            try registry.updateCoreContent(
                 paneID: Self.paneID,
-                pluginID: Self.pluginID,
+                featureID: Self.featureID,
                 tabID: context.tabID,
                 content: content
             )

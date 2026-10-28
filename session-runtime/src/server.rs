@@ -77,6 +77,7 @@ pub fn serve(path: &Path, argv: &[String]) -> io::Result<()> {
 pub struct ManagedSession {
     pub path: PathBuf,
     pub record: Record,
+    pub containment_root: Option<PathBuf>,
 }
 
 pub fn serve_managed(
@@ -144,6 +145,17 @@ pub fn serve_managed(
     {
         return Err(io::Error::last_os_error());
     }
+    let group = managed
+        .as_ref()
+        .and_then(|m| {
+            m.containment_root
+                .as_ref()
+                .map(|root| (root, &m.record.generation))
+        })
+        .map(|(root, generation)| crate::containment::Group::create(root, generation))
+        .transpose()?;
+    let membership = group.as_ref().map(|g| g.membership()).transpose()?;
+    let membership_fd = membership.as_ref().map(|f| f.as_raw_fd());
     let mut command = Command::new(&argv[0]);
     command
         .args(&argv[1..])
@@ -166,7 +178,14 @@ pub fn serve_managed(
         command.current_dir(&resume.cwd);
     }
     unsafe {
-        command.pre_exec(|| {
+        command.pre_exec(move || {
+            // Join before exec/fork: "0" means this child. Only async-signal-safe
+            // operations are allowed in the multithreaded host's fork child.
+            if let Some(fd) = membership_fd {
+                if libc::write(fd, b"0".as_ptr().cast(), 1) != 1 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
             // Background launchers/nohup may ignore SIGINT/SIGQUIT. A fresh
             // controlling terminal must not inherit that disposition or mask.
             for signal in [
@@ -196,6 +215,7 @@ pub fn serve_managed(
         });
     }
     let mut child = ChildGuard(command.spawn()?);
+    drop(membership);
     if let Some(m) = &mut managed {
         m.record.pid = Some(child.id());
         m.record.ended = None;
@@ -242,6 +262,15 @@ pub fn serve_managed(
     let mut last_cwd = crate::location::session_cwd(master, child.id());
     let mut cwd_checked = Instant::now();
     loop {
+        if closing.is_none()
+            && managed
+                .as_ref()
+                .is_some_and(|m| m.path.with_extension("closed").exists())
+        {
+            end_reason = EndReason::ExplicitClose;
+            terminate_group(master, child.id(), libc::SIGTERM);
+            closing = Some(Instant::now());
+        }
         if exited.is_none() && cwd_checked.elapsed() >= Duration::from_millis(500) {
             let cwd = crate::location::session_cwd(master, child.id());
             if cwd != last_cwd {
@@ -509,6 +538,9 @@ pub fn serve_managed(
             });
             if peers.iter().all(|p| p.queued == 0) || start.elapsed() > Duration::from_secs(2) {
                 let _ = child.wait();
+                if let Some(group) = &group {
+                    group.finish()?;
+                }
                 if let Some(m) = &mut managed {
                     m.record.pid = None;
                     m.record.ended = Some(end_reason);

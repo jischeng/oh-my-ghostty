@@ -73,6 +73,16 @@ fn ensure_host(directory: &str) -> io::Result<()> {
         .append(true)
         .open(root.join("host.log"))?;
     let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    if omg_session_runtime::supervision::start(root, &shell)? {
+        for _ in 0..100 {
+            if UnixStream::connect(&socket).is_ok() {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        return Err(io::Error::other("supervised host failed to become ready"));
+    }
+    eprintln!("runtime supervision unavailable; process-group cleanup only");
     let mut c = Command::new(env::current_exe()?);
     c.arg("host")
         .arg(root)
@@ -195,6 +205,18 @@ fn main() -> io::Result<()> {
                 omg_session_runtime::deploy::command(&config, &binary, &state)?,
                 true,
             )
+        }
+        Some("close-local") if a.len() == 4 => {
+            let mut socket = UnixStream::connect(&a[2])?;
+            socket.set_read_timeout(Some(std::time::Duration::from_secs(15)))?;
+            socket.set_write_timeout(Some(std::time::Duration::from_secs(2)))?;
+            omg_session_runtime::Frame::new(b'K', 0, a[3].as_bytes()).send(&mut socket)?;
+            let response = omg_session_runtime::Frame::read(&mut socket)?;
+            if response.kind == b'K' && response.data == b"closed" {
+                Ok(())
+            } else {
+                Err(io::Error::other("remote close pending or unavailable"))
+            }
         }
         Some("ensure-host") if a.len() == 3 => ensure_host(&a[2]),
         Some("report") if a.len() == 6 => report(&a[2], &a[3], &a[4], &a[5]),

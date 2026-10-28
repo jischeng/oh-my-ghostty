@@ -28,6 +28,7 @@ pub struct Registry {
     pub command: Vec<String>,
     pub policy: Policy,
     workers: HashMap<String, JoinHandle<()>>,
+    containment_root: Option<PathBuf>,
     last_maintenance: Instant,
 }
 impl Registry {
@@ -37,8 +38,12 @@ impl Registry {
             command,
             policy,
             workers: HashMap::new(),
+            containment_root: None,
             last_maintenance: Instant::now() - Duration::from_secs(30),
         }
+    }
+    pub fn set_containment_root(&mut self, root: Option<PathBuf>) {
+        self.containment_root = root;
     }
     pub fn maintenance(&mut self) {
         let finished: Vec<_> = self
@@ -60,9 +65,37 @@ impl Registry {
         if let Ok(entries) = fs::read_dir(&self.root) {
             for entry in entries.flatten() {
                 if entry.path().extension().is_some_and(|s| s == "json") {
-                    if let Ok(record) = Record::load(&entry.path()) {
-                        if !self.workers.contains_key(&record.id)
-                            && record.ended.is_some()
+                    if let Ok(mut record) = Record::load(&entry.path()) {
+                        if !valid_id(&record.id) || self.workers.contains_key(&record.id) {
+                            continue;
+                        }
+                        if record.ended.is_none() || record.pid.is_some() {
+                            if let Some(root) = &self.containment_root {
+                                if crate::containment::Group::finish_generation(
+                                    root,
+                                    &record.generation,
+                                )
+                                .is_err()
+                                {
+                                    continue;
+                                }
+                            }
+                            record.pid = None;
+                            record.ended = Some(EndReason::Lost);
+                            if record.save(&entry.path()).is_err() {
+                                continue;
+                            }
+                        }
+                        // We hold the host lock and there is no actor for this UUID.
+                        // Never signal the numeric PID stored by a previous host.
+                        use sha2::{Digest, Sha256};
+                        let key = format!("{:x}", Sha256::digest(record.id.as_bytes()));
+                        if let Some(parent) = self.root.parent() {
+                            let socket = parent.join(format!("{}.sock", &key[..16]));
+                            let _ = fs::remove_file(socket.with_extension("evt"));
+                            let _ = fs::remove_file(socket);
+                        }
+                        if record.ended.is_some()
                             && now.saturating_sub(record.updated_at)
                                 > record.policy.record_retention_seconds
                         {
@@ -72,6 +105,42 @@ impl Registry {
                 }
             }
         }
+    }
+    /// Durable close intent, independent of attachments. UUIDs are never reused:
+    /// the permanent marker also prohibits an automatic Agent resume/new generation.
+    pub fn close(&mut self, id: &str) -> io::Result<bool> {
+        if !valid_id(id) {
+            return Err(io::Error::other("invalid session identity"));
+        }
+        let marker = self.root.join(format!("{id}.closed"));
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(marker)?;
+        file.sync_all()?;
+        fs::File::open(&self.root)?.sync_all()?;
+        if self.workers.get(id).is_some_and(|w| !w.is_finished()) {
+            return Ok(false);
+        }
+        self.maintenance();
+        let path = self.root.join(format!("{id}.json"));
+        if let Ok(mut record) = Record::load(&path) {
+            if record.ended == Some(EndReason::Lost) {
+                // Only an owned cgroup provides evidence for cleanup after loss.
+                if !record.contained {
+                    return Err(io::Error::other("legacy session loss; cleanup unconfirmed"));
+                }
+                let root = self.containment_root.as_ref().ok_or_else(|| {
+                    io::Error::other("session lost; cleanup could not be confirmed")
+                })?;
+                crate::containment::Group::finish_generation(root, &record.generation)?;
+            }
+            record.pid = None;
+            record.ended = Some(EndReason::ExplicitClose);
+            record.save(&path)?;
+        }
+        Ok(true)
     }
     pub fn is_empty(&self) -> bool {
         self.workers.is_empty()
@@ -119,6 +188,9 @@ impl Registry {
             return Err(io::Error::other("invalid session identity"));
         }
         self.maintenance();
+        if self.root.join(format!("{id}.closed")).exists() {
+            return Err(io::Error::other("session explicitly closed"));
+        }
         use sha2::{Digest, Sha256};
         let key = format!("{:x}", Sha256::digest(id.as_bytes()));
         let socket = self
@@ -189,6 +261,7 @@ impl Registry {
                 .open(self.root.join(format!("{id}.created")))?;
             Record::new(id, policy.unwrap_or_else(|| self.policy.clone()))?
         };
+        record.contained = self.containment_root.is_some();
         record.save(&path)?;
         // This host owns the runtime directory exclusively; stale sockets cannot
         // be a still-running worker. Remove only our validated session paths.
@@ -196,6 +269,7 @@ impl Registry {
         let _ = fs::remove_file(socket.with_extension("evt"));
         let p = socket.clone();
         let record_path = path.clone();
+        let containment_root = self.containment_root.clone();
         let worker = thread::Builder::new()
             .name(format!("session-{id}"))
             .spawn(move || {
@@ -205,6 +279,7 @@ impl Registry {
                     Some(ManagedSession {
                         path: record_path.clone(),
                         record,
+                        containment_root,
                     }),
                 ) {
                     if let Ok(mut r) = Record::load(&record_path) {

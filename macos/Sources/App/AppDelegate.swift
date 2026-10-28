@@ -329,6 +329,7 @@ class AppDelegate: NSObject,
 
         // Store our start time
         applicationLaunchTime = ProcessInfo.processInfo.systemUptime
+        SessionRuntimeCloseQueue.shared.start()
 
         // Check if secure input was enabled when we last quit.
         if UserDefaults.ghostty.bool(forKey: "SecureInput") != SecureInput.shared.enabled {

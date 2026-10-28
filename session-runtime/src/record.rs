@@ -117,6 +117,8 @@ pub struct Record {
     pub ended: Option<EndReason>,
     pub resume: Option<Resume>,
     pub policy: Policy,
+    #[serde(default)]
+    pub contained: bool,
 }
 impl Record {
     pub fn new(id: &str, policy: Policy) -> io::Result<Self> {
@@ -130,6 +132,7 @@ impl Record {
             ended: None,
             resume: None,
             policy,
+            contained: false,
         })
     }
     pub fn load(path: &Path) -> io::Result<Self> {

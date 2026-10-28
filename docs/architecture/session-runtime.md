@@ -52,7 +52,8 @@ SSH 子进程使用普通管道与 `ssh -T`，它不持有 Agent PTY。Bridge �
 - 一个连接复用多个 stream；每流有界字节预算、公平发送和控制消息优先级。不可只限制消息个数。
 - 会话输出序号、attachment generation、daemon epoch 各自独立；重连拒绝旧 generation 的写入。输入不盲目自动重传，避免重复执行命令。
 - 单 writer、多 observer；输入和 resize 都验证 writer generation。无人连接保留最后有效尺寸，不停止读取 PTY。
-- CloseSession 明确进程组的 graceful termination、超时 escalation 与 reap；不承诺清理已经逃离进程组的所有后代。
+- CloseSession 先在客户端持久化，再由远端持久化 UUID 关闭标记；后台重试直至远端确认。关闭是整个 pane UUID 的永久撤销，禁止后续自动 resume 或重建，因此不会因 generation 更新漏掉已经关闭的 pane。仍保留原 attached `K` 供旧版本使用，但旧 host 不支持确认时请求保持待确认。
+- Linux systemd/cgroup v2 监管模式中，每 Session 一个 cgroup、仍由同一个 omgd 的线程持有 PTY。子进程在 exec 前加入 cgroup，普通 setsid/nohup/double-fork 不改变归属。退出时清理该组并检查 populated=0；daemon SIGKILL 则由 systemd KillMode=control-group 清理整个服务。macOS 或无监管能力的主机仍只有进程组清理保证。
 - SSH 配置负责路由；host ID 加远端账号/daemon namespace 负责身份。克隆机器可能复制 host ID，不能替代 SSH 主机认证。
 
 ## VT 状态恢复：首要技术验证
@@ -85,7 +86,9 @@ Termio 的 VT sidecar 注释说明它不注册 `on_pty_write`，主要由 writer
 
 Unix socket 位于用户私有目录，校验 owner/peer credentials，限制帧、快照和会话配额。远程安装按 OS/arch 检测、原子落盘和版本校验，禁止在 bridge 建连时替换正在持有 PTY 的 daemon。
 
-Linux systemd user 服务必须验证 logout 后生命周期；是否需要 linger 取决于主机配置，不能假设所有机器默认保活。未来 macOS launchd 的退出登录语义另行验证。首版 daemon 更新要求会话排空；不承诺 daemon 崩溃、升级或主机重启后 PID 不变。
+Linux root 账号使用 systemd 系统级临时服务；普通账号仅在用户管理器可用且已启用 linger 时使用用户临时服务。不会自动开启 linger 或请求提权；不满足条件则明确记录 process-group-only 模式。服务按 runtime directory 隔离，Delegate=yes，KillMode=control-group，Restart=no；下一次连接再启动，避免重复崩溃循环。监管模式启动失败不能偷偷降级绕过监管。未来 macOS launchd 的退出登录语义另行验证。不承诺 daemon 崩溃或主机重启后 PID 不变。
+
+启动和周期维护把没有 actor 的运行中记录改为 Lost，删除该 UUID 的失效 socket，不按历史 PID 发信号。待关闭请求保存在 App Support 的 session-runtime/pending-closes.json，App 启动及运行中重试；设置页显示未确认数量。空 relay 在 30 秒无客户端后退出，host 仍按存活 actor 和既有空闲策略管理。旧版本 daemon 保持原版本，不自动替换或收编现有工作会话；不支持新关闭能力的旧版本仍有待确认限制。高权限进程主动迁移 cgroup、通过外部服务创建任务不在自动回收保证内。
 
 ## 实施顺序与验收
 

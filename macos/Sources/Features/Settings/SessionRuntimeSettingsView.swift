@@ -3,6 +3,7 @@ import SwiftUI
 struct SessionRuntimeSettingsView: View {
     @ObservedObject var settings: OhMyGhosttySettings
     @State private var host = ""
+    @ObservedObject private var closes = SessionRuntimeCloseQueue.shared
     let strings: SettingsStrings
     @State private var error: String?
     private func text(_ english: String, _ chinese: String) -> String { strings.t(english, chinese) }
@@ -35,6 +36,11 @@ struct SessionRuntimeSettingsView: View {
                 }
                 Text(strings.runtimeDoneGraceCaption)
                     .font(.caption).foregroundStyle(.secondary)
+            }
+            if !closes.requests.isEmpty {
+                Text(text("Remote sessions awaiting close confirmation: ", "等待远端确认关闭的会话：") + String(closes.requests.count))
+                    .font(.caption).foregroundStyle(.orange)
+                Button(text("Retry pending closes", "重试待关闭会话")) { closes.retry() }
             }
             Text(strings.runtimeIdleCaption)
                 .font(.caption).foregroundStyle(.secondary)

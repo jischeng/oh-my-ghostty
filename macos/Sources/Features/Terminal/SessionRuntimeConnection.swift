@@ -99,7 +99,7 @@ final class SessionRuntimeConnections {
         return cached
     }
 
-    func prepare(_ descriptor: SessionRuntimeDescriptor) throws -> URL {
+    func prepare(_ descriptor: SessionRuntimeDescriptor, interactive: Bool = true) throws -> URL {
         if let relay = relays[descriptor.identity], relay.process.isRunning { return relay.socket }
         // Darwin sockaddr_un paths are capped near 104 bytes; the user's
         // /var/folders temporary path plus a host identity can exceed that.
@@ -120,7 +120,9 @@ final class SessionRuntimeConnections {
             let hooks: String?
         }
         let config = Configuration(executable: descriptor.connection.executablePath,
-            arguments: descriptor.connection.arguments.map { $0 == "BatchMode=yes" ? "BatchMode=no" : $0 },
+            arguments: descriptor.connection.arguments.map {
+                $0 == "BatchMode=yes" || $0 == "BatchMode=no" ? "BatchMode=\(interactive ? "no" : "yes")" : $0
+            },
             cwd: descriptor.connection.localWorkingDirectory,
             bundle: artifacts.path, policy: descriptor.policy, revision: descriptor.revision,
             hooks: try AgentHookInstaller.remoteInstallerScript(agents: [.codex, .claude, .pi]))
@@ -146,7 +148,7 @@ final class SessionRuntimeConnections {
         process.standardError = diagnostics
         var environment = ProcessInfo.processInfo.environment
         environment["SSH_ASKPASS"] = artifacts.appendingPathComponent("askpass").path
-        environment["SSH_ASKPASS_REQUIRE"] = "force"
+        environment["SSH_ASKPASS_REQUIRE"] = interactive ? "force" : "never"
         environment["DISPLAY"] = environment["DISPLAY"] ?? "omg:0"
         process.environment = environment
         try process.run()
@@ -160,6 +162,7 @@ final class SessionRuntimeConnections {
     }
 
     func shutdown() {
+        SessionRuntimeCloseQueue.shared.stop()
         for relay in relays.values where relay.process.isRunning { relay.process.terminate() }
         relays.removeAll()
     }

@@ -89,7 +89,10 @@ pub fn serve(directory: &Path, command: Vec<String>) -> io::Result<()> {
         fs::Permissions::from_mode(0o600),
     )?;
     listener.set_nonblocking(true)?;
-    let registry = Arc::new(Mutex::new(Registry::new(root, command, policy.clone())));
+    let mut initial = Registry::new(root, command, policy.clone());
+    initial.set_containment_root(crate::containment::host_root()?);
+    initial.maintenance();
+    let registry = Arc::new(Mutex::new(initial));
     let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut idle_since = Instant::now();
     loop {
@@ -135,7 +138,21 @@ fn host_connection(socket: UnixStream, registry: Arc<Mutex<Registry>>) -> io::Re
             match f.kind {
                 b'P' if f.seq == 0 => {
                     last_heartbeat = Instant::now();
-                    transport.push(Frame::new(b'P', 0, &[]));
+                    transport.push(Frame::new(b'P', 0, b"durable-close/1"));
+                }
+                b'K' if f.seq != 0 => {
+                    let result = std::str::from_utf8(&f.data)
+                        .map_err(io::Error::other)
+                        .and_then(|id| registry.lock().unwrap().close(id));
+                    match result {
+                        Ok(done) => transport.push(Frame::new(
+                            b'D',
+                            f.seq,
+                            &Frame::new(b'K', 0, if done { b"closed" } else { b"pending" })
+                                .encode(),
+                        )),
+                        Err(e) => transport.push(Frame::new(b'E', f.seq, e.to_string().as_bytes())),
+                    }
                 }
                 b'L' if f.seq == 0 => {
                     let list = registry.lock().unwrap().list()?;
@@ -265,7 +282,15 @@ pub fn relay(local: &Path, socket: UnixStream, lease: bool) -> io::Result<()> {
     let mut next = 1;
     let mut heartbeat = Instant::now() - Duration::from_secs(10);
     let mut pong = Instant::now();
+    let mut durable_close = false;
+    let mut idle = Instant::now();
     loop {
+        if !peers.is_empty() {
+            idle = Instant::now();
+        }
+        if idle.elapsed() > Duration::from_secs(30) {
+            return Ok(());
+        }
         if lease && heartbeat.elapsed() >= Duration::from_secs(10) {
             transport.push(Frame::new(b'P', 0, &[]));
             heartbeat = Instant::now();
@@ -288,6 +313,7 @@ pub fn relay(local: &Path, socket: UnixStream, lease: bool) -> io::Result<()> {
         for f in transport.read()? {
             if f.kind == b'P' && f.seq == 0 {
                 pong = Instant::now();
+                durable_close = f.data == b"durable-close/1";
                 continue;
             }
             if let Some((p, _, closing)) = peers.get_mut(&f.seq) {
@@ -311,6 +337,19 @@ pub fn relay(local: &Path, socket: UnixStream, lease: bool) -> io::Result<()> {
                 Ok(frames) => {
                     for f in frames {
                         if !*opened {
+                            if f.kind == b'K' && std::str::from_utf8(&f.data).is_ok_and(valid_id) {
+                                if durable_close {
+                                    transport.push(Frame::new(b'K', id, &f.data));
+                                } else {
+                                    p.push(Frame::new(
+                                        b'E',
+                                        0,
+                                        b"host does not advertise durable close",
+                                    ));
+                                    *closing = true;
+                                }
+                                continue;
+                            }
                             if f.kind != b'H' {
                                 p.dead = true;
                                 break;

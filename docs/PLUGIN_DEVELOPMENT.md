@@ -19,6 +19,31 @@ The Experimental `PluginInstallationManager` can download a GitHub repository's
 Support Plugins directory, but no installed package is launched or connected to
 runtime yet. There is no public SDK, socket listener, or hot reload command.
 
+## Native Session Runtime lifecycle
+
+The internal runtime keeps a single `omgd` host with per-session actor threads.
+Explicit pane/tab closure is persisted in `session-runtime/pending-closes.json`
+before local removal; detached/network-lost sessions retain their existing TTL
+and Agent-completion policy. The host heartbeat advertises `durable-close/1`.
+Only after this capability does a relay forward the outer `K(stream, UUID)`
+request; the host persists a permanent UUID close marker and replies with an
+inner `K` containing `pending` or `closed`. Confirmation requires the actor to
+finish cleanup. Repeated close requests are idempotent and cannot recreate a
+session, including when Close arrives before Create. This revokes the whole
+pane UUID across Agent resume generations. Old pinned hosts keep the attached
+Close path but cannot confirm durable cleanup; requests remain visible as pending.
+
+On supported Linux hosts, systemd supervises the single host service with
+`Delegate=yes` and `KillMode=control-group`. Each Session owns a child cgroup,
+joined before shell exec; normal setsid/double-fork descendants stay in it.
+Cleanup checks the group is unpopulated. Root uses a transient system service;
+non-root requires an existing lingering user manager. No implicit privilege
+escalation or linger changes occur. Unsupported hosts retain process-group-only
+cleanup. Host crashes terminate contained work rather than preserving its PTY.
+Startup reconciliation marks records without actors Lost and removes stale
+sockets without signalling historical PIDs. Empty local relays exit after 30
+seconds. See `docs/architecture/session-runtime.md` for platform limits.
+
 ## Agent history discovery
 
 Agent History paints one authoritative list per open. It does not publish a

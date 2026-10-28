@@ -3680,7 +3680,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         if surfaceTree.root != node {
             guard surfaceTree.contains(node) else { return }
             if !withConfirmation {
-                SessionRuntimeClose.close(node)
+                guard SessionRuntimeClose.close(node) else { return }
                 EditorWorkspaceStore.shared.remove(surfaceIDs: leafIDs)
                 removeSurfaceNode(node, registerUndo: false)
                 return
@@ -3690,7 +3690,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 informativeText: "The terminal still has a running process. If you close the terminal the process will be killed."
             ) { [weak self] in
                 guard let self else { return }
-                SessionRuntimeClose.close(node)
+                guard SessionRuntimeClose.close(node) else { return }
                 EditorWorkspaceStore.shared.remove(surfaceIDs: leafIDs)
                 self.removeSurfaceNode(node, registerUndo: false)
             }
@@ -3721,7 +3721,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         guard EditorWorkspaceStore.shared.prepareToClose(tabIDs: [tabSessionID], window: window, retry: { [weak self] in
             self?.closeTabImmediately(registerRedo: registerRedo)
         }) else { return }
-        if let root = surfaceTree.root { SessionRuntimeClose.close(root) }
+        if let root = surfaceTree.root, !SessionRuntimeClose.close(root) { return }
         TerminalWorkspaceSessionStore.shared.forget(self)
         guard let tabGroup = window.tabGroup,
                 tabGroup.windows.count > 1 else {

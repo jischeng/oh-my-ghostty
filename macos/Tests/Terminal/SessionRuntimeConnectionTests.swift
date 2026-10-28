@@ -5,6 +5,26 @@ import Testing
 
 struct SessionRuntimeConnectionTests {
     @MainActor
+    @Test func closeIntentSurvivesRestartAndRequiresAcknowledgement() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("closes.json")
+        let descriptor = SessionRuntimeDescriptor(connection: try GitSSHConnection(destination: "host"),
+                                                   revision: "test", policy: .init())
+        let request = SessionRuntimeCloseRequest(pane: UUID(), descriptor: descriptor)
+        let first = SessionRuntimeCloseQueue(url: url)
+        try first.enqueue([request, request])
+        let restarted = SessionRuntimeCloseQueue(url: url)
+        #expect(restarted.requests == [request])
+        try restarted.acknowledge(request)
+        #expect(SessionRuntimeCloseQueue(url: url).requests.isEmpty)
+        try Data("invalid".utf8).write(to: url)
+        let corrupt = SessionRuntimeCloseQueue(url: url)
+        #expect(throws: (any Error).self) { try corrupt.enqueue([request]) }
+        #expect(try String(contentsOf: url, encoding: .utf8) == "invalid")
+    }
+
+    @MainActor
     @Test func remoteExitRestoresRetainedLocalSurfaceAndClearsDescriptor() throws {
         let app = try #require(NSApp.delegate as? AppDelegate).ghostty
         let native = try #require(app.app)

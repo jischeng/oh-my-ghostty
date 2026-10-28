@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import SQLite3
 @testable import Ghostty
 
 @MainActor
@@ -661,7 +662,7 @@ struct AgentHistoryInspectorTests {
         """
 
         let access = AgentHistoryRemoteAccess(alias: "cloud") { command in
-            if command.contains("find") || command.contains("OMG_FILE") {
+            if command.contains("OMG_HISTORY_PY") {
                 return """
                 ===OMG_FILE===\(remoteListing)
                 \(remoteHeader)
@@ -703,7 +704,7 @@ struct AgentHistoryInspectorTests {
 
         """
         let access = AgentHistoryRemoteAccess(alias: "cloud") { command in
-            guard command.contains("find") || command.contains("OMG_FILE") else {
+            guard command.contains("OMG_HISTORY_PY") else {
                 return ""
             }
             return """
@@ -720,6 +721,64 @@ struct AgentHistoryInspectorTests {
         let session = try #require(sessions.first)
         #expect(session.conversationID.rawValue == "remote-generic-456")
         #expect(session.title == "Generic remote session")
+    }
+
+    @Test func remoteNumericTimestampAndNamedPiSession() async throws {
+        let timestamp = 1_800_000_000.0
+        let object: [String: Any] = [
+            "path": "/home/test/.pi/agent/sessions/project/session.jsonl", "size": 500,
+            "modified": timestamp, "records": [
+                ["type": "session", "id": "named-session", "cwd": "/repo"],
+                ["type": "session_info", "title": "Named Pi session"],
+            ],
+        ]
+        let output = String(data: try JSONSerialization.data(withJSONObject: object), encoding: .utf8)!
+        let access = AgentHistoryRemoteAccess(alias: "cloud") { command in
+            #expect(!command.contains("ls -ld"))
+            return output
+        }
+        let sessions = await AgentHistoryStore.loadRemote(access: access, agents: [.pi])
+        let session = try #require(sessions.first)
+        #expect(session.updatedAt.timeIntervalSince1970 == timestamp)
+        #expect(session.title == "Named Pi session")
+    }
+
+    @Test func antigravityHistoryUsesSummaryIndexAndResumeArgument() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let conversations = root.appendingPathComponent("conversations")
+        try FileManager.default.createDirectory(at: conversations, withIntermediateDirectories: true)
+        try Data().write(to: conversations.appendingPathComponent("agy-session.db"))
+        var database: OpaquePointer?
+        #expect(sqlite3_open(root.appendingPathComponent("conversation_summaries.db").path, &database) == SQLITE_OK)
+        defer { sqlite3_close(database) }
+        #expect(sqlite3_exec(database, "CREATE TABLE conversation_summaries (conversation_id TEXT, title TEXT, preview TEXT, workspace_uris TEXT, last_modified_time TEXT); INSERT INTO conversation_summaries VALUES ('agy-session', 'Agy title', 'Preview', '[\"file:///tmp/my%20project\"]', '2026-10-01 12:00:00+00:00');", nil, nil, nil) == SQLITE_OK)
+        let sessions = await AgentHistoryStore.load(agents: [.antigravity], rootURLs: [.antigravity: conversations],
+            cacheURL: root.appendingPathComponent("cache.json"))
+        let session = try #require(sessions.first)
+        #expect(session.title == "Agy title")
+        #expect(session.workingDirectory == "/tmp/my project")
+        #expect(session.updatedAt.timeIntervalSince1970 > 1_700_000_000)
+        #expect(SupportedAgent.antigravity.definition.resume.resumeArguments == ["--conversation", "{id}"])
+        let transcript = await AgentHistoryStore.transcript(for: session)
+        #expect(transcript.wasTruncated)
+        #expect(transcript.messages.first?.text == "Preview")
+    }
+
+    @Test func cacheDropsDeletedSessions() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("sessions/2026_deleted-session.jsonl")
+        let cache = root.appendingPathComponent("cache.json")
+        try writeJSONL([["type": "session", "id": "deleted-session", "cwd": "/repo"]], to: file)
+        let sessions = await AgentHistoryStore.load(agents: [.pi],
+            rootURLs: [.pi: file.deletingLastPathComponent()], cacheURL: cache)
+        #expect(sessions.count == 1)
+        try FileManager.default.removeItem(at: file)
+        #expect(await AgentHistoryStore.loadCached(cacheURL: cache).isEmpty)
+        #expect(await AgentHistoryStore.load(agents: [.pi],
+            rootURLs: [.pi: file.deletingLastPathComponent()], cacheURL: cache).isEmpty)
+        #expect(await AgentHistoryStore.loadCached(cacheURL: cache).isEmpty)
     }
 
     private func writeJSONL(

@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 
 struct AgentHistorySession: Identifiable, Equatable, Codable, Sendable {
     let agent: SupportedAgent
@@ -39,7 +40,7 @@ enum AgentHistoryStore {
 
     private static let maximumFiles = 200_000
     private static let maximumHeaderCandidates = 20_000
-    private static let maximumHeaderBytes = 256 * 1_024
+    private static let maximumHeaderBytes = 2 * 1_024 * 1_024
     private static let maximumTranscriptBytes = 2 * 1_024 * 1_024
     private static let maximumTranscriptMessages = 500
     private static let maximumTranscriptCharacters = 500_000
@@ -113,6 +114,7 @@ enum AgentHistoryStore {
             for entry in cache.entries.values {
                 guard !Task.isCancelled else { return [] }
                 let session = entry.session
+                guard FileManager.default.fileExists(atPath: session.sourcePath) else { continue }
                 if let existing = sessionsByID[session.id],
                    existing.updatedAt >= session.updatedAt {
                     continue
@@ -174,6 +176,12 @@ enum AgentHistoryStore {
         for session: AgentHistorySession,
         remoteAccess: AgentHistoryRemoteAccess? = nil
     ) async -> AgentHistoryTranscript {
+        // Agy stores protobuf steps in SQLite; its summary is the supported preview.
+        if session.agent == .antigravity {
+            return .init(sessionID: session.id, messages: session.previewSnippet.map {
+                [.init(id: session.id + ":preview", role: .user, text: $0, timestamp: nil)]
+            } ?? [], wasTruncated: true)
+        }
         if let alias = session.remoteHost {
             let access = remoteAccess ?? AgentHistoryRemoteAccess(alias: alias)
             guard let data = try? await access.read(
@@ -296,7 +304,7 @@ enum AgentHistoryStore {
     }
 
     private struct DiskCache: Codable {
-        static let currentVersion = 3
+        static let currentVersion = 4
         var version: Int = currentVersion
         struct Entry: Codable {
             let session: AgentHistorySession
@@ -382,7 +390,12 @@ enum AgentHistoryStore {
 
         candidates.sort { $0.updatedAt > $1.updatedAt }
         var sessionsByID: [String: AgentHistorySession] = [:]
-        var cacheUpdated = false
+        let candidatePaths = Set(candidates.map { $0.url.path })
+        let originalCacheCount = diskCache.entries.count
+        diskCache.entries = diskCache.entries.filter { path, entry in
+            !agents.contains(entry.session.agent) || candidatePaths.contains(path)
+        }
+        var cacheUpdated = diskCache.entries.count != originalCacheCount
 
         for candidate in candidates.prefix(maximumHeaderCandidates) {
             guard !Task.isCancelled, sessionsByID.count < maximumSessions else { break }
@@ -418,10 +431,51 @@ enum AgentHistoryStore {
             }
         }
 
-        return sessionsByID.values.sorted { lhs, rhs in
+        if agents.contains(.antigravity) {
+            for session in antigravitySessions(rootURL: rootURLs[.antigravity]) {
+                sessionsByID[session.id] = session
+            }
+        }
+        return Array(sessionsByID.values.sorted { lhs, rhs in
             if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
             return lhs.id < rhs.id
+        }.prefix(maximumSessions))
+    }
+
+    nonisolated private static func antigravitySessions(rootURL: URL?) -> [AgentHistorySession] {
+        let root = rootURL ?? URL(fileURLWithPath:
+            ("~/.gemini/antigravity-cli/conversations" as NSString).expandingTildeInPath)
+        let index = root.deletingLastPathComponent().appendingPathComponent("conversation_summaries.db")
+        var database: OpaquePointer?
+        guard sqlite3_open_v2(index.path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+            if let database { sqlite3_close(database) }
+            return []
         }
+        defer { sqlite3_close(database) }
+        var statement: OpaquePointer?
+        let query = "SELECT conversation_id, title, preview, workspace_uris, strftime('%s', last_modified_time) FROM conversation_summaries ORDER BY last_modified_time DESC LIMIT 10000"
+        guard sqlite3_prepare_v2(database, query, -1, &statement, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(statement) }
+        func value(_ column: Int32) -> String {
+            sqlite3_column_text(statement, column).map { String(cString: $0) } ?? ""
+        }
+        var sessions: [AgentHistorySession] = []
+        while !Task.isCancelled, sqlite3_step(statement) == SQLITE_ROW {
+            guard let id = AgentConversationID(value(0)), let seconds = Double(value(4)) else { continue }
+            let path = root.appendingPathComponent(id.rawValue + ".db").path
+            guard FileManager.default.fileExists(atPath: path) else { continue }
+            let uris = value(3).data(using: .utf8).flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? []
+            let cwd = uris.compactMap(URL.init(string:)).first(where: \.isFileURL)?.path
+            let modified = seconds > 0 ? Date(timeIntervalSince1970: seconds) :
+                ((try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date ?? Date())
+            let preview = value(2)
+            let title = value(1).isEmpty ? preview : value(1)
+            sessions.append(.init(agent: .antigravity, conversationID: id,
+                title: normalizedTitle(title, workingDirectory: cwd, conversationID: id),
+                workingDirectory: cwd, updatedAt: modified,
+                sourcePath: path, isActive: false, previewSnippet: preview.isEmpty ? nil : preview))
+        }
+        return sessions
     }
 
     nonisolated private static func source(
@@ -506,7 +560,7 @@ enum AgentHistoryStore {
         )
         let explicitTitle = records.reduce(nil as String?) { current, record in
             guard let type = record["type"] as? String,
-                  ["title", "title_change", "session"].contains(type),
+                  ["title", "title_change", "session", "session_info"].contains(type),
                   let title = record["title"] as? String,
                   !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 return current
@@ -727,7 +781,7 @@ enum AgentHistoryStore {
         ) else { return [] }
 
         var sessionsByID: [String: AgentHistorySession] = [:]
-        for chunk in chunks {
+        for chunk in chunks.sorted(by: { $0.file.modifiedAt > $1.file.modifiedAt }) {
             guard !Task.isCancelled, sessionsByID.count < maximumSessions else { break }
             let records = headerRecords(from: chunk.headerData)
             guard !records.isEmpty else { continue }
@@ -782,7 +836,7 @@ enum AgentHistoryStore {
             )
             let explicitTitle = records.reduce(nil as String?) { current, record in
                 guard let type = record["type"] as? String,
-                      ["title", "title_change", "session"].contains(type),
+                      ["title", "title_change", "session", "session_info"].contains(type),
                       let title = record["title"] as? String,
                       !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     return current
@@ -871,7 +925,19 @@ enum AgentHistoryStore {
         guard maximumBytes > 0,
               let handle = try? FileHandle(forReadingFrom: url) else { return [] }
         defer { try? handle.close() }
-        let data = (try? handle.read(upToCount: maximumBytes)) ?? Data()
+        var data = (try? handle.read(upToCount: maximumBytes)) ?? Data()
+        if let size = try? handle.seekToEnd(), size > UInt64(data.count) {
+            if let newline = data.lastIndex(of: 0x0A) { data = Data(data[...newline]) }
+            try? handle.seek(toOffset: size > 128 * 1_024 ? size - 128 * 1_024 : 0)
+            let tail = (try? handle.readToEnd()) ?? Data()
+            for line in tail.split(separator: 0x0A).dropFirst() {
+                guard let record = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                      let kind = record["type"] as? String,
+                      ["session_info", "title", "title_change"].contains(kind) else { continue }
+                data.append(0x0A)
+                data.append(contentsOf: line)
+            }
+        }
         return data.split(separator: 0x0A, omittingEmptySubsequences: true)
             .compactMap { line -> [String: Any]? in
                 try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any]

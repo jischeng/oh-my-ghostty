@@ -16,11 +16,12 @@ struct TerminalWorkspace: Codable, Equatable, Identifiable {
         "airplane", "leaf", "cup.and.saucer", "gamecontroller", "music.note", "camera",
         "paintbrush", "lightbulb", "bolt", "server.rack", "cloud", "shippingbox",
     ]
-    static let colors = ["sage", "green", "mint", "teal", "blue", "indigo", "purple", "rose", "red", "orange", "amber", "gray"]
-    static let initial = TerminalWorkspace(id: defaultID, name: "Personal", symbol: "house", color: "sage")
+    static let colors = ["accent", "sage", "green", "mint", "teal", "blue", "indigo", "purple", "rose", "red", "orange", "amber", "gray"]
+    static let initial = TerminalWorkspace(id: defaultID, name: "Personal", symbol: "house", color: "accent")
 
     var tint: Color {
         switch color {
+        case "accent": Color.accentColor
         case "green": Color.green
         case "mint": Color.mint
         case "teal": Color.teal
@@ -67,6 +68,13 @@ final class TerminalWorkspaceStore: ObservableObject {
            let decoded = try? JSONDecoder().decode(Snapshot.self, from: data),
            Self.isValid(decoded) {
             loaded = decoded
+        }
+        // Migrate only the original, uncustomized workspace appearance.
+        if let index = loaded.workspaces.firstIndex(where: {
+            $0.id == TerminalWorkspace.defaultID && $0.name == "Personal" &&
+                $0.symbol == "house" && $0.color == "sage"
+        }) {
+            loaded.workspaces[index].color = "accent"
         }
         snapshot = loaded
     }

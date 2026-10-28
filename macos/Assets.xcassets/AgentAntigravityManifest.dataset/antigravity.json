@@ -13,7 +13,11 @@
     ]
   },
   "resume": {
-    "resumeArguments": []
+    "resumeArguments": ["--conversation", "{id}"],
+    "store": {
+      "root": "~/.gemini/antigravity-cli/conversations",
+      "entryPattern": "{id}.db"
+    }
   },
   "hook": {
     "kind": "json",

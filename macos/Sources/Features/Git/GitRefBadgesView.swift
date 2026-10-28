@@ -141,10 +141,14 @@ final class GitRefBadgesView: NSView {
             rendered = next
             buttons = next.map { badge in
                 let button = NSButton()
+                button.setButtonType(.momentaryChange)
                 button.isBordered = false
                 button.alignment = .left
                 button.controlSize = .small
                 button.attributedTitle = Self.attributed(badge.decoration, inset: false)
+                button.attributedAlternateTitle = button.attributedTitle
+                (button.cell as? NSButtonCell)?.highlightsBy = []
+                (button.cell as? NSButtonCell)?.showsStateBy = []
                 button.cell?.lineBreakMode = .byTruncatingTail
                 button.wantsLayer = true
                 button.layer?.cornerRadius = 3

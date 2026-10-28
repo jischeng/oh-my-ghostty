@@ -64,33 +64,86 @@ struct AgentHistoryRemoteAccess: Sendable {
     ) async throws -> [AgentHistoryRemoteChunk] {
         let safeRoots = relativeRoots.filter { !$0.isEmpty && !$0.contains("'") }
         guard !safeRoots.isEmpty else { return [] }
-        let boundedLimit = min(max(maximumSessions, 1), 500)
-        let rootsList = safeRoots.map { "'\($0)'" }.joined(separator: " ")
+        let boundedLimit = min(max(maximumSessions, 1), AgentHistoryStore.maximumSessions)
+        let rootsJSON = String(data: try JSONEncoder().encode(safeRoots), encoding: .utf8)!
         let script = """
-        LC_ALL=C
-        export LC_ALL
-        dirs=""
-        for rel in \(rootsList); do
-          d="$HOME/$rel"
-          [ -d "$d" ] && dirs="$dirs \\"$d\\""
-        done
-        [ -z "$dirs" ] && exit 0
-        eval "find $dirs -type f -name '*.jsonl' -exec ls -t {} + 2>/dev/null" | head -n \(boundedLimit) | while IFS= read -r f; do
-          [ -f "$f" ] || continue
-          info=$(ls -ld "$f" 2>/dev/null)
-          printf "\\n===OMG_FILE===%s\\n" "$info"
-          case "$f" in
-            */.codex/sessions/*) header_bytes=65536 ;;
-            *) header_bytes=32768 ;;
-          esac
-          file_size=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
-          if [ -n "$file_size" ] && [ "$file_size" -le "$header_bytes" ]; then
-            cat "$f" 2>/dev/null
-          else
-            head -c "$header_bytes" "$f" 2>/dev/null | sed '$d'
-          fi
-          printf "\\n===OMG_END===\\n"
-        done
+        python3 - \(Self.shellQuote(rootsJSON)) \(boundedLimit) <<'OMG_HISTORY_PY'
+        import json, os, sqlite3, sys
+        candidates = []
+        inspected = 0
+        for relative in json.loads(sys.argv[1]):
+            root = os.path.join(os.path.expanduser('~'), relative)
+            if relative == '.gemini/antigravity-cli/conversations':
+                index = os.path.join(os.path.dirname(root), 'conversation_summaries.db')
+                try:
+                    connection = sqlite3.connect('file:' + index + '?mode=ro', uri=True)
+                    rows = connection.execute("SELECT conversation_id, title, preview, workspace_uris, strftime('%s', last_modified_time) FROM conversation_summaries ORDER BY last_modified_time DESC LIMIT ?", (int(sys.argv[2]),))
+                    from urllib.parse import urlparse, unquote
+                    for ident, title, preview, uris, modified in rows:
+                        path = os.path.join(root, ident + '.db')
+                        if not os.path.isfile(path) or modified is None:
+                            continue
+                        workspaces = json.loads(uris) if uris else []
+                        cwd = next((unquote(urlparse(uri).path) for uri in workspaces if uri.startswith('file://')), '')
+                        records = [dict(type='session', id=ident, title=title or preview, cwd=cwd)]
+                        if preview:
+                            records.append(dict(type='user', content=preview))
+                        print(json.dumps(dict(path=path, size=os.path.getsize(path), modified=float(modified) if float(modified) > 0 else os.path.getmtime(path), records=records)))
+                    connection.close()
+                except (sqlite3.Error, OSError, ValueError):
+                    pass
+                continue
+            for directory, dirs, files in os.walk(root):
+                dirs[:] = [d for d in dirs if not d.startswith('.')]
+                for name in files:
+                    inspected += 1
+                    if inspected > 200000:
+                        break
+                    path = os.path.join(directory, name)
+                    if not name.endswith('.jsonl') or os.path.islink(path):
+                        continue
+                    try:
+                        stat = os.stat(path)
+                        candidates.append((stat.st_mtime, path, stat.st_size))
+                    except OSError:
+                        pass
+                if inspected > 200000:
+                    break
+        candidates.sort(reverse=True)
+        for modified, path, size in candidates[:min(int(sys.argv[2]) * 2, 20000)]:
+            try:
+                with open(path, 'rb') as source:
+                    data = source.read(2 * 1024 * 1024)
+                    if len(data) < size:
+                        data = data.rsplit(b'\\n', 1)[0]
+                        source.seek(max(0, size - 128 * 1024))
+                        tail = source.read().split(b'\\n')[1:]
+                        # Pi's explicit session name can appear at the end.
+                        for line in tail:
+                            try:
+                                record = json.loads(line)
+                                if record.get('type') in ('session_info', 'title', 'title_change'):
+                                    data += b'\\n' + line
+                            except (ValueError, AttributeError):
+                                pass
+                # Preserve JSON records but omit large system/tool payloads from transport.
+                records = []
+                for line in data.splitlines():
+                    try:
+                        record = json.loads(line)
+                    except (ValueError, UnicodeDecodeError):
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    kind = record.get('type')
+                    payload = record.get('message') or record.get('payload') or record
+                    role = payload.get('role') if isinstance(payload, dict) else None
+                    if kind in ('session', 'session_meta', 'title', 'title_change', 'session_info') or role == 'user' or kind == 'user':
+                        records.append(record)
+                print(json.dumps(dict(path=path, size=size, modified=modified, records=records)))
+            except OSError:
+                pass
+        OMG_HISTORY_PY
         """
         let output = try await runCommand(script)
         return Self.parseBatchStream(output)
@@ -146,6 +199,23 @@ struct AgentHistoryRemoteAccess: Sendable {
 
     static func parseBatchStream(_ output: String) -> [AgentHistoryRemoteChunk] {
         var results: [AgentHistoryRemoteChunk] = []
+        for line in output.split(separator: "\n") {
+            guard let data = String(line).data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let path = object["path"] as? String, validRemotePath(path),
+                  let size = object["size"] as? Int,
+                  let modified = object["modified"] as? Double, modified.isFinite,
+                  let records = object["records"] as? [[String: Any]] else { continue }
+            var header = Data()
+            for record in records {
+                guard let encoded = try? JSONSerialization.data(withJSONObject: record) else { continue }
+                header.append(encoded)
+                header.append(0x0A)
+            }
+            results.append(.init(file: .init(path: path, size: size,
+                modifiedAt: Date(timeIntervalSince1970: modified)), headerData: header))
+        }
+        if !results.isEmpty { return results }
         let parts = output.components(separatedBy: "===OMG_FILE===")
         for part in parts where !part.isEmpty {
             guard let endRange = part.range(of: "\n===OMG_END===") ?? part.range(of: "===OMG_END===") else {
@@ -182,11 +252,11 @@ struct AgentHistoryRemoteAccess: Sendable {
 
         var date: Date?
         if time.contains(":") {
+            formatter.defaultDate = Calendar.current.date(from: DateComponents(year: Calendar.current.component(.year, from: Date())))
             formatter.dateFormat = "MMM dd HH:mm"
             let parsed = formatter.date(from: "\(month) \(day) \(time)")
             if let parsed, parsed > Date().addingTimeInterval(60) {
-                formatter.dateFormat = "MMM dd yyyy"
-                date = formatter.date(from: "\(month) \(day) \(time)")
+                date = Calendar.current.date(byAdding: .year, value: -1, to: parsed)
             } else {
                 date = parsed
             }

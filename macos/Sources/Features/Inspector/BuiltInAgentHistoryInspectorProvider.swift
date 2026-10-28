@@ -201,9 +201,9 @@ final class BuiltInAgentHistoryInspectorProvider {
         }
     }
 
-    private func loadOnDemand(context: InspectorPaneContext) {
+    private func loadOnDemand(context: InspectorPaneContext, refresh: Bool = false) {
         let hostKey = hostKey(for: context)
-        if sessionsByHost[hostKey] != nil {
+        if !refresh, sessionsByHost[hostKey] != nil {
             publish(context)
             return
         }
@@ -232,7 +232,7 @@ final class BuiltInAgentHistoryInspectorProvider {
                 loadTasks.removeValue(forKey: taskID)
                 publishPresentedContexts()
             } else {
-                let cached = await cachedSessionLoader()
+                let cached = refresh ? [] : await cachedSessionLoader()
                 guard !Task.isCancelled else { return }
                 if !cached.isEmpty, sessionsByHost[hostKey] == nil {
                     sessionsByHost[hostKey] = cached
@@ -256,9 +256,8 @@ final class BuiltInAgentHistoryInspectorProvider {
 
     private func reload(context: InspectorPaneContext) {
         let hostKey = hostKey(for: context)
-        sessionsByHost.removeValue(forKey: hostKey)
-        loadingHosts.remove(hostKey)
-        loadOnDemand(context: context)
+        guard !loadingHosts.contains(hostKey) else { return }
+        loadOnDemand(context: context, refresh: true)
     }
 
     private func hostKey(for context: InspectorPaneContext) -> String {

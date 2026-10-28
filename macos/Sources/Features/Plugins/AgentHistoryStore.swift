@@ -371,9 +371,12 @@ enum AgentHistoryStore {
                 let filenameID: AgentConversationID?
                 if let pattern = source.entryPattern {
                     let relativePath = relativePath(of: url, under: source.root)
-                    guard let rawID = id(from: relativePath, pattern: pattern),
-                          let id = AgentConversationID(rawID) else { continue }
-                    filenameID = id
+                    // Stores such as omp write each conversation into its own
+                    // directory, so a file name alone may not carry the ID.
+                    // Fall back to validated header metadata instead of
+                    // discarding the transcript entirely.
+                    filenameID = id(from: relativePath, pattern: pattern)
+                        .flatMap(AgentConversationID.init)
                 } else {
                     filenameID = nil
                 }
@@ -446,8 +449,20 @@ enum AgentHistoryStore {
         let root = rootURL ?? URL(fileURLWithPath:
             ("~/.gemini/antigravity-cli/conversations" as NSString).expandingTildeInPath)
         let index = root.deletingLastPathComponent().appendingPathComponent("conversation_summaries.db")
+        // Antigravity keeps its index in WAL mode. A read-only handle cannot
+        // prepare statements against it (SQLITE_CANTOPEN), so read a private
+        // copy with a read-write handle and never touch the Agent's own files.
+        let staging = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-agy-\(UUID().uuidString)", isDirectory: true)
+        guard (try? FileManager.default.createDirectory(
+            at: staging, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )) != nil else { return [] }
+        defer { try? FileManager.default.removeItem(at: staging) }
+        let copy = staging.appendingPathComponent("summary.db")
+        guard (try? FileManager.default.copyItem(at: index, to: copy)) != nil else { return [] }
         var database: OpaquePointer?
-        guard sqlite3_open_v2(index.path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+        guard sqlite3_open_v2(copy.path, &database, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else {
             if let database { sqlite3_close(database) }
             return []
         }

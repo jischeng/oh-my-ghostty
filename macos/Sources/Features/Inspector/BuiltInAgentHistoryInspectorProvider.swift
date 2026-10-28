@@ -26,7 +26,6 @@ final class BuiltInAgentHistoryInspectorProvider {
     }
 
     private let registry: InspectorRegistry
-    private let cachedSessionLoader: SessionLoader
     private let sessionLoader: SessionLoader
     private let remoteSessionLoader: RemoteSessionLoader
     private let transcriptLoader: TranscriptLoader
@@ -45,11 +44,6 @@ final class BuiltInAgentHistoryInspectorProvider {
 
     init(
         registry: InspectorRegistry,
-        cachedSessionLoader: @escaping SessionLoader = {
-            await AgentHistoryStore.loadCached(
-                maximumSessions: Int(OhMyGhosttySettings.shared.agentHistoryLimit)
-            )
-        },
         sessionLoader: @escaping SessionLoader = {
             await AgentHistoryStore.load(
                 maximumSessions: Int(OhMyGhosttySettings.shared.agentHistoryLimit)
@@ -70,7 +64,6 @@ final class BuiltInAgentHistoryInspectorProvider {
             BuiltInAgentHistoryInspectorProvider.fork
     ) {
         self.registry = registry
-        self.cachedSessionLoader = cachedSessionLoader
         self.sessionLoader = sessionLoader
         self.remoteSessionLoader = remoteSessionLoader
         self.transcriptLoader = transcriptLoader
@@ -232,13 +225,8 @@ final class BuiltInAgentHistoryInspectorProvider {
                 loadTasks.removeValue(forKey: taskID)
                 publishPresentedContexts()
             } else {
-                let cached = refresh ? [] : await cachedSessionLoader()
-                guard !Task.isCancelled else { return }
-                if !cached.isEmpty, sessionsByHost[hostKey] == nil {
-                    sessionsByHost[hostKey] = cached
-                    publishPresentedContexts()
-                }
-
+                // Paint once. A provisional cached list made the session count
+                // jump whenever the authoritative scan disagreed with it.
                 guard presentedContexts[context.tabID] != nil else {
                     loadingHosts.remove(hostKey)
                     loadTasks.removeValue(forKey: taskID)

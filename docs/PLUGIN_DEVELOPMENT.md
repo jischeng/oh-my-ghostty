@@ -21,9 +21,14 @@ runtime yet. There is no public SDK, socket listener, or hot reload command.
 
 ## Agent history discovery
 
-Agent History retains the currently displayed list during manual refresh, shows
-its loading indicator even when cached rows are present, and
-reconciles deleted local JSONL files out of its disk cache. Remote discovery uses
+Agent History paints one authoritative list per open. It does not publish a
+disk-cache snapshot before the scan, which previously made the visible session
+count change on first open. The disk cache stays a per-file metadata reuse layer
+and is reconciled against files that still exist. Manual refresh keeps the
+displayed rows, shows progress, and disables the refresh action while running.
+Discovery falls back to validated header metadata when a transcript file name
+does not encode the conversation ID, because stores such as omp keep the ID in
+the parent directory and name transcripts freely. Remote discovery uses
 Python 3 over SSH, globally sorts file modification timestamps, and transfers
 numeric Unix timestamps and bounded JSON metadata instead of parsing `ls` dates.
 The configured history limit applies to remote results as well as local results;
@@ -32,8 +37,11 @@ Headers are bounded at 2 MiB per remote file, with a 128 KiB tail for explicit
 session names; oversized or malformed records may still lack a title.
 
 Antigravity CLI (`agy`) resumes with `--conversation {id}`. Local and SSH history
-read its `antigravity-cli/conversation_summaries.db` index read-only and validate
-that the corresponding `conversations/{id}.db` exists. Titles fall back to the
+read its `antigravity-cli/conversation_summaries.db` index. That index is a WAL
+database where a read-only SQLite handle cannot prepare statements, so OMG reads
+a private temporary copy with a read-write handle and never writes to the
+Agent's own files. OMG validates that the corresponding
+`conversations/{id}.db` exists. Titles fall back to the
 stored preview, workspace URIs provide directories, and index timestamps provide
 recency. Its protobuf conversation steps are not decoded: the transcript panel
 shows only the available summary preview and marks it truncated.

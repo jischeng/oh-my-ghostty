@@ -5,13 +5,39 @@ import SQLite3
 
 @MainActor
 struct AgentHistoryInspectorTests {
+    @Test func discoversSessionsStoredInIdentifierDirectories() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let conversationID = try #require(AgentConversationID("019fa897-1a97-7000-81b1-9a2fd2b4c2ce"))
+        // omp writes each conversation into its own timestamp_ID directory and
+        // names transcripts freely, so the file name carries no identifier.
+        let file = root
+            .appendingPathComponent("project")
+            .appendingPathComponent("2026-07-28T11-58-22-871Z_\(conversationID.rawValue)")
+            .appendingPathComponent("FailurePathReview.jsonl")
+        try writeJSONL([
+            ["type": "title", "title": ""],
+            ["type": "session", "version": 3, "id": conversationID.rawValue, "cwd": "/repo"],
+            ["type": "message", "message": ["role": "user", "content": "Review the failure paths"]],
+        ], to: file)
+
+        let sessions = await AgentHistoryStore.load(
+            agents: [.omp],
+            rootURLs: [.omp: root],
+            cacheURL: root.appendingPathComponent("cache.json")
+        )
+        let session = try #require(sessions.first)
+        #expect(session.conversationID == conversationID)
+        #expect(session.title == "Review the failure paths")
+    }
+
     @Test func refreshKeepsRowsAndPublishesLoadingState() async throws {
         let registry = InspectorRegistry()
         let gate = AgentHistoryTranscriptGate()
         let session = AgentHistorySession(agent: .pi, conversationID: AgentConversationID("refresh")!,
             title: "Existing", workingDirectory: "/tmp", updatedAt: Date(), sourcePath: "/tmp/session", isActive: false)
         var loads = 0
-        let provider = BuiltInAgentHistoryInspectorProvider(registry: registry, cachedSessionLoader: { [] }, sessionLoader: {
+        let provider = BuiltInAgentHistoryInspectorProvider(registry: registry, sessionLoader: {
             loads += 1
             if loads > 1 { await gate.wait() }
             return [session]
@@ -38,7 +64,7 @@ struct AgentHistoryInspectorTests {
                 sourcePath: "/tmp/session-\(index)", isActive: false)
         }
         let registry = InspectorRegistry()
-        let provider = BuiltInAgentHistoryInspectorProvider(registry: registry, cachedSessionLoader: { [] }, sessionLoader: { sessions })
+        let provider = BuiltInAgentHistoryInspectorProvider(registry: registry, sessionLoader: { sessions })
         try provider.register()
         let a = InspectorPaneContext(tabID: UUID(), surfaceID: nil, title: "a", workingDirectory: "/repo")
         let b = InspectorPaneContext(tabID: UUID(), surfaceID: nil, title: "b", workingDirectory: "/repo")
@@ -358,15 +384,10 @@ struct AgentHistoryInspectorTests {
     }
 
     @Test func registrationDoesNotLoadHistoryUntilPaneAppears() async throws {
-        var cachedLoadCount = 0
         var refreshLoadCount = 0
         let registry = InspectorRegistry()
         let provider = BuiltInAgentHistoryInspectorProvider(
             registry: registry,
-            cachedSessionLoader: {
-                cachedLoadCount += 1
-                return []
-            },
             sessionLoader: {
                 refreshLoadCount += 1
                 return []
@@ -380,7 +401,6 @@ struct AgentHistoryInspectorTests {
 
         try provider.register()
         await Task.yield()
-        #expect(cachedLoadCount == 0)
         #expect(refreshLoadCount == 0)
 
         let context = InspectorPaneContext(
@@ -396,7 +416,6 @@ struct AgentHistoryInspectorTests {
         for _ in 0..<20 where refreshLoadCount == 0 {
             await Task.yield()
         }
-        #expect(cachedLoadCount == 1)
         #expect(refreshLoadCount == 1)
     }
 
@@ -426,7 +445,6 @@ struct AgentHistoryInspectorTests {
         let registry = InspectorRegistry()
         let provider = BuiltInAgentHistoryInspectorProvider(
             registry: registry,
-            cachedSessionLoader: { [] },
             sessionLoader: { [session] },
             transcriptLoader: { _ in
                 await gate.wait()
@@ -520,7 +538,6 @@ struct AgentHistoryInspectorTests {
         let registry = InspectorRegistry()
         let provider = BuiltInAgentHistoryInspectorProvider(
             registry: registry,
-            cachedSessionLoader: { [] },
             sessionLoader: { [session] },
             transcriptLoader: { _ in transcript },
             sessionResumer: { session, _ in resumedIDs.append(session.id) },

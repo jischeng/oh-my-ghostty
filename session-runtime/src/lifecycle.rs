@@ -23,7 +23,7 @@ impl Default for Policy {
         Self {
             detached_ttl_seconds: 3 * 24 * 3600,
             expires_at: None,
-            close_on_agent_done: true,
+            close_on_agent_done: false,
             agent_done_grace_seconds: 60,
             terminate_grace_seconds: 5,
             host_idle_seconds: 300,
@@ -183,16 +183,14 @@ mod tests {
     fn ttl_and_completion_are_independent_retirement_conditions() {
         let defaults: Policy = serde_json::from_str("{}").unwrap();
         assert_eq!(defaults.detached_ttl_seconds, 3 * 24 * 3600);
-        assert!(defaults.close_on_agent_done);
+        assert!(!defaults.close_on_agent_done);
         let now = Instant::now();
         let mut state = Lifetime::new(now);
         state.activity(true, now);
         let after_grace = now + Duration::from_secs(defaults.agent_done_grace_seconds);
-        assert_eq!(
-            state.reason(&defaults, after_grace, 0, true),
-            Some(EndReason::AgentCompleted)
-        );
+        assert_eq!(state.reason(&defaults, after_grace, 0, true), None);
         let unlimited = Policy {
+            close_on_agent_done: true,
             detached_ttl_seconds: 0,
             ..defaults.clone()
         };
@@ -223,7 +221,10 @@ mod tests {
     #[test]
     fn completion_grace_starts_after_both_detach_and_completion() {
         let now = Instant::now();
-        let policy = Policy::default();
+        let policy = Policy {
+            close_on_agent_done: true,
+            ..Policy::default()
+        };
         let mut state = Lifetime::new(now);
         state.attached(1, now);
         state.activity(true, now + Duration::from_secs(10));

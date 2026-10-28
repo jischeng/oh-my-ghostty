@@ -5,7 +5,7 @@ import Foundation
 struct SessionRuntimePolicy: Codable, Equatable, Sendable {
     var detachedTTLSeconds = 259_200
     var expiresAt: Int?
-    var closeOnAgentDone = true
+    var closeOnAgentDone = false
     var agentDoneGraceSeconds = 60
     var terminateGraceSeconds = 5
     var hostIdleSeconds = 300

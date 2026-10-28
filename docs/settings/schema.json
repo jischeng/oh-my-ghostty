@@ -388,8 +388,8 @@
     },
     "sessions.runtimeCloseOnAgentDone": {
       "category": "general",
-      "default": true,
-      "description": "Close detached Agent sessions only after verified completion and durable recovery metadata.",
+      "default": false,
+      "description": "Beta, disabled by default. Close detached Agent sessions only after verified completion and durable recovery metadata; unsupported Agents remain running like ordinary processes.",
       "type": "boolean"
     },
     "sessions.runtimeDoneGraceSeconds": {

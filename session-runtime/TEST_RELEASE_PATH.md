@@ -8,7 +8,7 @@ key prompts use SSH askpass. Unsupported platforms or setup errors are visible.
 
 Lifecycle settings apply to newly created Sessions. Default detached lifetime is
 72 hours (3 days); 0 disables only that time limit. An optional ISO-8601 cutoff applies
-only while detached. Completion cleanup is on by default, with a 60-second grace
+only while detached. Completion cleanup is an opt-in Beta feature, off by default, with a 60-second grace
 period and validated Agent hooks/conversation stores. It is independent of the TTL:
 completion can retire a session early, while an unfinished session still expires
 at the maximum detached lifetime. Grace begins when both detach and completion

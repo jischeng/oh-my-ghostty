@@ -768,10 +768,10 @@ struct SettingsStrings: Equatable, Sendable {
           "默认 72 小时（3 天）。0 仅关闭此时间上限，不影响任务完成后回收。持续输出不会延长期限；修改对新会话生效。")
     }
     var runtimeExpirationPlaceholder: String { t("Optional deadline, e.g. 2026-12-01T18:00:00Z", "可选截止时间，例如 2026-12-01T18:00:00Z") }
-    var runtimeCloseOnDone: String { t("Close after Agent task completion", "Agent 任务完成后回收") }
+    var runtimeCloseOnDone: String { t("Close after Agent task completion [Beta]", "Agent 任务完成后回收【Beta】") }
     var runtimeCloseOnDoneCaption: String {
-        t("With remote Python 3, installs OMG recovery hooks for Codex, Claude and Pi. Only closes disconnected sessions with verified completion and an existing conversation record; reopening resumes that conversation.",
-          "远端有 Python 3 时会安装 Codex、Claude、Pi 的 OMG 对话恢复 hooks。仅在无人连接、收到可靠完成事件且已有对话记录时回收，再次打开恢复原对话。")
+        t("Off by default. When enabled, closes disconnected Codex, Claude and Pi sessions only after verified completion and an existing conversation record; reopening resumes that conversation. Unsupported Agents keep running like ordinary processes. The detached time limit and explicit close still apply. Changes apply to new sessions.",
+          "默认关闭。开启后，仅在无人连接、确认任务完成且已有对话记录时回收 Codex、Claude、Pi，再次打开恢复原对话。不支持的 Agent 与普通进程一样继续后台运行，仍受保留期限和显式关闭控制。修改对新会话生效。")
     }
     var runtimeDoneGrace: String { t("Completion grace period (seconds)", "完成后的宽限期（秒）") }
     var runtimeDoneGraceCaption: String {

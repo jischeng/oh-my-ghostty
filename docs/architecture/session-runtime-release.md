@@ -28,7 +28,10 @@ codec. No claim of arbitrary cross-version snapshot compatibility.
 - Optional UTC expiration deadline: applies while detached, even if output continues.
 - No heartbeat for a bounded lease: considered detached even on half-open links.
 - Last child exit: reap PTY/process resources immediately; retain reason/metadata.
-- Close after Agent task completion: on by default. When enabled, only detached
+- Close after Agent task completion [Beta]: off by default. Unsupported Agents
+  remain running like ordinary processes, subject to detached TTL/deadline and
+  explicit close. Existing explicit settings/session policies are preserved.
+  When enabled, only detached
   sessions with a validated durable conversation resume record; grace period 60s.
   New input, working/attention/error events or reattach cancels pending completion.
   The grace period starts after both completion and detach. Completion and detached

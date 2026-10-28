@@ -559,9 +559,9 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Optional ISO-8601 deadline for detached sessions; empty disables the absolute deadline.",
             requiresNewWindow: true, category: "general"),
         .init(
-            id: "sessions.runtimeCloseOnAgentDone", type: .boolean, defaultValue: "true",
+            id: "sessions.runtimeCloseOnAgentDone", type: .boolean, defaultValue: "false",
             allowedValues: nil, minimum: nil, maximum: nil,
-            description: "Close detached sessions after a verified Agent completion and durable recovery record.",
+            description: "Beta, disabled by default. Close detached sessions after verified Agent completion and durable recovery metadata; unsupported Agents remain running like ordinary processes.",
             requiresNewWindow: true, category: "general"),
         .init(
             id: "sessions.runtimeDoneGraceSeconds", type: .number, defaultValue: "60",
@@ -908,7 +908,7 @@ final class OhMyGhosttySettings: ObservableObject {
     @Published var runtimeExpiration = "" {
         didSet { persist("sessions.runtimeExpiration", runtimeExpiration) }
     }
-    @Published var runtimeCloseOnAgentDone = true {
+    @Published var runtimeCloseOnAgentDone = false {
         didSet { persist("sessions.runtimeCloseOnAgentDone", runtimeCloseOnAgentDone) }
     }
     @Published var runtimeDoneGraceSeconds: Double = 60 {
@@ -1239,7 +1239,7 @@ final class OhMyGhosttySettings: ObservableObject {
             startupMode = enumValue("sessions.startupMode", fallback: .restoreSessions)
             runtimeDetachedHours = min(max(chosen["sessions.runtimeDetachedHours"] as? Double ?? 72, 0), 8760)
             runtimeExpiration = chosen["sessions.runtimeExpiration"] as? String ?? ""
-            runtimeCloseOnAgentDone = chosen["sessions.runtimeCloseOnAgentDone"] as? Bool ?? true
+            runtimeCloseOnAgentDone = chosen["sessions.runtimeCloseOnAgentDone"] as? Bool ?? false
             runtimeDoneGraceSeconds = min(max(chosen["sessions.runtimeDoneGraceSeconds"] as? Double ?? 60, 1), 86400)
             quitWithoutConfirmation = boolValue(
                 "general.quitWithoutConfirmation",

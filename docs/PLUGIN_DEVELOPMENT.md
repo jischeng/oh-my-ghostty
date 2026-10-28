@@ -24,7 +24,12 @@ runtime yet. There is no public SDK, socket listener, or hot reload command.
 The internal runtime keeps a single `omgd` host with per-session actor threads.
 Explicit pane/tab closure is persisted in `session-runtime/pending-closes.json`
 before local removal; detached/network-lost sessions retain their existing TTL
-and Agent-completion policy. The host heartbeat advertises `durable-close/1`.
+and Agent-completion policy. Completion cleanup is an opt-in Beta feature,
+disabled by default in settings and daemon policy. Unsupported Agents follow
+ordinary process retention (TTL/deadline/explicit Close), even when completion
+cleanup is enabled; verified recoverability remains required. Previously saved
+explicit settings and existing Session policies are preserved.
+The host heartbeat advertises `durable-close/1`.
 Only after this capability does a relay forward the outer `K(stream, UUID)`
 request; the host persists a permanent UUID close marker and replies with an
 inner `K` containing `pending` or `closed`. Confirmation requires the actor to

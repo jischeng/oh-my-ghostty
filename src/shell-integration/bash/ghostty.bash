@@ -126,7 +126,7 @@ fi
 #
 # Wrap `ssh` with `ghostty +ssh` and translate the shell-integration
 # feature flags into command options.
-if [[ "$GHOSTTY_SHELL_FEATURES" == *ssh-* ]]; then
+if [[ "$GHOSTTY_SHELL_FEATURES" == *ssh-* || -n "${OMG_SSH_HANDOFF_HELPER-}" ]]; then
   function ssh() {
     builtin local -a flags
     flags=()

@@ -9,7 +9,7 @@ import tempfile
 import time
 import unittest
 
-BINARY = Path(__file__).resolve().parents[1] / 'target/debug/omg-sessiond'
+BINARY = Path(__file__).resolve().parents[1] / 'target/debug/omgd'
 
 
 def encode(kind, sequence=0, data=b''):

@@ -185,12 +185,23 @@ fn main() -> io::Result<()> {
         }
         Some("ensure-host") if a.len() == 3 => ensure_host(&a[2]),
         Some("report") if a.len() == 6 => report(&a[2], &a[3], &a[4], &a[5]),
+        Some("handoff-check") if a.len() >= 3 => {
+            if unsafe { libc::isatty(libc::STDIN_FILENO) } == 1
+                && unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1
+                && omg_session_runtime::handoff::interactive(&a[2..])
+            {
+                Ok(())
+            } else {
+                std::process::exit(64)
+            }
+        }
+        Some("handoff") if a.len() >= 4 => omg_session_runtime::handoff::request(&a[2], &a[3..]),
         Some("version") => {
             println!("omg-session-runtime/2 snapshot/1");
             Ok(())
         }
         _ => {
-            eprintln!("usage: omg-sessiond host DIRECTORY -- SHELL... | serve SOCKET -- COMMAND... | bridge SOCKET | connect LOCAL_SOCKET CONNECTION_JSON");
+            eprintln!("usage: omgd host DIRECTORY -- SHELL... | serve SOCKET -- COMMAND... | bridge SOCKET | connect LOCAL_SOCKET CONNECTION_JSON");
             std::process::exit(2)
         }
     }

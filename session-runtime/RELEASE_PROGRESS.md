@@ -43,8 +43,10 @@ Validation so far:
 
 Release gaps (do not advertise these as completed):
 
-- Normal typed `ssh host` is not intercepted into the native backend yet; the new
-  Settings connection entry is required. Automatic deployment is on that path.
+- Ordinary interactive `ssh host` now hands off through the shell wrapper to the
+  native backend. Commands, tunnels, explicit noninteractive/unsupported flags and
+  bypassing shell integration retain system SSH semantics. The helper is `omgd`.
+  Typed SSH → native surface → GUI quit/reopen preserved PID/generation on vps-jump.
 - Real Codex/Claude/Pi task completion and resume acceptance, Linux arm64/macOS remote
   execution and password/host-key UI still need acceptance.
 - Runtime revisions are cached independently from the snapshot compatibility hash.

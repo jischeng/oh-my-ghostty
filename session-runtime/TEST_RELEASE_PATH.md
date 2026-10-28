@@ -34,8 +34,9 @@ Checks:
    reuse a cached runtime only if the snapshot compatibility hash matches. Incompatible
    cores preserve the remote process and report the mismatch.
 
-Current release gates remain in RELEASE_PROGRESS.md: ordinary typed `ssh host`
-is not yet intercepted into this native path, transparent network reconnect and
+Ordinary interactive `ssh host` in an integrated local shell now uses this native
+path. Remote commands and tunnels retain system SSH semantics. Current release
+gates remain in RELEASE_PROGRESS.md: transparent network reconnect and
 full management UI remain pending, and real vendor Agent/cross-platform execution
 acceptance is required before public release. The development default for quitting
 without a prompt is enabled in the PTY profile, independent from other OMG variants.

@@ -12,5 +12,5 @@ serde_json = "1"
 sha2 = "0.10"
 
 [[bin]]
-name = "omg-sessiond"
+name = "omgd"
 path = "src/main.rs"

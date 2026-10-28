@@ -1180,6 +1180,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 .compactMap { $0 }
                 .sink { [weak self, weak surface] signal in
                     guard let self, let surface else { return }
+                    if SessionRuntimeHandoff.shared.accept(signal, source: surface, controller: self) { return }
                     var context = paneSessionContexts[surface.id] ?? .init(
                         workingDirectory: surface.pwd,
                         terminalTitle: surface.title

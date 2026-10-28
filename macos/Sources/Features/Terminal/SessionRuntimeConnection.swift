@@ -128,7 +128,7 @@ final class SessionRuntimeConnections {
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configURL.path)
         try? FileManager.default.removeItem(at: socket)
         let process = Process()
-        process.executableURL = artifacts.appendingPathComponent("omg-sessiond")
+        process.executableURL = artifacts.appendingPathComponent("omgd")
         process.arguments = ["connect", socket.path, configURL.path]
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice

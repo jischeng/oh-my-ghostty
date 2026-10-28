@@ -14,7 +14,7 @@ from test_sessions import encode, frame
 @unittest.skipUnless(os.environ.get('OMG_SSH_TEST_CONFIG'), 'requires explicit SSH deployment configuration')
 class SSHMultiplexTests(unittest.TestCase):
     def test_two_panes_share_ssh_and_survive_transport_restart(self):
-        binary = Path(__file__).resolve().parents[1] / 'target/debug/omg-sessiond'
+        binary = Path(__file__).resolve().parents[1] / 'target/debug/omgd'
         with tempfile.TemporaryDirectory(prefix='omg-mux-', dir='/tmp') as directory:
             path = directory + '/s'
             identities = [str(uuid.uuid4()).encode(), str(uuid.uuid4()).encode()]

@@ -300,6 +300,22 @@ fn runInner(
         return 2;
     }
 
+    // A pane-scoped capability is injected only by the native GUI. Let its
+    // helper classify arguments before any SSH setup or remote process launch.
+    if (opts.@"remote-agent" == null and opts.@"remote-working-directory" == null) {
+        var handoff_env = try global.environMap();
+        defer handoff_env.deinit();
+        if (handoff_env.get("OMG_SSH_HANDOFF_HELPER")) |helper| {
+            if (handoff_env.get("OMG_SSH_HANDOFF_TOKEN") != null) {
+                const check = try std.mem.concat(alloc, []const u8, &.{ &.{ helper, "handoff-check" }, opts._ssh_args.items });
+                if ((childExec(check) catch 64) == 0) {
+                    const request = try std.mem.concat(alloc, []const u8, &.{ &.{ helper, "handoff", opts.ssh }, opts._ssh_args.items });
+                    return try childExec(request);
+                }
+            }
+        }
+    }
+
     const remote_agent: ?RemoteAgent = if (opts.@"remote-agent") |value|
         RemoteAgent.parse(value) orelse {
             try stderr.print("Error: invalid --remote-agent `{s}`.\n", .{value});

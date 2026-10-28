@@ -412,6 +412,7 @@ extension Ghostty {
                     return
                 }
             }
+            SessionRuntimeHandoff.shared.configure(&surface_cfg, pane: self.id)
             QuickInputDraftBridge.shared.configure(&surface_cfg, surfaceID: self.id)
             // A restored command can launch an agent before any shell prompt
             // reports OSC 7. Seed the known launch directory for all consumers.

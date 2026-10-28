@@ -22,7 +22,7 @@ fn start() -> Daemon {
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
     // Raw mode gives byte-exact replies; the child increments while detached.
     let script="import os,tty,select,time\ntty.setraw(0)\nn=0\nwhile True:\n n+=1\n os.write(1, ('\\x1b[2J\\x1b[Htick:%d pid:%d' % (n,os.getpid())).encode())\n ready,_,_=select.select([0],[],[],0.04)\n if ready:\n  data=os.read(0,1024)\n  if b'q' in data: break\n  if b'?' in data:\n   time.sleep(0.15)\n   os.write(1,b'\\x1b[6n')\n   ready,_,_=select.select([0],[],[],1)\n   if ready and b'R' in os.read(0,128):\n    open(os.environ['REPORT'],'w').write('query answered')\n";
-    let child = Command::new(env!("CARGO_BIN_EXE_omg-sessiond"))
+    let child = Command::new(env!("CARGO_BIN_EXE_omgd"))
         .args([
             "serve",
             dir.join("s").to_str().unwrap(),

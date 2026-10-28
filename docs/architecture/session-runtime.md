@@ -22,10 +22,10 @@ Ghostty macOS host
   ├─ OMG SessionCoordinator / HostConnection
   └─ Ghostty Termio: OmgSession backend
        └─ 每 host/account 一条逻辑连接，多 session stream
-            ├─ SSH pipes → omg-sessiond bridge → Unix socket
+            ├─ SSH pipes → omgd bridge → Unix socket
             └─ Unix socket（内部验证；后续本地产品入口）
                           ↓
-                 omg-sessiond
+                 omgd
                    ├─ Session registry / attach ownership
                    ├─ Session actor → PTY → shell / agent
                    └─ authoritative terminal state / snapshots

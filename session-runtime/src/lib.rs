@@ -221,6 +221,7 @@ impl Peer {
     }
 }
 pub mod deploy;
+pub mod handoff;
 pub mod host;
 pub mod lifecycle;
 pub mod location;

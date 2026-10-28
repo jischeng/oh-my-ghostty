@@ -192,7 +192,7 @@ pub fn prepare(config: &Connection) -> io::Result<(String, String)> {
     let exists = run(
         config,
         &format!(
-            "if [ -x {v}/omg-sessiond ] && [ -f {v}/verified ]; then printf 'OMG_PRESENT'; fi",
+            "if [ -x {v}/omgd ] && [ -f {v}/verified ]; then printf 'OMG_PRESENT'; fi",
             v = quote(&version)
         ),
         None,
@@ -221,8 +221,8 @@ printf '%s\n' {checks} > checksums
 if command -v sha256sum >/dev/null 2>&1; then sha256sum -c checksums >/dev/null
 elif command -v shasum >/dev/null 2>&1; then shasum -a 256 -c checksums >/dev/null
 else echo 'No SHA-256 verifier on remote host' >&2; exit 1; fi
-chmod 700 omg-sessiond
-./omg-sessiond version >/dev/null
+chmod 700 omgd
+./omgd version >/dev/null
 printf '%s\n' {revision} > verified
 if [ ! -d "$version" ]; then mv "$staging" "$version"; fi
 "#,
@@ -284,13 +284,13 @@ printf '\nOMG_RUNTIME_READY\n'
 "#,
         state = quote(&state),
         policy = quote(&policy),
-        binary = quote(&format!("{version}/omg-sessiond"))
+        binary = quote(&format!("{version}/omgd"))
     );
     let out = run(config, &setup, None)?;
     if !out.ends_with(b"OMG_RUNTIME_READY\n") {
         return Err(io::Error::other("remote daemon not ready"));
     }
-    Ok((format!("{version}/omg-sessiond"), state))
+    Ok((format!("{version}/omgd"), state))
 }
 pub fn command(config: &Connection, binary: &str, state: &str) -> io::Result<Command> {
     ssh(

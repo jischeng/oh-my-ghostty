@@ -11,7 +11,7 @@ fn background_signal_dispositions_do_not_disable_ctrl_c() {
     fs::create_dir(&dir).unwrap();
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
     let path = dir.join("s");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_omg-sessiond"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_omgd"));
     command.args([
         "serve",
         path.to_str().unwrap(),

@@ -318,7 +318,7 @@ _ghostty_deferred_init() {
     #
     # Wrap `ssh` with the running terminal executable and translate the shell-integration
     # feature flags into command options.
-    if [[ "$GHOSTTY_SHELL_FEATURES" == *ssh-* ]]; then
+    if [[ "$GHOSTTY_SHELL_FEATURES" == *ssh-* || -n "${OMG_SSH_HANDOFF_HELPER-}" ]]; then
       function ssh() {
         local flags=()
         [[ "$GHOSTTY_SHELL_FEATURES" != *ssh-env* ]] && flags+=(--forward-env=false)

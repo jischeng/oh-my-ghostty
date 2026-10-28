@@ -19,6 +19,36 @@ The Experimental `PluginInstallationManager` can download a GitHub repository's
 Support Plugins directory, but no installed package is launched or connected to
 runtime yet. There is no public SDK, socket listener, or hot reload command.
 
+## Agent history discovery
+
+Agent History retains the currently displayed list during manual refresh and
+reconciles deleted local JSONL files out of its disk cache. Remote discovery uses
+Python 3 over SSH, globally sorts file modification timestamps, and transfers
+numeric Unix timestamps and bounded JSON metadata instead of parsing `ls` dates.
+The configured history limit applies to remote results as well as local results;
+remote JSONL candidates are bounded at 20,000 and file traversal at 200,000.
+Headers are bounded at 2 MiB per remote file, with a 128 KiB tail for explicit
+session names; oversized or malformed records may still lack a title.
+
+Antigravity CLI (`agy`) resumes with `--conversation {id}`. Local and SSH history
+read its `antigravity-cli/conversation_summaries.db` index read-only and validate
+that the corresponding `conversations/{id}.db` exists. Titles fall back to the
+stored preview, workspace URIs provide directories, and index timestamps provide
+recency. Its protobuf conversation steps are not decoded: the transcript panel
+shows only the available summary preview and marks it truncated.
+
+## Native interactive SSH handoff (Experimental)
+
+Local GUI panes receive a private per-pane capability and request directory.
+The existing shell SSH wrapper calls `omg +ssh`, which routes conservative
+interactive shell invocations to the bundled `omgd handoff` helper. A private
+request file carries exact argv/cwd; OSC 3008 only references its random ID.
+The host checks the owning pane capability before replacing that local surface
+with the native remote backend. Output alone is insufficient to authorize it.
+Remote commands, tunnels and unsupported flags retain standard SSH behavior.
+Runtime remote executable/deployment identity is `omgd`; the remote `omg` draft
+CLI remains a separate non-daemon command interface.
+
 ## Native Session Runtime hooks (Experimental)
 
 The SSH runtime is an independent PTY owner, not a third-party plugin loader.

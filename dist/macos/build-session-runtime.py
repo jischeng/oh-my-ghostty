@@ -84,8 +84,8 @@ def main():
             run(cargo, env=env)
             binary = ROOT/'session-runtime/target'
             if rust_target: binary /= rust_target
-            binary /= 'release/omg-sessiond'
-            shutil.copy2(binary, destination/'omg-sessiond')
+            binary /= 'release/omgd'
+            shutil.copy2(binary, destination/'omgd')
             if name.startswith('linux-'):
                 library = next(p for p in (prefix/'lib').glob('libghostty-vt.so.*') if not p.is_symlink())
                 shutil.copy2(library, destination/'libghostty-vt.so.0')
@@ -93,11 +93,11 @@ def main():
                 library = next(p for p in (prefix/'lib').glob('libghostty-vt.*.dylib') if not p.is_symlink())
                 shutil.copy2(library, destination/library.name)
                 run(['/usr/bin/install_name_tool', '-id', '@rpath/' + library.name, str(destination/library.name)])
-                dependencies = subprocess.check_output(['/usr/bin/otool', '-L', str(destination/'omg-sessiond')], text=True)
+                dependencies = subprocess.check_output(['/usr/bin/otool', '-L', str(destination/'omgd')], text=True)
                 for line in dependencies.splitlines()[1:]:
                     dependency = line.strip().split(' (')[0]
                     if 'libghostty-vt' in dependency:
-                        run(['/usr/bin/install_name_tool', '-change', dependency, '@rpath/' + library.name, str(destination/'omg-sessiond')])
+                        run(['/usr/bin/install_name_tool', '-change', dependency, '@rpath/' + library.name, str(destination/'omgd')])
             files = [{'name': p.name, 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()}
                      for p in sorted(destination.iterdir()) if p.name != 'manifest.json' and p.is_file()]
             (destination/'manifest.json').write_text(json.dumps({'revision': revision, 'platform': name, 'files': files}, indent=2)+'\n')

@@ -232,7 +232,13 @@ if [ ! -d "$version" ]; then mv "$staging" "$version"; fi
             checks = quote(&checks),
             revision = quote(&manifest.revision)
         );
-        let archive = std::env::temp_dir().join(format!("omg-runtime-{nonce}.tar"));
+        // GUI helpers may inherit a short-lived agent/Finder TMPDIR. Keep the
+        // upload archive in the private runtime cache, which outlives the caller.
+        let cache = config
+            .bundle
+            .parent()
+            .ok_or_else(|| io::Error::other("runtime cache has no parent"))?;
+        let archive = cache.join(format!(".upload-{nonce}.tar"));
         let mut tar = Command::new("/usr/bin/tar");
         tar.env("COPYFILE_DISABLE", "1")
             .arg("--no-xattrs")

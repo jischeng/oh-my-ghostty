@@ -47,6 +47,10 @@ request file carries exact argv/cwd; OSC 3008 only references its random ID.
 The host checks the owning pane capability before replacing that local surface
 with the native remote backend. Output alone is insufficient to authorize it.
 Remote commands, tunnels and unsupported flags retain standard SSH behavior.
+The local surface is retained during handoff. A confirmed remote process exit
+returns to that local shell and records a local pane; transport disconnection
+never triggers this transition. Across app restart, the local shell is recreated
+at the descriptor's original local working directory.
 Runtime remote executable/deployment identity is `omgd`; the remote `omg` draft
 CLI remains a separate non-daemon command interface.
 

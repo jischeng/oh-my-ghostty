@@ -1,8 +1,35 @@
+import AppKit
 import Foundation
 import Testing
 @testable import Ghostty
 
 struct SessionRuntimeConnectionTests {
+    @MainActor
+    @Test func remoteExitRestoresRetainedLocalSurfaceAndClearsDescriptor() throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let native = try #require(app.app)
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let local = Ghostty.SurfaceView(native, baseConfig: config)
+        let remote = Ghostty.SurfaceView(native, baseConfig: config)
+        remote.runtimeDescriptor = .init(connection: try GitSSHConnection(destination: "host", localWorkingDirectory: "/tmp"), revision: "test", policy: .init())
+        remote.runtimeLocalSurface = local
+        let completion = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        remote.runtimeLocalCompletion = completion
+        let controller = TerminalController(app, withSurfaceTree: .init(view: remote))
+        _ = controller.window
+        controller.focusedSurface = remote
+        defer { controller.window?.delegate = nil; controller.window?.close(); try? FileManager.default.removeItem(at: completion) }
+        SessionRuntimeHandoff.shared.returnToLocal(from: remote)
+        #expect(controller.surfaceTree.first === local)
+        #expect(controller.focusedSurface === local)
+        #expect(remote.runtimeDescriptor == nil)
+        #expect(remote.runtimeLocalSurface == nil)
+        #expect(FileManager.default.fileExists(atPath: completion.path))
+        let data = try JSONEncoder().encode(TerminalRestorableState(from: controller))
+        #expect(!(String(data: data, encoding: .utf8) ?? "").contains("runtimeDescriptor"))
+    }
+
     @Test func hostIdentityIncludesExactRoutingAndRuntimeRevision() throws {
         let a = try GitSSHConnection(destination: "devbox", options: ["-p", "2222", "-J", "jump"])
         let b = try GitSSHConnection(destination: "devbox", options: ["-p", "2223", "-J", "jump"])

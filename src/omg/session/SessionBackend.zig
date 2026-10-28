@@ -192,7 +192,14 @@ fn readLoop(self: *Self, io: *HostIO) !void {
                 io.processOutput("\r\n");
                 return;
             },
-            'X' => return,
+            'X' => {
+                const code = std.fmt.parseInt(i32, bytes, 10) catch -1;
+                _ = io.surface_mailbox.push(.{ .child_exited = .{
+                    .exit_code = if (code < 0) 1 else @intCast(code),
+                    .runtime_ms = 1,
+                } }, .{ .forever = {} });
+                return;
+            },
             else => return error.InvalidFrame,
         }
     }

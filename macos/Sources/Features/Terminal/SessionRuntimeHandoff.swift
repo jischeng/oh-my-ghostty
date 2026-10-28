@@ -23,6 +23,31 @@ final class SessionRuntimeHandoff {
         } catch { Ghostty.logger.error("Could not prepare native SSH handoff") }
     }
 
+    func returnToLocal(from remote: Ghostty.SurfaceView) {
+        guard let descriptor = remote.runtimeDescriptor,
+              let controller = TerminalController.all.first(where: { $0.surfaceTree.contains(where: { $0 === remote }) }),
+              let node = controller.surfaceTree.find(id: remote.id),
+              let app = controller.ghostty.app else { return }
+        let local: Ghostty.SurfaceView
+        if let retained = remote.runtimeLocalSurface {
+            local = retained
+        } else {
+            var config = Ghostty.SurfaceConfiguration()
+            config.workingDirectory = descriptor.connection.localWorkingDirectory
+            local = Ghostty.SurfaceView(app, baseConfig: config)
+        }
+        guard let tree = try? controller.surfaceTree.replacing(node: node, with: .leaf(view: local)) else { return }
+        let wasFocused = controller.focusedSurface === remote
+        controller.replaceSurfaceTree(tree, moveFocusTo: wasFocused ? local : controller.focusedSurface,
+                                      moveFocusFrom: remote, undoAction: nil)
+        if wasFocused { controller.focusedSurface = local }
+        if let completion = remote.runtimeLocalCompletion { try? Data().write(to: completion, options: .atomic) }
+        remote.runtimeLocalSurface = nil
+        remote.runtimeDescriptor = nil
+        controller.invalidateRestorableState()
+        TerminalWorkspaceSessionStore.shared.capture()
+    }
+
     func accept(_ signal: Ghostty.ContextSignal, source: Ghostty.SurfaceView, controller: TerminalController) -> Bool {
         let prefix = "omg-runtime-request-"
         guard signal.id.hasPrefix(prefix) else { return false }
@@ -47,11 +72,13 @@ final class SessionRuntimeHandoff {
             var config = Ghostty.SurfaceConfiguration()
             try descriptor.configure(&config)
             let replacement = Ghostty.SurfaceView(app, baseConfig: config)
+            replacement.runtimeLocalSurface = source
+            replacement.runtimeLocalCompletion = directory.appendingPathComponent(name + ".done")
+            try Data().write(to: directory.appendingPathComponent(name + ".accepted"), options: .atomic)
             let tree = try controller.surfaceTree.replacing(node: node, with: .leaf(view: replacement))
             controller.replaceSurfaceTree(tree, moveFocusTo: replacement, moveFocusFrom: source, undoAction: nil)
             controller.focusedSurface = replacement
             controller.invalidateRestorableState()
-            tokens.removeValue(forKey: source.id)
         } catch { Ghostty.logger.error("Native SSH handoff failed: \(error.localizedDescription, privacy: .public)") }
         return true
     }

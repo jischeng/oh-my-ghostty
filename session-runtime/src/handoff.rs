@@ -62,10 +62,21 @@ pub fn request(ssh: &str, args: &[String]) -> io::Result<()> {
     file.sync_all()?;
     print!("\x1b]3008;start=omg-runtime-request-{id};type=app\x07");
     io::stdout().flush()?;
-    // The owning surface replaces this local PTY. Never launch SSH in it.
-    // Timeout leaves a visible failure instead of silently taking a non-durable path.
-    for _ in 0..600 {
-        std::thread::sleep(Duration::from_millis(100));
+    // Preserve the local shell while its surface is parked behind the remote
+    // pane. Only GUI-owned completion returns to that exact shell environment.
+    let accepted = std::path::Path::new(&directory).join(format!("{id}.accepted"));
+    let done = std::path::Path::new(&directory).join(format!("{id}.done"));
+    let start = std::time::Instant::now();
+    loop {
+        if done.exists() {
+            let _ = std::fs::remove_file(done);
+            let _ = std::fs::remove_file(accepted);
+            return Ok(());
+        }
+        if !accepted.exists() && start.elapsed() > Duration::from_secs(60) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
     let _ = std::fs::remove_file(path);
     Err(io::Error::new(

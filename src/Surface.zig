@@ -1303,6 +1303,13 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
     // Mark our flag that we exited immediately
     self.child_exited = true;
 
+    // A native SSH exit is handled by the host's return-to-local lifecycle,
+    // regardless of duration. Transport disconnect never emits this message.
+    if (self.io.backend == .omg_session) {
+        _ = self.rt_app.performAction(.{ .surface = self }, .show_child_exited, info) catch false;
+        return;
+    }
+
     // If our runtime was below some threshold then we assume that this
     // was an abnormal exit and we show an error message.
     if (info.runtime_ms <= self.config.abnormal_command_exit_runtime_ms) runtime: {

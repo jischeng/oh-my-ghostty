@@ -1053,7 +1053,11 @@ execution on that account; OMG does not log in or silently modify remote dotfile
 
 Agent glyphs use assets from LobeHub `lobe-icons` (MIT) plus the projects' own
 published marks, including Termio, OMP/oh-my-pi, Reasonix, Charm Crush, Factory
-Droid, and Nous Research Hermes. Product names and marks remain trademarks of
+Droid, and Nous Research Hermes. The Copilot glyph is the GitHub Copilot CLI
+robot head from the published VS Code marketplace icon: the raster mark is
+reduced to a monochrome silhouette (the goggle lenses stay cut out) and traced
+into the same template path format as the other Agent icons. Product names and
+marks remain trademarks of
 their respective owners; the assets do not imply vendor endorsement.
 
 An agent manifest declares icons in two roles:

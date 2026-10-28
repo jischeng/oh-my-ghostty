@@ -2272,10 +2272,9 @@ struct AgentHistoryFilterPopover: View {
             sectionLabel(strings.filterSection)
             AgentHistoryFilterRow(
                 title: strings.allAgents,
-                agent: nil,
+                icon: .symbol("square.grid.2x2"),
                 count: sessions.count,
-                isSelected: filter.agent == nil,
-                reservesIconColumn: true
+                isSelected: filter.agent == nil
             ) { filter.agent = nil }
 
             if agents.count > 6 {
@@ -2325,19 +2324,19 @@ struct AgentHistoryFilterPopover: View {
                 VStack(alignment: .leading, spacing: 1) {
                     sectionLabel(strings.groupSection)
                     AgentHistoryFilterRow(
-                        title: strings.groupNone, agent: nil, count: nil,
+                        title: strings.groupNone, icon: .symbol("list.bullet"), count: nil,
                         isSelected: filter.grouping == .none
                     ) { filter.grouping = .none }
                     AgentHistoryFilterRow(
-                        title: strings.groupProject, agent: nil, count: nil,
+                        title: strings.groupProject, icon: .symbol("folder"), count: nil,
                         isSelected: filter.grouping == .project
                     ) { filter.grouping = .project }
                     AgentHistoryFilterRow(
-                        title: strings.groupAgent, agent: nil, count: nil,
+                        title: strings.groupAgent, icon: .symbol("person.2"), count: nil,
                         isSelected: filter.grouping == .agent
                     ) { filter.grouping = .agent }
                     AgentHistoryFilterRow(
-                        title: strings.groupDate, agent: nil, count: nil,
+                        title: strings.groupDate, icon: .symbol("calendar"), count: nil,
                         isSelected: filter.grouping == .date
                     ) { filter.grouping = .date }
                 }
@@ -2346,11 +2345,11 @@ struct AgentHistoryFilterPopover: View {
                 VStack(alignment: .leading, spacing: 1) {
                     sectionLabel(strings.orderSection)
                     AgentHistoryFilterRow(
-                        title: strings.orderRecentlyUpdated, agent: nil, count: nil,
+                        title: strings.orderRecentlyUpdated, icon: .symbol("clock"), count: nil,
                         isSelected: filter.ordering == .recentlyUpdated
                     ) { filter.ordering = .recentlyUpdated }
                     AgentHistoryFilterRow(
-                        title: strings.orderTitle, agent: nil, count: nil,
+                        title: strings.orderTitle, icon: .symbol("textformat"), count: nil,
                         isSelected: filter.ordering == .title
                     ) { filter.ordering = .title }
                 }
@@ -2379,10 +2378,9 @@ struct AgentHistoryFilterPopover: View {
             ForEach(agents) { agent in
                 AgentHistoryFilterRow(
                     title: agent.displayName,
-                    agent: agent,
+                    icon: .agent(agent),
                     count: sessions.count { $0.agent == agent },
-                    isSelected: filter.agent == agent,
-                    reservesIconColumn: true
+                    isSelected: filter.agent == agent
                 ) { filter.agent = agent }
             }
         }
@@ -2467,15 +2465,21 @@ struct AgentHistoryFilterPopover: View {
     }
 }
 
+/// Leading glyph of a filter row. Every row in a section uses the same icon
+/// column, so an entry without an Agent still lines up with the ones below.
+enum AgentHistoryFilterIcon {
+    case none
+    case agent(SupportedAgent)
+    case symbol(String)
+}
+
 /// One option row. The leading columns keep a fixed width so selection never
 /// shifts text, which is what made the previous menu look ragged.
 struct AgentHistoryFilterRow: View {
     let title: String
-    let agent: SupportedAgent?
+    var icon: AgentHistoryFilterIcon = .none
     let count: Int?
     let isSelected: Bool
-    /// Reserved for rows whose siblings show an icon, so text keeps one edge.
-    var reservesIconColumn = false
     let action: () -> Void
     @State private var isHovered = false
 
@@ -2486,13 +2490,19 @@ struct AgentHistoryFilterRow: View {
                     .font(.system(size: 9, weight: .bold))
                     .frame(width: 11)
                     .opacity(isSelected ? 1 : 0)
-                if let agent {
+                switch icon {
+                case .none:
+                    Color.clear.frame(width: 13, height: 13)
+                case .agent(let agent):
                     Image(agent.assetName)
                         .resizable()
                         .scaledToFit()
                         .frame(width: 13, height: 13)
-                } else if reservesIconColumn {
-                    Color.clear.frame(width: 13, height: 13)
+                case .symbol(let name):
+                    Image(systemName: name)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 13, height: 13)
                 }
                 Text(title)
                     .lineLimit(1)

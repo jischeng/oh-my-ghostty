@@ -27,8 +27,11 @@ count change on first open. The disk cache stays a per-file metadata reuse layer
 and is reconciled against files that still exist. Manual refresh keeps the
 displayed rows, shows progress, and disables the refresh action while running.
 Filtering, grouping and ordering live in one popover that stays open while it
-is adjusted. Rows keep a fixed checkmark column, agent icon column and
-right-aligned count, so selecting an option never shifts text. Agent rows scroll
+is adjusted. Rows keep a fixed checkmark column, icon column and right-aligned
+count, so selecting an option never shifts text. Every row carries a glyph
+(the Agent's own logo, or a system symbol for scope, grouping and ordering
+choices), so the "All Agents" entry and the group/order options line up with
+the Agent rows instead of leaving an empty gutter. Agent rows scroll
 only when the list exceeds six entries, and a Reset action restores the default
 filter, grouping and ordering. The trigger shows the selected Agent's icon plus
 a corner badge (an overlay, so the glyph stays centered) whenever any

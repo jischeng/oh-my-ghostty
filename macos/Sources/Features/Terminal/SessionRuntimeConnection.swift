@@ -132,7 +132,16 @@ final class SessionRuntimeConnections {
         process.arguments = ["connect", socket.path, configURL.path]
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.standardError
+        // Finder launches have no reliable inherited stderr. Keep helper
+        // diagnostics in this connection's private directory instead.
+        let logURL = root.appendingPathComponent(key + ".log")
+        if !FileManager.default.fileExists(atPath: logURL.path) {
+            FileManager.default.createFile(atPath: logURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        }
+        let diagnostics = try FileHandle(forWritingTo: logURL)
+        try diagnostics.seekToEnd()
+        defer { try? diagnostics.close() }
+        process.standardError = diagnostics
         var environment = ProcessInfo.processInfo.environment
         environment["SSH_ASKPASS"] = artifacts.appendingPathComponent("askpass").path
         environment["SSH_ASKPASS_REQUIRE"] = "force"

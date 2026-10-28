@@ -332,6 +332,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     private var agentResumeContextIDs: [UUID: String] = [:]
     private var paneSessionObservers: [UUID: Set<AnyCancellable>] = [:]
     private var agentReducers: [UUID: AgentContextSignalReducer] = [:]
+    /// Title observations per surface, used to clear a stale "working" state
+    /// when an Agent hook never delivered its terminal event.
+    private var agentTitleWatchers: [UUID: AgentTitleIdleWatcher] = [:]
     private var typedAgentHookContextIDs: [UUID: String] = [:]
     private var agentValidationWorkItems: [UUID: DispatchWorkItem] = [:]
 
@@ -1105,6 +1108,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             activeIDs.contains($0.key)
         }
         agentReducers = agentReducers.filter { activeIDs.contains($0.key) }
+        agentTitleWatchers = agentTitleWatchers.filter { activeIDs.contains($0.key) }
         typedAgentHookContextIDs = typedAgentHookContextIDs.filter {
             activeIDs.contains($0.key)
         }
@@ -1652,6 +1656,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         agentScreenSignatures.removeValue(forKey: surfaceID)
         agentScreenStableTicks.removeValue(forKey: surfaceID)
         agentStatusSignatures.removeValue(forKey: surfaceID)
+        agentTitleWatchers.removeValue(forKey: surfaceID)
         updateAgentActivity(.init(
             action: .end,
             id: detected.id,
@@ -1699,13 +1704,19 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         for surfaceID: UUID
     ) {
         guard let descriptor = agentResumeDescriptors[surfaceID],
-              let contextID = agentResumeContextIDs[surfaceID],
-              let state = AgentTitleStatusReconciler.nextState(
-                  status: descriptor.agent.definition.titleStatus,
-                  title: title,
-                  current: agentActivities[surfaceID]?.state,
-                  typedHookOwnsContext: typedAgentHookContextIDs[surfaceID] == contextID
-              ) else { return }
+              let contextID = agentResumeContextIDs[surfaceID] else { return }
+        let status = descriptor.agent.definition.titleStatus
+        agentTitleWatchers[surfaceID, default: AgentTitleIdleWatcher()].observe(
+            title: title,
+            status: status,
+            now: Date()
+        )
+        guard let state = AgentTitleStatusReconciler.nextState(
+            status: status,
+            title: title,
+            current: agentActivities[surfaceID]?.state,
+            typedHookOwnsContext: typedAgentHookContextIDs[surfaceID] == contextID
+        ) else { return }
         updateAgentActivity(.init(
             action: .start,
             id: contextID,
@@ -1737,6 +1748,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     ) {
         guard AgentStatusPlugin.isEnabled else {
             agentReducers.removeValue(forKey: surfaceID)
+            agentTitleWatchers.removeValue(forKey: surfaceID)
             typedAgentHookContextIDs.removeValue(forKey: surfaceID)
             agentValidationWorkItems.removeValue(forKey: surfaceID)?.cancel()
             clearAgentResumeDescriptor(for: surfaceID)
@@ -1987,6 +1999,33 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
     }
 
+    /// A hook that never delivered its terminal event would keep the tab in
+    /// "working" forever. The Agent title is an independent channel, so a
+    /// sustained idle title may clear the state.
+    private func staleWorkingActivityUpdate(for surfaceID: UUID) -> AgentActivityUpdate? {
+        guard let activity = agentActivities[surfaceID],
+              activity.state == .working,
+              let contextID = agentResumeContextIDs[surfaceID],
+              typedAgentHookContextIDs[surfaceID] == contextID,
+              let watcher = agentTitleWatchers[surfaceID],
+              watcher.confirmsIdle(
+                  now: Date(),
+                  delay: AgentTitleStatusReconciler.idleConfirmationDelay,
+                  stallDelay: AgentTitleStatusReconciler.idleStallDelay
+              ) else { return nil }
+        return .set(.init(
+            source: activity.source,
+            state: .idle,
+            phase: nil,
+            attentionKind: nil,
+            label: activity.label,
+            message: nil,
+            detail: nil,
+            progress: nil,
+            icon: activity.icon
+        ))
+    }
+
     private func scheduleAgentValidation(for surfaceID: UUID) {
         agentValidationWorkItems.removeValue(forKey: surfaceID)?.cancel()
         guard agentReducers[surfaceID]?.requiresForegroundValidation == true else {
@@ -2008,6 +2047,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 livenessIsAlive: livenessIsAlive
             )
             agentReducers[surfaceID] = reducer
+            if let stale = staleWorkingActivityUpdate(for: surfaceID) {
+                applyAgentActivityUpdate(stale, for: surfaceID)
+            }
             if let update {
                 applyAgentActivityUpdate(update, for: surfaceID)
                 if update == .clear {

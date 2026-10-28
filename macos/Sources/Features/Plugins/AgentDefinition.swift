@@ -336,6 +336,15 @@ struct AgentDefinition: Codable, Equatable, Sendable {
 }
 
 enum AgentTitleStatusReconciler {
+    /// Claude Code animates its title between the idle and the working glyph
+    /// while a turn runs, so the idle form must persist before a stale
+    /// "working" state may be cleared.
+    static let idleConfirmationDelay: TimeInterval = 2
+    /// A working Agent keeps its title moving; a title that stopped changing
+    /// is the stronger signal that the turn already ended. The window is
+    /// generous so a long tool call cannot clear a real working state.
+    static let idleStallDelay: TimeInterval = 20
+
     static func nextState(
         status: AgentDefinition.StatusSpec?,
         title: String,
@@ -346,6 +355,59 @@ enum AgentTitleStatusReconciler {
         let detected = AgentScreenStatusDetector.detect(status: status, text: title)
         if let detected, detected != .idle { return detected }
         return current == .working ? .idle : nil
+    }
+}
+
+/// Tracks the terminal title of an Agent surface. Hooks stay authoritative for
+/// starting work, but a hook that never delivered its terminal event would
+/// otherwise pin the tab to "working" forever, so a sustained idle title may
+/// clear it.
+struct AgentTitleIdleWatcher: Equatable, Sendable {
+    private(set) var detected: TabActivityState?
+    private(set) var idleSince: Date?
+    private(set) var lastTitle: String?
+    private(set) var lastChangedAt: Date?
+
+    mutating func observe(
+        title: String,
+        status: AgentDefinition.StatusSpec?,
+        now: Date
+    ) {
+        let detected = AgentScreenStatusDetector.detect(status: status, text: title)
+        if title != lastTitle {
+            lastTitle = title
+            lastChangedAt = now
+        }
+        if detected == .idle {
+            // Only a continuous idle title counts; any working glyph restarts
+            // the window.
+            if self.detected != .idle { idleSince = now }
+        } else {
+            idleSince = nil
+        }
+        self.detected = detected
+    }
+
+    /// True once the title shows the Agent is no longer busy. The idle glyph
+    /// is enough on its own, but an animation that ends on its working frame
+    /// is only caught by the title having stopped changing.
+    func confirmsIdle(now: Date, delay: TimeInterval, stallDelay: TimeInterval) -> Bool {
+        // Without a title status there is no title channel to trust.
+        guard detected != nil else { return false }
+        if detected == .idle, let idleSince, now.timeIntervalSince(idleSince) >= delay {
+            return true
+        }
+        if let lastChangedAt, now.timeIntervalSince(lastChangedAt) >= stallDelay {
+            return true
+        }
+        return false
+    }
+
+    mutating func reset() {
+        detected = nil
+        idleSince = nil
+        lastTitle = nil
+        lastChangedAt = nil
     }
 }
 

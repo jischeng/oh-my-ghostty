@@ -481,6 +481,80 @@ struct AgentStatusPluginTests {
         ) == nil)
     }
 
+    @Test func titleIdleWatcherClearsStaleWorkingOnlyWhenTitleSettles() throws {
+        let claudeStatus = SupportedAgent.claude.definition.titleStatus
+        let start = Date(timeIntervalSince1970: 1_780_000_000)
+        var watcher = AgentTitleIdleWatcher()
+
+        // No title channel at all: the watcher must never claim idle.
+        watcher.observe(title: "Ready", status: nil, now: start)
+        #expect(!watcher.confirmsIdle(
+            now: start.addingTimeInterval(60),
+            delay: AgentTitleStatusReconciler.idleConfirmationDelay,
+            stallDelay: AgentTitleStatusReconciler.idleStallDelay
+        ))
+
+        // Claude Code shows a spinner glyph while a turn runs.
+        watcher.observe(title: "◐ Claude Code", status: claudeStatus, now: start)
+        #expect(watcher.detected == .working)
+        #expect(!watcher.confirmsIdle(
+            now: start.addingTimeInterval(1),
+            delay: AgentTitleStatusReconciler.idleConfirmationDelay,
+            stallDelay: AgentTitleStatusReconciler.idleStallDelay
+        ))
+
+        // The idle glyph must persist before a stale working state is cleared.
+        watcher.observe(title: "✳ Claude Code", status: claudeStatus, now: start.addingTimeInterval(1))
+        #expect(watcher.detected == .idle)
+        #expect(!watcher.confirmsIdle(
+            now: start.addingTimeInterval(2),
+            delay: AgentTitleStatusReconciler.idleConfirmationDelay,
+            stallDelay: AgentTitleStatusReconciler.idleStallDelay
+        ))
+        #expect(watcher.confirmsIdle(
+            now: start.addingTimeInterval(4),
+            delay: AgentTitleStatusReconciler.idleConfirmationDelay,
+            stallDelay: AgentTitleStatusReconciler.idleStallDelay
+        ))
+
+        // While the animation keeps running, the busy state must hold even
+        // though the idle glyph shows up in between.
+        var animated = AgentTitleIdleWatcher()
+        for step in 0..<20 {
+            animated.observe(
+                title: step.isMultiple(of: 2) ? "✳ Claude Code" : "◐ Claude Code",
+                status: claudeStatus,
+                now: start.addingTimeInterval(Double(step) * 0.1)
+            )
+        }
+        #expect(!animated.confirmsIdle(
+            now: start.addingTimeInterval(1.9),
+            delay: AgentTitleStatusReconciler.idleConfirmationDelay,
+            stallDelay: AgentTitleStatusReconciler.idleStallDelay
+        ))
+        // Once the animation stopped, the stalled title confirms idle.
+        #expect(animated.confirmsIdle(
+            now: start.addingTimeInterval(23),
+            delay: AgentTitleStatusReconciler.idleConfirmationDelay,
+            stallDelay: AgentTitleStatusReconciler.idleStallDelay
+        ))
+
+        // An animation that ends on its working frame is still caught, because
+        // the title stopped changing.
+        var stalled = AgentTitleIdleWatcher()
+        stalled.observe(title: "◐ Claude Code", status: claudeStatus, now: start)
+        #expect(!stalled.confirmsIdle(
+            now: start.addingTimeInterval(19),
+            delay: AgentTitleStatusReconciler.idleConfirmationDelay,
+            stallDelay: AgentTitleStatusReconciler.idleStallDelay
+        ))
+        #expect(stalled.confirmsIdle(
+            now: start.addingTimeInterval(21),
+            delay: AgentTitleStatusReconciler.idleConfirmationDelay,
+            stallDelay: AgentTitleStatusReconciler.idleStallDelay
+        ))
+    }
+
     @Test func detectsLocalAgentForegroundCommandsWithoutFalseArguments() {
         for agent in SupportedAgent.allCases {
             let command = agent.definition.command

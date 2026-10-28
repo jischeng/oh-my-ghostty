@@ -1030,6 +1030,18 @@ longer matches a working pattern the host downgrades that title-derived
 spinning forever. Agents without `titleStatus` (including the screen-detected
 Crush/Hermes) are unaffected by this title path.
 
+A typed hook owns the context once it reported, so its title is not used to
+start work. That leaves a gap when a hook never delivers its terminal event:
+Claude Code, for example, does not deliver `Stop` when a turn ends in an error,
+so the tab would stay `working` forever. The title is therefore also watched as
+an independent idle channel for hook-owned contexts. Two signals clear the
+stale state: the title shows the idle form continuously for two seconds, or the
+title stopped changing for twenty seconds. Claude Code animates its title
+between `✳ Claude Code` and `◐ Claude Code` while a turn runs, so the idle
+glyph alone is not enough and the animation may end on its working frame. The
+second signal requires a long stall so a long tool call cannot clear a real
+working state.
+
 Because the event is written to the owning TTY, the same hook works through
 OpenSSH. Shell hooks resolve the target TTY from the parent process with
 `ps -o tty=` and keep the process-group ID for the instance context; when that

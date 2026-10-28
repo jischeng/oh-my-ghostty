@@ -23,6 +23,8 @@ Use this skill in the `oh-my-ghostty` repo. Never open the Xcode GUI. Never touc
 4. **GitHub CLI target**: Always pass `--repo jischeng/oh-my-ghostty` when running `gh release create` (`upstream` points to `ghostty-org/ghostty`).
 5. **Release signing**: Use persistent self-signing (`OMG_SIGNING_MODE=self-signed`) with the same pinned certificate on every release. Source the private `signing.env`; initialize it once with `python3 dist/macos/omg_signing.py create <private-directory>`. Never regenerate an existing identity or fall back to ad-hoc for public releases. Apps and DMGs are not notarized; Developer ID, paid membership, and notarization profiles are not prerequisites. Record persistent self-signing, no notarization, first-launch Gatekeeper behavior, and the possible one-time authorization on migration. Full TCC upgrade experiments are not a release prerequisite and must be reported NOT RUN when omitted. Sparkle EdDSA signing remains required.
 6. **Rosetta**: If Rosetta 2 is not installed, the script verifies the `x86_64` Mach-O slice without launching it. Record the actual architecture checks and any unperformed launch checks in release notes.
+7. **Bundle the Session Runtime**: Every release App must include `Contents/Resources/session-runtime`, containing the universal local `omgd` relay, Linux x86_64/aarch64 and macOS x86_64/aarch64 artifacts, dependencies, manifests, `revision`, `snapshot-revision`, and `askpass`. Use the existing build/sign scripts; do not ship an App-only build or require users to download/compile a separate daemon. See `docs/RELEASING.md#native-session-runtime-artifacts`.
+8. **Preserve remote session ownership**: A single remote `omgd` owns session actor threads and PTYs. Deployment creates the service on the host as supported; it does not install one daemon per Session. Never replace a live remote daemon or delete a cached revision needed by existing sessions as part of release validation. New cgroup/close capabilities do not retroactively upgrade old pinned sessions.
 
 ---
 
@@ -35,6 +37,7 @@ Use this skill in the `oh-my-ghostty` repo. Never open the Xcode GUI. Never touc
 **Prerequisites**:
 - Working tree **must be clean** (commit changes first).
 - Use `--skip-build` if the app was just compiled.
+- Honor the checkout/session's selected development channel. For the explicitly selected PTY channel, use `bash dist/macos/install-pty-dev.sh` and `/Applications/OMG Dev PTY.app`; for Workspace Dev use `bash dist/macos/install-workspace-dev.sh`. Do not substitute the generic Dev installer. PTY installation also packages the native relay and both Linux architectures.
 
 ---
 
@@ -117,6 +120,31 @@ python3 -m unittest discover -s dist -p 'test_omg_test_plan.py'
 ```
 Output placed under `.release-build/<OMG_VERSION>/`.
 
+The script already invokes `dist/macos/build-session-runtime.py --macos all`
+and copies its output into **each** arm64, x86_64 and universal App. Keep builds
+serial; `TMPDIR=/tmp` may be used when the invoking environment has a short-lived
+temporary directory. Rust/Cargo, the corresponding Rust targets and Zig are
+required by the runtime builder.
+
+For runtime changes, run these checks serially before packaging:
+```bash
+cargo fmt --manifest-path session-runtime/Cargo.toml --check
+cargo clippy --manifest-path session-runtime/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path session-runtime/Cargo.toml -- --test-threads=1
+cargo build --manifest-path session-runtime/Cargo.toml
+python3 -m unittest discover -s session-runtime/tests -p 'test_*.py'
+macos/build.nu --action test --only-testing GhosttyTests/SessionRuntimeConnectionTests
+```
+These supplement, not replace, Step 2's change-selected suites. Python discovery
+skips environment-dependent SSH and Linux containment tests unless configured;
+report those skips explicitly. For lifecycle/containment changes, run
+`test_containment_linux.py` on an authorized disposable Linux runtime using
+`OMG_CONTAINMENT_TEST_BINARY` pointing to the **packaged** target binary. It
+creates two sessions, verifies detach retention and isolated Close including
+setsid/double-fork descendants, then SIGKILLs its test host to verify supervisor
+cleanup. Never aim fault injection at an existing work daemon or use a permanent
+hard-coded test host.
+
 ### Step 4: Sign & Package DMGs
 ```bash
 source "<private-signing-directory>/signing.env"
@@ -130,6 +158,28 @@ PREVIOUS_TAG=v<PREVIOUS_VERSION> \
 .agents/skills/omg-release/scripts/package-release.sh <OMG_VERSION>
 ```
 Produces `arm64`, `x86_64`, and `universal` DMGs, `SHA256SUMS.txt`, and `appcast.xml`.
+
+Before publishing, inspect the final signed App in each packaged DMG:
+- Require all runtime platform directories, matching manifest revisions and all
+  listed dependencies; recompute manifest SHA-256 hashes **after signing**.
+- Verify the universal local relay and the intended Mach-O/ELF architectures.
+  `sign_omg_app.sh` signs nested Mach-O files and refreshes their hashes before
+  sealing the App; do not modify runtime resources after App signing.
+- Check the local relay launches (`omgd version`) and run remote acceptance with
+  packaged artifacts. A cross-build proves compilation, not execution on that
+  OS/CPU. Distinguish key/password SSH, first deployment/reuse, detach/reconnect,
+  pending Close across disconnect/restart, expiry and real Agent conversation
+  recovery in the validation report. Follow the acceptance gates in
+  `docs/RELEASING.md`; record any outstanding cases rather than claiming them passed.
+- Linux cgroup cleanup requires supported systemd/cgroup v2: root uses a system
+  transient service; non-root needs an accessible lingering user manager. Do not
+  enable linger, request privilege escalation or disable SELinux to make a gate
+  pass. Unsupported environments and macOS retain process-group-only cleanup.
+  Daemon-crash cleanup is not preservation of the original PTY/Agent process.
+- Old hosts without `durable-close/1` cannot acknowledge durable Close; their
+  requests may remain pending. Keep this compatibility limit visible.
+
+The DMGs already carry `omgd`; a separate public daemon asset is not required.
 
 ### Step 5: Commit, Tag & Push
 ```bash
@@ -161,4 +211,6 @@ gh release create "v<OMG_VERSION>" \
 - Architectures built (`arm64`, `x86_64`, `universal`).
 - Persistent certificate/DR verification, launch-probe evidence, and explicit not-notarized status.
 - Prior persistent app compatibility if supplied; report migration/omitted desktop TCC verification honestly.
+- Runtime revision/snapshot revision, bundled platform matrix and post-sign manifest checks.
+- Packaged-runtime SSH/lifecycle/containment results, actual supervisor mode, and unexecuted platform/Agent recovery cases. Report broad-suite failures and isolated retries separately.
 - GitHub Release URL and list of 5 uploaded assets.

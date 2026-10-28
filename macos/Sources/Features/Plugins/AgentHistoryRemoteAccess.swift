@@ -69,6 +69,43 @@ struct AgentHistoryRemoteAccess: Sendable {
         let script = """
         python3 - \(Self.shellQuote(rootsJSON)) \(boundedLimit) <<'OMG_HISTORY_PY'
         import json, os, sqlite3, sys
+
+        def read_zstd_prefix(path, limit=256 * 1024):
+            try:
+                import zstandard
+                with open(path, 'rb') as source:
+                    with zstandard.ZstdDecompressor().stream_reader(source) as reader:
+                        return reader.read(limit)
+            except Exception:
+                import selectors, subprocess, time
+                process = subprocess.Popen(
+                    ['zstd', '--decompress', '--stdout', '--quiet', path],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, bufsize=0)
+                try:
+                    data = bytearray()
+                    deadline = time.monotonic() + 5
+                    with selectors.DefaultSelector() as ready:
+                        ready.register(process.stdout, selectors.EVENT_READ)
+                        while len(data) < limit:
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0 or not ready.select(remaining):
+                                break
+                            chunk = os.read(process.stdout.fileno(), min(65536, limit - len(data)))
+                            if not chunk:
+                                break
+                            data.extend(chunk)
+                    return bytes(data)
+                finally:
+                    process.stdout.close()
+                    if process.poll() is None:
+                        process.terminate()
+                    try:
+                        process.wait(timeout=0.5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+
         candidates = []
         inspected = 0
         for relative in json.loads(sys.argv[1]):
@@ -113,19 +150,9 @@ struct AgentHistoryRemoteAccess: Sendable {
         for modified, path, size in candidates[:min(int(sys.argv[2]) * 2, 20000)]:
             try:
                 if path.endswith('.jsonl.zst'):
-                    # Codex archives rollouts with zstd; prefer the Python module
-                    # because the command-line tool may be absent.
-                    data = b''
-                    try:
-                        import zstandard
-                        with open(path, 'rb') as source:
-                            data = zstandard.ZstdDecompressor().stream_reader(source).read(256 * 1024)
-                    except Exception:
-                        import subprocess
-                        data = subprocess.run(
-                            ['zstd', '--decompress', '--stdout', '--quiet', path],
-                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
-                        ).stdout[:256 * 1024]
+                    # Bound output before buffering; reap the helper even when
+                    # the prefix is complete before the archive finishes.
+                    data = read_zstd_prefix(path)
                 else:
                     with open(path, 'rb') as source:
                         data = source.read(2 * 1024 * 1024)

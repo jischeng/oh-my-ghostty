@@ -10,7 +10,7 @@ extension TerminalController {
         SessionRuntimeConnections.shared.invalidate(descriptor)
         var config = Ghostty.SurfaceConfiguration()
         do { try descriptor.configure(&config) } catch { return }
-        let replacement = Ghostty.SurfaceView(app, baseConfig: config)
+        let replacement = Ghostty.SurfaceView(app, baseConfig: config, uuid: surface.id)
         replacement.runtimeLocalSurface = surface.runtimeLocalSurface
         replacement.runtimeLocalCompletion = surface.runtimeLocalCompletion
         guard let tree = try? surfaceTree.replacing(node: node, with: .leaf(view: replacement)) else { return }
@@ -23,7 +23,7 @@ extension TerminalController {
 struct SessionRuntimeRecoveryBanner: View {
     @ObservedObject var controller: TerminalController
     @ObservedObject var settings = OhMyGhosttySettings.shared
-    let surface: Ghostty.SurfaceView
+    @ObservedObject var surface: Ghostty.SurfaceView
 
     var body: some View {
         if surface.runtimeDisconnected, let descriptor = surface.runtimeDescriptor {

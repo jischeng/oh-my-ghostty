@@ -5,6 +5,73 @@ import Testing
 
 struct SessionRuntimeConnectionTests {
     @MainActor
+    @Test func reconnectReplacesViewButPreservesPaneIdentityAndRestoreOnlyRequest() throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let native = try #require(app.app)
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let original = Ghostty.SurfaceView(native, baseConfig: config)
+        // An unavailable revision avoids launching SSH in this UI integration
+        // test; identity must survive even when connection preparation fails.
+        let descriptor = SessionRuntimeDescriptor(connection: try GitSSHConnection(destination: "host"),
+                                                   revision: "unavailable-test-revision", policy: .init())
+        original.runtimeDescriptor = descriptor
+        original.runtimeDisconnected = true
+        let controller = TerminalController(app, withSurfaceTree: .init(view: original))
+        defer { controller.window?.delegate = nil; controller.window?.close() }
+        controller.reconnectRuntimeHere(for: original)
+        let replacement = try #require(controller.surfaceTree.first)
+        #expect(replacement !== original)
+        #expect(replacement.id == original.id)
+        #expect(replacement.runtimeDescriptor == descriptor)
+        #expect(controller.focusedSurface === replacement)
+        let request = try #require(try JSONSerialization.jsonObject(with:
+            Data(descriptor.openRequest(pane: replacement.id, restoring: true).utf8)) as? [String: Any])
+        #expect(request["id"] as? String == original.id.uuidString.lowercased())
+        #expect(request["create"] as? Bool == false)
+    }
+
+    @MainActor
+    @Test func protocolErrorPublishesReconnectState() async throws {
+        let root = URL(fileURLWithPath: "/tmp/omg-error-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let socket = root.appendingPathComponent("s")
+        let server = Process()
+        server.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        server.arguments = ["-c", """
+        import socket,struct,sys
+        s=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1]);s.listen(1)
+        c,_=s.accept();c.recv(65536)
+        message=b'authentication failed'
+        c.sendall(struct.pack('>cQI',b'E',0,len(message))+message)
+        c.close();s.close()
+        """, socket.path]
+        try server.run()
+        defer {
+            if server.isRunning { server.terminate() }
+            try? FileManager.default.removeItem(at: root)
+        }
+        for _ in 0..<100 where !FileManager.default.fileExists(atPath: socket.path) {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(FileManager.default.fileExists(atPath: socket.path))
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let native = try #require(app.app)
+        var config = Ghostty.SurfaceConfiguration()
+        config.environmentVariables["OMG_RUNTIME_SOCKET"] = socket.path
+        config.environmentVariables["OMG_RUNTIME_PANE_ID"] = UUID().uuidString.lowercased()
+        let view = Ghostty.SurfaceView(native, baseConfig: config)
+        view.runtimeDescriptor = .init(connection: try GitSSHConnection(destination: "host"), revision: "test", policy: .init())
+        let controller = TerminalController(app, withSurfaceTree: .init(view: view))
+        defer { controller.window?.delegate = nil; controller.window?.close() }
+        for _ in 0..<150 where !view.runtimeDisconnected {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(view.runtimeDisconnected)
+        #expect(view.contextSignal?.id == "omg-runtime-disconnected")
+    }
+
+    @MainActor
     @Test func closeIntentSurvivesRestartAndRequiresAcknowledgement() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

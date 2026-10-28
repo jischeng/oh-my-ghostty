@@ -210,7 +210,10 @@ fn readLoop(self: *Self, io: *HostIO) !void {
                     if (byte >= 0x20 and byte != 0x7f) io.processOutput(&.{byte});
                 }
                 io.processOutput("\r\n");
-                return;
+                // Remote/setup rejection must use the same GUI recovery path
+                // as transport failure. Retrying preserves the UUID and cannot
+                // recreate a retired session; keep the server's reason visible.
+                return error.RemoteRejected;
             },
             'X' => {
                 const code = std.fmt.parseInt(i32, bytes, 10) catch -1;

@@ -79,6 +79,10 @@ archived sessions, so OMG reads a bounded decompressed prefix (64 KiB locally,
 An agent may declare `additionalRoots` beside its primary root; Codex uses this
 for `~/.codex/archived_sessions`. Archive headers are parsed concurrently, and
 per-file results are reused from the disk cache, so repeat scans stay fast.
+Remote compressed-history command fallback reads at most 256 KiB while streaming,
+with a five-second read deadline; it closes the pipe and terminates/reaps the
+helper, escalating to kill after 0.5 seconds. It never buffers a whole archive
+before truncating. The Python `zstandard` stream reader is also closed explicitly.
 Remote discovery uses
 Python 3 over SSH, globally sorts file modification timestamps, and transfers
 numeric Unix timestamps and bounded JSON metadata instead of parsing `ls` dates.

@@ -25,7 +25,9 @@ struct AgentHistoryStrings: Equatable, Sendable {
     var allAgents: String { t("All Agents", "全部 Agent") }
     var searchPlaceholder: String { t("Search sessions", "搜索会话") }
     var organize: String { t("Filter & Organize", "筛选与整理") }
-    var filterAgentSection: String { t("FILTER BY AGENT", "按 AGENT 筛选") }
+    var filterSection: String { t("Filter", "筛选") }
+    var filterActive: String { t("Filtered", "已筛选") }
+    var reset: String { t("Reset", "重置") }
     var groupSection: String { t("GROUP", "分组") }
     var orderSection: String { t("ORDER", "排序") }
     var groupNone: String { t("No Grouping", "不分组") }

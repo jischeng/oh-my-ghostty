@@ -1,6 +1,8 @@
+import AppKit
 import Foundation
-import Testing
 import SQLite3
+import SwiftUI
+import Testing
 @testable import Ghostty
 
 @MainActor
@@ -68,6 +70,48 @@ struct AgentHistoryInspectorTests {
         let session = try #require(sessions.first)
         #expect(session.conversationID == conversationID)
         #expect(session.title == "Review the failure paths")
+    }
+
+    @Test func filterStateReportsDefaultAndReset() throws {
+        var state = AgentHistoryFilterState.initial
+        #expect(state.isDefault)
+        state.agent = .pi
+        #expect(!state.isDefault)
+        state.grouping = .project
+        state.ordering = .title
+        #expect(!state.isDefault)
+        state.reset()
+        #expect(state == .initial)
+        #expect(state.isDefault)
+    }
+
+    @Test func filterPopoverLaysOutWithManyAgents() throws {
+        let sessions = SupportedAgent.allCases.flatMap { agent in
+            (0..<2).map { index in
+                AgentHistorySession(
+                    agent: agent,
+                    conversationID: AgentConversationID("\(agent.rawValue)-\(index)")!,
+                    title: "\(agent.displayName) \(index)",
+                    workingDirectory: "/repo",
+                    updatedAt: Date(),
+                    sourcePath: "/repo/\(index)",
+                    isActive: false
+                )
+            }
+        }
+        let view = AgentHistoryFilterPopover(
+            sessions: sessions,
+            agents: SupportedAgent.allCases,
+            strings: .current,
+            selectedAgent: .constant(.pi),
+            groupingMode: .constant(.none),
+            orderingMode: .constant(.recentlyUpdated)
+        )
+        let host = NSHostingView(rootView: view)
+        host.frame = NSRect(x: 0, y: 0, width: 420, height: 640)
+        host.layoutSubtreeIfNeeded()
+        #expect(host.fittingSize.width <= 340)
+        #expect(host.fittingSize.height < 640)
     }
 
     @Test func refreshKeepsRowsAndPublishesLoadingState() async throws {

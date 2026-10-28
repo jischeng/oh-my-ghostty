@@ -830,6 +830,20 @@ enum AgentHistoryOrderingMode: String, CaseIterable, Sendable {
     case title
 }
 
+/// Filter and organize selection for Agent History. Held as one value so the
+/// trigger can show a single "modified" state and Reset is unambiguous.
+struct AgentHistoryFilterState: Equatable, Sendable {
+    var agent: SupportedAgent?
+    var grouping: AgentHistoryGroupingMode = .none
+    var ordering: AgentHistoryOrderingMode = .recentlyUpdated
+
+    static let initial = Self()
+
+    var isDefault: Bool { self == Self.initial }
+
+    mutating func reset() { self = Self.initial }
+}
+
 private struct InspectorAgentHistoryView: View {
     let history: InspectorAgentHistoryContent
     let perform: (InspectorPaneActionKind) -> Void
@@ -844,6 +858,7 @@ private struct InspectorAgentHistoryView: View {
     @State private var selectedAgent: SupportedAgent?
     @State private var groupingMode: AgentHistoryGroupingMode = .none
     @State private var orderingMode: AgentHistoryOrderingMode = .recentlyUpdated
+    @State private var isFilterPopoverPresented = false
     @State private var collapsedGroupIDs: Set<String> = []
     @State private var transcriptSearch = ""
     @State private var isTranscriptSearchVisible = false
@@ -1108,67 +1123,15 @@ private struct InspectorAgentHistoryView: View {
         .onDisappear { searchTask?.cancel() }
     }
 
+    private var filterState: AgentHistoryFilterState {
+        .init(agent: selectedAgent, grouping: groupingMode, ordering: orderingMode)
+    }
+
     private var filterAndOrganizeMenu: some View {
-        Menu {
-            Section(strings.filterAgentSection) {
-                Button {
-                    selectedAgent = nil
-                } label: {
-                    menuRow(
-                        "\(strings.allAgents) (\(history.sessions.count))",
-                        selected: selectedAgent == nil
-                    )
-                }
-                ForEach(availableAgents) { agent in
-                    Button {
-                        selectedAgent = agent
-                    } label: {
-                        let count = history.sessions.count { $0.agent == agent }
-                        menuRow(
-                            "\(agent.displayName) (\(count))",
-                            selected: selectedAgent == agent
-                        )
-                    }
-                }
-            }
-
-            Section(strings.groupSection) {
-                Button {
-                    groupingMode = .none
-                } label: {
-                    menuRow(strings.groupNone, selected: groupingMode == .none)
-                }
-                Button {
-                    groupingMode = .project
-                } label: {
-                    menuRow(strings.groupProject, selected: groupingMode == .project)
-                }
-                Button {
-                    groupingMode = .agent
-                } label: {
-                    menuRow(strings.groupAgent, selected: groupingMode == .agent)
-                }
-                Button {
-                    groupingMode = .date
-                } label: {
-                    menuRow(strings.groupDate, selected: groupingMode == .date)
-                }
-            }
-
-            Section(strings.orderSection) {
-                Button {
-                    orderingMode = .recentlyUpdated
-                } label: {
-                    menuRow(strings.orderRecentlyUpdated, selected: orderingMode == .recentlyUpdated)
-                }
-                Button {
-                    orderingMode = .title
-                } label: {
-                    menuRow(strings.orderTitle, selected: orderingMode == .title)
-                }
-            }
+        Button {
+            isFilterPopoverPresented.toggle()
         } label: {
-            HStack(spacing: 4) {
+            HStack(spacing: 3) {
                 if let selectedAgent {
                     Image(selectedAgent.assetName)
                         .resizable()
@@ -1178,31 +1141,45 @@ private struct InspectorAgentHistoryView: View {
                     Image(systemName: "ellipsis")
                         .font(.system(size: 13, weight: .semibold))
                 }
+                // A persistent dot keeps the trigger honest when a filter is
+                // hidden behind the agent icon.
+                Circle()
+                    .fill(Color.accentColor)
+                    .frame(width: 5, height: 5)
+                    .opacity(filterState.isDefault ? 0 : 1)
+                    .accessibilityHidden(true)
             }
             .frame(width: 28, height: 28)
             .background(
-                Color.primary.opacity(0.12),
+                Color.primary.opacity(isFilterPopoverPresented ? 0.2 : 0.12),
                 in: RoundedRectangle(cornerRadius: 6)
             )
             .overlay {
                 RoundedRectangle(cornerRadius: 6)
-                    .stroke(Color.primary.opacity(0.18), lineWidth: 1)
+                    .stroke(
+                        isFilterPopoverPresented || !filterState.isDefault
+                            ? Color.accentColor.opacity(0.7)
+                            : Color.primary.opacity(0.18),
+                        lineWidth: 1
+                    )
             }
+            .contentShape(Rectangle())
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
+        .buttonStyle(.plain)
         .fixedSize()
+        .popover(isPresented: $isFilterPopoverPresented, arrowEdge: .top) {
+            AgentHistoryFilterPopover(
+                sessions: history.sessions,
+                agents: availableAgents,
+                strings: strings,
+                selectedAgent: $selectedAgent,
+                groupingMode: $groupingMode,
+                orderingMode: $orderingMode
+            )
+        }
         .help(strings.organize)
         .accessibilityLabel(strings.organize)
-    }
-
-    @ViewBuilder
-    private func menuRow(_ text: String, selected: Bool) -> some View {
-        if selected {
-            Label(text, systemImage: "checkmark")
-        } else {
-            Text(text)
-        }
+        .accessibilityValue(filterState.isDefault ? "" : strings.filterActive)
     }
 
     private func sectionHeader(_ section: GroupedSection) -> some View {
@@ -2199,6 +2176,176 @@ private struct InspectorFileIconView: View {
         case .purple: .purple
         case .red: .red
         }
+    }
+}
+
+/// Stays open while adjusting. Filter, grouping and ordering are independent
+/// settings, so dismissing the surface after each choice was pure friction.
+struct AgentHistoryFilterPopover: View {
+    let sessions: [AgentHistorySession]
+    let agents: [SupportedAgent]
+    let strings: AgentHistoryStrings
+    @Binding var selectedAgent: SupportedAgent?
+    @Binding var groupingMode: AgentHistoryGroupingMode
+    @Binding var orderingMode: AgentHistoryOrderingMode
+
+    private var state: AgentHistoryFilterState {
+        .init(agent: selectedAgent, grouping: groupingMode, ordering: orderingMode)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            sectionLabel(strings.filterSection)
+            AgentHistoryFilterRow(
+                title: strings.allAgents,
+                agent: nil,
+                count: sessions.count,
+                isSelected: selectedAgent == nil,
+                reservesIconColumn: true
+            ) { selectedAgent = nil }
+
+            if agents.count > 6 {
+                // Only scroll when the list would otherwise dominate the
+                // popover; a greedy ScrollView leaves a large empty gap.
+                ScrollView {
+                    agentRows
+                }
+                .frame(height: 198)
+            } else {
+                agentRows
+            }
+
+            Divider().padding(.vertical, 6)
+
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 1) {
+                    sectionLabel(strings.groupSection)
+                    AgentHistoryFilterRow(
+                        title: strings.groupNone, agent: nil, count: nil,
+                        isSelected: groupingMode == .none
+                    ) { groupingMode = .none }
+                    AgentHistoryFilterRow(
+                        title: strings.groupProject, agent: nil, count: nil,
+                        isSelected: groupingMode == .project
+                    ) { groupingMode = .project }
+                    AgentHistoryFilterRow(
+                        title: strings.groupAgent, agent: nil, count: nil,
+                        isSelected: groupingMode == .agent
+                    ) { groupingMode = .agent }
+                    AgentHistoryFilterRow(
+                        title: strings.groupDate, agent: nil, count: nil,
+                        isSelected: groupingMode == .date
+                    ) { groupingMode = .date }
+                }
+                .frame(width: 148, alignment: .leading)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    sectionLabel(strings.orderSection)
+                    AgentHistoryFilterRow(
+                        title: strings.orderRecentlyUpdated, agent: nil, count: nil,
+                        isSelected: orderingMode == .recentlyUpdated
+                    ) { orderingMode = .recentlyUpdated }
+                    AgentHistoryFilterRow(
+                        title: strings.orderTitle, agent: nil, count: nil,
+                        isSelected: orderingMode == .title
+                    ) { orderingMode = .title }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            Divider().padding(.vertical, 6)
+
+            Button {
+                selectedAgent = nil
+                groupingMode = .none
+                orderingMode = .recentlyUpdated
+            } label: {
+                Label(strings.reset, systemImage: "arrow.counterclockwise")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(state.isDefault ? Color.secondary : Color.accentColor)
+            .disabled(state.isDefault)
+            .help(strings.reset)
+        }
+        .padding(10)
+        .frame(width: 316)
+    }
+
+    private var agentRows: some View {
+        LazyVStack(alignment: .leading, spacing: 1) {
+            ForEach(agents) { agent in
+                AgentHistoryFilterRow(
+                    title: agent.displayName,
+                    agent: agent,
+                    count: sessions.count { $0.agent == agent },
+                    isSelected: selectedAgent == agent,
+                    reservesIconColumn: true
+                ) { selectedAgent = agent }
+            }
+        }
+    }
+
+    private func sectionLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 6)
+            .padding(.bottom, 2)
+    }
+}
+
+/// One option row. The leading columns keep a fixed width so selection never
+/// shifts text, which is what made the previous menu look ragged.
+struct AgentHistoryFilterRow: View {
+    let title: String
+    let agent: SupportedAgent?
+    let count: Int?
+    let isSelected: Bool
+    /// Reserved for rows whose siblings show an icon, so text keeps one edge.
+    var reservesIconColumn = false
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .frame(width: 11)
+                    .opacity(isSelected ? 1 : 0)
+                if let agent {
+                    Image(agent.assetName)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 13, height: 13)
+                } else if reservesIconColumn {
+                    Color.clear.frame(width: 13, height: 13)
+                }
+                Text(title)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 8)
+                if let count {
+                    Text("\(count)")
+                        .font(.system(size: 11))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .font(.system(size: 12))
+            .padding(.horizontal, 6)
+            .frame(height: 24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(Color.primary.opacity(isHovered ? 0.08 : 0))
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
 

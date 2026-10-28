@@ -26,6 +26,12 @@ disk-cache snapshot before the scan, which previously made the visible session
 count change on first open. The disk cache stays a per-file metadata reuse layer
 and is reconciled against files that still exist. Manual refresh keeps the
 displayed rows, shows progress, and disables the refresh action while running.
+Filtering, grouping and ordering live in one popover that stays open while it
+is adjusted. Rows keep a fixed checkmark column, agent icon column and
+right-aligned count, so selecting an option never shifts text. Agent rows scroll
+only when the list exceeds six entries, and a Reset action restores the default
+filter, grouping and ordering. The trigger shows the selected Agent's icon plus
+a dot whenever any non-default choice is active.
 Discovery falls back to validated header metadata when a transcript file name
 does not encode the conversation ID, because stores such as omp keep the ID in
 the parent directory and name transcripts freely. Zstandard-compressed

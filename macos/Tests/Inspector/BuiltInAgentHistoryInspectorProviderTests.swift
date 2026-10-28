@@ -72,6 +72,50 @@ struct AgentHistoryInspectorTests {
         #expect(session.title == "Review the failure paths")
     }
 
+    @Test func timeAndFolderScopeNarrowSessions() throws {
+        let now = Date(timeIntervalSince1970: 1_780_000_000)
+        var state = AgentHistoryFilterState()
+        state.time = .quarter
+        state.directory = .currentTree
+
+        var counter = 0
+        func session(_ directory: String?, _ age: TimeInterval, agent: SupportedAgent = .pi) -> AgentHistorySession {
+            counter += 1
+            return AgentHistorySession(
+                agent: agent,
+                conversationID: AgentConversationID("scope-\(counter)")!,
+                title: "Session",
+                workingDirectory: directory,
+                updatedAt: now.addingTimeInterval(-age),
+                sourcePath: "/tmp/session",
+                isActive: false
+            )
+        }
+        let day: TimeInterval = 86_400
+        #expect(state.includes(session("/repo", 10 * day), currentDirectory: "/repo/", now: now))
+        #expect(state.includes(session("/repo/sub/dir", 10 * day), currentDirectory: "/repo", now: now))
+        #expect(!state.includes(session("/repository", 10 * day), currentDirectory: "/repo", now: now))
+        #expect(!state.includes(session("/repo", 100 * day), currentDirectory: "/repo", now: now))
+        #expect(!state.includes(session(nil, 10 * day), currentDirectory: "/repo", now: now))
+
+        state.directory = .any
+        #expect(state.includes(session("/elsewhere", 10 * day), currentDirectory: "/repo", now: now))
+        #expect(state.narrowsSessions)
+        state.reset()
+        #expect(!state.narrowsSessions)
+        #expect(state.includes(session(nil, 400 * day), currentDirectory: "/repo", now: now))
+    }
+
+    @Test func timeFilterCutoffsMatchCalendarMath() throws {
+        let calendar = Calendar(identifier: .gregorian)
+        let now = Date(timeIntervalSince1970: 1_780_000_000)
+        #expect(AgentHistoryTimeFilter.any.cutoff(now: now, calendar: calendar) == nil)
+        let quarter = try #require(AgentHistoryTimeFilter.quarter.cutoff(now: now, calendar: calendar))
+        #expect(calendar.dateComponents([.month], from: quarter, to: now).month == 3)
+        let year = try #require(AgentHistoryTimeFilter.year.cutoff(now: now, calendar: calendar))
+        #expect(calendar.dateComponents([.year], from: year, to: now).year == 1)
+    }
+
     @Test func filterStateReportsDefaultAndReset() throws {
         var state = AgentHistoryFilterState.initial
         #expect(state.isDefault)
@@ -99,13 +143,16 @@ struct AgentHistoryInspectorTests {
                 )
             }
         }
+        var filter = AgentHistoryFilterState()
+        filter.agent = .pi
+        filter.directory = .currentTree
+        filter.time = .quarter
         let view = AgentHistoryFilterPopover(
             sessions: sessions,
             agents: SupportedAgent.allCases,
             strings: .current,
-            selectedAgent: .constant(.pi),
-            groupingMode: .constant(.none),
-            orderingMode: .constant(.recentlyUpdated)
+            filter: .constant(filter),
+            currentDirectory: "/repo"
         )
         let host = NSHostingView(rootView: view)
         host.frame = NSRect(x: 0, y: 0, width: 420, height: 640)

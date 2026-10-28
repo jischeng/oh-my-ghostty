@@ -26,6 +26,16 @@ struct AgentHistoryStrings: Equatable, Sendable {
     var searchPlaceholder: String { t("Search sessions", "搜索会话") }
     var organize: String { t("Filter & Organize", "筛选与整理") }
     var filterSection: String { t("Filter", "筛选") }
+    var directorySection: String { t("Folder", "目录") }
+    var directoryCurrent: String { t("This Folder", "当前目录") }
+    var directoryUnavailable: String { t("Current folder unavailable", "当前目录不可用") }
+    var timeSection: String { t("Time", "时间") }
+    var anyOption: String { t("All", "全部") }
+    var timeDay: String { t("24h", "24 小时") }
+    var timeWeek: String { t("7d", "7 天") }
+    var timeMonth: String { t("30d", "30 天") }
+    var timeQuarter: String { t("3mo", "3 个月") }
+    var timeYear: String { t("1y", "1 年") }
     var filterActive: String { t("Filtered", "已筛选") }
     var reset: String { t("Reset", "重置") }
     var groupSection: String { t("GROUP", "分组") }

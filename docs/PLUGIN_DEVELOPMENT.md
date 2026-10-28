@@ -31,7 +31,17 @@ is adjusted. Rows keep a fixed checkmark column, agent icon column and
 right-aligned count, so selecting an option never shifts text. Agent rows scroll
 only when the list exceeds six entries, and a Reset action restores the default
 filter, grouping and ordering. The trigger shows the selected Agent's icon plus
-a dot whenever any non-default choice is active.
+a corner badge (an overlay, so the glyph stays centered) whenever any
+non-default choice is active.
+
+Folder and time scopes narrow the list before the Agent filter. `This Folder`
+matches the presented pane's working directory and every subfolder, so a
+session started inside a subproject still counts, while sibling paths such as
+`/repository` never match `/repo`. Time scopes are relative windows (24h, 7d,
+30d, 3 months, 1 year) evaluated against each session's last update. Agent
+counts in the popover reflect the active folder/time scope, so they describe the
+rows the choice would actually show, and `This Folder` is disabled when the pane
+has no resolved directory.
 Discovery falls back to validated header metadata when a transcript file name
 does not encode the conversation ID, because stores such as omp keep the ID in
 the parent directory and name transcripts freely. Zstandard-compressed

@@ -797,6 +797,7 @@ struct InspectorPaneContentView: View {
         case .agentHistory(let history):
             InspectorAgentHistoryView(
                 history: history,
+                currentDirectory: context.workingDirectory,
                 perform: { kind in
                     registry.performAction(
                         paneID: paneID,
@@ -830,22 +831,80 @@ enum AgentHistoryOrderingMode: String, CaseIterable, Sendable {
     case title
 }
 
+enum AgentHistoryDirectoryFilter: String, CaseIterable, Sendable {
+    case any
+    case currentTree
+}
+
+enum AgentHistoryTimeFilter: String, CaseIterable, Sendable {
+    case any
+    case day
+    case week
+    case month
+    case quarter
+    case year
+
+    /// Inclusive lower bound for a session's last update.
+    func cutoff(now: Date = Date(), calendar: Calendar = .current) -> Date? {
+        switch self {
+        case .any: return nil
+        case .day: return calendar.date(byAdding: .day, value: -1, to: now)
+        case .week: return calendar.date(byAdding: .day, value: -7, to: now)
+        case .month: return calendar.date(byAdding: .month, value: -1, to: now)
+        case .quarter: return calendar.date(byAdding: .month, value: -3, to: now)
+        case .year: return calendar.date(byAdding: .year, value: -1, to: now)
+        }
+    }
+}
+
 /// Filter and organize selection for Agent History. Held as one value so the
 /// trigger can show a single "modified" state and Reset is unambiguous.
 struct AgentHistoryFilterState: Equatable, Sendable {
     var agent: SupportedAgent?
+    var directory: AgentHistoryDirectoryFilter = .any
+    var time: AgentHistoryTimeFilter = .any
     var grouping: AgentHistoryGroupingMode = .none
     var ordering: AgentHistoryOrderingMode = .recentlyUpdated
 
     static let initial = Self()
 
     var isDefault: Bool { self == Self.initial }
+    var narrowsSessions: Bool { agent != nil || directory != .any || time != .any }
 
     mutating func reset() { self = Self.initial }
+
+    /// Directories match on the resolved path so a session started in a
+    /// subfolder of the current one still counts as "this project".
+    func includes(
+        _ session: AgentHistorySession,
+        currentDirectory: String?,
+        now: Date = Date()
+    ) -> Bool {
+        if let agent, session.agent != agent { return false }
+        if directory == .currentTree {
+            guard let root = Self.normalizedPath(currentDirectory),
+                  let value = Self.normalizedPath(session.workingDirectory) else {
+                return false
+            }
+            let prefix = root == "/" ? "/" : root + "/"
+            guard value == root || value.hasPrefix(prefix) else { return false }
+        }
+        if let cutoff = time.cutoff(now: now), session.updatedAt < cutoff { return false }
+        return true
+    }
+
+    static func normalizedPath(_ value: String?) -> String? {
+        guard let value, value.hasPrefix("/"), !value.contains("\0") else { return nil }
+        var path = value
+        while path.count > 1, path.hasSuffix("/") { path.removeLast() }
+        return path
+    }
 }
 
 private struct InspectorAgentHistoryView: View {
     let history: InspectorAgentHistoryContent
+    /// Working directory of the presented pane, used by the folder filter.
+    let currentDirectory: String?
     let perform: (InspectorPaneActionKind) -> Void
     @ObservedObject private var settings = OhMyGhosttySettings.shared
     @State private var visibleSessionCount = 60
@@ -855,9 +914,7 @@ private struct InspectorAgentHistoryView: View {
     @State private var searchMatches: [String: String] = [:]
     @State private var isSearching = false
     @State private var searchTask: Task<Void, Never>?
-    @State private var selectedAgent: SupportedAgent?
-    @State private var groupingMode: AgentHistoryGroupingMode = .none
-    @State private var orderingMode: AgentHistoryOrderingMode = .recentlyUpdated
+    @State private var filter = AgentHistoryFilterState()
     @State private var isFilterPopoverPresented = false
     @State private var collapsedGroupIDs: Set<String> = []
     @State private var transcriptSearch = ""
@@ -868,21 +925,29 @@ private struct InspectorAgentHistoryView: View {
         .init(language: settings.language)
     }
 
+    /// Sessions inside the selected folder/time scope, before the Agent filter.
+    /// Agent counts in the popover come from this list so they stay meaningful.
+    private var scopedSessions: [AgentHistorySession] {
+        var scope = filter
+        scope.agent = nil
+        return history.sessions.filter { scope.includes($0, currentDirectory: currentDirectory) }
+    }
+
     private var availableAgents: [SupportedAgent] {
         SupportedAgent.allCases.filter { agent in
-            history.sessions.contains { $0.agent == agent }
+            scopedSessions.contains { $0.agent == agent }
         }
     }
 
     private var filteredAndOrderedSessions: [AgentHistorySession] {
         let needle = committedQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        let matching = history.sessions.filter { session in
-            guard selectedAgent == nil || session.agent == selectedAgent else {
+        let matching = scopedSessions.filter { session in
+            guard filter.agent == nil || session.agent == filter.agent else {
                 return false
             }
             return needle.isEmpty || searchMatches[session.id] != nil
         }
-        switch orderingMode {
+        switch filter.ordering {
         case .recentlyUpdated:
             // Store snapshots are already newest-first. Preserve that order to
             // avoid sorting thousands of rows on every SwiftUI body update.
@@ -903,7 +968,7 @@ private struct InspectorAgentHistoryView: View {
 
     private var groupedSections: [GroupedSection] {
         let list = filteredAndOrderedSessions
-        switch groupingMode {
+        switch filter.grouping {
         case .none:
             return [.init(id: "all", title: "", icon: .systemSymbol("folder"), sessions: list)]
         case .project:
@@ -1062,7 +1127,7 @@ private struct InspectorAgentHistoryView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        if groupingMode == .none {
+                        if filter.grouping == .none {
                             let total = filteredAndOrderedSessions.count
                             let displayed = Array(filteredAndOrderedSessions.prefix(visibleSessionCount))
                             ForEach(displayed) { session in
@@ -1123,63 +1188,26 @@ private struct InspectorAgentHistoryView: View {
         .onDisappear { searchTask?.cancel() }
     }
 
-    private var filterState: AgentHistoryFilterState {
-        .init(agent: selectedAgent, grouping: groupingMode, ordering: orderingMode)
-    }
-
     private var filterAndOrganizeMenu: some View {
-        Button {
+        AgentHistoryFilterTrigger(
+            selectedAgent: filter.agent,
+            isActive: !filter.isDefault,
+            isPresented: isFilterPopoverPresented
+        ) {
             isFilterPopoverPresented.toggle()
-        } label: {
-            HStack(spacing: 3) {
-                if let selectedAgent {
-                    Image(selectedAgent.assetName)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 14, height: 14)
-                } else {
-                    Image(systemName: "ellipsis")
-                        .font(.system(size: 13, weight: .semibold))
-                }
-                // A persistent dot keeps the trigger honest when a filter is
-                // hidden behind the agent icon.
-                Circle()
-                    .fill(Color.accentColor)
-                    .frame(width: 5, height: 5)
-                    .opacity(filterState.isDefault ? 0 : 1)
-                    .accessibilityHidden(true)
-            }
-            .frame(width: 28, height: 28)
-            .background(
-                Color.primary.opacity(isFilterPopoverPresented ? 0.2 : 0.12),
-                in: RoundedRectangle(cornerRadius: 6)
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(
-                        isFilterPopoverPresented || !filterState.isDefault
-                            ? Color.accentColor.opacity(0.7)
-                            : Color.primary.opacity(0.18),
-                        lineWidth: 1
-                    )
-            }
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .fixedSize()
         .popover(isPresented: $isFilterPopoverPresented, arrowEdge: .top) {
             AgentHistoryFilterPopover(
-                sessions: history.sessions,
+                sessions: scopedSessions,
                 agents: availableAgents,
                 strings: strings,
-                selectedAgent: $selectedAgent,
-                groupingMode: $groupingMode,
-                orderingMode: $orderingMode
+                filter: $filter,
+                currentDirectory: currentDirectory
             )
         }
         .help(strings.organize)
         .accessibilityLabel(strings.organize)
-        .accessibilityValue(filterState.isDefault ? "" : strings.filterActive)
+        .accessibilityValue(filter.isDefault ? "" : strings.filterActive)
     }
 
     private func sectionHeader(_ section: GroupedSection) -> some View {
@@ -2179,19 +2207,65 @@ private struct InspectorFileIconView: View {
     }
 }
 
-/// Stays open while adjusting. Filter, grouping and ordering are independent
-/// settings, so dismissing the surface after each choice was pure friction.
+/// Trigger for the Agent History filter popover. The active-filter badge is an
+/// overlay so the glyph itself stays centered in the button.
+struct AgentHistoryFilterTrigger: View {
+    let selectedAgent: SupportedAgent?
+    let isActive: Bool
+    let isPresented: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                if let selectedAgent {
+                    Image(selectedAgent.assetName)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 15, height: 15)
+                } else {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+            }
+            .frame(width: 28, height: 28)
+            .overlay(alignment: .topTrailing) {
+                Circle()
+                    .fill(Color.accentColor)
+                    .frame(width: 6, height: 6)
+                    .offset(x: -3, y: 3)
+                    .opacity(isActive ? 1 : 0)
+                    .accessibilityHidden(true)
+            }
+            .background(
+                Color.primary.opacity(isPresented ? 0.2 : 0.12),
+                in: RoundedRectangle(cornerRadius: 6)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(
+                        isPresented || isActive
+                            ? Color.accentColor.opacity(0.7)
+                            : Color.primary.opacity(0.18),
+                        lineWidth: 1
+                    )
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+    }
+}
+
+/// Stays open while adjusting. Filter, scope, grouping and ordering are
+/// independent settings, so dismissing the surface after each choice was pure
+/// friction. Short enumerations use chips; longer lists use aligned rows.
 struct AgentHistoryFilterPopover: View {
     let sessions: [AgentHistorySession]
     let agents: [SupportedAgent]
     let strings: AgentHistoryStrings
-    @Binding var selectedAgent: SupportedAgent?
-    @Binding var groupingMode: AgentHistoryGroupingMode
-    @Binding var orderingMode: AgentHistoryOrderingMode
-
-    private var state: AgentHistoryFilterState {
-        .init(agent: selectedAgent, grouping: groupingMode, ordering: orderingMode)
-    }
+    @Binding var filter: AgentHistoryFilterState
+    let currentDirectory: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -2200,9 +2274,9 @@ struct AgentHistoryFilterPopover: View {
                 title: strings.allAgents,
                 agent: nil,
                 count: sessions.count,
-                isSelected: selectedAgent == nil,
+                isSelected: filter.agent == nil,
                 reservesIconColumn: true
-            ) { selectedAgent = nil }
+            ) { filter.agent = nil }
 
             if agents.count > 6 {
                 // Only scroll when the list would otherwise dominate the
@@ -2217,25 +2291,55 @@ struct AgentHistoryFilterPopover: View {
 
             Divider().padding(.vertical, 6)
 
+            sectionLabel(strings.directorySection)
+            chips(
+                AgentHistoryDirectoryFilter.allCases,
+                selected: filter.directory,
+                title: directoryTitle,
+                isEnabled: { $0 == .any || directoryScope != nil },
+                select: { filter.directory = $0 }
+            )
+            if filter.directory == .currentTree {
+                Text(directoryScopeDescription)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .padding(.horizontal, 6)
+                    .help(directoryScopeDescription)
+            }
+
+            Divider().padding(.vertical, 6)
+
+            sectionLabel(strings.timeSection)
+            chips(
+                AgentHistoryTimeFilter.allCases,
+                selected: filter.time,
+                title: timeTitle,
+                select: { filter.time = $0 }
+            )
+
+            Divider().padding(.vertical, 6)
+
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 1) {
                     sectionLabel(strings.groupSection)
                     AgentHistoryFilterRow(
                         title: strings.groupNone, agent: nil, count: nil,
-                        isSelected: groupingMode == .none
-                    ) { groupingMode = .none }
+                        isSelected: filter.grouping == .none
+                    ) { filter.grouping = .none }
                     AgentHistoryFilterRow(
                         title: strings.groupProject, agent: nil, count: nil,
-                        isSelected: groupingMode == .project
-                    ) { groupingMode = .project }
+                        isSelected: filter.grouping == .project
+                    ) { filter.grouping = .project }
                     AgentHistoryFilterRow(
                         title: strings.groupAgent, agent: nil, count: nil,
-                        isSelected: groupingMode == .agent
-                    ) { groupingMode = .agent }
+                        isSelected: filter.grouping == .agent
+                    ) { filter.grouping = .agent }
                     AgentHistoryFilterRow(
                         title: strings.groupDate, agent: nil, count: nil,
-                        isSelected: groupingMode == .date
-                    ) { groupingMode = .date }
+                        isSelected: filter.grouping == .date
+                    ) { filter.grouping = .date }
                 }
                 .frame(width: 148, alignment: .leading)
 
@@ -2243,12 +2347,12 @@ struct AgentHistoryFilterPopover: View {
                     sectionLabel(strings.orderSection)
                     AgentHistoryFilterRow(
                         title: strings.orderRecentlyUpdated, agent: nil, count: nil,
-                        isSelected: orderingMode == .recentlyUpdated
-                    ) { orderingMode = .recentlyUpdated }
+                        isSelected: filter.ordering == .recentlyUpdated
+                    ) { filter.ordering = .recentlyUpdated }
                     AgentHistoryFilterRow(
                         title: strings.orderTitle, agent: nil, count: nil,
-                        isSelected: orderingMode == .title
-                    ) { orderingMode = .title }
+                        isSelected: filter.ordering == .title
+                    ) { filter.ordering = .title }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -2256,20 +2360,18 @@ struct AgentHistoryFilterPopover: View {
             Divider().padding(.vertical, 6)
 
             Button {
-                selectedAgent = nil
-                groupingMode = .none
-                orderingMode = .recentlyUpdated
+                filter.reset()
             } label: {
                 Label(strings.reset, systemImage: "arrow.counterclockwise")
                     .font(.system(size: 11))
             }
             .buttonStyle(.plain)
-            .foregroundStyle(state.isDefault ? Color.secondary : Color.accentColor)
-            .disabled(state.isDefault)
+            .foregroundStyle(filter.isDefault ? Color.secondary : Color.accentColor)
+            .disabled(filter.isDefault)
             .help(strings.reset)
         }
         .padding(10)
-        .frame(width: 316)
+        .frame(width: 320)
     }
 
     private var agentRows: some View {
@@ -2279,11 +2381,81 @@ struct AgentHistoryFilterPopover: View {
                     title: agent.displayName,
                     agent: agent,
                     count: sessions.count { $0.agent == agent },
-                    isSelected: selectedAgent == agent,
+                    isSelected: filter.agent == agent,
                     reservesIconColumn: true
-                ) { selectedAgent = agent }
+                ) { filter.agent = agent }
             }
         }
+    }
+
+    private var directoryScope: String? {
+        AgentHistoryFilterState.normalizedPath(currentDirectory)
+    }
+
+    private var directoryScopeDescription: String {
+        guard let name = directoryScope else { return strings.directoryUnavailable }
+        return name == "/" ? "/" : WorkspacePathPresentation.folderName(name)
+    }
+
+    private func directoryTitle(_ value: AgentHistoryDirectoryFilter) -> String {
+        switch value {
+        case .any: strings.anyOption
+        case .currentTree: strings.directoryCurrent
+        }
+    }
+
+    private func timeTitle(_ value: AgentHistoryTimeFilter) -> String {
+        switch value {
+        case .any: strings.anyOption
+        case .day: strings.timeDay
+        case .week: strings.timeWeek
+        case .month: strings.timeMonth
+        case .quarter: strings.timeQuarter
+        case .year: strings.timeYear
+        }
+    }
+
+    private func chips<Value: Hashable>(
+        _ values: [Value],
+        selected: Value,
+        title: @escaping (Value) -> String,
+        isEnabled: @escaping (Value) -> Bool = { _ in true },
+        select: @escaping (Value) -> Void
+    ) -> some View {
+        HStack(spacing: 4) {
+            ForEach(values, id: \.self) { value in
+                let isSelected = value == selected
+                Button {
+                    select(value)
+                } label: {
+                    Text(title(value))
+                        .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+                        .lineLimit(1)
+                        .padding(.horizontal, 8)
+                        .frame(height: 22)
+                        .foregroundStyle(isSelected ? Color.primary : Color.primary.opacity(0.85))
+                        .background(
+                            RoundedRectangle(cornerRadius: 5)
+                                .fill(isSelected
+                                      ? Color.accentColor.opacity(0.22)
+                                      : Color.primary.opacity(0.07))
+                        )
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 5)
+                                .stroke(
+                                    isSelected
+                                        ? Color.accentColor.opacity(0.6)
+                                        : Color.clear,
+                                    lineWidth: 1
+                                )
+                        }
+                }
+                .buttonStyle(.plain)
+                .disabled(!isEnabled(value))
+                .accessibilityAddTraits(isSelected ? .isSelected : [])
+            }
+        }
+        .padding(.horizontal, 6)
     }
 
     private func sectionLabel(_ text: String) -> some View {

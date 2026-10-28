@@ -53,7 +53,9 @@ Release gaps (do not advertise these as completed):
   Old runtime descriptors work while the terminal core hash matches; incompatible
   snapshot cores are rejected visibly with the process retained. A production
   upgrade/migration UI is still needed.
-- Connection drop requires reopening the pane/app; transparent reconnect is pending.
+- Explicit pane close sends CLOSE and terminates that remote session; app quit
+  detaches. Transport loss shows a reconnect banner which recreates the relay and
+  attaches the original session. Automatic reconnect remains pending.
 - Metadata/status list and explicit restore protocol exist, but full session manager
   UI and local process death reconciliation are still pending.
 - Existing terminal side effects and capabilities need parity checks. Arbitrary

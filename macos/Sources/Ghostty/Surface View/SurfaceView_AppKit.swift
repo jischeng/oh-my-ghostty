@@ -20,6 +20,7 @@ extension Ghostty {
         }
 
         var runtimeDescriptor: SessionRuntimeDescriptor?
+        @Published var runtimeDisconnected = false
         // Only retained while this app stays open. On relaunch a local shell is
         // recreated at the saved original cwd after the remote process exits.
         var runtimeLocalSurface: Ghostty.SurfaceView?

@@ -54,6 +54,19 @@ struct SessionRuntimeConnectionTests {
         #expect(split.environmentVariables[SessionRuntimeDescriptor.environmentKey] != nil)
     }
 
+    @MainActor
+    @Test func runtimeSettingsStringsFollowLanguageAndSearch() {
+        let en = SettingsStrings(language: .english)
+        let zh = SettingsStrings(language: .simplifiedChinese)
+        #expect(en.runtimeTitle == "Persistent SSH sessions")
+        #expect(zh.runtimeTitle == "SSH 后台会话")
+        #expect(en.runtimeTitle != zh.runtimeTitle)
+        #expect(SettingsStrings(language: .system, preferredLanguages: ["zh-CN"]).runtimeTitle == zh.runtimeTitle)
+        #expect(zh.runtimeDoneGraceCaption.contains("最长保留期限"))
+        let entries = SettingsSearchCatalog.entries(strings: zh)
+        #expect(entries.contains { $0.settingIDs.contains("sessions.runtimeDetachedHours") && $0.title == zh.runtimeTitle })
+    }
+
     @Test func hostIdentityIncludesExactRoutingAndRuntimeRevision() throws {
         let a = try GitSSHConnection(destination: "devbox", options: ["-p", "2222", "-J", "jump"])
         let b = try GitSSHConnection(destination: "devbox", options: ["-p", "2223", "-J", "jump"])

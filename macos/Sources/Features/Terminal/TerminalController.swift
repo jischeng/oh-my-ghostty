@@ -1181,6 +1181,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 .sink { [weak self, weak surface] signal in
                     guard let self, let surface else { return }
                     if SessionRuntimeHandoff.shared.accept(signal, source: surface, controller: self) { return }
+                    if signal.id == "omg-runtime-disconnected", surface.runtimeDescriptor != nil {
+                        surface.runtimeDisconnected = true
+                        return
+                    }
                     var context = paneSessionContexts[surface.id] ?? .init(
                         workingDirectory: surface.pwd,
                         terminalTitle: surface.title
@@ -3676,6 +3680,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         if surfaceTree.root != node {
             guard surfaceTree.contains(node) else { return }
             if !withConfirmation {
+                SessionRuntimeClose.close(node)
                 EditorWorkspaceStore.shared.remove(surfaceIDs: leafIDs)
                 removeSurfaceNode(node, registerUndo: false)
                 return
@@ -3685,6 +3690,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 informativeText: "The terminal still has a running process. If you close the terminal the process will be killed."
             ) { [weak self] in
                 guard let self else { return }
+                SessionRuntimeClose.close(node)
                 EditorWorkspaceStore.shared.remove(surfaceIDs: leafIDs)
                 self.removeSurfaceNode(node, registerUndo: false)
             }
@@ -3715,6 +3721,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         guard EditorWorkspaceStore.shared.prepareToClose(tabIDs: [tabSessionID], window: window, retry: { [weak self] in
             self?.closeTabImmediately(registerRedo: registerRedo)
         }) else { return }
+        if let root = surfaceTree.root { SessionRuntimeClose.close(root) }
         TerminalWorkspaceSessionStore.shared.forget(self)
         guard let tabGroup = window.tabGroup,
                 tabGroup.windows.count > 1 else {

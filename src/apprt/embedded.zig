@@ -2069,6 +2069,12 @@ pub const CAPI = struct {
         height.* = pos.height;
     }
 
+    /// Explicitly terminate the process owned by a native session backend.
+    /// This is only for an intentional pane close, never app quit/detach.
+    export fn ghostty_surface_close_session(ptr: *Surface) void {
+        ptr.core_surface.io.backend.closeSession();
+    }
+
     /// Request that the surface become closed. This will go through the
     /// normal trigger process that a close surface input binding would.
     export fn ghostty_surface_request_close(ptr: *Surface) void {

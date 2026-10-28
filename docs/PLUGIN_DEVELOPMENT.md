@@ -80,6 +80,12 @@ not erase the daemon's last durable conversation recovery record. Detached TTL a
 UTC deadline decisions are made remotely even while the Mac App is closed.
 Recovery launches allowlisted manifest-equivalent arguments for the original
 conversation ID and project directory; it does not replay arbitrary hook commands.
+Closing a pane/tab explicitly sends the session CLOSE frame and retires only that
+owned process group; App termination and detach do not send it. Transport failure
+emits an internal disconnected context event, leaves the remote session running,
+and presents a clickable reconnect action that rebuilds the relay before attach.
+Remote shell exit returns to the retained local shell and is distinct from loss.
+
 The new process gets a new generation and PID. No-ID or unsupported Agents do not
 qualify for completion-driven cleanup; process TTL can still end their session.
 

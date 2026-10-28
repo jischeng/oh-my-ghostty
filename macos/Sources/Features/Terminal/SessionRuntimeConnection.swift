@@ -154,6 +154,11 @@ final class SessionRuntimeConnections {
         return socket
     }
 
+    func invalidate(_ descriptor: SessionRuntimeDescriptor) {
+        guard let relay = relays.removeValue(forKey: descriptor.identity) else { return }
+        if relay.process.isRunning { relay.process.terminate() }
+    }
+
     func shutdown() {
         for relay in relays.values where relay.process.isRunning { relay.process.terminate() }
         relays.removeAll()

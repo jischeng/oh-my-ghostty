@@ -34,7 +34,7 @@ enum SettingsSearchCatalog {
             item(.general, \.languageSection, ["general.language"], "English 中文 language"),
             item(.general, \.quitSection, ["general.quitWithoutConfirmation"], "exit quit confirmation 退出 确认"),
             item(.terminal, \.sessionRecoverySection, ["sessions.startup"], "startup restore scrollback 启动 恢复 滚屏"),
-            .init(id: "terminal:runtime", tab: .terminal, title: "Session Runtime", anchor: "Session Runtime",
+            .init(id: "terminal:runtime", tab: .terminal, title: strings.runtimeTitle, anchor: strings.runtimeTitle,
                   keywords: "SSH background lifetime deadline TTL Agent completion resume 后台 会话 存活 截止 完成 恢复",
                   prefixes: ["sessions.runtime"]),
             item(.controls, \.quickInputSection, ["keyboard.quickInputHeight", "keyboard.quickInputHistory"], "history retention 快捷输入 历史 保留"),

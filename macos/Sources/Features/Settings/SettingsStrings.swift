@@ -753,6 +753,37 @@ struct SettingsStrings: Equatable, Sendable {
     var notifyAttentionLabel: String { t("Attention Required", "需要注意") }
     var notificationSoundLabel: String { t("Play Sound", "播放声音") }
 
+    // MARK: Native Session Runtime
+
+    var runtimeTitle: String { t("Persistent SSH sessions", "SSH 后台会话") }
+    var runtimeHostPlaceholder: String { t("SSH host or user@host", "SSH 主机别名或 user@host") }
+    var runtimeConnect: String { t("Connect", "连接") }
+    var runtimeConnectCaption: String {
+        t("Uses your SSH configuration and keys. Installs the runtime and, when Python 3 is available, OMG recovery hooks for Codex, Claude and Pi in the remote user's directory.",
+          "使用现有 SSH 配置与密钥，自动在远端用户目录安装 Runtime；有 Python 3 时同时安装 Codex、Claude、Pi 的 OMG 对话恢复 hooks。")
+    }
+    var runtimeDetachedHours: String { t("Keep disconnected sessions (hours)", "断开后最长保留（小时）") }
+    var runtimeDetachedCaption: String {
+        t("Defaults to 72 hours (3 days). 0 disables only this time limit, not completion cleanup. Output does not extend it. Changes apply to new sessions.",
+          "默认 72 小时（3 天）。0 仅关闭此时间上限，不影响任务完成后回收。持续输出不会延长期限；修改对新会话生效。")
+    }
+    var runtimeExpirationPlaceholder: String { t("Optional deadline, e.g. 2026-12-01T18:00:00Z", "可选截止时间，例如 2026-12-01T18:00:00Z") }
+    var runtimeCloseOnDone: String { t("Close after Agent task completion", "Agent 任务完成后回收") }
+    var runtimeCloseOnDoneCaption: String {
+        t("With remote Python 3, installs OMG recovery hooks for Codex, Claude and Pi. Only closes disconnected sessions with verified completion and an existing conversation record; reopening resumes that conversation.",
+          "远端有 Python 3 时会安装 Codex、Claude、Pi 的 OMG 对话恢复 hooks。仅在无人连接、收到可靠完成事件且已有对话记录时回收，再次打开恢复原对话。")
+    }
+    var runtimeDoneGrace: String { t("Completion grace period (seconds)", "完成后的宽限期（秒）") }
+    var runtimeDoneGraceCaption: String {
+        t("Wait after both disconnection and verified completion. Reconnecting or new work cancels this pending cleanup; the maximum detached lifetime still applies independently.",
+          "断开连接且确认任务完成后，再等待这段时间。重连或新任务会取消本次完成回收；最长保留期限仍独立生效。")
+    }
+    var runtimeIdleCaption: String {
+        t("The remote manager exits after 5 minutes with no active sessions or client connections. Running or waiting Agent sessions are not an idle manager.",
+          "远端管理进程在没有活跃会话和客户端连接达 5 分钟后退出。仍有 Agent 运行或等待输入时，不属于管理进程空闲。")
+    }
+    var runtimeInvalidDeadline: String { t("Enter an ISO-8601 deadline or leave it empty.", "请填写 ISO-8601 截止时间，或留空。") }
+
     // MARK: Advanced
 
     var forkSettingsSection: String { t("Settings File", "设置文件") }

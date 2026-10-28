@@ -45,6 +45,7 @@ struct EditorWorkspaceHost<Terminal: View>: View {
     var body: some View {
         ZStack {
             VStack(spacing: 0) {
+                SessionRuntimeRecoveryBanner(controller: controller, surface: surfaceView)
                 SSHRecoveryBanner(controller: controller, surface: surfaceView)
                 terminal
             }

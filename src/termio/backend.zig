@@ -59,6 +59,14 @@ pub const Backend = union(Kind) {
         }
     }
 
+    /// Explicitly end the owned remote session. A normal detach never calls this.
+    pub fn closeSession(self: *Backend) void {
+        switch (self.*) {
+            .exec => {},
+            .omg_session => |*session| session.closeSession(),
+        }
+    }
+
     pub fn focusGained(
         self: *Backend,
         td: *termio.Termio.ThreadData,

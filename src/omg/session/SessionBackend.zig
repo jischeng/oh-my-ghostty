@@ -5,6 +5,7 @@ const global = @import("../../global.zig");
 const HostIO = @import("../../omg_session_host.zig").HostIO;
 const terminal = @import("../../terminal/main.zig");
 const renderer = @import("../../renderer.zig");
+const apprt = @import("../../apprt.zig");
 const ProcessInfo = @import("../../pty.zig").ProcessInfo;
 const c = @cImport({
     @cInclude("sys/socket.h");
@@ -20,6 +21,7 @@ fd: c_int = -1,
 write_mutex: std.Io.Mutex = .init,
 ready: std.atomic.Value(bool) = .init(false),
 stopping: std.atomic.Value(bool) = .init(false),
+close_requested: std.atomic.Value(bool) = .init(false),
 requested_size: std.atomic.Value(u32) = .init((80 << 16) | 24),
 
 pub fn init(alloc: std.mem.Allocator, path: []const u8, pane_id: ?[]const u8) !Self {
@@ -63,6 +65,10 @@ pub fn threadExit(self: *Self, td: *HostIO.ThreadData) void {
     td.backend.omg_session.thread.join();
     _ = c.close(self.fd);
     self.fd = -1;
+}
+pub fn closeSession(self: *Self) void {
+    self.close_requested.store(true, .release);
+    if (self.ready.load(.acquire)) self.send('K', 0, &.{}) catch {};
 }
 pub fn focusGained(_: *Self, _: *HostIO.ThreadData, _: bool) !void {}
 pub fn resize(self: *Self, grid: renderer.GridSize, _: renderer.ScreenSize) !void {
@@ -114,7 +120,17 @@ fn reader(self: *Self, io: *HostIO) void {
         self.ready.store(false, .release);
         _ = c.shutdown(self.fd, c.SHUT_RDWR);
     }
-    self.readLoop(io) catch |err| std.log.warn("OMG session disconnected: {s}", .{@errorName(err)});
+    self.readLoop(io) catch |err| {
+        std.log.warn("OMG session disconnected: {s}", .{@errorName(err)});
+        if (!self.stopping.load(.acquire)) {
+            const signal = apprt.surface.Message.ContextSignal.init(self.alloc, .{
+                .action = .start,
+                .id = "omg-runtime-disconnected",
+                .metadata = "",
+            }) catch return;
+            _ = io.surface_mailbox.push(.{ .context_signal = signal }, .{ .forever = {} });
+        }
+    };
 }
 fn readLoop(self: *Self, io: *HostIO) !void {
     var address: c.struct_sockaddr_un = std.mem.zeroes(c.struct_sockaddr_un);
@@ -161,6 +177,10 @@ fn readLoop(self: *Self, io: *HostIO) !void {
             },
             'W' => {
                 self.ready.store(true, .release);
+                if (self.close_requested.load(.acquire)) {
+                    try self.send('K', 0, &.{});
+                    continue;
+                }
                 var dimensions: [4]u8 = undefined;
                 std.mem.writeInt(u32, &dimensions, self.requested_size.load(.acquire), .big);
                 try self.send('R', 0, &dimensions);

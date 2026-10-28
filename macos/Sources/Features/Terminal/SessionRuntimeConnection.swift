@@ -128,7 +128,9 @@ final class SessionRuntimeConnections {
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configURL.path)
         try? FileManager.default.removeItem(at: socket)
         let process = Process()
-        process.executableURL = artifacts.appendingPathComponent("omgd")
+        // Use the current transport optimizations for compatible cached runtimes;
+        // the connection JSON still pins deployment to the original revision.
+        process.executableURL = Self.resources.appendingPathComponent("omgd")
         process.arguments = ["connect", socket.path, configURL.path]
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice

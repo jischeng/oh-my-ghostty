@@ -302,10 +302,118 @@ pub fn command(config: &Connection, binary: &str, state: &str) -> io::Result<Com
         ),
     )
 }
+/// Warm restore reuses the exact requested revision. Readiness is emitted before
+/// bridge bytes; stdout remains untouched after the fixed one-byte handshake.
+pub fn fast_connect(config: &Connection) -> io::Result<std::process::Child> {
+    use sha2::{Digest, Sha256};
+    let revision = config
+        .revision
+        .as_deref()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no pinned runtime"))?;
+    if !valid_component(revision) {
+        return Err(io::Error::other("invalid runtime revision"));
+    }
+    let key = format!("{:x}", Sha256::digest(revision.as_bytes()));
+    let script = format!(
+        r#"set -eu
+binary="$HOME/.local/share/oh-my-ghostty/session-runtime/versions/{revision}/omgd"
+state="$HOME/.omg/run/{key}"
+if [ ! -x "$binary" ] || [ ! -f "${{binary%/*}}/verified" ]; then printf M; exit 0; fi
+"$binary" ensure-host "$state" || exit 1
+printf R
+exec "$binary" bridge "$state/host.sock"
+"#,
+        revision = revision,
+        key = &key[..12]
+    );
+    let mut child = ssh(config, &script)?.spawn()?;
+    let mut output = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut byte = [0u8; 1];
+        let result = output.read_exact(&mut byte).map(|_| byte[0]);
+        let _ = tx.send((result, output));
+    });
+    let result = rx.recv_timeout(Duration::from_secs(30));
+    match result {
+        Ok((Ok(b'R'), output)) => {
+            child.stdout = Some(output);
+            let _ = reader.join();
+            Ok(child)
+        }
+        other => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            match other {
+                Ok((Ok(b'M'), _)) => Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "runtime not installed",
+                )),
+                Err(_) => Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "SSH runtime reconnect timed out",
+                )),
+                _ => Err(io::Error::other(
+                    "SSH runtime reconnect failed; verify authentication and remote startup output",
+                )),
+            }
+        }
+    }
+}
+
 pub fn load(path: &Path) -> io::Result<Connection> {
     let data = fs::read(path)?;
     if data.len() > 2 * 1024 * 1024 {
         return Err(io::Error::other("connection config too large"));
     }
     Ok(serde_json::from_slice(&data)?)
+}
+
+#[cfg(test)]
+mod fast_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    fn fixture(reply: &str) -> (PathBuf, Connection) {
+        let root =
+            std::env::temp_dir().join(format!("omg-fast-{}", crate::record::nonce().unwrap()));
+        fs::create_dir(&root).unwrap();
+        let exe = root.join("ssh");
+        fs::write(&exe, format!("#!/bin/sh\nprintf '{reply}'\n")).unwrap();
+        fs::set_permissions(&exe, fs::Permissions::from_mode(0o700)).unwrap();
+        let config = Connection {
+            executable: exe.to_str().unwrap().into(),
+            arguments: vec!["host".into()],
+            cwd: "/".into(),
+            bundle: root.join("missing-artifacts"),
+            policy: Policy::default(),
+            revision: Some("test123".into()),
+            hooks: Some("must not execute".into()),
+        };
+        (root, config)
+    }
+    #[test]
+    fn warm_restore_preserves_protocol_bytes_without_deployment() {
+        let (root, config) = fixture("Rpayload");
+        let mut child = fast_connect(&config).unwrap();
+        let mut bytes = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut bytes)
+            .unwrap();
+        assert_eq!(bytes, "payload");
+        let _ = child.wait();
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn only_explicit_missing_response_enables_deployment() {
+        for (response, missing) in [("M", true), ("", false), ("banner", false)] {
+            let (root, config) = fixture(response);
+            let error = fast_connect(&config).unwrap_err();
+            assert_eq!(error.kind() == io::ErrorKind::NotFound, missing);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
 }

@@ -18,11 +18,14 @@ persistence still works, but completion cleanup/recovery cannot be assumed.
 
 Checks:
 
-1. Connect, inspect remote hostname/PID, split and create tabs. Each pane has a
-   distinct PID and inherits its host descriptor. Normal new local windows remain
-   local. Two configured hosts must not share sessions.
+1. Connect, inspect remote hostname/PID, split and create tabs. Splits inherit the
+   host with a distinct PID. New tabs start locally in the pre-SSH directory, as
+   do new local windows. Two configured hosts must not share sessions.
 2. Cmd-Q and reopen OMG Dev PTY normally. No test launcher is needed for descriptor
-   panes. Layout, IDs and still-live remote PIDs must match.
+   panes. Layout, IDs and still-live remote PIDs must match. Warm restoration uses
+   a single SSH connection to the pinned runtime; it must not repeat deployment
+   probes or hook installation. Only an explicit missing-runtime response falls
+   back to deployment.
 3. Set a short detached TTL for a new session, disconnect and wait. Its process
    should terminate; reopen displays an ended-session error for ordinary shells.
    Output alone must not prevent expiry. Check the record's reason remotely.

@@ -36,6 +36,9 @@ fn relay_command(local: &str, mut command: Command, lease: bool) -> io::Result<(
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()?;
+    relay_child(local, &mut ssh, lease)
+}
+fn relay_child(local: &str, ssh: &mut std::process::Child, lease: bool) -> io::Result<()> {
     let (socket, pipe) = UnixStream::pair()?;
     let upload = pipe.try_clone()?;
     let input = ssh.stdin.take().unwrap();
@@ -170,6 +173,16 @@ fn main() -> io::Result<()> {
         Some("bridge") if a.len() == 3 => bridge(&a[2]),
         Some("connect") if a.len() == 4 => {
             let config = omg_session_runtime::deploy::load(Path::new(&a[3]))?;
+            // One authenticated SSH connection handles warm restore. Only a
+            // positive missing-installation response authorizes deployment.
+            match omg_session_runtime::deploy::fast_connect(&config) {
+                Ok(mut ssh) => return relay_child(&a[2], &mut ssh, true),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    let _ = show_error(&a[2], &error);
+                    return Err(error);
+                }
+            }
             let (binary, state) = match omg_session_runtime::deploy::prepare(&config) {
                 Ok(result) => result,
                 Err(error) => {

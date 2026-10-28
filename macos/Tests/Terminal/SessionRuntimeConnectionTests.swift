@@ -30,6 +30,30 @@ struct SessionRuntimeConnectionTests {
         #expect(!(String(data: data, encoding: .utf8) ?? "").contains("runtimeDescriptor"))
     }
 
+    @MainActor
+    @Test func newTabIsLocalButSplitInheritsRuntime() throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let native = try #require(app.app)
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let view = Ghostty.SurfaceView(native, baseConfig: config)
+        let descriptor = SessionRuntimeDescriptor(connection: try GitSSHConnection(destination: "host", localWorkingDirectory: "/tmp"), revision: "test", policy: .init())
+        view.runtimeDescriptor = descriptor
+        let controller = TerminalController(app, withSurfaceTree: .init(view: view))
+        defer { controller.window?.delegate = nil; controller.window?.close() }
+        try descriptor.configure(&config)
+        config.environmentVariables["OMG_RUNTIME_SOCKET"] = "/tmp/remote.sock"
+        config.environmentVariables["OMG_RUNTIME_PANE_ID"] = "old"
+        let tab = try #require(controller.tabConfiguration(inherited: config, from: view))
+        #expect(tab.workingDirectory == "/tmp")
+        #expect(tab.command == nil)
+        #expect(tab.environmentVariables[SessionRuntimeDescriptor.environmentKey] == nil)
+        #expect(tab.environmentVariables["OMG_RUNTIME_SOCKET"] == nil)
+        #expect(tab.environmentVariables["OMG_RUNTIME_PANE_ID"] == nil)
+        let split = try #require(controller.splitConfiguration(inherited: nil, from: view))
+        #expect(split.environmentVariables[SessionRuntimeDescriptor.environmentKey] != nil)
+    }
+
     @Test func hostIdentityIncludesExactRoutingAndRuntimeRevision() throws {
         let a = try GitSSHConnection(destination: "devbox", options: ["-p", "2222", "-J", "jump"])
         let b = try GitSSHConnection(destination: "devbox", options: ["-p", "2223", "-J", "jump"])

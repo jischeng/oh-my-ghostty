@@ -2076,8 +2076,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     ) -> Ghostty.SurfaceConfiguration? {
         if let runtime = source.runtimeDescriptor {
             var result = config ?? .init()
-            try? runtime.configure(&result)
-            result.workingDirectory = nil
+            result.environmentVariables.removeValue(forKey: SessionRuntimeDescriptor.environmentKey)
+            result.environmentVariables.removeValue(forKey: "OMG_RUNTIME_SOCKET")
+            result.environmentVariables.removeValue(forKey: "OMG_RUNTIME_PANE_ID")
+            result.workingDirectory = runtime.connection.localWorkingDirectory
+            result.command = nil
             return result
         }
         guard let session = paneSessionContext(for: source) else { return config }

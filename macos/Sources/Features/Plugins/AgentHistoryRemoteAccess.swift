@@ -100,7 +100,7 @@ struct AgentHistoryRemoteAccess: Sendable {
                     if inspected > 200000:
                         break
                     path = os.path.join(directory, name)
-                    if not name.endswith('.jsonl') or os.path.islink(path):
+                    if not (name.endswith('.jsonl') or name.endswith('.jsonl.zst')) or os.path.islink(path):
                         continue
                     try:
                         stat = os.stat(path)
@@ -112,20 +112,35 @@ struct AgentHistoryRemoteAccess: Sendable {
         candidates.sort(reverse=True)
         for modified, path, size in candidates[:min(int(sys.argv[2]) * 2, 20000)]:
             try:
-                with open(path, 'rb') as source:
-                    data = source.read(2 * 1024 * 1024)
-                    if len(data) < size:
-                        data = data.rsplit(b'\\n', 1)[0]
-                        source.seek(max(0, size - 128 * 1024))
-                        tail = source.read().split(b'\\n')[1:]
-                        # Pi's explicit session name can appear at the end.
-                        for line in tail:
-                            try:
-                                record = json.loads(line)
-                                if record.get('type') in ('session_info', 'title', 'title_change'):
-                                    data += b'\\n' + line
-                            except (ValueError, AttributeError):
-                                pass
+                if path.endswith('.jsonl.zst'):
+                    # Codex archives rollouts with zstd; prefer the Python module
+                    # because the command-line tool may be absent.
+                    data = b''
+                    try:
+                        import zstandard
+                        with open(path, 'rb') as source:
+                            data = zstandard.ZstdDecompressor().stream_reader(source).read(256 * 1024)
+                    except Exception:
+                        import subprocess
+                        data = subprocess.run(
+                            ['zstd', '--decompress', '--stdout', '--quiet', path],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+                        ).stdout[:256 * 1024]
+                else:
+                    with open(path, 'rb') as source:
+                        data = source.read(2 * 1024 * 1024)
+                        if len(data) < size:
+                            data = data.rsplit(b'\\n', 1)[0]
+                            source.seek(max(0, size - 128 * 1024))
+                            tail = source.read().split(b'\\n')[1:]
+                            # Pi's explicit session name can appear at the end.
+                            for line in tail:
+                                try:
+                                    record = json.loads(line)
+                                    if record.get('type') in ('session_info', 'title', 'title_change'):
+                                        data += b'\\n' + line
+                                except (ValueError, AttributeError):
+                                    pass
                 # Preserve JSON records but omit large system/tool payloads from transport.
                 records = []
                 for line in data.splitlines():
@@ -327,8 +342,10 @@ struct AgentHistoryRemoteAccess: Sendable {
                 } catch {
                     throw AgentHistoryRemoteError.unavailable
                 }
+                // Compressed archives make discovery slower; keep a bounded
+                // but generous ceiling so large stores still complete.
                 let timeout = Task.detached {
-                    try? await Task.sleep(for: .seconds(30))
+                    try? await Task.sleep(for: .seconds(60))
                     if process.isRunning { process.terminate() }
                 }
                 process.waitUntilExit()

@@ -19,6 +19,7 @@
     ],
     "discover": {
       "root": "~/.codex/sessions",
+      "additionalRoots": ["~/.codex/archived_sessions"],
       "format": "jsonl",
       "idKeyPath": "payload.id",
       "cwdKeyPath": "payload.cwd"

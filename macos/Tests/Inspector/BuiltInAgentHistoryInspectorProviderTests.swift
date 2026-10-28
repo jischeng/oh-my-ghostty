@@ -5,6 +5,45 @@ import SQLite3
 
 @MainActor
 struct AgentHistoryInspectorTests {
+    @Test func discoversCompressedCodexArchives() async throws {
+        let zstd = ["/opt/homebrew/bin/zstd", "/usr/local/bin/zstd", "/usr/bin/zstd"]
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let conversationID = try #require(AgentConversationID("019d05c3-3eb9-7562-b8e6-111111111111"))
+        let plain = root.appendingPathComponent("rollout.jsonl")
+        try writeJSONL([
+            ["type": "session_meta", "payload": ["id": conversationID.rawValue, "cwd": "/repo"]],
+            ["type": "response_item", "payload": ["type": "message", "role": "user",
+                                                  "content": [["type": "input_text", "text": "Archived question"]]]],
+        ], to: plain)
+        guard let zstd else {
+            // The archived-session reader shells out to zstd; report the skip.
+            return
+        }
+        let archive = root.appendingPathComponent("rollout-\(conversationID.rawValue).jsonl.zst")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: zstd)
+        process.arguments = ["--quiet", "--force", plain.path, "-o", archive.path]
+        try process.run()
+        process.waitUntilExit()
+        try #require(process.terminationStatus == 0)
+        try FileManager.default.removeItem(at: plain)
+
+        let sessions = await AgentHistoryStore.load(
+            agents: [.codex],
+            rootURLs: [.codex: root],
+            cacheURL: root.appendingPathComponent("cache.json")
+        )
+        let session = try #require(sessions.first)
+        #expect(session.conversationID == conversationID)
+        #expect(session.title == "Archived question")
+        #expect(session.workingDirectory == "/repo")
+        // Codex keeps compressed rollouts beside the live store.
+        #expect(SupportedAgent.codex.definition.resume.discover?.additionalRoots?
+            .contains("~/.codex/archived_sessions") == true)
+    }
+
     @Test func discoversSessionsStoredInIdentifierDirectories() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

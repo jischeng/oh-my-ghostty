@@ -28,13 +28,22 @@ and is reconciled against files that still exist. Manual refresh keeps the
 displayed rows, shows progress, and disables the refresh action while running.
 Discovery falls back to validated header metadata when a transcript file name
 does not encode the conversation ID, because stores such as omp keep the ID in
-the parent directory and name transcripts freely. Remote discovery uses
+the parent directory and name transcripts freely. Zstandard-compressed
+`*.jsonl.zst` rollouts are supported: Codex now compresses both live and
+archived sessions, so OMG reads a bounded decompressed prefix (64 KiB locally,
+256 KiB remotely) through the `zstd` helper and parses it like plain JSONL.
+An agent may declare `additionalRoots` beside its primary root; Codex uses this
+for `~/.codex/archived_sessions`. Archive headers are parsed concurrently, and
+per-file results are reused from the disk cache, so repeat scans stay fast.
+Remote discovery uses
 Python 3 over SSH, globally sorts file modification timestamps, and transfers
 numeric Unix timestamps and bounded JSON metadata instead of parsing `ls` dates.
 The configured history limit applies to remote results as well as local results;
 remote JSONL candidates are bounded at 20,000 and file traversal at 200,000.
 Headers are bounded at 2 MiB per remote file, with a 128 KiB tail for explicit
-session names; oversized or malformed records may still lack a title.
+session names; oversized or malformed records may still lack a title. Remote
+discovery has a 60-second transport ceiling because compressed archives add
+decompression work.
 
 Antigravity CLI (`agy`) resumes with `--conversation {id}`. Local and SSH history
 read its `antigravity-cli/conversation_summaries.db` index. That index is a WAL

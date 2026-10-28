@@ -340,55 +340,55 @@ enum AgentHistoryStore {
         var inspectedFiles = 0
 
         for agent in agents where !Task.isCancelled {
-            guard let source = source(for: agent, rootURL: rootURLs[agent]) else {
-                continue
-            }
-            guard let enumerator = FileManager.default.enumerator(
-                at: source.root,
-                includingPropertiesForKeys: [
-                    .contentModificationDateKey,
-                    .creationDateKey,
-                    .isRegularFileKey,
-                    .isSymbolicLinkKey,
-                ],
-                options: [.skipsHiddenFiles]
-            ) else { continue }
-
-            for case let url as URL in enumerator {
+            for source in sources(for: agent, rootURL: rootURLs[agent]) {
                 guard !Task.isCancelled else { break }
-                inspectedFiles += 1
-                guard inspectedFiles <= maximumFiles else { break }
-                guard url.pathExtension.lowercased() == "jsonl",
-                      let values = try? url.resourceValues(forKeys: [
-                          .contentModificationDateKey,
-                          .creationDateKey,
-                          .isRegularFileKey,
-                          .isSymbolicLinkKey,
-                      ]),
-                      values.isRegularFile == true,
-                      values.isSymbolicLink != true else { continue }
+                guard let enumerator = FileManager.default.enumerator(
+                    at: source.root,
+                    includingPropertiesForKeys: [
+                        .contentModificationDateKey,
+                        .creationDateKey,
+                        .isRegularFileKey,
+                        .isSymbolicLinkKey,
+                    ],
+                    options: [.skipsHiddenFiles]
+                ) else { continue }
 
-                let filenameID: AgentConversationID?
-                if let pattern = source.entryPattern {
-                    let relativePath = relativePath(of: url, under: source.root)
-                    // Stores such as omp write each conversation into its own
-                    // directory, so a file name alone may not carry the ID.
-                    // Fall back to validated header metadata instead of
-                    // discarding the transcript entirely.
-                    filenameID = id(from: relativePath, pattern: pattern)
-                        .flatMap(AgentConversationID.init)
-                } else {
-                    filenameID = nil
+                for case let url as URL in enumerator {
+                    guard !Task.isCancelled else { break }
+                    inspectedFiles += 1
+                    guard inspectedFiles <= maximumFiles else { break }
+                    guard isTranscript(url),
+                          let values = try? url.resourceValues(forKeys: [
+                              .contentModificationDateKey,
+                              .creationDateKey,
+                              .isRegularFileKey,
+                              .isSymbolicLinkKey,
+                          ]),
+                          values.isRegularFile == true,
+                          values.isSymbolicLink != true else { continue }
+
+                    let filenameID: AgentConversationID?
+                    if let pattern = source.entryPattern {
+                        let relativePath = relativePath(of: url, under: source.root)
+                        // Stores such as omp write each conversation into its own
+                        // directory, so a file name alone may not carry the ID.
+                        // Fall back to validated header metadata instead of
+                        // discarding the transcript entirely.
+                        filenameID = id(from: relativePath, pattern: pattern)
+                            .flatMap(AgentConversationID.init)
+                    } else {
+                        filenameID = nil
+                    }
+                    candidates.append(.init(
+                        source: source,
+                        url: url,
+                        filenameID: filenameID,
+                        updatedAt: values.contentModificationDate ??
+                            values.creationDate ?? .distantPast
+                    ))
                 }
-                candidates.append(.init(
-                    source: source,
-                    url: url,
-                    filenameID: filenameID,
-                    updatedAt: values.contentModificationDate ??
-                        values.creationDate ?? .distantPast
-                ))
+                if inspectedFiles > maximumFiles { break }
             }
-            if inspectedFiles > maximumFiles { break }
         }
 
         candidates.sort { $0.updatedAt > $1.updatedAt }
@@ -400,24 +400,52 @@ enum AgentHistoryStore {
         }
         var cacheUpdated = diskCache.entries.count != originalCacheCount
 
-        for candidate in candidates.prefix(maximumHeaderCandidates) {
-            guard !Task.isCancelled, sessionsByID.count < maximumSessions else { break }
-            let candidateMtime = candidate.updatedAt.timeIntervalSince1970
-
+        // Parsing a compressed rollout needs an external decompressor, which
+        // costs several milliseconds each. Fold cache hits serially, then parse
+        // the remainder concurrently so thousands of archives stay responsive.
+        let candidateLimit = min(candidates.count, maximumHeaderCandidates)
+        var cachedSessions = [AgentHistorySession?](repeating: nil, count: candidateLimit)
+        var parsedSessions = [AgentHistorySession?](repeating: nil, count: candidateLimit)
+        var needsParse: [Int] = []
+        needsParse.reserveCapacity(candidateLimit)
+        for index in 0..<candidateLimit {
+            let candidate = candidates[index]
             if let cached = diskCache.entries[candidate.url.path],
-               abs(cached.mtime - candidateMtime) < 0.001 {
-                let session = cached.session
-                if let existing = sessionsByID[session.id], existing.updatedAt >= session.updatedAt {
-                    continue
-                }
-                sessionsByID[session.id] = session
-                continue
+               abs(cached.mtime - candidate.updatedAt.timeIntervalSince1970) < 0.001 {
+                cachedSessions[index] = cached.session
+            } else {
+                needsParse.append(index)
             }
+        }
+        if !needsParse.isEmpty {
+            let lock = NSLock()
+            DispatchQueue.concurrentPerform(iterations: needsParse.count) { offset in
+                guard !Task.isCancelled else { return }
+                let index = needsParse[offset]
+                let session = session(from: candidates[index])
+                lock.lock()
+                parsedSessions[index] = session
+                lock.unlock()
+            }
+        }
 
-            guard let session = session(from: candidate) else { continue }
-            diskCache.entries[candidate.url.path] = .init(session: session, mtime: candidateMtime)
-            cacheUpdated = true
-
+        for index in 0..<candidateLimit {
+            guard !Task.isCancelled, sessionsByID.count < maximumSessions else { break }
+            let candidate = candidates[index]
+            let session: AgentHistorySession?
+            if let cached = cachedSessions[index] {
+                session = cached
+            } else {
+                session = parsedSessions[index]
+                if let session {
+                    diskCache.entries[candidate.url.path] = .init(
+                        session: session,
+                        mtime: candidate.updatedAt.timeIntervalSince1970
+                    )
+                    cacheUpdated = true
+                }
+            }
+            guard let session else { continue }
             if let existing = sessionsByID[session.id], existing.updatedAt >= session.updatedAt {
                 continue
             }
@@ -493,42 +521,43 @@ enum AgentHistoryStore {
         return sessions
     }
 
-    nonisolated private static func source(
+    nonisolated private static func sources(
         for agent: SupportedAgent,
         rootURL: URL?
-    ) -> Source? {
+    ) -> [Source] {
         let resume = agent.definition.resume
-        guard !resume.resumeArguments.isEmpty else { return nil }
+        guard !resume.resumeArguments.isEmpty else { return [] }
 
         if let discovery = resume.discover, discovery.format == .jsonl {
-            let root = rootURL ?? URL(fileURLWithPath:
-                (discovery.root as NSString).expandingTildeInPath
-            )
-            return .init(
-                agent: agent,
-                root: root,
-                format: .jsonl,
-                entryPattern: nil,
-                idKeyPath: discovery.idKeyPath,
-                cwdKeyPath: discovery.cwdKeyPath
-            )
+            let roots = rootURL.map { [$0] } ?? ([discovery.root] + (discovery.additionalRoots ?? []))
+                .map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
+            return roots.map { root in
+                .init(
+                    agent: agent,
+                    root: root,
+                    format: .jsonl,
+                    entryPattern: nil,
+                    idKeyPath: discovery.idKeyPath,
+                    cwdKeyPath: discovery.cwdKeyPath
+                )
+            }
         }
 
         guard let store = resume.store,
               store.entryPattern.lowercased().contains(".jsonl") else {
-            return nil
+            return []
         }
         let root = rootURL ?? URL(fileURLWithPath:
             (store.root as NSString).expandingTildeInPath
         )
-        return .init(
+        return [.init(
             agent: agent,
             root: root,
             format: .jsonl,
             entryPattern: store.entryPattern,
             idKeyPath: nil,
             cwdKeyPath: nil
-        )
+        )]
     }
 
     nonisolated private static func session(
@@ -784,7 +813,7 @@ enum AgentHistoryStore {
 
         var roots: [String] = []
         for agent in agents {
-            if let rel = relativeRoot(for: agent), !roots.contains(rel) {
+            for rel in relativeRoots(for: agent) where !roots.contains(rel) {
                 roots.append(rel)
             }
         }
@@ -802,8 +831,9 @@ enum AgentHistoryStore {
             guard !records.isEmpty else { continue }
 
             guard let matchedAgent = agents.first(where: { agent in
-                guard let rel = relativeRoot(for: agent) else { return false }
-                return chunk.file.path.contains("/" + rel + "/") || chunk.file.path.contains("/" + rel)
+                relativeRoots(for: agent).contains { rel in
+                    chunk.file.path.contains("/" + rel + "/") || chunk.file.path.contains("/" + rel)
+                }
             }) else { continue }
 
             let pattern = matchedAgent.definition.resume.store?.entryPattern
@@ -913,17 +943,70 @@ enum AgentHistoryStore {
         return AgentConversationID(String(name.suffix(36)))
     }
 
-    nonisolated private static func relativeRoot(for agent: SupportedAgent) -> String? {
+    nonisolated private static func relativeRoots(for agent: SupportedAgent) -> [String] {
         let resume = agent.definition.resume
-        guard !resume.resumeArguments.isEmpty else { return nil }
-        let rawPath = resume.discover?.root ?? resume.store?.root
-        guard let rawPath else { return nil }
+        guard !resume.resumeArguments.isEmpty else { return [] }
+        var values: [String] = []
+        for rawPath in [resume.discover?.root ?? resume.store?.root] + (resume.discover?.additionalRoots ?? []) {
+            guard let rawPath, let relative = relativePath(rawPath), !values.contains(relative) else { continue }
+            values.append(relative)
+        }
+        return values
+    }
+
+    nonisolated private static func relativePath(_ rawPath: String) -> String? {
         if rawPath.hasPrefix("~/") {
             return String(rawPath.dropFirst(2))
         } else if rawPath.hasPrefix("~") {
             return String(rawPath.dropFirst(1)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         }
         return nil
+    }
+
+    /// Streams a bounded prefix of a zstd-compressed transcript. The helper is
+    /// external because compression libs ship zstd only with newer SDKs; when
+    /// it is unavailable the archived session is skipped rather than listed
+    /// without metadata.
+    /// GUI processes inherit a minimal PATH, so Homebrew's zstd is invisible to
+    /// `/usr/bin/env`. Resolve an absolute executable once.
+    nonisolated private static let zstdExecutable: URL? = {
+        let fixed = ["/opt/homebrew/bin/zstd", "/usr/local/bin/zstd", "/usr/bin/zstd"]
+        if let path = fixed.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
+            return URL(fileURLWithPath: path)
+        }
+        for directory in (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":") {
+            let candidate = String(directory) + "/zstd"
+            if FileManager.default.isExecutableFile(atPath: candidate) {
+                return URL(fileURLWithPath: candidate)
+            }
+        }
+        return nil
+    }()
+
+    nonisolated private static func decompressedHeader(
+        at url: URL,
+        maximumBytes: Int
+    ) -> Data {
+        guard maximumBytes > 0, let executable = zstdExecutable else { return Data() }
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["--decompress", "--stdout", "--quiet", url.path]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return Data() }
+        var data = Data()
+        let handle = pipe.fileHandleForReading
+        while data.count < maximumBytes {
+            let chunk = handle.availableData
+            if chunk.isEmpty { break }
+            data.append(chunk.prefix(maximumBytes - data.count))
+        }
+        try? handle.close()
+        if process.isRunning { process.terminate() }
+        process.waitUntilExit()
+        return data
     }
 
     nonisolated private static func headerRecords(from data: Data) -> [[String: Any]] {
@@ -933,12 +1016,28 @@ enum AgentHistoryStore {
             }
     }
 
+    /// Codex archives older rollouts as `rollout-….jsonl.zst`. They hold the
+    /// same JSONL records, so only the transport differs.
+    nonisolated private static func isTranscript(_ url: URL) -> Bool {
+        let name = url.lastPathComponent.lowercased()
+        return name.hasSuffix(".jsonl") || name.hasSuffix(".jsonl.zst")
+    }
+
     nonisolated private static func headerRecords(
         at url: URL,
         maximumBytes: Int
     ) -> [[String: Any]] {
-        guard maximumBytes > 0,
-              let handle = try? FileHandle(forReadingFrom: url) else { return [] }
+        guard maximumBytes > 0 else { return [] }
+        if url.lastPathComponent.lowercased().hasSuffix(".zst") {
+            // Codex archives are single-session rollouts whose metadata sits in
+            // the leading records; decompressing less keeps thousands of archive
+            // headers affordable.
+            return headerRecords(from: decompressedHeader(
+                at: url,
+                maximumBytes: min(maximumBytes, 64 * 1_024)
+            ))
+        }
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return [] }
         defer { try? handle.close() }
         var data = (try? handle.read(upToCount: maximumBytes)) ?? Data()
         if let size = try? handle.seekToEnd(), size > UInt64(data.count) {

@@ -213,6 +213,9 @@ struct AgentDefinition: Codable, Equatable, Sendable {
             }
 
             let root: String
+            /// Extra stores holding the same record format, such as Codex's
+            /// compressed `archived_sessions` directory.
+            let additionalRoots: [String]?
             let format: Format
             let idKeyPath: String
             let cwdKeyPath: String

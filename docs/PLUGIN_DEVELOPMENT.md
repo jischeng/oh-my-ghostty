@@ -1053,12 +1053,14 @@ execution on that account; OMG does not log in or silently modify remote dotfile
 
 Agent glyphs use assets from LobeHub `lobe-icons` (MIT) plus the projects' own
 published marks, including Termio, OMP/oh-my-pi, Reasonix, Charm Crush, Factory
-Droid, and Nous Research Hermes. The Copilot glyph is GitHub's Primer `copilot`
-Octicon (24 px variant), so it is the same robot head the Copilot CLI ships and
-it already uses the repo's template path conventions. Tracing the raster
-marketplace icon by hand filled its goggle lenses, so the official vector is
-preferred. Product names and
-marks remain trademarks of
+Droid, and Nous Research Hermes. The Copilot glyph is the GitHub Copilot CLI
+robot head: a solid head with the goggle lenses, mouth band and nostrils cut
+out, traced from the published marketplace app icon. Xcode ignores a root
+`fill-rule`, so the sub-paths are wound by nesting depth (outer clockwise,
+holes counter-clockwise) and the shape renders correctly under both even-odd
+and non-zero rules. Agent glyphs are template images, so those cut-outs show
+the tab background instead of the marketplace icon's white disc. Product names
+and marks remain trademarks of
 their respective owners; the assets do not imply vendor endorsement.
 
 An agent manifest declares icons in two roles:

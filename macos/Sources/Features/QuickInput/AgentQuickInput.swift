@@ -347,19 +347,20 @@ final class AgentQuickInputModel: ObservableObject {
     }
 
     func bindPresentation(_ presentation: QuickInputGlobalPresentation?) {
+        guard globalPresentation !== presentation || globalObservers.isEmpty else { return }
         globalObservers.removeAll()
         globalPresentation = presentation
         if let globalPresentation = presentation {
             globalPresentation.$height.sink { [weak self] height in
                 self?.dockResizeWorkItem?.cancel()
                 self?.pendingDockHeight = nil
-                self?.dockHeight = CGFloat(height)
+                if self?.dockHeight != CGFloat(height) { self?.dockHeight = CGFloat(height) }
             }.store(in: &globalObservers)
             globalPresentation.$isPresented.sink { [weak self] visible in
                 self?.synchronizeGlobalPresentation(visible)
             }.store(in: &globalObservers)
             globalPresentation.$isPinned.sink { [weak self] pinned in
-                self?.isPinned = pinned
+                if self?.isPinned != pinned { self?.isPinned = pinned }
             }.store(in: &globalObservers)
         }
     }
@@ -379,7 +380,7 @@ final class AgentQuickInputModel: ObservableObject {
             if isEditingQueuedItem { cancelQueuedItemEdit() }
             historyPresentation.close()
             historyNavigation.edited()
-            isPresented = false
+            if isPresented { isPresented = false }
         }
     }
 

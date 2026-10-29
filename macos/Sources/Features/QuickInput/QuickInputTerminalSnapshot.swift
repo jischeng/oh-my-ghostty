@@ -10,6 +10,7 @@ final class QuickInputTerminalSnapshot {
 
     private var overlay: NSImageView?
     private var timeout: Task<Void, Never>?
+    private var frameObserver: NSObjectProtocol?
 
     init(surface: Ghostty.SurfaceView, maximumDuration: Duration = .seconds(6)) {
         guard let image = surface.asImage else { return }
@@ -24,6 +25,18 @@ final class QuickInputTerminalSnapshot {
         overlay.frame = surface.frame
         parent.addSubview(overlay, positioned: .above, relativeTo: surface)
         self.overlay = overlay
+        let capturedSize = surface.bounds.size
+        surface.postsFrameChangedNotifications = true
+        frameObserver = NotificationCenter.default.addObserver(
+            forName: NSView.frameDidChangeNotification, object: surface, queue: .main
+        ) { [weak self, weak surface] _ in
+            MainActor.assumeIsolated {
+                guard let surface, surface.bounds.size != capturedSize else { return }
+                // A pre-resize image is no longer a valid representation of
+                // this pane. Never stretch it over the new terminal geometry.
+                self?.remove()
+            }
+        }
         timeout = Task { @MainActor [weak self] in
             try? await Task.sleep(for: maximumDuration)
             guard !Task.isCancelled else { return }
@@ -39,7 +52,11 @@ final class QuickInputTerminalSnapshot {
         }
     }
 
+    deinit { if let frameObserver { NotificationCenter.default.removeObserver(frameObserver) } }
+
     func remove() {
+        if let frameObserver { NotificationCenter.default.removeObserver(frameObserver) }
+        frameObserver = nil
         timeout?.cancel()
         timeout = nil
         overlay?.removeFromSuperview()

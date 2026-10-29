@@ -533,7 +533,7 @@ struct TerminalShellLayoutContainer<Content: View>: View {
                     backgroundOpacity: backgroundOpacity
                 ) {
                     VStack(spacing: 0) {
-                        if !leftVisible {
+                        if !showsTabSidebar {
                             HStack {
                                 TerminalWorkspaceButton(controller: controller)
                                 Spacer()

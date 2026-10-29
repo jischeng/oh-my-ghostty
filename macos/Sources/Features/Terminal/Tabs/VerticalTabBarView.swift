@@ -104,12 +104,29 @@ final class VerticalTabWindowLayoutState: ObservableObject {
     var workspaceBindingID: UUID? { workspaceID }
     private weak var workspaceStore: TerminalWorkspaceStore?
     private var workspaceObservation: AnyCancellable?
+    private struct WorkspaceChrome: Equatable {
+        let sidebarVisible: Bool
+        let sidebarWidth: Double
+        let inspectorVisible: Bool
+        let inspectorWidth: Double
+        let inspectorPane: String?
+
+        init(_ value: TerminalWorkspaceStore.Presentation) {
+            sidebarVisible = value.sidebarVisible
+            sidebarWidth = value.sidebarWidth
+            inspectorVisible = value.inspectorVisible
+            inspectorWidth = value.inspectorWidth
+            inspectorPane = value.inspectorPane
+        }
+    }
+    private var appliedWorkspaceChrome: WorkspaceChrome?
     private var applyingWorkspace = false
 
     func bindWorkspace(_ id: UUID, store: TerminalWorkspaceStore = .shared) {
         guard workspaceID != id || workspaceStore !== store else { return }
         workspaceID = id
         workspaceStore = store
+        appliedWorkspaceChrome = nil
         workspaceObservation = store.presentationChanges.sink { [weak self] changed, value in
             guard let self, changed == self.workspaceID else { return }
             self.applyWorkspacePresentation(value)
@@ -118,6 +135,9 @@ final class VerticalTabWindowLayoutState: ObservableObject {
     }
 
     private func applyWorkspacePresentation(_ value: TerminalWorkspaceStore.Presentation) {
+        let chrome = WorkspaceChrome(value)
+        guard appliedWorkspaceChrome != chrome else { return }
+        appliedWorkspaceChrome = chrome
         applyingWorkspace = true
         defer { applyingWorkspace = false }
         resizeWorkItem?.cancel()
@@ -125,13 +145,13 @@ final class VerticalTabWindowLayoutState: ObservableObject {
         inspectorResizeWorkItem?.cancel()
         pendingSidebarWidth = nil
         pendingInspectorWidth = nil
-        isSidebarVisible = value.sidebarVisible
-        sidebarWidth = CGFloat(value.sidebarWidth)
-        committedSidebarWidth = sidebarWidth
-        isInspectorVisible = value.inspectorVisible
-        inspectorWidth = CGFloat(value.inspectorWidth)
-        committedInspectorWidth = inspectorWidth
-        selectedInspectorPaneID = value.inspectorPane
+        if isSidebarVisible != value.sidebarVisible { isSidebarVisible = value.sidebarVisible }
+        if sidebarWidth != CGFloat(value.sidebarWidth) { sidebarWidth = CGFloat(value.sidebarWidth) }
+        if committedSidebarWidth != sidebarWidth { committedSidebarWidth = sidebarWidth }
+        if isInspectorVisible != value.inspectorVisible { isInspectorVisible = value.inspectorVisible }
+        if inspectorWidth != CGFloat(value.inspectorWidth) { inspectorWidth = CGFloat(value.inspectorWidth) }
+        if committedInspectorWidth != inspectorWidth { committedInspectorWidth = inspectorWidth }
+        if selectedInspectorPaneID != value.inspectorPane { selectedInspectorPaneID = value.inspectorPane }
     }
 
     private func saveWorkspacePresentation() {

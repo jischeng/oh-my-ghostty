@@ -190,6 +190,24 @@ struct QuickInputDraftBridgeTests {
         #expect(parent.subviews.count == count)
     }
 
+    @Test func draftSnapshotIsInvalidatedByPaneResize() async throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 30"
+        let controller = TerminalController(app, withBaseConfig: config)
+        defer { controller.window?.delegate = nil; controller.window?.close() }
+        controller.showWindow(nil)
+        try await Task.sleep(for: .milliseconds(50))
+        let surface = try #require(controller.focusedSurface)
+        let parent = try #require(surface.superview)
+        let count = parent.subviews.count
+        let snapshot = QuickInputTerminalSnapshot(surface: surface)
+        #expect(parent.subviews.count == count + 1)
+        surface.setFrameSize(NSSize(width: surface.frame.width, height: surface.frame.height - 30))
+        #expect(parent.subviews.count == count)
+        snapshot.remove()
+    }
+
     @Test func sendingImportedPrefixAppendsOnlySuffixAndRecordsFullMessage() {
         let model = AgentQuickInputModel()
         let pane = UUID()

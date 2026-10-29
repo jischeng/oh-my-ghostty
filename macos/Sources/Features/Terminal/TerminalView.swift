@@ -73,6 +73,17 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
         return URL(fileURLWithPath: surfacePwd)
     }
 
+    /// Pane selection belongs to the controller. SwiftUI keyboard focus can be
+    /// nil while the composer/Inspector/popover is first responder or while a
+    /// parked workspace is being attached to its native window.
+    private var presentedFocusedSurface: Weak<Ghostty.SurfaceView>? {
+        if let controller = viewModel as? TerminalController,
+           let surface = controller.focusedSurface ?? controller.surfaceTree.first {
+            return Weak(surface)
+        }
+        return lastFocusedSurface
+    }
+
     private var terminalBackground: Color {
         if let controller = viewModel as? TerminalController {
             return controller.terminalBackgroundColor
@@ -105,7 +116,7 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                 action: { delegate?.performSplitAction($0) })
                 .environment(\.editorTerminalController, viewModel as? TerminalController)
                 .environmentObject(ghostty)
-                .ghosttyLastFocusedSurface(lastFocusedSurface)
+                .ghosttyLastFocusedSurface(presentedFocusedSurface)
                 .focused($focused)
                 .onAppear { self.focused = true }
                 .onChange(of: focusedSurface) { newValue in

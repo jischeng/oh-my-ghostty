@@ -292,10 +292,16 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     var workspacePresentationGeneration: UInt64 = 0
     @Published var workspaceID: UUID {
         didSet {
+            guard workspaceID != oldValue else { return }
             quickInputModel.bindPresentation(workspaceCoordinator.store.quickInputPresentation(for: workspaceID))
         }
     }
-    @Published var workspaceSwitcherIsPresented = false
+    @Published var workspaceSwitcherIsPresented = false {
+        didSet {
+            guard workspaceSwitcherIsPresented != oldValue else { return }
+            workspacePopover.setPresented(workspaceSwitcherIsPresented)
+        }
+    }
     lazy var workspacePopover = WorkspacePopoverPresentation(controller: self)
     let tabCreatedAt: Date
     @Published private(set) var tabLastActivatedAt: Date
@@ -439,18 +445,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return
         }
         guard let surface = focusedSurface ?? surfaceTree.first else { return }
-        // Bound the overlay independently of the editor handshake. Otherwise
-        // its old geometry hides the terminal's resize until import completes.
-        let snapshot = QuickInputTerminalSnapshot(surface: surface, maximumDuration: .milliseconds(150))
-        defer {
-            if quickInputDraftImportTask == nil { snapshot.removeAfterRedraw() }
-        }
-        // Presentation must never depend on the CLI's editor handshake.
+        // Presentation must never depend on the CLI's editor handshake. Only
+        // an actual external-editor request may retain its TUI's last frame.
         presentQuickInput(for: surface, requestFocus: true)
         guard quickInputDraftImportTask == nil else { return }
         let setting = OhMyGhosttySettings.shared.quickInputImportShortcut
         if let context = paneSessionContext(for: surface), context.isSSHSession {
-            importRemoteQuickInputDraft(for: surface, context: context, setting: setting, snapshot: snapshot)
+            importRemoteQuickInputDraft(for: surface, context: context, setting: setting)
             return
         }
         let foregroundCommands = surface.surfaceModel?.foregroundPID.flatMap {
@@ -475,6 +476,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
               let request = try? QuickInputDraftBridge.shared.begin(surfaceID: surface.id) else {
             return
         }
+        let snapshot = QuickInputTerminalSnapshot(surface: surface, maximumDuration: .milliseconds(150))
         quickInputDraftImportTask = Task { @MainActor [weak self, weak surface] in
             defer {
                 QuickInputDraftBridge.shared.finish(request)
@@ -518,7 +520,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         beginQuickInputResizeDeferral()
         quickInputLastTerminalSurfaceID = surface.id
         quickInputModel.present(for: surface.id, requestFocus: requestFocus)
-        if requestFocus { _ = surface.resignFirstResponder() }
+        // The composer transfers first responder once its native view is ready.
+        // Manually resigning here creates an intermediate unfocused pane frame.
     }
 
     func sendQuickInputDraft() {
@@ -690,7 +693,6 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
         quickInputLastTerminalSurfaceID = surface.id
         quickInputModel.requestFocus()
-        _ = surface.resignFirstResponder()
         return nil
     }
 

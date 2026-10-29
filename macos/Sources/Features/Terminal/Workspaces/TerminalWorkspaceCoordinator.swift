@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import GhosttyKit
 
 @MainActor
 enum TerminalWorkspacePresentation {
@@ -223,7 +224,8 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
             let members = self.members(host: host, workspace: id, state: state)
             destination = members.first { $0.tabSessionID == group?.selected } ?? members.first
             if destination == nil {
-                destination = TerminalController(source.ghostty, parent: source.window, tabLayout: source.tabLayout,
+                destination = TerminalController(source.ghostty, withBaseConfig: self.localShellConfiguration(from: source),
+                    parent: source.window, tabLayout: source.tabLayout,
                     workspaceID: id, windowSessionID: host, workspaceGroupID: group?.id, workspaceCoordinator: self)
                 destination?.isBackgroundOpaque = source.isBackgroundOpaque
                 _ = destination?.window
@@ -255,8 +257,8 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
             if state.windows?[host]?.currentWorkspace == sourceWorkspace {
                 let remaining = self.members(host: host, workspace: sourceWorkspace, state: state)
                 if remaining.isEmpty && replacingLastTab {
-                    let replacement = TerminalController(controller.ghostty, parent: controller.window,
-                        tabLayout: controller.tabLayout, workspaceID: sourceWorkspace, windowSessionID: host,
+                    let replacement = TerminalController(controller.ghostty, withBaseConfig: self.localShellConfiguration(from: controller),
+                        parent: controller.window, tabLayout: controller.tabLayout, workspaceID: sourceWorkspace, windowSessionID: host,
                         workspaceGroupID: sourceGroup, workspaceCoordinator: self)
                     _ = replacement.window
                     state = self.draft ?? state
@@ -329,6 +331,16 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
         revision &+= 1
         sessions.capture()
         return succeeded
+    }
+
+    /// Use the host's existing new-tab configuration contract. Besides keeping
+    /// SSH/runtime directories local, this supplies launch metadata before OSC
+    /// title/cwd events arrive, so the first row need not flash a generic title.
+    private func localShellConfiguration(from source: TerminalController) -> Ghostty.SurfaceConfiguration? {
+        guard let pane = source.focusedSurface ?? source.surfaceTree.first,
+              let surface = pane.surface else { return nil }
+        return source.tabConfiguration(inherited: .init(from: ghostty_surface_inherited_config(
+            surface, GHOSTTY_SURFACE_CONTEXT_TAB)), from: pane)
     }
 
     private func restoreMissing(workspace: UUID, host: UUID, app: Ghostty.App, parent: NSWindow?) {

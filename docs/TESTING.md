@@ -17,7 +17,9 @@ release does not automatically require every unrelated feature suite.
    (native fullscreen tab creation, framebuffer/sidebar handoff, and exit), `QuickInputFooterMouseTests`
    (icon-only History and its complete padded mouse hit target), and the visual
    `VerticalTabsIntegrationTests.appKitTabGroupDrivesVerticalTabsWithoutRecreatingSurfaces`,
-   and `TerminalLinkHoverTests.commandHoverRemainsStable` (Cmd-link hover in single/split panes).
+   `TerminalLinkHoverTests.commandHoverRemainsStable` (Cmd-link hover in single/split panes),
+   and `TerminalWorkspacePresentationTests.clickingWorkspaceButtonOpensItsNativePopover`
+   (actual mouseDown/mouseUp opening the transient workspace popover).
    Real CoreDrag, menu focus routing, native window appearance, and screenshots
    need an unlocked desktop and foreground test application. Lockscreen,
    background, and unattended runs cannot establish that behavior. Other methods

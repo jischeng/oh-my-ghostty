@@ -180,7 +180,7 @@ struct VerticalTabMouseTests {
             while let queued = NSApp.nextEvent(matching: [.leftMouseDragged, .leftMouseUp],
                 until: .distantPast, inMode: .default, dequeue: true) { NSApp.sendEvent(queued) }
             try await Task.sleep(for: .milliseconds(200))
-            #expect(pasteboard.changeCount > before, "The native drag source must actually run")
+            #expect(pasteboard.changeCount > before, "The native drag source must actually run for destination row \(destination)")
         }
         let initialOrder = group.windows
         try await nativeDrag(toRow: 0)

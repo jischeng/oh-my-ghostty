@@ -44,6 +44,7 @@ struct TerminalWorkspaceButton: View {
 final class WorkspacePopoverPresentation: NSObject, NSPopoverDelegate {
     private weak var controller: TerminalController?
     private let popover = NSPopover()
+    private weak var anchor: NSView?
     private var pendingAction: (() -> Void)?
     private(set) var contentCreationCount = 0
     var isShown: Bool { popover.isShown }
@@ -57,19 +58,39 @@ final class WorkspacePopoverPresentation: NSObject, NSPopoverDelegate {
     }
 
     func update(anchor: NSView) {
-        guard let controller else { return }
-        guard controller.workspaceSwitcherIsPresented else {
+        self.anchor = anchor
+        setPresented(controller?.workspaceSwitcherIsPresented == true)
+    }
+
+    /// Presentation is a controller command. SwiftUI only registers an anchor;
+    /// it must not be the event source for opening a native popover.
+    func setPresented(_ presented: Bool) {
+        guard presented else {
             if popover.isShown { popover.performClose(nil) }
             return
         }
-        guard !popover.isShown, anchor.window === controller.window,
-              controller.isAvailableForWorkspace, !controller.workspacePresentationIsParked else { return }
+        guard let controller, !popover.isShown, controller.isAvailableForWorkspace,
+              !controller.workspacePresentationIsParked,
+              let window = controller.window else { return }
+        let source: NSView
+        let rect: NSRect
+        if let anchor, anchor.window === window, !anchor.isHiddenOrHasHiddenAncestor,
+           anchor.bounds.width > 0, anchor.bounds.height > 0 {
+            source = anchor
+            rect = anchor.bounds
+        } else {
+            // Keyboard switching remains available with the sidebar collapsed.
+            // The content view is stable even when SwiftUI removes the button.
+            guard let content = window.contentView else { return }
+            source = content
+            rect = NSRect(x: 12, y: content.isFlipped ? 0 : max(0, content.bounds.height - 1), width: 1, height: 1)
+        }
         let content = TerminalWorkspacePicker(controller: controller) { [weak self] action in
             self?.close(after: action)
         }
         popover.contentViewController = NSHostingController(rootView: content)
         contentCreationCount += 1
-        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
+        popover.show(relativeTo: rect, of: source, preferredEdge: .maxY)
     }
 
     func close(after action: (() -> Void)? = nil) {

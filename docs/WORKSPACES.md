@@ -8,14 +8,17 @@ they do not sandbox files, credentials, shell environment variables or networkin
 
 The upper-left workspace name replaces the vertical sidebar's TABS heading. Click
 it to search, switch, create or edit a workspace. Each workspace has a name, symbol
-and muted accent color. When the vertical sidebar is hidden, or horizontal tabs
-are enabled, a compact workspace control remains above the terminal content.
+and muted accent color. Collapsing the vertical sidebar also hides its workspace
+control; workspace shortcuts remain available. Horizontal tabs use a compact
+workspace control above the terminal content.
 
 - `Control-Command-W`: open the searchable switcher. It initially selects the
   current window's previous workspace; Return confirms, arrow keys choose, Escape cancels.
 - `Control-Command-1` through `Control-Command-9`: select the corresponding
   workspace in its fixed catalog order.
 - **New Workspace…**: choose a name, icon and color, then start with a local shell.
+  Its launch configuration follows the normal new-tab directory inheritance
+  settings, including the local-directory fallback for SSH/runtime panes.
 - **Edit Current Workspace…**: rename or change its appearance. The name field
   receives initial keyboard focus in both the create and edit forms.
 - **Delete Current Workspace…**: confirm removal of the workspace label. Its live
@@ -40,8 +43,9 @@ preferences immediately. Window-local selection, tab order and scroll position
 remain independent. New workspaces start
 from the global sidebar and composer defaults; changing one workspace does not
 change another workspace's saved layout. Quick Input drafts, queues and send
-targets remain attached to their original panes. Theme, fonts and keyboard
-shortcuts remain global.
+targets remain attached to their original panes. Quick Input changes do not
+republish sidebar/Inspector geometry. Theme, fonts and keyboard shortcuts remain
+global.
 
 ## Multiple windows
 
@@ -137,6 +141,17 @@ membership and selection together, restores the workspace sidebar host, prepares
 the correctly sized terminal frame and restores focus. Fullscreen transition
 notifications defer switches until the transition completes; delayed presentation
 callbacks carry a generation so rapid subsequent switches supersede them.
+The workspace popover is opened by the controller command; SwiftUI registers
+its anchor but does not own the open event. Keyboard commands fall back to the
+window content anchor when the sidebar is collapsed.
+
+New workspace shells use the same launch-configuration path as new tabs, so a
+known inherited directory is available for the first row before shell title
+notifications arrive. Ordinary Quick Input presentation does not cover the pane
+with a screenshot. Only an actual external-editor draft handshake may retain a
+short-lived TUI image, and resizing the pane immediately invalidates that image.
+The native composer takes first responder when ready; the controller's selected
+pane continues to own the split highlight during the handoff.
 
 The workspace regression suites cover the state graph, close/undo, cross-window
 delete, rollback and checkpoint migration. `VerticalTabFullscreenTests` additionally

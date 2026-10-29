@@ -2,8 +2,7 @@ import Foundation
 
 extension TerminalController {
     func importRemoteQuickInputDraft(
-        for surface: Ghostty.SurfaceView, context: PaneSessionContext, setting: String,
-        snapshot: QuickInputTerminalSnapshot
+        for surface: Ghostty.SurfaceView, context: PaneSessionContext, setting: String
     ) {
         guard !setting.isEmpty, !SecureInput.shared.enabled,
               case .sshReady(let ssh, _) = context.state,
@@ -15,8 +14,9 @@ extension TerminalController {
         let hasAgentActivity = agentActivity(for: surface) != nil
         let request = UUID().uuidString
         quickInputDraftImportTask = Task { @MainActor [weak self, weak surface] in
+            var snapshot: QuickInputTerminalSnapshot?
             defer {
-                snapshot.removeAfterRedraw()
+                snapshot?.removeAfterRedraw()
                 self?.quickInputDraftImportTask = nil
             }
             do {
@@ -38,6 +38,7 @@ extension TerminalController {
                     await QuickInputRemoteDraftBridge.finish(connection: connection, session: ssh.connectionID, request: request)
                     return
                 }
+                snapshot = QuickInputTerminalSnapshot(surface: surface, maximumDuration: .milliseconds(150))
                 for key in keys {
                     terminal.sendKeyEvent(key)
                     terminal.sendKeyEvent(.init(key: key.key, action: .release, mods: key.mods,

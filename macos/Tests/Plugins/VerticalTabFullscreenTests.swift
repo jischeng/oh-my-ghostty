@@ -146,6 +146,11 @@ struct VerticalTabFullscreenTests {
         let targetSurface = try #require(target.focusedSurface ?? target.surfaceTree.first)
         #expect(targetSurface.window === targetWindow)
         #expect(targetWindow.firstResponder === targetSurface)
+        target.workspaceSwitcherIsPresented = true
+        #expect(target.workspacePopover.isShown)
+        target.workspaceSwitcherIsPresented = false
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(!target.workspacePopover.isShown)
         #expect(coordinator.switchWorkspace(to: source.workspaceID, from: target) === source)
         try await Task.sleep(for: .milliseconds(250))
         #expect(window.styleMask.contains(.fullScreen))
@@ -186,6 +191,24 @@ struct VerticalTabFullscreenTests {
         #expect(!target.sidebarIsShowing)
         #expect(targetWindow.firstResponder === extraPane)
         try expectPreparedFrame(target)
+        // A collapsed sidebar has no replacement header. The keyboard command
+        // still opens against the owning fullscreen content view.
+        target.workspaceSwitcherIsPresented = true
+        #expect(target.workspacePopover.isShown)
+        target.workspaceSwitcherIsPresented = false
+        try await Task.sleep(for: .milliseconds(50))
+        targetWindow.makeFirstResponder(extraPane)
+        let parent = try #require(extraPane.superview)
+        let overlayCount = parent.subviews.filter { $0 is NSImageView }.count
+        target.toggleQuickInput()
+        #expect(parent.subviews.filter { $0 is NSImageView }.count == overlayCount)
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(targetWindow.firstResponder is ComposerTextView)
+        #expect(target.focusedSurface === extraPane)
+        target.dismissQuickInput()
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(targetWindow.firstResponder === extraPane)
+        #expect(targetWindow.styleMask.contains(.fullScreen))
 
         // Moving the last source tab must create its replacement inside the
         // existing fullscreen stack before parking the moved tab.

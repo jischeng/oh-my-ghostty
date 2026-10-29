@@ -306,7 +306,9 @@ fn runInner(
         var handoff_env = try global.environMap();
         defer handoff_env.deinit();
         if (handoff_env.get("OMG_SSH_HANDOFF_HELPER")) |helper| {
-            if (handoff_env.get("OMG_SSH_HANDOFF_TOKEN") != null) {
+            const token = handoff_env.get("OMG_SSH_HANDOFF_TOKEN") orelse "";
+            const directory = handoff_env.get("OMG_SSH_HANDOFF_DIRECTORY") orelse "";
+            if (helper.len > 0 and token.len > 0 and directory.len > 0) {
                 const check = try std.mem.concat(alloc, []const u8, &.{ &.{ helper, "handoff-check" }, opts._ssh_args.items });
                 if ((childExec(check) catch 64) == 0) {
                     const request = try std.mem.concat(alloc, []const u8, &.{ &.{ helper, "handoff", opts.ssh }, opts._ssh_args.items });

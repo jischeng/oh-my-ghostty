@@ -117,6 +117,13 @@ request file carries exact argv/cwd; OSC 3008 only references its random ID.
 The host checks the owning pane capability before replacing that local surface
 with the native remote backend. Output alone is insufficient to authorize it.
 Remote commands, tunnels and unsupported flags retain standard SSH behavior.
+Each local pane overwrites inherited handoff variables, including when its app
+bundle lacks the helper; capabilities from the terminal that launched the app
+must never be reused. An authenticated request receives `.accepted` only after
+native surface construction succeeds, or a private `.failed` response with a
+setup error. The helper reports that failure immediately rather than waiting
+for its unacknowledged-request timeout. Development installers validate bundled
+helpers, dependencies and remote platform manifests before replacing the app.
 The local surface is retained during handoff. A confirmed remote process exit
 returns to that local shell and records a local pane; transport disconnection
 never triggers this transition. Across app restart, the local shell is recreated

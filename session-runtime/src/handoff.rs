@@ -48,6 +48,11 @@ pub fn request(ssh: &str, args: &[String]) -> io::Result<()> {
     }
     let token = env::var("OMG_SSH_HANDOFF_TOKEN").map_err(io::Error::other)?;
     let directory = env::var("OMG_SSH_HANDOFF_DIRECTORY").map_err(io::Error::other)?;
+    if token.is_empty() || directory.is_empty() {
+        return Err(io::Error::other(
+            "native SSH is unavailable in this terminal",
+        ));
+    }
     let id = crate::record::nonce()?;
     let payload =
         serde_json::json!({"token":token,"ssh":ssh,"args":args,"cwd":env::current_dir()?});
@@ -66,8 +71,15 @@ pub fn request(ssh: &str, args: &[String]) -> io::Result<()> {
     // pane. Only GUI-owned completion returns to that exact shell environment.
     let accepted = std::path::Path::new(&directory).join(format!("{id}.accepted"));
     let done = std::path::Path::new(&directory).join(format!("{id}.done"));
+    let failed = std::path::Path::new(&directory).join(format!("{id}.failed"));
     let start = std::time::Instant::now();
     loop {
+        if let Ok(message) = std::fs::read_to_string(&failed) {
+            let _ = std::fs::remove_file(&failed);
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(&accepted);
+            return Err(io::Error::other(format!("OMG native SSH: {message}")));
+        }
         if done.exists() {
             let _ = std::fs::remove_file(done);
             let _ = std::fs::remove_file(accepted);

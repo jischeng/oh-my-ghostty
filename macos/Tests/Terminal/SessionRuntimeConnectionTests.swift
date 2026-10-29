@@ -5,6 +5,92 @@ import Testing
 
 struct SessionRuntimeConnectionTests {
     @MainActor
+    @Test func missingRuntimeClearsInheritedHandoffCapability() {
+        var config = Ghostty.SurfaceConfiguration()
+        let keys = ["OMG_SSH_HANDOFF_HELPER", "OMG_SSH_HANDOFF_DIRECTORY", "OMG_SSH_HANDOFF_TOKEN"]
+        for key in keys { config.environmentVariables[key] = "stale-from-another-app" }
+        let missing = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        SessionRuntimeHandoff(resources: missing).configure(&config, pane: UUID())
+        for key in keys { #expect(config.environmentVariables[key] == "") }
+    }
+
+    @MainActor
+    @Test func handoffCapabilityBelongsToTheCurrentAppAndPane() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let helper = root.appendingPathComponent("omgd")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: helper)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+        let directory = root.appendingPathComponent("requests")
+        let handoff = SessionRuntimeHandoff(resources: root, directory: directory)
+        var first = Ghostty.SurfaceConfiguration()
+        first.environmentVariables["OMG_SSH_HANDOFF_DIRECTORY"] = "old-app"
+        handoff.configure(&first, pane: UUID())
+        var second = Ghostty.SurfaceConfiguration()
+        handoff.configure(&second, pane: UUID())
+        #expect(first.environmentVariables["OMG_SSH_HANDOFF_HELPER"] == helper.path)
+        #expect(first.environmentVariables["OMG_SSH_HANDOFF_DIRECTORY"] == directory.path)
+        #expect(first.environmentVariables["OMG_SSH_HANDOFF_TOKEN"] != second.environmentVariables["OMG_SSH_HANDOFF_TOKEN"])
+
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        var base = Ghostty.SurfaceConfiguration()
+        base.command = "/bin/sleep 60"
+        let controller = TerminalController(app, withBaseConfig: base)
+        defer { controller.window?.delegate = nil; controller.window?.close() }
+        let surface = try #require(controller.surfaceTree.first)
+        handoff.configure(&first, pane: surface.id)
+        let name = String(repeating: "a", count: 32)
+        let request: [String: Any] = ["token": first.environmentVariables["OMG_SSH_HANDOFF_TOKEN"]!,
+            "ssh": "/usr/bin/ssh", "args": ["-N", "host"], "cwd": root.path]
+        try JSONSerialization.data(withJSONObject: request).write(to: directory.appendingPathComponent(name + ".json"))
+        #expect(handoff.accept(.init(action: .start, id: "omg-runtime-request-" + name, metadata: "type=app"),
+                               source: surface, controller: controller))
+        #expect(FileManager.default.fileExists(atPath: directory.appendingPathComponent(name + ".failed").path))
+        #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent(name + ".accepted").path))
+        #expect(controller.surfaceTree.first === surface)
+    }
+
+    @MainActor
+    @Test(.enabled(if: FileManager.default.isExecutableFile(atPath:
+        Bundle.main.resourceURL!.appendingPathComponent("session-runtime/omgd").path),
+        "Requires the bundled Session Runtime helper"))
+    func packagedHandoffReachesOwningPaneWithoutConnectingToSSH() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let script = root.appendingPathComponent("request.py")
+        let result = root.appendingPathComponent("result")
+        try """
+        import json, os, pathlib, time
+        directory = pathlib.Path(os.environ['OMG_SSH_HANDOFF_DIRECTORY'])
+        name = '1234567890abcdef1234567890abcdef'
+        payload = dict(token=os.environ['OMG_SSH_HANDOFF_TOKEN'], ssh='/usr/bin/ssh', args=['-N', 'host'], cwd=os.getcwd())
+        (directory / (name + '.json')).write_text(json.dumps(payload))
+        os.write(1, ('\\x1b]3008;start=omg-runtime-request-' + name + ';type=app\\x07').encode())
+        failed = directory / (name + '.failed')
+        for _ in range(100):
+            if failed.exists():
+                pathlib.Path(\(String(reflecting: result.path))).write_text('acknowledged')
+                failed.unlink()
+                break
+            time.sleep(.05)
+        """.write(to: script, atomically: true, encoding: .utf8)
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/usr/bin/python3 " + script.path
+        let controller = TerminalController(app, withBaseConfig: config)
+        _ = controller.window
+        defer { controller.window?.delegate = nil; controller.window?.close() }
+        for _ in 0..<120 {
+            if FileManager.default.fileExists(atPath: result.path) { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(try String(contentsOf: result, encoding: .utf8) == "acknowledged")
+        #expect(controller.surfaceTree.first?.runtimeDescriptor == nil)
+    }
+
+    @MainActor
     @Test func reconnectReplacesViewButPreservesPaneIdentityAndRestoreOnlyRequest() throws {
         let app = try #require(NSApp.delegate as? AppDelegate).ghostty
         let native = try #require(app.app)

@@ -95,6 +95,57 @@ final class TerminalWorkspaceStore: ObservableObject {
         return result
     }
 
+    struct Group: Codable, Equatable {
+        var id: UUID
+        var tabs: [UUID] = []
+        var selected: UUID?
+        var scrollOffset: Double?
+    }
+
+    struct Window: Codable, Equatable {
+        var currentWorkspace: UUID
+        var previousWorkspace: UUID?
+        var groups: [UUID: Group] = [:]
+        var frame: CGRect?
+        var fullscreen: Bool?
+    }
+
+    func group(window: UUID, workspace: UUID) -> Group? {
+        snapshot.windows?[window]?.groups[workspace]
+    }
+
+    func rememberGroup(window: UUID, workspace: UUID, group: Group) {
+        var record = snapshot.windows?[window] ?? Window(currentWorkspace: workspace)
+        guard record.groups[workspace] != group else { return }
+        record.groups[workspace] = group
+        setWindow(window, record)
+    }
+
+    func selectWorkspace(_ workspace: UUID, in window: UUID, frame: CGRect?, fullscreen: Bool?) {
+        var record = snapshot.windows?[window] ?? Window(currentWorkspace: workspace)
+        if record.currentWorkspace != workspace {
+            record.previousWorkspace = record.currentWorkspace
+            record.currentWorkspace = workspace
+        }
+        record.frame = frame ?? record.frame
+        record.fullscreen = fullscreen ?? record.fullscreen
+        setWindow(window, record)
+    }
+
+    func removeTab(_ tab: UUID, window: UUID, workspace: UUID) {
+        guard var group = group(window: window, workspace: workspace) else { return }
+        group.tabs.removeAll { $0 == tab }
+        if group.selected == tab { group.selected = group.tabs.first }
+        rememberGroup(window: window, workspace: workspace, group: group)
+    }
+
+    private func setWindow(_ id: UUID, _ value: Window) {
+        guard snapshot.windows?[id] != value else { return }
+        if snapshot.windows == nil { snapshot.windows = [:] }
+        snapshot.windows?[id] = value
+        persist()
+    }
+
     struct Snapshot: Codable, Equatable {
         var version = 1
         var workspaces: [TerminalWorkspace] = [.initial]
@@ -104,6 +155,8 @@ final class TerminalWorkspaceStore: ObservableObject {
         var parkedGroups: [UUID: [UUID]]? = [:]
         var shortcuts: [String: String] = [:]
         var presentations: [UUID: Presentation]? = [:]
+        // Optional so catalogs written before window-scoped groups still decode.
+        var windows: [UUID: Window]?
     }
 
     @Published private(set) var snapshot: Snapshot

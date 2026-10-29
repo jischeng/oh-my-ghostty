@@ -12,6 +12,54 @@ final class VerticalTabSidebarHost {
     private(set) var mountCount = 0
 
     var liveView: NSView? { hostingView }
+    private var pendingScrollOffset: Double?
+    private var rememberedScrollOffset: Double?
+    private var scrollRestorationGeneration = 0
+
+    var scrollOffset: Double? {
+        if let pendingScrollOffset { return pendingScrollOffset }
+        guard let scroll = scrollView(in: hostingView) else { return rememberedScrollOffset }
+        let value = Double(scroll.contentView.bounds.origin.y)
+        rememberedScrollOffset = value
+        return value
+    }
+
+    func restoreScrollOffset(_ value: Double?) {
+        guard let value, value.isFinite, value >= 0 else { return }
+        rememberedScrollOffset = value
+        pendingScrollOffset = value
+        applyScrollOffset()
+        scrollRestorationGeneration += 1
+        let generation = scrollRestorationGeneration
+        DispatchQueue.main.async { [weak self] in
+            guard let self, generation == self.scrollRestorationGeneration else { return }
+            if self.applyScrollOffset() { self.pendingScrollOffset = nil }
+        }
+    }
+
+    /// SwiftUI's onAppear/selection effects run after native host mounting.
+    /// Reapply a saved group position there instead of auto-scrolling to a
+    /// selected tab the user may intentionally have scrolled away from.
+    func restorePendingScrollPosition() -> Bool {
+        guard pendingScrollOffset != nil else { return false }
+        return applyScrollOffset()
+    }
+
+    private func scrollView(in view: NSView?) -> NSScrollView? {
+        guard let view else { return nil }
+        if let scroll = view as? NSScrollView { return scroll }
+        return view.subviews.lazy.compactMap { self.scrollView(in: $0) }.first
+    }
+
+    @discardableResult
+    private func applyScrollOffset() -> Bool {
+        guard let offset = pendingScrollOffset, let scroll = scrollView(in: hostingView),
+              let document = scroll.documentView else { return false }
+        let maximum = max(0, document.bounds.height - scroll.contentView.bounds.height)
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: min(CGFloat(offset), maximum)))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        return true
+    }
 
     func register(_ container: VerticalTabSidebarContainer) {
         containers[ObjectIdentifier(container)] = Weak(container)
@@ -68,6 +116,7 @@ final class VerticalTabSidebarHost {
             mountCount += 1
             destination.install(host)
         }
+        applyScrollOffset()
     }
 }
 

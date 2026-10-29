@@ -14,6 +14,7 @@ final class TerminalWorkspaceSessionStore {
         var selected: Bool?
         var frame: CGRect?
         var fullscreen: Bool?
+        var window: UUID?
     }
     struct Snapshot: Codable {
         var version = 1
@@ -22,11 +23,13 @@ final class TerminalWorkspaceSessionStore {
     static let restoreSessionsKey = CodingUserInfoKey(rawValue: "omg.workspace.restore-sessions")!
     private let url: URL
     private let testing: Bool
+    private let workspaces: TerminalWorkspaceStore
 
-    init(url: URL? = nil, testing: Bool = false) {
+    init(url: URL? = nil, testing: Bool = false, workspaces: TerminalWorkspaceStore? = nil) {
         self.url = url ?? OMGApplicationEnvironment.applicationSupportURL()
             .appendingPathComponent("workspaces/sessions.json")
         self.testing = testing
+        self.workspaces = workspaces ?? .shared
     }
     private var saved = Snapshot()
     private var timer: AnyCancellable?
@@ -41,7 +44,30 @@ final class TerminalWorkspaceSessionStore {
         if let data = try? Data(contentsOf: url), data.count <= 32 * 1_024 * 1_024,
            let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data), snapshot.version == 1 {
             saved = snapshot
+            migrateWindowGroups()
             ownsRestoration = true
+        }
+    }
+
+    private func migrateWindowGroups() {
+        // A legacy native group is the only reliable window boundary. Do not
+        // infer that unrelated parked groups used to share a window.
+        for index in saved.tabs.indices {
+            let group = saved.tabs[index].group ?? saved.tabs[index].workspace
+            saved.tabs[index].group = group
+            if saved.tabs[index].window == nil { saved.tabs[index].window = group }
+        }
+        for (host, tabs) in Dictionary(grouping: saved.tabs, by: { $0.window! }) {
+            for (workspace, members) in Dictionary(grouping: tabs, by: \.workspace) {
+                guard workspaces.group(window: host, workspace: workspace) == nil else { continue }
+                let selected = members.first { $0.selected == true }?.id ?? members.first?.id
+                workspaces.rememberGroup(window: host, workspace: workspace,
+                    group: .init(id: members[0].group!, tabs: members.map(\.id), selected: selected))
+            }
+            if let tab = tabs.first, workspaces.snapshot.windows?[host]?.frame == nil {
+                let current = workspaces.snapshot.windows?[host]?.currentWorkspace ?? tab.workspace
+                workspaces.selectWorkspace(current, in: host, frame: tab.frame, fullscreen: tab.fullscreen)
+            }
         }
     }
 
@@ -55,31 +81,27 @@ final class TerminalWorkspaceSessionStore {
             NSDisableScreenUpdates()
             TerminalWorkspacePresentation.begin()
             defer {
+                for anchor in anchors.values {
+                    if let controller = anchor.windowController as? TerminalController {
+                        controller.tabLayoutState.sidebarHost.restoreScrollOffset(workspaces.group(
+                            window: controller.windowSessionID, workspace: controller.workspaceID)?.scrollOffset)
+                    }
+                }
                 TerminalWorkspacePresentation.end()
                 for anchor in anchors.values {
                     (anchor.windowController as? TerminalController)?.refreshWorkspaceTabs()
                     anchor.contentView?.superview?.layoutSubtreeIfNeeded()
+                    if let controller = anchor.windowController as? TerminalController {
+                        controller.tabLayoutState.sidebarHost.restoreScrollOffset(workspaces.group(
+                            window: controller.windowSessionID, workspace: controller.workspaceID)?.scrollOffset)
+                    }
                     anchor.contentView?.displayIfNeeded()
                 }
                 NSEnableScreenUpdates()
             }
             for tab in saved.tabs {
-                guard !TerminalController.all.contains(where: { $0.tabSessionID == tab.id }),
-                      let state = try? decoder.decode(TerminalRestorableState.self, from: tab.state) else { continue }
-                let controller = TerminalController(
-                    app, withSurfaceTree: state.surfaceTree, tabSessionID: tab.id,
-                    tabCreatedAt: state.tabCreatedAt, workspaceID: tab.workspace
-                )
-                controller.titleOverride = state.titleOverride
-                if let focused = state.focusedSurface {
-                    controller.focusedSurface = controller.surfaceTree.first { $0.id.uuidString == focused }
-                }
-                guard let window = controller.window else { continue }
-                if let frame = tab.frame {
-                    window.setFrame(frame, display: false)
-                    window.constrainToScreen()
-                }
-                (window as? TerminalWindow)?.tabColor = state.tabColor ?? .none
+                guard let controller = restore(tab, app: app, decoder: decoder),
+                      let window = controller.window else { continue }
                 let group = tab.group ?? tab.workspace
                 if let anchor = anchors[group] { _ = anchor.addTabbedWindowSafely(window, ordered: .above) }
                 anchors[group] = window
@@ -87,25 +109,27 @@ final class TerminalWorkspaceSessionStore {
             }
             // Assemble every group before exposing its selected tab. Showing
             // each tab during construction causes visible incremental restore.
-            let presentation = TerminalWorkspaceStore.shared.snapshot
+            let presentation = workspaces.snapshot
             for (_, anchor) in anchors {
-                let workspace = (anchor.windowController as? TerminalController)?.workspaceID
+                guard let controller = anchor.windowController as? TerminalController else { continue }
+                let workspace = controller.workspaceID
+                let host = controller.windowSessionID
+                let record = presentation.windows?[host]
                 let windows = anchor.tabGroup?.windows ?? [anchor]
-                let visible = windows.filter {
-                    guard let controller = $0.windowController as? TerminalController else { return false }
-                    return !presentation.hiddenTabs.contains(controller.tabSessionID)
+                let selectedID = record?.groups[workspace]?.selected ?? saved.tabs.first {
+                    ($0.window ?? $0.group ?? $0.workspace) == host && $0.workspace == workspace && $0.selected == true
+                }?.id
+                let selected = windows.first { ($0.windowController as? TerminalController)?.tabSessionID == selectedID } ?? anchor
+                anchor.tabGroup?.selectedWindow = selected
+                let hidden = record.map { $0.currentWorkspace != workspace } ?? false
+                for window in windows {
+                    (window.windowController as? TerminalController)?.workspacePresentationIsParked = hidden
                 }
-                let selected = visible.first {
-                    guard let id = ($0.windowController as? TerminalController)?.tabSessionID else { return false }
-                    return saved.tabs.first(where: { $0.id == id })?.selected == true ||
-                        (workspace.flatMap { presentation.selectedTabs[$0] } == id)
-                } ?? visible.first
-                (anchor.windowController as? TerminalController)?.refreshWorkspaceTabs()
-                if let selected {
-                    anchor.tabGroup?.selectedWindow = selected
+                if !hidden {
+                    if let frame = record?.frame { selected.setFrame(frame, display: false); selected.constrainToScreen() }
                     selected.makeKeyAndOrderFront(nil)
                     let selectedID = (selected.windowController as? TerminalController)?.tabSessionID
-                    if saved.tabs.first(where: { $0.id == selectedID })?.fullscreen == true {
+                    if record?.fullscreen ?? (saved.tabs.first(where: { $0.id == selectedID })?.fullscreen == true) {
                         DispatchQueue.main.async { [weak selected] in
                             guard let selected, selected.isVisible,
                                   !selected.styleMask.contains(.fullScreen) else { return }
@@ -116,7 +140,9 @@ final class TerminalWorkspaceSessionStore {
             }
         }
         for (workspace, anchor) in ownsRestoration ? [:] : anchorsForRestoredTabs() {
-            let selectedID = TerminalWorkspaceStore.shared.snapshot.selectedTabs[workspace]
+            let host = (anchor.windowController as? TerminalController)?.windowSessionID
+            let selectedID = host.flatMap { workspaces.group(window: $0, workspace: workspace)?.selected }
+                ?? workspaces.snapshot.selectedTabs[workspace]
             if let selected = anchor.tabGroup?.windows.first(where: {
                 ($0.windowController as? TerminalController)?.tabSessionID == selectedID
             }) {
@@ -141,6 +167,49 @@ final class TerminalWorkspaceSessionStore {
         timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect().sink { [weak self] _ in
             self?.capture()
         }
+    }
+
+    /// A window close retains its catalog entries. Reopen them only when the
+    /// user switches to that workspace, never by re-showing a torn-down window.
+    /// The coordinator attaches this ordered group to the current window.
+    func restoreWorkspace(_ id: UUID, window: UUID, group: UUID?, app: Ghostty.App, parent: NSWindow?) -> [TerminalController] {
+        let wasRestoring = restoring
+        restoring = true
+        defer { restoring = wasRestoring }
+        let decoder = JSONDecoder()
+        decoder.userInfo[Self.restoreSessionsKey] = true
+        return saved.tabs.filter {
+            $0.workspace == id && ($0.window ?? $0.group ?? $0.workspace) == window &&
+                (group == nil || ($0.group ?? $0.workspace) == group) && !removed.contains($0.id)
+        }.compactMap { restore($0, app: app, decoder: decoder, parent: parent) }
+    }
+
+    private func restore(
+        _ tab: Tab, app: Ghostty.App, decoder: JSONDecoder, parent: NSWindow? = nil
+    ) -> TerminalController? {
+        guard !TerminalController.all.contains(where: { $0.tabSessionID == tab.id && $0.isAvailableForWorkspace }),
+              let state = try? decoder.decode(TerminalRestorableState.self, from: tab.state),
+              !state.surfaceTree.isEmpty else { return nil }
+        let controller = TerminalController(
+            app, withSurfaceTree: state.surfaceTree, parent: parent,
+            tabLayout: (parent?.windowController as? TerminalController)?.tabLayout,
+            tabSessionID: tab.id, tabCreatedAt: state.tabCreatedAt, workspaceID: tab.workspace,
+            windowSessionID: tab.window ?? tab.group ?? tab.workspace,
+            workspaceGroupID: tab.group ?? tab.workspace
+        )
+        controller.workspaceID = tab.workspace
+        controller.titleOverride = state.titleOverride
+        if let focused = state.focusedSurface {
+            controller.focusedSurface = controller.surfaceTree.first { $0.id.uuidString == focused }
+        }
+        guard let window = controller.window else { return nil }
+        if parent == nil, let frame = tab.frame {
+            window.setFrame(frame, display: false)
+            window.constrainToScreen()
+        }
+        (window as? TerminalWindow)?.tabColor = state.tabColor ?? .none
+        controller.cancelWorkspacePendingPresentation()
+        return controller
     }
 
     private func anchorsForRestoredTabs() -> [UUID: NSWindow] {
@@ -170,32 +239,41 @@ final class TerminalWorkspaceSessionStore {
     func forget(_ controller: TerminalController) {
         guard started, !quitting else { return }
         removed.insert(controller.tabSessionID)
+        workspaces.removeTab(controller.tabSessionID, window: controller.windowSessionID, workspace: controller.workspaceID)
         saved.tabs.removeAll { $0.id == controller.tabSessionID }
         persist()
     }
 
     /// Retain a window-close snapshot; only explicit tab close removes it.
     func capture() {
-        guard started, !restoring, !quitting else { return }
-        for controller in TerminalController.all where !controller.surfaceTree.isEmpty && !removed.contains(controller.tabSessionID) {
+        guard started, !restoring, !quitting, !TerminalWorkspacePresentation.isChanging else { return }
+        let live = TerminalController.all.filter { $0.isAvailableForWorkspace && !removed.contains($0.tabSessionID) }
+        var visited = Set<UUID>()
+        for controller in live where !controller.workspacePresentationIsParked && !visited.contains(controller.workspaceGroupID) {
+            let members = (controller.window?.tabGroup?.windows ?? [controller.window].compactMap { $0 }).compactMap {
+                $0.windowController as? TerminalController
+            }.filter(\.isAvailableForWorkspace)
+            TerminalWorkspaceCoordinator.shared.reconcileNativeGroup(members)
+            visited.insert(controller.workspaceGroupID)
+            let ids = members.filter { $0.isAvailableForWorkspace }.map(\.tabSessionID)
+            let selected = (controller.window?.tabGroup?.selectedWindow?.windowController as? TerminalController) ?? controller
+            workspaces.rememberGroup(window: controller.windowSessionID, workspace: controller.workspaceID,
+                group: .init(id: controller.workspaceGroupID, tabs: ids.isEmpty ? [controller.tabSessionID] : ids,
+                    selected: selected.tabSessionID, scrollOffset: controller.tabLayoutState.sidebarHost.scrollOffset))
+            workspaces.selectWorkspace(controller.workspaceID, in: controller.windowSessionID,
+                frame: controller.window?.frame, fullscreen: controller.window?.styleMask.contains(.fullScreen))
+        }
+        for controller in live {
             guard let data = try? JSONEncoder().encode(TerminalRestorableState(from: controller)) else { continue }
             let window = controller.window
-            let parkedGroup = TerminalWorkspaceStore.shared.snapshot.parkedGroups?.first {
-                $0.value.contains(controller.tabSessionID)
-            }?.key
-            let group = parkedGroup ?? (window?.tabGroup?.windows.first?.windowController as? TerminalController)?.tabSessionID
-                ?? controller.tabSessionID
+            let selection = workspaces.group(window: controller.windowSessionID, workspace: controller.workspaceID)?.selected
             let tab = Tab(id: controller.tabSessionID, workspace: controller.workspaceID, state: data,
-                group: group, selected: (window?.tabGroup?.selectedWindow ?? window) === window,
-                frame: window?.frame, fullscreen: window?.styleMask.contains(.fullScreen))
+                group: controller.workspaceGroupID, selected: selection == controller.tabSessionID,
+                frame: window?.frame, fullscreen: window?.styleMask.contains(.fullScreen), window: controller.windowSessionID)
             if let index = saved.tabs.firstIndex(where: { $0.id == tab.id }) { saved.tabs[index] = tab } else { saved.tabs.append(tab) }
         }
         // Retain saved closed-window records, but refresh live native ordering.
-        let order = TerminalController.all.flatMap { controller in
-            (controller.window?.tabGroup?.windows ?? []).compactMap {
-                ($0.windowController as? TerminalController)?.tabSessionID
-            }
-        }
+        let order = workspaces.snapshot.windows?.values.flatMap { $0.groups.values.flatMap(\.tabs) } ?? []
         var ranks: [UUID: Int] = [:]
         for id in order where ranks[id] == nil { ranks[id] = ranks.count }
         saved.tabs.sort { (ranks[$0.id] ?? Int.max) < (ranks[$1.id] ?? Int.max) }

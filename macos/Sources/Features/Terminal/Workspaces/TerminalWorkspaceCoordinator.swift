@@ -16,43 +16,105 @@ enum TerminalWorkspacePresentation {
 @MainActor
 final class TerminalWorkspaceCoordinator: ObservableObject {
     static let shared = TerminalWorkspaceCoordinator()
-    @Published private(set) var previousWorkspaceID: UUID?
     @Published private(set) var revision = 0
     private(set) var parked: [UUID: TerminalController] = [:]
-    private var selectedTabs: [UUID: UUID] = [:]
     private var parkedGroups: [UUID: [TerminalController]] = [:]
     private var isSwitching = false
     private var restoring = true
     private var quitting = false
     let store: TerminalWorkspaceStore
+    private let sessions: TerminalWorkspaceSessionStore
 
-    init(store: TerminalWorkspaceStore? = nil) {
+    init(store: TerminalWorkspaceStore? = nil, sessions: TerminalWorkspaceSessionStore? = nil) {
         let store = store ?? .shared
         self.store = store
-        selectedTabs = store.snapshot.selectedTabs
+        self.sessions = sessions ?? .shared
     }
 
     func controllers(in id: UUID) -> [TerminalController] {
-        TerminalController.all.filter { $0.workspaceID == id && !$0.surfaceTree.isEmpty }
+        TerminalController.all.filter { $0.workspaceID == id && $0.isAvailableForWorkspace }
     }
 
     func register(_ controller: TerminalController) {
         store.assign(tab: controller.tabSessionID, to: controller.workspaceID)
     }
 
+    func previousWorkspaceID(in controller: TerminalController) -> UUID? {
+        store.snapshot.windows?[controller.windowSessionID]?.previousWorkspace
+    }
+
+    /// Reconcile native tab joins/detaches at the adapter boundary. The host ID
+    /// never depends on whichever tab AppKit currently selects.
+    func reconcileNativeGroup(_ members: [TerminalController]) {
+        guard !quitting, !TerminalWorkspacePresentation.isChanging, !members.isEmpty else { return }
+        let native = members[0].window?.tabGroup
+        let anchor = members.first { $0.tabLayoutState.nativeTabGroup === native } ?? members[0]
+        if members.count == 1, anchor.workspaceTabAttachmentIsPending { return }
+        var host = anchor.windowSessionID
+        var group = anchor.workspaceGroupID
+        let memberIDs = Set(members.map(\.tabSessionID))
+        if let old = anchor.tabLayoutState.nativeTabGroup, old !== native,
+           old.windows.contains(where: {
+               guard let other = $0.windowController as? TerminalController else { return false }
+               return other.isAvailableForWorkspace && !other.workspacePresentationIsParked &&
+                   other.workspaceGroupID == group && !memberIDs.contains(other.tabSessionID)
+           }) {
+            // A detached native tab becomes an independent user-visible window.
+            host = UUID()
+            group = UUID()
+        }
+        for member in members {
+            if member.windowSessionID != host || member.workspaceGroupID != group || member.workspaceID != anchor.workspaceID {
+                store.removeTab(member.tabSessionID, window: member.windowSessionID, workspace: member.workspaceID)
+                member.windowSessionID = host
+                member.workspaceGroupID = group
+                member.workspaceID = anchor.workspaceID
+                store.assign(tab: member.tabSessionID, to: member.workspaceID)
+                member.window?.tabbingIdentifier = "omg.window.\(host).workspace.\(member.workspaceID)"
+            }
+        }
+        if !restoring && !quitting { rememberGroup(members) }
+    }
+
+    private func rememberGroup(_ members: [TerminalController], selected: UUID? = nil) {
+        guard let first = members.first else { return }
+        let ids = members.map(\.tabSessionID)
+        let existing = store.group(window: first.windowSessionID, workspace: first.workspaceID)
+        let nativeSelection = (first.window?.tabGroup?.selectedWindow?.windowController as? TerminalController)?.tabSessionID
+        let chosen = [selected, nativeSelection, existing?.selected].compactMap { $0 }.first { ids.contains($0) } ?? ids.first
+        store.rememberGroup(window: first.windowSessionID, workspace: first.workspaceID,
+            group: .init(id: first.workspaceGroupID, tabs: ids, selected: chosen,
+                         scrollOffset: first.tabLayoutState.sidebarHost.scrollOffset ?? existing?.scrollOffset))
+    }
+
+    private func select(_ controller: TerminalController) {
+        store.selectWorkspace(controller.workspaceID, in: controller.windowSessionID,
+            frame: controller.window?.frame, fullscreen: controller.window?.styleMask.contains(.fullScreen))
+    }
+
     func didActivate(_ controller: TerminalController) {
-        guard !isSwitching, !restoring, !quitting,
+        guard !isSwitching, !restoring, !quitting, controller.isAvailableForWorkspace,
               controller.window?.isVisible == true else { return }
         // Ignore late activation notifications from a window just parked by a
         // handoff. Window-menu/Dock activation makes it visible before this call.
         // A native Window menu or Dock activation must restore the entire
         // parked group, rather than expose one detached tab in isolation.
         if parked[controller.tabSessionID] != nil {
+            if let current = TerminalController.all.first(where: {
+                $0.windowSessionID == controller.windowSessionID && $0.workspaceID != controller.workspaceID &&
+                    $0.isAvailableForWorkspace && !$0.workspacePresentationIsParked
+            }) {
+                _ = switchWorkspace(to: controller.workspaceID, from: current)
+                return
+            }
             isSwitching = true
             activate(controller, matching: nil)
             isSwitching = false
         }
-        selectedTabs[controller.workspaceID] = controller.tabSessionID
+        let members = groupControllers(controller)
+        reconcileNativeGroup(members)
+        rememberGroup(members, selected: controller.tabSessionID)
+        select(controller)
         savePresentation()
     }
 
@@ -85,50 +147,50 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
     @discardableResult
     func switchWorkspace(to id: UUID, from source: TerminalController) -> TerminalController? {
         guard store.workspaces.contains(where: { $0.id == id }), !isSwitching,
-              source.window?.attachedSheet == nil else { return nil }
+              source.isAvailableForWorkspace, source.window?.attachedSheet == nil else { return nil }
         source.workspaceSwitcherIsPresented = false
         if source.workspaceID == id { return source }
-        let candidates = controllers(in: id)
-        let visible = candidates.first {
-            !parked.keys.contains($0.tabSessionID) && $0.window?.isVisible == true
-        }
-        let target = visible ?? candidates.first { $0.tabSessionID == selectedTabs[id] } ?? candidates.first
+        let host = source.windowSessionID
+        let candidates = controllers(in: id).filter { $0.windowSessionID == host }
+        let selected = store.group(window: host, workspace: id)?.selected
+        let target = candidates.first { $0.tabSessionID == selected } ?? candidates.first
         isSwitching = true
         TerminalWorkspacePresentation.begin()
         NSDisableScreenUpdates()
         var presented = source
         defer {
+            let scrollOffset = store.group(window: host, workspace: presented.workspaceID)?.scrollOffset
+            presented.tabLayoutState.sidebarHost.restoreScrollOffset(scrollOffset)
             TerminalWorkspacePresentation.end()
             presented.window?.tabGroup?.setGhosttyTerminalShellLayoutState(presented.tabLayoutState)
             presented.refreshWorkspaceTabs()
             presented.tabLayoutState.sidebarHost.presentSelectedWindow(updateContent: true)
             presented.window?.contentView?.superview?.layoutSubtreeIfNeeded()
+            presented.tabLayoutState.sidebarHost.restoreScrollOffset(scrollOffset)
             presented.window?.contentView?.displayIfNeeded()
             NSEnableScreenUpdates()
             isSwitching = false
+            sessions.capture()
         }
-        previousWorkspaceID = source.workspaceID
-        selectedTabs[source.workspaceID] = source.tabSessionID
-
-        // An already-visible workspace belongs to another window: focus it and
-        // leave the source window alone, rather than duplicating its sessions.
-        if let visible {
-            presented = visible
-            activate(visible, matching: nil)
-            selectedTabs[id] = visible.tabSessionID
-            savePresentation()
-            return visible
-        }
-
         // Capture membership before creating a window: AppKit can auto-tab
         // it during initialization in a fullscreen Space.
         let outgoing = groupControllers(source)
+        rememberGroup(outgoing, selected: source.tabSessionID)
+        select(source)
         let destination: TerminalController
+        let restored = target == nil ? sessions.restoreWorkspace(id, window: host,
+            group: store.group(window: host, workspace: id)?.id, app: source.ghostty, parent: source.window) : []
         if let target {
             destination = target
+        } else if let selectedController = restored.first(where: { $0.tabSessionID == selected }) ?? restored.first {
+            destination = selectedController
         } else {
-            destination = TerminalController(source.ghostty, parent: source.window, tabLayout: source.tabLayout, workspaceID: id)
+            destination = TerminalController(source.ghostty, parent: source.window, tabLayout: source.tabLayout,
+                workspaceID: id, windowSessionID: host, workspaceGroupID: store.group(window: host, workspace: id)?.id)
             destination.isBackgroundOpaque = source.isBackgroundOpaque
+            // Explicit workspace switches must also work with an isolated
+            // catalog, rather than falling back through the shared default ID.
+            destination.workspaceID = id
             guard destination.window != nil else { return nil }
         }
         guard let sourceWindow = source.window, destination.window != nil else { return nil }
@@ -141,9 +203,11 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
         for member in outgoing { member.cancelWorkspacePendingPresentation() }
         // Keep the native fullscreen container alive across the handoff. The
         // incoming tab joins it before any outgoing tab is detached.
-        let destinationGroupID = parkedGroups.first { $0.value.contains { $0 === destination } }?.key
-        let incoming = destinationGroupID.flatMap { parkedGroups[$0] } ??
-            groupControllers(destination).filter { $0.workspaceID == id }
+        let destinationGroupID = destination.workspaceGroupID
+        let incoming = (parkedGroups[destinationGroupID] ??
+            (restored.isEmpty ? groupControllers(destination) : restored)).filter {
+                $0.workspaceID == id && $0.windowSessionID == host && $0.isAvailableForWorkspace
+            }
         var completed = false
         defer {
             if !completed {
@@ -154,8 +218,7 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
                     parked[member.tabSessionID] = member
                     member.workspacePresentationIsParked = true
                 }
-                if let destinationGroupID { parkedGroups.removeValue(forKey: destinationGroupID) }
-                if let first = incoming.first { parkedGroups[first.tabSessionID] = incoming }
+                parkedGroups[destinationGroupID] = incoming
                 sourceWindow.makeKeyAndOrderFront(nil)
                 source.refreshWorkspaceTabs()
                 savePresentation()
@@ -170,6 +233,7 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
             if sourceWindow.tabGroup?.windows.contains(window) != true {
                 guard anchor.addTabbedWindowSafely(window, ordered: .above) else { return nil }
             }
+            member.finishWorkspaceTabAttachment()
             anchor = window
         }
         // AppKit must establish the incoming tab's fullscreen geometry before
@@ -179,7 +243,7 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
         }
         guard shown else { return nil }
         activate(destination, matching: sourceWindow, members: incoming)
-        parkedGroups[source.tabSessionID] = outgoing
+        parkedGroups[source.workspaceGroupID] = outgoing
         for member in outgoing {
             parked[member.tabSessionID] = member
             member.workspacePresentationIsParked = true
@@ -190,16 +254,16 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
         destination.refreshWorkspaceTabs()
         completed = true
         presented = destination
-        selectedTabs[id] = destination.tabSessionID
+        rememberGroup(incoming, selected: destination.tabSessionID)
+        select(destination)
         savePresentation()
         return destination
     }
 
     private func activate(_ target: TerminalController, matching source: NSWindow?, members explicitMembers: [TerminalController]? = nil) {
-        guard let window = target.window else { return }
-        let groupID = parkedGroups.first { $0.value.contains { $0 === target } }?.key
-        let storedMembers = groupID.flatMap { parkedGroups.removeValue(forKey: $0) }
-        let members = explicitMembers ?? storedMembers ?? groupControllers(target)
+        guard target.isAvailableForWorkspace, let window = target.window else { return }
+        let storedMembers = parkedGroups.removeValue(forKey: target.workspaceGroupID)
+        let members = (explicitMembers ?? storedMembers ?? groupControllers(target)).filter(\.isAvailableForWorkspace)
         if let anchor = members.first?.window {
             var previous = anchor
             for member in members.dropFirst() {
@@ -212,6 +276,7 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
             }
         }
         for member in members {
+            member.finishWorkspaceTabAttachment()
             parked.removeValue(forKey: member.tabSessionID)
             member.workspacePresentationIsParked = false
         }
@@ -230,52 +295,71 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
 
     @discardableResult
     func move(_ controller: TerminalController, to id: UUID) -> Bool {
-        guard controller.workspaceID != id, store.workspaces.contains(where: { $0.id == id }),
-              let window = controller.window, window.attachedSheet == nil else { return false }
+        guard !isSwitching, controller.isAvailableForWorkspace, controller.workspaceID != id,
+              store.workspaces.contains(where: { $0.id == id }),
+              let window = controller.window, window.attachedSheet == nil,
+              window.tabbingMode != .disallowed, controller.fullscreenStyle?.supportsTabs != false else { return false }
         let originalID = controller.workspaceID
+        let host = controller.windowSessionID
+        let oldGroupID = controller.workspaceGroupID
+        let outgoing = groupControllers(controller)
+        rememberGroup(outgoing, selected: controller.tabSessionID)
         let originalGroup = window.tabGroup
-        let successor = originalGroup?.windows.first { $0 !== window }
-        let target = controllers(in: id).first
-        // Refuse unsupported native operations before touching ownership.
-        guard window.tabbingMode != .disallowed,
-              controller.fullscreenStyle?.supportsTabs != false else { return false }
+        let successor = outgoing.first { $0 !== controller }
+        let candidates = controllers(in: id).filter { $0.windowSessionID == host }
+        let stored = store.group(window: host, workspace: id)
         isSwitching = true
-        defer { isSwitching = false }
+        TerminalWorkspacePresentation.begin()
+        NSDisableScreenUpdates()
+        var presented = successor ?? controller
+        defer {
+            TerminalWorkspacePresentation.end()
+            presented.window?.tabGroup?.setGhosttyTerminalShellLayoutState(presented.tabLayoutState)
+            presented.refreshWorkspaceTabs()
+            NSEnableScreenUpdates()
+            isSwitching = false
+            savePresentation()
+        }
+        let restored = candidates.isEmpty ? sessions.restoreWorkspace(id, window: host, group: stored?.id,
+            app: controller.ghostty, parent: window) : []
+        let target = (candidates + restored).first { $0.tabSessionID == stored?.selected }
+            ?? candidates.first ?? restored.first
+        var incoming = target.flatMap { parkedGroups[$0.workspaceGroupID] } ??
+            (restored.isEmpty ? target.map { groupControllers($0) } ?? [] : restored)
+        controller.cancelWorkspacePendingPresentation()
         originalGroup?.removeWindow(window)
-        if let anchor = target?.window,
-           !anchor.addTabbedWindowSafely(window, ordered: .above) {
-            if let successor { _ = successor.addTabbedWindowSafely(window, ordered: .above) }
-            controller.refreshWorkspaceTabs()
+        if let anchor = target?.window, !anchor.addTabbedWindowSafely(window, ordered: .above) {
+            if let successor = successor?.window { _ = successor.addTabbedWindowSafely(window, ordered: .above) }
             return false
         }
+        store.removeTab(controller.tabSessionID, window: host, workspace: originalID)
         controller.workspaceID = id
+        controller.workspaceGroupID = target?.workspaceGroupID ?? stored?.id ?? UUID()
+        controller.tabLayoutState = target?.tabLayoutState ?? controller.tabLayoutState.detachedCopy()
+        controller.tabLayoutState.bindWorkspace(id)
         store.assign(tab: controller.tabSessionID, to: id)
-        controller.refreshWorkspaceTabs()
+        incoming.append(controller)
+        parkedGroups[controller.workspaceGroupID] = incoming
+        rememberGroup(incoming, selected: target?.tabSessionID ?? controller.tabSessionID)
+        for member in incoming {
+            member.workspacePresentationIsParked = true
+            parked[member.tabSessionID] = member
+            member.window?.orderOut(nil)
+        }
         if let successor {
-            (successor.windowController as? TerminalController)?.refreshWorkspaceTabs()
-            successor.makeKeyAndOrderFront(nil)
-        }
-        if target == nil || target.map({ parked[$0.tabSessionID] != nil }) == true {
-            let groupID = target.flatMap { target in
-                parkedGroups.first { $0.value.contains { $0 === target } }?.key
-            } ?? controller.tabSessionID
-            if parkedGroups[groupID] == nil { parkedGroups[groupID] = target.map { groupControllers($0) } ?? [] }
-            if parkedGroups[groupID]?.contains(where: { $0 === controller }) != true {
-                parkedGroups[groupID]?.append(controller)
-            }
-            parked[controller.tabSessionID] = controller
-            controller.workspacePresentationIsParked = true
-            window.orderOut(nil)
-        }
-        selectedTabs[id] = target?.tabSessionID ?? controller.tabSessionID
-        if successor == nil {
-            // Keep the source workspace reachable, even when moving its last tab.
-            let replacement = TerminalController(controller.ghostty, tabLayout: controller.tabLayout, workspaceID: originalID)
+            rememberGroup(outgoing.filter { $0 !== controller }, selected: successor.tabSessionID)
+            successor.window?.makeKeyAndOrderFront(nil)
+            select(successor)
+        } else {
+            let replacement = TerminalController(controller.ghostty, tabLayout: controller.tabLayout,
+                workspaceID: originalID, windowSessionID: host, workspaceGroupID: oldGroupID)
+            replacement.workspaceID = originalID
             replacement.window?.setFrame(window.frame, display: false)
             replacement.window?.makeKeyAndOrderFront(nil)
-            selectedTabs[originalID] = replacement.tabSessionID
+            rememberGroup([replacement], selected: replacement.tabSessionID)
+            select(replacement)
+            presented = replacement
         }
-        savePresentation()
         return true
     }
 
@@ -285,14 +369,22 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
         guard restoring else { return }
         let hidden = store.snapshot.hiddenTabs
         isSwitching = true
-        let hiddenControllers = TerminalController.all.filter { hidden.contains($0.tabSessionID) }
-        for (id, members) in store.snapshot.parkedGroups ?? [:] {
-            parkedGroups[id] = members.compactMap { tabID in
+        let hiddenControllers = TerminalController.all.filter {
+            guard $0.isAvailableForWorkspace else { return false }
+            if let record = store.snapshot.windows?[$0.windowSessionID] {
+                return record.currentWorkspace != $0.workspaceID
+            }
+            return hidden.contains($0.tabSessionID)
+        }
+        for controller in hiddenControllers {
+            let group = store.group(window: controller.windowSessionID, workspace: controller.workspaceID)
+            let ids = group?.tabs ?? store.snapshot.parkedGroups?.values.first { $0.contains(controller.tabSessionID) } ?? []
+            parkedGroups[controller.workspaceGroupID] = ids.compactMap { tabID in
                 hiddenControllers.first { $0.tabSessionID == tabID }
             }
         }
         for controller in hiddenControllers where !parkedGroups.values.contains(where: { $0.contains { $0 === controller } }) {
-            parkedGroups[controller.tabSessionID] = groupControllers(controller)
+            parkedGroups[controller.workspaceGroupID] = groupControllers(controller)
         }
         for controller in hiddenControllers {
             parked[controller.tabSessionID] = controller
@@ -307,7 +399,7 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
 
     func ensureVisibleWorkspace() {
         guard !quitting, !isSwitching else { return }
-        let controllers = TerminalController.all.filter { !$0.surfaceTree.isEmpty }
+        let controllers = TerminalController.all.filter(\.isAvailableForWorkspace)
         guard !controllers.contains(where: { $0.window?.isVisible == true }),
               let target = controllers.first else { return }
         isSwitching = true
@@ -330,16 +422,16 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
     func savePresentation() {
         guard !quitting, !restoring else { return }
         store.rememberPresentation(
-            hidden: Set(parked.keys), selected: selectedTabs,
+            hidden: Set(parked.keys), selected: [:],
             groups: parkedGroups.mapValues { $0.map(\.tabSessionID) }
         )
         revision &+= 1
-        TerminalWorkspaceSessionStore.shared.capture()
+        sessions.capture()
     }
 
     private func groupControllers(_ controller: TerminalController) -> [TerminalController] {
         (controller.window?.tabGroup?.windows ?? [controller.window].compactMap { $0 }).compactMap {
             $0.windowController as? TerminalController
-        }
+        }.filter(\.isAvailableForWorkspace)
     }
 }

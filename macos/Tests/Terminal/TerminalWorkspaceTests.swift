@@ -26,6 +26,34 @@ struct TerminalWorkspaceTests {
         #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
     }
 
+    @Test func windowGroupsPersistIndependentSelectionHistoryAndScroll() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("catalog.json")
+        let store = TerminalWorkspaceStore(fileURL: url)
+        let first = store.defaultID
+        let second = try #require(store.create(name: "Two", symbol: "house", color: "blue"))
+        let a = UUID(), b = UUID(), aTab = UUID(), bTab = UUID()
+        store.rememberGroup(window: a, workspace: first, group: .init(id: UUID(), tabs: [aTab], selected: aTab, scrollOffset: 25))
+        store.rememberGroup(window: b, workspace: first, group: .init(id: UUID(), tabs: [bTab], selected: bTab, scrollOffset: 320))
+        store.selectWorkspace(second, in: b, frame: .init(x: 50, y: 60, width: 800, height: 500), fullscreen: false)
+        store.flush()
+        let restored = TerminalWorkspaceStore(fileURL: url)
+        #expect(restored.group(window: a, workspace: first)?.selected == aTab)
+        #expect(restored.group(window: b, workspace: first)?.selected == bTab)
+        #expect(restored.group(window: a, workspace: first)?.scrollOffset == 25)
+        #expect(restored.group(window: b, workspace: first)?.scrollOffset == 320)
+        #expect(restored.snapshot.windows?[a]?.currentWorkspace == first)
+        #expect(restored.snapshot.windows?[b]?.currentWorkspace == second)
+        #expect(restored.snapshot.windows?[b]?.previousWorkspace == first)
+        restored.removeTab(bTab, window: b, workspace: first)
+        #expect(restored.group(window: a, workspace: first)?.tabs == [aTab])
+        #expect(restored.group(window: b, workspace: first)?.tabs.isEmpty == true)
+        let host = VerticalTabSidebarHost()
+        host.restoreScrollOffset(320)
+        #expect(host.scrollOffset == 320)
+    }
+
     @Test func workspaceChromeIsIsolatedAndPersistsWithoutSharingDrafts() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

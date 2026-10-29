@@ -949,10 +949,10 @@ struct TerminalTabSidebarView: View {
                 .padding(.bottom, 8)
             }
             .onChange(of: selectedTabID) { id in
-                if let id { scroll.scrollTo(id) }
+                if !layoutState.sidebarHost.restorePendingScrollPosition(), let id { scroll.scrollTo(id) }
             }
             .onAppear {
-                if let id = selectedTabID { scroll.scrollTo(id) }
+                if !layoutState.sidebarHost.restorePendingScrollPosition(), let id = selectedTabID { scroll.scrollTo(id) }
             }
             }
         }

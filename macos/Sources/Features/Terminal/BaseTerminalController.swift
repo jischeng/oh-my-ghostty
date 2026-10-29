@@ -917,7 +917,8 @@ class BaseTerminalController: NSWindowController,
             tree: newTree,
             position: notification.userInfo?[Notification.Name.ghosttySurfaceDragEndedNoTargetPointKey] as? NSPoint,
             confirmUndo: false,
-            inheritBackgroundOpacity: isBackgroundOpaque)
+            inheritBackgroundOpacity: isBackgroundOpaque,
+            workspaceID: (self as? TerminalController)?.workspaceID)
     }
 
     // MARK: Local Events

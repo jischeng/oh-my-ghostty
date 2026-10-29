@@ -130,7 +130,7 @@ struct TerminalWorkspacePicker: View {
         .frame(width: 310)
         .fixedSize(horizontal: false, vertical: true)
         .onAppear {
-            selectedID = coordinator.previousWorkspaceID ?? controller.workspaceID
+            selectedID = coordinator.previousWorkspaceID(in: controller) ?? controller.workspaceID
             searchFocused = true
         }
         .onChange(of: query) { _ in selectedID = filtered.first?.id }

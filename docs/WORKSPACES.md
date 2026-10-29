@@ -12,13 +12,14 @@ and muted accent color. When the vertical sidebar is hidden, or horizontal tabs
 are enabled, a compact workspace control remains above the terminal content.
 
 - `Control-Command-W`: open the searchable switcher. It initially selects the
-  previous workspace; Return confirms, arrow keys choose, Escape cancels.
+  current window's previous workspace; Return confirms, arrow keys choose, Escape cancels.
 - `Control-Command-1` through `Control-Command-9`: select the corresponding
   workspace in its fixed catalog order.
 - **New Workspace…**: choose a name, icon and color, then start with a local shell.
 - **Edit Current Workspace…**: rename or change its appearance.
 - **Move Current Tab to**: move the complete tab, including its splits and live
-  sessions. Moving the last tab leaves a new shell in the source workspace.
+  sessions, into the target workspace in the same window. Moving the last tab
+  leaves a new shell in that window's source workspace.
 
 Configure shortcuts in **Settings > Shortcuts > Workspaces**. Workspace shortcuts
 must include Command and apply inside OMG. Conflict captions cover duplicate
@@ -36,6 +37,19 @@ change another workspace's saved layout. Quick Input drafts, queues and send
 targets remain attached to their original panes. Theme, fonts and keyboard
 shortcuts remain global.
 
+## Multiple windows
+
+Each window switches workspaces independently. A stable window identity owns one
+tab group per workspace, with its own tab order, selection and sidebar scroll
+position. For example, if A shows workspace One with a1/a2 and B shows One with
+b1/b2, switching B to Two and back restores b1/b2 in B; A stays unchanged.
+Opening a workspace for the first time in B creates B's own terminal rather than
+focusing A or moving A's tabs. New windows inherit the current workspace name
+but receive a new window identity. Native tab detachment likewise creates an
+independent window; explicit tab joins and undo transfer/restore that identity.
+Workspace appearance and panel preferences are shared by workspace; terminal
+content, drafts and send targets remain pane-owned.
+
 ## Session behavior
 
 Switching workspaces keeps existing Surface/PTY objects alive. Background local
@@ -45,16 +59,25 @@ Returning restores the saved tab order and selected tab. Native tab-group change
 during a handoff are not published to the sidebar: each workspace retains its
 layout/host, and the destination list and selection appear together after the
 handoff. This prevents intermediate mixed lists and selection-driven scrolling.
-A workspace already
-visible in another window is focused there instead of duplicated.
+Only the current window's destination group participates in the switch. Other
+windows displaying the same workspace keep their own sessions and selection.
 
 Named workspace sessions are now checkpointed independently to
 `workspaces/sessions.json` while the app runs. A valid nonempty checkpoint takes
 precedence over AppKit restoration and resumes supported Agent/SSH descriptors.
 Closing a window retains its saved tabs; explicitly closing a tab removes it.
+If the current window's group has no usable presentation when selected again,
+OMG reconstructs that group's saved tabs and splits, preserving their order and
+selected tab. Records belonging to another window are not merged or claimed. It does not re-show closed windows whose content views have been
+torn down. Explicitly removed tabs stay removed; a workspace without a restorable
+record opens a fresh terminal. Reconstructing a closed workspace uses the same
+supported session descriptors as startup, not arbitrary live process recovery.
 Checkpoints preserve native window grouping, selected tabs, window frames and
-native fullscreen state. Older checkpoints without these fields fall back to
-one group per workspace. Startup assembles groups before showing selected tabs;
+native fullscreen state, stable window/group IDs and each window's current and
+previous workspace. Legacy checkpoints migrate each saved native group to an
+independent window identity; unrelated parked groups are not guessed to share
+one window. The oldest records without any group field fall back to one group
+per workspace. Startup assembles groups before showing selected tabs;
 quit freezes hidden-workspace metadata before window teardown begins. If all
 records fail to decode, startup creates a terminal; if restoration leaves every
 window hidden, it reveals an existing workspace.
@@ -77,7 +100,7 @@ remote process persistence retain their existing limitations.
 
 Workspace metadata is written atomically to `workspaces/catalog.json` inside the
 channel-specific Application Support directory (`OMG` or `OMG Dev`). It records
-names, appearance, shortcut slots, tab membership, selected tabs, parked-group
-order and workspace layout preferences. It does not contain terminal output, SSH credentials or Agent transcripts.
+names, appearance, shortcut slots, tab membership, window-owned groups and their
+selected tabs/order/scroll positions, window presentation and workspace layout preferences. It does not contain terminal output, SSH credentials or Agent transcripts.
 The directory uses mode 0700 and the catalog uses mode 0600. Session content is
 handled by the existing AppKit/terminal restoration path.

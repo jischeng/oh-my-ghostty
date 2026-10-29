@@ -81,8 +81,14 @@ struct VerticalTabWindowGroupSnapshot {
     let index: Int
     let selectedSessionID: UUID
     let layoutState: VerticalTabWindowLayoutState
+    let workspaceID: UUID
+    let windowSessionID: UUID
+    let workspaceGroupID: UUID
 
     init(controller: TerminalController) {
+        self.workspaceID = controller.workspaceID
+        self.windowSessionID = controller.windowSessionID
+        self.workspaceGroupID = controller.workspaceGroupID
         let window = controller.window
         if let group = window?.tabGroup,
            group.windows.count > 1,
@@ -154,6 +160,17 @@ struct VerticalTabWindowGroupSnapshot {
     /// (or standalone) window layout state.
     func restore(_ restoration: Restoration) -> Bool {
         guard let window = restoration.controller.window else { return false }
+        TerminalWorkspacePresentation.begin()
+        defer { TerminalWorkspacePresentation.end() }
+        func restoreIdentity(_ controller: TerminalController) {
+            TerminalWorkspaceStore.shared.removeTab(controller.tabSessionID,
+                window: controller.windowSessionID, workspace: controller.workspaceID)
+            controller.workspaceID = workspaceID
+            controller.windowSessionID = windowSessionID
+            controller.workspaceGroupID = workspaceGroupID
+            TerminalWorkspaceStore.shared.assign(tab: controller.tabSessionID, to: workspaceID)
+            controller.window?.tabbingIdentifier = "omg.window.\(windowSessionID).workspace.\(workspaceID)"
+        }
         if let group = restoration.group {
             if window.tabGroup !== group || !group.windows.contains(window) {
                 window.tabGroup?.removeWindow(window)
@@ -170,6 +187,7 @@ struct VerticalTabWindowGroupSnapshot {
             }
             group.setGhosttyTerminalShellLayoutState(layoutState)
             for controller in restoration.memberControllers {
+                restoreIdentity(controller)
                 controller.tabLayoutState = layoutState
             }
             guard let selectedWindow = restoration.selectedWindow,
@@ -185,6 +203,7 @@ struct VerticalTabWindowGroupSnapshot {
             currentGroup.removeWindow(window)
         }
         window.tabGroup?.setGhosttyTerminalShellLayoutState(layoutState)
+        restoreIdentity(restoration.controller)
         restoration.controller.tabLayoutState = layoutState
         guard let standaloneGroup = window.tabGroup else { return true }
         return standaloneGroup.windows.count == 1 &&
@@ -265,6 +284,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     private var surfaceAppearanceCancellables: Set<AnyCancellable> = []
 
     let tabSessionID: UUID
+    var windowSessionID: UUID
+    var workspaceGroupID: UUID
     @Published var workspaceID: UUID {
         didSet {
             quickInputModel.bindPresentation(TerminalWorkspaceStore.shared.quickInputPresentation(for: workspaceID))
@@ -831,6 +852,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     private var verticalTabWindowsObservation: NSKeyValueObservation?
     private var verticalTabSelectionObservation: NSKeyValueObservation?
     private weak var initialTabParent: NSWindow?
+    var workspaceTabAttachmentIsPending: Bool { initialTabParent != nil }
+    func finishWorkspaceTabAttachment() { initialTabParent = nil }
 
     init(_ ghostty: Ghostty.App,
          withBaseConfig base: Ghostty.SurfaceConfiguration? = nil,
@@ -839,7 +862,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
          tabLayout: Ghostty.Config.MacOSTabLayout? = nil,
          tabSessionID: UUID? = nil,
          tabCreatedAt: Date? = nil,
-         workspaceID: UUID? = nil
+         workspaceID: UUID? = nil,
+         windowSessionID: UUID? = nil,
+         workspaceGroupID: UUID? = nil
     ) {
         // The window we manage is not restorable if we've specified a command
         // to execute. We do this because the restored window is meaningless at the
@@ -869,10 +894,15 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         )
         self.tabLayout = tabLayout ?? OhMyGhosttySettings.shared.tabLayout
         self.tabSessionID = tabSessionID ?? UUID()
-        self.workspaceID = TerminalWorkspaceStore.shared.workspaceID(
+        let resolvedWorkspaceID = TerminalWorkspaceStore.shared.workspaceID(
             for: self.tabSessionID,
             inheriting: workspaceID ?? (parent?.windowController as? TerminalController)?.workspaceID
         )
+        self.workspaceID = resolvedWorkspaceID
+        let parentController = parent?.windowController as? TerminalController
+        self.windowSessionID = windowSessionID ?? parentController?.windowSessionID ?? UUID()
+        let inheritedGroup = parentController?.workspaceID == resolvedWorkspaceID ? parentController?.workspaceGroupID : nil
+        self.workspaceGroupID = workspaceGroupID ?? inheritedGroup ?? UUID()
         let now = Date()
         self.tabCreatedAt = tabCreatedAt ?? now
         self.tabLastActivatedAt = now
@@ -1007,7 +1037,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     func refreshWorkspaceTabs() {
-        window?.tabbingIdentifier = "omg.workspace.\(workspaceID.uuidString)"
+        window?.tabbingIdentifier = "omg.window.\(windowSessionID).workspace.\(workspaceID)"
         invalidateRestorableState()
         setupTabObservation()
     }
@@ -3040,6 +3070,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     private var tabPresentationIsClosing = false
     var workspacePresentationIsParked = false
 
+    /// Closed windows can remain in NSApp.windows while undo retains their
+    /// surface trees. Only an intact presentation can participate in a workspace.
+    var isAvailableForWorkspace: Bool {
+        !tabPresentationIsClosing && !surfaceTree.isEmpty && window?.contentView != nil
+    }
+
     private func refreshTabs() {
         guard !tabPresentationIsClosing, !workspacePresentationIsParked,
               !TerminalWorkspacePresentation.isChanging else { return }
@@ -3091,6 +3127,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let controllers = tabGroup.windows.compactMap { $0.windowController as? TerminalController }
             .filter { !$0.tabPresentationIsClosing && !$0.workspacePresentationIsParked }
         guard let window = controllers.first?.window else { return }
+        TerminalWorkspaceCoordinator.shared.reconcileNativeGroup(controllers)
         let sharedState = tabGroup.ghosttyTerminalShellLayoutState
         let membershipChanged = sharedState.tabSnapshot.controllers.map(ObjectIdentifier.init) !=
             controllers.map(ObjectIdentifier.init)
@@ -3169,7 +3206,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         withBaseConfig baseConfig: Ghostty.SurfaceConfiguration? = nil,
         withParent explicitParent: NSWindow? = nil
     ) -> TerminalController {
-        let c = TerminalController.init(ghostty, withBaseConfig: baseConfig)
+        let inheritedWorkspace = (explicitParent?.windowController as? TerminalController)?.workspaceID
+            ?? preferredParent?.workspaceID
+        let c = TerminalController.init(ghostty, withBaseConfig: baseConfig, workspaceID: inheritedWorkspace)
 
         // Get our parent. Our parent is the one explicitly given to us,
         // otherwise the focused terminal, otherwise an arbitrary one.
@@ -3260,13 +3299,14 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         tree: SplitTree<Ghostty.SurfaceView>,
         position: NSPoint? = nil,
         confirmUndo: Bool = true,
-        inheritBackgroundOpacity: Bool? = nil
+        inheritBackgroundOpacity: Bool? = nil,
+        workspaceID: UUID? = nil
     ) -> TerminalController {
         // Calculate the target frame based on the tree's view bounds
         // before moving into the new window
         let treeSize: CGSize? = tree.root?.viewBounds()
 
-        let c = TerminalController.init(ghostty, withSurfaceTree: tree)
+        let c = TerminalController.init(ghostty, withSurfaceTree: tree, workspaceID: workspaceID)
         if let inheritBackgroundOpacity {
             c.isBackgroundOpaque = inheritBackgroundOpacity
         }
@@ -3314,7 +3354,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                     _ = TerminalController.newWindow(
                         ghostty,
                         tree: tree,
-                        inheritBackgroundOpacity: inheritBackgroundOpacity
+                        inheritBackgroundOpacity: inheritBackgroundOpacity,
+                        workspaceID: workspaceID
                     )
                 }
             }
@@ -3395,7 +3436,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             parent: parent,
             tabLayout: parentController.tabLayout
         )
-        defer { controller.initialTabParent = nil }
+        defer { controller.finishWorkspaceTabAttachment() }
         controller.isBackgroundOpaque = parentController.isBackgroundOpaque
         controller.tabLayoutState = parentController.tabLayoutState
         guard let window = controller.window else { return nil }
@@ -4139,6 +4180,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let tabColor: TerminalTabColor
         let tabSessionID: UUID
         let tabCreatedAt: Date
+        var workspaceID: UUID = TerminalWorkspace.defaultID
+        var windowSessionID: UUID = UUID()
+        var workspaceGroupID: UUID = UUID()
         let paneSessionStates: [UUID: PaneSessionStateSnapshot]
     }
 
@@ -4147,7 +4191,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             ghostty,
             withSurfaceTree: undoState.surfaceTree,
             tabSessionID: undoState.tabSessionID,
-            tabCreatedAt: undoState.tabCreatedAt
+            tabCreatedAt: undoState.tabCreatedAt,
+            workspaceID: undoState.workspaceID,
+            windowSessionID: undoState.windowSessionID,
+            workspaceGroupID: undoState.workspaceGroupID
         )
         for (surfaceID, snapshot) in undoState.paneSessionStates {
             restorePaneSessionState(snapshot, for: surfaceID)
@@ -4206,6 +4253,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             tabColor: (window as? TerminalWindow)?.tabColor ?? .none,
             tabSessionID: tabSessionID,
             tabCreatedAt: tabCreatedAt,
+            workspaceID: workspaceID,
+            windowSessionID: windowSessionID,
+            workspaceGroupID: workspaceGroupID,
             paneSessionStates: Dictionary(
                 uniqueKeysWithValues: surfaceTree.compactMap { surface in
                     capturePaneSessionState(for: surface.id).map {
@@ -4227,7 +4277,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         super.windowDidLoad()
         guard let window else { return }
         DevMemoryDiagnostics.windowOpened()
-        window.tabbingIdentifier = "omg.workspace.\(workspaceID.uuidString)"
+        window.tabbingIdentifier = "omg.window.\(windowSessionID).workspace.\(workspaceID)"
 
         // I copy this because we may change the source in the future but also because
         // I regularly audit our codebase for "ghostty.config" access because generally
@@ -4392,8 +4442,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     override func windowWillClose(_ notification: Notification) {
         TerminalWorkspaceSessionStore.shared.capture()
-        TerminalWorkspaceCoordinator.shared.didClose(self)
         tabPresentationIsClosing = true
+        TerminalWorkspaceCoordinator.shared.didClose(self)
         tabLayoutState.cancelPendingTabSelection(ObjectIdentifier(self))
         verticalTabWindowsObservation?.invalidate()
         verticalTabSelectionObservation?.invalidate()

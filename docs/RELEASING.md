@@ -328,17 +328,9 @@ Output:
 macos/build/Debug/OMG.app
 ```
 
-The `omg-workspace` checkout uses the dedicated
-`bash dist/macos/install-workspace-dev.sh` installer instead. It builds with
-`macos/build.nu --workspace-app`, installs `/Applications/OMG Dev Workspace.app`
-with bundle ID `com.jischeng.omg.debug.workspace`, and isolates settings and
-Application Support under `oh-my-ghostty-dev-workspace` and `OMG Dev Workspace`.
-It preserves the clean-commit and persistent development-signature requirements,
-disables automatic updates/URL registration, and does not create or push a tag.
-Subsequent installs replace only that dedicated app.
-
-For a traceable `/Applications/OMG Dev.app` install, use the release skill's
-installer instead of the raw build command:
+For a traceable `/Applications/OMG Dev.app` install, including from the
+`omg-workspace` checkout, use the release skill's installer instead of the raw
+build command:
 
 ```bash
 .agents/skills/omg-release/scripts/install-dev.sh

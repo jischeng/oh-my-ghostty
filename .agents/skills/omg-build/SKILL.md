@@ -180,7 +180,8 @@ rm -f default.profraw
 
 ## 5. Installing to OMG Dev
 
-To test the compiled app locally in a persistent environment:
+To test the compiled app locally in a persistent environment, including from the
+`omg-workspace` checkout, install to `/Applications/OMG Dev.app`:
 
 1. **Commit your changes first**: The tree MUST be clean. Dev installs link to a specific commit hash.
 2. **Run the installer**:

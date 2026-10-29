@@ -37,7 +37,7 @@ Use this skill in the `oh-my-ghostty` repo. Never open the Xcode GUI. Never touc
 **Prerequisites**:
 - Working tree **must be clean** (commit changes first).
 - Use `--skip-build` if the app was just compiled.
-- Honor the checkout/session's selected development channel. For the explicitly selected PTY channel, use `bash dist/macos/install-pty-dev.sh` and `/Applications/OMG Dev PTY.app`; for Workspace Dev use `bash dist/macos/install-workspace-dev.sh`. Do not substitute the generic Dev installer. PTY installation also packages the native relay and both Linux architectures.
+- For the `omg-workspace` checkout, use this standard installer and `/Applications/OMG Dev.app`. For an explicitly selected PTY channel, use `bash dist/macos/install-pty-dev.sh` and `/Applications/OMG Dev PTY.app`. PTY installation also packages the native relay and both Linux architectures.
 
 ---
 

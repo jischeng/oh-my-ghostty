@@ -13,6 +13,7 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
     private var parkedGroups: [UUID: [TerminalController]] = [:]
     private var isSwitching = false
     private var restoring = true
+    private var quitting = false
     let store: TerminalWorkspaceStore
 
     init(store: TerminalWorkspaceStore? = nil) {
@@ -30,7 +31,7 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
     }
 
     func didActivate(_ controller: TerminalController) {
-        guard !isSwitching, !restoring else { return }
+        guard !isSwitching, !restoring, !quitting else { return }
         // A native Window menu or Dock activation must restore the entire
         // parked group, rather than expose one detached tab in isolation.
         if parked[controller.tabSessionID] != nil {
@@ -43,6 +44,7 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
     }
 
     func didClose(_ controller: TerminalController) {
+        guard !quitting else { return }
         parked.removeValue(forKey: controller.tabSessionID)
         for id in Array(parkedGroups.keys) {
             parkedGroups[id]?.removeAll { $0 === controller }
@@ -92,44 +94,69 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
             return visible
         }
 
+        // Capture membership before creating a window: AppKit can auto-tab
+        // it during initialization in a fullscreen Space.
+        let outgoing = groupControllers(source)
         let destination: TerminalController
         if let target {
             destination = target
         } else {
-            destination = TerminalController(source.ghostty, tabLayout: source.tabLayout, workspaceID: id)
+            destination = TerminalController(source.ghostty, parent: source.window, tabLayout: source.tabLayout, workspaceID: id)
             destination.isBackgroundOpaque = source.isBackgroundOpaque
             guard destination.window != nil else { return nil }
         }
         guard let sourceWindow = source.window, destination.window != nil else { return nil }
-        let outgoing = groupControllers(source)
-        parkedGroups[source.tabSessionID] = outgoing
-        for member in outgoing {
-            member.cancelWorkspacePendingPresentation()
-            parked[member.tabSessionID] = member
-        }
+        for member in outgoing { member.cancelWorkspacePendingPresentation() }
         // Keep the native fullscreen container alive across the handoff. The
         // incoming tab joins it before any outgoing tab is detached.
         NSDisableScreenUpdates()
         defer { NSEnableScreenUpdates() }
         let destinationGroupID = parkedGroups.first { $0.value.contains { $0 === destination } }?.key
-        let incoming = destinationGroupID.flatMap { parkedGroups[$0] } ?? groupControllers(destination)
+        let incoming = destinationGroupID.flatMap { parkedGroups[$0] } ??
+            groupControllers(destination).filter { $0.workspaceID == id }
+        var completed = false
+        defer {
+            if !completed {
+                for member in incoming where !outgoing.contains(where: { $0 === member }) {
+                    guard let window = member.window else { continue }
+                    window.tabGroup?.removeWindow(window)
+                    window.orderOut(nil)
+                    parked[member.tabSessionID] = member
+                }
+                if let destinationGroupID { parkedGroups.removeValue(forKey: destinationGroupID) }
+                if let first = incoming.first { parkedGroups[first.tabSessionID] = incoming }
+                sourceWindow.makeKeyAndOrderFront(nil)
+                source.refreshWorkspaceTabs()
+                savePresentation()
+            }
+        }
         var anchor = sourceWindow
         for member in incoming {
             guard let window = member.window else { continue }
-            window.setFrame(sourceWindow.frame, display: false)
-            if window.tabGroup !== sourceWindow.tabGroup {
+            if !window.styleMask.contains(.fullScreen) {
+                window.setFrame(sourceWindow.frame, display: false)
+            }
+            if sourceWindow.tabGroup?.windows.contains(window) != true {
                 guard anchor.addTabbedWindowSafely(window, ordered: .above) else { return nil }
             }
             anchor = window
         }
-        destination.prepareTabPresentation(from: sourceWindow)
+        // AppKit must establish the incoming tab's fullscreen geometry before
+        // the outgoing windows are detached from its native stack.
+        let shown = destination.withNewTabPresentation(from: sourceWindow) {
+            destination.showWindowSafely(nil)
+        }
+        guard shown else { return nil }
         activate(destination, matching: sourceWindow, members: incoming)
+        parkedGroups[source.tabSessionID] = outgoing
         for member in outgoing {
+            parked[member.tabSessionID] = member
             guard let window = member.window else { continue }
             window.tabGroup?.removeWindow(window)
             window.orderOut(nil)
         }
         destination.refreshWorkspaceTabs()
+        completed = true
         selectedTabs[id] = destination.tabSessionID
         savePresentation()
         return destination
@@ -144,7 +171,7 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
             var previous = anchor
             for member in members.dropFirst() {
                 if let memberWindow = member.window {
-                    if memberWindow.tabGroup !== anchor.tabGroup {
+                    if anchor.tabGroup?.windows.contains(memberWindow) != true {
                         _ = previous.addTabbedWindowSafely(memberWindow, ordered: .above)
                     }
                     previous = memberWindow
@@ -239,7 +266,19 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
         revision &+= 1
     }
 
+    func prepareToQuit() {
+        guard !quitting else { return }
+        savePresentation()
+        quitting = true
+    }
+
+    func cancelQuit() {
+        quitting = false
+        savePresentation()
+    }
+
     func savePresentation() {
+        guard !quitting, !restoring else { return }
         store.rememberPresentation(
             hidden: Set(parked.keys), selected: selectedTabs,
             groups: parkedGroups.mapValues { $0.map(\.tabSessionID) }

@@ -10,6 +10,10 @@ final class TerminalWorkspaceSessionStore {
         var id: UUID
         var workspace: UUID
         var state: Data
+        var group: UUID?
+        var selected: Bool?
+        var frame: CGRect?
+        var fullscreen: Bool?
     }
     struct Snapshot: Codable {
         var version = 1
@@ -48,6 +52,8 @@ final class TerminalWorkspaceSessionStore {
         decoder.userInfo[Self.restoreSessionsKey] = true
         if ownsRestoration {
             var anchors: [UUID: NSWindow] = [:]
+            NSDisableScreenUpdates()
+            defer { NSEnableScreenUpdates() }
             for tab in saved.tabs {
                 guard !TerminalController.all.contains(where: { $0.tabSessionID == tab.id }),
                       let state = try? decoder.decode(TerminalRestorableState.self, from: tab.state) else { continue }
@@ -60,15 +66,47 @@ final class TerminalWorkspaceSessionStore {
                     controller.focusedSurface = controller.surfaceTree.first { $0.id.uuidString == focused }
                 }
                 guard let window = controller.window else { continue }
-                if let anchor = anchors[tab.workspace] { _ = anchor.addTabbedWindowSafely(window, ordered: .above) }
-                anchors[tab.workspace] = window
-                controller.refreshWorkspaceTabs()
-                if !TerminalWorkspaceStore.shared.snapshot.hiddenTabs.contains(tab.id) {
-                    window.makeKeyAndOrderFront(nil)
+                if let frame = tab.frame {
+                    window.setFrame(frame, display: false)
+                    window.constrainToScreen()
+                }
+                (window as? TerminalWindow)?.tabColor = state.tabColor ?? .none
+                let group = tab.group ?? tab.workspace
+                if let anchor = anchors[group] { _ = anchor.addTabbedWindowSafely(window, ordered: .above) }
+                anchors[group] = window
+                controller.cancelWorkspacePendingPresentation()
+            }
+            // Assemble every group before exposing its selected tab. Showing
+            // each tab during construction causes visible incremental restore.
+            let presentation = TerminalWorkspaceStore.shared.snapshot
+            for (_, anchor) in anchors {
+                let workspace = (anchor.windowController as? TerminalController)?.workspaceID
+                let windows = anchor.tabGroup?.windows ?? [anchor]
+                let visible = windows.filter {
+                    guard let controller = $0.windowController as? TerminalController else { return false }
+                    return !presentation.hiddenTabs.contains(controller.tabSessionID)
+                }
+                let selected = visible.first {
+                    guard let id = ($0.windowController as? TerminalController)?.tabSessionID else { return false }
+                    return saved.tabs.first(where: { $0.id == id })?.selected == true ||
+                        (workspace.flatMap { presentation.selectedTabs[$0] } == id)
+                } ?? visible.first
+                (anchor.windowController as? TerminalController)?.refreshWorkspaceTabs()
+                if let selected {
+                    anchor.tabGroup?.selectedWindow = selected
+                    selected.makeKeyAndOrderFront(nil)
+                    let selectedID = (selected.windowController as? TerminalController)?.tabSessionID
+                    if saved.tabs.first(where: { $0.id == selectedID })?.fullscreen == true {
+                        DispatchQueue.main.async { [weak selected] in
+                            guard let selected, selected.isVisible,
+                                  !selected.styleMask.contains(.fullScreen) else { return }
+                            selected.toggleFullScreen(nil)
+                        }
+                    }
                 }
             }
         }
-        for (workspace, anchor) in anchorsForRestoredTabs() {
+        for (workspace, anchor) in ownsRestoration ? [:] : anchorsForRestoredTabs() {
             let selectedID = TerminalWorkspaceStore.shared.snapshot.selectedTabs[workspace]
             if let selected = anchor.tabGroup?.windows.first(where: {
                 ($0.windowController as? TerminalController)?.tabSessionID == selectedID
@@ -100,11 +138,13 @@ final class TerminalWorkspaceSessionStore {
     /// user's layout with an intermediate teardown order.
     func prepareToQuit() {
         guard started, !quitting else { return }
+        if !testing { TerminalWorkspaceCoordinator.shared.prepareToQuit() }
         capture()
         quitting = true
     }
 
     func cancelQuit() {
+        if !testing { TerminalWorkspaceCoordinator.shared.cancelQuit() }
         quitting = false
         capture()
     }
@@ -121,7 +161,15 @@ final class TerminalWorkspaceSessionStore {
         guard started, !restoring, !quitting else { return }
         for controller in TerminalController.all where !controller.surfaceTree.isEmpty && !removed.contains(controller.tabSessionID) {
             guard let data = try? JSONEncoder().encode(TerminalRestorableState(from: controller)) else { continue }
-            let tab = Tab(id: controller.tabSessionID, workspace: controller.workspaceID, state: data)
+            let window = controller.window
+            let parkedGroup = TerminalWorkspaceStore.shared.snapshot.parkedGroups?.first {
+                $0.value.contains(controller.tabSessionID)
+            }?.key
+            let group = parkedGroup ?? (window?.tabGroup?.windows.first?.windowController as? TerminalController)?.tabSessionID
+                ?? controller.tabSessionID
+            let tab = Tab(id: controller.tabSessionID, workspace: controller.workspaceID, state: data,
+                group: group, selected: (window?.tabGroup?.selectedWindow ?? window) === window,
+                frame: window?.frame, fullscreen: window?.styleMask.contains(.fullScreen))
             if let index = saved.tabs.firstIndex(where: { $0.id == tab.id }) { saved.tabs[index] = tab } else { saved.tabs.append(tab) }
         }
         // Retain saved closed-window records, but refresh live native ordering.

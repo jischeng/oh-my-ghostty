@@ -88,6 +88,55 @@ struct VerticalTabFullscreenTests {
         #expect(selected.contentLayoutRect.height < selected.frame.height)
     }
 
+    @Test func workspaceSwitchKeepsNativeFullscreenSpace() async throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let store = TerminalWorkspaceStore.shared
+        let coordinator = TerminalWorkspaceCoordinator.shared
+        coordinator.finishRestoring()
+        let workspace = try #require(store.create(name: "Fullscreen test", symbol: "house", color: "blue"))
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let source = TerminalController(app, withBaseConfig: config, tabLayout: .vertical)
+        var controllers = [source]
+        defer {
+            for controller in controllers {
+                controller.window?.delegate = nil
+                controller.window?.close()
+            }
+        }
+        let window = try #require(source.window)
+        source.showWindow(nil)
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+        for _ in 0..<100 {
+            if NSApp.isActive && window.isKeyWindow { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try #require(NSApp.isActive && window.isKeyWindow, "Requires foreground test app")
+        window.toggleFullScreen(nil)
+        try await Task.sleep(for: .seconds(2))
+        try #require(window.styleMask.contains(.fullScreen))
+        let original = try #require(source.surfaceTree.first)
+        let target = try #require(coordinator.switchWorkspace(to: workspace, from: source))
+        controllers.append(target)
+        try await Task.sleep(for: .milliseconds(250))
+        let targetWindow = try #require(target.window)
+        #expect(target.workspaceID == workspace)
+        #expect(target.surfaceTree.first !== original)
+        #expect(targetWindow.styleMask.contains(.fullScreen))
+        #expect(targetWindow.isKeyWindow)
+        #expect(targetWindow.tabGroup?.windows == [targetWindow])
+        #expect(coordinator.switchWorkspace(to: source.workspaceID, from: target) === source)
+        try await Task.sleep(for: .milliseconds(250))
+        #expect(window.styleMask.contains(.fullScreen))
+        #expect(window.isKeyWindow)
+        #expect(source.surfaceTree.first === original)
+        window.toggleFullScreen(nil)
+        try await Task.sleep(for: .seconds(2))
+    }
+
     private func expectPreparedFrame(_ controller: TerminalController) throws {
         let view = try #require(controller.surfaceTree.first)
         let layer = try #require(view.layer)

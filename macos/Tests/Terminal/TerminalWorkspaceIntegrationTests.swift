@@ -231,6 +231,76 @@ struct TerminalWorkspaceIntegrationTests {
         #expect(try savedOrder() == Array(expected.reversed()).filter { $0 != controllers[0].tabSessionID })
     }
 
+    @Test func sessionCatalogPreservesSeparateWindowsInOneWorkspace() throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("sessions.json")
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let first = TerminalController(app, withBaseConfig: config)
+        let second = TerminalController(app, withBaseConfig: config)
+        let ids = Set([first.tabSessionID, second.tabSessionID])
+        _ = first.window
+        _ = second.window
+        let store = TerminalWorkspaceSessionStore(url: url, testing: true)
+        store.start(app)
+        let saved = try JSONDecoder().decode(TerminalWorkspaceSessionStore.Snapshot.self, from: Data(contentsOf: url))
+        let tabs = saved.tabs.filter { ids.contains($0.id) }
+        #expect(tabs.count == 2)
+        #expect(tabs[0].group != tabs[1].group)
+        for controller in [first, second] {
+            controller.window?.delegate = nil
+            controller.window?.close()
+        }
+        let restoredStore = TerminalWorkspaceSessionStore(url: url, testing: true)
+        restoredStore.prepare()
+        restoredStore.start(app)
+        let restored = TerminalController.all.filter { ids.contains($0.tabSessionID) }
+        defer {
+            for controller in restored {
+                controller.window?.delegate = nil
+                controller.window?.close()
+            }
+        }
+        #expect(restored.count == 2)
+        for controller in restored {
+            #expect((controller.window?.tabGroup?.windows.count ?? 1) == 1)
+        }
+    }
+
+    @Test func quittingFreezesParkedWorkspacePresentation() throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let store = TerminalWorkspaceStore(fileURL: nil)
+        let coordinator = TerminalWorkspaceCoordinator(store: store)
+        coordinator.finishRestoring()
+        let targetID = try #require(store.create(name: "Other", symbol: "house", color: "blue"))
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let source = TerminalController(app, withBaseConfig: config)
+        let target = TerminalController(app, withBaseConfig: config)
+        target.workspaceID = targetID
+        defer {
+            for controller in [source, target] {
+                controller.window?.delegate = nil
+                controller.window?.close()
+            }
+        }
+        _ = source.window
+        target.window?.orderOut(nil)
+        #expect(coordinator.switchWorkspace(to: targetID, from: source) === target)
+        #expect(store.snapshot.hiddenTabs.contains(source.tabSessionID))
+        coordinator.prepareToQuit()
+        let snapshot = store.snapshot
+        coordinator.didClose(source)
+        coordinator.didActivate(source)
+        coordinator.savePresentation()
+        #expect(store.snapshot == snapshot)
+        coordinator.cancelQuit()
+        coordinator.didClose(source)
+        #expect(!store.snapshot.hiddenTabs.contains(source.tabSessionID))
+    }
+
     @Test func switchingRetainsSurfacesAndNativeTabMembership() async throws {
         let appDelegate = try #require(NSApp.delegate as? AppDelegate)
         let store = TerminalWorkspaceStore(fileURL: nil)

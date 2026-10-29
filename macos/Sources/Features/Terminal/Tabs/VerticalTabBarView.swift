@@ -100,6 +100,40 @@ final class VerticalTabWindowLayoutState: ObservableObject {
     let tabPresentation = VerticalTabPresentationState()
     let sidebarHost = VerticalTabSidebarHost()
     weak var nativeTabGroup: NSWindowTabGroup?
+    private var workspaceID: UUID?
+    private var applyingWorkspace = false
+
+    func bindWorkspace(_ id: UUID) {
+        guard workspaceID != id else { return }
+        applyingWorkspace = true
+        defer { applyingWorkspace = false }
+        workspaceID = id
+        resizeWorkItem?.cancel()
+        sidebarPersistenceWorkItem?.cancel()
+        inspectorResizeWorkItem?.cancel()
+        pendingSidebarWidth = nil
+        pendingInspectorWidth = nil
+        let value = TerminalWorkspaceStore.shared.presentation(for: id)
+        TerminalWorkspaceStore.shared.updatePresentation(for: id) { $0 = value }
+        isSidebarVisible = value.sidebarVisible
+        sidebarWidth = CGFloat(value.sidebarWidth)
+        committedSidebarWidth = sidebarWidth
+        isInspectorVisible = value.inspectorVisible
+        inspectorWidth = CGFloat(value.inspectorWidth)
+        committedInspectorWidth = inspectorWidth
+        selectedInspectorPaneID = value.inspectorPane
+    }
+
+    private func saveWorkspacePresentation() {
+        guard !applyingWorkspace, let workspaceID else { return }
+        TerminalWorkspaceStore.shared.updatePresentation(for: workspaceID) {
+            $0.sidebarVisible = isSidebarVisible
+            $0.sidebarWidth = Double(committedSidebarWidth)
+            $0.inspectorVisible = isInspectorVisible
+            $0.inspectorWidth = Double(committedInspectorWidth)
+            $0.inspectorPane = selectedInspectorPaneID
+        }
+    }
 
     func detachedCopy() -> VerticalTabWindowLayoutState {
         let copy = VerticalTabWindowLayoutState(
@@ -115,6 +149,7 @@ final class VerticalTabWindowLayoutState: ObservableObject {
         copy.collapsedGroupIDs = collapsedGroupIDs
         copy.inspectorWidth = inspectorWidth
         copy.committedInspectorWidth = committedInspectorWidth
+        copy.workspaceID = workspaceID
         copy.selectedInspectorPaneID = selectedInspectorPaneID
         return copy
     }
@@ -202,6 +237,7 @@ final class VerticalTabWindowLayoutState: ObservableObject {
     func setSidebarVisible(_ visible: Bool) {
         guard isSidebarVisible != visible else { return }
         isSidebarVisible = visible
+        saveWorkspacePresentation()
     }
 
     func applySidebarPreferences(
@@ -262,7 +298,8 @@ final class VerticalTabWindowLayoutState: ObservableObject {
     func setInspectorVisible(_ visible: Bool) {
         guard isInspectorVisible != visible else { return }
         isInspectorVisible = visible
-        inspectorPresentation.setVisible(visible)
+        if workspaceID == nil { inspectorPresentation.setVisible(visible) }
+        saveWorkspacePresentation()
     }
 
     func toggleInspector() {
@@ -272,7 +309,8 @@ final class VerticalTabWindowLayoutState: ObservableObject {
     func selectInspectorPane(_ paneID: String?) {
         guard selectedInspectorPaneID != paneID else { return }
         selectedInspectorPaneID = paneID
-        inspectorPresentation.selectPane(paneID)
+        if workspaceID == nil { inspectorPresentation.selectPane(paneID) }
+        saveWorkspacePresentation()
     }
 
     func toggleInspectorPane(atSlot slot: Int, registry: InspectorRegistry) {
@@ -364,6 +402,10 @@ final class VerticalTabWindowLayoutState: ObservableObject {
 
     private func scheduleSidebarWidthPersistence(_ width: CGFloat) {
         sidebarPersistenceWorkItem?.cancel()
+        if workspaceID != nil {
+            saveWorkspacePresentation()
+            return
+        }
         guard settings.rememberSidebarWidth else {
             sidebarPersistenceWorkItem = nil
             return
@@ -398,7 +440,8 @@ final class VerticalTabWindowLayoutState: ObservableObject {
             pendingInspectorWidth = nil
             applyInspectorWidth(width)
             committedInspectorWidth = width
-            inspectorPresentation.setWidth(width)
+            if workspaceID == nil { inspectorPresentation.setWidth(width) }
+            saveWorkspacePresentation()
             return
         }
 

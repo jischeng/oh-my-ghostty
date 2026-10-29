@@ -265,7 +265,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     private var surfaceAppearanceCancellables: Set<AnyCancellable> = []
 
     let tabSessionID: UUID
-    @Published var workspaceID: UUID
+    @Published var workspaceID: UUID {
+        didSet {
+            quickInputModel.bindPresentation(TerminalWorkspaceStore.shared.quickInputPresentation(for: workspaceID))
+        }
+    }
     @Published var workspaceSwitcherIsPresented = false
     let tabCreatedAt: Date
     @Published private(set) var tabLastActivatedAt: Date
@@ -321,7 +325,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     @Published private(set) var agentActivities: [UUID: TabActivity] = [:]
     @Published private(set) var tabPaneFocusHistory = TabPaneFocusHistory()
     @Published private(set) var agentResumeDescriptors: [UUID: AgentResumeDescriptor] = [:]
-    let quickInputModel = AgentQuickInputModel(historyStore: .shared, globalPresentation: .shared)
+    let quickInputModel = AgentQuickInputModel(historyStore: .shared)
     var quickInputDraftImportTask: Task<Void, Never>?
     private var quickInputSubmissionTasks: [UUID: Task<Void, Never>] = [:]
     private var quickInputEventMonitor: Any?
@@ -889,6 +893,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             surfaceTree: tree,
             tabLayoutState: initialLayoutState
         )
+        quickInputModel.bindPresentation(TerminalWorkspaceStore.shared.quickInputPresentation(for: self.workspaceID))
         (NSApp.delegate as? AppDelegate)?.inspectorRegistry.openTab(self.tabSessionID)
         DevMemoryDiagnostics.tabCreated()
 
@@ -3040,6 +3045,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             if let owner = tabLayoutState.nativeTabGroup, !owner.windows.contains(window) {
                 tabLayoutState = tabLayoutState.detachedCopy()
             }
+            tabLayoutState.bindWorkspace(workspaceID)
             applyTabSnapshot(controllers, selectedID: ObjectIdentifier(self))
             tabLayoutState.updateTabs(controllers, selectedID: ObjectIdentifier(self))
             tabLayoutState.sidebarHost.presentSelectedWindow()
@@ -3083,6 +3089,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
         let selectedID = (selectedWindow.windowController as? TerminalController)
             .map(ObjectIdentifier.init)
+        if let selected = selectedWindow.windowController as? TerminalController {
+            sharedState.bindWorkspace(selected.workspaceID)
+        }
         for controller in controllers {
             let changedGroup = controller.tabLayoutState !== sharedState
             if changedGroup { controller.tabLayoutState = sharedState }
@@ -4704,7 +4713,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
         if changedKey == nil || changedKey == "keyboard.quickInputHeight" {
             quickInputModel.applyConfiguredDockHeight(
-                CGFloat(settings.quickInputHeight),
+                CGFloat(TerminalWorkspaceStore.shared.presentation(for: workspaceID).quickInputHeight),
                 availableHeight: window?.contentLayoutRect.height ?? 720
             )
         }
@@ -4713,9 +4722,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         if changedKey == nil ||
             changedKey == "tabs.sidebarVisible" ||
             changedKey == "tabs.sidebarWidth" {
+            let presentation = TerminalWorkspaceStore.shared.presentation(for: workspaceID)
             tabLayoutState.applySidebarPreferences(
-                visible: settings.sidebarVisible,
-                width: CGFloat(settings.defaultSidebarWidth),
+                visible: presentation.sidebarVisible,
+                width: CGFloat(presentation.sidebarWidth),
                 availableWidth: window?.contentLayoutRect.width ?? 960
             )
         }

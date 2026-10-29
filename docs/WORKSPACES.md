@@ -26,6 +26,16 @@ workspace shortcuts, OMG panel/composer shortcuts, menu items and detected
 Ghostty bindings. Third-party global shortcuts are not exhaustively detectable.
 Existing tab and Inspector panel shortcuts retain their meanings.
 
+## Workspace layout
+
+Each workspace remembers sidebar visibility and width, Inspector visibility,
+width and selected panel, and Quick Input visibility, pinning and height. Tabs
+within a workspace share these presentation preferences. New workspaces start
+from the global sidebar and composer defaults; changing one workspace does not
+change another workspace's saved layout. Quick Input drafts, queues and send
+targets remain attached to their original panes. Theme, fonts and keyboard
+shortcuts remain global.
+
 ## Session behavior
 
 Switching workspaces keeps existing Surface/PTY objects alive. Background local
@@ -38,6 +48,10 @@ Named workspace sessions are now checkpointed independently to
 `workspaces/sessions.json` while the app runs. A valid nonempty checkpoint takes
 precedence over AppKit restoration and resumes supported Agent/SSH descriptors.
 Closing a window retains its saved tabs; explicitly closing a tab removes it.
+Checkpoints preserve native window grouping, selected tabs, window frames and
+native fullscreen state. Older checkpoints without these fields fall back to
+one group per workspace. Startup assembles groups before showing selected tabs;
+quit freezes hidden-workspace metadata before window teardown begins.
 Snapshots are written on structural changes and checked once per second for
 changed directory/title/resume data. A forced kill restores the last successful
 checkpoint; changes not yet written at the instant of termination may be lost.
@@ -57,7 +71,7 @@ remote process persistence retain their existing limitations.
 
 Workspace metadata is written atomically to `workspaces/catalog.json` inside the
 channel-specific Application Support directory (`OMG` or `OMG Dev`). It records
-names, appearance, shortcut slots, tab membership, selected tabs and parked-group
-order. It does not contain terminal output, SSH credentials or Agent transcripts.
+names, appearance, shortcut slots, tab membership, selected tabs, parked-group
+order and workspace layout preferences. It does not contain terminal output, SSH credentials or Agent transcripts.
 The directory uses mode 0700 and the catalog uses mode 0600. Session content is
 handled by the existing AppKit/terminal restoration path.

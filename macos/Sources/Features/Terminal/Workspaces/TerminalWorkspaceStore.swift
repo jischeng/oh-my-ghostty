@@ -44,6 +44,57 @@ struct TerminalWorkspace: Codable, Equatable, Identifiable {
 final class TerminalWorkspaceStore: ObservableObject {
     static let shared = TerminalWorkspaceStore()
 
+    struct Presentation: Codable, Equatable {
+        var sidebarVisible: Bool
+        var sidebarWidth: Double
+        var inspectorVisible: Bool
+        var inspectorWidth: Double
+        var inspectorPane: String?
+        var quickInputVisible = false
+        var quickInputPinned = false
+        var quickInputHeight: Double
+    }
+
+    private var quickInputPresentations: [UUID: QuickInputGlobalPresentation] = [:]
+
+    func presentation(for id: UUID) -> Presentation {
+        snapshot.presentations?[id] ?? Presentation(
+            sidebarVisible: OhMyGhosttySettings.shared.sidebarVisible,
+            sidebarWidth: OhMyGhosttySettings.shared.defaultSidebarWidth,
+            inspectorVisible: false,
+            inspectorWidth: Double(RightInspectorMetrics.defaultWidth),
+            quickInputHeight: OhMyGhosttySettings.shared.quickInputHeight
+        )
+    }
+
+    func updatePresentation(for id: UUID, _ update: (inout Presentation) -> Void) {
+        var value = presentation(for: id)
+        update(&value)
+        guard snapshot.presentations?[id] != value else { return }
+        if snapshot.presentations == nil { snapshot.presentations = [:] }
+        snapshot.presentations?[id] = value
+        persist()
+    }
+
+    func quickInputPresentation(for id: UUID) -> QuickInputGlobalPresentation {
+        if let existing = quickInputPresentations[id] { return existing }
+        let value = presentation(for: id)
+        let result = QuickInputGlobalPresentation()
+        result.setPresented(value.quickInputVisible)
+        if value.quickInputPinned { result.togglePinned() }
+        result.setHeight(value.quickInputHeight)
+        result.onChange = { [weak self, weak result] in
+            guard let result else { return }
+            self?.updatePresentation(for: id) {
+                $0.quickInputVisible = result.isPresented
+                $0.quickInputPinned = result.isPinned
+                $0.quickInputHeight = result.height
+            }
+        }
+        quickInputPresentations[id] = result
+        return result
+    }
+
     struct Snapshot: Codable, Equatable {
         var version = 1
         var workspaces: [TerminalWorkspace] = [.initial]
@@ -52,6 +103,7 @@ final class TerminalWorkspaceStore: ObservableObject {
         var selectedTabs: [UUID: UUID] = [:]
         var parkedGroups: [UUID: [UUID]]? = [:]
         var shortcuts: [String: String] = [:]
+        var presentations: [UUID: Presentation]? = [:]
     }
 
     @Published private(set) var snapshot: Snapshot

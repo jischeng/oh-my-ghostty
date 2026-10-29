@@ -26,6 +26,72 @@ struct TerminalWorkspaceTests {
         #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
     }
 
+    @Test func workspaceChromeIsIsolatedAndPersistsWithoutSharingDrafts() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("catalog.json")
+        let store = TerminalWorkspaceStore(fileURL: url)
+        let other = try #require(store.create(name: "Other", symbol: "house", color: "blue"))
+        let first = store.quickInputPresentation(for: store.defaultID)
+        let second = store.quickInputPresentation(for: other)
+        let model = AgentQuickInputModel(globalPresentation: first)
+        let sibling = AgentQuickInputModel(globalPresentation: first)
+        let foreign = AgentQuickInputModel(globalPresentation: second)
+        model.bindGlobalTarget { UUID() }
+        sibling.bindGlobalTarget { UUID() }
+        foreign.bindGlobalTarget { UUID() }
+        first.setPresented(true)
+        first.togglePinned()
+        first.setHeight(310)
+        model.draft = "Only this pane"
+        #expect(sibling.isPresented)
+        #expect(sibling.draft.isEmpty)
+        #expect(!foreign.isPresented)
+        #expect(!foreign.isPinned)
+        #expect(foreign.draft.isEmpty)
+        #expect(model.dockHeight == 310)
+        store.updatePresentation(for: other) {
+            $0.sidebarVisible = false
+            $0.sidebarWidth = 300
+            $0.inspectorVisible = true
+            $0.inspectorWidth = 350
+        }
+        store.flush()
+        let restored = TerminalWorkspaceStore(fileURL: url)
+        #expect(restored.presentation(for: other).sidebarWidth == 300)
+        #expect(restored.presentation(for: other).inspectorVisible)
+        #expect(!restored.presentation(for: other).quickInputVisible)
+        #expect(restored.quickInputPresentation(for: store.defaultID).isPresented)
+        #expect(restored.quickInputPresentation(for: store.defaultID).height == 310)
+        #expect(restored.quickInputPresentation(for: store.defaultID).isPinned)
+    }
+
+    @Test func nativeGroupHandoffRestoresWorkspaceLayout() {
+        let first = UUID()
+        let second = UUID()
+        let layout = VerticalTabWindowLayoutState(isSidebarVisible: true)
+        layout.bindWorkspace(first)
+        layout.setSidebarVisible(false)
+        layout.setInspectorVisible(true)
+        layout.updateSidebarWidth(280, availableWidth: 1200, persist: true)
+        layout.updateInspectorWidth(360, availableWidth: 1200, persist: true)
+        layout.selectInspectorPane("files")
+        layout.bindWorkspace(second)
+        layout.setSidebarVisible(true)
+        layout.setInspectorVisible(false)
+        layout.updateSidebarWidth(220, availableWidth: 1200, persist: true)
+        layout.bindWorkspace(first)
+        #expect(!layout.isSidebarVisible)
+        #expect(layout.isInspectorVisible)
+        #expect(layout.sidebarWidth == 280)
+        #expect(layout.inspectorWidth == 360)
+        #expect(layout.selectedInspectorPaneID == "files")
+        layout.bindWorkspace(second)
+        #expect(layout.isSidebarVisible)
+        #expect(!layout.isInspectorVisible)
+        #expect(layout.sidebarWidth == 220)
+    }
+
     @Test func newTabsInheritButKnownTabsKeepTheirWorkspace() throws {
         let store = TerminalWorkspaceStore(fileURL: nil)
         let work = try #require(store.create(name: "Work", symbol: "briefcase", color: "blue"))

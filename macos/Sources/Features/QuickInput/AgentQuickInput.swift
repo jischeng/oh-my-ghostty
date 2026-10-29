@@ -318,7 +318,7 @@ final class AgentQuickInputModel: ObservableObject {
     private var historyNavigation = QuickInputHistoryNavigation()
     private var presentationObserver: AnyCancellable?
     private var globalObservers: Set<AnyCancellable> = []
-    private let globalPresentation: QuickInputGlobalPresentation?
+    private var globalPresentation: QuickInputGlobalPresentation?
     private var isSynchronizingGlobal = false
     private var currentSurfaceID: (() -> UUID?)?
 
@@ -343,7 +343,18 @@ final class AgentQuickInputModel: ObservableObject {
         presentationObserver = historyPresentation.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
-        if let globalPresentation {
+        bindPresentation(globalPresentation)
+    }
+
+    func bindPresentation(_ presentation: QuickInputGlobalPresentation?) {
+        globalObservers.removeAll()
+        globalPresentation = presentation
+        if let globalPresentation = presentation {
+            globalPresentation.$height.sink { [weak self] height in
+                self?.dockResizeWorkItem?.cancel()
+                self?.pendingDockHeight = nil
+                self?.dockHeight = CGFloat(height)
+            }.store(in: &globalObservers)
             globalPresentation.$isPresented.sink { [weak self] visible in
                 self?.synchronizeGlobalPresentation(visible)
             }.store(in: &globalObservers)
@@ -631,7 +642,11 @@ final class AgentQuickInputModel: ObservableObject {
             dockResizeWorkItem?.cancel()
             dockResizeWorkItem = nil
             applyPendingDockHeight()
-            OhMyGhosttySettings.shared.quickInputHeight = Double(height)
+            if let globalPresentation {
+                globalPresentation.setHeight(Double(height))
+            } else {
+                OhMyGhosttySettings.shared.quickInputHeight = Double(height)
+            }
             return
         }
         guard dockResizeWorkItem == nil else { return }

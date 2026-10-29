@@ -16,7 +16,11 @@ are enabled, a compact workspace control remains above the terminal content.
 - `Control-Command-1` through `Control-Command-9`: select the corresponding
   workspace in its fixed catalog order.
 - **New Workspace…**: choose a name, icon and color, then start with a local shell.
-- **Edit Current Workspace…**: rename or change its appearance.
+- **Edit Current Workspace…**: rename or change its appearance. The name field
+  receives initial keyboard focus in both the create and edit forms.
+- **Delete Current Workspace…**: confirm removal of the workspace label. Its live
+  and saved tabs move to the default workspace in their respective windows;
+  running sessions are retained. The default workspace cannot be deleted.
 - **Move Current Tab to**: move the complete tab, including its splits and live
   sessions, into the target workspace in the same window. Moving the last tab
   leaves a new shell in that window's source workspace.

@@ -4,6 +4,25 @@ import Testing
 
 @MainActor
 struct TerminalWorkspaceTests {
+    @Test func deletingWorkspacePreservesTabsAndMergesWindowGroups() throws {
+        let store = TerminalWorkspaceStore(fileURL: nil)
+        let id = try #require(store.create(name: "Delete", symbol: "house", color: "blue"))
+        let host = UUID(), first = UUID(), second = UUID()
+        store.assign(tab: first, to: store.defaultID)
+        store.assign(tab: second, to: id)
+        store.rememberGroup(window: host, workspace: store.defaultID,
+            group: .init(id: UUID(), tabs: [first], selected: first))
+        store.rememberGroup(window: host, workspace: id,
+            group: .init(id: UUID(), tabs: [second], selected: second))
+        store.selectWorkspace(id, in: host, frame: nil, fullscreen: nil)
+        #expect(!store.delete(id: store.defaultID))
+        #expect(store.delete(id: id))
+        #expect(store.workspaceID(for: second) == store.defaultID)
+        #expect(store.group(window: host, workspace: store.defaultID)?.tabs == [first, second])
+        #expect(store.snapshot.windows?[host]?.currentWorkspace == store.defaultID)
+        #expect(store.group(window: host, workspace: id) == nil)
+    }
+
     @Test func catalogRoundTripsStableMembershipAndPresentation() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let url = directory.appendingPathComponent("catalog.json")

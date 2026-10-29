@@ -42,7 +42,8 @@ struct TerminalWorkspace: Codable, Equatable, Identifiable {
 /// Stable tab IDs join this catalog to AppKit's existing session archives.
 @MainActor
 final class TerminalWorkspaceStore: ObservableObject {
-    static let shared = TerminalWorkspaceStore()
+    static let shared = NSClassFromString("XCTestCase") == nil
+        ? TerminalWorkspaceStore() : TerminalWorkspaceStore(fileURL: nil)
 
     struct Presentation: Codable, Equatable {
         var sidebarVisible: Bool
@@ -214,6 +215,35 @@ final class TerminalWorkspaceStore: ObservableObject {
         snapshot.workspaces.append(.init(id: id, name: name, symbol: symbol, color: color))
         persist()
         return id
+    }
+
+    /// Removing a label retains sessions and merges each window's group into
+    /// the fallback workspace. The default workspace itself is never removed.
+    @discardableResult
+    func delete(id: UUID) -> Bool {
+        guard id != defaultID, workspaces.contains(where: { $0.id == id }) else { return false }
+        let fallback = defaultID
+        snapshot.workspaces.removeAll { $0.id == id }
+        for tab in snapshot.membership.keys where snapshot.membership[tab] == id {
+            snapshot.membership[tab] = fallback
+        }
+        for host in Array((snapshot.windows ?? [:]).keys) {
+            guard var record = snapshot.windows?[host] else { continue }
+            if let removed = record.groups.removeValue(forKey: id) {
+                if var target = record.groups[fallback] {
+                    target.tabs += removed.tabs.filter { !target.tabs.contains($0) }
+                    record.groups[fallback] = target
+                } else { record.groups[fallback] = removed }
+            }
+            if record.currentWorkspace == id { record.currentWorkspace = fallback }
+            if record.previousWorkspace == id { record.previousWorkspace = nil }
+            snapshot.windows?[host] = record
+        }
+        snapshot.selectedTabs.removeValue(forKey: id)
+        snapshot.presentations?.removeValue(forKey: id)
+        quickInputPresentations.removeValue(forKey: id)
+        persist()
+        return true
     }
 
     func update(id: UUID, name: String, symbol: String, color: String) {

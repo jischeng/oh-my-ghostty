@@ -236,6 +236,17 @@ final class TerminalWorkspaceSessionStore {
         capture()
     }
 
+    func reassignWorkspace(_ id: UUID, to fallback: UUID) {
+        for index in saved.tabs.indices where saved.tabs[index].workspace == id {
+            saved.tabs[index].workspace = fallback
+            if let host = saved.tabs[index].window,
+               let group = workspaces.group(window: host, workspace: fallback) {
+                saved.tabs[index].group = group.id
+            }
+        }
+        persist()
+    }
+
     func forget(_ controller: TerminalController) {
         guard started, !quitting else { return }
         removed.insert(controller.tabSessionID)

@@ -5,6 +5,7 @@ struct TerminalWorkspaceButton: View {
     @ObservedObject var controller: TerminalController
     @ObservedObject private var store = TerminalWorkspaceStore.shared
     @State private var hovered = false
+    @State private var pendingAction: (() -> Void)?
 
     var body: some View {
         let workspace = store.workspace(controller.workspaceID)
@@ -30,7 +31,15 @@ struct TerminalWorkspaceButton: View {
               (OMGKeyboardShortcut(storageValue: store.shortcut(slot: 0))?.displayValue ?? ""))
         .accessibilityLabel(WorkspaceL10n.text("Workspace: ", "工作区：") + workspace.name)
         .popover(isPresented: $controller.workspaceSwitcherIsPresented, arrowEdge: .bottom) {
-            TerminalWorkspacePicker(controller: controller)
+            TerminalWorkspacePicker(controller: controller) { action in
+                pendingAction = action
+                controller.workspaceSwitcherIsPresented = false
+            }
+            .onDisappear {
+                let action = pendingAction
+                pendingAction = nil
+                DispatchQueue.main.async { action?() }
+            }
         }
     }
 }
@@ -57,6 +66,7 @@ private struct WorkspaceAttentionDot: View {
 
 struct TerminalWorkspacePicker: View {
     @ObservedObject var controller: TerminalController
+    var afterDismiss: (@escaping () -> Void) -> Void = { action in DispatchQueue.main.async(execute: action) }
     @ObservedObject private var store = TerminalWorkspaceStore.shared
     @ObservedObject private var coordinator = TerminalWorkspaceCoordinator.shared
     @State private var query = ""
@@ -67,6 +77,8 @@ struct TerminalWorkspacePicker: View {
     @State private var symbol = "house"
     @State private var color = "sage"
     @FocusState private var searchFocused: Bool
+    @FocusState private var nameFocused: Bool
+    @State private var deleting = false
 
     private var filtered: [TerminalWorkspace] {
         store.workspaces.filter { query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) }
@@ -104,11 +116,15 @@ struct TerminalWorkspacePicker: View {
                 action("pencil", WorkspaceL10n.text("Edit Current Workspace…", "编辑当前工作区…")) {
                     beginEditing(create: false)
                 }
+                action("trash", WorkspaceL10n.text("Delete Current Workspace…", "删除当前工作区…")) {
+                    deleting = true
+                }.disabled(controller.workspaceID == store.defaultID)
                 Menu {
                     ForEach(store.workspaces.filter { $0.id != controller.workspaceID }) { workspace in
                         Button(workspace.name) {
-                            controller.workspaceSwitcherIsPresented = false
-                            if !coordinator.move(controller, to: workspace.id) { NSSound.beep() }
+                            afterDismiss {
+                                if !coordinator.move(controller, to: workspace.id) { NSSound.beep() }
+                            }
                         }
                     }
                 } label: {
@@ -133,6 +149,16 @@ struct TerminalWorkspacePicker: View {
             selectedID = coordinator.previousWorkspaceID(in: controller) ?? controller.workspaceID
             searchFocused = true
         }
+        .alert(WorkspaceL10n.text("Delete workspace?", "删除工作区？"), isPresented: $deleting) {
+            Button(WorkspaceL10n.text("Delete", "删除"), role: .destructive) {
+                let id = controller.workspaceID
+                afterDismiss { if !coordinator.deleteWorkspace(id) { NSSound.beep() } }
+            }
+            Button(WorkspaceL10n.text("Cancel", "取消"), role: .cancel) {}
+        } message: {
+            Text(WorkspaceL10n.text("Tabs and running sessions will move to Personal. They will not be closed.",
+                                   "标签和运行中的会话将移至默认工作区，不会关闭。"))
+        }
         .onChange(of: query) { _ in selectedID = filtered.first?.id }
         .onExitCommand {
             if editing { editing = false; searchFocused = true } else {
@@ -144,7 +170,7 @@ struct TerminalWorkspacePicker: View {
     private func row(_ workspace: TerminalWorkspace) -> some View {
         let slot = (store.workspaces.firstIndex { $0.id == workspace.id } ?? 0) + 1
         return Button {
-            coordinator.switchWorkspace(to: workspace.id, from: controller)
+            afterDismiss { coordinator.switchWorkspace(to: workspace.id, from: controller) }
         } label: {
             HStack(spacing: 9) {
                 Image(systemName: workspace.symbol)
@@ -205,7 +231,7 @@ struct TerminalWorkspacePicker: View {
 
     private func activateSelected() {
         guard let id = selectedID, filtered.contains(where: { $0.id == id }) else { return }
-        coordinator.switchWorkspace(to: id, from: controller)
+        afterDismiss { coordinator.switchWorkspace(to: id, from: controller) }
     }
 
     private func beginEditing(create: Bool) {
@@ -223,6 +249,8 @@ struct TerminalWorkspacePicker: View {
                     WorkspaceL10n.text("Edit Workspace", "编辑工作区")).font(.headline)
             TextField(WorkspaceL10n.text("Name", "名称"), text: $name)
                 .textFieldStyle(.roundedBorder)
+                .focused($nameFocused)
+                .onAppear { DispatchQueue.main.async { nameFocused = true } }
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 6), spacing: 6) {
                 ForEach(TerminalWorkspace.symbols, id: \.self) { item in
                     Button { symbol = item } label: {
@@ -254,7 +282,7 @@ struct TerminalWorkspacePicker: View {
     private func saveEditor() {
         if creating {
             if let id = store.create(name: name, symbol: symbol, color: color) {
-                coordinator.switchWorkspace(to: id, from: controller)
+                afterDismiss { coordinator.switchWorkspace(to: id, from: controller) }
             }
         } else {
             store.update(id: controller.workspaceID, name: name, symbol: symbol, color: color)

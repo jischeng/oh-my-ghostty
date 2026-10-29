@@ -29,6 +29,27 @@ struct TerminalWorkspaceIntegrationTests {
         #expect(host.liveView?.window === window)
     }
 
+    @Test func deletingLiveWorkspacePreservesItsSurface() throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let store = TerminalWorkspaceStore(fileURL: nil)
+        let id = try #require(store.create(name: "Delete live", symbol: "house", color: "blue"))
+        let coordinator = TerminalWorkspaceCoordinator(store: store)
+        coordinator.finishRestoring()
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let controller = TerminalController(app, withBaseConfig: config)
+        controller.workspaceID = id
+        controller.window?.makeKeyAndOrderFront(nil)
+        let surface = try #require(controller.surfaceTree.first)
+        defer { controller.window?.delegate = nil; controller.window?.close() }
+        #expect(coordinator.deleteWorkspace(id))
+        #expect(controller.workspaceID == store.defaultID)
+        #expect(controller.surfaceTree.first === surface)
+        #expect(controller.window?.contentView != nil)
+        #expect(controller.window?.isVisible == true)
+        #expect(!controller.workspacePresentationIsParked)
+    }
+
     @Test func sessionSnapshotSurvivesStoreRecreationAndExplicitTabDeletion() throws {
         let app = try #require(NSApp.delegate as? AppDelegate).ghostty
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

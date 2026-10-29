@@ -315,7 +315,30 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
     }
 
     @discardableResult
-    func move(_ controller: TerminalController, to id: UUID) -> Bool {
+    func deleteWorkspace(_ id: UUID) -> Bool {
+        guard id != store.defaultID, !isSwitching, !quitting else { return false }
+        let fallback = store.defaultID
+        let affected = controllers(in: id)
+        let visibleHosts = Set(affected.filter { !$0.workspacePresentationIsParked }.map(\.windowSessionID))
+        guard affected.allSatisfy({ $0.window?.attachedSheet == nil }) else { return false }
+        // Move live tabs through the existing lifecycle path; no PTY is closed.
+        for controller in affected {
+            guard move(controller, to: fallback, replacingLastTab: false) else { return false }
+        }
+        guard store.delete(id: id) else { return false }
+        sessions.reassignWorkspace(id, to: fallback)
+        for host in visibleHosts {
+            if let controller = affected.first(where: { $0.windowSessionID == host }) {
+                activate(controller, matching: nil)
+                select(controller)
+            }
+        }
+        savePresentation()
+        return true
+    }
+
+    @discardableResult
+    func move(_ controller: TerminalController, to id: UUID, replacingLastTab: Bool = true) -> Bool {
         guard !isSwitching, controller.isAvailableForWorkspace, controller.workspaceID != id,
               store.workspaces.contains(where: { $0.id == id }),
               let window = controller.window, window.attachedSheet == nil,
@@ -371,7 +394,7 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
             rememberGroup(outgoing.filter { $0 !== controller }, selected: successor.tabSessionID)
             successor.window?.makeKeyAndOrderFront(nil)
             select(successor)
-        } else {
+        } else if replacingLastTab {
             let replacement = TerminalController(controller.ghostty, tabLayout: controller.tabLayout,
                 workspaceID: originalID, windowSessionID: host, workspaceGroupID: oldGroupID)
             replacement.workspaceID = originalID

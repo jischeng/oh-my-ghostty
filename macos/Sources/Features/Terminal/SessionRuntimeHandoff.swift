@@ -58,7 +58,7 @@ final class SessionRuntimeHandoff {
         remote.runtimeLocalSurface = nil
         remote.runtimeDescriptor = nil
         controller.invalidateRestorableState()
-        TerminalWorkspaceSessionStore.shared.capture()
+        controller.workspaceCoordinator.sessions.capture()
     }
 
     func accept(_ signal: Ghostty.ContextSignal, source: Ghostty.SurfaceView, controller: TerminalController) -> Bool {

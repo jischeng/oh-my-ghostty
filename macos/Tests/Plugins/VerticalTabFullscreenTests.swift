@@ -88,15 +88,16 @@ struct VerticalTabFullscreenTests {
         #expect(selected.contentLayoutRect.height < selected.frame.height)
     }
 
-    @Test func workspaceSwitchKeepsNativeFullscreenSpace() async throws {
+    @Test(arguments: [Ghostty.Config.MacOSTabLayout.vertical, .horizontal])
+    func workspaceSwitchKeepsNativeFullscreenSpace(layout: Ghostty.Config.MacOSTabLayout) async throws {
         let app = try #require(NSApp.delegate as? AppDelegate).ghostty
-        let store = TerminalWorkspaceStore.shared
-        let coordinator = TerminalWorkspaceCoordinator.shared
+        let store = TerminalWorkspaceStore(fileURL: nil)
+        let coordinator = TerminalWorkspaceCoordinator(store: store)
         coordinator.finishRestoring()
         let workspace = try #require(store.create(name: "Fullscreen test", symbol: "house", color: "blue"))
         var config = Ghostty.SurfaceConfiguration()
         config.command = "/bin/sleep 60"
-        let source = TerminalController(app, withBaseConfig: config, tabLayout: .vertical)
+        let source = TerminalController(app, withBaseConfig: config, tabLayout: layout, workspaceCoordinator: coordinator)
         var controllers = [source]
         defer {
             for controller in controllers {
@@ -140,7 +141,7 @@ struct VerticalTabFullscreenTests {
         #expect(targetWindow.styleMask.contains(.fullScreen))
         #expect(targetWindow.isKeyWindow)
         #expect(targetWindow.tabGroup?.windows == [targetWindow])
-        #expect(target.tabLayoutState.sidebarHost.liveView?.window === targetWindow)
+        if layout == .vertical { #expect(target.tabLayoutState.sidebarHost.liveView?.window === targetWindow) }
         #expect(target.tabControllers.map(\.tabSessionID) == [target.tabSessionID])
         let targetSurface = try #require(target.focusedSurface ?? target.surfaceTree.first)
         #expect(targetSurface.window === targetWindow)
@@ -150,9 +151,59 @@ struct VerticalTabFullscreenTests {
         #expect(window.styleMask.contains(.fullScreen))
         #expect(window.isKeyWindow)
         #expect(source.surfaceTree.first === original)
-        #expect(source.tabLayoutState.sidebarHost.liveView?.window === window)
+        if layout == .vertical { #expect(source.tabLayoutState.sidebarHost.liveView?.window === window) }
         #expect(window.firstResponder === original)
-        window.toggleFullScreen(nil)
+
+        // Multiple tabs and splits exercise the final native geometry, not just
+        // one empty destination window. Each workspace keeps its own sidebar.
+        try #require(coordinator.switchWorkspace(to: workspace, from: source) === target)
+        let sibling = try #require(TerminalController.newTab(app, from: targetWindow, withBaseConfig: config))
+        controllers.append(sibling)
+        try await Task.sleep(for: .milliseconds(150))
+        let nativeApp = try #require(app.app)
+        let extraPane = Ghostty.SurfaceView(nativeApp, baseConfig: config)
+        target.surfaceTree = .init(root: .split(.init(direction: .horizontal, ratio: 0.4,
+            left: .leaf(view: targetSurface), right: .leaf(view: extraPane))), zoomed: nil)
+        target.focusedSurface = extraPane
+        target.tabLayoutState.setSidebarVisible(false)
+        targetWindow.makeKeyAndOrderFront(nil)
+        coordinator.didActivate(target)
+        try #require(coordinator.switchWorkspace(to: source.workspaceID, from: target) === source)
+        let sourceLayout = source.tabLayoutState
+        for _ in 0..<6 {
+            try #require(coordinator.switchWorkspace(to: workspace, from: source) === target)
+            try #require(coordinator.switchWorkspace(to: source.workspaceID, from: target) === source)
+        }
+        try await Task.sleep(for: .milliseconds(250))
+        #expect(source.tabLayoutState === sourceLayout)
+        #expect(window.isKeyWindow && window.styleMask.contains(.fullScreen))
+        #expect(window.firstResponder === original)
+        #expect(target.surfaceTree.contains { $0 === extraPane })
+        try expectPreparedFrame(source)
+        try #require(coordinator.switchWorkspace(to: workspace, from: source) === target)
+        try await Task.sleep(for: .milliseconds(250))
+        #expect(targetWindow.tabGroup?.windows == [targetWindow, sibling.window!])
+        #expect(!target.sidebarIsShowing)
+        #expect(targetWindow.firstResponder === extraPane)
+        try expectPreparedFrame(target)
+
+        // Moving the last source tab must create its replacement inside the
+        // existing fullscreen stack before parking the moved tab.
+        try #require(coordinator.switchWorkspace(to: source.workspaceID, from: target) === source)
+        try #require(coordinator.move(source, to: workspace))
+        let replacement = try #require(coordinator.controllers(in: store.defaultID).first)
+        controllers.append(replacement)
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(replacement.window?.styleMask.contains(.fullScreen) == true)
+        #expect(replacement.window?.isKeyWindow == true)
+        try #require(coordinator.deleteWorkspace(workspace))
+        try await Task.sleep(for: .milliseconds(250))
+        let selected = try #require(replacement.window?.tabGroup?.selectedWindow ?? replacement.window)
+        #expect(selected.styleMask.contains(.fullScreen))
+        #expect(selected.isKeyWindow)
+        #expect(coordinator.store.snapshot.validationErrors.isEmpty)
+        #expect(source.surfaceTree.first === original)
+        selected.toggleFullScreen(nil)
         try await Task.sleep(for: .seconds(2))
     }
 

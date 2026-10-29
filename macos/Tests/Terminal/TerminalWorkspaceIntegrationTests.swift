@@ -6,6 +6,37 @@ import Testing
 
 @MainActor
 struct TerminalWorkspaceIntegrationTests {
+    @Test func workspacePopoverSurvivesAnchorUpdatesAndExecutesActionOnceAfterClosing() async throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let controller = TerminalController(app, withBaseConfig: config)
+        let window = try #require(controller.window)
+        defer { controller.workspacePopover.close(); window.delegate = nil; window.close() }
+        let anchor = NSView(frame: .init(x: 20, y: 20, width: 180, height: 30))
+        window.contentView?.addSubview(anchor)
+        window.makeKeyAndOrderFront(nil)
+        controller.workspaceSwitcherIsPresented = true
+        let presentation = controller.workspacePopover
+        presentation.update(anchor: anchor)
+        try #require(presentation.isShown)
+        let count = presentation.contentCreationCount
+        for _ in 0..<20 { presentation.update(anchor: anchor) }
+        #expect(presentation.isShown)
+        #expect(presentation.contentCreationCount == count)
+        var calls = 0
+        presentation.close {
+            #expect(!presentation.isShown)
+            calls += 1
+        }
+        #expect(calls == 0)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(!controller.workspaceSwitcherIsPresented)
+        #expect(calls == 1)
+        presentation.close()
+        #expect(calls == 1)
+    }
+
     @Test func sidebarRegisteredDuringWorkspaceHandoffMountsOnLaterLayout() throws {
         let delegate = try #require(NSApp.delegate as? AppDelegate)
         var config = Ghostty.SurfaceConfiguration()
@@ -37,8 +68,7 @@ struct TerminalWorkspaceIntegrationTests {
         coordinator.finishRestoring()
         var config = Ghostty.SurfaceConfiguration()
         config.command = "/bin/sleep 60"
-        let controller = TerminalController(app, withBaseConfig: config)
-        controller.workspaceID = id
+        let controller = TerminalController(app, withBaseConfig: config, workspaceID: id, workspaceCoordinator: coordinator)
         controller.window?.makeKeyAndOrderFront(nil)
         let surface = try #require(controller.surfaceTree.first)
         defer { controller.window?.delegate = nil; controller.window?.close() }
@@ -82,10 +112,10 @@ struct TerminalWorkspaceIntegrationTests {
         let coordinator = TerminalWorkspaceCoordinator(store: store)
         var config = Ghostty.SurfaceConfiguration()
         config.command = "/bin/sleep 60"
-        let source = TerminalController(app, withBaseConfig: config, tabLayout: .vertical)
-        let closed = TerminalController(app, withBaseConfig: config, tabLayout: .vertical)
-        source.workspaceID = sourceID
-        closed.workspaceID = closedID
+        let source = TerminalController(app, withBaseConfig: config, tabLayout: .vertical,
+            workspaceID: sourceID, workspaceCoordinator: coordinator)
+        let closed = TerminalController(app, withBaseConfig: config, tabLayout: .vertical,
+            workspaceID: closedID, workspaceCoordinator: coordinator)
         let sourceWindow = try #require(source.window)
         let closedWindow = try #require(closed.window)
         var reopened: TerminalController?
@@ -123,10 +153,10 @@ struct TerminalWorkspaceIntegrationTests {
         let coordinator = TerminalWorkspaceCoordinator(store: store, sessions: sessions)
         var config = Ghostty.SurfaceConfiguration()
         config.command = "/bin/sleep 60"
-        let source = TerminalController(app, withBaseConfig: config, tabLayout: .vertical)
-        source.workspaceID = sourceID
+        let source = TerminalController(app, withBaseConfig: config, tabLayout: .vertical,
+            workspaceID: sourceID, workspaceCoordinator: coordinator)
         let original = (0..<tabCount).map { _ in TerminalController(app, withBaseConfig: config, tabLayout: .vertical,
-            windowSessionID: source.windowSessionID) }
+            workspaceID: closedID, windowSessionID: source.windowSessionID, workspaceCoordinator: coordinator) }
         let extraPane = Ghostty.SurfaceView(native, baseConfig: config)
         let firstPane = try #require(original[0].surfaceTree.first)
         original[0].surfaceTree = .init(root: .split(.init(direction: .horizontal, ratio: 0.4,
@@ -142,7 +172,6 @@ struct TerminalWorkspaceIntegrationTests {
             }
         }
         for (index, controller) in original.enumerated() {
-            controller.workspaceID = closedID
             controller.titleOverride = "Saved \(index)"
             _ = controller.window
         }
@@ -153,6 +182,8 @@ struct TerminalWorkspaceIntegrationTests {
         }
         let selected = try #require(original.last)
         firstWindow.tabGroup?.selectedWindow = selected.window
+        original[0].refreshWorkspaceTabs()
+        store.selectWorkspace(closedID, in: source.windowSessionID, frame: nil, fullscreen: false)
         coordinator.finishRestoring()
         selected.window?.makeKeyAndOrderFront(nil)
         coordinator.didActivate(selected)
@@ -186,17 +217,15 @@ struct TerminalWorkspaceIntegrationTests {
         let app = try #require(NSApp.delegate as? AppDelegate).ghostty
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let sessions = TerminalWorkspaceSessionStore(url: directory.appendingPathComponent("sessions.json"), testing: true)
         let store = TerminalWorkspaceStore(fileURL: nil)
+        let sessions = TerminalWorkspaceSessionStore(url: directory.appendingPathComponent("sessions.json"), testing: true, workspaces: store)
         let sourceID = try #require(store.create(name: "Open", symbol: "house", color: "blue"))
         let closedID = try #require(store.create(name: "Deleted", symbol: "house", color: "blue"))
         let coordinator = TerminalWorkspaceCoordinator(store: store, sessions: sessions)
         var config = Ghostty.SurfaceConfiguration()
         config.command = "/bin/sleep 60"
-        let source = TerminalController(app, withBaseConfig: config)
-        let deleted = TerminalController(app, withBaseConfig: config)
-        source.workspaceID = sourceID
-        deleted.workspaceID = closedID
+        let source = TerminalController(app, withBaseConfig: config, workspaceID: sourceID, workspaceCoordinator: coordinator)
+        let deleted = TerminalController(app, withBaseConfig: config, workspaceID: closedID, workspaceCoordinator: coordinator)
         _ = source.window
         _ = deleted.window
         var fresh: TerminalController?
@@ -389,6 +418,7 @@ struct TerminalWorkspaceIntegrationTests {
             }
         }
         reorder(manual)
+        controllers[0].refreshWorkspaceTabs()
         let ids = Set(controllers.map(\.tabSessionID))
         func savedOrder() throws -> [UUID] {
             let snapshot = try JSONDecoder().decode(TerminalWorkspaceSessionStore.Snapshot.self, from: Data(contentsOf: url))
@@ -410,6 +440,8 @@ struct TerminalWorkspaceIntegrationTests {
         #expect(try savedOrder() == expected)
 
         store.cancelQuit()
+        controllers[0].refreshWorkspaceTabs()
+        store.capture()
         #expect(try savedOrder() == Array(expected.reversed()))
         store.forget(controllers[0])
         #expect(try savedOrder() == Array(expected.reversed()).filter { $0 != controllers[0].tabSessionID })
@@ -463,7 +495,7 @@ struct TerminalWorkspaceIntegrationTests {
         let coordinator = TerminalWorkspaceCoordinator(store: store)
         var config = Ghostty.SurfaceConfiguration()
         config.command = "/bin/sleep 60"
-        let controller = TerminalController(app, withBaseConfig: config)
+        let controller = TerminalController(app, withBaseConfig: config, workspaceCoordinator: coordinator)
         let window = try #require(controller.window)
         let previouslyVisible = TerminalController.all.filter { $0 !== controller && $0.window?.isVisible == true }
         defer {
@@ -485,9 +517,9 @@ struct TerminalWorkspaceIntegrationTests {
         let targetID = try #require(store.create(name: "Other", symbol: "house", color: "blue"))
         var config = Ghostty.SurfaceConfiguration()
         config.command = "/bin/sleep 60"
-        let source = TerminalController(app, withBaseConfig: config)
-        let target = TerminalController(app, withBaseConfig: config, windowSessionID: source.windowSessionID)
-        target.workspaceID = targetID
+        let source = TerminalController(app, withBaseConfig: config, workspaceCoordinator: coordinator)
+        let target = TerminalController(app, withBaseConfig: config, workspaceID: targetID,
+            windowSessionID: source.windowSessionID, workspaceCoordinator: coordinator)
         defer {
             for controller in [source, target] {
                 controller.window?.delegate = nil
@@ -506,7 +538,9 @@ struct TerminalWorkspaceIntegrationTests {
         #expect(store.snapshot == snapshot)
         coordinator.cancelQuit()
         coordinator.didClose(source)
-        #expect(!store.snapshot.hiddenTabs.contains(source.tabSessionID))
+        #expect(coordinator.parked[source.tabSessionID] == nil)
+        // Closing a window retains its logical group for restoration.
+        #expect(store.group(window: source.windowSessionID, workspace: source.workspaceID)?.tabs.contains(source.tabSessionID) == true)
     }
 
     @Test func restartPreservesEachWindowsCurrentWorkspaceAndParkedSelection() async throws {
@@ -523,10 +557,8 @@ struct TerminalWorkspaceIntegrationTests {
         coordinator.finishRestoring()
         var config = Ghostty.SurfaceConfiguration()
         config.command = "/bin/sleep 60"
-        let a = TerminalController(app, withBaseConfig: config)
-        let b = TerminalController(app, withBaseConfig: config)
-        a.workspaceID = one
-        b.workspaceID = one
+        let a = TerminalController(app, withBaseConfig: config, workspaceID: one, workspaceCoordinator: coordinator)
+        let b = TerminalController(app, withBaseConfig: config, workspaceID: one, workspaceCoordinator: coordinator)
         let aID = a.tabSessionID, bID = b.tabSessionID
         let aHost = a.windowSessionID, bHost = b.windowSessionID
         _ = a.window
@@ -542,9 +574,9 @@ struct TerminalWorkspaceIntegrationTests {
         for controller in [a, b, bTwo] { controller.window?.close() }
         let restoredStore = TerminalWorkspaceStore(fileURL: catalogURL)
         let restoredSessions = TerminalWorkspaceSessionStore(url: sessionsURL, testing: true, workspaces: restoredStore)
+        let restoredCoordinator = TerminalWorkspaceCoordinator(store: restoredStore, sessions: restoredSessions)
         restoredSessions.prepare()
         restoredSessions.start(app)
-        let restoredCoordinator = TerminalWorkspaceCoordinator(store: restoredStore, sessions: restoredSessions)
         restoredCoordinator.finishRestoring()
         let ids = Set([aID, bID, bTwoID])
         let restored = TerminalController.all.filter { ids.contains($0.tabSessionID) && $0.isAvailableForWorkspace }
@@ -594,9 +626,11 @@ struct TerminalWorkspaceIntegrationTests {
 
     @Test func detachedNativeTabGetsItsOwnWindowIdentityAndUndoRestoresIt() throws {
         let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let coordinator = TerminalWorkspaceCoordinator(store: TerminalWorkspaceStore(fileURL: nil))
+        coordinator.finishRestoring()
         var config = Ghostty.SurfaceConfiguration()
         config.command = "/bin/sleep 60"
-        let first = TerminalController(app, withBaseConfig: config)
+        let first = TerminalController(app, withBaseConfig: config, workspaceCoordinator: coordinator)
         let firstWindow = try #require(first.window)
         let second = TerminalController(app, withBaseConfig: config, parent: firstWindow)
         let secondWindow = try #require(second.window)
@@ -634,11 +668,15 @@ struct TerminalWorkspaceIntegrationTests {
         _ = original.window
         defer { original.window?.delegate = nil; original.window?.close() }
         let data = try JSONEncoder().encode(TerminalRestorableState(from: original))
+        let other = TerminalController(app, withBaseConfig: config)
+        _ = other.window
+        defer { other.window?.delegate = nil; other.window?.close() }
+        let otherData = try JSONEncoder().encode(TerminalRestorableState(from: other))
         let first = UUID(), second = UUID()
         let groupA = UUID(), groupB = UUID()
         var snapshot = TerminalWorkspaceSessionStore.Snapshot()
         snapshot.tabs = [.init(id: first, workspace: store.defaultID, state: data, group: groupA),
-                         .init(id: second, workspace: store.defaultID, state: data, group: groupB)]
+                         .init(id: second, workspace: store.defaultID, state: otherData, group: groupB)]
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try JSONEncoder().encode(snapshot).write(to: url)
         let sessions = TerminalWorkspaceSessionStore(url: url, testing: true, workspaces: store)
@@ -661,9 +699,10 @@ struct TerminalWorkspaceIntegrationTests {
         func group(_ count: Int) throws -> [TerminalController] {
             let host = UUID(), group = UUID()
             let result = (0..<count).map { _ in TerminalController(app, withBaseConfig: config,
-                tabLayout: .vertical, windowSessionID: host, workspaceGroupID: group) }
+                tabLayout: .vertical, workspaceID: one, windowSessionID: host, workspaceGroupID: group,
+                workspaceCoordinator: coordinator) }
             controllers += result
-            for controller in result { controller.workspaceID = one; _ = controller.window }
+            for controller in result { _ = controller.window }
             for index in 1..<count { #expect(result[index - 1].window!.addTabbedWindowSafely(result[index].window!, ordered: .above)) }
             result[0].refreshWorkspaceTabs()
             result.last?.window?.makeKeyAndOrderFront(nil)
@@ -723,13 +762,13 @@ struct TerminalWorkspaceIntegrationTests {
         let sourceID = try #require(store.create(name: "Short", symbol: "house", color: "blue"))
         var config = Ghostty.SurfaceConfiguration()
         config.command = "/bin/sleep 60"
-        let source = TerminalController(app, withBaseConfig: config, tabLayout: .vertical)
-        source.workspaceID = sourceID
+        let restoredCoordinator = TerminalWorkspaceCoordinator(store: store)
+        let source = TerminalController(app, withBaseConfig: config, tabLayout: .vertical,
+            workspaceID: sourceID, workspaceCoordinator: restoredCoordinator)
         let targets = (0..<5).map { _ in TerminalController(app, withBaseConfig: config, tabLayout: .vertical,
-            windowSessionID: source.windowSessionID) }
+            workspaceID: destinationID, windowSessionID: source.windowSessionID, workspaceCoordinator: restoredCoordinator) }
         let sourceWindow = try #require(source.window)
         let windows = try targets.map { controller -> NSWindow in
-            controller.workspaceID = destinationID
             return try #require(controller.window)
         }
         defer {
@@ -745,7 +784,6 @@ struct TerminalWorkspaceIntegrationTests {
             group: .init(id: targets[0].workspaceGroupID, tabs: targets.map(\.tabSessionID), selected: targets[2].tabSessionID))
         store.selectWorkspace(sourceID, in: source.windowSessionID, frame: nil, fullscreen: nil)
         // Build the same parked catalog used by a restored long workspace.
-        let restoredCoordinator = TerminalWorkspaceCoordinator(store: store)
         restoredCoordinator.finishRestoring()
         sourceWindow.makeKeyAndOrderFront(nil)
         var published: [([UUID], ObjectIdentifier?)] = []
@@ -775,13 +813,12 @@ struct TerminalWorkspaceIntegrationTests {
         let work = try #require(store.create(name: "Work", symbol: "briefcase", color: "blue"))
         var config = Ghostty.SurfaceConfiguration()
         config.command = "/bin/sleep 60"
-        let first = TerminalController(appDelegate.ghostty, withBaseConfig: config, tabLayout: .vertical)
-        let second = TerminalController(appDelegate.ghostty, withBaseConfig: config, tabLayout: .vertical)
+        let first = TerminalController(appDelegate.ghostty, withBaseConfig: config, tabLayout: .vertical,
+            workspaceID: personal, workspaceCoordinator: coordinator)
+        let second = TerminalController(appDelegate.ghostty, withBaseConfig: config, tabLayout: .vertical,
+            workspaceID: personal, workspaceCoordinator: coordinator)
         let target = TerminalController(appDelegate.ghostty, withBaseConfig: config, tabLayout: .vertical,
-            windowSessionID: first.windowSessionID)
-        first.workspaceID = personal
-        second.workspaceID = personal
-        target.workspaceID = work
+            workspaceID: work, windowSessionID: first.windowSessionID, workspaceCoordinator: coordinator)
         let firstWindow = try #require(first.window)
         let secondWindow = try #require(second.window)
         let targetWindow = try #require(target.window)

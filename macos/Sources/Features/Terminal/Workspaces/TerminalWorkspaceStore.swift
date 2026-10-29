@@ -45,16 +45,36 @@ final class TerminalWorkspaceStore: ObservableObject {
     static let shared = NSClassFromString("XCTestCase") == nil
         ? TerminalWorkspaceStore() : TerminalWorkspaceStore(fileURL: nil)
 
-    struct Presentation: Codable, Equatable {
-        var sidebarVisible: Bool
-        var sidebarWidth: Double
-        var inspectorVisible: Bool
-        var inspectorWidth: Double
-        var inspectorPane: String?
-        var quickInputVisible = false
-        var quickInputPinned = false
-        var quickInputHeight: Double
+    typealias Presentation = TerminalWorkspaceState.Presentation
+    typealias Group = TerminalWorkspaceState.Group
+    typealias Window = TerminalWorkspaceState.Window
+    typealias Snapshot = TerminalWorkspaceState
+
+    /// The session writer takes over persistence after startup. One envelope
+    /// then owns both catalog and session state; catalog.json is migration-only.
+    var checkpointRequested: (() -> Void)?
+    let presentationChanges = PassthroughSubject<(UUID, Presentation), Never>()
+
+    func commit(_ value: Snapshot) {
+        guard snapshot != value else { return }
+        let removed = Set(snapshot.workspaces.map(\.id)).subtracting(value.workspaces.map(\.id))
+        for id in removed { quickInputPresentations.removeValue(forKey: id) }
+        snapshot = value
+        persist()
     }
+
+    func transaction(_ change: (inout Snapshot) -> Void) {
+        var next = snapshot
+        change(&next)
+        commit(next)
+    }
+
+    func restore(_ value: Snapshot) {
+        quickInputPresentations.removeAll()
+        snapshot = value
+    }
+
+    func reportSaveError(_ message: String?) { saveError = message }
 
     private var quickInputPresentations: [UUID: QuickInputGlobalPresentation] = [:]
 
@@ -74,6 +94,7 @@ final class TerminalWorkspaceStore: ObservableObject {
         guard snapshot.presentations?[id] != value else { return }
         if snapshot.presentations == nil { snapshot.presentations = [:] }
         snapshot.presentations?[id] = value
+        presentationChanges.send((id, value))
         persist()
     }
 
@@ -96,21 +117,6 @@ final class TerminalWorkspaceStore: ObservableObject {
         return result
     }
 
-    struct Group: Codable, Equatable {
-        var id: UUID
-        var tabs: [UUID] = []
-        var selected: UUID?
-        var scrollOffset: Double?
-    }
-
-    struct Window: Codable, Equatable {
-        var currentWorkspace: UUID
-        var previousWorkspace: UUID?
-        var groups: [UUID: Group] = [:]
-        var frame: CGRect?
-        var fullscreen: Bool?
-    }
-
     func group(window: UUID, workspace: UUID) -> Group? {
         snapshot.windows?[window]?.groups[workspace]
     }
@@ -118,8 +124,19 @@ final class TerminalWorkspaceStore: ObservableObject {
     func rememberGroup(window: UUID, workspace: UUID, group: Group) {
         var record = snapshot.windows?[window] ?? Window(currentWorkspace: workspace)
         guard record.groups[workspace] != group else { return }
-        record.groups[workspace] = group
-        setWindow(window, record)
+        var normalized = group
+        normalized.tabs = group.tabs.reduce(into: []) { if !$0.contains($1) { $0.append($1) } }
+        if !normalized.tabs.contains(normalized.selected ?? UUID()) { normalized.selected = normalized.tabs.first }
+        record.groups[workspace] = normalized
+        transaction { state in
+            for tab in normalized.tabs {
+                if let old = state.owner(of: tab), old.window != window || old.workspace != workspace { state.remove(tab) }
+                state.membership[tab] = workspace
+            }
+            if state.windows == nil { state.windows = [:] }
+            state.windows?[window] = record
+            state.updateLegacyPresentation()
+        }
     }
 
     func selectWorkspace(_ workspace: UUID, in window: UUID, frame: CGRect?, fullscreen: Bool?) {
@@ -134,30 +151,16 @@ final class TerminalWorkspaceStore: ObservableObject {
     }
 
     func removeTab(_ tab: UUID, window: UUID, workspace: UUID) {
-        guard var group = group(window: window, workspace: workspace) else { return }
-        group.tabs.removeAll { $0 == tab }
-        if group.selected == tab { group.selected = group.tabs.first }
-        rememberGroup(window: window, workspace: workspace, group: group)
+        guard group(window: window, workspace: workspace)?.tabs.contains(tab) == true else { return }
+        transaction { $0.remove(tab) }
     }
 
     private func setWindow(_ id: UUID, _ value: Window) {
         guard snapshot.windows?[id] != value else { return }
         if snapshot.windows == nil { snapshot.windows = [:] }
         snapshot.windows?[id] = value
+        snapshot.updateLegacyPresentation()
         persist()
-    }
-
-    struct Snapshot: Codable, Equatable {
-        var version = 1
-        var workspaces: [TerminalWorkspace] = [.initial]
-        var membership: [UUID: UUID] = [:]
-        var hiddenTabs: Set<UUID> = []
-        var selectedTabs: [UUID: UUID] = [:]
-        var parkedGroups: [UUID: [UUID]]? = [:]
-        var shortcuts: [String: String] = [:]
-        var presentations: [UUID: Presentation]? = [:]
-        // Optional so catalogs written before window-scoped groups still decode.
-        var windows: [UUID: Window]?
     }
 
     @Published private(set) var snapshot: Snapshot
@@ -222,27 +225,8 @@ final class TerminalWorkspaceStore: ObservableObject {
     @discardableResult
     func delete(id: UUID) -> Bool {
         guard id != defaultID, workspaces.contains(where: { $0.id == id }) else { return false }
-        let fallback = defaultID
-        snapshot.workspaces.removeAll { $0.id == id }
-        for tab in snapshot.membership.keys where snapshot.membership[tab] == id {
-            snapshot.membership[tab] = fallback
-        }
-        for host in Array((snapshot.windows ?? [:]).keys) {
-            guard var record = snapshot.windows?[host] else { continue }
-            if let removed = record.groups.removeValue(forKey: id) {
-                if var target = record.groups[fallback] {
-                    target.tabs += removed.tabs.filter { !target.tabs.contains($0) }
-                    record.groups[fallback] = target
-                } else { record.groups[fallback] = removed }
-            }
-            if record.currentWorkspace == id { record.currentWorkspace = fallback }
-            if record.previousWorkspace == id { record.previousWorkspace = nil }
-            snapshot.windows?[host] = record
-        }
-        snapshot.selectedTabs.removeValue(forKey: id)
-        snapshot.presentations?.removeValue(forKey: id)
+        transaction { _ = $0.deleteWorkspace(id) }
         quickInputPresentations.removeValue(forKey: id)
-        persist()
         return true
     }
 
@@ -327,6 +311,7 @@ final class TerminalWorkspaceStore: ObservableObject {
     func flush() { queue.sync {} }
 
     private func persist() {
+        if let checkpointRequested { checkpointRequested(); return }
         guard let fileURL else { return }
         let value = snapshot
         revision += 1

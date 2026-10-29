@@ -563,6 +563,7 @@ class AppDelegate: NSObject,
             SessionRuntimeConnections.shared.shutdown()
             TerminalWorkspaceCoordinator.shared.savePresentation()
             TerminalWorkspaceStore.shared.flush()
+            TerminalWorkspaceSessionStore.shared.flush()
             QuickInputHistoryStore.shared.pruneExpired()
             QuickInputHistoryStore.shared.flushPendingWrites()
             if OhMyGhosttySettings.shared.startupMode.restoresSessions {

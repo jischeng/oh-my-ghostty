@@ -35,7 +35,9 @@ Existing tab and Inspector panel shortcuts retain their meanings.
 
 Each workspace remembers sidebar visibility and width, Inspector visibility,
 width and selected panel, and Quick Input visibility, pinning and height. Tabs
-within a workspace share these presentation preferences. New workspaces start
+within a workspace, including tabs in other windows, share these presentation
+preferences immediately. Window-local selection, tab order and scroll position
+remain independent. New workspaces start
 from the global sidebar and composer defaults; changing one workspace does not
 change another workspace's saved layout. Quick Input drafts, queues and send
 targets remain attached to their original panes. Theme, fonts and keyboard
@@ -66,10 +68,14 @@ handoff. This prevents intermediate mixed lists and selection-driven scrolling.
 Only the current window's destination group participates in the switch. Other
 windows displaying the same workspace keep their own sessions and selection.
 
-Named workspace sessions are now checkpointed independently to
-`workspaces/sessions.json` while the app runs. A valid nonempty checkpoint takes
-precedence over AppKit restoration and resumes supported Agent/SSH descriptors.
+Workspace metadata and terminal descriptors are checkpointed together to
+`workspaces/state.json` while the app runs. Each version-2 generation contains
+one complete catalog, window/group graph and session snapshot. A valid nonempty
+checkpoint takes precedence over AppKit restoration and resumes supported
+Agent/SSH descriptors. An explicitly emptied version-2 checkpoint also takes
+precedence, so closing every tab does not resurrect an older AppKit archive.
 Closing a window retains its saved tabs; explicitly closing a tab removes it.
+Undo restores both the tab and its eligibility for future checkpoints.
 If the current window's group has no usable presentation when selected again,
 OMG reconstructs that group's saved tabs and splits, preserving their order and
 selected tab. Records belonging to another window are not merged or claimed. It does not re-show closed windows whose content views have been
@@ -81,12 +87,16 @@ native fullscreen state, stable window/group IDs and each window's current and
 previous workspace. Legacy checkpoints migrate each saved native group to an
 independent window identity; unrelated parked groups are not guessed to share
 one window. The oldest records without any group field fall back to one group
-per workspace. Startup assembles groups before showing selected tabs;
-quit freezes hidden-workspace metadata before window teardown begins. If all
-records fail to decode, startup creates a terminal; if restoration leaves every
-window hidden, it reveals an existing workspace.
-Snapshots are written on structural changes and checked once per second for
-changed directory/title/resume data. A forced kill restores the last successful
+per workspace. Startup validates pure session data and all ownership references
+before creating surfaces, then assembles groups before showing selected tabs.
+Quit freezes workspace metadata before window teardown begins. A damaged latest
+generation falls back to `state.json.previous`; an empty or unusable legacy
+checkpoint does not suppress AppKit restoration. Unknown legacy workspace IDs
+migrate to the default workspace. If restoration leaves every window hidden,
+it reveals an existing workspace.
+Structural changes request a coalesced checkpoint; directory/title/resume data
+is checked once per second. Unchanged state does not write a file. Encoding and
+atomic file replacement run on a private serial queue. A forced kill restores the last successful
 checkpoint; changes not yet written at the instant of termination may be lost.
 This is process reconstruction, not a process checkpoint: arbitrary running
 commands and remote jobs cannot be resurrected by OMG.
@@ -102,9 +112,34 @@ Restarting the application does not preserve arbitrary running processes. Agent
 resume requires a supported exact conversation descriptor. SSH reconnect and
 remote process persistence retain their existing limitations.
 
-Workspace metadata is written atomically to `workspaces/catalog.json` inside the
-channel-specific Application Support directory (`OMG` or `OMG Dev`). It records
-names, appearance, shortcut slots, tab membership, window-owned groups and their
-selected tabs/order/scroll positions, window presentation and workspace layout preferences. It does not contain terminal output, SSH credentials or Agent transcripts.
-The directory uses mode 0700 and the catalog uses mode 0600. Session content is
-handled by the existing AppKit/terminal restoration path.
+The checkpoint lives inside the channel-specific Application Support directory
+(`OMG` or `OMG Dev`). The directory uses mode 0700 and checkpoint files use mode
+0600. It records names, appearance, shortcuts, ownership, selected tabs/order/
+scroll positions, window presentation, layout preferences, split trees and typed
+session descriptors. It does not contain terminal output, SSH credentials or
+Agent transcripts. Legacy `workspaces/catalog.json` and `workspaces/sessions.json`
+are migration inputs; they are not independent writers after the session store
+starts. The original files remain available for migration diagnosis.
+
+## Native presentation and implementation
+
+`TerminalWorkspaceState` is the committed ownership/order graph. The coordinator
+owns commands and a live controller registry; native tab groups and controller
+identity fields are projections. Checkpoint sampling never reconciles ownership.
+Switch, move and delete preflight every affected host, retain the previous graph,
+apply native changes, and publish only after success. Failed attachment/show
+operations restore the previous arrangement. Delete merges each window's groups
+without hiding other windows' currently visible workspace.
+
+`TerminalWorkspaceNativeAdapter` keeps the existing fullscreen stack alive by
+joining incoming members before parking outgoing ones. It publishes final
+membership and selection together, restores the workspace sidebar host, prepares
+the correctly sized terminal frame and restores focus. Fullscreen transition
+notifications defer switches until the transition completes; delayed presentation
+callbacks carry a generation so rapid subsequent switches supersede them.
+
+The workspace regression suites cover the state graph, close/undo, cross-window
+delete, rollback and checkpoint migration. `VerticalTabFullscreenTests` additionally
+checks horizontal and vertical native fullscreen, repeated workspace switches,
+multiple tabs/splits, moving the last tab, deletion, framebuffer size and focus.
+These desktop tests require an unlocked desktop with the test process foregrounded.

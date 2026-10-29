@@ -101,20 +101,30 @@ final class VerticalTabWindowLayoutState: ObservableObject {
     let sidebarHost = VerticalTabSidebarHost()
     weak var nativeTabGroup: NSWindowTabGroup?
     private var workspaceID: UUID?
+    var workspaceBindingID: UUID? { workspaceID }
+    private weak var workspaceStore: TerminalWorkspaceStore?
+    private var workspaceObservation: AnyCancellable?
     private var applyingWorkspace = false
 
-    func bindWorkspace(_ id: UUID) {
-        guard workspaceID != id else { return }
+    func bindWorkspace(_ id: UUID, store: TerminalWorkspaceStore = .shared) {
+        guard workspaceID != id || workspaceStore !== store else { return }
+        workspaceID = id
+        workspaceStore = store
+        workspaceObservation = store.presentationChanges.sink { [weak self] changed, value in
+            guard let self, changed == self.workspaceID else { return }
+            self.applyWorkspacePresentation(value)
+        }
+        applyWorkspacePresentation(store.presentation(for: id))
+    }
+
+    private func applyWorkspacePresentation(_ value: TerminalWorkspaceStore.Presentation) {
         applyingWorkspace = true
         defer { applyingWorkspace = false }
-        workspaceID = id
         resizeWorkItem?.cancel()
         sidebarPersistenceWorkItem?.cancel()
         inspectorResizeWorkItem?.cancel()
         pendingSidebarWidth = nil
         pendingInspectorWidth = nil
-        let value = TerminalWorkspaceStore.shared.presentation(for: id)
-        TerminalWorkspaceStore.shared.updatePresentation(for: id) { $0 = value }
         isSidebarVisible = value.sidebarVisible
         sidebarWidth = CGFloat(value.sidebarWidth)
         committedSidebarWidth = sidebarWidth
@@ -126,7 +136,7 @@ final class VerticalTabWindowLayoutState: ObservableObject {
 
     private func saveWorkspacePresentation() {
         guard !applyingWorkspace, let workspaceID else { return }
-        TerminalWorkspaceStore.shared.updatePresentation(for: workspaceID) {
+        workspaceStore?.updatePresentation(for: workspaceID) {
             $0.sidebarVisible = isSidebarVisible
             $0.sidebarWidth = Double(committedSidebarWidth)
             $0.inspectorVisible = isInspectorVisible
@@ -149,8 +159,8 @@ final class VerticalTabWindowLayoutState: ObservableObject {
         copy.collapsedGroupIDs = collapsedGroupIDs
         copy.inspectorWidth = inspectorWidth
         copy.committedInspectorWidth = committedInspectorWidth
-        copy.workspaceID = workspaceID
         copy.selectedInspectorPaneID = selectedInspectorPaneID
+        if let workspaceID, let workspaceStore { copy.bindWorkspace(workspaceID, store: workspaceStore) }
         return copy
     }
     var tabSnapshot: VerticalTabSnapshot { tabPresentation.tabSnapshot }

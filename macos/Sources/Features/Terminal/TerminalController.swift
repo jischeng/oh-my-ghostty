@@ -163,12 +163,14 @@ struct VerticalTabWindowGroupSnapshot {
         TerminalWorkspacePresentation.begin()
         defer { TerminalWorkspacePresentation.end() }
         func restoreIdentity(_ controller: TerminalController) {
-            TerminalWorkspaceStore.shared.removeTab(controller.tabSessionID,
+            controller.workspaceCoordinator.store.removeTab(controller.tabSessionID,
                 window: controller.windowSessionID, workspace: controller.workspaceID)
             controller.workspaceID = workspaceID
             controller.windowSessionID = windowSessionID
             controller.workspaceGroupID = workspaceGroupID
-            TerminalWorkspaceStore.shared.assign(tab: controller.tabSessionID, to: workspaceID)
+            controller.workspaceCoordinator.store.transaction {
+                $0.register(controller.tabSessionID, owner: .init(window: windowSessionID, workspace: workspaceID, group: workspaceGroupID))
+            }
             controller.window?.tabbingIdentifier = "omg.window.\(windowSessionID).workspace.\(workspaceID)"
         }
         if let group = restoration.group {
@@ -286,12 +288,15 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     let tabSessionID: UUID
     var windowSessionID: UUID
     var workspaceGroupID: UUID
+    var workspaceCoordinator: TerminalWorkspaceCoordinator
+    var workspacePresentationGeneration: UInt64 = 0
     @Published var workspaceID: UUID {
         didSet {
-            quickInputModel.bindPresentation(TerminalWorkspaceStore.shared.quickInputPresentation(for: workspaceID))
+            quickInputModel.bindPresentation(workspaceCoordinator.store.quickInputPresentation(for: workspaceID))
         }
     }
     @Published var workspaceSwitcherIsPresented = false
+    lazy var workspacePopover = WorkspacePopoverPresentation(controller: self)
     let tabCreatedAt: Date
     @Published private(set) var tabLastActivatedAt: Date
 
@@ -633,7 +638,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return event
         }
 
-        if TerminalWorkspaceCoordinator.shared.handle(event, in: self) { return nil }
+        if workspaceCoordinator.handle(event, in: self) { return nil }
         let settings = OhMyGhosttySettings.shared
         if OMGKeyboardShortcut.quickInputHistory.matches(event) {
             toggleQuickInputHistory()
@@ -864,7 +869,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
          tabCreatedAt: Date? = nil,
          workspaceID: UUID? = nil,
          windowSessionID: UUID? = nil,
-         workspaceGroupID: UUID? = nil
+         workspaceGroupID: UUID? = nil,
+         workspaceCoordinator: TerminalWorkspaceCoordinator? = nil
     ) {
         // The window we manage is not restorable if we've specified a command
         // to execute. We do this because the restored window is meaningless at the
@@ -894,7 +900,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         )
         self.tabLayout = tabLayout ?? OhMyGhosttySettings.shared.tabLayout
         self.tabSessionID = tabSessionID ?? UUID()
-        let resolvedWorkspaceID = TerminalWorkspaceStore.shared.workspaceID(
+        let workspaceCoordinator = workspaceCoordinator ?? (parent?.windowController as? TerminalController)?.workspaceCoordinator ?? .shared
+        self.workspaceCoordinator = workspaceCoordinator
+        let resolvedWorkspaceID = workspaceCoordinator.store.workspaceID(
             for: self.tabSessionID,
             inheriting: workspaceID ?? (parent?.windowController as? TerminalController)?.workspaceID
         )
@@ -911,7 +919,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             ? Self.injectingSessionID(self.tabSessionID, into: base)
             : base
         initialTabParent = parent
-        let initialLayoutState = (parent?.windowController as? TerminalController)?.tabLayoutState ?? VerticalTabWindowLayoutState(
+        let parentLayout = parentController?.workspaceID == resolvedWorkspaceID ? parentController?.tabLayoutState : nil
+        let initialLayoutState = parentLayout ?? VerticalTabWindowLayoutState(
             isSidebarVisible: self.tabLayout == .vertical &&
                 OhMyGhosttySettings.shared.sidebarVisible,
             isInspectorVisible: false
@@ -923,7 +932,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             surfaceTree: tree,
             tabLayoutState: initialLayoutState
         )
-        quickInputModel.bindPresentation(TerminalWorkspaceStore.shared.quickInputPresentation(for: self.workspaceID))
+        quickInputModel.bindPresentation(workspaceCoordinator.store.quickInputPresentation(for: self.workspaceID))
         (NSApp.delegate as? AppDelegate)?.inspectorRegistry.openTab(self.tabSessionID)
         DevMemoryDiagnostics.tabCreated()
 
@@ -1005,8 +1014,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             }
         synchronizePaneSessionContexts()
         startAgentProcessPolling()
-        TerminalWorkspaceCoordinator.shared.register(self)
-        DispatchQueue.main.async { TerminalWorkspaceSessionStore.shared.capture() }
+        workspaceCoordinator.register(self)
+        DispatchQueue.main.async { [weak self] in self?.workspaceCoordinator.sessions.capture() }
     }
 
     required init?(coder: NSCoder) {
@@ -1032,6 +1041,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     func cancelWorkspacePendingPresentation() {
+        workspacePresentationGeneration &+= 1
         cancelPendingInitialPresentation()
         tabLayoutState.cancelPendingTabSelection(ObjectIdentifier(self))
     }
@@ -2337,7 +2347,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // we want to invalidate our state.
         invalidateRestorableState()
         synchronizePaneSessionContexts()
-        TerminalWorkspaceSessionStore.shared.capture()
+        workspaceCoordinator.sessions.capture()
 
         // Update our zoom state
         if let window = window as? TerminalWindow {
@@ -3093,10 +3103,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         if let tabGroup {
             Self.refreshTabs(in: tabGroup)
         } else {
+            workspaceCoordinator.reconcileNativeGroup(controllers)
             if let owner = tabLayoutState.nativeTabGroup, !owner.windows.contains(window) {
                 tabLayoutState = tabLayoutState.detachedCopy()
             }
-            tabLayoutState.bindWorkspace(workspaceID)
+            tabLayoutState.bindWorkspace(workspaceID, store: workspaceCoordinator.store)
             applyTabSnapshot(controllers, selectedID: ObjectIdentifier(self))
             tabLayoutState.updateTabs(controllers, selectedID: ObjectIdentifier(self))
             tabLayoutState.sidebarHost.presentSelectedWindow()
@@ -3127,7 +3138,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let controllers = tabGroup.windows.compactMap { $0.windowController as? TerminalController }
             .filter { !$0.tabPresentationIsClosing && !$0.workspacePresentationIsParked }
         guard let window = controllers.first?.window else { return }
-        TerminalWorkspaceCoordinator.shared.reconcileNativeGroup(controllers)
+        controllers.first?.workspaceCoordinator.reconcileNativeGroup(controllers)
         let sharedState = tabGroup.ghosttyTerminalShellLayoutState
         let membershipChanged = sharedState.tabSnapshot.controllers.map(ObjectIdentifier.init) !=
             controllers.map(ObjectIdentifier.init)
@@ -3142,7 +3153,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let selectedID = (selectedWindow.windowController as? TerminalController)
             .map(ObjectIdentifier.init)
         if let selected = selectedWindow.windowController as? TerminalController {
-            sharedState.bindWorkspace(selected.workspaceID)
+            sharedState.bindWorkspace(selected.workspaceID, store: selected.workspaceCoordinator.store)
         }
         for controller in controllers {
             let changedGroup = controller.tabLayoutState !== sharedState
@@ -3846,7 +3857,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             self?.closeTabImmediately(registerRedo: registerRedo)
         }) else { return }
         if let root = surfaceTree.root, !SessionRuntimeClose.close(root) { return }
-        TerminalWorkspaceSessionStore.shared.forget(self)
+        workspaceCoordinator.forget(self)
         guard let tabGroup = window.tabGroup,
                 tabGroup.windows.count > 1 else {
             closeWindowImmediately()
@@ -3990,7 +4001,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// Closes the current window (including any other tabs) immediately and without
     /// confirmation. This will setup proper undo state so the action can be undone.
     func closeWindowImmediately() {
-        TerminalWorkspaceSessionStore.shared.capture()
+        workspaceCoordinator.savePresentation()
+        workspaceCoordinator.sessions.capture()
         guard let window = window else { return }
         let editorTabIDs = (window.tabGroup?.windows ?? [window]).compactMap {
             ($0.windowController as? TerminalController)?.tabSessionID
@@ -4183,6 +4195,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         var workspaceID: UUID = TerminalWorkspace.defaultID
         var windowSessionID: UUID = UUID()
         var workspaceGroupID: UUID = UUID()
+        var workspaceCoordinator: TerminalWorkspaceCoordinator = .shared
         let paneSessionStates: [UUID: PaneSessionStateSnapshot]
     }
 
@@ -4194,7 +4207,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             tabCreatedAt: undoState.tabCreatedAt,
             workspaceID: undoState.workspaceID,
             windowSessionID: undoState.windowSessionID,
-            workspaceGroupID: undoState.workspaceGroupID
+            workspaceGroupID: undoState.workspaceGroupID,
+            workspaceCoordinator: undoState.workspaceCoordinator
         )
         for (surfaceID, snapshot) in undoState.paneSessionStates {
             restorePaneSessionState(snapshot, for: surfaceID)
@@ -4256,6 +4270,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             workspaceID: workspaceID,
             windowSessionID: windowSessionID,
             workspaceGroupID: workspaceGroupID,
+            workspaceCoordinator: workspaceCoordinator,
             paneSessionStates: Dictionary(
                 uniqueKeysWithValues: surfaceTree.compactMap { surface in
                     capturePaneSessionState(for: surface.id).map {
@@ -4441,9 +4456,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     override func windowWillClose(_ notification: Notification) {
-        TerminalWorkspaceSessionStore.shared.capture()
+        workspacePopover.close()
+        workspaceCoordinator.sessions.capture()
         tabPresentationIsClosing = true
-        TerminalWorkspaceCoordinator.shared.didClose(self)
+        workspaceCoordinator.didClose(self)
         tabLayoutState.cancelPendingTabSelection(ObjectIdentifier(self))
         verticalTabWindowsObservation?.invalidate()
         verticalTabSelectionObservation?.invalidate()
@@ -4503,6 +4519,14 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
     }
 
+    func windowDidFailToEnterFullScreen(_ window: NSWindow) {
+        workspaceCoordinator.native.fullscreenTransitionFailed(in: windowSessionID)
+    }
+
+    func windowDidFailToExitFullScreen(_ window: NSWindow) {
+        workspaceCoordinator.native.fullscreenTransitionFailed(in: windowSessionID)
+    }
+
     override func windowDidBecomeKey(_ notification: Notification) {
         super.windowDidBecomeKey(notification)
         guard !TerminalWorkspacePresentation.isChanging else { return }
@@ -4523,6 +4547,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // Whenever we move save our last position for the next start.
         LastWindowPosition.shared.save(window)
+        workspaceCoordinator.savePresentation()
     }
 
     override func windowDidResize(_ notification: Notification) {
@@ -4530,6 +4555,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // Whenever we resize save our last position and size for the next start.
         LastWindowPosition.shared.save(window)
+        workspaceCoordinator.savePresentation()
     }
 
     func windowDidBecomeMain(_ notification: Notification) {
@@ -4541,7 +4567,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // Remember our last main and invalidate the app-level selected-tab
         // snapshot as well as the window's own focused-Surface state.
         Self.lastMain = self
-        TerminalWorkspaceCoordinator.shared.didActivate(self)
+        workspaceCoordinator.didActivate(self)
         NSApp.invalidateRestorableState()
     }
 
@@ -4779,7 +4805,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
         if changedKey == nil || changedKey == "keyboard.quickInputHeight" {
             quickInputModel.applyConfiguredDockHeight(
-                CGFloat(TerminalWorkspaceStore.shared.presentation(for: workspaceID).quickInputHeight),
+                CGFloat(workspaceCoordinator.store.presentation(for: workspaceID).quickInputHeight),
                 availableHeight: window?.contentLayoutRect.height ?? 720
             )
         }
@@ -4788,7 +4814,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         if changedKey == nil ||
             changedKey == "tabs.sidebarVisible" ||
             changedKey == "tabs.sidebarWidth" {
-            let presentation = TerminalWorkspaceStore.shared.presentation(for: workspaceID)
+            let presentation = workspaceCoordinator.store.presentation(for: workspaceID)
             tabLayoutState.applySidebarPreferences(
                 visible: presentation.sidebarVisible,
                 width: CGFloat(presentation.sidebarWidth),

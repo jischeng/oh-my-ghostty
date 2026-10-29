@@ -3,9 +3,13 @@ import SwiftUI
 
 struct TerminalWorkspaceButton: View {
     @ObservedObject var controller: TerminalController
-    @ObservedObject private var store = TerminalWorkspaceStore.shared
+    @ObservedObject private var store: TerminalWorkspaceStore
     @State private var hovered = false
-    @State private var pendingAction: (() -> Void)?
+
+    init(controller: TerminalController) {
+        self.controller = controller
+        self.store = controller.workspaceCoordinator.store
+    }
 
     var body: some View {
         let workspace = store.workspace(controller.workspaceID)
@@ -30,17 +34,81 @@ struct TerminalWorkspaceButton: View {
         .help(WorkspaceL10n.text("Switch workspace", "切换工作区") + " · " +
               (OMGKeyboardShortcut(storageValue: store.shortcut(slot: 0))?.displayValue ?? ""))
         .accessibilityLabel(WorkspaceL10n.text("Workspace: ", "工作区：") + workspace.name)
-        .popover(isPresented: $controller.workspaceSwitcherIsPresented, arrowEdge: .bottom) {
-            TerminalWorkspacePicker(controller: controller) { action in
-                pendingAction = action
-                controller.workspaceSwitcherIsPresented = false
-            }
-            .onDisappear {
-                let action = pendingAction
-                pendingAction = nil
-                DispatchQueue.main.async { action?() }
-            }
+        .background(WorkspacePopoverAnchor(controller: controller))
+    }
+}
+
+/// The native controller owns the popover, not the frequently replaced sidebar
+/// root view. Re-rendering the button must not dismiss or recreate its editor.
+@MainActor
+final class WorkspacePopoverPresentation: NSObject, NSPopoverDelegate {
+    private weak var controller: TerminalController?
+    private let popover = NSPopover()
+    private var pendingAction: (() -> Void)?
+    private(set) var contentCreationCount = 0
+    var isShown: Bool { popover.isShown }
+
+    init(controller: TerminalController) {
+        self.controller = controller
+        super.init()
+        popover.behavior = .transient
+        popover.animates = false
+        popover.delegate = self
+    }
+
+    func update(anchor: NSView) {
+        guard let controller else { return }
+        guard controller.workspaceSwitcherIsPresented else {
+            if popover.isShown { popover.performClose(nil) }
+            return
         }
+        guard !popover.isShown, anchor.window === controller.window,
+              controller.isAvailableForWorkspace, !controller.workspacePresentationIsParked else { return }
+        let content = TerminalWorkspacePicker(controller: controller) { [weak self] action in
+            self?.close(after: action)
+        }
+        popover.contentViewController = NSHostingController(rootView: content)
+        contentCreationCount += 1
+        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
+    }
+
+    func close(after action: (() -> Void)? = nil) {
+        pendingAction = action
+        if popover.isShown {
+            popover.performClose(nil)
+        } else {
+            finishClosing()
+        }
+    }
+
+    func popoverDidClose(_ notification: Notification) { finishClosing() }
+
+    private func finishClosing() {
+        controller?.workspaceSwitcherIsPresented = false
+        popover.contentViewController = nil
+        let action = pendingAction
+        pendingAction = nil
+        // The native close notification is the boundary, not SwiftUI teardown.
+        if let action { DispatchQueue.main.async(execute: action) }
+    }
+}
+
+private struct WorkspacePopoverAnchor: NSViewRepresentable {
+    let controller: TerminalController
+
+    final class AnchorView: NSView {
+        weak var controller: TerminalController?
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window != nil { controller?.workspacePopover.update(anchor: self) }
+        }
+    }
+
+    func makeNSView(context: Context) -> AnchorView { AnchorView() }
+    func updateNSView(_ view: AnchorView, context: Context) {
+        view.controller = controller
+        controller.workspacePopover.update(anchor: view)
     }
 }
 
@@ -67,8 +135,17 @@ private struct WorkspaceAttentionDot: View {
 struct TerminalWorkspacePicker: View {
     @ObservedObject var controller: TerminalController
     var afterDismiss: (@escaping () -> Void) -> Void = { action in DispatchQueue.main.async(execute: action) }
-    @ObservedObject private var store = TerminalWorkspaceStore.shared
-    @ObservedObject private var coordinator = TerminalWorkspaceCoordinator.shared
+    @ObservedObject private var store: TerminalWorkspaceStore
+    @ObservedObject private var coordinator: TerminalWorkspaceCoordinator
+
+    init(controller: TerminalController,
+         afterDismiss: @escaping (@escaping () -> Void) -> Void = { action in DispatchQueue.main.async(execute: action) }) {
+        self.controller = controller
+        self.afterDismiss = afterDismiss
+        self.coordinator = controller.workspaceCoordinator
+        self.store = controller.workspaceCoordinator.store
+    }
+
     @State private var query = ""
     @State private var selectedID: UUID?
     @State private var editing = false
@@ -137,6 +214,9 @@ struct TerminalWorkspacePicker: View {
                 if let error = store.saveError {
                     Text(WorkspaceL10n.text("Could not save workspaces: ", "无法保存工作区：") + error)
                         .font(.caption).foregroundStyle(.orange).padding(8)
+                }
+                if let error = coordinator.operationError {
+                    Text(error).font(.caption).foregroundStyle(.orange).padding(8)
                 }
                 Text(WorkspaceL10n.text("↑ ↓ Choose · ↵ Switch · esc Cancel", "↑ ↓ 选择 · ↵ 切换 · esc 取消"))
                     .font(.system(size: 10)).foregroundStyle(.tertiary).padding(7)

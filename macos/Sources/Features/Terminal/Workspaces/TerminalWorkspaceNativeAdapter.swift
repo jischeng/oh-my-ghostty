@@ -1,0 +1,189 @@
+import AppKit
+
+/// All native workspace topology changes pass this boundary. The model is
+/// committed only after apply succeeds. Injected operations exercise real
+/// rollback without depending on AppKit throwing an Objective-C exception.
+@MainActor
+final class TerminalWorkspaceNativeAdapter {
+    struct Group {
+        var members: [TerminalController]
+        var selected: TerminalController
+        var visible: Bool
+        var layout: VerticalTabWindowLayoutState
+        var scrollOffset: Double?
+    }
+
+    var attach: (NSWindow, NSWindow, NSWindow.OrderingMode) -> Bool = {
+        $0.addTabbedWindowSafely($1, ordered: $2)
+    }
+    var show: (TerminalController) -> Bool = { $0.showWindowSafely(nil) }
+    private(set) var transitioningWindows = Set<UUID>()
+    private var observers: [NSObjectProtocol] = []
+    var transitionCompleted: ((UUID) -> Void)?
+
+    init() {
+        let center = NotificationCenter.default
+        for name in [NSWindow.willEnterFullScreenNotification, NSWindow.willExitFullScreenNotification] {
+            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                MainActor.assumeIsolated {
+                    guard let controller = (note.object as? NSWindow)?.windowController as? TerminalController else { return }
+                    self?.transitioningWindows.insert(controller.windowSessionID)
+                }
+            })
+        }
+        for name in [NSWindow.didEnterFullScreenNotification, NSWindow.didExitFullScreenNotification] {
+            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                MainActor.assumeIsolated {
+                    guard let self, let controller = (note.object as? NSWindow)?.windowController as? TerminalController else { return }
+                    self.transitioningWindows.remove(controller.windowSessionID)
+                    self.transitionCompleted?(controller.windowSessionID)
+                }
+            })
+        }
+    }
+
+    deinit { for observer in observers { NotificationCenter.default.removeObserver(observer) } }
+
+    func fullscreenTransitionFailed(in host: UUID) {
+        transitioningWindows.remove(host)
+        transitionCompleted?(host)
+    }
+
+    func canApply(_ controllers: [TerminalController]) -> Bool {
+        controllers.allSatisfy {
+            $0.isAvailableForWorkspace && $0.window?.attachedSheet == nil &&
+                $0.window?.tabbingMode != .disallowed && $0.fullscreenStyle?.supportsTabs != false &&
+                !transitioningWindows.contains($0.windowSessionID)
+        }
+    }
+
+    /// Incoming windows join the existing fullscreen stack before outgoing
+    /// members leave. At no point may that native fullscreen container be empty.
+    func apply(_ groups: [Group], previous: [Group], focus: TerminalController?) -> Bool {
+        let previousVisible = previous.filter(\.visible)
+        for group in groups where group.visible {
+            guard let selectedWindow = group.selected.window else { return false }
+            let outgoing = previousVisible.first {
+                $0.selected.windowSessionID == group.selected.windowSessionID
+            }?.selected.window
+            var anchor = outgoing ?? selectedWindow
+            for member in group.members {
+                guard let window = member.window else { return false }
+                member.cancelWorkspacePendingPresentation()
+                if let outgoing, !window.styleMask.contains(.fullScreen) {
+                    window.setFrame(outgoing.frame, display: false)
+                }
+                if window !== anchor && anchor.tabGroup?.windows.contains(window) != true {
+                    guard attach(anchor, window, .above) else { return false }
+                }
+                member.finishWorkspaceTabAttachment()
+                anchor = window
+            }
+            if outgoing !== selectedWindow {
+                guard group.selected.withNewTabPresentation(from: outgoing, show: { self.show(group.selected) }) else { return false }
+            }
+        }
+        // Only the completed destination can now occupy the fullscreen stack.
+        for group in groups where !group.visible {
+            for member in group.members {
+                guard let window = member.window else { continue }
+                member.cancelWorkspacePendingPresentation()
+                window.tabGroup?.removeWindow(window)
+                window.orderOut(nil)
+            }
+        }
+        for group in groups where group.visible {
+            guard let window = group.selected.window else { return false }
+            let windows = group.members.compactMap(\.window)
+            if let native = window.tabGroup {
+                // insertWindow moves an existing member without explicitly
+                // emptying the native stack or removing its selected anchor.
+                for (index, member) in windows.enumerated() where native.windows.indices.contains(index) && native.windows[index] !== member {
+                    native.insertWindow(member, at: index)
+                }
+                guard native.windows == windows else { return false }
+                native.selectedWindow = window
+            } else if windows.count != 1 { return false }
+            if window.isMiniaturized { window.deminiaturize(nil) }
+            if group.selected === focus { window.makeKeyAndOrderFront(nil) } else if !window.isVisible { window.orderFront(nil) }
+        }
+        return true
+    }
+
+    /// Compensation deliberately uses the real native operation, rather than an
+    /// injected failing operation. A failed compensation is reported to callers.
+    func rollback(_ previous: [Group], attempted: [Group], focus: TerminalController?) -> Bool {
+        let savedAttach = attach
+        let savedShow = show
+        attach = { $0.addTabbedWindowSafely($1, ordered: $2) }
+        show = { $0.showWindowSafely(nil) }
+        defer { attach = savedAttach; show = savedShow }
+        let originalIDs = Set(previous.flatMap(\.members).map(\.tabSessionID))
+        let additions = attempted.compactMap { group -> Group? in
+            let members = group.members.filter { !originalIDs.contains($0.tabSessionID) }
+            guard let selected = members.first else { return nil }
+            return Group(members: members, selected: selected, visible: false, layout: group.layout)
+        }
+        return apply(previous + additions, previous: attempted, focus: focus)
+    }
+
+    func publish(_ groups: [Group]) {
+        for group in groups {
+            for member in group.members {
+                member.workspacePresentationIsParked = !group.visible
+                member.tabLayoutState = group.layout
+            }
+            guard group.visible else { continue }
+            let selected = group.selected
+            group.layout.sidebarHost.restoreScrollOffset(group.scrollOffset)
+            selected.window?.tabGroup?.setGhosttyTerminalShellLayoutState(group.layout)
+            selected.refreshWorkspaceTabs()
+            group.layout.sidebarHost.presentSelectedWindow(updateContent: true)
+            selected.window?.contentView?.superview?.layoutSubtreeIfNeeded()
+            group.layout.sidebarHost.restoreScrollOffset(group.scrollOffset)
+            selected.prepareWorkspaceFrame()
+            selected.window?.contentView?.displayIfNeeded()
+            if let surface = selected.focusedSurface ?? selected.surfaceTree.first,
+               let window = selected.window, window.isKeyWindow, surface.window === window {
+                window.makeFirstResponder(surface)
+            }
+            selected.finishWorkspacePresentation()
+        }
+    }
+}
+
+/// Suppresses only native presentation while a command is applying. The
+/// coordinator's graph remains frozen until its commit; screen suppression is
+/// never used as a substitute for model atomicity.
+@MainActor
+final class TerminalWorkspacePresentationTransaction {
+    private var animations: [(NSWindow, NSWindow.AnimationBehavior)] = []
+    private var ended = false
+
+    init(_ controllers: [TerminalController]) {
+        TerminalWorkspacePresentation.begin()
+        NSDisableScreenUpdates()
+        NSAnimationContext.beginGrouping()
+        NSAnimationContext.current.duration = 0
+        NSAnimationContext.current.allowsImplicitAnimation = false
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        var seen = Set<ObjectIdentifier>()
+        for controller in controllers {
+            guard let window = controller.window, seen.insert(ObjectIdentifier(window)).inserted else { continue }
+            animations.append((window, window.animationBehavior))
+            window.animationBehavior = .none
+        }
+    }
+
+    func publish(_ update: () -> Void) {
+        guard !ended else { return }
+        ended = true
+        TerminalWorkspacePresentation.end()
+        update()
+        CATransaction.commit()
+        NSAnimationContext.endGrouping()
+        for (window, behavior) in animations { window.animationBehavior = behavior }
+        NSEnableScreenUpdates()
+    }
+}

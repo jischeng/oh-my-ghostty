@@ -6,8 +6,11 @@ extension TerminalController {
     /// Native fullscreen attachment and SwiftUI container registration finish
     /// on subsequent run-loop turns. Repair only the still-selected live pane;
     /// a rapid second switch or a user tab selection supersedes this work.
-    func finishWorkspacePresentation(attempt: Int = 0) {
-        guard isAvailableForWorkspace, !workspacePresentationIsParked,
+    func finishWorkspacePresentation(attempt: Int = 0, generation: UInt64? = nil) {
+        let generation = generation ?? workspacePresentationGeneration
+        guard generation == workspacePresentationGeneration,
+              !workspaceCoordinator.native.transitioningWindows.contains(windowSessionID),
+              isAvailableForWorkspace, !workspacePresentationIsParked,
               let window, (window.tabGroup?.selectedWindow ?? window) === window else { return }
         window.contentView?.superview?.layoutSubtreeIfNeeded()
         refreshWorkspaceTabs()
@@ -22,7 +25,7 @@ extension TerminalController {
         let surfaceReady = (focusedSurface ?? surfaceTree.first)?.window === window
         guard attempt < 10, attempt == 0 || !sidebarReady || !surfaceReady else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + (attempt == 0 ? 0 : 0.02)) { [weak self] in
-            self?.finishWorkspacePresentation(attempt: attempt + 1)
+            self?.finishWorkspacePresentation(attempt: attempt + 1, generation: generation)
         }
     }
 

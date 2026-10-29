@@ -162,7 +162,9 @@ Layout 配置只对新窗口生效。运行时更换 orientation 需要替换 NS
 
 运行期切换保留 TerminalController、Surface、PTY、SSH 与 Agent，不通过序列化重建。目标成员先加入当前原生标签组并准备画面，然后才移走旧成员，避免先隐藏全屏窗口造成容器空洞；成员列表在交接前冻结，不从临时混合组反推归属。原生窗口 orderOut 可能拆散 NSWindowTabGroup，因此后台保存有序成员，返回时重建原生分组并选中原 Tab。每个用户窗口有独立稳定 ID，按 `(windowSessionID, workspaceID)` 管理稳定 tab 组、顺序、选中项和滚动位置；切换只查找当前窗口的组，其他窗口显示相同工作区时不抢焦点、不搬动其 tab。首次进入目标工作区时创建当前窗口自己的组。后台会话继续占用进程资源。完整 Tab 移动保留 Surface/tab 身份，原工作区最后一个 Tab 被移走后创建空终端。窗口 tabbingIdentifier 包含窗口 ID 和工作区 UUID，避免系统自动合并独立窗口。原生 tab 拆窗创建新窗口身份，合组和撤销同步更新归属。
 
-工作区元数据放在 channel-specific Application Support 的 `workspaces/catalog.json`，使用私有目录/文件和串行原子写入；运行期另外维护 `workspaces/sessions.json`，保存可编码的 tab/split 状态与 typed Agent/SSH 恢复描述，结构变化时保存并每秒检查其他状态变化。有效非空快照优先于 AppKit 启动归档；保存窗口/组 ID 与每个窗口当前及上一个工作区。窗口关闭保留、显式 tab 关闭删除；按需恢复只重建当前窗口所属组，不合并其他窗口记录。旧快照按已有原生组迁移为独立窗口，不猜测缺失的历史窗口关联。kill 后恢复最后成功落盘状态，不承诺尚未写入的变更或任意进程内存。恢复选中 Tab 完成后再隐藏后台工作区；目录中保存成员顺序以处理 AppKit 对隐藏标签组的拆分。工作区只隔离标签组织和窗口展示，不隔离 shell 环境、磁盘、凭据或网络。首次升级通过稳定 tab-session UUID 将已有窗口归入默认工作区。
+`TerminalWorkspaceState` 统一保存已提交的 workspace/window/group/tab 归属与顺序；Coordinator 的 live registry 保留运行对象，Controller 字段和原生组只作为投影。switch/move/delete 整体预检、冻结旧图，经 `TerminalWorkspaceNativeAdapter` 完成原生操作后一次提交；失败补偿旧拓扑，删除按窗口合并组，不隐藏其他窗口当前 workspace。全屏进入/退出期间推迟切换，延迟呈现回调携带 generation，避免快速往返后旧回调抢回焦点或重挂 sidebar。共享 workspace 布局偏好即时同步到各窗口，order/selection/scroll 保持窗口独立。
+
+工作区目录与纯 tab/split/Agent/SSH/runtime 描述共同写入 channel-specific Application Support 的 `workspaces/state.json` v2 envelope，包含 generation，私有后台串行 writer 合并请求并原子替换，保留 `state.json.previous`。旧 `catalog.json`/`sessions.json` 只作迁移输入。恢复先校验纯数据及全部归属引用，再创建 Surface；损坏新快照回退上一代，未知旧 workspace 迁入默认组。有效非空快照及用户明确清空的 v2 快照优先于 AppKit，空或不可用 v1 不抢占恢复。结构变化触发提交，每秒只检查目录/标题/恢复描述变化；无变化不落盘，采样不再修正归属。窗口关闭保留、显式 tab 关闭删除，Undo 同时恢复持久化资格。旧快照按已有原生组迁移独立窗口，不猜历史窗口关联；kill 恢复最后成功提交，不承诺任意进程内存。工作区只隔离标签组织和窗口展示，不隔离 shell 环境、磁盘、凭据或网络。详见 `docs/WORKSPACES.md`。
 
 ### 6.3 Pi
 

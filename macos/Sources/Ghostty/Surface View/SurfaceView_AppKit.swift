@@ -233,6 +233,7 @@ extension Ghostty {
         // the terminal title as the main title property. If the title is set manually
         // by the user, this is set to the prior value (which may be empty, but non-nil).
         private var titleFromTerminal: String?
+        var hasUserSetTitle: Bool { titleFromTerminal != nil }
 
         // The cached contents of the screen.
         private(set) var cachedScreenContents: CachedValue<String>

@@ -343,6 +343,11 @@ OMG Dev, the signed executable's `+ssh` command is captured with a fake SSH
 transport, compared byte-for-byte against current source (except session IDs),
 and exercised through Fish/bash/zsh. This offline artifact gate also applies to
 `--skip-build`; a version label and `.ReleaseFast` mode alone are insufficient.
+It also builds the native Session Runtime relay and both Linux architectures,
+then validates helpers, revisions, platform manifests, dependency hashes and
+`omgd version` before replacing the installed app. `--skip-build` requires this
+complete bundle too. Launch clears inherited handoff/runtime variables, and
+builds/launch use the persistent macOS user temporary directory.
 
 The Dev installer requires a persistent code-signing identity so macOS TCC can
 recognize replacement builds and retain previously granted folder permissions.

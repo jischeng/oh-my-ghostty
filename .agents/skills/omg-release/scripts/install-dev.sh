@@ -20,6 +20,11 @@ done
 repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
 
+# Builds and the launched app must not inherit an agent's short-lived temp root.
+launch_tmpdir=$(getconf DARWIN_USER_TEMP_DIR)
+[[ -d "$launch_tmpdir" ]] || { echo "missing macOS user temporary directory" >&2; exit 1; }
+export TMPDIR="$launch_tmpdir"
+
 worktree_status=$(git status --porcelain=v1 --untracked-files=all)
 [[ -z "$worktree_status" ]] || {
   echo "refusing to install OMG Dev from a dirty worktree; review, validate, and commit the intended test changes first" >&2
@@ -84,7 +89,13 @@ if [[ "$skip_build" != true ]]; then
     --configuration Debug \
     --action build \
     --marketing-version "$dev_version"
+  python3 dist/macos/build-session-runtime.py \
+    --output "$source_app/Contents/Resources/session-runtime"
 fi
+
+# --skip-build must validate the same complete artifact, never install a Swift
+# app missing the native SSH helper or its remote platform dependencies.
+python3 dist/macos/check-session-runtime.py "$source_app/Contents/Resources/session-runtime"
 
 [[ "$(git rev-parse HEAD)" == "$head_commit" ]] || {
   echo "HEAD changed during the Dev build; refusing to install or tag it" >&2
@@ -148,6 +159,7 @@ rm -rf "$target_app"
 ditto "$source_app" "$target_app"
 
 codesign --verify --deep --strict "$target_app"
+python3 dist/macos/check-session-runtime.py "$target_app/Contents/Resources/session-runtime"
 source_sha=$(shasum -a 256 "$source_bin" | awk '{print $1}')
 target_sha=$(shasum -a 256 "$target_bin" | awk '{print $1}')
 [[ "$source_sha" == "$target_sha" ]] || {
@@ -178,12 +190,9 @@ fi
 # LaunchServices can retain the installer's inherited environment for the app.
 # Agent harnesses use short-lived TMPDIR directories that disappear after the
 # tool call; terminal children need the user's persistent macOS temporary root.
-launch_tmpdir=$(getconf DARWIN_USER_TEMP_DIR)
-[[ -d "$launch_tmpdir" ]] || {
-  echo "missing macOS user temporary directory" >&2
-  exit 1
-}
-TMPDIR="$launch_tmpdir" open "$target_app"
+env -u OMG_SSH_HANDOFF_HELPER -u OMG_SSH_HANDOFF_DIRECTORY -u OMG_SSH_HANDOFF_TOKEN \
+  -u OMG_SESSION_RUNTIME_DESCRIPTOR -u OMG_RUNTIME_SOCKET -u OMG_RUNTIME_PANE_ID \
+  TMPDIR="$launch_tmpdir" open "$target_app"
 printf 'installed=%s\nbundle_id=%s\nomg_version=%s\nbundle_version=%s\ndev_tag=%s\ntag_created=%s\ntag_scope=%s\ncommit=%s\nbuild_mode=%s\nsigning_identity=%s\nsource_sha=%s\ninstalled_sha=%s\nlaunched=yes\n' \
   "$target_app" "$installed_bundle_id" "$installed_version" "$installed_build" \
   "$dev_tag" "$tag_created" "$tag_scope" "$head_commit" "$build_mode" \

@@ -157,6 +157,12 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
         isSwitching = true
         TerminalWorkspacePresentation.begin()
         NSDisableScreenUpdates()
+        NSAnimationContext.beginGrouping()
+        NSAnimationContext.current.duration = 0
+        NSAnimationContext.current.allowsImplicitAnimation = false
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        var animationBehaviors: [(NSWindow, NSWindow.AnimationBehavior)] = []
         var presented = source
         defer {
             let scrollOffset = store.group(window: host, workspace: presented.workspaceID)?.scrollOffset
@@ -167,10 +173,15 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
             presented.tabLayoutState.sidebarHost.presentSelectedWindow(updateContent: true)
             presented.window?.contentView?.superview?.layoutSubtreeIfNeeded()
             presented.tabLayoutState.sidebarHost.restoreScrollOffset(scrollOffset)
+            presented.prepareWorkspaceFrame()
             presented.window?.contentView?.displayIfNeeded()
+            CATransaction.commit()
+            NSAnimationContext.endGrouping()
+            for (window, behavior) in animationBehaviors { window.animationBehavior = behavior }
             NSEnableScreenUpdates()
             isSwitching = false
             sessions.capture()
+            presented.finishWorkspacePresentation()
         }
         // Capture membership before creating a window: AppKit can auto-tab
         // it during initialization in a fullscreen Space.
@@ -208,6 +219,11 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
             (restored.isEmpty ? groupControllers(destination) : restored)).filter {
                 $0.workspaceID == id && $0.windowSessionID == host && $0.isAvailableForWorkspace
             }
+        for member in outgoing + incoming {
+            guard let window = member.window else { continue }
+            animationBehaviors.append((window, window.animationBehavior))
+            window.animationBehavior = .none
+        }
         var completed = false
         defer {
             if !completed {
@@ -251,6 +267,11 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
             window.tabGroup?.removeWindow(window)
             window.orderOut(nil)
         }
+        // Removing the outgoing fullscreen tabs can change AppKit's selected
+        // window and responder after the initial show. Commit selection only
+        // after the native group has its final membership.
+        destination.window?.tabGroup?.selectedWindow = destination.window
+        destination.window?.makeKeyAndOrderFront(nil)
         destination.refreshWorkspaceTabs()
         completed = true
         presented = destination

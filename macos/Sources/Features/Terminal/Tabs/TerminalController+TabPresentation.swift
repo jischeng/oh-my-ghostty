@@ -3,6 +3,45 @@ import GhosttyKit
 import IOSurface
 
 extension TerminalController {
+    /// Native fullscreen attachment and SwiftUI container registration finish
+    /// on subsequent run-loop turns. Repair only the still-selected live pane;
+    /// a rapid second switch or a user tab selection supersedes this work.
+    func finishWorkspacePresentation(attempt: Int = 0) {
+        guard isAvailableForWorkspace, !workspacePresentationIsParked,
+              let window, (window.tabGroup?.selectedWindow ?? window) === window else { return }
+        window.contentView?.superview?.layoutSubtreeIfNeeded()
+        refreshWorkspaceTabs()
+        tabLayoutState.sidebarHost.presentSelectedWindow(updateContent: true)
+        if window.isKeyWindow, let surface = focusedSurface ?? surfaceTree.first,
+           surface.window === window, window.firstResponder === window || window.firstResponder == nil {
+            window.makeFirstResponder(surface)
+        }
+        prepareWorkspaceFrame()
+        window.contentView?.displayIfNeeded()
+        let sidebarReady = !sidebarIsShowing || tabLayoutState.sidebarHost.liveView?.window === window
+        let surfaceReady = (focusedSurface ?? surfaceTree.first)?.window === window
+        guard attempt < 10, attempt == 0 || !sidebarReady || !surfaceReady else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + (attempt == 0 ? 0 : 0.02)) { [weak self] in
+            self?.finishWorkspacePresentation(attempt: attempt + 1)
+        }
+    }
+
+    /// The final sidebar/layout can differ from the intermediate mixed native
+    /// tab group. Fill the terminal at that final geometry before exposing it.
+    func prepareWorkspaceFrame() {
+        guard let targetWindow = window else { return }
+        targetWindow.contentView?.superview?.layoutSubtreeIfNeeded()
+        for view in surfaceTree {
+            guard view.window === targetWindow, !view.isHiddenOrHasHiddenAncestor,
+                  let layer = view.layer, let surface = view.surface else { continue }
+            let width = Int((layer.bounds.width * layer.contentsScale).rounded(.down))
+            let height = Int((layer.bounds.height * layer.contentsScale).rounded(.down))
+            guard width > 0, height > 0 else { continue }
+            if let image = layer.contents as? IOSurface, image.width == width, image.height == height { continue }
+            ghostty_surface_draw(surface)
+        }
+    }
+
     /// AppKit gives a newly attached tab its fullscreen content rect only when
     /// selecting it. Keep that selection, the sidebar handoff, and the first
     /// correctly sized terminal frame in one nonanimated presentation update.

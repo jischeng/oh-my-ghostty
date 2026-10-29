@@ -1,10 +1,34 @@
 import AppKit
 import Combine
+import SwiftUI
 import Testing
 @testable import Ghostty
 
 @MainActor
 struct TerminalWorkspaceIntegrationTests {
+    @Test func sidebarRegisteredDuringWorkspaceHandoffMountsOnLaterLayout() throws {
+        let delegate = try #require(NSApp.delegate as? AppDelegate)
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let controller = TerminalController(delegate.ghostty, withBaseConfig: config, tabLayout: .vertical)
+        let window = try #require(controller.window)
+        defer { window.delegate = nil; window.close() }
+        controller.tabLayoutState = VerticalTabWindowLayoutState(isSidebarVisible: true)
+        let host = controller.tabLayoutState.sidebarHost
+        let container = VerticalTabSidebarContainer(frame: .init(x: 0, y: 0, width: 240, height: 400))
+        window.contentView = container
+        controller.tabLayoutState.updateTabs([controller], selectedID: ObjectIdentifier(controller))
+        TerminalWorkspacePresentation.begin()
+        container.configure(controller: controller, owner: host,
+            content: TerminalTabSidebarView(controller: controller, layoutState: controller.tabLayoutState,
+                statusStore: delegate.tabActivities, backgroundColor: .black))
+        #expect(host.liveView == nil)
+        TerminalWorkspacePresentation.end()
+        container.layout()
+        #expect(host.liveView?.superview === container)
+        #expect(host.liveView?.window === window)
+    }
+
     @Test func sessionSnapshotSurvivesStoreRecreationAndExplicitTabDeletion() throws {
         let app = try #require(NSApp.delegate as? AppDelegate).ghostty
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

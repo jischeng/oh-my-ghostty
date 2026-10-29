@@ -168,6 +168,16 @@ final class VerticalTabSidebarContainer: NSView {
         }
     }
 
+    override func layout() {
+        super.layout()
+        // Fullscreen tab attachment may register while selection/publication is
+        // suspended. A later layout must complete the mount even if SwiftUI's
+        // representable content did not change and updateNSView is not called.
+        if isSelectedWindow, owner?.liveView?.superview !== self {
+            owner?.presentSelectedWindow()
+        }
+    }
+
     func configure(
         controller: TerminalController,
         owner: VerticalTabSidebarHost,

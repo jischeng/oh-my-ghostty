@@ -2185,25 +2185,38 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         direction: SplitTree<Ghostty.SurfaceView>.NewDirection,
         baseConfig config: Ghostty.SurfaceConfiguration? = nil
     ) -> Ghostty.SurfaceView? {
-        super.newSplit(
-            at: oldView,
-            direction: direction,
-            baseConfig: splitConfiguration(
-                inherited: config,
-                from: oldView
-            )
-        )
+        do {
+            let configuration = try splitConfiguration(inherited: config, from: oldView)
+            return super.newSplit(at: oldView, direction: direction, baseConfig: configuration)
+        } catch {
+            // Do not silently open a local pane when remote split setup fails.
+            let alert = NSAlert(error: error)
+            if let window { alert.beginSheetModal(for: window) }
+            return nil
+        }
     }
 
     func splitConfiguration(
         inherited config: Ghostty.SurfaceConfiguration?,
-        from source: Ghostty.SurfaceView
-    ) -> Ghostty.SurfaceConfiguration? {
+        from source: Ghostty.SurfaceView,
+        runtimeRevision: String? = nil
+    ) throws -> Ghostty.SurfaceConfiguration? {
         if let runtime = source.runtimeDescriptor {
+            // A split creates a new PTY on this host. Use the current bundled
+            // protocol; the existing pane remains pinned to its own revision.
+            var next = try runtimeRevision.map {
+                SessionRuntimeDescriptor(connection: runtime.connection, revision: $0, policy: runtime.policy)
+            } ?? SessionRuntimeConnections.descriptor(connection: runtime.connection, policy: runtime.policy)
+            next.initialWorkingDirectory = SessionRuntimeDescriptor.validWorkingDirectory(source.pwd)
             var result = config ?? .init()
-            try? runtime.configure(&result)
+            try next.configure(&result)
+            result.environmentVariables.removeValue(forKey: "OMG_RUNTIME_SOCKET")
+            result.environmentVariables.removeValue(forKey: "OMG_RUNTIME_PANE_ID")
             result.workingDirectory = nil
-            return result
+            result.command = nil
+            result.initialInput = nil
+            result.waitAfterCommand = false
+            return Self.injectingSessionID(tabSessionID, into: result)
         }
         guard let session = paneSessionContext(for: source) else { return config }
         let replay: SSHReplayDescriptor? = switch session.state {

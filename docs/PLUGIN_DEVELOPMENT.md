@@ -127,7 +127,21 @@ helpers, dependencies and remote platform manifests before replacing the app.
 The local surface is retained during handoff. A confirmed remote process exit
 returns to that local shell and records a local pane; transport disconnection
 never triggers this transition. Across app restart, the local shell is recreated
-at the descriptor's original local working directory.
+at the descriptor's original local working directory. The remote surface has
+its own terminal scrollback; the retained local history is not prepended to a
+remote snapshot. Handoff replaces the current pane, not its tab/window. Local
+history becomes visible again after a normal remote shell exit.
+
+Native SSH splits create an independent remote session on the same exact SSH
+connection. The current remote pane directory is sent as optional `cwd` in the
+open request, validated as an absolute path (at most 4096 bytes, no NUL), and
+applied via the child process working directory only at first creation. Paths
+are never evaluated as shell commands. Reattach ignores `cwd`, and Agent resume
+uses its recorded recovery directory. New splits use the bundled runtime revision
+that understands this field; existing panes remain pinned to their original
+revision. A missing/deleted directory produces a connection error rather than
+silently opening a local pane or a different directory. Old requests/archives
+without `cwd` remain readable and retain the default shell directory behavior.
 Runtime remote executable/deployment identity is `omgd`; the remote `omg` draft
 CLI remains a separate non-daemon command interface.
 

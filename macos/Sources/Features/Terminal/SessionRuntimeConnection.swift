@@ -27,6 +27,13 @@ struct SessionRuntimeDescriptor: Codable, Equatable, Sendable {
     var connection: GitSSHConnection
     var revision: String
     var policy: SessionRuntimePolicy
+    /// Used only when creating this pane. Reattach never changes a live cwd.
+    var initialWorkingDirectory: String?
+
+    static func validWorkingDirectory(_ value: String?) -> String? {
+        guard let value, value.hasPrefix("/"), value.utf8.count <= 4096, !value.contains("\0") else { return nil }
+        return value
+    }
 
     var identity: String {
         SHA256.hash(data: Data((connection.identity + "\0" + revision).utf8))
@@ -42,8 +49,10 @@ struct SessionRuntimeDescriptor: Codable, Equatable, Sendable {
             let id: String
             let policy: SessionRuntimePolicy
             let create: Bool
+            let cwd: String?
         }
-        let data = try JSONEncoder().encode(Request(id: pane.uuidString.lowercased(), policy: policy, create: !restoring))
+        let data = try JSONEncoder().encode(Request(id: pane.uuidString.lowercased(), policy: policy, create: !restoring,
+            cwd: restoring ? nil : Self.validWorkingDirectory(initialWorkingDirectory)))
         guard let result = String(data: data, encoding: .utf8) else { throw CocoaError(.fileReadCorruptFile) }
         return result
     }

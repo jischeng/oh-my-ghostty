@@ -78,6 +78,7 @@ pub struct ManagedSession {
     pub path: PathBuf,
     pub record: Record,
     pub containment_root: Option<PathBuf>,
+    pub initial_cwd: Option<PathBuf>,
 }
 
 pub fn serve_managed(
@@ -175,7 +176,11 @@ pub fn serve_managed(
         .stdout(Stdio::from(slave.try_clone()?))
         .stderr(Stdio::from(slave));
     if let Some(resume) = managed.as_ref().and_then(|m| m.record.resume.as_ref()) {
-        command.current_dir(&resume.cwd);
+        command.current_dir(&resume.cwd).env("PWD", &resume.cwd);
+    } else if let Some(cwd) = managed.as_ref().and_then(|m| m.initial_cwd.as_ref()) {
+        // Set cwd on this child command only; the host serves other sessions on
+        // parallel threads. Treat paths as data, never a shell `cd` expression.
+        command.current_dir(cwd).env("PWD", cwd);
     }
     unsafe {
         command.pre_exec(move || {

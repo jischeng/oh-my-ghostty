@@ -223,8 +223,19 @@ struct SessionRuntimeConnectionTests {
         #expect(tab.environmentVariables[SessionRuntimeDescriptor.environmentKey] == nil)
         #expect(tab.environmentVariables["OMG_RUNTIME_SOCKET"] == nil)
         #expect(tab.environmentVariables["OMG_RUNTIME_PANE_ID"] == nil)
-        let split = try #require(controller.splitConfiguration(inherited: nil, from: view))
-        #expect(split.environmentVariables[SessionRuntimeDescriptor.environmentKey] != nil)
+        view.pwd = "/srv/project with spaces/中文"
+        let split = try #require(try controller.splitConfiguration(inherited: config, from: view, runtimeRevision: "current"))
+        let encoded = try #require(split.environmentVariables[SessionRuntimeDescriptor.environmentKey])
+        let next = try JSONDecoder().decode(SessionRuntimeDescriptor.self, from: Data(encoded.utf8))
+        #expect(next.connection == descriptor.connection)
+        #expect(next.revision == "current")
+        #expect(next.policy == descriptor.policy)
+        #expect(next.initialWorkingDirectory == view.pwd)
+        #expect(view.runtimeDescriptor == descriptor)
+        #expect(split.workingDirectory == nil)
+        #expect(split.command == nil)
+        #expect(split.environmentVariables["OMG_RUNTIME_SOCKET"] == nil)
+        #expect(split.environmentVariables["OMG_RUNTIME_PANE_ID"] == nil)
     }
 
     @MainActor
@@ -251,6 +262,28 @@ struct SessionRuntimeConnectionTests {
         #expect(first.identity != SessionRuntimeDescriptor(connection: a, revision: "def", policy: .init()).identity)
         let decoded = try JSONDecoder().decode(SessionRuntimeDescriptor.self, from: JSONEncoder().encode(first))
         #expect(decoded == first)
+    }
+
+    @Test func splitDirectoryIsOnlyUsedForCreationAndDoesNotChangeConnectionIdentity() throws {
+        let descriptor = SessionRuntimeDescriptor(connection: try GitSSHConnection(destination: "devbox"),
+            revision: "current", policy: .init())
+        var split = descriptor
+        split.initialWorkingDirectory = "/srv/dir with spaces/中文;$(not-a-command)"
+        #expect(split.identity == descriptor.identity)
+        let id = UUID()
+        let fresh = try #require(try JSONSerialization.jsonObject(with:
+            Data(split.openRequest(pane: id, restoring: false).utf8)) as? [String: Any])
+        let restored = try #require(try JSONSerialization.jsonObject(with:
+            Data(split.openRequest(pane: id, restoring: true).utf8)) as? [String: Any])
+        #expect(fresh["cwd"] as? String == split.initialWorkingDirectory)
+        #expect(restored["cwd"] == nil)
+        #expect(restored["create"] as? Bool == false)
+        // The optional field must not invalidate pre-upgrade restore archives.
+        let oldData = try JSONEncoder().encode(descriptor)
+        #expect(try JSONDecoder().decode(SessionRuntimeDescriptor.self, from: oldData).initialWorkingDirectory == nil)
+        for invalid in ["relative/path", "", "/bad\0path", "/" + String(repeating: "界", count: 1500)] {
+            #expect(SessionRuntimeDescriptor.validWorkingDirectory(invalid) == nil)
+        }
     }
 
     @Test func restoredPaneCannotSilentlyCreateANewRemoteProcess() throws {

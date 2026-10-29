@@ -21,6 +21,8 @@ pub struct OpenRequest {
     pub id: String,
     pub policy: Policy,
     pub create: bool,
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 pub struct Registry {
@@ -158,7 +160,7 @@ impl Registry {
         Ok(records)
     }
     pub fn connect(&mut self, id: &str, resume_generation: Option<&str>) -> io::Result<UnixStream> {
-        self.connect_with(id, resume_generation, None, true)
+        self.connect_with(id, resume_generation, None, true, None)
     }
     pub fn open(&mut self, request: &OpenRequest) -> io::Result<UnixStream> {
         request.policy.validate()?;
@@ -167,11 +169,18 @@ impl Registry {
             None,
             Some(request.policy.clone()),
             request.create,
+            request.cwd.as_deref(),
         );
         if first.is_err() && valid_id(&request.id) {
             if let Ok(record) = Record::load(&self.root.join(format!("{}.json", request.id))) {
                 if record.ended.is_some_and(EndReason::resumable) && record.resume.is_some() {
-                    return self.connect_with(&request.id, Some(&record.generation), None, false);
+                    return self.connect_with(
+                        &request.id,
+                        Some(&record.generation),
+                        None,
+                        false,
+                        None,
+                    );
                 }
             }
         }
@@ -183,6 +192,7 @@ impl Registry {
         resume_generation: Option<&str>,
         policy: Option<Policy>,
         create: bool,
+        initial_cwd: Option<&str>,
     ) -> io::Result<UnixStream> {
         if !valid_id(id) {
             return Err(io::Error::other("invalid session identity"));
@@ -206,6 +216,7 @@ impl Registry {
             return Err(io::Error::other("active session quota exceeded"));
         }
         let mut argv = self.command.clone();
+        let mut working_directory = None;
         let mut record = if path.exists() {
             let mut record = Record::load(&path)?;
             if record.ended.is_none() {
@@ -253,6 +264,17 @@ impl Registry {
             if self.list()?.len() >= MAX_RECORDS {
                 return Err(io::Error::other("session metadata quota exceeded"));
             }
+            if let Some(cwd) = initial_cwd {
+                if !cwd.starts_with('/') || cwd.len() > 4096 || cwd.contains('\0') {
+                    return Err(io::Error::other("invalid initial working directory"));
+                }
+                if !fs::metadata(cwd)?.is_dir() {
+                    return Err(io::Error::other(
+                        "initial working directory is not a directory",
+                    ));
+                }
+                working_directory = Some(PathBuf::from(cwd));
+            }
             // A compact permanent marker distinguishes a new pane from an
             // expired/deleted recovery record, avoiding silent recreation.
             fs::OpenOptions::new()
@@ -280,6 +302,7 @@ impl Registry {
                         path: record_path.clone(),
                         record,
                         containment_root,
+                        initial_cwd: working_directory,
                     }),
                 ) {
                     if let Ok(mut r) = Record::load(&record_path) {

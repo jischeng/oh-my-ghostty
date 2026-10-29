@@ -17,6 +17,16 @@ Keep the host runtime revision in restored pane descriptors. One host connection
 multiplexes native session streams; normal tabs remain local unless a runtime
 connection descriptor is attached. Original shell PTY is never a relay.
 
+A split inside a native SSH pane creates a new remote PTY on the same exact SSH
+connection and passes the current remote directory as optional `cwd`. The host
+validates the path and sets it on the new child command without shell evaluation
+or process-wide `chdir`. Existing-session attach ignores this creation hint;
+Agent resume still uses its recorded directory. New splits use current bundled
+artifacts to support this request field; already running panes stay on their
+pinned versions. The native remote terminal's history remains separate from the
+retained local terminal; handoff does not create a new GUI window, and normal
+remote exit returns to the original local surface.
+
 Initial artifact targets: Linux x86_64/aarch64 with documented libc baseline;
 macOS arm64/x86_64 via native build runners. Unsupported platforms fail explicitly.
 Binaries and manifests are produced from the same checkout as the GUI snapshot

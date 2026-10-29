@@ -54,7 +54,7 @@ extension TerminalController {
                     return
                 }
                 self.quickInputModel.importAgentDraft(text)
-                self.quickInputModel.setStatusMessage("Draft imported. Sending will append only text after the original prefix.")
+                self.quickInputModel.setStatusMessage(SettingsStrings(language: OhMyGhosttySettings.shared.language).quickInputDraftImported)
             } catch {
                 if !Task.isCancelled, let self, let surface, self.quickInputModel.isPresented,
                    self.quickInputModel.targetSurfaceID == surface.id {

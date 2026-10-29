@@ -33,6 +33,58 @@ struct QuickInputPresentationTests {
         }
     }
 
+    @Test func multilineSubmissionReachesPTYBeforeEnter() async throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let script = root.appendingPathComponent("receive.py")
+        let ready = root.appendingPathComponent("ready")
+        let output = root.appendingPathComponent("input")
+        try """
+        import os, tty, pathlib
+        tty.setraw(0)
+        os.write(1, b'\\x1b[?2004h')
+        pathlib.Path(\(String(reflecting: ready.path))).touch()
+        data = b''
+        while not data.endswith(b'\\r'):
+            data += os.read(0, 65536)
+        pathlib.Path(\(String(reflecting: output.path))).write_bytes(data)
+        """.write(to: script, atomically: true, encoding: .utf8)
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/usr/bin/python3 " + script.path
+        let controller = TerminalController(app, withBaseConfig: config)
+        _ = controller.window
+        defer {
+            controller.window?.delegate = nil
+            controller.window?.close()
+        }
+        for _ in 0..<100 {
+            if FileManager.default.fileExists(atPath: ready.path) { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try #require(FileManager.default.fileExists(atPath: ready.path))
+        try await Task.sleep(for: .milliseconds(100))
+        let surface = try #require(controller.surfaceTree.first)
+        controller.quickInputModel.present(for: surface.id)
+        let text = "第一行中文🙂\n" + String(repeating: "long line abc 中文\n", count: 200) + "last line"
+        controller.quickInputModel.draft = text
+        controller.sendQuickInputDraft()
+        for _ in 0..<100 {
+            if FileManager.default.fileExists(atPath: output.path) { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        let received = try String(contentsOf: output, encoding: .utf8)
+        #expect(received == "\u{1B}[200~" + text + "\u{1B}[201~\r")
+    }
+
+    @Test func importedDraftNoticeUsesSelectedLanguage() {
+        #expect(SettingsStrings(language: .english).quickInputDraftImported ==
+            "Draft imported. Sending will append only text after the original prefix.")
+        #expect(SettingsStrings(language: .simplifiedChinese).quickInputDraftImported ==
+            "草稿已导入。发送时只会追加原有内容之后新增的文字。")
+    }
+
     @Test func inputUsesRegularFaceAndConfiguredForegroundForTextAndCaret() async throws {
         let foreground = NSColor(srgbRed: 0.8, green: 0.82, blue: 0.85, alpha: 1)
         let font = QuickInputTypography.font(family: "Menlo", size: 13)

@@ -323,6 +323,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     @Published private(set) var agentResumeDescriptors: [UUID: AgentResumeDescriptor] = [:]
     let quickInputModel = AgentQuickInputModel(historyStore: .shared, globalPresentation: .shared)
     var quickInputDraftImportTask: Task<Void, Never>?
+    private var quickInputSubmissionTasks: [UUID: Task<Void, Never>] = [:]
     private var quickInputEventMonitor: Any?
     private var quickInputSecureInputCancellable: AnyCancellable?
     private var quickInputLastTerminalSurfaceID: UUID?
@@ -408,8 +409,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return
         }
         guard let surface = focusedSurface ?? surfaceTree.first else { return }
-        // Capture before the dock resizes the PTY, for both local and SSH CLIs.
-        let snapshot = QuickInputTerminalSnapshot(surface: surface)
+        // Bound the overlay independently of the editor handshake. Otherwise
+        // its old geometry hides the terminal's resize until import completes.
+        let snapshot = QuickInputTerminalSnapshot(surface: surface, maximumDuration: .milliseconds(150))
         defer {
             if quickInputDraftImportTask == nil { snapshot.removeAfterRedraw() }
         }
@@ -459,7 +461,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                     if let text = try QuickInputDraftBridge.shared.receive(request) {
                         guard !SecureInput.shared.enabled else { return }
                         self.quickInputModel.importAgentDraft(text)
-                        self.quickInputModel.setStatusMessage("Draft imported. Sending will append only text after the original prefix.")
+                        self.quickInputModel.setStatusMessage(SettingsStrings(language: OhMyGhosttySettings.shared.language).quickInputDraftImported)
                         return
                     }
                 } catch is CancellationError {
@@ -728,11 +730,25 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             quickInputModel.setStatusMessage("The imported prefix changed. Clear the agent input and reopen Quick Input before sending.")
             return false
         }
+        guard quickInputSubmissionTasks[surfaceID] == nil else {
+            quickInputModel.setStatusMessage(SettingsStrings(language: OhMyGhosttySettings.shared.language)
+                .t("Wait for the previous message to finish sending.", "请等待上一条消息发送完成。"))
+            return false
+        }
         if !suffix.isEmpty { terminal.sendText(suffix) }
-        terminal.sendKeyEvent(.init(key: .enter))
+        // TUIs often defer bracketed-paste handling. An Enter in the same
+        // input batch can be consumed as part of paste instead of submission.
+        quickInputSubmissionTasks[surfaceID] = Task { @MainActor [weak self, weak surface] in
+            defer { self?.quickInputSubmissionTasks.removeValue(forKey: surfaceID) }
+            do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+            guard let self, let surface,
+                  self.surfaceTree.contains(where: { $0 === surface }) else { return }
+            terminal.sendKeyEvent(.init(key: .enter))
+            terminal.sendKeyEvent(.init(key: .enter, action: .release))
+            self.acknowledgeTerminalAgentState(for: surface)
+        }
         quickInputModel.didSubmitAgentDraft(for: surfaceID)
         quickInputModel.recordSentText(text, for: surfaceID)
-        acknowledgeTerminalAgentState(for: surface)
         quickInputModel.setStatusMessage(nil)
         if restoreFocus {
             restoreTerminalFocus(surfaceID: surfaceID)
@@ -969,6 +985,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         pendingTabOrganizationWorkItem?.cancel()
         quickInputSecureInputCancellable?.cancel()
         quickInputDraftImportTask?.cancel()
+        for task in quickInputSubmissionTasks.values { task.cancel() }
         endQuickInputResizeDeferral()
         if let quickInputEventMonitor {
             NSEvent.removeMonitor(quickInputEventMonitor)

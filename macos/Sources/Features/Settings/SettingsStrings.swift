@@ -432,6 +432,10 @@ struct SettingsStrings: Equatable, Sendable {
         t("Use up to four comma-separated shortcuts with control, option or shift and a letter or digit.",
           "使用 control、option、shift 加字母或数字；多个按键组合用逗号分隔，最多四组。")
     }
+    var quickInputDraftImported: String {
+        t("Draft imported. Sending will append only text after the original prefix.",
+          "草稿已导入。发送时只会追加原有内容之后新增的文字。")
+    }
     var quickInputHeightLabel: String { t("Composer Height", "输入框高度") }
     var quickInputHeightCaption: String {
         t(

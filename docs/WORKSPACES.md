@@ -41,7 +41,11 @@ shortcuts remain global.
 Switching workspaces keeps existing Surface/PTY objects alive. Background local
 commands, Agent sessions and SSH clients continue running and consuming resources.
 A network failure can still disconnect SSH independently of workspace switching.
-Returning restores the saved tab order and selected tab. A workspace already
+Returning restores the saved tab order and selected tab. Native tab-group changes
+during a handoff are not published to the sidebar: each workspace retains its
+layout/host, and the destination list and selection appear together after the
+handoff. This prevents intermediate mixed lists and selection-driven scrolling.
+A workspace already
 visible in another window is focused there instead of duplicated.
 
 Named workspace sessions are now checkpointed independently to
@@ -51,7 +55,9 @@ Closing a window retains its saved tabs; explicitly closing a tab removes it.
 Checkpoints preserve native window grouping, selected tabs, window frames and
 native fullscreen state. Older checkpoints without these fields fall back to
 one group per workspace. Startup assembles groups before showing selected tabs;
-quit freezes hidden-workspace metadata before window teardown begins.
+quit freezes hidden-workspace metadata before window teardown begins. If all
+records fail to decode, startup creates a terminal; if restoration leaves every
+window hidden, it reveals an existing workspace.
 Snapshots are written on structural changes and checked once per second for
 changed directory/title/resume data. A forced kill restores the last successful
 checkpoint; changes not yet written at the instant of termination may be lost.

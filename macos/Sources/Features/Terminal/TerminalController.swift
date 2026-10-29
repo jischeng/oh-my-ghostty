@@ -3025,9 +3025,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     private var tabPresentationIsClosing = false
+    var workspacePresentationIsParked = false
 
     private func refreshTabs() {
-        guard !tabPresentationIsClosing else { return }
+        guard !tabPresentationIsClosing, !workspacePresentationIsParked,
+              !TerminalWorkspacePresentation.isChanging else { return }
         guard let window else {
             if !tabControllers.isEmpty { tabControllers = [] }
             if selectedTabID != nil { selectedTabID = nil }
@@ -3071,10 +3073,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     static func refreshTabs(in tabGroup: NSWindowTabGroup?) {
-        guard let tabGroup else { return }
+        guard let tabGroup, !TerminalWorkspacePresentation.isChanging else { return }
         pendingTabRefreshes.removeValue(forKey: ObjectIdentifier(tabGroup))?.cancel()
         let controllers = tabGroup.windows.compactMap { $0.windowController as? TerminalController }
-            .filter { !$0.tabPresentationIsClosing }
+            .filter { !$0.tabPresentationIsClosing && !$0.workspacePresentationIsParked }
         guard let window = controllers.first?.window else { return }
         let sharedState = tabGroup.ghosttyTerminalShellLayoutState
         let membershipChanged = sharedState.tabSnapshot.controllers.map(ObjectIdentifier.init) !=
@@ -4440,6 +4442,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     override func windowDidBecomeKey(_ notification: Notification) {
         super.windowDidBecomeKey(notification)
+        guard !TerminalWorkspacePresentation.isChanging else { return }
         markTabActivated()
         setupTabObservation()
         Self.refreshTabs(in: window?.tabGroup)

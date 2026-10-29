@@ -27,6 +27,7 @@ final class VerticalTabSidebarHost {
     }
 
     func presentSelectedWindow(updateContent: Bool = false) {
+        guard !TerminalWorkspacePresentation.isChanging else { return }
         containers = containers.filter { $0.value.value != nil }
         guard let destination = containers.values.compactMap(\.value).first(where: { $0.isSelectedWindow }) else { return }
         present(in: destination, updateContent: updateContent)
@@ -80,6 +81,7 @@ final class VerticalTabSidebarContainer: NSView {
 
     var isSelectedWindow: Bool {
         guard let window, let controller, controller.window === window,
+              !controller.workspacePresentationIsParked,
               controller.tabLayoutState.sidebarHost === owner else { return false }
         // A newly loaded window temporarily has its own native tab group while
         // already sharing the parent's layout state. It must not steal the list

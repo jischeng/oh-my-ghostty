@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Testing
 @testable import Ghostty
 
@@ -269,6 +270,26 @@ struct TerminalWorkspaceIntegrationTests {
         }
     }
 
+    @Test func recoveryExposesAnExistingWindowWhenEveryWindowIsHidden() throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let store = TerminalWorkspaceStore(fileURL: nil)
+        let coordinator = TerminalWorkspaceCoordinator(store: store)
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let controller = TerminalController(app, withBaseConfig: config)
+        let window = try #require(controller.window)
+        let previouslyVisible = TerminalController.all.filter { $0 !== controller && $0.window?.isVisible == true }
+        defer {
+            controller.window?.delegate = nil
+            controller.window?.close()
+            for other in previouslyVisible { other.window?.orderFront(nil) }
+        }
+        for other in previouslyVisible { other.window?.orderOut(nil) }
+        window.orderOut(nil)
+        coordinator.ensureVisibleWorkspace()
+        #expect(TerminalController.all.contains { $0.window?.isVisible == true })
+    }
+
     @Test func quittingFreezesParkedWorkspacePresentation() throws {
         let app = try #require(NSApp.delegate as? AppDelegate).ghostty
         let store = TerminalWorkspaceStore(fileURL: nil)
@@ -299,6 +320,56 @@ struct TerminalWorkspaceIntegrationTests {
         coordinator.cancelQuit()
         coordinator.didClose(source)
         #expect(!store.snapshot.hiddenTabs.contains(source.tabSessionID))
+    }
+
+    @Test func switchingPublishesOnlyFinalMembershipAndSelection() async throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let store = TerminalWorkspaceStore(fileURL: nil)
+        let destinationID = try #require(store.create(name: "Long", symbol: "house", color: "blue"))
+        let sourceID = try #require(store.create(name: "Short", symbol: "house", color: "blue"))
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let source = TerminalController(app, withBaseConfig: config, tabLayout: .vertical)
+        source.workspaceID = sourceID
+        let targets = (0..<5).map { _ in TerminalController(app, withBaseConfig: config, tabLayout: .vertical) }
+        let sourceWindow = try #require(source.window)
+        let windows = try targets.map { controller -> NSWindow in
+            controller.workspaceID = destinationID
+            return try #require(controller.window)
+        }
+        defer {
+            for controller in [source] + targets {
+                controller.window?.delegate = nil
+                controller.window?.close()
+            }
+        }
+        for index in 1..<windows.count { #expect(windows[index - 1].addTabbedWindowSafely(windows[index], ordered: .above)) }
+        targets[0].refreshWorkspaceTabs()
+        let destinationLayout = targets[0].tabLayoutState
+        store.rememberPresentation(hidden: Set(targets.map(\.tabSessionID)),
+            selected: [destinationID: targets[2].tabSessionID],
+            groups: [targets[0].tabSessionID: targets.map(\.tabSessionID)])
+        // Build the same parked catalog used by a restored long workspace.
+        let restoredCoordinator = TerminalWorkspaceCoordinator(store: store)
+        restoredCoordinator.finishRestoring()
+        sourceWindow.makeKeyAndOrderFront(nil)
+        var published: [([UUID], ObjectIdentifier?)] = []
+        let observation = destinationLayout.tabPresentation.$tabSnapshot.dropFirst().sink { snapshot in
+            published.append((snapshot.controllers.map(\.tabSessionID), snapshot.selectedID))
+        }
+        defer { observation.cancel() }
+        let target = try #require(restoredCoordinator.switchWorkspace(to: destinationID, from: source))
+        let expected = targets.map(\.tabSessionID)
+        #expect(target === targets[2])
+        #expect(target.tabControllers.map(\.tabSessionID) == expected)
+        #expect(target.tabLayoutState === destinationLayout)
+        #expect(source.tabLayoutState !== destinationLayout)
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(published.allSatisfy { $0.0 == expected && $0.1 == ObjectIdentifier(target) })
+        #expect(restoredCoordinator.switchWorkspace(to: source.workspaceID, from: target) === source)
+        #expect(restoredCoordinator.switchWorkspace(to: destinationID, from: source) === target)
+        #expect(target.tabLayoutState === destinationLayout)
+        #expect(target.tabControllers.map(\.tabSessionID) == expected)
     }
 
     @Test func switchingRetainsSurfacesAndNativeTabMembership() async throws {

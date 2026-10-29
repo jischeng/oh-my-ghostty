@@ -53,7 +53,16 @@ final class TerminalWorkspaceSessionStore {
         if ownsRestoration {
             var anchors: [UUID: NSWindow] = [:]
             NSDisableScreenUpdates()
-            defer { NSEnableScreenUpdates() }
+            TerminalWorkspacePresentation.begin()
+            defer {
+                TerminalWorkspacePresentation.end()
+                for anchor in anchors.values {
+                    (anchor.windowController as? TerminalController)?.refreshWorkspaceTabs()
+                    anchor.contentView?.superview?.layoutSubtreeIfNeeded()
+                    anchor.contentView?.displayIfNeeded()
+                }
+                NSEnableScreenUpdates()
+            }
             for tab in saved.tabs {
                 guard !TerminalController.all.contains(where: { $0.tabSessionID == tab.id }),
                       let state = try? decoder.decode(TerminalRestorableState.self, from: tab.state) else { continue }
@@ -114,8 +123,17 @@ final class TerminalWorkspaceSessionStore {
                 anchor.tabGroup?.selectedWindow = selected
             }
         }
-        if ownsRestoration, saved.tabs.isEmpty, TerminalController.all.isEmpty {
+        // A valid catalog can still contain only undecodable records. It must
+        // not suppress the initial window when no surface could be restored.
+        if ownsRestoration, TerminalController.all.isEmpty {
             _ = TerminalController.newWindow(app)
+        }
+        if ownsRestoration, !testing {
+            // Run after selection restoration has parked hidden groups. Never
+            // strand a launch with live sessions but no accessible window.
+            DispatchQueue.main.async {
+                TerminalWorkspaceCoordinator.shared.ensureVisibleWorkspace()
+            }
         }
         restoring = false
         started = true

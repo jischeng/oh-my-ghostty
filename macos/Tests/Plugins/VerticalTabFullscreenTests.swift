@@ -110,14 +110,26 @@ struct VerticalTabFullscreenTests {
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
+        NSRunningApplication.current.activate(options: [.activateIgnoringOtherApps, .activateAllWindows])
         for _ in 0..<100 {
             if NSApp.isActive && window.isKeyWindow { break }
+            if NSApp.isActive { window.makeKeyAndOrderFront(nil) }
             try await Task.sleep(for: .milliseconds(50))
         }
-        try #require(NSApp.isActive && window.isKeyWindow, "Requires foreground test app")
-        window.toggleFullScreen(nil)
-        try await Task.sleep(for: .seconds(2))
-        try #require(window.styleMask.contains(.fullScreen))
+        try #require(NSApp.isActive && window.isKeyWindow,
+                     "Requires foreground test app: active=\(NSApp.isActive), key=\(window.isKeyWindow), visible=\(window.isVisible)")
+        var enteredFullscreen = false
+        let observer = NotificationCenter.default.addObserver(
+            forName: NSWindow.didEnterFullScreenNotification, object: window, queue: .main
+        ) { _ in MainActor.assumeIsolated { enteredFullscreen = true } }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        source.toggleFullscreen(mode: .native)
+        for _ in 0..<200 {
+            if enteredFullscreen { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try #require(enteredFullscreen && window.styleMask.contains(.fullScreen),
+                     "Requires a desktop capable of completing the native fullscreen transition")
         let original = try #require(source.surfaceTree.first)
         let target = try #require(coordinator.switchWorkspace(to: workspace, from: source))
         controllers.append(target)

@@ -1886,7 +1886,9 @@ private struct VerticalTabRow: View {
             workingDirectory: activeSurface.pwd,
             terminalTitle: activeSurface.title
         )
-        let agentActivity = controller.agentActivity(for: activeSurface)
+        // Match the parent row's activity fallback on its first render. The
+        // pane activity cache can lag the tab status store during activation.
+        let agentActivity = controller.agentActivity(for: activeSurface) ?? presentation.activity
         let canonicalIcon = session.workspace?.icon ?? .systemSymbol(
             session.tabIconSystemName
         )
@@ -1900,7 +1902,8 @@ private struct VerticalTabRow: View {
         } else {
             canonicalIcon
         }
-        let baseTitle = controller.titleOverride ?? (agentActivity == nil
+        let agent = agentActivity.flatMap { SupportedAgent(rawValue: $0.source) }
+        let baseTitle = controller.titleOverride ?? (agent == nil
             ? session.presentationTitle(pathDisplay: settings.tabPathDisplay)
             : session.agentPathTitle(pathDisplay: settings.tabPathDisplay))
         let pluginActivity = presentation.activity.flatMap {
@@ -2033,6 +2036,7 @@ private struct VerticalTabRow: View {
             let nextTitle = livePresentation.title
             if observedTitle != nextTitle { observedTitle = nextTitle }
         }
+        .transaction { $0.animation = nil }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(presentation.title)
     }

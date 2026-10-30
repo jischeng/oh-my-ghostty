@@ -221,10 +221,10 @@ final class TerminalWorkspaceStore: ObservableObject {
     }
 
     /// Removing a label retains sessions and merges each window's group into
-    /// the fallback workspace. The default workspace itself is never removed.
+    /// a remaining workspace. At least one workspace must be retained.
     @discardableResult
     func delete(id: UUID) -> Bool {
-        guard id != defaultID, workspaces.contains(where: { $0.id == id }) else { return false }
+        guard workspaces.count > 1, workspaces.contains(where: { $0.id == id }) else { return false }
         transaction { _ = $0.deleteWorkspace(id) }
         quickInputPresentations.removeValue(forKey: id)
         return true

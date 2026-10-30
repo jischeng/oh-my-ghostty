@@ -114,9 +114,10 @@ struct TerminalWorkspaceState: Codable, Equatable {
         return true
     }
 
-    mutating func deleteWorkspace(_ id: UUID) -> Bool {
-        guard id != defaultID, workspaces.contains(where: { $0.id == id }) else { return false }
-        let fallback = defaultID
+    mutating func deleteWorkspace(_ id: UUID, movingTo destination: UUID? = nil) -> Bool {
+        guard workspaces.count > 1, workspaces.contains(where: { $0.id == id }),
+              let fallback = destination ?? workspaces.first(where: { $0.id != id })?.id,
+              fallback != id, workspaces.contains(where: { $0.id == fallback }) else { return false }
         for host in Array((windows ?? [:]).keys) {
             guard var window = windows?[host] else { continue }
             if let source = window.groups.removeValue(forKey: id) {

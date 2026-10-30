@@ -15,7 +15,6 @@ struct TerminalWorkspaceTests {
         store.rememberGroup(window: host, workspace: id,
             group: .init(id: UUID(), tabs: [second], selected: second))
         store.selectWorkspace(id, in: host, frame: nil, fullscreen: nil)
-        #expect(!store.delete(id: store.defaultID))
         #expect(store.delete(id: id))
         #expect(store.workspaceID(for: second) == store.defaultID)
         #expect(store.group(window: host, workspace: store.defaultID)?.tabs == [first, second])

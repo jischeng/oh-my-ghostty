@@ -159,7 +159,7 @@ struct TerminalWorkspacePicker: View {
                     }.accessibilityIdentifier("workspace.edit.\(workspace.id)")
                     WorkspaceRowAction(symbol: "trash", title: WorkspaceL10n.text("Delete \(workspace.name)", "删除 \(workspace.name)"), destructive: true) {
                         model.beginDelete(workspace.id)
-                    }.disabled(workspace.id == store.defaultID)
+                    }.disabled(!model.canDelete(workspace.id))
                         .accessibilityIdentifier("workspace.delete.\(workspace.id)")
                 }.padding(.trailing, 5)
             }
@@ -220,7 +220,7 @@ struct TerminalWorkspacePicker: View {
 
     private func deletion(_ id: UUID) -> some View {
         let workspace = store.workspace(id)
-        let fallback = store.workspace(store.defaultID)
+        let fallback = model.deletionDestination ?? store.workspace(store.defaultID)
         return VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 10) {
                 workspaceIcon(workspace, size: 36)

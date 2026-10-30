@@ -24,11 +24,13 @@ workspace control above the terminal content.
 - Each row has **pencil** and **trash** buttons beside its shortcut hint to edit
   or delete that exact workspace, including an inactive workspace. Both have
   hover highlights and tooltips; trash uses a warning color on hover and is
-  disabled for the default workspace. Hover/search selection does not change the action target.
+  disabled for the workspace currently active in the invoking window. Hover/search selection does not change the action target.
   The name field receives focus in both create and edit forms; Return saves.
 - **Delete…** opens an inline confirmation naming the workspace, tab count and
-  actual default-workspace destination. Live and saved tabs move in their own
-  windows; running sessions remain open. The default workspace cannot be deleted.
+  actual current-workspace destination. Live and saved tabs move in their own
+  windows; running sessions remain open. The current workspace cannot be deleted;
+  switch away first. Personal is an ordinary deletable workspace when inactive.
+  At least one workspace is retained.
 - **Move current tab…** opens a searchable destination page naming the tab being
   moved. Choose a destination to move the complete tab, including its splits and
   live sessions, within the same window. Moving the last tab leaves a new shell.

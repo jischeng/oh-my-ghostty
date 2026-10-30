@@ -316,12 +316,18 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
     }
 
     @discardableResult
-    func deleteWorkspace(_ id: UUID) -> Bool {
-        guard !quitting, !applying, id != store.defaultID,
+    func deleteWorkspace(_ id: UUID, from source: TerminalController? = nil) -> Bool {
+        let focus = source ?? liveControllers.first { $0.window?.isKeyWindow == true }
+        let current = focus?.workspaceID
+        guard !quitting, !applying, store.workspaces.count > 1,
               store.workspaces.contains(where: { $0.id == id }) else { return false }
+        guard current != id else {
+            operationError = WorkspaceL10n.text("Switch to another workspace before deleting this one.", "请先切换到其他工作区，再删除此工作区。")
+            return false
+        }
+        let fallback = current ?? store.workspaces.first(where: { $0.id != id })!.id
         let hosts = Set((store.snapshot.windows ?? [:]).filter { $0.value.groups[id] != nil }.map(\.key))
-        let focus = liveControllers.first { $0.window?.isKeyWindow == true }
-        return perform(hosts: hosts, focus: focus) { state in state.deleteWorkspace(id) }
+        return perform(hosts: hosts, focus: focus) { state in state.deleteWorkspace(id, movingTo: fallback) }
     }
 
     /// Build the entire next graph before touching native ownership. Every host

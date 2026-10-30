@@ -80,8 +80,11 @@ final class TerminalWorkspacePickerModel: ObservableObject {
         notice = nil
     }
     func beginMove() { page = .move; query = ""; selectedID = filtered.first?.id; error = nil; notice = nil }
+    func canDelete(_ id: UUID) -> Bool { store.workspaces.count > 1 && id != currentID }
+    var deletionDestination: TerminalWorkspace? { currentID.flatMap { id in store.workspaces.first { $0.id == id } } }
+
     func beginDelete(_ id: UUID) {
-        guard id != store.defaultID else { return }
+        guard canDelete(id) else { return }
         page = .delete(id)
         error = nil
         notice = nil
@@ -132,8 +135,8 @@ final class TerminalWorkspacePickerModel: ObservableObject {
     }
 
     func confirmDelete() {
-        guard case .delete(let id) = page else { return }
-        perform { self.coordinator.deleteWorkspace(id) }
+        guard case .delete(let id) = page, let controller, canDelete(id) else { return }
+        perform { self.coordinator.deleteWorkspace(id, from: controller) }
     }
 
     private func perform(_ action: @escaping () -> Bool) {

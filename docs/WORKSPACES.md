@@ -21,8 +21,10 @@ workspace control above the terminal content.
   The launch configuration follows normal new-tab directory inheritance settings,
   including the local-directory fallback for SSH/runtime panes. Failed operations
   reopen the form with its input preserved and a specific error.
-- Each row's **…** menu edits or deletes that exact workspace, including an
-  inactive workspace. Hover/search selection does not change the action target.
+- Each row has **pencil** and **trash** buttons beside its shortcut hint to edit
+  or delete that exact workspace, including an inactive workspace. Both have
+  hover highlights and tooltips; trash uses a warning color on hover and is
+  disabled for the default workspace. Hover/search selection does not change the action target.
   The name field receives focus in both create and edit forms; Return saves.
 - **Delete…** opens an inline confirmation naming the workspace, tab count and
   actual default-workspace destination. Live and saved tabs move in their own

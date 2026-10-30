@@ -51,9 +51,17 @@ struct TerminalWorkspacePicker: View {
             Text(pageTitle).font(.system(size: 13, weight: .semibold))
             Spacer()
             if model.page == .switcher {
-                Button { model.beginCreate() } label: { Label(WorkspaceL10n.text("New", "新建"), systemImage: "plus") }
-                    .buttonStyle(.borderless).disabled(!model.canCreate)
-                    .accessibilityIdentifier("workspace.create")
+                Button { model.beginCreate() } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "plus").font(.system(size: 10, weight: .semibold))
+                        Text(WorkspaceL10n.text("New", "新建")).font(.system(size: 11, weight: .medium))
+                    }
+                    .padding(.horizontal, 9).frame(height: 26)
+                    .contentShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(WorkspaceCreateButtonStyle()).disabled(!model.canCreate)
+                .help(WorkspaceL10n.text("Create a workspace", "创建工作区"))
+                .accessibilityIdentifier("workspace.create")
             }
         }
         .padding(.horizontal, 12).frame(height: 42)
@@ -145,17 +153,15 @@ struct TerminalWorkspacePicker: View {
             }
             .buttonStyle(.plain).accessibilityIdentifier("workspace.open.\(workspace.id)")
             if !moving {
-                Menu {
-                    Button(WorkspaceL10n.text("Edit…", "编辑…")) { model.beginEdit(workspace.id) }
-                    if workspace.id != store.defaultID {
-                        Button(WorkspaceL10n.text("Delete…", "删除…"), role: .destructive) { model.beginDelete(workspace.id) }
-                    }
-                } label: {
-                    Image(systemName: "ellipsis").frame(width: 28, height: 32).contentShape(Rectangle())
-                }
-                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                .help(WorkspaceL10n.text("Manage \(workspace.name)", "管理 \(workspace.name)"))
-                .accessibilityIdentifier("workspace.manage.\(workspace.id)").padding(.trailing, 5)
+                HStack(spacing: 2) {
+                    WorkspaceRowAction(symbol: "pencil", title: WorkspaceL10n.text("Edit \(workspace.name)", "编辑 \(workspace.name)")) {
+                        model.beginEdit(workspace.id)
+                    }.accessibilityIdentifier("workspace.edit.\(workspace.id)")
+                    WorkspaceRowAction(symbol: "trash", title: WorkspaceL10n.text("Delete \(workspace.name)", "删除 \(workspace.name)"), destructive: true) {
+                        model.beginDelete(workspace.id)
+                    }.disabled(workspace.id == store.defaultID)
+                        .accessibilityIdentifier("workspace.delete.\(workspace.id)")
+                }.padding(.trailing, 5)
             }
         }
         .background(model.selectedID == workspace.id ? Color.primary.opacity(0.07) : .clear)
@@ -245,6 +251,43 @@ struct TerminalWorkspacePicker: View {
         case .switcher, .move: searchFocused = true
         case .delete: break
         }
+    }
+}
+
+private struct WorkspaceCreateButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { Control(configuration: configuration) }
+    private struct Control: View {
+        let configuration: Configuration
+        @Environment(\.isEnabled) private var enabled
+        @State private var hovered = false
+        var body: some View {
+            configuration.label
+                .foregroundStyle(Color.primary.opacity(enabled ? 0.85 : 0.3))
+                .background(Color.primary.opacity(enabled && configuration.isPressed ? 0.16 : enabled && hovered ? 0.1 : 0.04))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .onHover { hovered = $0 }
+        }
+    }
+}
+
+private struct WorkspaceRowAction: View {
+    let symbol: String
+    let title: String
+    var destructive = false
+    let action: () -> Void
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: 11))
+                .foregroundStyle(destructive && hovered && isEnabled ? Color.red : Color.primary.opacity(isEnabled ? 0.65 : 0.2))
+                .frame(width: 26, height: 28)
+                .background(hovered && isEnabled ? Color.primary.opacity(0.09) : .clear)
+                .clipShape(RoundedRectangle(cornerRadius: 5)).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).help(title).accessibilityLabel(title)
+        .onHover { hovered = $0 }
     }
 }
 

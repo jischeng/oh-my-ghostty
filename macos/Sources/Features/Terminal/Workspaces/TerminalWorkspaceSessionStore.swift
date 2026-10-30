@@ -86,7 +86,7 @@ final class TerminalWorkspaceSessionStore {
     }
 
     func prepare() {
-        guard testing || NSClassFromString("XCTestCase") == nil else { return }
+        guard testing || !OMGApplicationEnvironment.isRunningTests else { return }
         preparing = true
         defer { preparing = false }
         let candidates = [url, url.appendingPathExtension("previous"),
@@ -193,7 +193,7 @@ final class TerminalWorkspaceSessionStore {
     }
 
     func start(_ app: Ghostty.App) {
-        guard testing || NSClassFromString("XCTestCase") == nil else { return }
+        guard testing || !OMGApplicationEnvironment.isRunningTests else { return }
         if !testing { TerminalWorkspaceCoordinator.shared.useSessions(self) }
         restoring = true
         if ownsRestoration {
@@ -224,10 +224,11 @@ final class TerminalWorkspaceSessionStore {
             for group in groups where group.visible {
                 let selected = group.selected
                 guard catalog.windows?[selected.windowSessionID]?.fullscreen == true else { continue }
+                let mode = catalog.windows?[selected.windowSessionID]?.fullscreenMode ?? .native
                 DispatchQueue.main.async { [weak selected] in
                     guard let selected, selected.isAvailableForWorkspace, !selected.workspacePresentationIsParked,
                           let window = selected.window, window.isVisible, !window.styleMask.contains(.fullScreen) else { return }
-                    selected.toggleFullscreen(mode: .native)
+                    selected.toggleFullscreen(mode: mode)
                 }
             }
         }

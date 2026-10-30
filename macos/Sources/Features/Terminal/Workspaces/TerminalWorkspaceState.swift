@@ -16,6 +16,7 @@ struct TerminalWorkspaceState: Codable, Equatable {
         var groups: [UUID: Group] = [:]
         var frame: CGRect?
         var fullscreen: Bool?
+        var fullscreenMode: FullscreenMode?
     }
 
     struct Owner: Equatable {

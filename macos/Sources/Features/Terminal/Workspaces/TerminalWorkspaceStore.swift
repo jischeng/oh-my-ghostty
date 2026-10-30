@@ -42,8 +42,8 @@ struct TerminalWorkspace: Codable, Equatable, Identifiable {
 /// Stable tab IDs join this catalog to AppKit's existing session archives.
 @MainActor
 final class TerminalWorkspaceStore: ObservableObject {
-    static let shared = NSClassFromString("XCTestCase") == nil
-        ? TerminalWorkspaceStore() : TerminalWorkspaceStore(fileURL: nil)
+    static let shared = OMGApplicationEnvironment.isRunningTests
+        ? TerminalWorkspaceStore(fileURL: nil) : TerminalWorkspaceStore()
 
     typealias Presentation = TerminalWorkspaceState.Presentation
     typealias Group = TerminalWorkspaceState.Group

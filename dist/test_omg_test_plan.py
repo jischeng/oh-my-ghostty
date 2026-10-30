@@ -17,6 +17,7 @@ QUICK_INPUT_DESKTOP_TEST = "GhosttyTests/QuickInputFooterMouseTests"
 DESKTOP_TESTS = {
     "GhosttyTests/VerticalTabMouseTests",
     "GhosttyTests/VerticalTabFullscreenTests",
+    "GhosttyTests/TerminalWorkspaceManagementDesktopTests",
     QUICK_INPUT_DESKTOP_TEST,
     VISUAL_DESKTOP_TEST,
     LINK_HOVER_DESKTOP_TEST,

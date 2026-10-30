@@ -2,6 +2,16 @@ import Combine
 import Foundation
 
 enum OMGApplicationEnvironment {
+    /// XCTest can load after AppDelegate's early singleton initialization.
+    /// Launch environment is available before the test bundle classes exist.
+    static var isRunningTests: Bool {
+        let environment = ProcessInfo.processInfo.environment
+        return environment["OMG_TESTING"] == "1" || NSClassFromString("XCTestCase") != nil ||
+            environment["XCTestConfigurationFilePath"] != nil ||
+            environment["XCTestBundlePath"] != nil ||
+            environment["XCTestSessionIdentifier"] != nil
+    }
+
     static var isWorkspaceDevelopment: Bool {
         Bundle.main.bundleIdentifier == "com.jischeng.omg.debug.workspace"
     }

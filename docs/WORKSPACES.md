@@ -16,17 +16,23 @@ workspace control above the terminal content.
   current window's previous workspace; Return confirms, arrow keys choose, Escape cancels.
 - `Control-Command-1` through `Control-Command-9`: select the corresponding
   workspace in its fixed catalog order.
-- **New Workspace…**: choose a name, icon and color, then start with a local shell.
-  Its launch configuration follows the normal new-tab directory inheritance
-  settings, including the local-directory fallback for SSH/runtime panes.
-- **Edit Current Workspace…**: rename or change its appearance. The name field
-  receives initial keyboard focus in both the create and edit forms.
-- **Delete Current Workspace…**: confirm removal of the workspace label. Its live
-  and saved tabs move to the default workspace in their respective windows;
-  running sessions are retained. The default workspace cannot be deleted.
-- **Move Current Tab to**: move the complete tab, including its splits and live
-  sessions, into the target workspace in the same window. Moving the last tab
-  leaves a new shell in that window's source workspace.
+- **New** in the header opens a name/icon/color form with a live preview.
+  **Create & Open** commits the workspace only after its terminal can be displayed.
+  The launch configuration follows normal new-tab directory inheritance settings,
+  including the local-directory fallback for SSH/runtime panes. Failed operations
+  reopen the form with its input preserved and a specific error.
+- Each row's **…** menu edits or deletes that exact workspace, including an
+  inactive workspace. Hover/search selection does not change the action target.
+  The name field receives focus in both create and edit forms; Return saves.
+- **Delete…** opens an inline confirmation naming the workspace, tab count and
+  actual default-workspace destination. Live and saved tabs move in their own
+  windows; running sessions remain open. The default workspace cannot be deleted.
+- **Move current tab…** opens a searchable destination page naming the tab being
+  moved. Choose a destination to move the complete tab, including its splits and
+  live sessions, within the same window. Moving the last tab leaves a new shell.
+- The list identifies the current workspace separately from keyboard selection,
+  and its counts refer to the current window. Back/Escape returns from management
+  pages; Escape on the switcher dismisses the popover.
 
 Configure shortcuts in **Settings > Shortcuts > Workspaces**. Workspace shortcuts
 must include Command and apply inside OMG. Conflict captions cover duplicate
@@ -87,7 +93,7 @@ torn down. Explicitly removed tabs stay removed; a workspace without a restorabl
 record opens a fresh terminal. Reconstructing a closed workspace uses the same
 supported session descriptors as startup, not arbitrary live process recovery.
 Checkpoints preserve native window grouping, selected tabs, window frames and
-native fullscreen state, stable window/group IDs and each window's current and
+fullscreen state and mode, stable window/group IDs and each window's current and
 previous workspace. Legacy checkpoints migrate each saved native group to an
 independent window identity; unrelated parked groups are not guessed to share
 one window. The oldest records without any group field fall back to one group
@@ -141,6 +147,13 @@ membership and selection together, restores the workspace sidebar host, prepares
 the correctly sized terminal frame and restores focus. Fullscreen transition
 notifications defer switches until the transition completes; delayed presentation
 callbacks carry a generation so rapid subsequent switches supersede them.
+Native transitions are tracked by the actual NSWindow identity, so logical group
+reassignment cannot leave a stale transition blocking future operations.
+Non-native (borderless) fullscreen has no native tab stack: inside the same
+presentation transaction the adapter normalizes the outgoing window, assembles
+the destination group, then enters the same fullscreen mode on its selected tab.
+The committed logical group continues to drive its sidebar while AppKit detaches
+the borderless selected window. Exiting fullscreen restores the native group.
 The workspace popover is opened by the controller command; SwiftUI registers
 its anchor but does not own the open event. Keyboard commands fall back to the
 window content anchor when the sidebar is collapsed.
@@ -157,4 +170,10 @@ The workspace regression suites cover the state graph, close/undo, cross-window
 delete, rollback and checkpoint migration. `VerticalTabFullscreenTests` additionally
 checks horizontal and vertical native fullscreen, repeated workspace switches,
 multiple tabs/splits, moving the last tab, deletion, framebuffer size and focus.
-These desktop tests require an unlocked desktop with the test process foregrounded.
+`TerminalWorkspaceManagementDesktopTests` exercises creation through actual
+popover controls in both native and non-native fullscreen. These desktop tests
+require an unlocked desktop with the test process foregrounded.
+The test plan sets `OMG_TESTING=1` before application launch, disabling shared
+workspace disk reads/writes even before XCTest classes are loaded. Explicit
+session-store fixtures use temporary paths. Existing user catalogs are never
+cleaned by matching test-like workspace names.

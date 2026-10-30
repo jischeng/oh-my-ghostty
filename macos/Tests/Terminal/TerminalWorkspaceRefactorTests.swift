@@ -142,7 +142,7 @@ struct TerminalWorkspaceRefactorTests {
         #expect(first.window?.tabGroup?.selectedWindow === first.window)
         #expect(first.window?.isVisible == true)
         #expect(fixture.coordinator.controllers(in: work).isEmpty)
-        #expect(fixture.coordinator.operationError == nil)
+        #expect(fixture.coordinator.operationError != nil)
     }
 
     @Test func sharedPreferencesDoNotOverwriteUnrelatedFields() throws {

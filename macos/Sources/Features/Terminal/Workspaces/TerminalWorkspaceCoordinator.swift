@@ -95,6 +95,12 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
         controller.tabLayoutState.bindWorkspace(controller.workspaceID, store: store)
     }
 
+    func workspaceID(for tab: UUID, inheriting parent: UUID?) -> UUID {
+        let state = draft ?? store.snapshot
+        let id = state.membership[tab] ?? parent ?? state.defaultID
+        return state.workspaces.contains { $0.id == id } ? id : state.defaultID
+    }
+
     func previousWorkspaceID(in controller: TerminalController) -> UUID? {
         store.snapshot.windows?[controller.windowSessionID]?.previousWorkspace
     }
@@ -103,7 +109,8 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
     /// A command's temporary mixed native group can never become authoritative.
     func reconcileNativeGroup(_ members: [TerminalController]) {
         guard !quitting, !applying, !TerminalWorkspacePresentation.isChanging, let first = members.first,
-              members.allSatisfy({ $0.workspaceCoordinator === self && !$0.workspacePresentationIsParked }) else { return }
+              members.allSatisfy({ $0.workspaceCoordinator === self && !$0.workspacePresentationIsParked }),
+              !hasNonNativeFullscreen(in: first.windowSessionID) else { return }
         let nativeGroup = first.window?.tabGroup
         let anchor = members.first { $0.tabLayoutState.nativeTabGroup === nativeGroup } ?? first
         if members.count == 1, anchor.workspaceTabAttachmentIsPending { return }
@@ -166,6 +173,11 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
             }
             return
         }
+        if hasNonNativeFullscreen(in: controller.windowSessionID),
+           store.group(window: controller.windowSessionID, workspace: controller.workspaceID)?.selected != controller.tabSessionID {
+            _ = selectNonNativeTab(controller)
+            return
+        }
         let members = nativeMembers(controller)
         reconcileNativeGroup(members)
         store.transaction { state in
@@ -203,21 +215,47 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
     }
 
     @discardableResult
+    func createWorkspace(name: String, symbol: String, color: String, from source: TerminalController) -> TerminalController? {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.count <= 40, store.workspaces.count < 100,
+              TerminalWorkspace.symbols.contains(symbol), TerminalWorkspace.colors.contains(color) else {
+            operationError = WorkspaceL10n.text("Enter a name of up to 40 characters; at most 100 workspaces are supported.",
+                "请输入不超过 40 个字符的名称；最多支持 100 个工作区。")
+            return nil
+        }
+        let workspace = TerminalWorkspace(id: UUID(), name: name, symbol: symbol, color: color)
+        return switchWorkspace(to: workspace.id, from: source, creating: workspace)
+    }
+
+    @discardableResult
     func switchWorkspace(to id: UUID, from source: TerminalController) -> TerminalController? {
-        guard store.workspaces.contains(where: { $0.id == id }), !quitting, !applying,
-              source.isAvailableForWorkspace else { return nil }
+        switchWorkspace(to: id, from: source, creating: nil)
+    }
+
+    private func switchWorkspace(to id: UUID, from source: TerminalController,
+                                 creating: TerminalWorkspace?) -> TerminalController? {
+        guard creating != nil || store.workspaces.contains(where: { $0.id == id }), !quitting, !applying,
+              source.isAvailableForWorkspace else {
+            operationError = WorkspaceL10n.text("The workspace could not be opened. Try again after the current operation.", "当前无法打开工作区，请等待当前操作完成后重试。")
+            return nil
+        }
         adopt(source)
         source.workspaceSwitcherIsPresented = false
         source.workspacePopover.close()
         if source.workspaceID == id { return source }
         if native.transitioningWindows.contains(source.windowSessionID) {
-            deferredSwitches[source.windowSessionID] = id
+            if creating == nil { deferredSwitches[source.windowSessionID] = id }
+            operationError = WorkspaceL10n.text("The window is changing fullscreen mode. Try again when it finishes.", "窗口正在切换全屏状态，请完成后重试。")
             return nil
         }
         reconcileNativeGroup(nativeMembers(source))
         let host = source.windowSessionID
         var destination: TerminalController?
         let success = perform(hosts: [host], focus: source, desiredFocus: { destination }, change: { state in
+            if let creating {
+                state.workspaces.append(creating)
+                self.draft = state
+            }
             let group = state.windows?[host]?.groups[id]
             self.restoreMissing(workspace: id, host: host, app: source.ghostty, parent: source.window)
             state = self.draft ?? state
@@ -287,7 +325,10 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
         let before = store.snapshot
         let previous = groups(state: before, hosts: hosts)
         let existing = Set(registry.keys)
-        guard native.canApply(previous.flatMap(\.members)) else { return false }
+        if let error = native.preflightError(previous.flatMap(\.members)) {
+            operationError = error
+            return false
+        }
         applying = true
         draft = before
         let transaction = TerminalWorkspacePresentationTransaction(previous.flatMap(\.members))
@@ -295,18 +336,23 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
         var succeeded = change(&next)
         draft = next
         let proposed = groups(state: next, hosts: hosts)
-        succeeded = succeeded && next.validationErrors.isEmpty && native.canApply(proposed.flatMap(\.members))
+        let preflightError = native.preflightError(proposed.flatMap(\.members))
+        succeeded = succeeded && next.validationErrors.isEmpty && preflightError == nil
         if succeeded { succeeded = native.apply(proposed, previous: previous, focus: desiredFocus?() ?? focus) }
         if succeeded {
             projectIdentities(next, controllers: proposed.flatMap(\.members))
             for group in proposed where group.visible {
                 let host = group.selected.windowSessionID
                 next.windows?[host]?.frame = group.selected.window?.frame
-                next.windows?[host]?.fullscreen = group.selected.window?.styleMask.contains(.fullScreen)
+                next.windows?[host]?.fullscreen = group.selected.fullscreenStyle?.isFullscreen == true
+                next.windows?[host]?.fullscreenMode = group.selected.fullscreenStyle?.isFullscreen == true
+                    ? group.selected.fullscreenStyle?.fullscreenMode : nil
             }
             store.commit(next)
             operationError = nil
         } else {
+            operationError = preflightError ?? WorkspaceL10n.text("The window could not display the workspace. Your previous workspace is retained.",
+                "窗口未能显示该工作区，原工作区已保留。")
             if !native.rollback(previous, attempted: proposed, focus: focus) {
                 operationError = WorkspaceL10n.text("Could not restore the window arrangement. Your sessions are retained.",
                     "无法恢复窗口布局，会话仍然保留。")
@@ -341,6 +387,50 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
               let surface = pane.surface else { return nil }
         return source.tabConfiguration(inherited: .init(from: ghostty_surface_inherited_config(
             surface, GHOSTTY_SURFACE_CONTEXT_TAB)), from: pane)
+    }
+
+    func hasNonNativeFullscreen(in host: UUID) -> Bool {
+        liveControllers.contains { $0.windowSessionID == host && $0.fullscreenStyle?.isFullscreen == true &&
+            $0.fullscreenStyle?.supportsTabs == false }
+    }
+
+    /// Borderless fullscreen temporarily detaches the selected native tab. Its
+    /// logical group remains complete and continues to drive the sidebar.
+    @discardableResult
+    func projectNonNativeTabs(for controller: TerminalController) -> Bool {
+        guard hasNonNativeFullscreen(in: controller.windowSessionID),
+              let group = store.group(window: controller.windowSessionID, workspace: controller.workspaceID) else { return false }
+        let members = members(host: controller.windowSessionID, workspace: controller.workspaceID, state: store.snapshot)
+        let selected = members.first { $0.tabSessionID == group.selected } ?? controller
+        for member in members {
+            member.tabLayoutState = selected.tabLayoutState
+            member.applyWorkspaceTabProjection(members, selected: selected)
+        }
+        selected.tabLayoutState.sidebarHost.presentSelectedWindow()
+        return true
+    }
+
+    @discardableResult
+    func selectNonNativeTab(_ controller: TerminalController) -> Bool {
+        guard hasNonNativeFullscreen(in: controller.windowSessionID) else { return false }
+        return perform(hosts: [controller.windowSessionID], focus: controller) { state in
+            state.windows?[controller.windowSessionID]?.groups[controller.workspaceID]?.selected = controller.tabSessionID
+            return true
+        }
+    }
+
+    func fullscreenDidChange(_ controller: TerminalController) {
+        guard !applying, !restoring, !quitting else { return }
+        if hasNonNativeFullscreen(in: controller.windowSessionID) {
+            native.beginNonNativeProjection(in: controller.windowSessionID)
+            for member in members(host: controller.windowSessionID, workspace: controller.workspaceID, state: store.snapshot)
+                where member !== controller { member.window?.orderOut(nil) }
+            _ = projectNonNativeTabs(for: controller)
+        } else if native.nonNativeProjectionWindows.contains(controller.windowSessionID) {
+            native.finishNonNativeProjection(in: controller.windowSessionID)
+            _ = perform(hosts: [controller.windowSessionID], focus: controller) { _ in true }
+        }
+        savePresentation()
     }
 
     private func restoreMissing(workspace: UUID, host: UUID, app: Ghostty.App, parent: NSWindow?) {
@@ -436,10 +526,13 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
         guard !quitting, !restoring, !applying else { return }
         store.transaction { state in
             for controller in liveControllers where !state.isParked(controller.tabSessionID) {
-                guard let window = controller.window, (window.tabGroup?.selectedWindow ?? window) === window else { continue }
+                guard state.windows?[controller.windowSessionID]?.groups[controller.workspaceID]?.selected == controller.tabSessionID,
+                      let window = controller.window else { continue }
                 state.windows?[controller.windowSessionID]?.frame = window.frame
                 if !native.transitioningWindows.contains(controller.windowSessionID) {
-                    state.windows?[controller.windowSessionID]?.fullscreen = window.styleMask.contains(.fullScreen)
+                    state.windows?[controller.windowSessionID]?.fullscreen = controller.fullscreenStyle?.isFullscreen == true
+                    state.windows?[controller.windowSessionID]?.fullscreenMode = controller.fullscreenStyle?.isFullscreen == true
+                        ? controller.fullscreenStyle?.fullscreenMode : nil
                 }
                 state.windows?[controller.windowSessionID]?.groups[controller.workspaceID]?.scrollOffset =
                     controller.tabLayoutState.sidebarHost.scrollOffset

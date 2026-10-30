@@ -19,11 +19,18 @@ release does not automatically require every unrelated feature suite.
    `VerticalTabsIntegrationTests.appKitTabGroupDrivesVerticalTabsWithoutRecreatingSurfaces`,
    `TerminalLinkHoverTests.commandHoverRemainsStable` (Cmd-link hover in single/split panes),
    and `TerminalWorkspacePresentationTests.clickingWorkspaceButtonOpensItsNativePopover`
-   (actual mouseDown/mouseUp opening the transient workspace popover).
+   (actual mouseDown/mouseUp opening the transient workspace popover), plus
+   `TerminalWorkspaceManagementDesktopTests` (creation through the popover's
+   form in native and non-native fullscreen).
    Real CoreDrag, menu focus routing, native window appearance, and screenshots
    need an unlocked desktop and foreground test application. Lockscreen,
    background, and unattended runs cannot establish that behavior. Other methods
    in a mixed suite remain routine tests.
+
+The test plan provides `OMG_TESTING=1` before the application starts. Workspace
+singletons use this launch marker to avoid user catalog/checkpoint reads or writes
+before XCTest classes have loaded. Persistence fixtures explicitly use temporary
+paths; test-like names in a user's catalog are not automatically deleted.
 
 The wrapper excludes interactive-desktop suites by default and prints **NOT RUN**
 when the chosen scope contains one. This is not a pass or a silently swallowed

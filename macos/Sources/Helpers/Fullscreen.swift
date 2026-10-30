@@ -151,6 +151,7 @@ class NonNativeFullscreen: FullscreenBase, FullscreenStyle {
     }
 
     private var savedState: SavedState?
+    private var transitionGeneration: UInt64 = 0
 
     required init?(_ window: NSWindow) {
         super.init(window)
@@ -192,6 +193,8 @@ class NonNativeFullscreen: FullscreenBase, FullscreenStyle {
         // Save the state that we need to exit again
         guard let savedState = SavedState(window) else { return }
         self.savedState = savedState
+        transitionGeneration &+= 1
+        let generation = transitionGeneration
 
         // Get our current first responder on this window. For non-native fullscreen
         // we have to restore this because for some reason the operations below
@@ -234,7 +237,8 @@ class NonNativeFullscreen: FullscreenBase, FullscreenStyle {
         // We do this async so that all the style edits above (title removal, dock
         // hide, menu hide, etc.) take effect. This fixes:
         // https://github.com/ghostty-org/ghostty/issues/1996
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isFullscreen, self.transitionGeneration == generation else { return }
             self.window.setFrame(self.fullscreenFrame(screen), display: true)
             if let firstResponder {
                 self.window.makeFirstResponder(firstResponder)
@@ -248,6 +252,7 @@ class NonNativeFullscreen: FullscreenBase, FullscreenStyle {
     func exit() {
         guard isFullscreen else { return }
         guard let savedState else { return }
+        transitionGeneration &+= 1
 
         // Remove all our notifications. We remove them one by one because
         // we don't want to remove the observers that our superclass sets.

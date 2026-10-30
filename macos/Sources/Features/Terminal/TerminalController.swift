@@ -904,7 +904,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         self.tabSessionID = tabSessionID ?? UUID()
         let workspaceCoordinator = workspaceCoordinator ?? (parent?.windowController as? TerminalController)?.workspaceCoordinator ?? .shared
         self.workspaceCoordinator = workspaceCoordinator
-        let resolvedWorkspaceID = workspaceCoordinator.store.workspaceID(
+        let resolvedWorkspaceID = workspaceCoordinator.workspaceID(
             for: self.tabSessionID,
             inheriting: workspaceID ?? (parent?.windowController as? TerminalController)?.workspaceID
         )
@@ -2385,6 +2385,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     // MARK: Vertical Tabs
 
     func selectVerticalTab(_ controller: TerminalController) {
+        if workspaceCoordinator.hasNonNativeFullscreen(in: controller.windowSessionID) {
+            _ = workspaceCoordinator.selectNonNativeTab(controller)
+            return
+        }
         guard let targetWindow = controller.window,
               NSApp.windows.contains(where: { $0 === targetWindow }) else { return }
         // Native selection can expose the destination before refreshTabs moves
@@ -3091,6 +3095,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     private func refreshTabs() {
         guard !tabPresentationIsClosing, !workspacePresentationIsParked,
               !TerminalWorkspacePresentation.isChanging else { return }
+        if workspaceCoordinator.projectNonNativeTabs(for: self) { return }
         guard let window else {
             if !tabControllers.isEmpty { tabControllers = [] }
             if selectedTabID != nil { selectedTabID = nil }
@@ -3116,6 +3121,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
     }
 
+    func applyWorkspaceTabProjection(_ controllers: [TerminalController], selected: TerminalController) {
+        let selectedID = ObjectIdentifier(selected)
+        applyTabSnapshot(controllers, selectedID: selectedID,
+            membershipChanged: tabControllers.map(ObjectIdentifier.init) != controllers.map(ObjectIdentifier.init))
+        tabLayoutState.updateTabs(controllers, selectedID: selectedID)
+    }
+
     private func applyTabSnapshot(
         _ controllers: [TerminalController],
         selectedID: ObjectIdentifier?,
@@ -3139,8 +3151,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         pendingTabRefreshes.removeValue(forKey: ObjectIdentifier(tabGroup))?.cancel()
         let controllers = tabGroup.windows.compactMap { $0.windowController as? TerminalController }
             .filter { !$0.tabPresentationIsClosing && !$0.workspacePresentationIsParked }
-        guard let window = controllers.first?.window else { return }
-        controllers.first?.workspaceCoordinator.reconcileNativeGroup(controllers)
+        guard let first = controllers.first, let window = first.window else { return }
+        if first.workspaceCoordinator.projectNonNativeTabs(for: first) { return }
+        first.workspaceCoordinator.reconcileNativeGroup(controllers)
         let sharedState = tabGroup.ghosttyTerminalShellLayoutState
         let membershipChanged = sharedState.tabSnapshot.controllers.map(ObjectIdentifier.init) !=
             controllers.map(ObjectIdentifier.init)
@@ -4521,6 +4534,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
     }
 
+    override func fullscreenDidChange() {
+        super.fullscreenDidChange()
+        workspaceCoordinator.fullscreenDidChange(self)
+    }
+
     func windowDidFailToEnterFullScreen(_ window: NSWindow) {
         workspaceCoordinator.native.fullscreenTransitionFailed(in: windowSessionID)
     }
@@ -4914,6 +4932,21 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         guard let tabEnumAny = notification.userInfo?[Ghostty.Notification.GotoTabKey] else { return }
         guard let tabEnum = tabEnumAny as? ghostty_action_goto_tab_e else { return }
         let tabIndex: Int32 = tabEnum.rawValue
+        if workspaceCoordinator.hasNonNativeFullscreen(in: windowSessionID) {
+            let tabs = tabControllers
+            guard !tabs.isEmpty, let selected = tabs.firstIndex(where: { $0 === self }) else { return }
+            let index: Int
+            switch tabIndex {
+            case GHOSTTY_GOTO_TAB_PREVIOUS.rawValue: index = (selected + tabs.count - 1) % tabs.count
+            case GHOSTTY_GOTO_TAB_NEXT.rawValue: index = (selected + 1) % tabs.count
+            case GHOSTTY_GOTO_TAB_LAST.rawValue: index = tabs.count - 1
+            default:
+                guard tabIndex > 0 else { return }
+                index = min(Int(tabIndex - 1), tabs.count - 1)
+            }
+            _ = workspaceCoordinator.selectNonNativeTab(tabs[index])
+            return
+        }
 
         guard let windowController = window.windowController else { return }
         guard let tabGroup = windowController.window?.tabGroup else { return }
@@ -4966,6 +4999,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     @discardableResult
     static func selectTab(digit: Int, in window: NSWindow?) -> Bool {
+        if let controller = window?.windowController as? TerminalController,
+           controller.workspaceCoordinator.hasNonNativeFullscreen(in: controller.windowSessionID) {
+            let tabs = controller.tabControllers
+            let index = digit == 9 ? tabs.count - 1 : digit - 1
+            guard tabs.indices.contains(index) else { return false }
+            return controller.workspaceCoordinator.selectNonNativeTab(tabs[index])
+        }
         guard let tabGroup = window?.tabGroup else { return false }
         let tabbedWindows = tabGroup.windows
         guard tabbedWindows.count > 1 else { return false }

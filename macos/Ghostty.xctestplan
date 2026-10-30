@@ -16,6 +16,10 @@
     ],
     "environmentVariableEntries" : [
       {
+        "key" : "OMG_TESTING",
+        "value" : "1"
+      },
+      {
         "key" : "GHOSTTY_CONFIG_PATH",
         "value" : "\/tmp\/Ghostty\/testing_config.ghostty"
       }

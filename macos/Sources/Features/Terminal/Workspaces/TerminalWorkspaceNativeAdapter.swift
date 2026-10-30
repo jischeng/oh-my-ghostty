@@ -17,7 +17,15 @@ final class TerminalWorkspaceNativeAdapter {
         $0.addTabbedWindowSafely($1, ordered: $2)
     }
     var show: (TerminalController) -> Bool = { $0.showWindowSafely(nil) }
-    private(set) var transitioningWindows = Set<UUID>()
+    private struct Transition {
+        weak var window: NSWindow?
+        let host: UUID
+    }
+    private var transitions: [ObjectIdentifier: Transition] = [:]
+    var transitioningWindows: Set<UUID> {
+        Set(transitions.values.compactMap { $0.window == nil ? nil : $0.host })
+    }
+    private(set) var nonNativeProjectionWindows = Set<UUID>()
     private var observers: [NSObjectProtocol] = []
     var transitionCompleted: ((UUID) -> Void)?
 
@@ -26,41 +34,86 @@ final class TerminalWorkspaceNativeAdapter {
         for name in [NSWindow.willEnterFullScreenNotification, NSWindow.willExitFullScreenNotification] {
             observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
                 MainActor.assumeIsolated {
-                    guard let controller = (note.object as? NSWindow)?.windowController as? TerminalController else { return }
-                    self?.transitioningWindows.insert(controller.windowSessionID)
+                    guard let self, let window = note.object as? NSWindow,
+                          let controller = window.windowController as? TerminalController,
+                          controller.workspaceCoordinator.native === self else { return }
+                    self.transitions[ObjectIdentifier(window)] = Transition(window: window, host: controller.windowSessionID)
                 }
             })
         }
         for name in [NSWindow.didEnterFullScreenNotification, NSWindow.didExitFullScreenNotification] {
             observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
                 MainActor.assumeIsolated {
-                    guard let self, let controller = (note.object as? NSWindow)?.windowController as? TerminalController else { return }
-                    self.transitioningWindows.remove(controller.windowSessionID)
-                    self.transitionCompleted?(controller.windowSessionID)
+                    guard let self, let window = note.object as? NSWindow,
+                          let controller = window.windowController as? TerminalController,
+                          controller.workspaceCoordinator.native === self else { return }
+                    let host = self.transitions.removeValue(forKey: ObjectIdentifier(window))?.host ?? controller.windowSessionID
+                    if !self.transitioningWindows.contains(host) { self.transitionCompleted?(host) }
                 }
             })
         }
+        observers.append(center.addObserver(forName: NSWindow.willCloseNotification, object: nil, queue: .main) { [weak self] note in
+            MainActor.assumeIsolated {
+                guard let window = note.object as? NSWindow else { return }
+                self?.transitions.removeValue(forKey: ObjectIdentifier(window))
+            }
+        })
     }
 
     deinit { for observer in observers { NotificationCenter.default.removeObserver(observer) } }
 
+    func beginNonNativeProjection(in host: UUID) { nonNativeProjectionWindows.insert(host) }
+    func finishNonNativeProjection(in host: UUID) { nonNativeProjectionWindows.remove(host) }
+
     func fullscreenTransitionFailed(in host: UUID) {
-        transitioningWindows.remove(host)
+        transitions = transitions.filter { $0.value.host != host && $0.value.window != nil }
         transitionCompleted?(host)
     }
 
-    func canApply(_ controllers: [TerminalController]) -> Bool {
-        controllers.allSatisfy {
-            $0.isAvailableForWorkspace && $0.window?.attachedSheet == nil &&
-                $0.window?.tabbingMode != .disallowed && $0.fullscreenStyle?.supportsTabs != false &&
-                !transitioningWindows.contains($0.windowSessionID)
+    func preflightError(_ controllers: [TerminalController]) -> String? {
+        for controller in controllers {
+            if !controller.isAvailableForWorkspace {
+                return WorkspaceL10n.text("The terminal window is no longer available.", "终端窗口已不可用。")
+            }
+            if controller.window?.attachedSheet != nil {
+                return WorkspaceL10n.text("Finish the open dialog before changing workspaces.", "请先完成当前对话框，再操作工作区。")
+            }
+            if transitioningWindows.contains(controller.windowSessionID) {
+                return WorkspaceL10n.text("The window is changing fullscreen mode. Try again when it finishes.", "窗口正在切换全屏状态，请完成后重试。")
+            }
+            if controller.window?.tabbingMode == .disallowed {
+                return WorkspaceL10n.text("This window style does not support workspace tab groups.", "当前窗口样式不支持工作区标签组。")
+            }
         }
+        return nil
     }
+
+    func canApply(_ controllers: [TerminalController]) -> Bool { preflightError(controllers) == nil }
 
     /// Incoming windows join the existing fullscreen stack before outgoing
     /// members leave. At no point may that native fullscreen container be empty.
     func apply(_ groups: [Group], previous: [Group], focus: TerminalController?) -> Bool {
         let previousVisible = previous.filter(\.visible)
+        let all = previous.flatMap(\.members) + groups.flatMap(\.members)
+        var modes: [UUID: FullscreenMode] = [:]
+        var seen = Set<ObjectIdentifier>()
+        for controller in all where seen.insert(ObjectIdentifier(controller)).inserted {
+            guard let style = controller.fullscreenStyle, style.isFullscreen, !style.supportsTabs else { continue }
+            modes[controller.windowSessionID] = style.fullscreenMode
+            nonNativeProjectionWindows.insert(controller.windowSessionID)
+            // Borderless fullscreen cannot join native tabs. Normalize inside
+            // the presentation transaction, then enter the same mode on the
+            // committed destination after native membership is complete.
+            style.exit()
+        }
+        var completed = false
+        defer {
+            let destinations = completed ? groups : previous
+            for (host, mode) in modes {
+                guard let target = destinations.first(where: { $0.visible && $0.selected.windowSessionID == host })?.selected else { continue }
+                target.toggleFullscreen(mode: mode)
+            }
+        }
         for group in groups where group.visible {
             guard let selectedWindow = group.selected.window else { return false }
             let outgoing = previousVisible.first {
@@ -107,6 +160,7 @@ final class TerminalWorkspaceNativeAdapter {
             if window.isMiniaturized { window.deminiaturize(nil) }
             if group.selected === focus { window.makeKeyAndOrderFront(nil) } else if !window.isVisible { window.orderFront(nil) }
         }
+        completed = true
         return true
     }
 

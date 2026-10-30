@@ -48,7 +48,13 @@ final class TerminalWorkspaceNativeAdapter {
                           let controller = window.windowController as? TerminalController,
                           controller.workspaceCoordinator.native === self else { return }
                     let host = self.transitions.removeValue(forKey: ObjectIdentifier(window))?.host ?? controller.windowSessionID
-                    if !self.transitioningWindows.contains(host) { self.transitionCompleted?(host) }
+                    // AppKit still owns its fullscreen stack while delivering
+                    // this notification. Drain queued workspace commands only
+                    // after the native transition has completely unwound.
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, !self.transitioningWindows.contains(host) else { return }
+                        self.transitionCompleted?(host)
+                    }
                 }
             })
         }
@@ -93,6 +99,12 @@ final class TerminalWorkspaceNativeAdapter {
     /// Incoming windows join the existing fullscreen stack before outgoing
     /// members leave. At no point may that native fullscreen container be empty.
     func apply(_ groups: [Group], previous: [Group], focus: TerminalController?) -> Bool {
+        // Bind the destination's own presentation before AppKit selects it.
+        // The native stack temporarily contains both workspaces during handoff;
+        // its associated layout must never supply the outgoing header/rows.
+        for group in groups {
+            for member in group.members { member.tabLayoutState = group.layout }
+        }
         let previousVisible = previous.filter(\.visible)
         let all = previous.flatMap(\.members) + groups.flatMap(\.members)
         var modes: [UUID: FullscreenMode] = [:]

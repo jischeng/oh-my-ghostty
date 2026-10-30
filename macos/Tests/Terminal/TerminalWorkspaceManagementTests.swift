@@ -26,6 +26,70 @@ struct TerminalWorkspaceManagementTests {
         func close() { for controller in coordinator.liveControllers { controller.window?.close() } }
     }
 
+    @Test func deferredRestoreDoesNotToggleOffUserEnteredFullscreen() async throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("state.json")
+        let fixture = try Fixture()
+        let sessions = TerminalWorkspaceSessionStore(url: url, testing: true, workspaces: fixture.store)
+        fixture.coordinator.useSessions(sessions)
+        sessions.start(app)
+        fixture.store.transaction {
+            $0.windows?[fixture.controller.windowSessionID]?.fullscreen = true
+            $0.windows?[fixture.controller.windowSessionID]?.fullscreenMode = .nonNative
+        }
+        sessions.capture()
+        sessions.flush()
+        fixture.coordinator.prepareToQuit()
+        fixture.controller.window?.close()
+        let store = TerminalWorkspaceStore(fileURL: nil)
+        let restoredSessions = TerminalWorkspaceSessionStore(url: url, testing: true, workspaces: store)
+        let runtime = TerminalWorkspaceCoordinator(store: store, sessions: restoredSessions)
+        restoredSessions.prepare()
+        restoredSessions.start(app)
+        runtime.finishRestoring()
+        defer { for controller in runtime.liveControllers { controller.window?.close() } }
+        let controller = try #require(runtime.liveControllers.first)
+        // User action wins before the queued automatic restore executes.
+        controller.toggleFullscreen(mode: .nonNative)
+        try #require(controller.fullscreenStyle?.isFullscreen == true)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(controller.fullscreenStyle?.isFullscreen == true)
+        controller.toggleFullscreen(mode: .nonNative)
+    }
+
+    @Test func fullscreenCompletionDoesNotReenterTheNativeNotification() async throws {
+        let fixture = try Fixture()
+        defer { fixture.close() }
+        let window = try #require(fixture.controller.window)
+        var completed = false
+        fixture.coordinator.native.transitionCompleted = { _ in completed = true }
+        NotificationCenter.default.post(name: NSWindow.willEnterFullScreenNotification, object: window)
+        NotificationCenter.default.post(name: NSWindow.didEnterFullScreenNotification, object: window)
+        #expect(!completed)
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(completed)
+    }
+
+    @Test func incomingHeaderAndLayoutResolveBeforeTheWindowIsShown() throws {
+        let fixture = try Fixture()
+        defer { fixture.close() }
+        var inspected = false
+        fixture.coordinator.native.show = { controller in
+            inspected = true
+            // Catalog commit deliberately follows native presentation.
+            #expect(!fixture.store.workspaces.contains { $0.id == controller.workspaceID })
+            #expect(fixture.coordinator.presentationWorkspace(controller.workspaceID)?.name == "Destination")
+            #expect(controller.tabLayoutState.workspaceBindingID == controller.workspaceID)
+            return controller.showWindowSafely(nil)
+        }
+        let result = fixture.coordinator.createWorkspace(name: "Destination", symbol: "house", color: "blue", from: fixture.controller)
+        #expect(result != nil)
+        #expect(inspected)
+        #expect(fixture.coordinator.presentationWorkspace(UUID()) == nil)
+    }
+
     @Test func createCommitsCatalogAndTerminalTogetherAfterDismissal() throws {
         let fixture = try Fixture()
         defer { fixture.close() }

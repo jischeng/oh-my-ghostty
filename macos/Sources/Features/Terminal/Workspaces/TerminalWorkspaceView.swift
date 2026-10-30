@@ -12,11 +12,11 @@ struct TerminalWorkspaceButton: View {
     }
 
     var body: some View {
-        let workspace = store.workspace(controller.workspaceID)
+        let workspace = controller.workspaceCoordinator.presentationWorkspace(controller.workspaceID)
         Button { controller.workspaceSwitcherIsPresented.toggle() } label: {
             HStack(spacing: 7) {
-                Image(systemName: workspace.symbol).foregroundStyle(workspace.tint)
-                Text(workspace.name).fontWeight(.medium).lineLimit(1)
+                Image(systemName: workspace?.symbol ?? "square.grid.2x2").foregroundStyle(workspace?.tint ?? .secondary)
+                Text(workspace?.name ?? WorkspaceL10n.text("Workspace", "工作区")).fontWeight(.medium).lineLimit(1)
                 Image(systemName: "chevron.down").font(.system(size: 9, weight: .medium)).foregroundStyle(.secondary)
                 if let activities = (NSApp.delegate as? AppDelegate)?.tabActivities {
                     WorkspaceAttentionDot(currentID: controller.workspaceID, activities: activities)
@@ -32,7 +32,7 @@ struct TerminalWorkspaceButton: View {
         .onHover { hovered = $0 }
         .help(WorkspaceL10n.text("Switch workspace", "切换工作区") + " · " +
               (OMGKeyboardShortcut(storageValue: store.shortcut(slot: 0))?.displayValue ?? ""))
-        .accessibilityLabel(WorkspaceL10n.text("Workspace: ", "工作区：") + workspace.name)
+        .accessibilityLabel(WorkspaceL10n.text("Workspace: ", "工作区：") + (workspace?.name ?? ""))
         .background(WorkspacePopoverAnchor(controller: controller))
     }
 }

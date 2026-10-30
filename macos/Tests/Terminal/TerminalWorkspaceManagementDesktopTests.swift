@@ -66,6 +66,97 @@ struct TerminalWorkspaceManagementDesktopTests {
         try await Task.sleep(for: .seconds(2))
     }
 
+    @Test(arguments: [FullscreenMode.native, .nonNative])
+    func restoredWorkspaceSwitchesUsingKeyboardInFullscreen(mode: FullscreenMode) async throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("state.json")
+        let store = TerminalWorkspaceStore(fileURL: nil)
+        let sessions = TerminalWorkspaceSessionStore(url: url, testing: true, workspaces: store)
+        let coordinator = TerminalWorkspaceCoordinator(store: store, sessions: sessions)
+        coordinator.finishRestoring()
+        let other = try #require(store.create(name: "Restored destination", symbol: "house", color: "blue"))
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let first = TerminalController(app, withBaseConfig: config, workspaceCoordinator: coordinator)
+        first.window?.makeKeyAndOrderFront(nil)
+        sessions.start(app)
+        let second = try #require(coordinator.switchWorkspace(to: other, from: first))
+        _ = try #require(TerminalController.newTab(app, from: second.window!, withBaseConfig: config))
+        try await Task.sleep(for: .milliseconds(100))
+        second.window?.makeKeyAndOrderFront(nil)
+        coordinator.didActivate(second)
+        try #require(coordinator.switchWorkspace(to: store.defaultID, from: second) === first)
+        store.transaction { state in
+            state.windows?[first.windowSessionID]?.fullscreen = mode != .native
+            state.windows?[first.windowSessionID]?.fullscreenMode = mode == .native ? nil : mode
+        }
+        sessions.capture()
+        sessions.flush()
+        coordinator.prepareToQuit()
+        for controller in coordinator.liveControllers { controller.window?.close() }
+        let restoredStore = TerminalWorkspaceStore(fileURL: nil)
+        let restoredSessions = TerminalWorkspaceSessionStore(url: url, testing: true, workspaces: restoredStore)
+        let restored = TerminalWorkspaceCoordinator(store: restoredStore, sessions: restoredSessions)
+        restoredSessions.prepare()
+        restoredSessions.start(app)
+        restored.finishRestoring()
+        defer { for controller in restored.liveControllers { controller.window?.close() } }
+        let source = try #require(restored.controllers(in: restoredStore.defaultID).first)
+        let target = try #require(restored.controllers(in: other).first)
+        let window = try #require(source.window)
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        for _ in 0..<100 {
+            if NSApp.isActive && window.isKeyWindow { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try #require(NSApp.isActive && window.isKeyWindow)
+        var entered = false
+        let observer = NotificationCenter.default.addObserver(forName: NSWindow.didEnterFullScreenNotification,
+            object: window, queue: .main) { _ in MainActor.assumeIsolated { entered = true } }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        if mode == .native {
+            let fullscreenKey = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.control, .command],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+                characters: "f", charactersIgnoringModifiers: "f", isARepeat: false, keyCode: 3))
+            NSApp.sendEvent(fullscreenKey)
+        } else if source.fullscreenStyle?.isFullscreen != true { source.toggleFullscreen(mode: mode) }
+        for _ in 0..<200 {
+            if mode == .native ? (entered || (source.fullscreenStyle?.isFullscreen == true && restored.native.transitioningWindows.isEmpty)) : source.fullscreenStyle?.isFullscreen == true { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try #require(source.fullscreenStyle?.isFullscreen == true && restored.native.transitioningWindows.isEmpty,
+            "The fullscreen shortcut must complete before workspace switching is exercised")
+        try await Task.sleep(for: .milliseconds(100))
+        let key = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.control, .command],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+            characters: "2", charactersIgnoringModifiers: "2", isARepeat: false, keyCode: 19))
+        NSApp.sendEvent(key)
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(restoredStore.snapshot.windows?[source.windowSessionID]?.currentWorkspace == other)
+        #expect(target.window?.isKeyWindow == true)
+        #expect(target.fullscreenStyle?.isFullscreen == true)
+        #expect(source.window?.isVisible == false)
+        #expect(target.window?.tabGroup?.selectedWindow === target.window || mode != .native)
+        #expect(target.tabLayoutState.sidebarHost.liveView?.window === target.window)
+        for index in 0..<8 {
+            let current = index.isMultiple(of: 2) ? target : source
+            let digit = index.isMultiple(of: 2) ? "1" : "2"
+            let event = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.control, .command],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: current.window!.windowNumber, context: nil,
+                characters: digit, charactersIgnoringModifiers: digit, isARepeat: false, keyCode: digit == "1" ? 18 : 19))
+            NSApp.sendEvent(event)
+            try await Task.sleep(for: .milliseconds(150))
+            let expected = index.isMultiple(of: 2) ? source : target
+            #expect(expected.window?.isKeyWindow == true)
+            #expect(expected.fullscreenStyle?.isFullscreen == true)
+        }
+        target.toggleFullscreen(mode: mode)
+        try await Task.sleep(for: .seconds(2))
+    }
+
     private func click(_ view: NSView, at point: NSPoint) throws {
         let window = try #require(view.window)
         let location = view.convert(point, to: nil)

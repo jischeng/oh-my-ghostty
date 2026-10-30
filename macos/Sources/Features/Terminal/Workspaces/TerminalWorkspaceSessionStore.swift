@@ -225,9 +225,15 @@ final class TerminalWorkspaceSessionStore {
                 let selected = group.selected
                 guard catalog.windows?[selected.windowSessionID]?.fullscreen == true else { continue }
                 let mode = catalog.windows?[selected.windowSessionID]?.fullscreenMode ?? .native
+                let generation = selected.workspacePresentationGeneration
                 DispatchQueue.main.async { [weak selected] in
-                    guard let selected, selected.isAvailableForWorkspace, !selected.workspacePresentationIsParked,
-                          let window = selected.window, window.isVisible, !window.styleMask.contains(.fullScreen) else { return }
+                    guard let selected,
+                          selected.workspacePresentationGeneration == generation,
+                          selected.isAvailableForWorkspace, !selected.workspacePresentationIsParked,
+                          selected.workspaceCoordinator.store.snapshot.windows?[selected.windowSessionID]?.currentWorkspace == selected.workspaceID,
+                          let window = selected.window, window.isVisible,
+                          selected.fullscreenStyle?.isFullscreen != true,
+                          !window.styleMask.contains(.fullScreen) else { return }
                     selected.toggleFullscreen(mode: mode)
                 }
             }

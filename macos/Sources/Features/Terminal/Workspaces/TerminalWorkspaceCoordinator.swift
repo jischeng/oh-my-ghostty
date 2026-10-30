@@ -52,9 +52,11 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
         self.native.transitionCompleted = { [weak self] host in
             guard let self else { return }
             if let target = self.deferredSwitches.removeValue(forKey: host),
-               let source = self.liveControllers.first(where: {
-                   $0.windowSessionID == host && !self.store.snapshot.isParked($0.tabSessionID)
-               }) { self.switchWorkspace(to: target, from: source) }
+               let record = self.store.snapshot.windows?[host],
+               let selected = record.groups[record.currentWorkspace]?.selected,
+               let source = self.liveControllers.first(where: { $0.tabSessionID == selected }) {
+                self.switchWorkspace(to: target, from: source)
+            }
             for controller in self.liveControllers where controller.windowSessionID == host &&
                 !controller.workspacePresentationIsParked { controller.finishWorkspacePresentation() }
             self.savePresentation()
@@ -93,6 +95,12 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
         controller.workspaceCoordinator = self
         register(controller)
         controller.tabLayoutState.bindWorkspace(controller.workspaceID, store: store)
+    }
+
+    /// The incoming window is built before catalog commit. Presentation must
+    /// resolve against that same transaction, never substitute the default label.
+    func presentationWorkspace(_ id: UUID) -> TerminalWorkspace? {
+        (draft ?? store.snapshot).workspaces.first { $0.id == id }
     }
 
     func workspaceID(for tab: UUID, inheriting parent: UUID?) -> UUID {

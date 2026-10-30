@@ -153,7 +153,12 @@ final class TerminalWorkspaceNativeAdapter {
             for member in group.members {
                 guard let window = member.window else { continue }
                 member.cancelWorkspacePendingPresentation()
-                window.tabGroup?.removeWindow(window)
+                // Removing the sole member creates an empty native window
+                // stack which AppKit can later reuse when entering fullscreen.
+                // A singleton only needs parking, not detachment.
+                if let native = window.tabGroup, native.windows.count > 1 {
+                    native.removeWindow(window)
+                }
                 window.orderOut(nil)
             }
         }

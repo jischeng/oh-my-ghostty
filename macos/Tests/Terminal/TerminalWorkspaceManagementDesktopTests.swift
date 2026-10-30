@@ -157,6 +157,62 @@ struct TerminalWorkspaceManagementDesktopTests {
         try await Task.sleep(for: .seconds(2))
     }
 
+    @Test func closePersonalWindowThenSwitchAndEnterFullscreen() async throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("state.json")
+        let store = TerminalWorkspaceStore(fileURL: nil)
+        let sessions = TerminalWorkspaceSessionStore(url: url, testing: true, workspaces: store)
+        let runtime = TerminalWorkspaceCoordinator(store: store, sessions: sessions)
+        runtime.finishRestoring()
+        let other = try #require(store.create(name: "Independent", symbol: "house", color: "blue"))
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let personal = TerminalController(app, withBaseConfig: config, workspaceCoordinator: runtime)
+        let work = TerminalController(app, withBaseConfig: config, workspaceID: other, workspaceCoordinator: runtime)
+        personal.window?.makeKeyAndOrderFront(nil)
+        work.window?.makeKeyAndOrderFront(nil)
+        sessions.start(app)
+        sessions.prepareToQuit()
+        personal.window?.close(); work.window?.close()
+        let restoredStore = TerminalWorkspaceStore(fileURL: nil)
+        let restoredSessions = TerminalWorkspaceSessionStore(url: url, testing: true, workspaces: restoredStore)
+        let restored = TerminalWorkspaceCoordinator(store: restoredStore, sessions: restoredSessions)
+        restoredSessions.prepare(); restoredSessions.start(app); restored.finishRestoring()
+        defer { for controller in restored.liveControllers { controller.window?.close() } }
+        let closed = try #require(restored.controllers(in: restoredStore.defaultID).first)
+        let source = try #require(restored.controllers(in: other).first)
+        closed.closeWindowImmediately()
+        let target = try #require(restored.switchWorkspace(to: restoredStore.defaultID, from: source))
+        #expect(target !== closed)
+        let window = try #require(target.window)
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        for _ in 0..<100 {
+            if NSApp.isActive && window.isKeyWindow { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try #require(NSApp.isActive && window.isKeyWindow)
+        var entered = false
+        let observer = NotificationCenter.default.addObserver(forName: NSWindow.didEnterFullScreenNotification,
+            object: window, queue: .main) { _ in MainActor.assumeIsolated { entered = true } }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        let key = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.control, .command],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+            characters: "f", charactersIgnoringModifiers: "f", isARepeat: false, keyCode: 3))
+        NSApp.sendEvent(key)
+        for _ in 0..<200 {
+            if entered { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try #require(entered)
+        #expect(window.isKeyWindow)
+        #expect(restoredStore.snapshot.validationErrors.isEmpty)
+        window.toggleFullScreen(nil)
+        try await Task.sleep(for: .seconds(2))
+    }
+
     private func click(_ view: NSView, at point: NSPoint) throws {
         let window = try #require(view.window)
         let location = view.convert(point, to: nil)

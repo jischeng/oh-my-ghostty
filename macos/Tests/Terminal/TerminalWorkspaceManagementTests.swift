@@ -90,6 +90,47 @@ struct TerminalWorkspaceManagementTests {
         #expect(fixture.coordinator.presentationWorkspace(UUID()) == nil)
     }
 
+    @Test func currentWorkspaceCannotBeDeletedButPersonalCan() throws {
+        let fixture = try Fixture()
+        defer { fixture.close() }
+        let personal = fixture.store.defaultID
+        let target = try #require(fixture.coordinator.createWorkspace(name: "Current", symbol: "house", color: "blue", from: fixture.controller))
+        let model = TerminalWorkspacePickerModel(controller: target, dismiss: { $0() }, reopen: {})
+        #expect(!model.canDelete(target.workspaceID))
+        #expect(model.canDelete(personal))
+        let before = fixture.store.snapshot
+        #expect(!fixture.coordinator.deleteWorkspace(target.workspaceID, from: target))
+        #expect(fixture.store.snapshot == before)
+        model.beginDelete(personal)
+        model.confirmDelete()
+        #expect(!fixture.store.workspaces.contains { $0.id == personal })
+        #expect(target.isAvailableForWorkspace)
+        #expect(target.window?.isVisible == true)
+        #expect(fixture.store.snapshot.validationErrors.isEmpty)
+        #expect(!model.canDelete(target.workspaceID))
+    }
+
+    @Test func closingIndependentPersonalThenSwitchingDoesNotReuseClosedWindow() async throws {
+        let fixture = try Fixture()
+        defer { fixture.close() }
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let other = try #require(fixture.store.create(name: "Other window", symbol: "house", color: "blue"))
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let second = TerminalController(app, withBaseConfig: config, workspaceID: other, workspaceCoordinator: fixture.coordinator)
+        second.window?.makeKeyAndOrderFront(nil)
+        fixture.controller.closeWindowImmediately()
+        let reopened = try #require(fixture.coordinator.switchWorkspace(to: fixture.store.defaultID, from: second))
+        #expect(reopened !== fixture.controller)
+        #expect(reopened.windowSessionID == second.windowSessionID)
+        #expect(reopened.window?.isVisible == true)
+        #expect(fixture.coordinator.switchWorkspace(to: other, from: reopened) === second)
+        #expect(fixture.coordinator.switchWorkspace(to: fixture.store.defaultID, from: second) === reopened)
+        #expect(reopened.window?.tabGroup?.windows.contains(reopened.window!) != false)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(fixture.store.snapshot.validationErrors.isEmpty)
+    }
+
     @Test func createCommitsCatalogAndTerminalTogetherAfterDismissal() throws {
         let fixture = try Fixture()
         defer { fixture.close() }

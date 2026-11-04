@@ -17,7 +17,12 @@ impl Drop for Daemon {
     }
 }
 fn start() -> Daemon {
-    let dir = std::env::temp_dir().join(format!("omg-rt-{}", std::process::id()));
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "omg-rt-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     fs::create_dir(&dir).unwrap();
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
     // Raw mode gives byte-exact replies; the child increments while detached.
@@ -36,6 +41,49 @@ fn start() -> Daemon {
         .spawn()
         .unwrap();
     Daemon { child, dir }
+}
+fn until(socket: &mut UnixStream, kind: u8) -> Frame {
+    loop {
+        let frame = Frame::read(socket).unwrap();
+        if frame.kind == kind {
+            return frame;
+        }
+    }
+}
+
+#[test]
+fn explicit_takeover_keeps_both_viewers_and_discards_late_old_writer_input() {
+    let mut daemon = start();
+    let (mut mac, _, info, _) = attach(&daemon);
+    assert_eq!(info["writer_transfer"], true);
+    Frame::new(CLAIM, 0, &[]).send(&mut mac).unwrap();
+    until(&mut mac, CLAIM);
+    let (mut phone, _, phone_info, _) = attach(&daemon);
+    assert_eq!(info["pid"], phone_info["pid"]);
+    Frame::new(CLAIM, 0, &[]).send(&mut phone).unwrap();
+    until(&mut phone, b'B');
+    Frame::new(CLAIM, 0, b"takeover/1")
+        .send(&mut phone)
+        .unwrap();
+    until(&mut phone, CLAIM);
+    assert_eq!(until(&mut mac, b'B').data, b"writer transferred");
+    // The old writer had a quit key and resize in flight. Neither may affect
+    // the session, and it must remain attached as an observer.
+    Frame::new(INPUT, 0, b"q").send(&mut mac).unwrap();
+    Frame::new(RESIZE, 0, &[0, 1, 0, 1]).send(&mut mac).unwrap();
+    Frame::new(CLOSE, 0, &[]).send(&mut mac).unwrap();
+    until(&mut mac, OUTPUT);
+    assert!(daemon.child.try_wait().unwrap().is_none());
+    Frame::new(RESIZE, 0, &[0, 60, 0, 20])
+        .send(&mut phone)
+        .unwrap();
+    assert_eq!(until(&mut mac, RESIZE).data, [0, 60, 0, 20]);
+    Frame::new(CLAIM, 0, b"takeover/1").send(&mut mac).unwrap();
+    until(&mut mac, CLAIM);
+    until(&mut phone, b'B');
+    until(&mut phone, OUTPUT);
+    Frame::new(INPUT, 0, b"q").send(&mut mac).unwrap();
+    until(&mut mac, EXIT);
 }
 fn attach(d: &Daemon) -> (UnixStream, Vt, serde_json::Value, u64) {
     let start = Instant::now();

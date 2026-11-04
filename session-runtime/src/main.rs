@@ -7,6 +7,7 @@ use std::{
     process::{Child, Command, Stdio},
     sync::Arc,
 };
+mod mobile;
 mod session_cli;
 fn copy(mut input: impl Read, mut output: impl Write) -> io::Result<()> {
     let mut buffer = [0; 65536];
@@ -362,6 +363,7 @@ fn main() -> io::Result<()> {
         }
         Some("session-holder") if a.len() == 2 => omg_session_runtime::holder::run_from_stdin(),
         Some("bridge") if a.len() == 3 => bridge(&a[2]),
+        Some("mobile") => mobile::run(&a[2..]),
         Some("install-runtime") if a.len() == 3 => {
             let mut config = omg_session_runtime::deploy::load(Path::new(&a[2]))?;
             if config.transport != omg_session_runtime::deploy::TransportKind::Ssh {
@@ -436,7 +438,7 @@ fn main() -> io::Result<()> {
             Ok(())
         }
         _ => {
-            eprintln!("usage: omgd sessions --help | host DIRECTORY -- SHELL... | host-local DIRECTORY -- SHELL... | session-holder | serve SOCKET -- COMMAND... | bridge SOCKET | install-runtime CONNECTION_JSON | connect LOCAL_SOCKET CONNECTION_JSON | retry-local SOCKET [--interactive] | close-local SOCKET UUID | list-local SOCKET");
+            eprintln!("usage: omgd sessions --help | mobile --help | host DIRECTORY -- SHELL... | host-local DIRECTORY -- SHELL... | session-holder | serve SOCKET -- COMMAND... | bridge SOCKET | install-runtime CONNECTION_JSON | connect LOCAL_SOCKET CONNECTION_JSON | retry-local SOCKET [--interactive] | close-local SOCKET UUID | list-local SOCKET");
             std::process::exit(2)
         }
     }

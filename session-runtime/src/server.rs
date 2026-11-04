@@ -648,6 +648,7 @@ pub fn serve_managed(
                         "password_input": last_password_input,
                         "runtime_ms": runtime_millis(started_at),
                         "inline_viewer": inline_viewer,
+                        "writer_transfer": true,
                         "initial_output": initial_output.as_ref().map(|bytes| {
                             use base64::Engine;
                             base64::engine::general_purpose::STANDARD.encode(bytes)
@@ -686,6 +687,7 @@ pub fn serve_managed(
             }
         }
         let mut resizes = Vec::new();
+        let mut revoked = Vec::new();
         for peer in &mut peers {
             if close_after_flush.contains(&peer.id) {
                 continue;
@@ -707,13 +709,31 @@ pub fn serve_managed(
                     break;
                 }
                 match f.kind {
-                    CLAIM if writer.is_none() || writer == Some(peer.id) => {
-                        if !f.data.is_empty() && f.data != b"inline/1" {
+                    CLAIM
+                        if writer.is_none()
+                            || writer == Some(peer.id)
+                            || matches!(
+                                f.data.as_slice(),
+                                b"takeover/1" | b"inline-takeover/1"
+                            ) =>
+                    {
+                        if !f.data.is_empty()
+                            && !matches!(
+                                f.data.as_slice(),
+                                b"inline/1" | b"takeover/1" | b"inline-takeover/1"
+                            )
+                        {
                             peer.dead = true;
                             continue;
                         }
+                        if let Some(previous) = writer.filter(|id| *id != peer.id) {
+                            revoked.push(previous);
+                        }
                         initial_output = None;
-                        input.claim(f.data == b"inline/1");
+                        input.claim(matches!(
+                            f.data.as_slice(),
+                            b"inline/1" | b"inline-takeover/1"
+                        ));
                         writer = Some(peer.id);
                         peer.push(Frame::new(CLAIM, seq, &[]));
                     }
@@ -760,9 +780,19 @@ pub fn serve_managed(
                         terminate_group(master, child.id(), libc::SIGTERM);
                         closing = Some(Instant::now());
                     }
+                    // A former writer can have frames in flight when another
+                    // viewer takes over. Drop those frames without detaching it.
+                    INPUT | RESIZE | CLOSE => {}
                     _ => {
                         peer.dead = true;
                     }
+                }
+            }
+        }
+        for id in revoked {
+            if writer != Some(id) {
+                if let Some(peer) = peers.iter_mut().find(|p| p.id == id) {
+                    peer.push(Frame::new(b'B', seq, b"writer transferred"));
                 }
             }
         }
@@ -1105,6 +1135,7 @@ mod tests {
 
     #[test]
     fn password_input_requires_canonical_mode_without_echo() {
+        let _spawn = PTY_SPAWN.lock().unwrap();
         let mut master = -1;
         let mut slave = -1;
         let mut size = unsafe { std::mem::zeroed::<libc::winsize>() };
@@ -1143,6 +1174,7 @@ mod tests {
 
     #[test]
     fn pty_enables_utf8_input_mode() {
+        let _spawn = PTY_SPAWN.lock().unwrap();
         let mut master = -1;
         let mut slave = -1;
         let mut size = unsafe { std::mem::zeroed::<libc::winsize>() };

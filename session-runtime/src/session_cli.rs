@@ -85,7 +85,7 @@ fn valid_revision(value: &str) -> bool {
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
 }
-fn default_support() -> io::Result<PathBuf> {
+pub(crate) fn default_support() -> io::Result<PathBuf> {
     let executable = env::current_exe()?;
     let contents = executable
         .parent()
@@ -108,6 +108,51 @@ fn default_support() -> io::Result<PathBuf> {
         }
     };
     Ok(home()?.join("Library/Application Support").join(name))
+}
+
+/// Mobile uses the same channel/revision namespaces as the management CLI.
+/// Discovery never launches shells, installs runtimes, or includes SSH credentials.
+pub(crate) fn mobile_targets(support: &Path) -> io::Result<Vec<(String, PathBuf)>> {
+    let path = support.join("session-runtime/endpoints.json");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    if fs::metadata(&path)?.len() > 4 * 1024 * 1024 {
+        return Err(io::Error::other("Catalogue is too large"));
+    }
+    let archive: Archive = serde_json::from_slice(&fs::read(path)?)?;
+    if archive.version != 1 || archive.endpoints.len() > 512 {
+        return Err(io::Error::other("Invalid catalogue"));
+    }
+    let mut targets = BTreeMap::new();
+    for endpoint in archive.endpoints {
+        let d = endpoint.descriptor;
+        if d.connection.is_some() || !valid_revision(&d.revision) {
+            continue;
+        }
+        let key = digest(&format!("{}\0{}", support.display(), d.revision));
+        let root = home()?.join(".omg/run").join(&key[..20]);
+        if root.exists() {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = fs::symlink_metadata(&root)?;
+            if !metadata.is_dir()
+                || metadata.uid() != unsafe { libc::geteuid() }
+                || metadata.mode() & 0o077 != 0
+            {
+                return Err(io::Error::other(
+                    "Runtime directory must be private and owned by the current user",
+                ));
+            }
+            let socket = root.join("host.sock");
+            if socket.exists() {
+                targets.insert(socket, format!("This Mac · {}", d.revision));
+            }
+        }
+    }
+    Ok(targets
+        .into_iter()
+        .map(|(path, name)| (name, path))
+        .collect())
 }
 fn home() -> io::Result<PathBuf> {
     env::var_os("HOME")

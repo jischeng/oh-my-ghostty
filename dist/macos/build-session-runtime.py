@@ -67,6 +67,7 @@ def main():
         ROOT/'session-runtime/Cargo.toml', ROOT/'session-runtime/Cargo.lock',
         ROOT/'session-runtime/build.rs', ROOT/'session-runtime/LICENSE.herdr',
         ROOT/'src/shell-integration/omg/omg.py',
+        ROOT/'session-runtime/LICENSE.termio',
         ROOT/'session-runtime/THIRD-PARTY-NOTICES', Path(__file__).resolve(),
         ROOT/'dist/macos/session-runtime-snapshot-compatibility.json',
     ]:
@@ -132,7 +133,7 @@ def main():
                     if 'libghostty-vt' in dependency:
                         run(['/usr/bin/install_name_tool', '-change', dependency, '@rpath/' + library.name, str(destination/'omgd')])
                 sign_adhoc([destination/library.name, destination/'omgd'])
-            for notice in ('LICENSE.herdr', 'THIRD-PARTY-NOTICES'):
+            for notice in ('LICENSE.herdr', 'LICENSE.termio', 'THIRD-PARTY-NOTICES'):
                 shutil.copy2(ROOT/'session-runtime'/notice, destination/notice)
             files = [{'name': p.name, 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()}
                      for p in sorted(destination.iterdir()) if p.name != 'manifest.json' and p.is_file()]

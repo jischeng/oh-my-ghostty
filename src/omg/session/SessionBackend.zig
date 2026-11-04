@@ -38,6 +38,10 @@ password_input: bool = false,
 fd: c_int = -1,
 write_mutex: std.Io.Mutex = .init,
 ready: std.atomic.Value(bool) = .init(false),
+snapshot_ready: std.atomic.Value(bool) = .init(false),
+writer_transfer: std.atomic.Value(bool) = .init(false),
+takeover_pending: bool = false,
+takeover_input: std.ArrayList(u8) = .empty,
 generation: std.atomic.Value(u64) = .init(0),
 stopping: std.atomic.Value(bool) = .init(false),
 close_requested: std.atomic.Value(bool) = .init(false),
@@ -80,6 +84,8 @@ pub fn deinit(self: *Self) void {
     self.initial_input.deinit(self.alloc);
     self.clearStartupInput();
     self.startup_input.deinit(self.alloc);
+    std.crypto.secureZero(u8, self.takeover_input.items);
+    self.takeover_input.deinit(self.alloc);
     for (self.tty_names.items) |name| self.alloc.free(name);
     self.tty_names.deinit(self.alloc);
 }
@@ -124,6 +130,8 @@ fn closeSocket(self: *Self) void {
     self.write_mutex.lockUncancelable(global.io());
     defer self.write_mutex.unlock(global.io());
     self.ready.store(false, .release);
+    self.snapshot_ready.store(false, .release);
+    self.clearTakeoverInputLocked();
     self.disableStartupInputLocked();
     self.clearProcessInfo();
     if (self.fd >= 0) {
@@ -153,6 +161,8 @@ pub fn setSessionAttached(self: *Self, attached: bool) bool {
     _ = self.attachment_epoch.fetchAdd(1, .acq_rel);
     self.force_attach.store(true, .release);
     self.ready.store(false, .release);
+    self.snapshot_ready.store(false, .release);
+    self.clearTakeoverInputLocked();
     self.disableStartupInputLocked();
     self.clearProcessInfo();
     if (self.fd >= 0) _ = c.shutdown(self.fd, c.SHUT_RDWR);
@@ -201,7 +211,18 @@ pub fn closeSession(self: *Self) void {
     if (was_ready) self.sendFrameLocked('K', generation, &.{}) catch {};
     self.attachment_changed.broadcast(global.io());
 }
-pub fn focusGained(_: *Self, _: *HostIO.ThreadData, _: bool) !void {}
+pub fn focusGained(self: *Self, _: *HostIO.ThreadData, focused: bool) !void {
+    if (!focused) return;
+    self.write_mutex.lockUncancelable(global.io());
+    defer self.write_mutex.unlock(global.io());
+    if (!self.ready.load(.acquire) and self.snapshot_ready.load(.acquire) and
+        self.writer_transfer.load(.acquire) and !self.takeover_pending and
+        self.attachment_enabled.load(.acquire) and !self.stopping.load(.acquire))
+    {
+        try self.sendFrameLocked('W', self.generation.load(.acquire), "takeover/1");
+        self.takeover_pending = true;
+    }
+}
 pub fn resize(self: *Self, grid: renderer.GridSize, screen: renderer.ScreenSize) !void {
     self.requested_size.store((@as(u32, grid.columns) << 16) | grid.rows, .release);
     self.requested_pixels.store(packedPixels(screen), .release);
@@ -224,6 +245,7 @@ pub fn inputGeneration(self: *Self) ?u64 {
     if (self.stopping.load(.acquire) or !self.attachment_enabled.load(.acquire)) return null;
     const generation = self.generation.load(.acquire);
     if (self.ready.load(.acquire) and generation != 0) return generation;
+    if (self.snapshot_ready.load(.acquire) and self.writer_transfer.load(.acquire) and generation != 0) return generation;
     if (self.startup_input_enabled.load(.acquire)) return 0;
     return null;
 }
@@ -286,10 +308,26 @@ pub fn queueWriteGeneration(self: *Self, generation: u64, data: []const u8, line
         return error.SessionNotReady;
     }
 
-    if (!self.ready.load(.acquire) or generation != self.generation.load(.acquire)) {
+    if (generation != self.generation.load(.acquire)) {
         return error.SessionNotReady;
     }
+    if (!self.ready.load(.acquire)) {
+        if (!self.snapshot_ready.load(.acquire) or !self.writer_transfer.load(.acquire)) return error.SessionNotReady;
+        if (payload.len > max_pre_ready_input -| self.takeover_input.items.len) return error.InitialInputTooLarge;
+        if (!self.takeover_pending) {
+            try self.sendFrameLocked('W', generation, "takeover/1");
+            self.takeover_pending = true;
+        }
+        try self.takeover_input.appendSlice(self.alloc, payload);
+        return;
+    }
     try self.sendFrameLocked('I', generation, payload);
+}
+
+fn clearTakeoverInputLocked(self: *Self) void {
+    self.takeover_pending = false;
+    std.crypto.secureZero(u8, self.takeover_input.items);
+    self.takeover_input.clearAndFree(self.alloc);
 }
 pub fn getProcessInfo(self: *Self, comptime info: ProcessInfo) ?ProcessInfo.Type(info) {
     self.write_mutex.lockUncancelable(global.io());
@@ -333,6 +371,7 @@ fn invalidateStartupInput(self: *Self) void {
     self.write_mutex.lockUncancelable(global.io());
     defer self.write_mutex.unlock(global.io());
     self.ready.store(false, .release);
+    self.clearTakeoverInputLocked();
     self.disableStartupInputLocked();
 }
 
@@ -356,6 +395,8 @@ fn updateStatusGeneration(self: *Self, generation: u64, expected_epoch: ?u64) !v
     const previous = self.generation.load(.acquire);
     if (previous != 0 and previous != generation) self.disableStartupInputLocked();
     self.ready.store(false, .release);
+    self.snapshot_ready.store(false, .release);
+    self.clearTakeoverInputLocked();
     self.generation.store(generation, .release);
 }
 
@@ -384,6 +425,8 @@ fn activateWriter(self: *Self, generation: u64, expected_epoch: ?u64) !bool {
         }
         self.clearStartupInput();
     }
+    if (self.takeover_input.items.len > 0) try self.sendFrameLocked('I', generation, self.takeover_input.items);
+    self.clearTakeoverInputLocked();
     self.ready.store(true, .release);
     return true;
 }
@@ -707,12 +750,14 @@ fn readLoop(self: *Self, io: *HostIO, epoch: u64, attached: *bool, connected_onc
                     tty_name: ?[]const u8 = null,
                     password_input: bool = false,
                     runtime_ms: ?u64 = null,
+                    writer_transfer: bool = false,
                 };
                 if (bytes.len > 16 * 1024) return error.InvalidMetadata;
                 const metadata = try std.json.parseFromSlice(Metadata, self.alloc, bytes, .{ .ignore_unknown_fields = true });
                 defer metadata.deinit();
                 if (metadata.value.version != 1 and metadata.value.version != 2) return error.UnsupportedProtocol;
                 self.protocol_version.store(metadata.value.version, .release);
+                self.writer_transfer.store(metadata.value.writer_transfer, .release);
                 self.runtime_ms = metadata.value.runtime_ms orelse 1;
                 self.updatePasswordInputForEpoch(io, metadata.value.password_input, epoch);
                 if (!try self.updateProcessInfoForEpoch(.{
@@ -721,7 +766,13 @@ fn readLoop(self: *Self, io: *HostIO, epoch: u64, attached: *bool, connected_onc
                 }, epoch)) return error.SessionPaused;
             },
             'S' => {
-                self.ready.store(false, .release);
+                {
+                    self.write_mutex.lockUncancelable(global.io());
+                    defer self.write_mutex.unlock(global.io());
+                    self.ready.store(false, .release);
+                    self.snapshot_ready.store(false, .release);
+                    self.clearTakeoverInputLocked();
+                }
                 try self.restore(io, bytes);
                 attached.* = true;
                 try self.confirmCreation();
@@ -730,6 +781,7 @@ fn readLoop(self: *Self, io: *HostIO, epoch: u64, attached: *bool, connected_onc
                 std.mem.writeInt(u64, &acknowledgement, self.generation.load(.acquire), .big);
                 try self.sendForAttachment('A', seq, &acknowledgement, epoch);
                 try self.sendForAttachment('W', self.generation.load(.acquire), &.{}, epoch);
+                self.snapshot_ready.store(true, .release);
             },
             'O' => {
                 const previous = sequence orelse return error.MissingSnapshot;
@@ -925,6 +977,40 @@ test "session input generation rejects delayed writes after recovery" {
     backend.ready.store(false, .release);
     try std.testing.expect(backend.inputGeneration() == null);
     try std.testing.expectError(error.SessionNotReady, backend.queueWriteGeneration(3, "offline", false));
+}
+
+test "session takeover holds first input until grant and drops it on reconnect" {
+    var backend = try Self.init(std.testing.allocator, "/unused", null, .{});
+    defer backend.deinit();
+    var sockets: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF_UNIX, c.SOCK_STREAM, 0, &sockets));
+    defer _ = c.close(sockets[0]);
+    defer _ = c.close(sockets[1]);
+    backend.fd = sockets[0];
+    backend.generation.store(3, .release);
+    backend.snapshot_ready.store(true, .release);
+    backend.writer_transfer.store(true, .release);
+    try std.testing.expectEqual(@as(?u64, 3), backend.inputGeneration());
+    try backend.queueWriteGeneration(3, "hi", false);
+    var claim: [23]u8 = undefined;
+    try readTestBytes(sockets[1], &claim);
+    try std.testing.expectEqual(@as(u8, 'W'), claim[0]);
+    try std.testing.expectEqualStrings("takeover/1", claim[13..]);
+    var probe: [1]u8 = undefined;
+    try std.testing.expect(c.recv(sockets[1], &probe, 1, c.MSG_DONTWAIT) < 0);
+    try std.testing.expect(try backend.activateWriter(3, null));
+    var input: [15]u8 = undefined;
+    try readTestBytes(sockets[1], &input);
+    try std.testing.expectEqual(@as(u8, 'I'), input[0]);
+    try std.testing.expectEqualStrings("hi", input[13..]);
+    backend.invalidateStartupInput();
+    try backend.queueWriteGeneration(3, "never replay", false);
+    try readTestBytes(sockets[1], &claim);
+    try backend.updateStatusGeneration(4, null);
+    try std.testing.expectEqual(@as(usize, 0), backend.takeover_input.items.len);
+    try std.testing.expect(backend.inputGeneration() == null);
+    try std.testing.expect(try backend.activateWriter(4, null));
+    try std.testing.expect(c.recv(sockets[1], &probe, 1, c.MSG_DONTWAIT) < 0);
 }
 
 test "detaching pauses writes and resumes only the same session attachment epoch" {

@@ -416,6 +416,36 @@ the user's pending remote-close requests. Persistence fixtures supply private UR
 The new process gets a new generation and PID. No-ID or unsupported Agents do not
 qualify for completion-driven cleanup; process TTL can still end their session.
 
+### Mobile LAN transport (internal, experimental)
+
+`omgd mobile` exposes existing local runtime endpoints over an explicitly
+selected loopback/private IPv4 listener. The gateway and its private pairing
+token are independent of the macOS GUI. Authentication uses the `omg.<token>`
+WebSocket subprotocol, never a query parameter. Native clients omit Origin;
+browser origins require an explicit allowlist entry. The authenticated
+`/catalogue` socket returns endpoint IDs/names, and `/ws/<endpoint>` splices
+the existing host byte protocol to that endpoint's Unix socket. WebSocket
+messages are transport chunks, not protocol-frame boundaries. Discovery is
+channel/revision scoped, does not start shells, and does not export saved SSH
+credentials. See `ios/README.md`.
+
+Session INFO additionally advertises `writer_transfer: true` on new runtimes.
+Ordinary empty `W` claims retain their non-preemptive behavior. An explicit
+`W` payload `takeover/1` (or `inline-takeover/1` for delegated inline replies)
+transfers the writer while leaving the previous viewer attached; the old
+viewer receives the existing `B` event. Frames already in flight from a
+revoked writer cannot input, resize or close the session. New native clients
+only request takeover after the advertised capability and an applied snapshot;
+their first input waits for the grant and is discarded on reconnect/detach.
+Older pinned daemons are not upgraded or assumed to support takeover.
+
+The mobile viewer uses native snapshots, ACK barriers and ordered output/
+resize, initially observes without resizing, and sends no automatically
+generated terminal reports. It enables real input only after a writer grant.
+This is an internal client transport, not a stable plugin API or a
+public-internet deployment.
+
+
 ## Built-in Git review and commit actions
 
 Local Git filesystem events wake the visible Inspector after a short coalescing

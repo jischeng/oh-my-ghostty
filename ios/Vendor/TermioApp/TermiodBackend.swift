@@ -172,7 +172,7 @@ final class TermiodBackend: DeviceClient {
     func startSSH(host: String, workspaceID _: String?) {
         // The Session Protocol has no verb for the host list the Mac reads out
         // of `~/.ssh/config`, so there is no choice here to honour.
-        onError?(localized("Termio can't open an SSH session on \(host) from a device connection."))
+        onError?(localized("OMG can't open an SSH session on \(host) from a device connection."))
     }
 
     func stopSession(id: String) {

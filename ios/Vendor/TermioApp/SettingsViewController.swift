@@ -47,7 +47,7 @@ final class SettingsViewController: ThemedTableViewController {
     }
 
     private enum AboutRow: Int, CaseIterable {
-        case version, website, licenses
+        case version, website, acknowledgements, licenses
     }
 
     private static let websiteURL = URL(string: "https://github.com/jischeng/oh-my-ghostty")!
@@ -178,6 +178,9 @@ final class SettingsViewController: ThemedTableViewController {
             case .website:
                 cell.textLabel?.text = localized("Website")
                 cell.detailTextLabel?.text = "github.com/jischeng/oh-my-ghostty"
+            case .acknowledgements:
+                cell.textLabel?.text = localized("Acknowledgements")
+                cell.accessoryType = .disclosureIndicator
             case .licenses, nil:
                 cell.textLabel?.text = localized("Open Source Licenses")
             }
@@ -194,6 +197,7 @@ final class SettingsViewController: ThemedTableViewController {
             switch AboutRow(rawValue: indexPath.row) {
             case .website: UIApplication.shared.open(Self.websiteURL)
             case .licenses: OMGOpenSource.present(in: self)
+            case .acknowledgements: navigationController?.pushViewController(OMGAcknowledgements(), animated: true)
             default: break
             }
         }
@@ -600,7 +604,7 @@ final class DevicesSettingsViewController: ThemedTableViewController {
         case .macs:
             localized("One device is connected at a time — tap another to switch to it. Switching closes the terminals open on this phone; the sessions keep running on the Mac.")
         case .add:
-            localized("Scan the QR code in Settings ▸ Mobile on a Mac, or the one `termio pair --qr` prints on a machine running the server. Re-scanning a paired device updates its address.")
+            localized("Scan the pairing QR code shown by the OMG desktop, or the private invite printed by the OMG mobile gateway. Re-scanning a paired device updates its address.")
         }
     }
 
@@ -682,7 +686,7 @@ final class DevicesSettingsViewController: ThemedTableViewController {
     private func presentEnterAddress() {
         let alert = UIAlertController(
             title: localized("Connect to a Device"),
-            message: localized("The address your Mac is serving, or the link `termio pair` prints."),
+            message: localized("The address your Mac is serving, or the private invite printed by the OMG mobile gateway."),
             preferredStyle: .alert
         )
         alert.addTextField { field in

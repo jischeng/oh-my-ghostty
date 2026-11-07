@@ -1,5 +1,6 @@
 //! Termio's existing companion UI contract projected onto omgd.
 //! This control plane never attaches a PTY viewer to populate a list.
+mod experience;
 use super::{Config, Endpoint};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::{SinkExt, StreamExt};
@@ -40,6 +41,8 @@ struct PhoneMeta {
     generation: String,
     workspace: String,
     agent: String,
+    #[serde(default)]
+    project: Option<String>,
 }
 #[derive(Clone)]
 struct Project {
@@ -47,6 +50,7 @@ struct Project {
     root: PathBuf,
     workspace: String,
     endpoint: Option<Endpoint>,
+    host: Option<String>,
 }
 struct View {
     roster: Value,
@@ -410,6 +414,7 @@ fn build_view(config: &Config) -> io::Result<View> {
                         root: home.clone(),
                         workspace: workspace.clone(),
                         endpoint: preferred.clone(),
+                        host: None,
                     },
                     json!({"id":id,"name":label,"path":"","workspaceID":workspace,
                 "workspaceName":name,"branch":"","kind":kind,"sessions":[]}),
@@ -438,9 +443,11 @@ fn build_view(config: &Config) -> io::Result<View> {
             .into_owned();
         projects.entry(id.clone()).or_insert_with(|| (Project {
             id: id.clone(), root: root.clone(), workspace: workspace.clone(), endpoint: preferred.clone(),
+                        host: None,
         }, json!({"id":id,"name":name,"path":root,"workspaceID":workspace,"workspaceName":workspace_name,
             "branch":branch,"kind":"folder","sessions":[]})));
     }
+    experience::append_projects(config, &desktop, preferred.as_ref(), &mut projects)?;
     for (endpoint, sessions, supports_presentation) in endpoints {
         for session in sessions
             .into_iter()
@@ -516,7 +523,12 @@ fn build_view(config: &Config) -> io::Result<View> {
             } else {
                 "folder"
             };
-            let id = if loose {
+            let saved_project = saved
+                .and_then(|m| m.project.as_ref())
+                .filter(|id| projects.contains_key(*id));
+            let id = if let Some(id) = saved_project {
+                id.clone()
+            } else if loose {
                 format!("{workspace}-{kind}")
             } else {
                 format!(
@@ -536,6 +548,7 @@ fn build_view(config: &Config) -> io::Result<View> {
                         root: root.clone(),
                         workspace: workspace.into(),
                         endpoint: Some(endpoint.clone()),
+                        host: None,
                     },
                     json!({"id":id,"name":name,"path":root,"workspaceID":workspace,
                 "workspaceName":workspace_name,"branch":branch,"kind":kind,"sessions":[]}),
@@ -614,9 +627,11 @@ pub(super) async fn serve(
                 Some(Ok(Message::Text(text))) if text.len() <= 12 * FILE_LIMIT => {
                     let request = serde_json::from_str::<Value>(&text).map_err(io::Error::other)?;
                     let source = config.clone();
-                    let reply = tokio::task::spawn_blocking(move || request_control(&source, &request))
+                    let request_id = request.get("_request").cloned();
+                    let mut reply = tokio::task::spawn_blocking(move || request_control(&source, &request))
                         .await.map_err(io::Error::other)?
                         .unwrap_or_else(|error| json!({"t":"error","message":error.to_string()}));
+                    if let (Some(id), Some(object)) = (request_id, reply.as_object_mut()) { object.insert("_request".into(), id); }
                     if !reply.is_null() {
                         tokio::time::timeout(Duration::from_secs(5), ws.send(Message::Text(reply.to_string().into())))
                             .await.map_err(io::Error::other)?.map_err(io::Error::other)?;
@@ -683,6 +698,12 @@ fn mtime(metadata: &fs::Metadata) -> u64 {
 }
 fn request_control(config: &Config, request: &Value) -> io::Result<Value> {
     let kind = text(request, "t")?;
+    if matches!(
+        kind,
+        "workspaces" | "hosts" | "directories" | "addProject" | "transcript"
+    ) {
+        return experience::request(config, request);
+    }
     if kind == "auth" {
         return Ok(Value::Null);
     }
@@ -711,6 +732,11 @@ fn request_control(config: &Config, request: &Value) -> io::Result<Value> {
         .projects
         .get(text(request, "project")?)
         .ok_or_else(|| io::Error::other("Project is no longer in the roster"))?;
+    if project.host.is_some() {
+        return Err(io::Error::other(
+            "Remote file tools are not available for this project; use its SSH terminal.",
+        ));
+    }
     let path = request["path"].as_str().unwrap_or("");
     if path.len() > 4096 || path.contains('\0') {
         return Err(io::Error::other("Invalid project path"));
@@ -934,7 +960,7 @@ fn start(config: &Config, view: &View, request: &Value) -> io::Result<Value> {
     } else {
         "terminal"
     };
-    let argv = if kind == "startSSH" {
+    let mut argv = if kind == "startSSH" {
         let host = text(request, "host")?;
         if !ssh_hosts()
             .iter()
@@ -955,6 +981,34 @@ fn start(config: &Config, view: &View, request: &Value) -> io::Result<Value> {
         };
         vec![shell, "-lic".into(), format!("exec {command}")]
     };
+    if let Some(host) = &project.host {
+        let remote = experience::ssh_command(config, host)?;
+        let destination = text(&remote, "destination")?;
+        let mut ssh = vec!["/usr/bin/ssh".into(), "-t".into()];
+        ssh.extend(
+            remote["options"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str().map(str::to_owned)),
+        );
+        ssh.push(destination.into());
+        let remote_command = if agent == "terminal" {
+            "${SHELL:-/bin/sh} -l".to_owned()
+        } else {
+            let command = argv.last().cloned().unwrap_or_default();
+            format!(
+                "${{SHELL:-/bin/sh}} -lic {}",
+                experience::quote(command.strip_prefix("exec ").unwrap_or(&command))
+            )
+        };
+        ssh.push(format!(
+            "cd {} && exec {}",
+            experience::quote(&project.root.to_string_lossy()),
+            remote_command
+        ));
+        argv = ssh;
+    }
     let nonce = record::nonce()?;
     let id = format!(
         "{}-{}-{}-{}-{}",
@@ -983,7 +1037,7 @@ fn start(config: &Config, view: &View, request: &Value) -> io::Result<Value> {
     };
     policy.validate()?;
     let request = json!({"id":id,"create":true,"policy":policy,
-        "launch":{"argv":argv,"env":environment,"cwd":project.root,"cols":100,"rows":30,"pixel_width":0,"pixel_height":0}});
+        "launch":{"argv":argv,"env":environment,"cwd":if project.host.is_some() { home()? } else { project.root.clone() },"cols":100,"rows":30,"pixel_width":0,"pixel_height":0}});
     let mut socket = UnixStream::connect(&endpoint.socket)?;
     socket.set_read_timeout(Some(Duration::from_secs(8)))?;
     socket.set_write_timeout(Some(Duration::from_secs(2)))?;
@@ -1018,6 +1072,7 @@ fn start(config: &Config, view: &View, request: &Value) -> io::Result<Value> {
                 generation: summary.generation.clone(),
                 workspace: project.workspace.clone(),
                 agent: agent.into(),
+                project: Some(project.id.clone()),
             },
         );
         if let Some(path) = index_path(config) {
@@ -1369,6 +1424,7 @@ mod tests {
                             root: self.root.clone(),
                             workspace: PERSONAL.into(),
                             endpoint: None,
+                            host: None,
                         },
                     )]),
                 }),

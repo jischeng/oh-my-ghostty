@@ -119,11 +119,14 @@ echo '{"sessions.startupMode":"newTerminal"}' >"$HOME/.config/oh-my-ghostty-dev/
 GUEST
 "$vm" run
 ip=$(omg_vm_ip)
+# Keep a stale manual gateway (often left on the documented 18790) from
+# colliding with this disposable run.
+port=$(bash "$devtool" python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
 omg_vm_ssh "command -v python3 >/dev/null" || omg_vm_die "Guest needs Python 3"
 omg_vm_scp_to "$ip" "$root/ios/scripts/vm-fixture.py" /tmp/omg-mobile-vm-fixture.py
 fixture_started=true
 omg_vm_ssh "nohup python3 /tmp/omg-mobile-vm-fixture.py \
-  --directory '$guest_directory' --listen '$ip:18790' \
+  --directory '$guest_directory' --listen '$ip:$port' \
   >'$guest_directory.log' 2>&1 </dev/null &"
 ready=false
 for attempt in $(seq 1 40); do
@@ -149,7 +152,7 @@ project=$(bash "$devtool" python3 -c \
     -derivedDataPath ios/.build/app -resultBundlePath "$evidence/Simulator.xcresult" \
     CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
     -parallel-testing-enabled NO \
-    "OMG_MOBILE_UI_SERVER=$ip:18790" "OMG_MOBILE_UI_SESSION=$session_id" \
+    "OMG_MOBILE_UI_SERVER=$ip:$port" "OMG_MOBILE_UI_SESSION=$session_id" \
     "OMG_MOBILE_UI_PROJECT=$project" "OMG_MOBILE_UI_DIRECTORY=$guest_directory" \
     OMG_MOBILE_UI_VM=YES test
 ) >"$evidence/simulator.log" 2>&1 || {

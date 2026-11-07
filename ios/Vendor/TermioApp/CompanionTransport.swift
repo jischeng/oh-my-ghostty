@@ -216,7 +216,7 @@ final class CompanionTransport {
         if let roster = CompanionRoster.decode(text) {
             if roster.wire < Wire.minimumServer {
                 finish(
-                    .failed(localized("Update Termio on your Mac to connect this phone.")),
+                    .failed(localized("Update OMG on your Mac to connect this phone.")),
                     closeCode: .policyViolation
                 )
             } else {

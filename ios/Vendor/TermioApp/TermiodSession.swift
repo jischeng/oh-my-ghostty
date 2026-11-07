@@ -460,7 +460,7 @@ final class TermiodSession: StreamDeviceSession {
             encoding attach for \(self.sessionName, privacy: .public) failed: \
             \(error.localizedDescription, privacy: .public)
             """)
-            notify(.failed(localized("Termio couldn't attach to that session.")))
+            notify(.failed(localized("OMG couldn't attach to that session.")))
         }
     }
 

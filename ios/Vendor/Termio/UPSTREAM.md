@@ -38,6 +38,9 @@ Small UI changes provide OMG branding, open-source notices, meaningful unknown
 Git counts, rendering lifecycle notifications and accessibility identifiers.
 The existing parent drawer/back gesture priority also covers StreamTerminalView,
 so its scrolling recognizer cannot swallow horizontal navigation.
+Visible product copy and diagnostics say OMG rather than the upstream brand;
+source comments, license notices and internal compatibility type names retain
+Termio where they identify the reused contract.
 The original layout, project/Chats/Terminals/Needs You flows, Files/Diff/editor,
 settings, accessory keyboard and input handling are retained. Root URL pairing
 is verified before secrets are persisted, and tokens are stripped from defaults.

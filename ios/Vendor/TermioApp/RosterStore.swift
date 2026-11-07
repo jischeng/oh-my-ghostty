@@ -44,6 +44,8 @@ final class RosterStore {
     /// opened, or the one picked in the ＋ menu. See `destinationWorkspace`,
     /// which resolves it against the live roster.
     private var destinationWorkspaceID: String?
+    var workspaceScope: WorkspaceScope?
+    var scopedProjects: [MockProject] { projects.filter { workspaceScope?.admits($0) ?? true } }
 
     /// Open a session's terminal; the endpoint is non-nil when it's live.
     /// Fired for row taps (via `openSession`) and for `.started` replies.
@@ -65,7 +67,7 @@ final class RosterStore {
     /// Every session currently blocked on the user, across all projects, in
     /// roster order — the root page's "Needs You" strip.
     var attentionSessions: [MockSession] {
-        projects.flatMap(\.sessions).filter { $0.status == .needsAttention }
+        scopedProjects.flatMap(\.sessions).filter { $0.status == .needsAttention }
     }
 
     /// The Chats tab's sections: one per workspace that has loose agent
@@ -73,12 +75,16 @@ final class RosterStore {
     /// same reason the Projects list is — two paired machines' loose sessions
     /// are otherwise one undifferentiated list.
     var chatGroups: [WorkspaceGroup] {
-        WorkspaceGroup.grouped(projects.filter { $0.kind == "chats" })
+        WorkspaceGroup.grouped(scopedProjects.filter { $0.kind == "chats" })
     }
 
     /// The Terminals tab's sections, the shell twin of `chatGroups`.
     var terminalGroups: [WorkspaceGroup] {
-        WorkspaceGroup.grouped(projects.filter { $0.kind == "terminals" })
+        WorkspaceGroup.grouped(scopedProjects.map { project in
+            var project = project
+            project.sessions = project.sessions.filter { $0.agent.id == "terminal" }
+            return project
+        }.filter { !$0.sessions.isEmpty || $0.kind == "terminals" })
     }
 
     /// Every workspace on the roster, in the Mac's push order — what the ＋
@@ -94,7 +100,7 @@ final class RosterStore {
     /// screen the phone user cannot see.
     var currentWorkspace: WorkspaceGroup? {
         let groups = workspaceGroups
-        return groups.first { $0.id == destinationWorkspaceID } ?? groups.first
+        return groups.first { $0.id == (workspaceScope?.selectedID ?? destinationWorkspaceID) } ?? groups.first
     }
 
     /// Where a session the phone starts *here* lands — a plain shell or a chat,
@@ -222,7 +228,9 @@ final class RosterStore {
             ) { [weak self] _ in
                 self?.startSession(agent: agent, in: project)
             }
-        }
+        } + [UIAction(title: localized("New Terminal"), image: UIImage(systemName: "terminal")) { [weak self] _ in
+            self?.startSession(agent: .terminal, in: project)
+        }]
     }
 
     /// The ＋'s "Start in" section: one entry per workspace a phone-started

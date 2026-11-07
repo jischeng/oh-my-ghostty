@@ -150,7 +150,7 @@ final class TermiodChannel {
             \(self.name, privacy: .public) channel lost frame alignment: \
             \(error.localizedDescription, privacy: .public)
             """)
-            fail(localized("The device sent something Termio could not read."))
+            fail(localized("The device sent something OMG could not read."))
             return
         }
         for frame in frames {

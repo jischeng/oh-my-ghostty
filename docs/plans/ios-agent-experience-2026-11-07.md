@@ -106,12 +106,13 @@ a phone rather than reproducing desktop window chrome.
 1. **Live Needs You roster (implemented by full Termio port).** The host sends
    bounded UUID/generation-bound summaries from holder mirrors; the original
    donor UI performs grouping. No full terminal snapshot is opened per row.
-2. **Readable conversation history.** Reuse OMG's existing
-   `AgentHistoryStore`/remote access and conversation-ID association. Serve
-   bounded/paged normalized messages from the host, then evaluate Happy's
-   native presentation components. A transcript view can initially be
-   read-only alongside the existing terminal. Avoid a second set of four log
-   parsers on the phone.
+2. **Readable conversation history (initial implementation).** The mobile
+   Agent page reuses OMG's `AgentHistoryStore` through the packaged host helper,
+   resolves the live session's exact UUID/generation/resume descriptor, and
+   renders normalized messages in a phone conversation. The composer writes
+   through the same PTY writer grant; Terminal remains available for approvals.
+   Paging/background refresh and richer tool-call cards remain follow-up work,
+   and the phone still carries no provider log parser.
 3. **Structured input/questions/permissions.** Use explicit provider capabilities
    and the exact pending request ID/revision/options. Orca's permission identity
    and Paseo's provider contracts are useful references; Happy separates

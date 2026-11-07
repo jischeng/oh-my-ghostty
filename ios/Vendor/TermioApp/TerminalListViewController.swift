@@ -24,6 +24,7 @@ final class TerminalListViewController: UIViewController {
     private let newTerminalButton = UIButton(type: .system)
     private let tableView = UITableView(frame: .zero, style: .grouped)
     private let emptyState = ListEmptyStateView()
+    private var scopeObserver: NSObjectProtocol?
     private var rosterObserver: NSObjectProtocol?
     private var themeObserver: NSObjectProtocol?
 
@@ -48,6 +49,9 @@ final class TerminalListViewController: UIViewController {
         configureEmptyState(below: topBar)
         configureFab()
         refilter()
+        scopeObserver = NotificationCenter.default.addObserver(forName: WorkspaceScope.didChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refilter() }
+        }
         rosterObserver = NotificationCenter.default.addObserver(
             forName: RosterStore.didChange, object: nil, queue: .main
         ) { [weak self] _ in
@@ -56,6 +60,7 @@ final class TerminalListViewController: UIViewController {
     }
 
     deinit {
+        if let scopeObserver { NotificationCenter.default.removeObserver(scopeObserver) }
         if let rosterObserver {
             NotificationCenter.default.removeObserver(rosterObserver)
         }

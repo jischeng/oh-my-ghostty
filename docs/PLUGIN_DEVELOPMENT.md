@@ -454,6 +454,23 @@ workspace checkpoint metadata, including empty workspaces with directory hints.
 The persisted private `mobile-device-id` identifies this gateway's support
 directory independently of another machine or channel.
 
+Mobile workspace/project discovery is host-owned: `workspaces` returns the
+desktop catalog, `hosts` combines the local machine with the desktop's persisted
+SSH registry, `directories` performs a bounded folder listing on that exact host,
+and `addProject` stores the workspace/host/canonical-path tuple in private
+`mobile-projects.json`. A remote project launches `/usr/bin/ssh` on the runtime
+host and does not pretend its remote paths are local file-plane roots. Operations
+receive `_request` identities so asynchronous roster pushes cannot be mistaken
+for replies.
+
+`transcript` resolves the live session's UUID/generation, then its exact retained
+resume descriptor. A separately built `omg-mobile-support` helper compiles the
+desktop's existing `AgentHistoryStore`, definitions and remote reader rather than
+adding a second set of provider log parsers. Codex, Claude, Pi and Antigravity
+are supported; session and workspace must still match the requested identity.
+The phone polls bounded history and sends user text through the same PTY writer
+grant as its Terminal view. Structured approval remains terminal/TUI-owned.
+
 New host probes advertise `holder-presentation/1`. Only when advertised, the
 gateway reads a bounded activity snapshot through the existing authenticated
 holder control socket (`G`, with UUID/generation/capability proof). The server

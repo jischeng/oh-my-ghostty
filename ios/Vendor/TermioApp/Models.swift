@@ -63,7 +63,7 @@ struct MockProject: Identifiable {
     /// that machine is the Mac we're paired with. A checkout on a VPS and one on
     /// the Mac are otherwise indistinguishable here.
     var deviceAlias: String?
-    let sessions: [MockSession]
+    var sessions: [MockSession]
 
     /// A stand-in for the Mac's loose-terminals container before it has opened
     /// one, so a phone-seeded first terminal can open attached right away; the
@@ -640,9 +640,9 @@ enum CompanionLink {
         var message: String {
             switch self {
             case .unreadableAddress:
-                return localized("That isn't an address Termio can pair with.")
+                return localized("That isn't an address OMG can pair with.")
             case .protocolTooNew:
-                return localized("This device speaks a newer protocol. Update Termio on this phone.")
+                return localized("This device speaks a newer protocol. Update OMG on this phone.")
             case .unreachable(let reason):
                 return reason
             }
@@ -830,7 +830,7 @@ enum CompanionLink {
         NotificationCenter.default.post(name: macsDidChange, object: nil)
     }
 
-    private static func setActive(_ id: String) {
+    static func setActive(_ id: String) {
         UserDefaults.standard.set(id, forKey: activeKey)
         NotificationCenter.default.post(name: macsDidChange, object: nil)
         NotificationCenter.default.post(name: pairingDidChange, object: nil)

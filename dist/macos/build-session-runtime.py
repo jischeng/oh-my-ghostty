@@ -8,6 +8,7 @@ from pathlib import Path
 import platform
 import shutil
 import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -54,16 +55,22 @@ def main():
     # Content-derived revision also distinguishes uncommitted development builds.
     digest = hashlib.sha256()
     snapshot_digest = hashlib.sha256()
-    for base in ['session-runtime/src', 'include/ghostty/vt', 'src/terminal']:
+    for base in ['session-runtime/src', 'session-runtime/mobile-support', 'include/ghostty/vt', 'src/terminal']:
         for path in sorted((ROOT / base).rglob('*')):
             if path.is_file():
                 digest.update(str(path.relative_to(ROOT)).encode())
                 contents = path.read_bytes()
                 digest.update(contents)
-                if base != 'session-runtime/src':
+                if base in ['include/ghostty/vt', 'src/terminal']:
                     snapshot_digest.update(str(path.relative_to(ROOT)).encode())
                     snapshot_digest.update(contents)
     for path in [
+        ROOT/'macos/Sources/Features/Plugins/AgentHistoryStore.swift',
+        ROOT/'macos/Sources/Features/Plugins/AgentHistoryRemoteAccess.swift',
+        ROOT/'macos/Sources/Features/Plugins/AgentDefinition.swift',
+        ROOT/'macos/Sources/Helpers/TransientAttachmentNoise.swift',
+        ROOT/'dist/macos/build-mobile-support.py',
+        *sorted((ROOT/'macos/Assets.xcassets').glob('Agent*Manifest.dataset/*.json')),
         ROOT/'session-runtime/Cargo.toml', ROOT/'session-runtime/Cargo.lock',
         ROOT/'session-runtime/build.rs', ROOT/'session-runtime/LICENSE.herdr',
         ROOT/'src/shell-integration/omg/omg.py',
@@ -133,6 +140,15 @@ def main():
                     if 'libghostty-vt' in dependency:
                         run(['/usr/bin/install_name_tool', '-change', dependency, '@rpath/' + library.name, str(destination/'omgd')])
                 sign_adhoc([destination/library.name, destination/'omgd'])
+            if name.startswith('macos-'):
+                apple_arch = 'arm64' if name == 'macos-aarch64' else 'x86_64'
+                run([sys.executable, str(ROOT/'dist/macos/build-mobile-support.py'),
+                     '--output', str(destination/'omg-mobile-support'), '--arch', apple_arch])
+                for agent in ['codex', 'claude', 'pi', 'antigravity']:
+                    folder = {'codex': 'Codex', 'claude': 'Claude', 'pi': 'Pi', 'antigravity': 'Antigravity'}[agent]
+                    shutil.copy2(ROOT/f'macos/Assets.xcassets/Agent{folder}Manifest.dataset/{agent}.json',
+                                 destination/f'agent-{agent}.json')
+                sign_adhoc([destination/'omg-mobile-support'])
             for notice in ('LICENSE.herdr', 'LICENSE.termio', 'THIRD-PARTY-NOTICES'):
                 shutil.copy2(ROOT/'session-runtime'/notice, destination/notice)
             files = [{'name': p.name, 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()}

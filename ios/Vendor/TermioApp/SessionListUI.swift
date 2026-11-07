@@ -37,17 +37,8 @@ struct SessionRow: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: ListCard.tileSpacing) {
-            ListTile {
-                if session.status == .working {
-                    WorkingIndicator(tint: .sessionWorkingInk)
-                } else {
-                    AgentIconView(
-                        ref: session.agent.iconRef,
-                        size: 18,
-                        tint: session.agent.tintColor
-                    )
-                }
-            }
+            OMGAgentMark(agent: session.agent.id, status: session.status)
+                .frame(width: ListCard.tileSize, height: ListCard.tileSize)
             VStack(alignment: .leading, spacing: 1) {
                 Text(session.title)
                     .font(.body)

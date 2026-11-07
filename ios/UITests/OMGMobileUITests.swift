@@ -63,15 +63,30 @@ final class OMGMobileUITests: XCTestCase {
         add(image)
     }
 
+    /// Agent rows open the mobile conversation first; Terminal remains one tap
+    /// away for approvals and the full TUI.
+    private func openSessionTerminal(_ app: XCUIApplication) {
+        row(app).tap()
+        XCTAssertTrue(element(app, "agent.conversation").waitForExistence(timeout: 15))
+        if usingVM {
+            XCTAssertTrue(app.staticTexts["Mobile transcript from OMG"].waitForExistence(timeout: 15))
+            XCTAssertTrue(app.staticTexts["Mobile agent reply rendered from the desktop transcript."].exists)
+        }
+        XCTAssertTrue(app.buttons["agent.terminal"].waitForExistence(timeout: 5))
+        capture(app, "Mobile Agent conversation with Terminal fallback")
+        app.buttons["agent.terminal"].tap()
+        waitConnected(app)
+    }
+
     func testAttachTakeoverTypeAndMacReclaim() {
         var app = launch()
         XCTAssertTrue(app.buttons["home.tab.projects"].waitForExistence(timeout: 10))
+        XCTAssertEqual(app.buttons["home.tab.chats"].label, "Agent")
         capture(app, "Upstream Termio home connected to omgd")
         openProject(app)
         XCTAssertTrue(row(app).waitForExistence(timeout: 15))
         if usingVM { assertRow(app, agent: "Codex", state: "Working") }
-        row(app).tap()
-        waitConnected(app)
+        openSessionTerminal(app)
         XCTAssertTrue(app.buttons["tab"].waitForExistence(timeout: 5))
         let marker = "\\115\\117\\102\\111\\114\\105\\137\\125\\111\\137\\105\\130\\105\\103\\125\\124\\105\\104"
         let status = usingVM ? "\\033]7501;state=blocked:app=claude:id=mobile-agent-fixture:kind=permission\\007" : ""
@@ -83,8 +98,7 @@ final class OMGMobileUITests: XCTestCase {
             XCTAssertTrue(app.descendants(matching: .any).matching(
                 NSPredicate(format: "label == %@", "Needs You")).firstMatch.waitForExistence(timeout: 10))
             capture(app, "Upstream Needs You populated by the omgd holder facts")
-            row(app).tap()
-            waitConnected(app)
+            openSessionTerminal(app)
             app.typeText("printf '\\115\\117\\102\\111\\114\\105\\137\\122\\105\\101\\104\\131\\137\\106\\117\\122\\137\\115\\101\\103\\n'\n")
         }
         expectation(for: NSPredicate(format: "value == %@", "Read Only"),
@@ -114,8 +128,7 @@ final class OMGMobileUITests: XCTestCase {
             app = launch()
             openProject(app)
             assertRow(app, agent: "Pi", state: "Done")
-            row(app).tap()
-            waitConnected(app)
+            openSessionTerminal(app)
             let reconnect = "\\115\\117\\102\\111\\114\\105\\137\\122\\105\\103\\117\\116\\116\\105\\103\\124\\105\\104"
             app.typeText("printf '\(reconnect) pid=%s\\n\\033]7501;state=working:app=antigravity:id=mobile-agent-fixture\\007' \"$$\"\n")
             app.buttons["terminal.back"].tap()
@@ -128,8 +141,7 @@ final class OMGMobileUITests: XCTestCase {
         guard usingVM else { throw XCTSkip("The file/edit fixture is provided by the VM runner.") }
         let app = launch()
         openProject(app)
-        row(app).tap()
-        waitConnected(app)
+        openSessionTerminal(app)
         let viewport = element(app, "terminal.viewport")
         let start = viewport.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.35))
         let end = viewport.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.35))
@@ -163,11 +175,28 @@ final class OMGMobileUITests: XCTestCase {
         app.buttons["file.close"].tap()
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.03, dy: 0.4)).tap()
         app.buttons["terminal.back"].tap()
+        app.buttons["project.back"].tap()
+        XCTAssertTrue(app.buttons["projects.add"].exists)
+        XCTAssertTrue(app.buttons["home.workspaceRail"].exists)
+        app.buttons["projects.add"].tap()
+        XCTAssertTrue(app.navigationBars["Add Project"].waitForExistence(timeout: 10))
+        capture(app, "Add Project starts from the paired desktop")
+        app.navigationBars["Add Project"].buttons.element(boundBy: 0).tap()
+        app.buttons["home.workspaceRail"].tap()
+        XCTAssertTrue(app.navigationBars["Workspaces"].waitForExistence(timeout: 5))
+        capture(app, "Workspace picker mirrors the desktop catalog")
+        app.navigationBars["Workspaces"].buttons.element(boundBy: 0).tap()
         for id in ["home.tab.chats", "home.tab.terminals", "home.tab.settings", "home.tab.projects"] {
             XCTAssertTrue(app.buttons[id].exists)
             app.buttons[id].tap()
         }
         app.buttons["home.tab.settings"].tap()
+        let acknowledgements = app.staticTexts["Acknowledgements"]
+        XCTAssertTrue(acknowledgements.waitForExistence(timeout: 10))
+        acknowledgements.tap()
+        XCTAssertTrue(app.navigationBars["Acknowledgements"].waitForExistence(timeout: 5))
+        capture(app, "Open source acknowledgements")
+        app.navigationBars["Acknowledgements"].buttons.element(boundBy: 0).tap()
         capture(app, "Upstream settings and device connection")
     }
 

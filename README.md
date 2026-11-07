@@ -240,6 +240,13 @@ For the inherited terminal configuration, consult [Ghostty documentation](https:
   the Markdown rendering ecosystem:** live Markdown editing and diagram support.
 - **[Agent Client Protocol](https://agentclientprotocol.com/)** and the Agent
   adapter authors who make local Agent integration possible.
+- **[Termio](https://github.com/termio-sh/termio):** the mobile application,
+  terminal presentation and interaction foundation reused by OMG Mobile.
+- **[Remux](https://github.com/h3nock/remux), [Paseo](https://github.com/getpaseo/paseo)
+  and [Orca](https://github.com/stablyai/orca):** mobile terminal and Agent
+  conversation references.
+- **[Herdr](https://github.com/herdrdev/herdr-core):** inline terminal viewer
+  portions adapted to the OMG runtime protocol.
 
 Thank you to these projects and their contributors. Reference/integration does
 not imply their endorsement. Components retain their own licenses and notices;

@@ -87,6 +87,10 @@ final class ProjectListViewController: UIViewController {
         let topBar = configureTopBar()
         configureTable(below: topBar)
         configureEmptyState(below: topBar)
+        navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .add, primaryAction: UIAction { [weak self] _ in
+            guard let self else { return }
+            OMGProjectPicker.present(from: self, store: store)
+        })
         refilter()
         rosterObserver = NotificationCenter.default.addObserver(
             forName: RosterStore.didChange, object: nil, queue: .main
@@ -200,7 +204,15 @@ final class ProjectListViewController: UIViewController {
         ])
 
         let spacer = UIView()
-        let bar = UIStackView(arrangedSubviews: [titleStack, spacer, filterButton])
+        let add = UIButton(type: .system)
+        add.applyGlassSymbol("plus")
+        add.accessibilityLabel = localized("Add Project")
+        add.accessibilityIdentifier = "projects.add"
+        add.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            OMGProjectPicker.present(from: self, store: store)
+        }, for: .touchUpInside)
+        let bar = UIStackView(arrangedSubviews: [titleStack, spacer, add, filterButton])
         bar.axis = .horizontal
         bar.alignment = .center
         bar.spacing = 8
@@ -314,7 +326,7 @@ final class ProjectListViewController: UIViewController {
         pageTitle.text = name.isEmpty ? localized("Projects") : name
         machineLabel.text = workspace?.machineLabel
         machineLabel.isHidden = workspace?.machineLabel == nil
-        let hasOtherWorkspaces = machines.workspaceCount > 1
+        let hasOtherWorkspaces = machines.workspaceCount > 0
         workspaceChevron.isHidden = !hasOtherWorkspaces
         workspaceButton.isEnabled = hasOtherWorkspaces
         // With nowhere to switch to, the title is a title again: the button stops
@@ -358,7 +370,7 @@ final class ProjectListViewController: UIViewController {
             emptyState.configure(
                 icon: .devicePair,
                 title: localized("No Mac connected"),
-                message: localized("Open Termio on your Mac, then pair this phone to see and drive your projects from here."),
+                message: localized("Open OMG on your Mac, then pair this phone to see and drive your projects from here."),
                 actionTitle: localized("Connect a Mac"),
                 busy: false
             )
@@ -369,7 +381,7 @@ final class ProjectListViewController: UIViewController {
             emptyState.configure(
                 icon: .wifiError,
                 title: localized("Can't reach your Mac"),
-                message: localized("It may be asleep or off your network. Termio keeps trying — reopen the lid, or tap to retry now."),
+                message: localized("It may be asleep or off your network. OMG keeps trying — reopen the lid, or tap to retry now."),
                 actionTitle: localized("Try Again"),
                 busy: false
             )
@@ -388,7 +400,7 @@ final class ProjectListViewController: UIViewController {
             emptyState.configure(
                 icon: .folder,
                 title: localized("No projects open"),
-                message: localized("Open a project in Termio on your Mac and it'll show up here."),
+                message: localized("Open a project in OMG on your Mac and it'll show up here."),
                 actionTitle: nil,
                 busy: false
             )

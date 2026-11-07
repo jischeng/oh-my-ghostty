@@ -30,6 +30,10 @@ class MobileTestPlanTests(unittest.TestCase):
             "src/terminal/stream.zig", "include/ghostty/vt/terminal.h",
             "src/lib_vt.zig", "src/build/GhosttyLibVt.zig",
             "dist/macos/build-session-runtime.py",
+            "dist/macos/build-mobile-support.py",
+            "session-runtime/mobile-support/Support.swift",
+            "macos/Sources/Features/Plugins/AgentHistoryStore.swift",
+            "macos/Assets.xcassets/AgentPiManifest.dataset/pi.json",
         ]:
             with self.subTest(path=path):
                 result = make_plan([path])

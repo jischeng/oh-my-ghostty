@@ -34,7 +34,7 @@ final class RootContainerViewController: UIViewController {
     /// The Projects tab's root list.
     private lazy var projectList: ProjectListViewController = {
         let list = ProjectListViewController(store: store, scope: workspaceScope)
-        list.onOpenWorkspaceRail = { [weak self] in self?.setWorkspaceRail(open: true) }
+        list.onOpenWorkspaceRail = { [weak self] in self?.showWorkspacePicker() }
         return list
     }()
     /// The Projects tab's stack: the root list, plus a pushed project page.
@@ -44,7 +44,7 @@ final class RootContainerViewController: UIViewController {
     /// The Chats tab's stack: the flat chat list (nothing pushes onto it yet;
     /// a nav keeps both tabs the same shape).
     private lazy var chatsNav = HomeNavigationController(
-        rootViewController: ChatListViewController(store: store)
+        rootViewController: OMGAgentListViewController(store: store)
     )
     /// The Terminals tab's stack: the flat loose-shell list, the shell twin of
     /// Chats. Same shape (a nav for consistency; nothing pushes onto it yet).
@@ -70,19 +70,19 @@ final class RootContainerViewController: UIViewController {
         // the UI tests keep addressing `home.tab.projects` in every language.
         let destinations: [(nav: UIViewController, key: String, title: String, icon: HugeIcon)] = [
             (projectsNav, "projects", localized("Projects"), .folder),
-            (chatsNav, "chats", localized("Chats"), .bubbleChat),
+            (chatsNav, "chats", localized("Agent"), .bubbleChat),
             (terminalsNav, "terminals", localized("Terminals"), .terminal),
             (settingsNav, "settings", localized("Settings"), .settings),
         ]
         for (index, destination) in destinations.enumerated() {
             let item = UITabBarItem(
                 title: destination.title,
-                image: destination.icon.strokeImage(boxSize: 24, strokeWeight: 1.7),
+                image: UIImage(systemName: ["folder", "cpu", "terminal", "gearshape"][index]),
                 tag: index
             )
             // A selected tab fills its symbol in, the way every system tab bar
             // does; the outline stays for the unselected ones.
-            item.selectedImage = destination.icon.solidImage(boxSize: 24)
+            item.selectedImage = UIImage(systemName: ["folder.fill", "cpu.fill", "terminal.fill", "gearshape.fill"][index])
             item.accessibilityIdentifier = "home.tab.\(destination.key)"
             destination.nav.tabBarItem = item
         }
@@ -118,6 +118,7 @@ final class RootContainerViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        store.workspaceScope = workspaceScope
         themeObserver = installThemeBackdrop()
 
         // Registered before the tabs load their views, so the first roster has
@@ -151,6 +152,14 @@ final class RootContainerViewController: UIViewController {
             let screen: UIViewController
             if let parked = recentTerminals[session.key] {
                 screen = parked
+            } else if let endpoint, endpoint.kind == .omgd, session.agent.id != "terminal" {
+                let agent = OMGAgentViewController(endpoint: endpoint, session: session)
+                agent.onBack = { [weak self] in self?.goHome() }
+                agent.onTerminal = { [weak self] in
+                    self?.goHome(animated: false)
+                    self?.open(TerminalViewController(endpoint: endpoint, session: session), sessionKey: session.key + ":terminal")
+                }
+                screen = agent
             } else if let endpoint {
                 screen = TerminalViewController(endpoint: endpoint, session: session)
             } else {
@@ -246,6 +255,7 @@ final class RootContainerViewController: UIViewController {
         let isReopen = screen.parent === self
         installIfNeeded(screen)
         (screen as? TerminalViewController)?.setRuntimeRendering(true)
+        (screen as? OMGAgentViewController)?.setRuntimeRendering(true)
         if isReopen {
             (screen as? TerminalViewController)?.prepareForReappearance()
         }
@@ -275,6 +285,7 @@ final class RootContainerViewController: UIViewController {
     private func goHome(animated: Bool = true) {
         guard let screen = activeScreen else { return }
         (screen as? TerminalViewController)?.setRuntimeRendering(false)
+        (screen as? OMGAgentViewController)?.setRuntimeRendering(false)
         activeScreen = nil
         store.currentSessionKey = nil
         refreshHomeLists()
@@ -355,6 +366,19 @@ final class RootContainerViewController: UIViewController {
 
     /// The opener beside the page title, and the rail's own dismissals. An edge
     /// gesture on its own is undiscoverable, so the tap is not a convenience.
+    private func showWorkspacePicker() {
+        let picker = WorkspaceRailViewController(store: store, scope: workspaceScope)
+        let nav = UINavigationController(rootViewController: picker)
+        picker.title = localized("Workspaces")
+        picker.onSelect = { [weak nav, weak self] in
+            if let id = self?.workspaceScope.selectedID { self?.store.chooseDestinationWorkspace(id) }
+            nav?.dismiss(animated: true)
+        }
+        picker.navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .close, primaryAction: UIAction { [weak nav] _ in nav?.dismiss(animated: true) })
+        if let sheet = nav.sheetPresentationController { sheet.detents = [.medium(), .large()] }
+        present(nav, animated: true)
+    }
+
     func setWorkspaceRail(open: Bool) {
         guard open ? canPresentWorkspaceRail : railInstalled else { return }
         installWorkspaceRailIfNeeded()
@@ -556,6 +580,7 @@ final class RootContainerViewController: UIViewController {
 
         if commit {
             (screen as? TerminalViewController)?.setRuntimeRendering(false)
+        (screen as? OMGAgentViewController)?.setRuntimeRendering(false)
             // Teardown deferred from goHome to here (only once the drag commits).
             if activeScreen === screen { activeScreen = nil }
             store.currentSessionKey = nil
@@ -643,7 +668,7 @@ final class RootContainerViewController: UIViewController {
             (screen as? ProjectDetailViewController)?.refresh()
         }
         for screen in chatsNav.viewControllers {
-            (screen as? ChatListViewController)?.refresh()
+            (screen as? OMGAgentListViewController)?.refresh()
         }
         for screen in terminalsNav.viewControllers {
             (screen as? TerminalListViewController)?.refresh()

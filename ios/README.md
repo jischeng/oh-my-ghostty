@@ -103,6 +103,23 @@ Chinese IME, terminal keyboard, paste and reconnection are the initial scope.
 
 ## Checks
 
+Mobile checks are selected independently from macOS releases and routine suites.
+Use the previous published tag for a release or the branch integration base for
+development. The comparison includes committed, staged, unstaged and untracked
+changes, including deletions and both sides of renames:
+
+```sh
+python3 dist/omg_mobile_test_plan.py --changed-since <base-ref>
+ios/scripts/test.sh --changed-since <base-ref>
+ios/scripts/test-vm.sh --changed-since <base-ref>
+```
+
+With no mobile implementation/shared dependency changes, the gated commands
+print the skip reason and exit before starting builds, VM or Simulator.
+macOS-only features, version bumps and documentation do not select mobile
+checks. Explicit commands without `--changed-since` remain available when a
+mobile validation is intentionally requested.
+
 ```sh
 ios/scripts/test.sh
 cargo test --manifest-path session-runtime/Cargo.toml
@@ -115,6 +132,49 @@ snapshot/parser-continuation/alternate-screen restoration, and Ghostty's key and
 bracketed-paste encoding. Rust tests use real PTYs and authenticated WebSockets,
 including reconnect to the same session and transfer between live observers.
 These checks do not replace unlocked Simulator/device interaction acceptance.
+
+## VM + Simulator acceptance
+
+```sh
+# Build this checkout, deploy only to Tart, and run the iOS UI in Simulator.
+bash ios/scripts/test-vm.sh
+
+# Reuse matching, already built and packaged artifacts.
+bash ios/scripts/test-vm.sh --skip-build --simulator <SIMULATOR_UUID>
+```
+
+The runner uses the existing headless `omg-test` VM and a local iOS Simulator.
+It never deploys or launches the Mac app on the host. The host needs full Xcode,
+an installed iOS Simulator runtime and the prerequisites in
+[macos/VM_TESTING.md](../macos/VM_TESTING.md). The guest needs Python 3.
+
+The default build is serial: native GhosttyKit, Mac app, native runtime bundle,
+then iOS app. The test creates a fresh terminal through the actual guest GUI,
+discovers its UUID/PID in the runtime catalogue, and starts an authenticated
+gateway on the guest's private IP, port 18790. The test-only token is synthetic;
+it never reads a user's pairing token. The observer fixture does not claim input.
+Before launch it resets only the disposable **guest Dev** preferences, support
+directory and saved-window state, so ended sessions from older runtime epochs
+cannot become the test's terminal. No host profile is reset.
+The Simulator takes over and executes a marker command; the **Mac GUI** then
+types a second command to reclaim input through `SessionBackend`. The Simulator
+terminates/relaunches the mobile app, opens the same session and executes again.
+The guest requires matching UUID, generation and shell PID for all receipts.
+Native launches may retain `/usr/bin/login` as the runtime's PTY-root PID; the
+fixture identifies its shell descendant and checks both PIDs remain unchanged.
+
+Evidence defaults to `/tmp/omg-mobile-vm-evidence-<run-id>/`: `ready.json`,
+`result.json`, guest screenshot, Simulator xcresult/screenshots and logs.
+Set `OMG_MOBILE_TEST_EVIDENCE` to choose another output directory. Cleanup closes
+only the fixture's new session, stops its gateway, and shuts down the VM while
+keeping its disk. `--skip-build` requires matching source-built Mac app/runtime
+and iOS VT libraries; it is not an acceptance of an old installed app.
+
+Validated on 2026-11-07 with freshly built Mac/Simulator apps and runtime
+`d321f98a140a04e566cb`: one real VM + Simulator XCUITest passed, including mobile
+input, Mac GUI reclaim and mobile relaunch/reattach. The guest execution receipts
+confirmed the same UUID, generation, PTY-root PID and interactive shell PID.
+The two client screenshots were inspected, and the VM shut down cleanly.
 
 ## LAN UI acceptance
 

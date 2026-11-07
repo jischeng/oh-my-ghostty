@@ -66,10 +66,14 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
         TEST_TARGET_NAME: OMGMobile
         OMG_MOBILE_UI_SERVER: "127.0.0.1:18790"
+        OMG_MOBILE_UI_SESSION: "77777777-1111-2222-3333-444444444444"
+        OMG_MOBILE_UI_VM: "NO"
     info:
       path: .build/UITest-Info.plist
       properties:
         OMGTestServer: "$(OMG_MOBILE_UI_SERVER)"
+        OMGTestSession: "$(OMG_MOBILE_UI_SESSION)"
+        OMGTestVM: "$(OMG_MOBILE_UI_VM)"
 schemes:
   OMGMobile:
     build:

@@ -504,6 +504,14 @@ routine Swift suites. For an intentional broad sweep, use
 Affected Zig/Python/shell tests and actual-artifact checks still run separately;
 the selector does not claim to run those layers.
 
+The iOS app has a separate change-based gate:
+`python3 dist/omg_mobile_test_plan.py --changed-since "v<PREVIOUS_VERSION>"`.
+Only changes to mobile implementation or its shared runtime/VT dependencies
+select the native mobile, Simulator build and VM + Simulator checks described
+in [TESTING.md](TESTING.md#ios-client-selection). A macOS release, version bump
+or full macOS routine sweep alone must not build, launch or install the iOS app.
+When no relevant paths changed, record mobile checks as not selected.
+
 Real native desktop interaction suites tagged `.interactiveDesktop` are optional
 and excluded by default, with an explicit **NOT RUN** report. After relevant native
 tab, drag/drop, focus, or event-routing changes, schedule them explicitly on an

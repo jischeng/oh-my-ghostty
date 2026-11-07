@@ -7,6 +7,9 @@ final class OMGMobileUITests: XCTestCase {
         // a user's saved pairing key or existing terminal session.
         let app = XCUIApplication()
         let server = Bundle(for: Self.self).object(forInfoDictionaryKey: "OMGTestServer") as? String ?? "127.0.0.1:18790"
+        let sessionID = Bundle(for: Self.self).object(forInfoDictionaryKey: "OMGTestSession") as? String
+            ?? "77777777-1111-2222-3333-444444444444"
+        let usingVM = Bundle(for: Self.self).object(forInfoDictionaryKey: "OMGTestVM") as? String == "YES"
         app.launchArguments = ["--ui-test-server", server,
                                "--ui-test-token", String(repeating: "t", count: 64)]
         app.launch()
@@ -20,7 +23,7 @@ final class OMGMobileUITests: XCTestCase {
                 break
             }
         }
-        let session = app.cells["session.77777777-1111-2222-3333-444444444444"]
+        let session = app.cells["session.\(sessionID)"]
         guard session.waitForExistence(timeout: 15) else {
             let image = XCTAttachment(screenshot: app.screenshot())
             image.lifetime = .keepAlways
@@ -45,7 +48,7 @@ final class OMGMobileUITests: XCTestCase {
         XCTAssertTrue(app.buttons["tab"].exists)
         // The command contains octal escapes; only its actual execution emits
         // the marker the Mac fixture waits for, so echo cannot fake success.
-        app.typeText("printf '\\115\\117\\102\\111\\114\\105\\137\\125\\111\\137\\105\\130\\105\\103\\125\\124\\105\\104\\n'\n")
+        app.typeText("printf '\\115\\117\\102\\111\\114\\105\\137\\125\\111\\137\\105\\130\\105\\103\\125\\124\\105\\104 pid=%s\\n' \"$$\"\n")
         expectation(for: NSPredicate(format: "label CONTAINS %@", "输入权已交给"), evaluatedWith: status)
         waitForExpectations(timeout: 15)
         let viewport = app.scrollViews["terminal.viewport"]
@@ -55,6 +58,25 @@ final class OMGMobileUITests: XCTestCase {
         image.name = "Shared terminal after mobile input and Mac reclaim"
         image.lifetime = .keepAlways
         add(image)
+        if usingVM {
+            app.terminate()
+            app.launch()
+            app.buttons["connection.connect"].tap()
+            let reconnected = app.cells["session.\(sessionID)"]
+            XCTAssertTrue(reconnected.waitForExistence(timeout: 15))
+            reconnected.tap()
+            expectation(for: viewing, evaluatedWith: app.staticTexts["terminal.status"])
+            waitForExpectations(timeout: 10)
+            app.buttons["接管"].tap()
+            expectation(for: NSPredicate(format: "label CONTAINS %@", "正在操作"),
+                        evaluatedWith: app.staticTexts["terminal.status"])
+            waitForExpectations(timeout: 10)
+            app.typeText("printf '\\115\\117\\102\\111\\114\\105\\137\\122\\105\\103\\117\\116\\116\\105\\103\\124\\105\\104 pid=%s\\n' \"$$\"\n")
+            let reconnectedImage = XCTAttachment(screenshot: app.screenshot())
+            reconnectedImage.name = "Reattached to the same VM session"
+            reconnectedImage.lifetime = .keepAlways
+            add(reconnectedImage)
+        }
     }
 
     private func brightSamples(_ image: UIImage) -> Int {

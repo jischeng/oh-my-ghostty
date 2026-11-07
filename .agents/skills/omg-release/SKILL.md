@@ -19,6 +19,7 @@ Use this skill in the `oh-my-ghostty` repo. Never open the Xcode GUI. Never touc
    - Shared host/core, build/test infrastructure, or unmapped changes conservatively select all routine Swift suites. Explicit broad sweeps remain available with `--test-modules all`; do not force them solely because of a minor bump.
    - `.interactiveDesktop` native drag/focus tests are optional, excluded by default, and reported **NOT RUN**, not passed. After relevant native tab/drag/focus/event changes, schedule them explicitly with `--include-desktop-tests` on an unlocked foreground desktop. XCUITest stays excluded.
    - Swift selection does not replace affected Zig/Python/shell or artifact checks. See `docs/TESTING.md`.
+   - iOS is independent: inspect `python3 dist/omg_mobile_test_plan.py --changed-since "v<PREVIOUS_VERSION>"`. Run mobile checks only when mobile implementation/shared runtime or VT dependencies changed. An unrelated macOS release or full Swift sweep must not build or start the iOS app.
 2. **Build and test strictly serially**: Never run multiple builds or tests concurrently (`build.db: database is locked`).
 3. **Shell compatibility**: Pi shell may be Fish. Wrap multiline shell commands with `/bin/bash -lc '...'`.
 4. **GitHub CLI target**: Always pass `--repo jischeng/oh-my-ghostty` when running `gh release create` (`upstream` points to `ghostty-org/ghostty`).

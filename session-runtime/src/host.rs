@@ -155,7 +155,7 @@ fn host_connection(socket: UnixStream, registry: Arc<Mutex<Registry>>) -> io::Re
                 b'P' if f.seq == 0 => {
                     last_heartbeat = Instant::now();
                     let capabilities = if registry.lock().unwrap().is_local() {
-                        b"durable-close/1,strict-open/1,local-launch/1,inline-viewer/1,agent-state/1".as_slice()
+                        b"durable-close/1,strict-open/1,local-launch/1,inline-viewer/1,agent-state/1,holder-presentation/1".as_slice()
                     } else {
                         b"durable-close/1,strict-open/1,inline-viewer/1,agent-state/1".as_slice()
                     };

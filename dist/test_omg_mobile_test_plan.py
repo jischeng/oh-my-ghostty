@@ -25,6 +25,8 @@ class MobileTestPlanTests(unittest.TestCase):
             "ios/Vendor/Termio/StreamTerminalView.swift", "ios/project.yml",
             "ios/scripts/vm-fixture.py", "src/omg/session/SessionBackend.zig",
             "session-runtime/src/host.rs", "session-runtime/src/registry.rs",
+            "session-runtime/src/mobile/control.rs",
+            "session-runtime/src/activity.rs",
             "src/terminal/stream.zig", "include/ghostty/vt/terminal.h",
             "src/lib_vt.zig", "src/build/GhosttyLibVt.zig",
             "dist/macos/build-session-runtime.py",

@@ -200,8 +200,12 @@ mobile checks instead.
 Native mobile checks run locally without GUI. The integration runner uses the
 actual OMG Dev GUI inside Tart and the iOS app in Simulator: mobile takeover,
 Mac GUI reclaim and mobile relaunch/reattach must execute in the same session
-UUID, generation and shell PID. It owns its guest gateway and disposable session,
-saves execution receipts and screenshots, then shuts the VM down. See
+UUID, generation and shell PID. The full Termio UI suite also covers live agent
+rows/Needs You, project navigation, drawer Files/Diff, versioned editing, settings,
+and creating/explicitly closing a terminal. Agent reports are synthetic; provider
+inference and hooks require separate acceptance. Reuse the retained `omg-test`
+VM for mainline mobile work, without a separate clone. The runner owns its guest
+gateway and disposable sessions, saves receipts/screenshots and shuts the VM down. See
 [ios/README.md](../ios/README.md#vm--simulator-acceptance).
 Physical-device provisioning and acceptance are separate; ordinary macOS releases
 do not require them.

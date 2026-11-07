@@ -445,16 +445,37 @@ generated terminal reports. It enables real input only after a writer grant.
 This is an internal client transport, not a stable plugin API or a
 public-internet deployment.
 
-The mobile terminal consumes the existing inner `G` activity snapshot at its
-current output watermark. It displays committed hook/OSC 7501 presentation facts
-and clears them on detach, transport loss, exit or a replacement snapshot.
-Incomplete `pending` transactions do not replace the displayed state. These
-facts never authorize input, approval or recovery: the phone still needs the
-writer grant, and no structured approval command is inferred from terminal text.
-Older runtimes without activity snapshots continue to render the terminal.
-Live changes are delivered by libghostty's existing context callback while
-applying ordered output, as on the Mac; `G` restores retained state on attach
-and carries host-side pruning. The callback must not re-enter the locked VT.
+The authenticated `/control` WebSocket adapts Termio companion wire v2 to OMG.
+It pushes a bounded project/session/agent roster and handles terminal/agent
+creation, generation-checked close, project files, uploads and git diff. Roster
+session IDs are opaque `endpoint/UUID/generation` routes; clients must never
+resolve an obsolete route to a newer generation. Projects may include Mac
+workspace checkpoint metadata, including empty workspaces with directory hints.
+The persisted private `mobile-device-id` identifies this gateway's support
+directory independently of another machine or channel.
+
+New host probes advertise `holder-presentation/1`. Only when advertised, the
+gateway reads a bounded activity snapshot through the existing authenticated
+holder control socket (`G`, with UUID/generation/capability proof). The server
+copies committed hook/OSC facts into a mirror when the activity revision changes;
+serialization and socket I/O happen after releasing the mirror lock. Roster
+polls never attach a terminal viewer, take the writer or request a VT snapshot.
+Older runtimes show unavailable activity. The terminal's existing inner `G`
+watermark validation and VT context callbacks remain unchanged; callback effects
+are delivered after releasing the VT lock and fenced to their stream identity.
+These presentation facts never authorize input or structured approval replies.
+
+File operations are bounded, resolve canonical project roots and reject traversal
+and symlink escapes. Versioned writes report `conflict:` for the original mobile
+Reload/Overwrite flow; explicit base mtime zero permits overwrite. Git reads
+disable optional locks, external diff/textconv and fsmonitor and have bounded
+output/timeouts. Launches accept allowlisted agent commands and existing runtime
+policy; inherited runtime descriptors and GUI surface identifiers are stripped.
+An idle local broker may restart from its cached artifact through the existing
+launch helper. The gateway does not upgrade or replace running runtime binaries.
+SSH alias launch creates an ordinary local SSH PTY; it is not remote-runtime
+provisioning. `--print-invite` prints a private token-bearing pairing URL without
+starting a listener.
 
 ## Built-in Git review and commit actions
 

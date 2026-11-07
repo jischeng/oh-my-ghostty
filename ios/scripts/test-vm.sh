@@ -99,10 +99,23 @@ vm_started=true
 omg_vm_ssh bash -s <<'GUEST'
 set -euo pipefail
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' /Applications/OMG.app/Contents/Info.plist)" == com.jischeng.omg.debug ]]
+# A restored guest app can survive TERM while saving windows. Finish stopping
+# that disposable GUI before deleting its profile, or it can write stale state back.
+for pid in $(pgrep -x omg || true); do
+  [[ "$(ps -ww -p "$pid" -o command=)" == /Applications/OMG.app/Contents/MacOS/omg* ]]
+  kill -TERM "$pid"
+  for attempt in {1..50}; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid"; fi
+done
 defaults delete com.jischeng.omg.debug >/dev/null 2>&1 || true
 rm -rf "$HOME/Library/Application Support/OMG Dev" \
   "$HOME/Library/Saved Application State/com.jischeng.omg.debug.savedState" \
   "$HOME/.config/oh-my-ghostty-dev"
+mkdir -p "$HOME/.config/oh-my-ghostty-dev"
+echo '{"sessions.startupMode":"newTerminal"}' >"$HOME/.config/oh-my-ghostty-dev/settings.json"
 GUEST
 "$vm" run
 ip=$(omg_vm_ip)
@@ -125,6 +138,8 @@ fi
 omg_vm_scp_from "$ip" "$guest_directory/ready.json" "$evidence/ready.json"
 session_id=$(bash "$devtool" python3 -c \
   'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$evidence/ready.json")
+project=$(bash "$devtool" python3 -c \
+  'import json,sys; print(json.load(open(sys.argv[1]))["project"])' "$evidence/ready.json")
 (
   cd "$root"
   xcodegen generate --spec ios/project.yml
@@ -135,6 +150,7 @@ session_id=$(bash "$devtool" python3 -c \
     CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
     -parallel-testing-enabled NO \
     "OMG_MOBILE_UI_SERVER=$ip:18790" "OMG_MOBILE_UI_SESSION=$session_id" \
+    "OMG_MOBILE_UI_PROJECT=$project" "OMG_MOBILE_UI_DIRECTORY=$guest_directory" \
     OMG_MOBILE_UI_VM=YES test
 ) >"$evidence/simulator.log" 2>&1 || {
   tail -n 60 "$evidence/simulator.log" >&2
@@ -151,7 +167,8 @@ bash "$devtool" python3 - "$evidence/result.json" <<'PY'
 import json
 import sys
 result = json.load(open(sys.argv[1]))
-for key in ("mobile_executed", "mac_gui_reclaimed", "mobile_reconnected", "same_pid_and_generation"):
+for key in ("mobile_executed", "mac_gui_reclaimed", "mobile_reconnected", "same_pid_and_generation",
+            "mobile_created", "mobile_created_closed", "file_edited"):
     if result.get(key) is not True:
         sys.exit(f"Missing execution receipt: {key}")
 print(json.dumps(result, indent=2))

@@ -51,19 +51,4 @@ final class TerminalTests: XCTestCase {
         XCTAssertFalse(text.contains("unfinished-title"))
     }
 
-    func testNativeParserPublishesAgentContextsIncludingSnapshotContinuation() throws {
-        var signals: [TermiodStreamTerminal.Signal] = []
-        let prefix = "\u{1b}]3008;start=omg-agent-pi-42;type=app;omg_agent=pi;omg_state=wor"
-        let terminal = try screen(data: Data(prefix.utf8), onSignal: { signals.append($0) })
-        XCTAssertTrue(signals.isEmpty)
-        terminal.write(Data("king\u{7}".utf8))
-        XCTAssertEqual(signals, [.context(ended: false, id: "omg-agent-pi-42",
-            metadata: "type=app;omg_agent=pi;omg_state=working")])
-        terminal.write(Data("\u{1b}]7501;state=blocked:app=claude:id=permission\u{7}".utf8))
-        XCTAssertEqual(signals.last, .context(ended: false, id: "omg-program-status",
-            metadata: "state=blocked:app=claude:id=permission"))
-        terminal.write(Data("\u{1b}]3008;end=omg-agent-pi-42\u{7}".utf8))
-        XCTAssertEqual(signals.last, .context(ended: true, id: "omg-agent-pi-42", metadata: ""))
-        XCTAssertFalse(try terminal.activeText().contains("omg_state"))
-    }
 }

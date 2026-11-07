@@ -234,6 +234,7 @@ pub struct ManagedSession {
     pub containment_root: Option<PathBuf>,
     pub initial_cwd: Option<PathBuf>,
     pub local_launch: Option<LocalLaunchSpec>,
+    pub presentation: Option<std::sync::Arc<std::sync::Mutex<crate::activity::Snapshot>>>,
 }
 
 pub fn serve_managed(
@@ -472,6 +473,7 @@ pub fn serve_managed(
     )?;
     vt.activity_mut().local = local_mode;
     let mut output = crate::terminal_output::Relay::default();
+    let mut presentation_revision = None;
     let mut peers: Vec<Peer> = vec![];
     let mut close_after_flush = HashSet::new();
     let mut next_id = 1;
@@ -886,6 +888,14 @@ pub fn serve_managed(
                 // Escaped descendants retaining a slave cannot keep our actor forever.
                 if start.elapsed() > Duration::from_secs(policy.terminate_grace_seconds + 2) {
                     eof = true;
+                }
+            }
+        }
+        if presentation_revision != Some(vt.activity().revision()) {
+            if let Some(presentation) = managed.as_ref().and_then(|m| m.presentation.as_ref()) {
+                if let Ok(mut current) = presentation.lock() {
+                    *current = vt.activity().snapshot();
+                    presentation_revision = Some(current.revision);
                 }
             }
         }

@@ -11,11 +11,12 @@ from omg_test_plan import ROOT, changed_paths
 # These files are linked into the mobile VT library or define its host transport.
 # A macOS feature, version bump or release alone does not select mobile checks.
 SHARED_PATHS = (
-    "session-runtime/src/mobile.rs", "session-runtime/src/host.rs",
+    "session-runtime/src/mobile.rs", "session-runtime/src/mobile/**", "session-runtime/src/host.rs",
     "session-runtime/src/server.rs", "session-runtime/src/lib.rs",
     "session-runtime/src/main.rs", "session-runtime/src/session_cli.rs",
     "session-runtime/src/registry.rs", "session-runtime/src/record.rs",
     "session-runtime/src/holder.rs", "session-runtime/src/lifecycle.rs",
+    "session-runtime/src/activity.rs",
     "session-runtime/src/terminal_output.rs",
     "session-runtime/src/vt.c", "session-runtime/src/client.rs",
     "session-runtime/Cargo.*", "session-runtime/build.rs",

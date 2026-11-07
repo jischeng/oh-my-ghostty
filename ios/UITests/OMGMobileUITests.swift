@@ -2,115 +2,225 @@ import XCTest
 import UIKit
 
 final class OMGMobileUITests: XCTestCase {
-    func testAttachTakeoverTypeAndMacReclaim() {
-        // The isolated host fixture uses a public synthetic test token, never
-        // a user's saved pairing key or existing terminal session.
-        let app = XCUIApplication()
-        let server = Bundle(for: Self.self).object(forInfoDictionaryKey: "OMGTestServer") as? String ?? "127.0.0.1:18790"
-        let sessionID = Bundle(for: Self.self).object(forInfoDictionaryKey: "OMGTestSession") as? String
+    private var info: Bundle { Bundle(for: Self.self) }
+    private var usingVM: Bool { info.object(forInfoDictionaryKey: "OMGTestVM") as? String == "YES" }
+    private var sessionID: String {
+        info.object(forInfoDictionaryKey: "OMGTestSession") as? String
             ?? "77777777-1111-2222-3333-444444444444"
-        let usingVM = Bundle(for: Self.self).object(forInfoDictionaryKey: "OMGTestVM") as? String == "YES"
-        app.launchArguments = ["--ui-test-server", server,
-                               "--ui-test-token", String(repeating: "t", count: 64)]
+    }
+
+    private func launch() -> XCUIApplication {
+        let app = XCUIApplication()
+        let server = info.object(forInfoDictionaryKey: "OMGTestServer") as? String ?? "127.0.0.1:18790"
+        app.launchArguments = ["--ui-test-server", server, "--ui-test-token", String(repeating: "t", count: 64),
+                               "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         app.launch()
-        app.buttons["connection.connect"].tap()
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         let alert = springboard.alerts.firstMatch
         if alert.waitForExistence(timeout: 3),
            alert.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "OMG Mobile")).firstMatch.exists {
-            for title in ["允许", "Allow", "好", "OK"] where alert.buttons[title].exists {
+            for title in ["Allow", "允许", "OK", "好"] where alert.buttons[title].exists {
                 alert.buttons[title].tap()
                 break
             }
         }
-        let session = app.cells["session.\(sessionID)"]
-        guard session.waitForExistence(timeout: 15) else {
-            let image = XCTAttachment(screenshot: app.screenshot())
-            image.lifetime = .keepAlways
-            add(image)
-            XCTFail("The paired host did not provide the fixture session.")
-            return
-        }
-        session.tap()
-        let status = app.staticTexts["terminal.status"]
-        let viewing = NSPredicate(format: "label CONTAINS %@", "正在查看")
-        expectation(for: viewing, evaluatedWith: status)
+        return app
+    }
+
+    private func element(_ app: XCUIApplication, _ id: String) -> XCUIElement {
+        app.descendants(matching: .any).matching(identifier: id).firstMatch
+    }
+
+    private func openProject(_ app: XCUIApplication) {
+        let path = info.object(forInfoDictionaryKey: "OMGTestProject") as? String ?? ""
+        let project = path.isEmpty
+            ? app.descendants(matching: .any).matching(
+                NSPredicate(format: "identifier BEGINSWITH %@", "project.")).firstMatch
+            : element(app, "project.\(path)")
+        XCTAssertTrue(project.waitForExistence(timeout: 30), "The real omgd roster must populate the upstream project list.")
+        project.tap()
+    }
+
+    private func row(_ app: XCUIApplication) -> XCUIElement { element(app, "session.\(sessionID)") }
+
+    private func assertRow(_ app: XCUIApplication, agent: String, state: String) {
+        expectation(for: NSPredicate(format: "label CONTAINS %@ AND value == %@", agent, state),
+                    evaluatedWith: row(app))
         waitForExpectations(timeout: 10)
-        if usingVM { assertAgent(app, name: "Codex", state: "正在处理") }
-        app.buttons["接管"].tap()
-        expectation(for: NSPredicate(format: "label CONTAINS %@", "正在操作"), evaluatedWith: status)
-        waitForExpectations(timeout: 10)
-        // A newly installed Simulator can show the system's QuickPath tutorial
-        // over the keyboard. Complete it before checking the accessory bar.
-        for title in ["Continue", "继续"] where app.buttons[title].exists {
-            app.buttons[title].tap()
-        }
-        XCTAssertTrue(app.buttons["ctrl"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["tab"].exists)
-        // The command contains octal escapes; only its actual execution emits
-        // the marker the Mac fixture waits for, so echo cannot fake success.
-        let mobileMarker = "\\115\\117\\102\\111\\114\\105\\137\\125\\111\\137\\105\\130\\105\\103\\125\\124\\105\\104"
-        let claudeStatus = usingVM
-            ? "\\033]7501;state=blocked:app=claude:id=mobile-agent-fixture:kind=permission\\007" : ""
-        app.typeText("printf '\(mobileMarker) pid=%s\\n\(claudeStatus)' \"$$\"\n")
-        if usingVM {
-            assertAgent(app, name: "Claude Code", state: "等待授权")
-            // Notify the guest only after the phone rendered the waiting state.
-            app.typeText("printf '\\115\\117\\102\\111\\114\\105\\137\\122\\105\\101\\104\\131\\137\\106\\117\\122\\137\\115\\101\\103\\n'\n")
-        }
-        expectation(for: NSPredicate(format: "label CONTAINS %@", "输入权已交给"), evaluatedWith: status)
+    }
+
+    private func waitConnected(_ app: XCUIApplication) {
+        expectation(for: NSPredicate(format: "value == %@", "Connected"),
+                    evaluatedWith: app.staticTexts["terminal.title"])
         waitForExpectations(timeout: 15)
-        if usingVM { assertAgent(app, name: "Pi", state: "已完成") }
-        let viewport = app.scrollViews["terminal.viewport"]
-        XCTAssertGreaterThan(brightSamples(viewport.screenshot().image), 16,
-            "The shared terminal must remain visible after keyboard changes and writer transfer.")
+        for label in ["Continue", "继续"] where app.buttons[label].exists { app.buttons[label].tap() }
+    }
+
+    private func capture(_ app: XCUIApplication, _ name: String) {
         let image = XCTAttachment(screenshot: app.screenshot())
-        image.name = "Shared terminal after mobile input and Mac reclaim"
+        image.name = name
         image.lifetime = .keepAlways
         add(image)
+    }
+
+    func testAttachTakeoverTypeAndMacReclaim() {
+        var app = launch()
+        XCTAssertTrue(app.buttons["home.tab.projects"].waitForExistence(timeout: 10))
+        capture(app, "Upstream Termio home connected to omgd")
+        openProject(app)
+        XCTAssertTrue(row(app).waitForExistence(timeout: 15))
+        if usingVM { assertRow(app, agent: "Codex", state: "Working") }
+        row(app).tap()
+        waitConnected(app)
+        XCTAssertTrue(app.buttons["tab"].waitForExistence(timeout: 5))
+        let marker = "\\115\\117\\102\\111\\114\\105\\137\\125\\111\\137\\105\\130\\105\\103\\125\\124\\105\\104"
+        let status = usingVM ? "\\033]7501;state=blocked:app=claude:id=mobile-agent-fixture:kind=permission\\007" : ""
+        app.typeText("printf '\(marker) pid=%s\\n\(status)' \"$$\"\n")
         if usingVM {
+            app.buttons["terminal.back"].tap()
+            assertRow(app, agent: "Claude Code", state: "Needs You")
+            app.buttons["project.back"].tap()
+            XCTAssertTrue(app.descendants(matching: .any).matching(
+                NSPredicate(format: "label == %@", "Needs You")).firstMatch.waitForExistence(timeout: 10))
+            capture(app, "Upstream Needs You populated by the omgd holder facts")
+            row(app).tap()
+            waitConnected(app)
+            app.typeText("printf '\\115\\117\\102\\111\\114\\105\\137\\122\\105\\101\\104\\131\\137\\106\\117\\122\\137\\115\\101\\103\\n'\n")
+        }
+        expectation(for: NSPredicate(format: "value == %@", "Read Only"),
+                    evaluatedWith: app.staticTexts["terminal.title"])
+        waitForExpectations(timeout: 15)
+        let screenshot = app.screenshot()
+        let viewport = element(app, "terminal.viewport").frame
+        let scale = CGFloat(screenshot.image.cgImage?.width ?? 0) / app.frame.width
+        let rect = CGRect(x: viewport.minX * scale, y: viewport.minY * scale,
+                          width: viewport.width * scale, height: viewport.height * scale)
+        let terminalImage = screenshot.image.cgImage?.cropping(to: rect)
+        if let terminalImage {
+            let attachment = XCTAttachment(image: UIImage(cgImage: terminalImage))
+            attachment.name = "Shared terminal viewport"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        XCTAssertTrue(terminalImage.map { hasVisibleText(UIImage(cgImage: $0)) } == true,
+                      "The native shared VT must remain visible.")
+        capture(app, "Upstream terminal after mobile input and real Mac reclaim")
+        if usingVM {
+            app.buttons["terminal.back"].tap()
+            app.buttons["home.tab.projects"].tap()
+            openProject(app)
+            assertRow(app, agent: "Pi", state: "Done")
             app.terminate()
-            app.launch()
-            app.buttons["connection.connect"].tap()
-            let reconnected = app.cells["session.\(sessionID)"]
-            XCTAssertTrue(reconnected.waitForExistence(timeout: 15))
-            reconnected.tap()
-            expectation(for: viewing, evaluatedWith: app.staticTexts["terminal.status"])
-            waitForExpectations(timeout: 10)
-            assertAgent(app, name: "Pi", state: "已完成")
-            app.buttons["接管"].tap()
-            expectation(for: NSPredicate(format: "label CONTAINS %@", "正在操作"),
-                        evaluatedWith: app.staticTexts["terminal.status"])
-            waitForExpectations(timeout: 10)
-            let reconnectMarker = "\\115\\117\\102\\111\\114\\105\\137\\122\\105\\103\\117\\116\\116\\105\\103\\124\\105\\104"
-            let agyStatus = "\\033]7501;state=working:app=antigravity:id=mobile-agent-fixture\\007"
-            app.typeText("printf '\(reconnectMarker) pid=%s\\n\(agyStatus)' \"$$\"\n")
-            assertAgent(app, name: "Antigravity", state: "正在处理")
-            let reconnectedImage = XCTAttachment(screenshot: app.screenshot())
-            reconnectedImage.name = "Reattached to the same VM session"
-            reconnectedImage.lifetime = .keepAlways
-            add(reconnectedImage)
+            app = launch()
+            openProject(app)
+            assertRow(app, agent: "Pi", state: "Done")
+            row(app).tap()
+            waitConnected(app)
+            let reconnect = "\\115\\117\\102\\111\\114\\105\\137\\122\\105\\103\\117\\116\\116\\105\\103\\124\\105\\104"
+            app.typeText("printf '\(reconnect) pid=%s\\n\\033]7501;state=working:app=antigravity:id=mobile-agent-fixture\\007' \"$$\"\n")
+            app.buttons["terminal.back"].tap()
+            assertRow(app, agent: "Antigravity", state: "Working")
+            capture(app, "Upstream project sessions after restoring and updating agent state")
         }
     }
 
-    private func assertAgent(_ app: XCUIApplication, name: String, state: String) {
-        let activity = app.descendants(matching: .any).matching(identifier: "agent.activity").firstMatch
-        expectation(for: NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@", name, state),
-                    evaluatedWith: activity)
+    func testUpstreamPanelsReadDiffEditFilesAndSettings() throws {
+        guard usingVM else { throw XCTSkip("The file/edit fixture is provided by the VM runner.") }
+        let app = launch()
+        openProject(app)
+        row(app).tap()
+        waitConnected(app)
+        let viewport = element(app, "terminal.viewport")
+        let start = viewport.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.35))
+        let end = viewport.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.35))
+        start.press(forDuration: 0.1, thenDragTo: end)
+        let changes = app.segmentedControls.buttons["Changes"]
+        XCTAssertTrue(changes.waitForExistence(timeout: 10))
+        expectation(for: NSPredicate(format: "hittable == true"), evaluatedWith: changes)
+        waitForExpectations(timeout: 5)
+        XCTAssertTrue(app.staticTexts["README.md"].waitForExistence(timeout: 10))
+        capture(app, "Upstream changes drawer backed by real git status")
+        app.staticTexts["README.md"].tap()
+        XCTAssertTrue(app.textViews.firstMatch.waitForExistence(timeout: 10))
+        expectation(for: NSPredicate(format: "value CONTAINS %@", "shared session"),
+                    evaluatedWith: app.textViews.firstMatch)
         waitForExpectations(timeout: 10)
+        capture(app, "Upstream diff reader backed by real git diff")
+        app.buttons["diff.close"].tap()
+        app.segmentedControls.buttons["Files"].tap()
+        XCTAssertTrue(app.staticTexts["README.md"].waitForExistence(timeout: 10))
+        app.staticTexts["README.md"].tap()
+        let contents = element(app, "file.contents")
+        XCTAssertTrue(contents.waitForExistence(timeout: 10))
+        XCTAssertTrue((contents.value as? String)?.contains("shared session") == true)
+        app.buttons["file.edit"].tap()
+        contents.tap()
+        contents.typeText("\nmobile-editor-proof\n")
+        expectation(for: NSPredicate(format: "label CONTAINS %@", "saved"),
+                    evaluatedWith: app.staticTexts["file.state"])
+        waitForExpectations(timeout: 10)
+        capture(app, "Upstream file editor after a real versioned save")
+        app.buttons["file.close"].tap()
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.03, dy: 0.4)).tap()
+        app.buttons["terminal.back"].tap()
+        for id in ["home.tab.chats", "home.tab.terminals", "home.tab.settings", "home.tab.projects"] {
+            XCTAssertTrue(app.buttons[id].exists)
+            app.buttons[id].tap()
+        }
+        app.buttons["home.tab.settings"].tap()
+        capture(app, "Upstream settings and device connection")
     }
 
-    private func brightSamples(_ image: UIImage) -> Int {
-        guard let image = image.cgImage else { return 0 }
-        var pixels = [UInt8](repeating: 0, count: 64 * 64 * 4)
+    func testUpstreamTerminalCreationAndExplicitClose() throws {
+        guard usingVM else { throw XCTSkip("The VM records created-session execution and close receipts.") }
+        let app = launch()
+        XCTAssertTrue(app.buttons["home.tab.terminals"].waitForExistence(timeout: 15))
+        app.buttons["home.tab.terminals"].tap()
+        let add = app.buttons["terminals.new"]
+        XCTAssertTrue(add.waitForExistence(timeout: 10))
+        add.tap()
+        let create = app.buttons.matching(NSPredicate(format: "label == %@ AND identifier != %@",
+            "New Terminal", "terminals.new")).firstMatch
+        XCTAssertTrue(create.waitForExistence(timeout: 5))
+        create.tap()
+        waitConnected(app)
+        let container = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "terminal.session.")).firstMatch
+        let route = String(container.identifier.dropFirst("terminal.session.".count))
+        let parts = route.split(separator: "/")
+        XCTAssertEqual(parts.count, 3)
+        guard parts.count == 3 else { return }
+        let createdID = String(parts[1])
+        XCTAssertNotEqual(createdID, sessionID)
+        let directory = info.object(forInfoDictionaryKey: "OMGTestDirectory") as? String ?? ""
+        XCTAssertTrue(directory.hasPrefix("/tmp/omg-mobile-vm-"))
+        app.typeText("printf '%s' \"$$\" > \(directory)/new-terminal.pid\n")
+        capture(app, "Upstream new terminal created through omgd")
+        app.buttons["terminal.back"].tap()
+        let created = element(app, "session.\(createdID)")
+        XCTAssertTrue(created.waitForExistence(timeout: 10))
+        created.swipeLeft()
+        app.buttons["Close"].firstMatch.tap()
+        XCTAssertTrue(created.waitForNonExistence(timeout: 15))
+    }
+
+    private func hasVisibleText(_ image: UIImage) -> Bool {
+        guard let image = image.cgImage else { return false }
+        let size = 256
+        var pixels = [UInt8](repeating: 0, count: size * size * 4)
         return pixels.withUnsafeMutableBytes { bytes in
-            guard let context = CGContext(data: bytes.baseAddress, width: 64, height: 64,
-                bitsPerComponent: 8, bytesPerRow: 64 * 4, space: CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return 0 }
-            context.draw(image, in: CGRect(x: 0, y: 0, width: 64, height: 64))
-            return stride(from: 0, to: bytes.count, by: 4).filter {
-                Int(bytes[$0]) + Int(bytes[$0 + 1]) + Int(bytes[$0 + 2]) > 180
-            }.count
+            guard let context = CGContext(data: bytes.baseAddress, width: size, height: size,
+                bitsPerComponent: 8, bytesPerRow: size * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: size, height: size))
+            var dark = 0, bright = 0
+            for index in stride(from: 0, to: bytes.count, by: 4) {
+                let sum = Int(bytes[index]) + Int(bytes[index + 1]) + Int(bytes[index + 2])
+                // Downsampled small glyphs retain gray edges rather than pure black.
+                if sum < 400 { dark += 1 }
+                if sum > 600 { bright += 1 }
+            }
+            return dark > 16 && bright > 16
         }
     }
 }

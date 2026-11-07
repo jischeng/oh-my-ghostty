@@ -21,15 +21,17 @@ use tokio_tungstenite::tungstenite::{
     Message,
 };
 
+mod control;
 const PREFIX: &str = "omg.";
 const HELP: &str = "\
 Usage: omgd mobile [--listen IP:PORT] [--app-support PATH | --socket PATH]
-                   --token-file PATH [--allow-origin ORIGIN]
+                   --token-file PATH [--allow-origin ORIGIN] [--print-invite]
 
 Listens on loopback by default. For LAN use, choose the Mac's LAN IP explicitly.
 The private token file is created once and reused. Restart after rotating it.
-Only existing local session endpoints are exposed; no sessions are created.
+Explicit phone controls can create/close sessions and access selected projects.
 The gateway is independent of the Mac app. Stop it to disable mobile access.
+--print-invite prints a private omg://device pairing link without starting a listener.
 ";
 
 #[derive(Clone, Serialize)]
@@ -45,6 +47,12 @@ struct Config {
     support: Option<PathBuf>,
     token: String,
     origin: Option<String>,
+    control: control::State,
+}
+enum Route {
+    Catalogue,
+    Control,
+    Session(PathBuf),
 }
 impl Config {
     fn endpoints(&self) -> io::Result<Vec<Endpoint>> {
@@ -148,8 +156,13 @@ pub fn run(args: &[String]) -> io::Result<()> {
     }
     let (mut listen, mut support, mut socket, mut key, mut origin) =
         ("127.0.0.1:8791".to_owned(), None, None, None, None);
+    let mut print_invite = false;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
+        if arg == "--print-invite" {
+            print_invite = true;
+            continue;
+        }
         let value = args
             .next()
             .ok_or_else(|| io::Error::other("Missing option value"))?;
@@ -194,7 +207,15 @@ pub fn run(args: &[String]) -> io::Result<()> {
         support,
         token: token(&key)?,
         origin,
+        control: control::State::default(),
     });
+    if print_invite {
+        if address.port() == 0 {
+            return Err(io::Error::other("Choose a fixed port for pairing"));
+        }
+        println!("omg://device?url=ws://{address}&token={}", config.token);
+        return Ok(());
+    }
     tokio::runtime::Runtime::new()?.block_on(async move {
         let listener = tokio::net::TcpListener::bind(address).await?;
         eprintln!(
@@ -250,14 +271,16 @@ async fn serve(stream: tokio::net::TcpStream, config: Arc<Config>) -> io::Result
                 }
             }
             let destination = if request.uri().path() == "/catalogue" {
-                None
+                Route::Catalogue
+            } else if request.uri().path() == "/control" {
+                Route::Control
             } else {
                 let id = request
                     .uri()
                     .path()
                     .strip_prefix("/ws/")
                     .ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
-                Some(
+                Route::Session(
                     destinations
                         .iter()
                         .find(|e| e.id == id)
@@ -286,15 +309,19 @@ async fn serve(stream: tokio::net::TcpStream, config: Arc<Config>) -> io::Result
         .map_err(io::Error::other)?
         .map_err(io::Error::other)?;
     let destination = rx.await.map_err(io::Error::other)?;
-    let Some(destination) = destination else {
-        ws.send(Message::Text(
-            serde_json::json!({"endpoints": endpoints})
-                .to_string()
-                .into(),
-        ))
-        .await
-        .map_err(io::Error::other)?;
-        return ws.close(None).await.map_err(io::Error::other);
+    let destination = match destination {
+        Route::Control => return control::serve(ws, config).await,
+        Route::Catalogue => {
+            ws.send(Message::Text(
+                serde_json::json!({"endpoints": endpoints})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .map_err(io::Error::other)?;
+            return ws.close(None).await.map_err(io::Error::other);
+        }
+        Route::Session(path) => path,
     };
     // Adapted from Termio's splice. WebSocket messages are transport chunks,
     // never assumed to coincide with OMG's framed messages.

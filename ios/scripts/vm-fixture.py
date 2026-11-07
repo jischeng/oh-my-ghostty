@@ -63,11 +63,22 @@ def main():
     gateway = None
     control = None
     session = None
+    mobile_session = None
     with (directory / "gateway.log").open("wb") as log:
         try:
+            project = directory / "project"
+            project.mkdir()
+            readme = project / "README.md"
+            readme.write_text("# OMG Mobile\n\nBaseline.\n")
+            subprocess.run(["git", "-C", str(project), "init", "-q"], check=True)
+            subprocess.run(["git", "-C", str(project), "add", "README.md"], check=True)
+            subprocess.run(["git", "-C", str(project), "-c", "user.name=OMG fixture",
+                "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+                "commit", "-qm", "fixture"], check=True)
+            readme.write_text("# OMG Mobile\n\nA shared session from the VM.\n")
             pid_file = directory / "desktop.pid"
             startup_command = (
-                f'printf "%s" "$$" > {pid_file}; printf "OMG VM desktop ready\\n"; '
+                f'cd {project}; printf "%s" "$$" > {pid_file}; printf "OMG VM desktop ready\\n"; '
                 "printf '\\033]7501;state=working:app=codex:id=mobile-agent-fixture\\007'"
             )
             gui_type(startup_command, new_window=True)
@@ -99,14 +110,17 @@ def main():
                 parent = parents[parent]
                 ancestors.add(parent)
 
-            def inventory():
+            def all_sessions():
                 result = subprocess.check_output([
                     str(binary), "sessions", "list", "--local", "--json",
                     "--app-support", str(support),
                 ], text=True, timeout=10)
+                return json.loads(result)["sessions"]
+
+            def inventory():
                 # Native Mac launches can retain /usr/bin/login as the PTY root;
                 # the interactive shell's $$ is its descendant, not that PID.
-                return next((entry for entry in json.loads(result)["sessions"]
+                return next((entry for entry in all_sessions()
                              if entry["pid"] in ancestors and entry["ended"] is None), None)
 
             session = wait_for(inventory, "GUI-created session in runtime catalogue")
@@ -126,7 +140,7 @@ def main():
             token.chmod(0o600)
             gateway = subprocess.Popen([
                 str(binary), "mobile", "--listen", args.listen,
-                "--socket", str(host), "--token-file", str(token),
+                "--app-support", str(support), "--token-file", str(token),
             ], stdout=log, stderr=log)
             pending = bytearray()
             output = bytearray()
@@ -134,7 +148,11 @@ def main():
             mobile = False
             mac_started = False
             mac = False
+            reconnected = False
+            mobile_closed = False
+            file_edited = False
             reported = False
+            checked_mobile = 0
             last_ping = 0
             deadline = time.monotonic() + 600
             while not stopped and time.monotonic() < deadline:
@@ -143,6 +161,30 @@ def main():
                 if time.monotonic() - last_ping > 10:
                     control.sendall(encode(b"P"))
                     last_ping = time.monotonic()
+                if time.monotonic() - checked_mobile > 0.5:
+                    checked_mobile = time.monotonic()
+                    file_edited = "mobile-editor-proof" in readme.read_text()
+                    new_pid = directory / "new-terminal.pid"
+                    if new_pid.exists() and new_pid.read_text().isdigit():
+                        entries = all_sessions()
+                        if mobile_session is None:
+                            mobile_session = next((entry for entry in entries
+                                if entry["pid"] == int(new_pid.read_text()) and entry["ended"] is None), None)
+                        if mobile_session is not None:
+                            mobile_closed = any(entry["id"] == mobile_session["id"]
+                                and entry["generation"] == mobile_session["generation"]
+                                and entry["ended"] is not None and entry["pid"] is None for entry in entries)
+                if reconnected and mobile_closed and file_edited and not reported:
+                    (directory / "output.bin").write_bytes(output)
+                    (directory / "result.json").write_text(json.dumps({
+                        "session": session["id"], "pid": session["pid"], "shell_pid": pid,
+                        "generation": session["generation"], "revision": current,
+                        "mobile_executed": mobile, "mac_gui_reclaimed": mac,
+                        "mobile_reconnected": True, "same_pid_and_generation": True,
+                        "mobile_created": True, "mobile_created_closed": True,
+                        "file_edited": True,
+                    }, indent=2))
+                    reported = True
                 if not select.select([control], [], [], 0.1)[0]:
                     continue
                 data = control.recv(65536)
@@ -175,6 +217,7 @@ def main():
                                 "id": session["id"], "pid": session["pid"], "shell_pid": pid,
                                 "generation": session["generation"], "revision": current,
                                 "server": args.listen,
+                                "project": str(project.resolve()), "directory": str(directory),
                             }))
                             ready = True
                     if inner != b"O":
@@ -191,20 +234,13 @@ def main():
                                  "\\033]7501;state=done:app=pi:id=mobile-agent-fixture\\007' \"$$\"")
                     if f"MAC_RECLAIMED pid={pid}".encode() in output:
                         mac = True
-                    if mac and f"MOBILE_RECONNECTED pid={pid}".encode() in output and not reported:
+                    if mac and f"MOBILE_RECONNECTED pid={pid}".encode() in output and not reconnected:
                         current_session = inventory()
                         if (current_session is None
                                 or current_session["generation"] != session["generation"]
                                 or current_session["pid"] != session["pid"]):
                             raise RuntimeError("Session identity changed after reconnect")
-                        (directory / "output.bin").write_bytes(output)
-                        (directory / "result.json").write_text(json.dumps({
-                            "session": session["id"], "pid": session["pid"], "shell_pid": pid,
-                            "generation": session["generation"], "revision": current,
-                            "mobile_executed": mobile, "mac_gui_reclaimed": mac,
-                            "mobile_reconnected": True, "same_pid_and_generation": True,
-                        }, indent=2))
-                        reported = True
+                        reconnected = True
             if not stopped:
                 raise RuntimeError("Guest mobile fixture deadline expired")
         finally:
@@ -213,6 +249,11 @@ def main():
                     try:
                         control.sendall(encode(b"K", 2, session["id"].encode()))
                         time.sleep(0.2)
+                    except OSError:
+                        pass
+                if mobile_session is not None and not mobile_closed:
+                    try:
+                        control.sendall(encode(b"K", 3, mobile_session["id"].encode()))
                     except OSError:
                         pass
                 control.close()

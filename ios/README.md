@@ -1,20 +1,20 @@
 # OMG Mobile
 
-iPhone/iPad client for existing `omgd` local sessions. Implements the first LAN
-slice of [#37](https://github.com/jischeng/oh-my-ghostty/issues/37).
+An iPhone/iPad client for the same local sessions managed by `omgd`, implementing
+[#37](https://github.com/jischeng/oh-my-ghostty/issues/37). The app reuses Termio's
+complete UIKit application and shared UI at revision
+`819658751635eb298a467f4d84e793729c5242bc`, including projects, Chats, Terminals,
+Needs You, terminal drawers, Files, Diff and Settings. OMG supplies the backend
+adapter rather than maintaining a second mobile UI.
 
-The initial implementation adapts Termio's UIKit terminal, Metal/CoreText
-renderer, IME, key repeat and WebSocket reconnection code at revision
-`819658751635eb298a467f4d84e793729c5242bc`. See
-[Vendor/Termio/UPSTREAM.md](Vendor/Termio/UPSTREAM.md) and the bundled MIT license.
-The app also bundles the repository's Ghostty MIT license.
-Remux remains the second design reference; no Remux code is included.
-The VT parser, snapshots, keyboard/mouse encoding and selections come from
-OMG's own matching Ghostty core. There is no second terminal parser.
+See [Vendor/Termio/UPSTREAM.md](Vendor/Termio/UPSTREAM.md) for source locations,
+local adaptations, dependency pins and licenses. Remux, Orca and Paseo remain
+references; their code is not included. The active shared terminal uses OMG's
+matching Ghostty VT core, snapshots, key encoding and selections.
 
 ## Build
 
-Requirements: full Xcode with iOS SDK, Zig 0.16.0 through mise, XcodeGen,
+Requirements: full Xcode with iOS SDK, Zig 0.16.0 through mise, XcodeGen and
 Rust/Cargo. No Xcode GUI is needed.
 
 ```sh
@@ -22,54 +22,42 @@ ios/scripts/build.sh iphonesimulator
 ios/scripts/build.sh iphoneos
 ```
 
-The first command builds for Apple Silicon Simulator; it does not install a
-Simulator runtime. Simulator builds use Xcode's local ad-hoc signing and
-simulated application identifier so Keychain works without a device profile.
-Device builds are unsigned unless
-`OMG_IOS_DEVELOPMENT_TEAM` names an existing Apple Development team.
-Signing/provisioning and a connected device are needed for a physical install.
+The first command builds for Apple Silicon Simulator. Simulator builds use local
+ad-hoc signing so Keychain works without a device profile. Device builds are
+unsigned unless `OMG_IOS_DEVELOPMENT_TEAM` names an existing development team;
+physical installation requires matching provisioning. Generated projects,
+headers, libraries and build products remain ignored. The minimum OS is iOS 17.
 
-Generated projects, copied VT headers, libraries and app bundles stay in
-ignored paths. The matching VT library is built from this checkout; do not
-replace it with an unrelated prebuilt Ghostty framework.
+## LAN pairing
 
-## Connect over the LAN
+Build the runtime and start its separate gateway on the Mac:
 
-1. Build the Mac runtime:
+```sh
+ios/scripts/build-vt.sh macos
+cargo build --manifest-path session-runtime/Cargo.toml
+ios/scripts/serve-lan.sh
+```
 
-   ```sh
-   ios/scripts/build-vt.sh macos
-   cargo build --manifest-path session-runtime/Cargo.toml
-   ```
+The script discovers existing **OMG Dev local** runtime namespaces. Select a
+channel with `OMG_MOBILE_APP_SUPPORT`, a binary with `OMG_MOBILE_RUNTIME`, or an
+interface with `OMG_MOBILE_LISTEN=192.168.1.10:8791`. Keep the Mac awake and allow
+local-network/firewall access. The gateway stays independent of the Mac GUI;
+stopping it disables mobile access without closing the underlying sessions.
 
-2. Keep the Mac awake on the same Wi-Fi as the phone and run:
+In another shell, print a private pairing link using the same configuration:
 
-   ```sh
-   ios/scripts/serve-lan.sh
-   ```
+```sh
+ios/scripts/serve-lan.sh --print-invite
+```
 
-   This discovers existing **OMG Dev local** runtime namespaces. For another
-   channel, explicitly set `OMG_MOBILE_APP_SUPPORT`. Set
-   `OMG_MOBILE_LISTEN=192.168.1.10:8791` to choose a LAN interface. The gateway
-   stays independent of the Mac GUI; stopping it disables mobile access.
+Paste the `omg://device?...` link into the original app's device pairing flow or
+open it on the phone. It contains a bearer token: keep it private. The app checks
+the authenticated roster before saving; the token goes to Keychain rather than
+UserDefaults. `--print-invite` creates/reuses the token without starting a second
+listener. The token file is mode 0600; token changes require restarting the
+gateway, which disconnects its mobile transports.
 
-3. The gateway prints its address and the pairing-token file location. Read
-   that private file locally. Enter the Mac address (for example
-   `192.168.1.10:8791`) and token in OMG Mobile. Allow the iOS local-network
-   permission and Mac firewall access when requested.
-
-4. Select an existing session. Opening observes without claiming input or
-   resizing the PTY. Tap **接管** to acquire input and fit the PTY to the
-   phone's viewport. Mac clients with the matching implementation can reclaim
-   on focus or typing; both remain attached and receive output.
-
-Older pinned runtime processes remain untouched. They can be viewed, but do
-not advertise `writer_transfer` and cannot transfer an occupied writer.
-Create a session using the newly built runtime to validate transfer.
-The first slice exposes local runtimes only; saved SSH credentials and endpoint
-configuration are never sent to the phone.
-
-For an isolated runtime or a server without an app catalogue:
+For an explicit runtime without a Mac catalogue:
 
 ```sh
 session-runtime/target/debug/omgd mobile \
@@ -78,54 +66,53 @@ session-runtime/target/debug/omgd mobile \
   --token-file /private/path/to/mobile.token
 ```
 
-The token file is generated with mode 0600 and retained across gateway restarts.
-Token changes take effect after restarting the gateway, which also disconnects
-existing mobile transports. Public exposure/TLS/tunnels are a later validation
-stage; this listener accepts explicit loopback or private IPv4 addresses only.
+Only explicit loopback/private IPv4 listeners are accepted. Public TLS/tunnels
+remain a later validation stage. Saved provider credentials and SSH secrets are
+not sent to the phone.
 
-## State and input contracts
+## Existing sessions and agents
 
-- The phone attaches by UUID **and generation**, never creates a replacement.
-- The authoritative native snapshot is decoded before its watermark is ACKed.
-  Output byte offsets must stay contiguous; corruption or a gap stops the
-  attachment rather than applying bytes to an uncertain screen.
-- Session queries are answered by the runtime. Automatic phone terminal
-  reports do not become user keystrokes.
-- Input is accepted only after a writer grant. Offline input is discarded.
-- Closing the phone view or losing the network detaches; it never closes the
-  underlying shell. There is no mobile End Session control in this first slice.
-- All viewers follow the PTY's one ordered grid. An observer does not resize;
-  the phone writer coalesces identical viewport reports.
+The original Termio UI receives its wire-v2 roster from `/control`. Projects
+include live working directories and Mac workspace checkpoint names. Codex,
+Claude Code, Pi and Antigravity appear with upstream icons, agent session rows,
+activity summaries and Needs You grouping. State comes from retained host
+hook/OSC activity, with a lightweight read-only holder mirror; listing sessions
+does not open a terminal viewer or claim input. Older runtimes without that
+capability show unavailable activity rather than inferred completion.
 
-The selected terminal displays the existing runtime's agent activity snapshot:
-Codex, Claude Code, Pi and Antigravity names, working/done/error state, and
-permission/question attention. Indicators are reused from Termio; icons come
-from the Mac app. State clears on disconnect, detach and exit, and incomplete
-replacement transactions never replace committed state. Older runtimes keep
-the existing terminal behavior.
-Live state uses libghostty's context callback on ordered output; retained `G`
-snapshots restore state on attach. A runtime without snapshots can only show
-new live reports, not reconstruct a previous state on reconnect.
+Opening a terminal observes. Typing implicitly requests writer transfer and
+waits for its grant; the Mac can reclaim while both clients keep receiving
+output. UUID **and generation** bind every attachment and close operation.
+Offline/obsolete input is discarded. Native snapshot watermarks and ordered
+output remain authoritative, and automatic phone terminal reports never become
+user keystrokes. All viewers share one PTY grid; only the writer resizes it.
+Leaving a terminal detaches; the explicit session-row Close action ends it.
 
-This is status presentation, not a native chat or structured approval API.
-Hooks still run on the host. No new hook installation or runtime upgrade is
-performed by the phone. Research and the staged mobile design are recorded in
-[docs/plans/ios-agent-experience-2026-11-07.md](../docs/plans/ios-agent-experience-2026-11-07.md).
-The status slice passed 17 native tests and the VM + Simulator UI acceptance on
-2026-11-07. The UI test uses explicit synthetic reports for the four agents,
-including live transitions and snapshot restoration; real-provider turns and
-their hook coverage are a separate acceptance step.
+The original flows can create terminals/allowlisted agent sessions, browse and
+edit project files, upload files, inspect git diffs and start an ordinary local
+`ssh` terminal for a configured alias. File operations are bounded and confined
+to canonical project roots. Writes use mtime conflict detection and the original
+Reload/Overwrite flow. New sessions follow the existing runtime launch policy.
+An idle broker can restart its **cached** binary; the gateway never upgrades
+running daemons or replaces binaries. App naming alone does not isolate channels.
 
-Kitty image rendering, voice, uploads, agent notifications, QR/Bonjour discovery
-and public networking are not enabled in this slice. The text/TUI path,
-Chinese IME, terminal keyboard, paste and reconnection are the initial scope.
+Agent status is presentation of existing host reports, not a native chat or
+structured approval API. Hooks still run on the host. Phone permissions never
+infer a reply by parsing terminal text. The earlier custom activity-card UI has
+been removed; see the [design record](../docs/plans/ios-agent-experience-2026-11-07.md).
 
-## Checks
+Current limits: markdown reads show source, SSH alias parsing handles basic Host
+blocks rather than full Include resolution, and terminal query answers remain
+host-owned even when the phone changes its local display theme. Kitty image
+rendering, push notifications and public networking are not enabled. Upstream
+voice UI is retained, but microphone/provider/network behavior requires separate
+device acceptance. Provider credentials and real inference turns are not part
+of the synthetic agent-status test.
 
-Mobile checks are selected independently from macOS releases and routine suites.
-Use the previous published tag for a release or the branch integration base for
-development. The comparison includes committed, staged, unstaged and untracked
-changes, including deletions and both sides of renames:
+## Change-selected checks
+
+Mobile checks are independent of routine macOS releases. Compare to the previous
+published tag for release work or the integration base for development:
 
 ```sh
 python3 dist/omg_mobile_test_plan.py --changed-since <base-ref>
@@ -133,114 +120,68 @@ ios/scripts/test.sh --changed-since <base-ref>
 ios/scripts/test-vm.sh --changed-since <base-ref>
 ```
 
-With no mobile implementation/shared dependency changes, the gated commands
-print the skip reason and exit before starting builds, VM or Simulator.
-macOS-only features, version bumps and documentation do not select mobile
-checks. Explicit commands without `--changed-since` remain available when a
-mobile validation is intentionally requested.
+The selector includes committed, staged, unstaged and untracked changes,
+deletions and both rename paths. Unrelated Mac features, version changes and
+documentation exit before mobile tools, VM or Simulator start. Explicit commands
+without a reference intentionally run mobile checks:
 
 ```sh
 ios/scripts/test.sh
 cargo test --manifest-path session-runtime/Cargo.toml
-mise exec zig@0.16.0 -- zig build test \
-  -Dversion-string=1.3.2-dev -Dtest-filter='session'
 ```
 
-Swift package tests check fragmented transport frames, output gaps, real native
-snapshot/parser-continuation/alternate-screen restoration, and Ghostty's key and
-bracketed-paste encoding. Rust tests use real PTYs and authenticated WebSockets,
-including reconnect to the same session and transfer between live observers.
-These checks do not replace unlocked Simulator/device interaction acceptance.
+Native tests cover fragmented transport, watermark gaps, route/generation
+validation, real snapshot/parser/alternate-screen restoration and key/paste
+encoding. Rust integration uses real PTYs and authenticated WebSockets for
+reconnect, shared writers, roster activity, file editing/diff, terminal creation
+and stale-generation rejection.
 
 ## VM + Simulator acceptance
 
 ```sh
-# Build this checkout, deploy only to Tart, and run the iOS UI in Simulator.
 bash ios/scripts/test-vm.sh
-
-# Reuse matching, already built and packaged artifacts.
 bash ios/scripts/test-vm.sh --skip-build --simulator <SIMULATOR_UUID>
 ```
 
-The runner uses the existing headless `omg-test` VM and a local iOS Simulator.
-It never deploys or launches the Mac app on the host. The host needs full Xcode,
-an installed iOS Simulator runtime and the prerequisites in
-[macos/VM_TESTING.md](../macos/VM_TESTING.md). The guest needs Python 3.
+Use the existing retained **`omg-test`** VM for this mainline work; no separate
+mobile clone is needed. The Mac app runs only in the guest, and iOS runs in the
+host Simulator. The guest needs Python 3. Prerequisites are documented in
+[macos/VM_TESTING.md](../macos/VM_TESTING.md).
 
-The default build is serial: native GhosttyKit, Mac app, native runtime bundle,
-then iOS app. The test creates a fresh terminal through the actual guest GUI,
-discovers its UUID/PID in the runtime catalogue, and starts an authenticated
-gateway on the guest's private IP, port 18790. The test-only token is synthetic;
-it never reads a user's pairing token. The observer fixture does not claim input.
-Before launch it resets only the disposable **guest Dev** preferences, support
-directory and saved-window state, so ended sessions from older runtime epochs
-cannot become the test's terminal. No host profile is reset.
-The Simulator takes over and executes a marker command; the **Mac GUI** then
-types a second command to reclaim input through `SessionBackend`. The Simulator
-terminates/relaunches the mobile app, opens the same session and executes again.
-The guest requires matching UUID, generation and shell PID for all receipts.
-Native launches may retain `/usr/bin/login` as the runtime's PTY-root PID; the
-fixture identifies its shell descendant and checks both PIDs remain unchanged.
+Builds run serially: native GhosttyKit, Mac app, runtime bundle, then iOS. The
+runner resets only the disposable guest Dev profile, creates a terminal through
+the actual Mac GUI and starts an authenticated gateway on guest port 18790.
+The observer fixture never claims input. Test-only credentials are synthetic.
+No host app or host profile is installed, stopped or reset.
 
-Evidence defaults to `/tmp/omg-mobile-vm-evidence-<run-id>/`: `ready.json`,
-`result.json`, guest screenshot, Simulator xcresult/screenshots and logs.
-Set `OMG_MOBILE_TEST_EVIDENCE` to choose another output directory. Cleanup closes
-only the fixture's new session, stops its gateway, and shuts down the VM while
-keeping its disk. `--skip-build` requires matching source-built Mac app/runtime
-and iOS VT libraries; it is not an acceptance of an old installed app.
+The full-app UI suite covers project/session navigation, live synthetic Codex /
+Claude / Pi / Antigravity status, Needs You, parked terminal reopen, mobile input,
+Mac GUI reclaim, app relaunch/reattach, terminal drawing, original drawer Files /
+Diff and README editing, native tabs/settings, and creation/explicit closure of
+a terminal. Guest receipts require the original UUID, generation, PTY-root PID
+and shell PID to remain unchanged. Synthetic OSC reports verify presentation;
+real-provider authentication, inference and hook coverage remain separate.
 
-Validated on 2026-11-07 with freshly built Mac/Simulator apps and runtime
-`d321f98a140a04e566cb`: one real VM + Simulator XCUITest passed, including mobile
-input, Mac GUI reclaim and mobile relaunch/reattach. The guest execution receipts
-confirmed the same UUID, generation, PTY-root PID and interactive shell PID.
-The two client screenshots were inspected, and the VM shut down cleanly.
+Evidence defaults to `/tmp/omg-mobile-vm-evidence-<run-id>/`: ready/result JSON,
+Simulator xcresult and logs, plus guest captures. Set `OMG_MOBILE_TEST_EVIDENCE`
+to override. Cleanup closes only fixture-owned sessions, stops its gateway and
+shuts the VM down while preserving its disk. `--skip-build` requires matching
+source-built Mac app/runtime and iOS VT libraries.
 
-## LAN UI acceptance
+Validated on 2026-11-07: all three full-app UI tests passed against guest runtime
+`16648856c40342129196`; the guest receipts confirmed every operation and the
+unchanged original session/PIDs. Home/Needs You, terminal, drawer, Diff, editor
+and Settings screenshots were exported for inspection. Evidence:
+`/tmp/omg-mobile-vm-evidence-2827fc8bcccd499facdc9b074a0a5465/`.
+The VM shut down normally.
 
-After building the Simulator app, start an isolated fixture in a separate shell:
+Regression checks passed: 69 Rust tests, 10 native Swift tests, 50 test-selector
+tests and documentation checks. Python ran 35 tests with four prerequisites
+initially skipped; the legacy-runtime and bidirectional VT snapshot checks were
+then run successfully against the installed previous Dev artifacts. Only the
+external Linux-systemd and explicit SSH-deployment checks remain skipped.
+The full app compiled for both arm64 Simulator and unsigned arm64 iPhoneOS.
+The OMG-owned Swift adapters passed strict SwiftLint.
 
-```sh
-python3 ios/scripts/ui-fixture.py \
-  --directory /tmp/omg-mobile-ui-fixture \
-  --listen 192.168.1.10:18790
-```
-
-Replace the example LAN IP with this Mac's address; the directory must not
-already exist. The fixture owns one disposable session and uses a synthetic
-test-only pairing token. Run `OMGMobileUITests` against a booted Simulator:
-
-```sh
-xcodebuild -project ios/OMGMobile.xcodeproj -scheme OMGMobile \
-  -sdk iphonesimulator \
-  -destination 'platform=iOS Simulator,id=<SIMULATOR_UUID>' \
-  -derivedDataPath ios/.build/app \
-  CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- \
-  OMG_MOBILE_UI_SERVER=192.168.1.10:18790 test
-```
-
-The test pairs through the normal connection screen, opens the existing
-session, takes input, executes an octal-encoded `printf`, and observes the
-desktop Unix client taking back input and restoring a 120x50 grid. Echo alone
-cannot satisfy the execution receipt. A screenshot pixel check additionally
-requires visible terminal text after the shared grid grows beyond the phone.
-Stop the fixture with Ctrl-C; it explicitly closes only its own session before
-stopping its private host and gateway.
-
-Validated on 2026-11-05:
-
-- Simulator connected through the Mac's LAN address; both client commands
-  executed in the same session UUID/PID, and the larger desktop grid stayed
-  visible on the phone. The native keyboard bar and Chinese output were
-  visually inspected.
-- macOS regression: 1406 tests in 176 routine suites passed with packaged
-  runtime resources. Optional macOS desktop interaction tests were not run.
-- Native mobile core: 7 XCTest tests passed. Runtime: 55 Rust tests and
-  31 Python tests (2 external Linux-systemd/SSH tests skipped); previous
-  packaged runtime compatibility passed.
-- arm64 iPhoneOS app compiled. macOS arm64 and Linux x86_64/aarch64 runtime
-  artifacts built and passed bundle verification. Linux artifacts were not
-  executed on a Linux host.
-- Physical-device installation was not performed: no existing provisioning
-  profile matched the new mobile bundle ID and connected device.
-
-The app icon is reused unchanged from the fork's macOS OMG icon.
+Physical iPhone installation has not been performed: a matching provisioning
+profile is required. The app icon is reused from OMG's macOS icon.

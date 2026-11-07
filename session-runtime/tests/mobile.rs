@@ -13,14 +13,48 @@ use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest, http::Head
 struct Fixture {
     children: Vec<Child>,
     dir: std::path::PathBuf,
+    owned: Vec<(String, String)>,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        let host = self.dir.join("host.sock");
+        let mut confirmed = true;
+        for (id, generation) in &self.owned {
+            let path = self.dir.join("sessions").join(format!("{id}.json"));
+            if let Ok(record) = omg_session_runtime::record::Record::load(&path) {
+                if record.generation == *generation && record.ended.is_none() {
+                    if let Ok(mut socket) = UnixStream::connect(&host) {
+                        let _ = Frame::new(b'K', 9, id.as_bytes()).send(&mut socket);
+                    }
+                }
+            }
+            let deadline = std::time::Instant::now() + Duration::from_secs(7);
+            loop {
+                let ended = omg_session_runtime::record::Record::load(&path).is_ok_and(|r| {
+                    r.generation == *generation && r.ended.is_some() && r.pid.is_none()
+                });
+                if ended {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    confirmed = false;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
         for child in self.children.iter_mut().rev() {
             let _ = child.kill();
             let _ = child.wait();
         }
-        let _ = fs::remove_dir_all(&self.dir);
+        if confirmed {
+            let _ = fs::remove_dir_all(&self.dir);
+        } else {
+            eprintln!(
+                "Unconfirmed test-holder cleanup; retained {}",
+                self.dir.display()
+            );
+        }
     }
 }
 type Ws = tungstenite::WebSocket<TcpStream>;
@@ -73,6 +107,7 @@ fn lan_gateway_authenticates_and_restores_same_session_across_reconnect() {
     let mut fixture = Fixture {
         children: vec![],
         dir,
+        owned: vec![],
     };
     let host = fixture.dir.join("host.sock");
     fixture.children.push(
@@ -231,4 +266,240 @@ fn lan_gateway_authenticates_and_restores_same_session_across_reconnect() {
     Frame::new(b'K', 2, id.as_bytes())
         .send(&mut control)
         .unwrap();
+}
+
+fn json_reply(ws: &mut Ws, kind: &str) -> serde_json::Value {
+    for _ in 0..100 {
+        match ws.read().unwrap() {
+            Message::Text(text) => {
+                let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+                if value["t"] == kind {
+                    return value;
+                }
+            }
+            Message::Ping(_) => ws.flush().unwrap(),
+            _ => {}
+        }
+    }
+    panic!("missing control reply {kind}")
+}
+
+#[test]
+fn full_ui_control_projects_roster_without_taking_input_and_serves_real_files() {
+    let dir = std::path::PathBuf::from("/tmp").join(format!(
+        "omg-mc-{}",
+        &omg_session_runtime::record::nonce().unwrap()[..12]
+    ));
+    fs::create_dir(&dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let project = dir.join("project");
+    fs::create_dir(&project).unwrap();
+    fs::write(project.join("README.md"), "# Fixture\n").unwrap();
+    assert!(Command::new("git")
+        .args(["init", "-q"])
+        .arg(&project)
+        .status()
+        .unwrap()
+        .success());
+    let mut fixture = Fixture {
+        children: vec![],
+        dir,
+        owned: vec![],
+    };
+    let binary = env!("CARGO_BIN_EXE_omgd");
+    fixture.children.push(
+        Command::new(binary)
+            .args(["host-local"])
+            .arg(&fixture.dir)
+            .args(["--", "/bin/sh"])
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let host = fixture.dir.join("host.sock");
+    let mut desktop = (0..300)
+        .find_map(|_| {
+            UnixStream::connect(&host).ok().or_else(|| {
+                std::thread::sleep(Duration::from_millis(10));
+                None
+            })
+        })
+        .unwrap();
+    desktop
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let id = "12345678-1234-4234-a234-123456789abc";
+    let request = serde_json::json!({"id":id,"create":true,"policy":{},"launch":{
+        "argv":["/bin/sh","-i"],"env":{"HOME":fixture.dir,"PATH":"/usr/bin:/bin","SHELL":"/bin/sh"},
+        "cwd":project,"cols":100,"rows":30,"pixel_width":0,"pixel_height":0,
+    }});
+    Frame::new(b'C', 1, &serde_json::to_vec(&request).unwrap())
+        .send(&mut desktop)
+        .unwrap();
+    let mut generation = String::new();
+    let mut pid = 0;
+    loop {
+        let outer = Frame::read(&mut desktop).unwrap();
+        assert_eq!(outer.kind, b'D');
+        let inner = Frame::read(&mut outer.data.as_slice()).unwrap();
+        if inner.kind == b'J' {
+            let info: serde_json::Value = serde_json::from_slice(&inner.data).unwrap();
+            generation = info["generation"].as_str().unwrap().into();
+            pid = info["pid"].as_u64().unwrap();
+        }
+        if inner.kind == b'S' {
+            Frame::new(b'D', 1, &Frame::new(b'A', inner.seq, &[]).encode())
+                .send(&mut desktop)
+                .unwrap();
+            Frame::new(b'D', 1, &Frame::new(b'W', 0, &[]).encode())
+                .send(&mut desktop)
+                .unwrap();
+            break;
+        }
+    }
+    fixture.owned.push((id.into(), generation.clone()));
+    while Frame::read(&mut desktop)
+        .map(|f| Frame::read(&mut f.data.as_slice()).unwrap().kind != b'W')
+        .unwrap()
+    {}
+    let key = fixture.dir.join("pair.token");
+    let mut gateway = Command::new(binary)
+        .args(["mobile", "--listen", "127.0.0.1:0", "--socket"])
+        .arg(&host)
+        .arg("--token-file")
+        .arg(&key)
+        .env("HOME", &fixture.dir)
+        .env("SHELL", "/bin/sh")
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stderr = gateway.stderr.take().unwrap();
+    fixture.children.push(gateway);
+    let (send_address, address) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if let Some(value) = line.strip_prefix("OMG mobile listening on ws://") {
+                let _ = send_address.send(value.trim_end_matches("/catalogue").to_owned());
+            }
+        }
+    });
+    let address = address.recv_timeout(Duration::from_secs(5)).unwrap();
+    let token = fs::read_to_string(&key).unwrap();
+    assert!(connect(&address, "/control", "wrong").is_err());
+    let mut phone = connect(&address, "/control", token.trim()).unwrap();
+    let roster = json_reply(&mut phone, "roster");
+    assert_eq!(roster["wire"], 2);
+    assert_eq!(roster["agents"].as_array().unwrap().len(), 4);
+    let folder = roster["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["kind"] == "folder")
+        .unwrap();
+    let project_id = folder["id"].as_str().unwrap().to_owned();
+    let route = folder["sessions"][0]["id"].as_str().unwrap().to_owned();
+    assert!(route.ends_with(&format!("/{id}/{generation}")));
+    Frame::new(
+        b'D',
+        1,
+        &Frame::new(
+            b'I',
+            0,
+            b"printf '\\033]7501;state=blocked:app=claude:id=fixture:kind=permission\\007'\r",
+        )
+        .encode(),
+    )
+    .send(&mut desktop)
+    .unwrap();
+    loop {
+        let roster = json_reply(&mut phone, "roster");
+        if roster["projects"].as_array().unwrap().iter().any(|p| {
+            p["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["id"] == route && s["status"] == "needsAttention")
+        }) {
+            break;
+        }
+    }
+    let summary = omg_session_runtime::client::list_local(&host)
+        .unwrap()
+        .into_iter()
+        .find(|s| s.id == id)
+        .unwrap();
+    assert_eq!(summary.pid.map(u64::from), Some(pid));
+    let send = |phone: &mut Ws, value: serde_json::Value| {
+        phone.send(Message::Text(value.to_string().into())).unwrap();
+    };
+    send(
+        &mut phone,
+        serde_json::json!({"t":"listFiles","project":project_id,"path":""}),
+    );
+    let listing = json_reply(&mut phone, "fileList");
+    assert!(listing["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|f| f["name"] == "README.md" && f["changed"] == true));
+    send(
+        &mut phone,
+        serde_json::json!({"t":"readFile","project":project_id,"path":"README.md","dark":false}),
+    );
+    let file = json_reply(&mut phone, "file");
+    assert_eq!(file["size"], 10);
+    send(
+        &mut phone,
+        serde_json::json!({"t":"writeFile","project":project_id,"path":"README.md",
+        "baseMtime":file["mtime"],"data":"IyBFZGl0ZWQK"}),
+    );
+    assert!(json_reply(&mut phone, "written")["mtime"].as_u64().unwrap() > 0);
+    assert_eq!(fs::read(project.join("README.md")).unwrap(), b"# Edited\n");
+    send(
+        &mut phone,
+        serde_json::json!({"t":"readDiff","project":project_id,"path":"README.md","status":"U"}),
+    );
+    assert!(json_reply(&mut phone, "diff")["text"]
+        .as_str()
+        .unwrap()
+        .contains("+# Edited"));
+    // The catalogue read and holder probes did not revoke the desktop writer.
+    Frame::new(b'D', 1, &Frame::new(b'I', 0, b"printf '\\104\\105\\123\\113\\124\\117\\120\\137\\123\\124\\111\\114\\114\\137\\127\\122\\111\\124\\105\\123\\n'\r").encode())
+        .send(&mut desktop).unwrap();
+    let mut output = Vec::new();
+    while !output
+        .windows(b"DESKTOP_STILL_WRITES".len())
+        .any(|b| b == b"DESKTOP_STILL_WRITES")
+    {
+        let outer = Frame::read(&mut desktop).unwrap();
+        if outer.kind == b'D' {
+            let frame = Frame::read(&mut outer.data.as_slice()).unwrap();
+            assert_ne!(frame.kind, b'B');
+            if frame.kind == b'O' {
+                output.extend(frame.data);
+            }
+        }
+    }
+    send(&mut phone, serde_json::json!({"t":"startTerminal"}));
+    let started = json_reply(&mut phone, "started");
+    let parts = started["session"]
+        .as_str()
+        .unwrap()
+        .split('/')
+        .collect::<Vec<_>>();
+    assert_eq!(parts.len(), 3);
+    fixture.owned.push((parts[1].into(), parts[2].into()));
+    assert_ne!(parts[1], id);
+    send(
+        &mut phone,
+        serde_json::json!({"t":"stop","session":format!("{}/{}/{}",parts[0],parts[1],"0".repeat(32))}),
+    );
+    assert!(json_reply(&mut phone, "error")["message"]
+        .as_str()
+        .unwrap()
+        .contains("generation"));
+    assert!(omg_session_runtime::client::list_local(&host)
+        .unwrap()
+        .iter()
+        .any(|s| s.id == parts[1] && s.ended.is_none()));
 }

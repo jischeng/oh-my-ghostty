@@ -1,5 +1,6 @@
 // Adapted from termio-sh/termio 819658751635eb298a467f4d84e793729c5242bc. See LICENSE.termio.
 import Foundation
+import TermioShared
 import Network
 import UIKit
 

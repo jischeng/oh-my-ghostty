@@ -1,12 +1,13 @@
-// Adapted from termio-sh/termio 819658751635eb298a467f4d84e793729c5242bc. See LICENSE.termio.
 import GhosttyVt
 import QuartzCore
+import TermioShared
+import TermioStream
 import UIKit
 
 /// The phone's view of a session on the `vt_stream` plane: the session's own
 /// terminal (`TermiodSession.streamTerminal`) drawn by the shared renderer, in
 /// place of the embedded surface, with input sent as events termiod encodes.
-final class StreamTerminalView: UIView, UITextInput, UIGestureRecognizerDelegate {
+final class StreamTerminalView: UIView, UITextInput {
     /// The terminal to draw, read every frame: an attach replaces it.
     var terminal: () -> TermiodStreamTerminal? = { nil }
     /// The grid this screen could hold, each time it changes.
@@ -65,9 +66,7 @@ final class StreamTerminalView: UIView, UITextInput, UIGestureRecognizerDelegate
             Log.device.error("stream renderer unavailable: \(String(describing: error), privacy: .public)")
         }
         addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped)))
-        let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
-        pan.delegate = self
-        addGestureRecognizer(pan)
+        addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(panned(_:))))
         addGestureRecognizer(UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:))))
         addGestureRecognizer(UILongPressGestureRecognizer(target: self, action: #selector(longPressed(_:))))
     }
@@ -79,12 +78,6 @@ final class StreamTerminalView: UIView, UITextInput, UIGestureRecognizerDelegate
 
     /// Metal or the shaders could not be set up, so this view can draw nothing.
     var hasRenderer: Bool { renderer != nil }
-    override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-        guard let pan = gestureRecognizer as? UIPanGestureRecognizer else { return true }
-        let velocity = pan.velocity(in: self)
-        // Let the native parent scroll view pan a wider shared desktop grid.
-        return abs(velocity.y) >= abs(velocity.x)
-    }
     var cellSize: CGSize? { renderer?.cellSize }
     var appearance: TermiodStreamRenderer.Appearance? { renderer?.appearance }
 

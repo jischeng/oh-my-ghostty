@@ -5,4 +5,6 @@ See LICENSE.herdr. The sources have been adapted to the OMG runtime protocol.
 The mobile WebSocket authentication and Unix splice are adapted from
 termio-sh/termio, commit 819658751635eb298a467f4d84e793729c5242bc,
 termiod/src/wss.rs, Copyright (c) 2026 Jiwei Yuan, licensed under MIT.
-See LICENSE.termio. Catalogue discovery and the session protocol remain OMG-owned.
+See LICENSE.termio. The mobile control adapter follows its companion wire-v2
+models and adapts file confinement/git-read conventions from termiod/src.
+Catalogue discovery, holder presentation and the session protocol remain OMG-owned.

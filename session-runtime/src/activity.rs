@@ -107,6 +107,9 @@ fn valid(signal: &Signal) -> bool {
         && signal.metadata.chars().all(|c| !c.is_control())
 }
 impl State {
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
     pub fn replace(&mut self, snapshot: Snapshot) {
         self.records.clear();
         self.pending = None;

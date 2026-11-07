@@ -57,34 +57,24 @@ question coverage. Validate that separately with the installed AGY version.
   `Sources/HappyCore/Chat/ChatContracts.swift`,
   `Sources/HappyCore/ChatDisplay/ChatPermissionButtons.swift` under that package.
 
-## Implemented first slice
+## Superseded first slice and current implementation
 
-The selected terminal displays an agent activity card. It uses Termio's
-unchanged `SessionStatus.swift` for working/completed/attention indicators,
-the existing OMG Mac agent icons, and an adapter for omgd's existing `G`
-snapshot. There is no new runtime protocol or agent process.
-Live changes come from libghostty's existing OSC 3008/7501 context callback
-while applying ordered output. The `G` snapshot restores retained state on
-attach; relying on it alone would show the correct state after reconnect but
-miss normal live transitions. No second OSC parser or daemon modification is
-needed.
+The initial custom terminal activity card was superseded on 2026-11-07 following
+the user's correction: copy the complete Termio iOS application, including UI,
+and adapt its backend. That custom card and phone-side activity reducer have
+been removed. The current source reuses projects, agent session rows, Needs You,
+Chats/Terminals, drawer, Files/Diff/editor and Settings from the pinned donor.
 
-The adapter follows the existing Mac `AgentStatusPlugin` and
-`AgentProgramStatus` mappings:
+`omgd mobile /control` serves the original wire-v2 roster and actions. A bounded,
+capability-gated holder activity mirror supplies live status without attaching a
+VT viewer for every list row. OMGSession adapts the original terminal screen to
+the existing generation-bound byte transport and writer contract. This full port
+**does change session-runtime** for the control API and lightweight presentation
+capability; existing processes are not upgraded. Details and acceptance scope
+are maintained in [ios/README.md](../../ios/README.md).
 
-- Codex, Claude Code, Pi and Antigravity identities, with a text fallback for
-  another reported agent.
-- Hook/OSC 3008 states and native OSC 7501 states; done remains different from
-  blocked, and permission/question attention remains distinct.
-- Bounded message/progress presentation, committed snapshot replacement,
-  output-watermark validation and clearing on detach/disconnect/exit.
-- No invented state when an older runtime sends no activity snapshot: only
-  fresh live reports can populate the card. Never infer idle/done from silence.
-
-This does not install new hooks or inspect processes on the phone. Existing
-Mac-side agent integration remains responsible for reporting real state.
-No credentials, provider login files or global agent settings are copied to
-the VM or changed by this implementation.
+The remaining sections record possible future structured-chat work, not a plan
+to replace the copied UI with a custom application.
 
 ## Product direction
 
@@ -113,11 +103,9 @@ a phone rather than reproducing desktop window chrome.
 
 ## Next slices and dependencies
 
-1. **Live Needs You roster.** Add a bounded, capability-gated, read-only summary
-   of agent state keyed by session UUID/generation. The current catalogue
-   includes session metadata, not a device-wide activity feed. Do not open a
-   full terminal/snapshot stream for every row or label cached state as live.
-   Reuse Termio's roster/grouping UI once the host can supply these summaries.
+1. **Live Needs You roster (implemented by full Termio port).** The host sends
+   bounded UUID/generation-bound summaries from holder mirrors; the original
+   donor UI performs grouping. No full terminal snapshot is opened per row.
 2. **Readable conversation history.** Reuse OMG's existing
    `AgentHistoryStore`/remote access and conversation-ID association. Serve
    bounded/paged normalized messages from the host, then evaluate Happy's
@@ -150,15 +138,13 @@ operation, not transparent attachment to the original PID.
 
 ## Acceptance
 
-Native tests cover the four identities, hook/native states, bounded metadata,
-atomic snapshot replacement, stale revisions and output barriers.
+The full-app suite drives the original project/session/Needs You and drawer UI,
+with explicit synthetic Codex working, Claude permission, Pi done and Antigravity
+working reports. Mac GUI reclaim and phone relaunch retain the actual session
+UUID, generation and PIDs. It also exercises editing/diff and terminal creation /
+closure. See the current test runner and `ios/README.md` for measured results.
+This verifies the presentation/protocol path; real-provider inference and all
+four CLIs' hook coverage require an authenticated test host.
 
-The VM + Simulator UI fixture emits explicit synthetic OSC 7501 reports through
-the guest shell: Codex working, Claude permission, Pi done, and Antigravity
-working. It checks these on the phone, restores Pi's state after relaunch, and
-retains the actual Mac GUI reclaim/same-PID execution receipts.
-This proves the presentation/protocol path, not successful real-provider
-inference or all four CLIs' hooks. Real Codex/Claude/Pi/agy turns remain a
-separate acceptance step on an appropriately authenticated test host.
-
-Mobile checks remain change-selected as described in `docs/TESTING.md`.
+Mobile tests remain change-selected. Reuse the retained `omg-test` VM; the user
+explicitly chose this work as the primary line and rejected a separate clone.

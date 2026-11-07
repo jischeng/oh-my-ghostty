@@ -1,3 +1,4 @@
 .build/
+Vendor/**/.swiftpm/
 OMGMobile.xcodeproj/
 *.xcuserstate

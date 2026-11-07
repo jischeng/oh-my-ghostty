@@ -22,10 +22,14 @@ const MAX_HOLDER_REQUEST: usize = 16 * 1024 * 1024;
 const MAX_CONTROL_FRAME: usize = 8 * 1024;
 
 fn read_control_frame(stream: &mut UnixStream) -> io::Result<Frame> {
+    read_bounded_frame(stream, MAX_CONTROL_FRAME)
+}
+
+fn read_bounded_frame(stream: &mut UnixStream, maximum: usize) -> io::Result<Frame> {
     let mut header = [0u8; 13];
     stream.read_exact(&mut header)?;
     let len = u32::from_be_bytes(header[9..13].try_into().unwrap()) as usize;
-    if len > MAX_CONTROL_FRAME {
+    if len > maximum {
         return Err(io::Error::other("local holder control frame exceeds limit"));
     }
     let mut data = vec![0; len];
@@ -35,6 +39,37 @@ fn read_control_frame(stream: &mut UnixStream) -> io::Result<Frame> {
         seq: u64::from_be_bytes(header[1..9].try_into().unwrap()),
         data,
     })
+}
+
+/// Read-only presentation query. It neither attaches a viewer nor claims input.
+pub fn presentation(
+    session_socket: &Path,
+    record: &Record,
+) -> io::Result<crate::activity::Snapshot> {
+    let capability = record
+        .holder_capability
+        .as_deref()
+        .ok_or_else(|| io::Error::other("holder has no presentation control"))?;
+    let mut socket = UnixStream::connect(control_path(session_socket))?;
+    socket.set_read_timeout(Some(Duration::from_secs(1)))?;
+    socket.set_write_timeout(Some(Duration::from_secs(1)))?;
+    let request = HolderProbe {
+        id: record.id.clone(),
+        generation: record.generation.clone(),
+        capability: capability.into(),
+    };
+    Frame::new(b'G', 0, &serde_json::to_vec(&request)?).send(&mut socket)?;
+    let response = read_bounded_frame(&mut socket, crate::activity::MAX_SNAPSHOT + 512)?;
+    if response.kind != b'G' || response.seq != 0 {
+        return Err(io::Error::other("holder does not offer presentation state"));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&response.data)?;
+    if value["id"].as_str() != Some(record.id.as_str())
+        || value["generation"].as_str() != Some(record.generation.as_str())
+    {
+        return Err(io::Error::other("holder presentation identity changed"));
+    }
+    crate::activity::Snapshot::decode(&serde_json::to_vec(&value["activity"])?)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -220,12 +255,16 @@ pub fn run_from_stdin() -> io::Result<()> {
     let capability = request.record.holder_capability.clone().unwrap();
     let initial_cwd = request.launch.cwd.as_deref().map(PathBuf::from);
     let argv = request.launch.argv.clone();
+    let presentation = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::activity::State::default().snapshot(),
+    ));
     let managed = ManagedSession {
         path: record_path.clone(),
         record: request.record,
         containment_root: None,
         initial_cwd,
         local_launch: Some(request.launch),
+        presentation: Some(presentation.clone()),
     };
     let actor = std::thread::Builder::new()
         .name(format!("holder-session-{id}"))
@@ -256,7 +295,9 @@ pub fn run_from_stdin() -> io::Result<()> {
                 let _ = socket.set_read_timeout(Some(Duration::from_secs(1)));
                 let _ = socket.set_write_timeout(Some(Duration::from_secs(1)));
                 if let Ok(frame) = read_control_frame(&mut socket) {
-                    if frame.kind == b'V' && frame.seq == 0 && frame.data.len() <= MAX_CONTROL_FRAME
+                    if matches!(frame.kind, b'V' | b'G')
+                        && frame.seq == 0
+                        && frame.data.len() <= MAX_CONTROL_FRAME
                     {
                         if let Ok(probe) = serde_json::from_slice::<HolderProbe>(&frame.data) {
                             if probe.id == id
@@ -270,6 +311,21 @@ pub fn run_from_stdin() -> io::Result<()> {
                                             == Some(capability.as_str())
                                         && current.ended.is_none()
                                     {
+                                        if frame.kind == b'G' {
+                                            let activity =
+                                                presentation.lock().map(|value| value.clone());
+                                            if let Ok(activity) = activity {
+                                                let data = serde_json::to_vec(
+                                                    &serde_json::json!({
+                                                        "id": current.id, "generation": current.generation,
+                                                        "activity": activity,
+                                                    }),
+                                                )?;
+                                                let _ =
+                                                    Frame::new(b'G', 0, &data).send(&mut socket);
+                                            }
+                                            continue;
+                                        }
                                         let status = HolderStatus {
                                             id: current.id,
                                             generation: current.generation,

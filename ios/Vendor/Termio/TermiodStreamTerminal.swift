@@ -76,6 +76,8 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
         case notification(title: String, body: String)
         /// Text a program copied with OSC 52 to the standard clipboard.
         case clipboard(String)
+        /// OMG's parsed OSC 3008/7501 event; no second escape parser is needed.
+        case context(ended: Bool, id: String, metadata: String)
     }
     /// When the program began synchronized output (mode 2026), set by the
     /// render-hold callback under `lock`. Nil while nothing is held.
@@ -194,11 +196,16 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
         let clipboard: GhosttyTerminalClipboardWriteFn = { _, _, _ in
             GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED
         }
+        let context: GhosttyTerminalContextSignalFn = { _, userdata, ended, id, metadata in
+            owner(userdata)?.onSignal(.context(ended: ended,
+                id: TermiodStreamTerminal.text(id), metadata: TermiodStreamTerminal.text(metadata)))
+        }
         try Self.check(ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, unsafeBitCast(title, to: UnsafeRawPointer.self)), "ghostty_terminal_set(title)")
         try Self.check(ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_PWD_CHANGED, unsafeBitCast(directory, to: UnsafeRawPointer.self)), "ghostty_terminal_set(pwd)")
         try Self.check(ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_BELL, unsafeBitCast(bell, to: UnsafeRawPointer.self)), "ghostty_terminal_set(bell)")
         try Self.check(ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_DESKTOP_NOTIFICATION, unsafeBitCast(notification, to: UnsafeRawPointer.self)), "ghostty_terminal_set(notification)")
         try Self.check(ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, unsafeBitCast(clipboard, to: UnsafeRawPointer.self)), "ghostty_terminal_set(clipboard write)")
+        try Self.check(ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_CONTEXT_SIGNAL, unsafeBitCast(context, to: UnsafeRawPointer.self)), "ghostty_terminal_set(context)")
     }
 
     private static func text(_ string: GhosttyString) -> String {

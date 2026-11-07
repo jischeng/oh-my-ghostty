@@ -1,4 +1,5 @@
 import UIKit
+import SwiftUI
 
 @main
 final class AppDelegate: UIResponder, UIApplicationDelegate {
@@ -189,6 +190,9 @@ final class TerminalController: UIViewController {
     private let connection: RuntimeConnection
     private let scroll = UIScrollView()
     private let status = UILabel()
+    private let header = UIStackView()
+    private let agentHost = UIHostingController(rootView: AnyView(EmptyView()))
+    private var renderedAgentActivity: MobileAgentActivity?
     private let terminal: StreamTerminalView
     private var viewport: TerminalGrid?
     private var wasWriter = false
@@ -219,7 +223,14 @@ final class TerminalController: UIViewController {
         status.numberOfLines = 2
         status.text = "正在恢复终端…"
         status.accessibilityIdentifier = "terminal.status"
-        status.translatesAutoresizingMaskIntoConstraints = false
+        addChild(agentHost)
+        agentHost.view.backgroundColor = .clear
+        agentHost.view.isHidden = true
+        agentHost.sizingOptions = .intrinsicContentSize
+        header.axis = .vertical
+        header.addArrangedSubview(agentHost.view)
+        header.addArrangedSubview(status)
+        header.translatesAutoresizingMaskIntoConstraints = false
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.accessibilityIdentifier = "terminal.viewport"
         scroll.bounces = false
@@ -227,14 +238,15 @@ final class TerminalController: UIViewController {
         // Termio's terminal owns vertical scrollback; this container pans the
         // shared desktop grid horizontally without changing the PTY.
         scroll.addSubview(terminal)
-        view.addSubview(status)
+        view.addSubview(header)
+        agentHost.didMove(toParent: self)
         view.addSubview(scroll)
         NSLayoutConstraint.activate([
-            status.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-            status.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
-            status.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
+            header.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            header.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            header.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             status.heightAnchor.constraint(equalToConstant: 40),
-            scroll.topAnchor.constraint(equalTo: status.bottomAnchor),
+            scroll.topAnchor.constraint(equalTo: header.bottomAnchor),
             scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             scroll.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
@@ -303,6 +315,17 @@ final class TerminalController: UIViewController {
         terminal.becomeFirstResponder()
     }
     private func changed() {
+        if renderedAgentActivity != connection.agentState.activity {
+            renderedAgentActivity = connection.agentState.activity
+            if let activity = renderedAgentActivity {
+                agentHost.rootView = AnyView(AgentActivityView(activity: activity))
+                agentHost.view.isHidden = false
+            } else {
+                agentHost.view.isHidden = true
+                agentHost.rootView = AnyView(EmptyView())
+            }
+            agentHost.view.invalidateIntrinsicContentSize()
+        }
         navigationItem.rightBarButtonItem?.title = connection.isWriter ? "已接管" : "接管"
         if connection.isWriter && !wasWriter, let viewport { connection.resize(viewport) }
         wasWriter = connection.isWriter

@@ -1,0 +1,164 @@
+# OMG iOS agent experience
+
+Scope: Codex, Claude Code, Pi and Antigravity (`agy`). Keep the existing omgd
+session, generation and process as the identity when moving between Mac and
+phone. This document separates implemented status presentation from proposed
+chat/control features.
+
+## Source inspection
+
+Inspected on 2026-11-07, using pinned GitHub source trees:
+
+| Project | Revision | License inspected | Useful pieces |
+| --- | --- | --- | --- |
+| [Termio](https://github.com/termio-sh/termio) | `819658751635eb298a467f4d84e793729c5242bc` | MIT | UIKit navigation, SwiftUI session rows/indicators, device roster and Needs You grouping; matches our existing terminal components |
+| [Orca](https://github.com/stablyai/orca) | `de4cacd3a69669387cc7573e01f66e026ac358d9` | MIT | React Native/Expo mobile chat, structured permission identity/revision, Pi RPC and Antigravity ACP presentation |
+| [Paseo](https://github.com/getpaseo/paseo) | `751dc82e6c4d113b357a80593089b935113aa65c` | Apache-2.0, with third-party exceptions | Provider capabilities, shared timeline, Pi CLI RPC adapter and Antigravity provider plugin |
+| [Happy](https://github.com/slopus/happy) | `3c8877cae9444649d35e9110c503ba31ff9d5208` | MIT | Native Swift/UIKit chat, composer, history paging and permission button models; candidate for a later native chat port |
+
+Termio already supports agents on iPhone. We previously copied the terminal
+surface, renderer, key handling and transport, not its roster/status screens.
+Its README's optional TUI-to-GUI mobile rendering is still listed as a roadmap
+item; existing agent support should not be mistaken for a complete structured
+chat interface.
+
+Orca/Paseo UI components are TypeScript/React Native, so whole-screen copies
+would introduce a second UI stack and their backend contracts. Happy now has
+a native client, but its README requires iOS 26/Swift 6.2 and its lists depend
+on UltraView. OMG currently targets iOS 17. Assess individual components and
+their dependencies before importing; do not silently raise OMG's deployment
+target or transplant an entire application.
+
+Only Termio code is newly vendored in this step. Orca, Paseo and Happy remain
+source/design references; their code has not been copied into OMG.
+
+One concrete AGY difference matters before transplanting a driver: Orca has an
+ACP dialect that preserves offered question/permission options, while Paseo's
+inspected Antigravity driver launches `stream-json` and includes
+`--dangerously-skip-permissions` in its default arguments. Reuse appropriate
+framing/presentation code, not another application's launch/approval defaults.
+OMG's existing Antigravity hook manifest reports working/done through
+PreInvocation/PostToolUse/Stop; it does not establish complete permission
+question coverage. Validate that separately with the installed AGY version.
+
+### Concrete source entry points
+
+- Termio: `Shared/Sources/TermioShared/SessionStatus.swift`,
+  `ios/Sources/SessionListUI.swift`, `ios/Sources/RosterStore.swift`,
+  `ios/Sources/ProjectListViewController.swift`.
+- Orca: `mobile/src/session/native-chat/input/mobile-native-chat-permission.ts`,
+  `mobile-native-chat-permission-send.ts` in the same directory,
+  `src/main/acp/acp-dialects/antigravity-dialect.ts`,
+  `src/main/pi/rpc-launch.ts`.
+- Paseo: `docs/providers.md`,
+  `packages/server/src/server/agent/providers/pi/cli-runtime.ts`,
+  `plugins/antigravity-provider/server/internal/process.ts`.
+- Happy: `packages/happy-ios/README.md`,
+  `Sources/HappyCore/Chat/ChatContracts.swift`,
+  `Sources/HappyCore/ChatDisplay/ChatPermissionButtons.swift` under that package.
+
+## Implemented first slice
+
+The selected terminal displays an agent activity card. It uses Termio's
+unchanged `SessionStatus.swift` for working/completed/attention indicators,
+the existing OMG Mac agent icons, and an adapter for omgd's existing `G`
+snapshot. There is no new runtime protocol or agent process.
+Live changes come from libghostty's existing OSC 3008/7501 context callback
+while applying ordered output. The `G` snapshot restores retained state on
+attach; relying on it alone would show the correct state after reconnect but
+miss normal live transitions. No second OSC parser or daemon modification is
+needed.
+
+The adapter follows the existing Mac `AgentStatusPlugin` and
+`AgentProgramStatus` mappings:
+
+- Codex, Claude Code, Pi and Antigravity identities, with a text fallback for
+  another reported agent.
+- Hook/OSC 3008 states and native OSC 7501 states; done remains different from
+  blocked, and permission/question attention remains distinct.
+- Bounded message/progress presentation, committed snapshot replacement,
+  output-watermark validation and clearing on detach/disconnect/exit.
+- No invented state when an older runtime sends no activity snapshot: only
+  fresh live reports can populate the card. Never infer idle/done from silence.
+
+This does not install new hooks or inspect processes on the phone. Existing
+Mac-side agent integration remains responsible for reporting real state.
+No credentials, provider login files or global agent settings are copied to
+the VM or changed by this implementation.
+
+## Product direction
+
+The phone's first question is "what needs my attention?". Make that the entry
+point, followed by the existing sessions grouped by project/device. Each row
+should expose agent, state, project and a short preview without requiring a
+terminal visit.
+
+Within a session, retain one identity and three views:
+
+```text
+Needs You / Sessions
+    |
+    +-- same session UUID + generation
+          |
+          +-- Conversation: readable messages, tool cards, multiline composer
+          +-- Terminal: existing full TUI, same writer transfer
+          +-- Changes: files/diff preview relevant to this session
+```
+
+Connection state and agent state are separate. "Disconnected" must not become
+"agent finished". Opening a view observes; entering an interactive operation
+uses the runtime's existing writer contract. A completed turn is calm; a
+permission/question is actionable. Touch targets and text input should fit
+a phone rather than reproducing desktop window chrome.
+
+## Next slices and dependencies
+
+1. **Live Needs You roster.** Add a bounded, capability-gated, read-only summary
+   of agent state keyed by session UUID/generation. The current catalogue
+   includes session metadata, not a device-wide activity feed. Do not open a
+   full terminal/snapshot stream for every row or label cached state as live.
+   Reuse Termio's roster/grouping UI once the host can supply these summaries.
+2. **Readable conversation history.** Reuse OMG's existing
+   `AgentHistoryStore`/remote access and conversation-ID association. Serve
+   bounded/paged normalized messages from the host, then evaluate Happy's
+   native presentation components. A transcript view can initially be
+   read-only alongside the existing terminal. Avoid a second set of four log
+   parsers on the phone.
+3. **Structured input/questions/permissions.** Use explicit provider capabilities
+   and the exact pending request ID/revision/options. Orca's permission identity
+   and Paseo's provider contracts are useful references; Happy separates
+   button presentation from replies. A permission response must remain bound
+   to the current agent session/request and acknowledged by its host. Never
+   infer an approval command by searching terminal text or blindly typing `y`.
+4. **Background notifications and attachments.** Build on confirmed host state
+   and durable request identity after the foreground workflow works. These
+   are separate from local terminal reconnection and need their own transport,
+   privacy and device acceptance work.
+
+### The existing-TUI constraint
+
+Paseo's Pi runtime launches an RPC process; Orca also has a Pi RPC launch path
+and an Antigravity ACP dialect. Such adapters do not establish that an
+arbitrary, already-running interactive CLI can switch to structured mode in
+place. The same caution applies to importing a conversation into another
+provider-owned runtime.
+
+For an existing omgd TUI, keep terminal interaction and expose capabilities
+honestly. Enable a structured control only when a validated bridge can control
+that same live agent. Starting/resuming a separate provider process is a new
+operation, not transparent attachment to the original PID.
+
+## Acceptance
+
+Native tests cover the four identities, hook/native states, bounded metadata,
+atomic snapshot replacement, stale revisions and output barriers.
+
+The VM + Simulator UI fixture emits explicit synthetic OSC 7501 reports through
+the guest shell: Codex working, Claude permission, Pi done, and Antigravity
+working. It checks these on the phone, restores Pi's state after relaunch, and
+retains the actual Mac GUI reclaim/same-PID execution receipts.
+This proves the presentation/protocol path, not successful real-provider
+inference or all four CLIs' hooks. Real Codex/Claude/Pi/agy turns remain a
+separate acceptance step on an appropriately authenticated test host.
+
+Mobile checks remain change-selected as described in `docs/TESTING.md`.

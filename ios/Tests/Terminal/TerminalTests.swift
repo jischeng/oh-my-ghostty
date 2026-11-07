@@ -6,7 +6,8 @@ final class TerminalTests: XCTestCase {
     private func screen(_ text: String) throws -> TermiodStreamTerminal {
         try screen(data: Data(text.utf8))
     }
-    private func screen(data: Data) throws -> TermiodStreamTerminal {
+    private func screen(data: Data,
+                        onSignal: @escaping (TermiodStreamTerminal.Signal) -> Void = { _ in }) throws -> TermiodStreamTerminal {
         var terminal: GhosttyTerminal?
         XCTAssertEqual(ghostty_terminal_new(nil, &terminal, 80, 24), GHOSTTY_SUCCESS)
         defer { ghostty_terminal_free(terminal) }
@@ -19,7 +20,7 @@ final class TerminalTests: XCTestCase {
         XCTAssertEqual(ghostty_snapshot_encode_alloc(terminal, nil, &bytes, &count), GHOSTTY_SUCCESS)
         guard let bytes else { throw NSError(domain: "snapshot", code: 1) }
         defer { ghostty_free(nil, bytes, count) }
-        return try TermiodStreamTerminal(nativeSnapshot: Data(bytes: bytes, count: count))
+        return try TermiodStreamTerminal(nativeSnapshot: Data(bytes: bytes, count: count), onSignal: onSignal)
     }
 
     func testNativeSnapshotKeepsUnicodeAlternateScreenAndContinuation() throws {
@@ -48,5 +49,21 @@ final class TerminalTests: XCTestCase {
         let text = try title.activeText()
         XCTAssertTrue(text.contains("VISIBLE"))
         XCTAssertFalse(text.contains("unfinished-title"))
+    }
+
+    func testNativeParserPublishesAgentContextsIncludingSnapshotContinuation() throws {
+        var signals: [TermiodStreamTerminal.Signal] = []
+        let prefix = "\u{1b}]3008;start=omg-agent-pi-42;type=app;omg_agent=pi;omg_state=wor"
+        let terminal = try screen(data: Data(prefix.utf8), onSignal: { signals.append($0) })
+        XCTAssertTrue(signals.isEmpty)
+        terminal.write(Data("king\u{7}".utf8))
+        XCTAssertEqual(signals, [.context(ended: false, id: "omg-agent-pi-42",
+            metadata: "type=app;omg_agent=pi;omg_state=working")])
+        terminal.write(Data("\u{1b}]7501;state=blocked:app=claude:id=permission\u{7}".utf8))
+        XCTAssertEqual(signals.last, .context(ended: false, id: "omg-program-status",
+            metadata: "state=blocked:app=claude:id=permission"))
+        terminal.write(Data("\u{1b}]3008;end=omg-agent-pi-42\u{7}".utf8))
+        XCTAssertEqual(signals.last, .context(ended: true, id: "omg-agent-pi-42", metadata: ""))
+        XCTAssertFalse(try terminal.activeText().contains("omg_state"))
     }
 }

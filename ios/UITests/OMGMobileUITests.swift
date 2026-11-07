@@ -36,6 +36,7 @@ final class OMGMobileUITests: XCTestCase {
         let viewing = NSPredicate(format: "label CONTAINS %@", "正在查看")
         expectation(for: viewing, evaluatedWith: status)
         waitForExpectations(timeout: 10)
+        if usingVM { assertAgent(app, name: "Codex", state: "正在处理") }
         app.buttons["接管"].tap()
         expectation(for: NSPredicate(format: "label CONTAINS %@", "正在操作"), evaluatedWith: status)
         waitForExpectations(timeout: 10)
@@ -48,9 +49,18 @@ final class OMGMobileUITests: XCTestCase {
         XCTAssertTrue(app.buttons["tab"].exists)
         // The command contains octal escapes; only its actual execution emits
         // the marker the Mac fixture waits for, so echo cannot fake success.
-        app.typeText("printf '\\115\\117\\102\\111\\114\\105\\137\\125\\111\\137\\105\\130\\105\\103\\125\\124\\105\\104 pid=%s\\n' \"$$\"\n")
+        let mobileMarker = "\\115\\117\\102\\111\\114\\105\\137\\125\\111\\137\\105\\130\\105\\103\\125\\124\\105\\104"
+        let claudeStatus = usingVM
+            ? "\\033]7501;state=blocked:app=claude:id=mobile-agent-fixture:kind=permission\\007" : ""
+        app.typeText("printf '\(mobileMarker) pid=%s\\n\(claudeStatus)' \"$$\"\n")
+        if usingVM {
+            assertAgent(app, name: "Claude Code", state: "等待授权")
+            // Notify the guest only after the phone rendered the waiting state.
+            app.typeText("printf '\\115\\117\\102\\111\\114\\105\\137\\122\\105\\101\\104\\131\\137\\106\\117\\122\\137\\115\\101\\103\\n'\n")
+        }
         expectation(for: NSPredicate(format: "label CONTAINS %@", "输入权已交给"), evaluatedWith: status)
         waitForExpectations(timeout: 15)
+        if usingVM { assertAgent(app, name: "Pi", state: "已完成") }
         let viewport = app.scrollViews["terminal.viewport"]
         XCTAssertGreaterThan(brightSamples(viewport.screenshot().image), 16,
             "The shared terminal must remain visible after keyboard changes and writer transfer.")
@@ -67,16 +77,27 @@ final class OMGMobileUITests: XCTestCase {
             reconnected.tap()
             expectation(for: viewing, evaluatedWith: app.staticTexts["terminal.status"])
             waitForExpectations(timeout: 10)
+            assertAgent(app, name: "Pi", state: "已完成")
             app.buttons["接管"].tap()
             expectation(for: NSPredicate(format: "label CONTAINS %@", "正在操作"),
                         evaluatedWith: app.staticTexts["terminal.status"])
             waitForExpectations(timeout: 10)
-            app.typeText("printf '\\115\\117\\102\\111\\114\\105\\137\\122\\105\\103\\117\\116\\116\\105\\103\\124\\105\\104 pid=%s\\n' \"$$\"\n")
+            let reconnectMarker = "\\115\\117\\102\\111\\114\\105\\137\\122\\105\\103\\117\\116\\116\\105\\103\\124\\105\\104"
+            let agyStatus = "\\033]7501;state=working:app=antigravity:id=mobile-agent-fixture\\007"
+            app.typeText("printf '\(reconnectMarker) pid=%s\\n\(agyStatus)' \"$$\"\n")
+            assertAgent(app, name: "Antigravity", state: "正在处理")
             let reconnectedImage = XCTAttachment(screenshot: app.screenshot())
             reconnectedImage.name = "Reattached to the same VM session"
             reconnectedImage.lifetime = .keepAlways
             add(reconnectedImage)
         }
+    }
+
+    private func assertAgent(_ app: XCUIApplication, name: String, state: String) {
+        let activity = app.descendants(matching: .any).matching(identifier: "agent.activity").firstMatch
+        expectation(for: NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@", name, state),
+                    evaluatedWith: activity)
+        waitForExpectations(timeout: 10)
     }
 
     private func brightSamples(_ image: UIImage) -> Int {

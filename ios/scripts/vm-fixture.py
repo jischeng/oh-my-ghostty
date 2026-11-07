@@ -66,7 +66,10 @@ def main():
     with (directory / "gateway.log").open("wb") as log:
         try:
             pid_file = directory / "desktop.pid"
-            startup_command = f'printf "%s" "$$" > {pid_file}; printf "OMG VM desktop ready\\n"'
+            startup_command = (
+                f'printf "%s" "$$" > {pid_file}; printf "OMG VM desktop ready\\n"; '
+                "printf '\\033]7501;state=working:app=codex:id=mobile-agent-fixture\\007'"
+            )
             gui_type(startup_command, new_window=True)
             last_probe = time.monotonic()
 
@@ -129,6 +132,7 @@ def main():
             output = bytearray()
             ready = False
             mobile = False
+            mac_started = False
             mac = False
             reported = False
             last_ping = 0
@@ -179,9 +183,12 @@ def main():
                     output[:] = output[-262144:]
                     if f"MOBILE_UI_EXECUTED pid={pid}".encode() in output and not mobile:
                         mobile = True
+                    if mobile and b"MOBILE_READY_FOR_MAC" in output and not mac_started:
+                        mac_started = True
                         # Keystrokes go through the actual Mac GUI/SessionBackend.
                         gui_type("printf '\\115\\101\\103\\137\\122\\105\\103\\114"
-                                 "\\101\\111\\115\\105\\104 pid=%s\\n' \"$$\"")
+                                 "\\101\\111\\115\\105\\104 pid=%s\\n"
+                                 "\\033]7501;state=done:app=pi:id=mobile-agent-fixture\\007' \"$$\"")
                     if f"MAC_RECLAIMED pid={pid}".encode() in output:
                         mac = True
                     if mac and f"MOBILE_RECONNECTED pid={pid}".encode() in output and not reported:

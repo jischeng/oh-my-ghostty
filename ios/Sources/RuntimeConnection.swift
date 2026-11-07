@@ -74,6 +74,7 @@ final class RuntimeConnection {
     private var sessionEnded = false
     private(set) var terminal: TermiodStreamTerminal?
     private(set) var isWriter = false
+    private(set) var agentState = RuntimeAgentState()
     var onSessions: (([MobileSession]) -> Void)?
     var onChange: (() -> Void)?
     var onStatus: ((String) -> Void)?
@@ -120,6 +121,7 @@ final class RuntimeConnection {
         self.session = session
         sessionEnded = false
         snapshotApplied = false
+        agentState = RuntimeAgentState()
         isWriter = false
         sentViewport = nil
         requestedViewport = nil
@@ -135,6 +137,7 @@ final class RuntimeConnection {
         if let previous = attachment.detach() { send(RuntimeFrame(81, previous)) }
         session = nil
         snapshotApplied = false
+        agentState = RuntimeAgentState()
         isWriter = false
         requestedViewport = nil
         sentViewport = nil
@@ -181,6 +184,7 @@ final class RuntimeConnection {
         watermark = RuntimeWatermark()
         attachment = RuntimeAttachment()
         snapshotApplied = false
+        agentState = RuntimeAgentState()
         isWriter = false
         sentViewport = nil
         requestedViewport = nil
@@ -209,10 +213,16 @@ final class RuntimeConnection {
                     }
                     try receiveInner(frames[0])
                 case 69 where frame.sequence == 0 || attachment.accepts(frame):
-                    if frame.sequence != 0 { snapshotApplied = false; isWriter = false; onChange?() }
+                    if frame.sequence != 0 {
+                        snapshotApplied = false
+                        agentState = RuntimeAgentState()
+                        isWriter = false
+                        onChange?()
+                    }
                     onStatus?(String(data: frame.data, encoding: .utf8) ?? "无法读取会话错误")
                 case 81 where attachment.accepts(frame):
                     snapshotApplied = false
+                    agentState = RuntimeAgentState()
                     isWriter = false
                     onStatus?("会话连接已结束")
                     onChange?()
@@ -240,8 +250,13 @@ final class RuntimeConnection {
         case 83:
             // Regular local sessions are answered by omgd, so this terminal's
             // automatic reports are deliberately not sent back as user input.
-            terminal = try TermiodStreamTerminal(nativeSnapshot: frame.data)
+            terminal = try TermiodStreamTerminal(nativeSnapshot: frame.data, onSignal: { [weak self] signal in
+                if case .context(let ended, let id, let metadata) = signal {
+                    self?.agentState.consumeContext(ended: ended, id: id, metadata: metadata)
+                }
+            })
             watermark.snapshot(frame.sequence)
+            agentState = RuntimeAgentState()
             snapshotApplied = true
             inner(RuntimeFrame(65, frame.sequence))
             onStatus?("正在查看 · 点击“接管”后操作")
@@ -249,6 +264,9 @@ final class RuntimeConnection {
         case 79:
             try watermark.output(frame)
             terminal?.write(frame.data)
+            onChange?()
+        case 71:
+            try agentState.consume(frame, at: watermark.position)
             onChange?()
         case 82:
             guard frame.data.count == 4 || frame.data.count == 8 else { throw RuntimeFrame.Failure.invalidSequence }
@@ -271,6 +289,7 @@ final class RuntimeConnection {
             isWriter = false
             snapshotApplied = false
             sessionEnded = true
+            agentState = RuntimeAgentState()
             onStatus?("进程已退出：\(String(data: frame.data, encoding: .utf8) ?? "?")")
             onChange?()
         case 69:

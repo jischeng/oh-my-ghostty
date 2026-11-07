@@ -97,6 +97,25 @@ stage; this listener accepts explicit loopback or private IPv4 addresses only.
 - All viewers follow the PTY's one ordered grid. An observer does not resize;
   the phone writer coalesces identical viewport reports.
 
+The selected terminal displays the existing runtime's agent activity snapshot:
+Codex, Claude Code, Pi and Antigravity names, working/done/error state, and
+permission/question attention. Indicators are reused from Termio; icons come
+from the Mac app. State clears on disconnect, detach and exit, and incomplete
+replacement transactions never replace committed state. Older runtimes keep
+the existing terminal behavior.
+Live state uses libghostty's context callback on ordered output; retained `G`
+snapshots restore state on attach. A runtime without snapshots can only show
+new live reports, not reconstruct a previous state on reconnect.
+
+This is status presentation, not a native chat or structured approval API.
+Hooks still run on the host. No new hook installation or runtime upgrade is
+performed by the phone. Research and the staged mobile design are recorded in
+[docs/plans/ios-agent-experience-2026-11-07.md](../docs/plans/ios-agent-experience-2026-11-07.md).
+The status slice passed 17 native tests and the VM + Simulator UI acceptance on
+2026-11-07. The UI test uses explicit synthetic reports for the four agents,
+including live transitions and snapshot restoration; real-provider turns and
+their hook coverage are a separate acceptance step.
+
 Kitty image rendering, voice, uploads, agent notifications, QR/Bonjour discovery
 and public networking are not enabled in this slice. The text/TUI path,
 Chinese IME, terminal keyboard, paste and reconnection are the initial scope.

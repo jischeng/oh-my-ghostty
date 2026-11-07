@@ -445,6 +445,16 @@ generated terminal reports. It enables real input only after a writer grant.
 This is an internal client transport, not a stable plugin API or a
 public-internet deployment.
 
+The mobile terminal consumes the existing inner `G` activity snapshot at its
+current output watermark. It displays committed hook/OSC 7501 presentation facts
+and clears them on detach, transport loss, exit or a replacement snapshot.
+Incomplete `pending` transactions do not replace the displayed state. These
+facts never authorize input, approval or recovery: the phone still needs the
+writer grant, and no structured approval command is inferred from terminal text.
+Older runtimes without activity snapshots continue to render the terminal.
+Live changes are delivered by libghostty's existing context callback while
+applying ordered output, as on the Mac; `G` restores retained state on attach
+and carries host-side pruning. The callback must not re-enter the locked VT.
 
 ## Built-in Git review and commit actions
 

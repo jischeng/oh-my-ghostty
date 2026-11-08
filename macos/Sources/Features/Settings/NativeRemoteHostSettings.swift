@@ -4,15 +4,15 @@ import UniformTypeIdentifiers
 
 extension NativeSettingsController {
     func remoteHosts(_ form: NativeSettingsForm) {
-        form.section(text("Your hosts", "已添加的主机"))
-        if registry.hosts.isEmpty { form.note(text("Add a host to connect and configure its Agents.", "添加主机后，可连接并配置它的 Agent。")) }
+        form.section(text("Your machines", "已添加的机器"))
+        if registry.hosts.isEmpty { form.note(text("Add a machine to connect and configure its Agents.", "添加机器后，可连接并配置它的 Agent。")) }
         for host in registry.hosts {
             let state = registry.isConnected(host.id) ? text("Connected", "已连接") : text("Saved", "已保存")
             form.link(host.name, subtitle: "\(host.endpoint ?? host.connection.displayEndpoint) · \(state)") { [weak self] in
                 self?.showHost(host.id)
             }
         }
-        form.row(text("Add a host", "添加主机"), control: SettingsActionButton(text("Add…", "添加…")) { [weak self] in self?.addHost() })
+        form.row(text("Add a machine", "添加机器"), control: SettingsActionButton(text("Add…", "添加…")) { [weak self] in self?.addHost() })
         form.section(text("SSH configuration", "SSH 配置"))
         form.row("~/.ssh/config", control: SettingsActionButton(text("Edit…", "编辑…")) {
             NSWorkspace.shared.open(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh/config"))
@@ -101,7 +101,7 @@ extension NativeSettingsController {
                      help: self.text("Install the bundled version without ending existing sessions.", "安装随应用提供的版本，保留已有会话。"))
             form.section("Agent")
             let count = host.snapshot.cli.values.filter { $0.path != nil }.count
-            form.link(self.text("Agents on this host", "此主机上的 Agent"),
+            form.link(self.text("Agents on this machine", "此机器上的 Agent"),
                       subtitle: count == 0 ? self.text("Check and configure", "检查与配置") : self.text("\(count) detected", "已发现 \(count) 个")) { [weak self] in
                 self?.showAgents(target: id)
             }
@@ -121,7 +121,7 @@ extension NativeSettingsController {
         guard let window = view.window, window.attachedSheet == nil else { return }
         let sheet = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 540, height: 440),
                             styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        sheet.title = text("Add a host", "添加主机")
+        sheet.title = text("Add a machine", "添加机器")
         sheet.isReleasedWhenClosed = false
         let form = NativeSettingsForm()
         sheet.contentViewController = form

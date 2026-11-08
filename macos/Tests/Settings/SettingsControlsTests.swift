@@ -5,6 +5,12 @@ import Testing
 
 @MainActor
 struct SettingsControlsTests {
+    @Test func mobileAccessInvitationProducesPairingCode() {
+        #expect(MobileAccessController.qrImage(
+            for: "omg://device?url=ws://192.168.1.2:8791&token=" + String(repeating: "a", count: 64)
+        ) != nil)
+    }
+
     @Test func pickerUsesNativeMenuAndPreservesSelectionSemantics() throws {
         var value: String?
         let binding = Binding<String?>(get: { value }, set: { value = $0 })

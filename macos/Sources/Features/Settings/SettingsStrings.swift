@@ -59,7 +59,8 @@ struct SettingsStrings: Equatable, Sendable {
         case .editor: t("Editor", "编辑器")
         case .keyboard: t("Shortcuts", "快捷键")
         case .git: "Git"
-        case .ssh: t("Remote Hosts", "远程主机")
+        case .mobile: t("Mobile Devices", "移动设备")
+        case .ssh: t("Remote Machines", "远程机器")
         case .agents: "Agent"
         case .plugins: t("Plugins", "插件")
         case .advanced: t("Advanced", "高级")
@@ -71,7 +72,8 @@ struct SettingsStrings: Equatable, Sendable {
     var settingsSearch: String { t("Search Settings", "搜索设置") }
     var settingsNoResults: String { t("No matching settings", "没有找到匹配的设置") }
     var gitAISettingsTitle: String { t("AI Commit Messages", "AI 提交信息") }
-    var sshSettingsTitle: String { t("Remote Hosts", "远程主机") }
+    var sshSettingsTitle: String { t("Remote Machines", "远程机器") }
+    var mobileAccessTitle: String { t("Mobile Devices", "移动设备") }
     var inheritCoreSetting: String { t("Follow Ghostty Config", "跟随 Ghostty 配置") }
     var newTerminalRequired: String { t("Applies to new terminals", "新建终端后生效") }
     var coreInheritanceCaption: String {

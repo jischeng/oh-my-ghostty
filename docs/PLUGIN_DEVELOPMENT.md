@@ -429,6 +429,17 @@ messages are transport chunks, not protocol-frame boundaries. Discovery is
 channel/revision scoped, does not start shells, and does not export saved SSH
 credentials. See `ios/README.md`.
 
+Settings → Mobile Devices owns the desktop-facing lifecycle of that gateway.
+While OMG is running, it can start or stop the LAN listener, show the selected
+private address and readiness state, generate the private QR invitation, and
+revoke every pairing by deleting the bearer token. This is intentionally a
+separate settings destination from Remote Machines: the latter manages SSH
+compute targets, while Mobile Devices grants a paired phone access to local
+sessions. The current gateway exposes one full-access profile (session viewing,
+input/takeover, files/Git, and session creation); the page lists those grants
+explicitly and revocation is the security boundary. Granular per-capability
+tokens are not implied by these informational rows.
+
 Session INFO additionally advertises `writer_transfer: true` on new runtimes.
 Ordinary empty `W` claims retain their non-preemptive behavior. An explicit
 `W` payload `takeover/1` (or `inline-takeover/1` for delegated inline replies)
@@ -533,10 +544,12 @@ Contributor checklist:
 
 Settings uses flat task-oriented navigation: **General**, **Appearance**,
 **Views & Tabs**, **Shell & Sessions**, **Input & Controls**, **Editor**,
-**Shortcuts**, **Agent**, **Git**, **Remote Hosts**, **Plugins**, and **Advanced**.
+**Shortcuts**, **Agent**, **Git**, **Mobile Devices**, **Remote Machines**,
+**Plugins**, and **Advanced**.
 There is no expandable Integrations group. Existing
 navigation identifiers remain valid. Git auto-fetch and AI commit-message
-configuration live under Git; registered hosts live under Remote Hosts; Agent hooks, history,
+configuration live under Git; registered machines live under Remote Machines;
+LAN pairing, mobile access permissions and gateway status live under Mobile Devices; Agent hooks, history,
 automatic Quick Input behavior and notifications live under Agent (formerly Agent Integration).
 Quick Input/history controls live under Input & Controls, with their shortcut under
 Shortcuts; startup recovery is under Shell & Sessions. Existing JSON keys are unchanged.
@@ -721,7 +734,7 @@ prevents all closes, and partial close errors stay visible. Release/Dev scopes
 remain separate. The settings exit switches use explicit close-on-quit wording
 while preserving the existing keep-on-quit storage keys through inverse bindings.
 
-**Remote Hosts** displays only registered records. SSH-config candidates appear
+**Remote Machines** displays only registered records. SSH-config candidates appear
 in **Add a host**, and explicit registration is local/offline. Host details expose
 connection actions, Agent configuration, and independent automatic `omgd`/Hook
 installation switches. Newly registered hosts default to runtime installation on
@@ -1181,7 +1194,7 @@ request sequence; failures return a typed `PluginProtocolFailure`.
 
 ### Built-in agent hook bridge (Internal)
 
-Settings → Remote Hosts → Add registers a concrete host from OpenSSH config
+Settings → Remote Machines → Add registers a concrete machine from OpenSSH config
 or a typed address, or opts into registration after successful connections.
 The chooser enumerates user/system config and Include files, deduplicates aliases,
 and uses local `ssh -G` output to display `alias · user@hostname[:port]`. Wildcard
@@ -1208,7 +1221,7 @@ registration or disconnecting before its result returns cannot publish a late
 record. Unregister removes the local record/cache and suppresses automatic
 re-registration until explicitly registered again; it does not remove remote Hooks.
 
-Settings → Agent configures **This Mac**; Remote Hosts → host → Agent configures
+Settings → Agent configures **This Mac**; Remote Machines → machine → Agent configures
 the selected registered host.
 Each Agent separates OMG status-extension actions from CLI version/update controls.
 Installed extensions always expose a reinstall action, even when CLI updates require

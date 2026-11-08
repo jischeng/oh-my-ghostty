@@ -59,6 +59,7 @@ extension NativeSettingsController {
                 guard let self else { return }; GitCommitAISettingsPanel.presentPrompt(settings: self.settings, from: self.view.window)
             })
         case .ssh: remoteHosts(form)
+        case .mobile: mobileAccess(form)
         case .agents: agentOverview(form)
         case .plugins: plugins(form)
         case .advanced:

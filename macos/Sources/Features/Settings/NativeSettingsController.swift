@@ -25,6 +25,7 @@ final class NativeSettingsController: NSViewController, NSTableViewDataSource, N
     let settings: OhMyGhosttySettings
     let registry: SSHHostRegistry
     let agents: AgentIntegrationManager
+    let mobileAccessController: MobileAccessController
     var hostChoices: @Sendable () async -> [SSHRegistrationChoice] = { await SSHConfigurationCatalog.choices(live: []) }
     private(set) var selection: OhMyGhosttySettingsTab
     private let sidebar = NSTableView()
@@ -47,11 +48,13 @@ final class NativeSettingsController: NSViewController, NSTableViewDataSource, N
     func text(_ en: String, _ zh: String) -> String { strings.t(en, zh) }
 
     init(settings: OhMyGhosttySettings, initialSelection: OhMyGhosttySettingsTab,
-         registry: SSHHostRegistry = .shared, agents: AgentIntegrationManager = .shared) {
+         registry: SSHHostRegistry = .shared, agents: AgentIntegrationManager = .shared,
+         mobileAccessController: MobileAccessController = .shared) {
         self.settings = settings
         self.selection = initialSelection
         self.registry = registry
         self.agents = agents
+        self.mobileAccessController = mobileAccessController
         language = settings.language
         super.init(nibName: nil, bundle: nil)
     }

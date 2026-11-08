@@ -12,6 +12,7 @@ enum OhMyGhosttySettingsTab: String, CaseIterable, Identifiable {
     case editor
     case keyboard
     case git
+    case mobile
     case ssh
     case agents
     case plugins
@@ -19,7 +20,7 @@ enum OhMyGhosttySettingsTab: String, CaseIterable, Identifiable {
 
     static let navigationOrder: [Self] = [
         .general, .appearance, .tabs, .terminal, .controls, .editor,
-        .keyboard, .agents, .git, .ssh, .plugins, .advanced
+        .keyboard, .agents, .git, .mobile, .ssh, .plugins, .advanced
     ]
 
     var id: String { rawValue }
@@ -34,6 +35,7 @@ enum OhMyGhosttySettingsTab: String, CaseIterable, Identifiable {
         case .editor: "curlybraces.square"
         case .keyboard: "keyboard"
         case .git: "point.3.connected.trianglepath.dotted"
+        case .mobile: "iphone"
         case .ssh: "network"
         case .agents: "sparkles"
         case .plugins: "puzzlepiece.extension"
@@ -57,9 +59,14 @@ final class OhMyGhosttySettingsWindowController: NSWindowController {
         window.toolbarStyle = .unified
         window.titlebarAppearsTransparent = true
         window.isOpaque = true
-        window.setContentSize(NSSize(width: 900, height: 680))
         window.minSize = NSSize(width: 820, height: 540)
+        window.contentMinSize = NSSize(width: 760, height: 560)
         window.setFrameAutosaveName("OhMyGhosttySettingsWindow")
+        // The autosave restore can carry a frame from before a minimum-size
+        // change. Clamp it after restore so every page keeps usable columns.
+        if window.frame.width < 820 || window.frame.height < 540 {
+            window.setContentSize(NSSize(width: 900, height: 680))
+        }
         super.init(window: window)
 
         applyAppearance(settings)

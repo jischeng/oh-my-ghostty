@@ -207,4 +207,4 @@ passed strict SwiftLint.
 
 Physical launch still requires the phone to be unlocked and the Apple Development
 profile trusted under Settings ▸ General ▸ VPN & Device Management. The app icon
-is a full-bleed OMG adaptation of the existing desktop artwork.
+uses the complete OMG desktop artwork, including its metal bezel, flattened onto black; iOS applies only the outer platform mask.

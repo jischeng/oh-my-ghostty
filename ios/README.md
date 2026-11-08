@@ -98,11 +98,11 @@ running daemons or replaces binaries. App naming alone does not isolate channels
 
 The Agent tab groups live sessions under project folders and reuses the desktop
 agent icon/status language, including a monochrome breathing mark for working
-sessions. Tapping an agent opens a mobile conversation built from the same
-host-side history store as the desktop Inspector. The composer writes through
-the existing PTY writer grant, and Terminal remains one tap away for approvals
-or any TUI-only interaction. When an older host has not linked a live agent to
-its conversation yet, the page says so instead of inventing history.
+sessions. Tapping an agent opens its terminal directly. Opening requests the
+terminal to fit the phone viewport. When the user begins interacting, the phone
+takes the writer and reports its actual grid, so the existing TUI reflows instead
+of keeping the desktop width. The paired Mac can reclaim the writer later; there
+is no second mobile chat implementation or provider-log parser.
 
 The workspace control in the project title comes from the OMG desktop's actual
 workspace catalog. It scopes Projects, Agent, Terminals and Needs You together.
@@ -111,9 +111,9 @@ and a server-side folder picker. Project folders can start both Agents and plain
 terminals. Remote projects launch an SSH PTY on the registered host; their file
 tools are not silently redirected to the paired Mac's local filesystem.
 
-Agent status and conversation history are presentation of existing host reports,
-not a structured approval API. Hooks still run on the host. Phone permissions
-never infer a reply by parsing terminal text. See the
+Agent status is presentation of existing host reports, not a structured approval
+API. Hooks still run on the host. Phone permissions never infer a reply by
+parsing terminal text. See the
 [design record](../docs/plans/ios-agent-experience-2026-11-07.md).
 
 Current limits: markdown reads show source, SSH alias parsing handles basic Host
@@ -121,10 +121,8 @@ blocks rather than full Include resolution, and terminal query answers remain
 host-owned even when the phone changes its local display theme. Kitty image
 rendering, push notifications and public networking are not enabled. Upstream
 voice UI is retained, but microphone/provider/network behavior requires separate
-device acceptance. Conversation history follows what each provider has flushed
-to its local store; Antigravity exposes its stored preview rather than a complete
-protobuf transcript. Provider credentials and real inference turns are not part
-of the synthetic agent-status test.
+device acceptance. Provider credentials and real inference turns are not part of
+the synthetic agent-status test.
 
 ## Change-selected checks
 
@@ -173,10 +171,9 @@ The observer fixture never claims input. Test-only credentials are synthetic.
 No host app or host profile is installed, stopped or reset.
 
 The full-app UI suite covers project/session navigation, live synthetic Codex /
-Claude / Pi / Antigravity status, Needs You, a real host-side Pi transcript in
-the mobile Agent conversation, switching that same session to Terminal, mobile
-input, Mac GUI reclaim, app relaunch/reattach, terminal drawing, drawer
-Files/Diff, README editing, workspace and Add Project entry points,
+Claude / Pi / Antigravity status, Needs You, opening the existing Agent terminal
+directly, mobile input, Mac GUI reclaim, app relaunch/reattach, terminal drawing,
+drawer Files/Diff, README editing, workspace and Add Project entry points,
 acknowledgements, native tabs/settings, and creation/explicit closure of a
 terminal. Guest receipts require the original UUID, generation, PTY-root PID and
 shell PID to remain unchanged. Synthetic status transitions verify presentation;
@@ -189,14 +186,14 @@ shuts the VM down while preserving its disk. `--skip-build` requires matching
 source-built Mac app/runtime and iOS VT libraries.
 
 Validated on 2026-11-08: all three full-app UI tests passed against guest runtime
-`8a671617cfee9443eb54`; the guest receipts confirmed every operation and the
-unchanged original session/PIDs. Agent conversation/transcript, Home/Needs You,
-terminal, drawer, Diff, editor, project/workspace entry points and Settings
-screenshots were exported for inspection. Evidence:
-`/tmp/omg-mobile-vm-evidence-e7b1a75f918b45dc8b1276744481ead8/`.
+`a35043ff269754edab35`; the guest receipts confirmed every operation and the
+unchanged original session/PIDs. Agent terminal, Home/Needs You, drawer, Diff,
+editor, project/workspace entry points and Settings screenshots were exported for
+inspection. Evidence:
+`/tmp/omg-mobile-vm-evidence-7d2d27ee8b5542f2a1f8621195845972/`.
 The VM shut down normally.
 
-Regression checks passed: 70 Rust tests, 10 native Swift tests, 50 test-selector
+Regression checks passed: 69 Rust tests, 10 native Swift tests, 50 test-selector
 tests and documentation checks. Python ran 35 tests with four prerequisites
 initially skipped; the legacy-runtime and bidirectional VT snapshot checks were
 then run successfully against the installed previous Dev artifacts. Only the

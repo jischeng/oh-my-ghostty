@@ -201,22 +201,6 @@ pub(super) fn request(config: &Config, request: &Value) -> io::Result<Value> {
             config.control.invalidate();
             Ok(json!({"t":"projectAdded","id":id}))
         }
-        "transcript" => {
-            let (endpoint, id, generation) = route(config, text(request, "session")?)?;
-            let summary = omg_session_runtime::client::list_local(&endpoint.socket)?
-                .into_iter()
-                .find(|s| s.id == id && s.generation == generation)
-                .ok_or_else(|| io::Error::other("Session ended"))?;
-            let Some(resume) = summary.resume else {
-                return Ok(json!({"t":"transcript","available":false,"messages":[],
-                    "reason":"The host has not linked this live agent to its conversation yet. Continue in Terminal."}));
-            };
-            helper(
-                config,
-                json!({"operation":"transcript","agent":resume.agent,
-                "conversation":resume.conversation_id,"cwd":resume.cwd}),
-            )
-        }
         _ => Err(io::Error::other("Unsupported operation")),
     }
 }

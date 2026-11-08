@@ -65,12 +65,7 @@ def main():
                     snapshot_digest.update(str(path.relative_to(ROOT)).encode())
                     snapshot_digest.update(contents)
     for path in [
-        ROOT/'macos/Sources/Features/Plugins/AgentHistoryStore.swift',
-        ROOT/'macos/Sources/Features/Plugins/AgentHistoryRemoteAccess.swift',
-        ROOT/'macos/Sources/Features/Plugins/AgentDefinition.swift',
-        ROOT/'macos/Sources/Helpers/TransientAttachmentNoise.swift',
         ROOT/'dist/macos/build-mobile-support.py',
-        *sorted((ROOT/'macos/Assets.xcassets').glob('Agent*Manifest.dataset/*.json')),
         ROOT/'session-runtime/Cargo.toml', ROOT/'session-runtime/Cargo.lock',
         ROOT/'session-runtime/build.rs', ROOT/'session-runtime/LICENSE.herdr',
         ROOT/'src/shell-integration/omg/omg.py',
@@ -144,10 +139,6 @@ def main():
                 apple_arch = 'arm64' if name == 'macos-aarch64' else 'x86_64'
                 run([sys.executable, str(ROOT/'dist/macos/build-mobile-support.py'),
                      '--output', str(destination/'omg-mobile-support'), '--arch', apple_arch])
-                for agent in ['codex', 'claude', 'pi', 'antigravity']:
-                    folder = {'codex': 'Codex', 'claude': 'Claude', 'pi': 'Pi', 'antigravity': 'Antigravity'}[agent]
-                    shutil.copy2(ROOT/f'macos/Assets.xcassets/Agent{folder}Manifest.dataset/{agent}.json',
-                                 destination/f'agent-{agent}.json')
                 sign_adhoc([destination/'omg-mobile-support'])
             for notice in ('LICENSE.herdr', 'LICENSE.termio', 'THIRD-PARTY-NOTICES'):
                 shutil.copy2(ROOT/'session-runtime'/notice, destination/notice)

@@ -1,20 +1,5 @@
 import Foundation
 
-enum OMGApplicationEnvironment {
-    static func applicationSupportURL() -> URL {
-        FileManager.default.temporaryDirectory.appendingPathComponent("omg-mobile-support")
-    }
-}
-
-enum SupportedAgent: String, CaseIterable, Codable, Sendable {
-    case codex, claude, pi, antigravity
-    var definition: AgentDefinition {
-        let base = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
-        return try! JSONDecoder().decode(AgentDefinition.self,
-            from: Data(contentsOf: base.appendingPathComponent("agent-\(rawValue).json")))
-    }
-}
-
 enum Ghostty {
     enum Shell {
         static func quote(_ text: String) -> String { "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'" }
@@ -87,23 +72,6 @@ struct MobileSupport {
             let connection = try connection(host, request: request)
             guard let destination = connection["destination"] as? String else { throw CocoaError(.fileReadCorruptFile) }
             return ["t": "sshCommand", "destination": destination, "options": connection["options"] as? [String] ?? []]
-        case "transcript":
-            guard let raw = request["agent"] as? String, let agent = SupportedAgent(rawValue: raw),
-                  let value = request["conversation"] as? String, let id = AgentConversationID(value) else {
-                return ["t": "transcript", "messages": [], "available": false,
-                        "reason": "The host has not associated a conversation with this live session yet. Use Terminal to continue."]
-            }
-            let cache = FileManager.default.temporaryDirectory.appendingPathComponent("omg-mobile-history-cache.json")
-            let sessions = await AgentHistoryStore.load(agents: [agent], maximumSessions: 1000, cacheURL: cache)
-            guard let session = sessions.first(where: { $0.conversationID == id }),
-                  let cwd = request["cwd"] as? String, session.workingDirectory == cwd else {
-                return ["t": "transcript", "messages": [], "available": false,
-                        "reason": "The exact conversation is not available in the host history yet."]
-            }
-            let transcript = await AgentHistoryStore.transcript(for: session)
-            return ["t": "transcript", "available": true, "title": session.title,
-                    "truncated": transcript.wasTruncated,
-                    "messages": transcript.messages.map { ["id": $0.id, "role": $0.role.rawValue, "text": $0.text] }]
         default:
             throw CocoaError(.featureUnsupported)
         }

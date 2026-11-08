@@ -698,10 +698,7 @@ fn mtime(metadata: &fs::Metadata) -> u64 {
 }
 fn request_control(config: &Config, request: &Value) -> io::Result<Value> {
     let kind = text(request, "t")?;
-    if matches!(
-        kind,
-        "workspaces" | "hosts" | "directories" | "addProject" | "transcript"
-    ) {
+    if matches!(kind, "workspaces" | "hosts" | "directories" | "addProject") {
         return experience::request(config, request);
     }
     if kind == "auth" {

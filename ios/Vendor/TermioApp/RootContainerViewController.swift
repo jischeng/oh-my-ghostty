@@ -152,14 +152,6 @@ final class RootContainerViewController: UIViewController {
             let screen: UIViewController
             if let parked = recentTerminals[session.key] {
                 screen = parked
-            } else if let endpoint, endpoint.kind == .omgd, session.agent.id != "terminal" {
-                let agent = OMGAgentViewController(endpoint: endpoint, session: session)
-                agent.onBack = { [weak self] in self?.goHome() }
-                agent.onTerminal = { [weak self] in
-                    self?.goHome(animated: false)
-                    self?.open(TerminalViewController(endpoint: endpoint, session: session), sessionKey: session.key + ":terminal")
-                }
-                screen = agent
             } else if let endpoint {
                 screen = TerminalViewController(endpoint: endpoint, session: session)
             } else {
@@ -255,7 +247,6 @@ final class RootContainerViewController: UIViewController {
         let isReopen = screen.parent === self
         installIfNeeded(screen)
         (screen as? TerminalViewController)?.setRuntimeRendering(true)
-        (screen as? OMGAgentViewController)?.setRuntimeRendering(true)
         if isReopen {
             (screen as? TerminalViewController)?.prepareForReappearance()
         }
@@ -285,7 +276,6 @@ final class RootContainerViewController: UIViewController {
     private func goHome(animated: Bool = true) {
         guard let screen = activeScreen else { return }
         (screen as? TerminalViewController)?.setRuntimeRendering(false)
-        (screen as? OMGAgentViewController)?.setRuntimeRendering(false)
         activeScreen = nil
         store.currentSessionKey = nil
         refreshHomeLists()
@@ -580,7 +570,6 @@ final class RootContainerViewController: UIViewController {
 
         if commit {
             (screen as? TerminalViewController)?.setRuntimeRendering(false)
-        (screen as? OMGAgentViewController)?.setRuntimeRendering(false)
             // Teardown deferred from goHome to here (only once the drag commits).
             if activeScreen === screen { activeScreen = nil }
             store.currentSessionKey = nil

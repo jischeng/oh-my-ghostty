@@ -27,11 +27,6 @@ SHARED_PATHS = (
     "include/ghostty/vt.h", "include/ghostty/vt/**",
     "dist/macos/build-session-runtime.py",
     "dist/macos/build-mobile-support.py",
-    "macos/Sources/Features/Plugins/AgentHistoryStore.swift",
-    "macos/Sources/Features/Plugins/AgentHistoryRemoteAccess.swift",
-    "macos/Sources/Features/Plugins/AgentDefinition.swift",
-    "macos/Sources/Helpers/TransientAttachmentNoise.swift",
-    "macos/Assets.xcassets/Agent*Manifest.dataset/*.json",
     "dist/macos/session-runtime-snapshot-compatibility.json",
     "build.zig", "build.zig.zon",
 )

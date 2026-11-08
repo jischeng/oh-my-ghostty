@@ -63,19 +63,10 @@ final class OMGMobileUITests: XCTestCase {
         add(image)
     }
 
-    /// Agent rows open the mobile conversation first; Terminal remains one tap
-    /// away for approvals and the full TUI.
     private func openSessionTerminal(_ app: XCUIApplication) {
         row(app).tap()
-        XCTAssertTrue(element(app, "agent.conversation").waitForExistence(timeout: 15))
-        if usingVM {
-            XCTAssertTrue(app.staticTexts["Mobile transcript from OMG"].waitForExistence(timeout: 15))
-            XCTAssertTrue(app.staticTexts["Mobile agent reply rendered from the desktop transcript."].exists)
-        }
-        XCTAssertTrue(app.buttons["agent.terminal"].waitForExistence(timeout: 5))
-        capture(app, "Mobile Agent conversation with Terminal fallback")
-        app.buttons["agent.terminal"].tap()
         waitConnected(app)
+        capture(app, "Agent TUI reflowed to the phone viewport")
     }
 
     func testAttachTakeoverTypeAndMacReclaim() {

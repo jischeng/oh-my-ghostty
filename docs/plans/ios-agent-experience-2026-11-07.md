@@ -106,13 +106,12 @@ a phone rather than reproducing desktop window chrome.
 1. **Live Needs You roster (implemented by full Termio port).** The host sends
    bounded UUID/generation-bound summaries from holder mirrors; the original
    donor UI performs grouping. No full terminal snapshot is opened per row.
-2. **Readable conversation history (initial implementation).** The mobile
-   Agent page reuses OMG's `AgentHistoryStore` through the packaged host helper,
-   resolves the live session's exact UUID/generation/resume descriptor, and
-   renders normalized messages in a phone conversation. The composer writes
-   through the same PTY writer grant; Terminal remains available for approvals.
-   Paging/background refresh and richer tool-call cards remain follow-up work,
-   and the phone still carries no provider log parser.
+2. **Terminal reflow (implemented).** Agent rows open the existing terminal
+   rather than a second chat renderer. The phone fits the terminal to its
+   viewport and, once the user interacts, takes the writer and reports its grid
+   so the host reflows the live PTY.
+   A native transcript/chat page is deliberately deferred until it can add
+   something the terminal cannot, without duplicating provider parsers.
 3. **Structured input/questions/permissions.** Use explicit provider capabilities
    and the exact pending request ID/revision/options. Orca's permission identity
    and Paseo's provider contracts are useful references; Happy separates

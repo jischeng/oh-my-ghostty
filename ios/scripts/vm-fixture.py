@@ -12,7 +12,6 @@ import socket
 import struct
 import subprocess
 import time
-import uuid
 
 
 def encode(kind, sequence=0, data=b""):
@@ -69,22 +68,6 @@ def main():
         try:
             project = directory / "project"
             project.mkdir()
-            conversation = str(uuid.uuid4())
-            history = Path.home() / ".pi/agent/sessions/omg-mobile-fixture"
-            history.mkdir(parents=True, exist_ok=True)
-            stamp = time.strftime("%Y-%m-%dT%H-%M-%S")
-            (history / f"{stamp}_{conversation}.jsonl").write_text("\n".join([
-                json.dumps({"type": "session", "version": 3, "id": conversation,
-                            "timestamp": "2026-11-08T00:00:00.000Z", "cwd": str(project)}),
-                json.dumps({"type": "message", "id": "fixture-user", "parentId": None,
-                            "timestamp": "2026-11-08T00:00:01.000Z",
-                            "message": {"role": "user", "timestamp": 1794067201000,
-                                        "content": [{"type": "text", "text": "Mobile transcript from OMG"}]}}),
-                json.dumps({"type": "message", "id": "fixture-agent", "parentId": "fixture-user",
-                            "timestamp": "2026-11-08T00:00:02.000Z",
-                            "message": {"role": "assistant", "timestamp": 1794067202000,
-                                        "content": [{"type": "text", "text": "Mobile agent reply rendered from the desktop transcript."}]}}),
-            ]) + "\n")
             readme = project / "README.md"
             readme.write_text("# OMG Mobile\n\nBaseline.\n")
             subprocess.run(["git", "-C", str(project), "init", "-q"], check=True)
@@ -141,13 +124,6 @@ def main():
                              if entry["pid"] in ancestors and entry["ended"] is None), None)
 
             session = wait_for(inventory, "GUI-created session in runtime catalogue")
-            gui_type(f"{binary} report pi idle {conversation} {project}")
-            session = wait_for(
-                lambda: (candidate := inventory())
-                    and (candidate.get("resume") or {}).get("conversation_id") == conversation
-                    and candidate,
-                "Agent recovery descriptor from the real runtime",
-            )
             current = (binary.parent / "revision").read_text().strip()
             if session["revision"] != current:
                 raise RuntimeError("The GUI session is not using the newly packaged runtime")

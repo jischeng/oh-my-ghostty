@@ -32,8 +32,6 @@ class MobileTestPlanTests(unittest.TestCase):
             "dist/macos/build-session-runtime.py",
             "dist/macos/build-mobile-support.py",
             "session-runtime/mobile-support/Support.swift",
-            "macos/Sources/Features/Plugins/AgentHistoryStore.swift",
-            "macos/Assets.xcassets/AgentPiManifest.dataset/pi.json",
         ]:
             with self.subTest(path=path):
                 result = make_plan([path])

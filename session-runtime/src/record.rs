@@ -16,10 +16,8 @@ pub struct Resume {
 }
 impl Resume {
     pub fn validate(&self) -> io::Result<()> {
-        if !matches!(
-            self.agent.as_str(),
-            "codex" | "claude" | "pi" | "antigravity"
-        ) || self.conversation_id.is_empty()
+        if !matches!(self.agent.as_str(), "codex" | "claude" | "pi")
+            || self.conversation_id.is_empty()
             || self.conversation_id.len() > 128
             || self.conversation_id.starts_with('-')
             || !self
@@ -52,11 +50,6 @@ impl Resume {
                 "--session-id".into(),
                 self.conversation_id.clone(),
             ],
-            "antigravity" => vec![
-                "agy".into(),
-                "--conversation".into(),
-                self.conversation_id.clone(),
-            ],
             _ => unreachable!(),
         })
     }
@@ -72,7 +65,6 @@ impl Resume {
             "codex" => ".codex/sessions",
             "claude" => ".claude/projects",
             "pi" => ".pi/agent/sessions",
-            "antigravity" => ".gemini/antigravity-cli/conversations",
             _ => return false,
         });
         let mut stack = vec![(root, 0)];
@@ -98,10 +90,9 @@ impl Resume {
                     let suffix = match self.agent.as_str() {
                         "claude" => format!("{}.jsonl", self.conversation_id),
                         "pi" => format!("_{}.jsonl", self.conversation_id),
-                        "antigravity" => format!("{}.db", self.conversation_id),
                         _ => format!("-{}.jsonl", self.conversation_id),
                     };
-                    let matches = if matches!(self.agent.as_str(), "claude" | "antigravity") {
+                    let matches = if self.agent == "claude" {
                         name == suffix
                     } else {
                         name.ends_with(&suffix)
@@ -268,12 +259,6 @@ mod tests {
             cwd: "/tmp/project".into(),
         };
         assert_eq!(r.arguments().unwrap(), ["codex", "resume", "test-123"]);
-        r.agent = "antigravity".into();
-        assert_eq!(
-            r.arguments().unwrap(),
-            ["agy", "--conversation", "test-123"]
-        );
-        r.agent = "codex".into();
         r.conversation_id = "x;touch /tmp/bad".into();
         assert!(r.arguments().is_err());
     }

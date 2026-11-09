@@ -54,6 +54,27 @@ struct SettingsControlsTests {
         let tokenFile = directory.appendingPathComponent("mobile-pair.token")
         try Data("token".utf8).write(to: tokenFile)
         #expect(controller.hasPairing)
+
+        let settings = OhMyGhosttySettings(fileURL: directory.appendingPathComponent("settings.json"))
+        settings.language = .simplifiedChinese
+        let settingsController = NativeSettingsController(
+            settings: settings,
+            initialSelection: .mobile,
+            mobileAccessController: controller
+        )
+        let window = NSWindow(
+            contentRect: .init(x: 0, y: 0, width: 820, height: 640),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentViewController = settingsController
+        defer { window.close() }
+        settingsController.view.layoutSubtreeIfNeeded()
+        let form = try #require(settingsController.children.compactMap { $0 as? NativeSettingsForm }.first)
+        #expect(form.rowTitles == ["允许 iPhone 连接", "网关状态", "配对密钥"])
+
         controller.revokePairings()
         #expect(!controller.hasPairing)
         #expect(controller.invitation == nil)

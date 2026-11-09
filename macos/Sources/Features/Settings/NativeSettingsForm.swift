@@ -370,4 +370,18 @@ final class NativeSettingsForm: NSViewController {
         constraint.isActive = true
         return constraint
     }
+
+    func addCustomRow(_ child: NSView) {
+        guard let group else { return }
+        if rowCount > 0 {
+            let separator = NSBox()
+            separator.boxType = .separator
+            group.addArrangedSubview(separator)
+            separator.widthAnchor.constraint(equalTo: group.widthAnchor).isActive = true
+        }
+        rowCount += 1
+        child.translatesAutoresizingMaskIntoConstraints = false
+        group.addArrangedSubview(child)
+        child.widthAnchor.constraint(equalTo: group.widthAnchor).isActive = true
+    }
 }

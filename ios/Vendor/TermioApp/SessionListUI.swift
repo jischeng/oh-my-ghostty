@@ -270,7 +270,7 @@ struct ListChevron: View {
             .font(.footnote.weight(.semibold))
             .foregroundStyle(.tertiary)
             .rotationEffect(.degrees(isExpanded ? 90 : 0))
-            .animation(.snappy(duration: 0.2), value: isExpanded)
+            .animation(.snappy(duration: 0.18), value: isExpanded)
     }
 }
 
@@ -304,8 +304,73 @@ extension View {
                         .padding(.trailing, ListCard.horizontalPadding)
                 }
             }
-            .background(Color.primary.opacity(isHighlighted ? 0.13 : 0.06), in: shape)
+            .background(Color(uiColor: isHighlighted ? ThemeChrome.cardHighlighted : ThemeChrome.card), in: shape)
             .contentShape(shape)
+    }
+}
+
+extension UITableView {
+    /// Expands or collapses child session rows under a `ProjectRow` header (`row 0`)
+    /// as a single rigid drawer without UIKit's multi-cell cross-fade or cell squashing.
+    func animateDrawerToggle(
+        inSection section: Int,
+        childCount: Int,
+        nowExpanded: Bool,
+        updateHeaderCell: (UITableViewCell) -> Void
+    ) {
+        let headerPath = IndexPath(row: 0, section: section)
+        let childPaths = (0..<childCount).map { IndexPath(row: $0 + 1, section: section) }
+        guard !childPaths.isEmpty else {
+            if let headerCell = cellForRow(at: headerPath) {
+                updateHeaderCell(headerCell)
+            }
+            return
+        }
+
+        UIView.performWithoutAnimation {
+            performBatchUpdates {
+                if nowExpanded {
+                    insertRows(at: childPaths, with: .none)
+                } else {
+                    deleteRows(at: childPaths, with: .none)
+                }
+            }
+            layoutIfNeeded()
+        }
+
+        if let headerCell = cellForRow(at: headerPath) {
+            headerCell.layer.zPosition = 10
+            updateHeaderCell(headerCell)
+        }
+
+        if nowExpanded {
+            let slideOffset: CGFloat = -10
+            let childCells = childPaths.compactMap { cellForRow(at: $0) }
+            for cell in childCells {
+                cell.layer.zPosition = 0
+                cell.transform = CGAffineTransform(translationX: 0, y: slideOffset)
+            }
+            let lowerCells = indexPathsForVisibleRows?
+                .filter { $0.section > section }
+                .compactMap { cellForRow(at: $0) } ?? []
+            for cell in lowerCells {
+                cell.transform = CGAffineTransform(translationX: 0, y: slideOffset)
+            }
+            UIView.animate(
+                withDuration: 0.18,
+                delay: 0,
+                usingSpringWithDamping: 0.95,
+                initialSpringVelocity: 0,
+                options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]
+            ) {
+                for cell in childCells {
+                    cell.transform = .identity
+                }
+                for cell in lowerCells {
+                    cell.transform = .identity
+                }
+            }
+        }
     }
 }
 

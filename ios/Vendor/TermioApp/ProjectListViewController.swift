@@ -276,7 +276,8 @@ final class ProjectListViewController: UIViewController {
         tableView.estimatedSectionHeaderHeight = 0
         tableView.estimatedSectionFooterHeight = 0
         tableView.keyboardDismissMode = .onDrag
-        tableView.register(UITableViewCell.self, forCellReuseIdentifier: "row")
+        tableView.register(UITableViewCell.self, forCellReuseIdentifier: "projectRow")
+        tableView.register(UITableViewCell.self, forCellReuseIdentifier: "sessionRow")
         tableView.register(
             SectionCapView.self,
             forHeaderFooterViewReuseIdentifier: SectionCapView.reuseID
@@ -570,11 +571,14 @@ extension ProjectListViewController: UITableViewDataSource, UITableViewDelegate 
     }
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let cell = tableView.dequeueReusableCell(withIdentifier: "row", for: indexPath)
-        cell.selectionStyle = .none
-        cell.backgroundColor = .clear
         switch sections[indexPath.section] {
         case .needsYou:
+            let cell = tableView.dequeueReusableCell(withIdentifier: "sessionRow", for: indexPath)
+            cell.selectionStyle = .none
+            cell.backgroundColor = ThemeChrome.background
+            cell.clipsToBounds = true
+            cell.transform = .identity
+            cell.layer.zPosition = 0
             let session = attention[indexPath.row]
             cell.contentConfiguration = UIHostingConfiguration {
                 SessionRow(
@@ -587,20 +591,25 @@ extension ProjectListViewController: UITableViewDataSource, UITableViewDelegate 
             }
             .margins(.horizontal, ListCard.outerMargin)
             .margins(.vertical, 0)
+            return cell
         case .project(let project):
             let isExpanded = expandedProjects.contains(project.stableKey)
             if indexPath.row == 0 {
-                cell.contentConfiguration = UIHostingConfiguration {
-                    ProjectRow(
-                        project: project,
-                        isExpanded: isExpanded,
-                        isFirst: true,
-                        isLast: !isExpanded || project.sessions.isEmpty
-                    )
-                }
-                .margins(.horizontal, ListCard.outerMargin)
-                .margins(.vertical, 0)
+                let cell = tableView.dequeueReusableCell(withIdentifier: "projectRow", for: indexPath)
+                cell.selectionStyle = .none
+                cell.backgroundColor = ThemeChrome.background
+                cell.clipsToBounds = true
+                cell.transform = .identity
+                cell.layer.zPosition = 10
+                configureProjectHeaderCell(cell, project: project, isExpanded: isExpanded)
+                return cell
             } else {
+                let cell = tableView.dequeueReusableCell(withIdentifier: "sessionRow", for: indexPath)
+                cell.selectionStyle = .none
+                cell.backgroundColor = ThemeChrome.background
+                cell.clipsToBounds = true
+                cell.transform = .identity
+                cell.layer.zPosition = 0
                 let sessionIndex = indexPath.row - 1
                 let session = project.sessions[sessionIndex]
                 let isLast = sessionIndex == project.sessions.count - 1
@@ -617,9 +626,26 @@ extension ProjectListViewController: UITableViewDataSource, UITableViewDelegate 
                 }
                 .margins(.horizontal, ListCard.outerMargin)
                 .margins(.vertical, 0)
+                return cell
             }
         }
-        return cell
+    }
+
+    private func configureProjectHeaderCell(
+        _ cell: UITableViewCell,
+        project: MockProject,
+        isExpanded: Bool
+    ) {
+        cell.contentConfiguration = UIHostingConfiguration {
+            ProjectRow(
+                project: project,
+                isExpanded: isExpanded,
+                isFirst: true,
+                isLast: !isExpanded || project.sessions.isEmpty
+            )
+        }
+        .margins(.horizontal, ListCard.outerMargin)
+        .margins(.vertical, 0)
     }
 
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
@@ -640,18 +666,12 @@ extension ProjectListViewController: UITableViewDataSource, UITableViewDelegate 
         if !nowExpanded {
             expandedProjects.remove(project.stableKey)
         }
-        let childPaths = (0..<project.sessions.count).map { IndexPath(row: $0 + 1, section: section) }
-        guard !childPaths.isEmpty else {
-            tableView.reloadRows(at: [IndexPath(row: 0, section: section)], with: .none)
-            return
-        }
-        tableView.performBatchUpdates {
-            if nowExpanded {
-                tableView.insertRows(at: childPaths, with: .fade)
-            } else {
-                tableView.deleteRows(at: childPaths, with: .fade)
-            }
-            tableView.reloadRows(at: [IndexPath(row: 0, section: section)], with: .none)
+        tableView.animateDrawerToggle(
+            inSection: section,
+            childCount: project.sessions.count,
+            nowExpanded: nowExpanded
+        ) { [weak self] headerCell in
+            self?.configureProjectHeaderCell(headerCell, project: project, isExpanded: nowExpanded)
         }
     }
 

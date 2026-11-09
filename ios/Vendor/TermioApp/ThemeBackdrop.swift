@@ -29,6 +29,12 @@ enum ThemeChrome {
         }
     }
 
+    static var cardHighlighted: UIColor {
+        themed { theme, dark in
+            background(theme, dark).blended(with: dark ? .white : .black, amount: dark ? 0.13 : 0.10)
+        }
+    }
+
     /// Primary chrome text.
     static var ink: UIColor {
         themed { theme, _ in foreground(theme) }

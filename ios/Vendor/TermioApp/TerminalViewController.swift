@@ -75,6 +75,7 @@ final class TerminalViewController: UIViewController {
     private let contextLabel = UILabel()
     private let titleLabel = UILabel()
     private let statusLabel = UILabel()
+    private var headerButtonSizeConstraints: [NSLayoutConstraint] = []
     private var surfaceConfigured = false
     private var backendStarted = false
     /// Timestamp of the last renderer-death surface rebuild, to debounce a
@@ -192,8 +193,9 @@ final class TerminalViewController: UIViewController {
         terminalHost.accessibilityIdentifier = "terminal.viewport"
         // The embedded surface switches theme slots itself; the stream
         // terminal is told.
-        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: Self, _: UITraitCollection) in
+        registerForTraitChanges([UITraitUserInterfaceStyle.self, UITraitVerticalSizeClass.self]) { (self: Self, _: UITraitCollection) in
             if let session = self.companion as? any StreamDeviceSession { self.applyStreamTheme(to: session) }
+            self.applyCompactHeaderLayout()
         }
         // The page trait comes from the window's app-wide Appearance override
         // (set in AppDelegate), and the backdrop is the active theme's
@@ -316,13 +318,18 @@ final class TerminalViewController: UIViewController {
         let size = terminalView.bounds.size
         guard size != lastFittedSize else { return }
         fitDebounce?.cancel()
+        if lastFittedSize == .zero {
+            lastFittedSize = size
+            terminalView.fitToSize()
+            return
+        }
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             lastFittedSize = terminalView.bounds.size
             terminalView.fitToSize()
         }
         fitDebounce = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04, execute: work)
     }
 
     /// Frames the surface inside `terminalHost`, and states what this screen
@@ -361,11 +368,11 @@ final class TerminalViewController: UIViewController {
                 streamView.transform = terminalView.transform
             }
         }
-        // Everything below is measured against the keyboard-hidden height. The
-        // keyboard occludes this rectangle, it never shrinks it: shrinking is a
-        // viewport change, a viewport change is a PTY resize, and a PTY resize
-        // is a full TUI repaint on every show/hide of the keys.
-        let fullHeight = host.height + keyboardOverlap
+        // Measure against the actual visible host rectangle above the keyboard
+        // (or the bottom of the screen when the keyboard is hidden) so full-screen
+        // TUIs (Codex, Claude Code) fit completely inside the visible viewport
+        // without sliding top banners off-screen or leaving a blank void.
+        let fullHeight = host.height
         let screen = hostGrid
         if case .device = backend, let screen {
             companion?.setViewport(columns: Int(screen.cols), rows: Int(screen.rows))
@@ -379,14 +386,9 @@ final class TerminalViewController: UIViewController {
               let grid = sharedGrid,
               let cell = cellSize, grid.cols > 0, grid.rows > 0
         else {
-            // Full-height surface, slid up by exactly the content-aware pan:
-            // enough that the deepest drawn row clears the keys, never more.
-            // The host clips whatever the slide pushes past the top, and the
-            // keyboard covers whatever stays below. With the keys away this
-            // is exactly `host`.
-            lastAppliedPan = keyboardPan
+            lastAppliedPan = 0
             terminalView.frame = CGRect(
-                x: 0, y: -lastAppliedPan, width: host.width, height: fullHeight)
+                x: 0, y: 0, width: host.width, height: fullHeight)
             return
         }
         let padding = terminalPadding
@@ -395,17 +397,8 @@ final class TerminalViewController: UIViewController {
         let fit = min(1, host.width / width, fullHeight / height)
         terminalView.bounds = CGRect(x: 0, y: 0, width: width, height: height)
         terminalView.transform = CGAffineTransform(scaleX: fit, y: fit)
-        // The same cursor-anchored slide as the full-size path, in scaled
-        // space: with the keys up, the letterboxed picture rises just enough
-        // to keep the cursor's row above them.
-        let caret = streamView?.cursorRect ?? terminalView.caretRect(for: terminalView.beginningOfDocument)
-        var pan: CGFloat = 0
-        if keyboardOverlap > 0, caret.maxY.isFinite, caret.maxY > 0 {
-            let anchor = (caret.maxY + 2 * cell.height) * fit
-            pan = min(max(0, anchor - host.height), max(0, height * fit - host.height))
-        }
-        lastAppliedPan = pan
-        terminalView.center = CGPoint(x: host.midX, y: height * fit / 2 - pan)
+        lastAppliedPan = 0
+        terminalView.center = CGPoint(x: host.midX, y: height * fit / 2)
     }
 
     /// How much of a session this screen could show. The same
@@ -414,26 +407,7 @@ final class TerminalViewController: UIViewController {
     /// a per-platform copy of this arithmetic would drift a column apart. `nil`
     /// before the surface has reported a cell size, which the device reads as no
     /// viewport at all rather than as a stand-in.
-    /// How far the surface slides up while the keyboard shows: just enough to
-    /// keep the cursor's row visible above the keys, and not a point more. A
-    /// fresh session with the cursor near the top stays put — the keys cover
-    /// empty grid — while a full transcript slides its input line over them,
-    /// and a full-screen editor follows its own cursor wherever it sits.
-    /// Pushing the whole overlap unconditionally hid a short session's only
-    /// content off the top; never pushing hid a tall session's input line
-    /// under the keys; the cursor is what resolves the two, and it is exact:
-    /// `caretRect` reads the surface's own IME caret (`imePoint`), the same
-    /// geometry the system keyboard places candidate windows with. A couple
-    /// of margin rows keep an agent's box border, drawn just below its
-    /// cursor, in view.
-    private var keyboardPan: CGFloat {
-        guard keyboardOverlap > 0 else { return 0 }
-        guard let cell = cellSize else { return keyboardOverlap }
-        let caret = streamView?.cursorRect ?? terminalView.caretRect(for: terminalView.beginningOfDocument)
-        guard caret.maxY.isFinite, caret.maxY > 0 else { return keyboardOverlap }
-        let anchor = caret.maxY + 2 * cell.height
-        return min(keyboardOverlap, max(0, anchor - terminalHost.bounds.height))
-    }
+    private var keyboardPan: CGFloat { 0 }
 
     /// The pan the surface was last framed with, so output that moves the
     /// cursor while the keys are up can re-slide without thrash.
@@ -449,11 +423,7 @@ final class TerminalViewController: UIViewController {
 
     private var hostGrid: TerminalGrid? {
         guard let cell = cellSize else { return nil }
-        // The keyboard-hidden height, always: what this screen could show is a
-        // fact about the screen, not about whether the keys happen to be up.
-        let size = CGSize(
-            width: terminalHost.bounds.width,
-            height: terminalHost.bounds.height + keyboardOverlap)
+        let size = terminalHost.bounds.size
         let padding = terminalPadding
         return TerminalGrid.fitting(
             size, cell: cell,
@@ -575,15 +545,31 @@ final class TerminalViewController: UIViewController {
         headerBar.addArrangedSubview(overflow)
         headerBar.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(headerBar)
-        NSLayoutConstraint.activate([
-            headerBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-            headerBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
-            headerBar.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
+        let sizeConstraints = [
             back.widthAnchor.constraint(equalToConstant: 44),
             back.heightAnchor.constraint(equalToConstant: 44),
             overflow.widthAnchor.constraint(equalToConstant: 44),
             overflow.heightAnchor.constraint(equalToConstant: 44),
-        ])
+        ]
+        headerButtonSizeConstraints = sizeConstraints
+        NSLayoutConstraint.activate([
+            headerBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            headerBar.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 8),
+            headerBar.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -8),
+        ] + sizeConstraints)
+        applyCompactHeaderLayout()
+    }
+
+    private func applyCompactHeaderLayout() {
+        let compact = traitCollection.verticalSizeClass == .compact
+        let buttonSize: CGFloat = compact ? 34 : 44
+        for constraint in headerButtonSizeConstraints {
+            constraint.constant = buttonSize
+        }
+        titleLabel.font = .systemFont(ofSize: compact ? 14 : 15, weight: .semibold)
+        if statusLabel.isHidden {
+            contextLabel.isHidden = compact || (contextLabel.text?.isEmpty ?? true)
+        }
     }
 
     /// The header overflow menu. Copy Path appears only for a companion session,
@@ -660,6 +646,8 @@ final class TerminalViewController: UIViewController {
 
     private func configureTerminal() {
         terminalView.delegate = self
+        terminalView.inputAssistantItem.leadingBarButtonGroups = []
+        terminalView.inputAssistantItem.trailingBarButtonGroups = []
         // Long-press → floating Paste menu (see wirePasteMenu).
         wirePasteMenu()
         // Scrolling the terminal is reading; give the rows back to content.
@@ -739,6 +727,9 @@ final class TerminalViewController: UIViewController {
         keyBar.onVoiceTranscript = { [weak self] text in
             self?.terminalView.send(Data(text.utf8))
         }
+        keyBar.onDismissKeyboard = { [weak self] in
+            self?.inputSurface.resignFirstResponder()
+        }
         terminalView.setStickyModifierChangeHandler { [weak self] in
             guard let self else { return }
             keyBar.setStickyVisual(.ctrl, Self.stickyVisual(terminalView.stickyActivation(for: .ctrl)))
@@ -774,8 +765,8 @@ final class TerminalViewController: UIViewController {
         terminalBottomConstraint = bottom
         NSLayoutConstraint.activate([
             terminalHost.topAnchor.constraint(equalTo: headerBar.bottomAnchor),
-            terminalHost.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            terminalHost.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            terminalHost.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
+            terminalHost.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
             bottom,
         ])
         NotificationCenter.default.addObserver(
@@ -1216,6 +1207,8 @@ final class TerminalViewController: UIViewController {
             terminalHost.addSubview(stream)
             streamView = stream
             terminalView.isHidden = true
+            view.setNeedsLayout()
+            view.layoutIfNeeded()
             if hadKeyboard { stream.becomeFirstResponder() }
         } else {
             guard let stream = streamView else { return }
@@ -1224,12 +1217,10 @@ final class TerminalViewController: UIViewController {
             streamView = nil
             terminalView.addInteraction(editMenuInteraction)
             terminalView.isHidden = false
+            view.setNeedsLayout()
+            view.layoutIfNeeded()
             if hadKeyboard { terminalView.becomeFirstResponder() }
         }
-        // At once: the viewport this screen declares depends on whose cells
-        // are drawn, and the stream renderer's are not the embedded surface's.
-        view.setNeedsLayout()
-        view.layoutIfNeeded()
     }
 
     private func receiveStreamSignal(_ signal: TermiodStreamTerminal.Signal) {

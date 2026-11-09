@@ -791,24 +791,54 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
                 try Self.check(ghostty_focus_encode(focused ? GHOSTTY_FOCUS_GAINED : GHOSTTY_FOCUS_LOST,
                     &output, output.count, &written), "focus encode")
                 return Data(output.prefix(written).map { UInt8(bitPattern: $0) })
-            case .wheel:
-                // Local scrollback is handled by Termio's view. Alternate-screen
-                // scrolling uses the same application-cursor encoder as arrows.
-                if case .wheel(let wheel) = input {
-                    var encoder: GhosttyKeyEncoder?
-                    var event: GhosttyKeyEvent?
-                    try Self.check(ghostty_key_encoder_new(nil, &encoder), "wheel encoder")
-                    defer { ghostty_key_encoder_free(encoder) }
-                    try Self.check(ghostty_key_event_new(nil, &event), "wheel event")
-                    defer { ghostty_key_event_free(event) }
-                    ghostty_key_encoder_setopt_from_terminal(encoder, terminal)
-                    ghostty_key_event_set_action(event, GHOSTTY_KEY_ACTION_PRESS)
-                    ghostty_key_event_set_key(event, wheel.rows < 0 ? GHOSTTY_KEY_ARROW_UP : GHOSTTY_KEY_ARROW_DOWN)
-                    try Self.check(ghostty_key_encoder_encode(encoder, event, &bytes, bytes.count, &written), "wheel encode")
-                    return (0..<min(abs(Int(wheel.rows)), 100)).reduce(into: Data()) { data, _ in
+            case .wheel(let wheel):
+                guard wheel.rows != 0 else { return Data() }
+                var tracking = false
+                _ = ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING, &tracking)
+                if tracking {
+                    var encoder: GhosttyMouseEncoder?
+                    var event: GhosttyMouseEvent?
+                    try Self.check(ghostty_mouse_encoder_new(nil, &encoder), "wheel mouse encoder")
+                    defer { ghostty_mouse_encoder_free(encoder) }
+                    try Self.check(ghostty_mouse_event_new(nil, &event), "wheel mouse event")
+                    defer { ghostty_mouse_event_free(event) }
+                    ghostty_mouse_encoder_setopt_from_terminal(encoder, terminal)
+                    var size = GhosttyMouseEncoderSize()
+                    size.size = MemoryLayout<GhosttyMouseEncoderSize>.size
+                    size.cell_width = max(1, wheel.at.cellWidth)
+                    size.cell_height = max(1, wheel.at.cellHeight)
+                    size.screen_width = UInt32(gridLocked().cols) * size.cell_width
+                    size.screen_height = UInt32(gridLocked().rows) * size.cell_height
+                    ghostty_mouse_encoder_setopt(encoder, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &size)
+                    ghostty_mouse_event_set_action(event, GHOSTTY_MOUSE_ACTION_PRESS)
+                    ghostty_mouse_event_set_button(
+                        event,
+                        wheel.rows < 0 ? GHOSTTY_MOUSE_BUTTON_FOUR : GHOSTTY_MOUSE_BUTTON_FIVE
+                    )
+                    ghostty_mouse_event_set_mods(event, wheel.mods)
+                    ghostty_mouse_event_set_position(event, GhosttyMousePosition(x: wheel.at.x, y: wheel.at.y))
+                    try Self.check(
+                        ghostty_mouse_encoder_encode(encoder, event, &bytes, bytes.count, &written),
+                        "wheel mouse encode"
+                    )
+                    return (0..<min(abs(Int(wheel.rows)), 10)).reduce(into: Data()) { data, _ in
                         data.append(contentsOf: bytes.prefix(written))
                     }
                 }
+                // On the alternate screen without mouse tracking (e.g. Codex TUI),
+                // arrow keys cycle input prompt history rather than scrolling the
+                // transcript; send PageUp / PageDown instead.
+                var encoder: GhosttyKeyEncoder?
+                var event: GhosttyKeyEvent?
+                try Self.check(ghostty_key_encoder_new(nil, &encoder), "wheel encoder")
+                defer { ghostty_key_encoder_free(encoder) }
+                try Self.check(ghostty_key_event_new(nil, &event), "wheel event")
+                defer { ghostty_key_event_free(event) }
+                ghostty_key_encoder_setopt_from_terminal(encoder, terminal)
+                ghostty_key_event_set_action(event, GHOSTTY_KEY_ACTION_PRESS)
+                ghostty_key_event_set_key(event, wheel.rows < 0 ? GHOSTTY_KEY_PAGE_UP : GHOSTTY_KEY_PAGE_DOWN)
+                try Self.check(ghostty_key_encoder_encode(encoder, event, &bytes, bytes.count, &written), "wheel encode")
+                return Data(bytes.prefix(written))
             case .mouse(let mouse):
                 var encoder: GhosttyMouseEncoder?
                 var event: GhosttyMouseEvent?

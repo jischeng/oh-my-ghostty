@@ -51,4 +51,24 @@ final class TerminalTests: XCTestCase {
         XCTAssertFalse(text.contains("unfinished-title"))
     }
 
+    func testWheelEncodingUsesPageKeysOnAlternateScreenAndSGRWheelWhenMouseTracking() throws {
+        let alt = try screen("\u{1b}[?1049h")
+        let pointer = Termiod.InputEvent.Pointer(x: 40, y: 40, cellWidth: 10, cellHeight: 20)
+        XCTAssertEqual(
+            try alt.encodeInput(.wheel(.init(rows: -1, columns: 0, mods: 0, at: pointer))),
+            Data("\u{1b}[5~".utf8)
+        )
+        XCTAssertEqual(
+            try alt.encodeInput(.wheel(.init(rows: 1, columns: 0, mods: 0, at: pointer))),
+            Data("\u{1b}[6~".utf8)
+        )
+
+        alt.write(Data("\u{1b}[?1000h\u{1b}[?1006h".utf8))
+        let wheelUp = try String(
+            decoding: alt.encodeInput(.wheel(.init(rows: -1, columns: 0, mods: 0, at: pointer))),
+            as: UTF8.self
+        )
+        XCTAssertTrue(wheelUp.hasPrefix("\u{1b}[<64;"), "Expected SGR wheel-up sequence, got: \(wheelUp.debugDescription)")
+    }
+
 }

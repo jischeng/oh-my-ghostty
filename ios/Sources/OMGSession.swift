@@ -17,6 +17,7 @@ final class OMGSession: StreamDeviceSession {
     private let generation: String?
     private var pending = Data()
     private var claiming = false
+    private var needsAutoClaim = true
     private var inputRejected = false
     private var rendering = true
     private var theme: TermiodStreamTerminal.Theme?
@@ -115,16 +116,36 @@ final class OMGSession: StreamDeviceSession {
     }
 
     func setViewport(columns: Int, rows: Int) {
-        viewport = TerminalGrid(rows: UInt16(clamping: rows), cols: UInt16(clamping: columns))
-        if rendering, let viewport, connection?.isWriter == true { connection?.resize(viewport) }
+        let next = TerminalGrid(rows: UInt16(clamping: rows), cols: UInt16(clamping: columns))
+        let viewportChanged = viewport != next
+        viewport = next
+        guard rendering, let connection, connection.isAttached else { return }
+        if connection.isWriter {
+            connection.resize(next)
+        } else if (needsAutoClaim || viewportChanged), !claiming {
+            needsAutoClaim = false
+            claiming = true
+            connection.claim()
+        }
     }
 
     func noteSurfaceGrid(columns: Int, rows: Int) {
         // A decoded native snapshot is already authoritative; no keyframe is needed.
     }
 
-    func setRendering(_ showing: Bool) { rendering = showing }
-    func reassertGrid() { changed() }
+    func setRendering(_ showing: Bool) {
+        let becameVisible = !rendering && showing
+        rendering = showing
+        if becameVisible {
+            needsAutoClaim = true
+            changed()
+        }
+    }
+
+    func reassertGrid() {
+        needsAutoClaim = true
+        changed()
+    }
 
     func setStreamTheme(_ theme: TermiodStreamTerminal.Theme) {
         self.theme = theme
@@ -163,9 +184,16 @@ final class OMGSession: StreamDeviceSession {
             }
         }
         if connection.isWriter {
+            needsAutoClaim = false
             if !pending.isEmpty { connection.inputBytes(pending) }
             discardPending()
             if rendering, let viewport { connection.resize(viewport) }
+        } else if rendering, needsAutoClaim {
+            needsAutoClaim = false
+            if !claiming {
+                claiming = true
+                connection.claim()
+            }
         }
     }
 }

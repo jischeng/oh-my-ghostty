@@ -77,12 +77,12 @@ final class RootContainerViewController: UIViewController {
         for (index, destination) in destinations.enumerated() {
             let item = UITabBarItem(
                 title: destination.title,
-                image: UIImage(systemName: ["folder", "cpu", "terminal", "gearshape"][index]),
+                image: UIImage(systemName: ["folder", "sparkles", "terminal", "gearshape"][index]),
                 tag: index
             )
             // A selected tab fills its symbol in, the way every system tab bar
             // does; the outline stays for the unselected ones.
-            item.selectedImage = UIImage(systemName: ["folder.fill", "cpu.fill", "terminal.fill", "gearshape.fill"][index])
+            item.selectedImage = UIImage(systemName: ["folder.fill", "sparkles", "terminal.fill", "gearshape.fill"][index])
             item.accessibilityIdentifier = "home.tab.\(destination.key)"
             destination.nav.tabBarItem = item
         }

@@ -142,14 +142,23 @@ final class TerminalAccessoryBar: UIInputView {
     /// Voice dictation finished — the transcript to type into the terminal.
     /// Never carries a newline: dictation fills the prompt, it never sends it.
     var onVoiceTranscript: ((String) -> Void)?
+    /// Dismisses the software keyboard so the full terminal viewport is visible.
+    var onDismissKeyboard: (() -> Void)?
 
-    static let barHeight: CGFloat = 82
-    private static let keyHeight: CGFloat = 32
-    private static let keySpacing: CGFloat = 6
+    static let barHeight: CGFloat = 68
+    private static let compactBarHeight: CGFloat = 52
+    private static let keyHeight: CGFloat = 28
+    private static let compactKeyHeight: CGFloat = 22
+    private static let keySpacing: CGFloat = 4
+    private static let compactKeySpacing: CGFloat = 3
 
     private let haptic = UIImpactFeedbackGenerator(style: .light)
     private var stickyButtons: [TerminalStickyKey: UIButton] = [:]
     private let attachButton = UIButton(type: .system)
+    private var keyHeightConstraints: [NSLayoutConstraint] = []
+    private var keyRows: [UIStackView] = []
+    private var planeTopConstraint: NSLayoutConstraint?
+    private var planeBottomConstraint: NSLayoutConstraint?
 
     /// Voice dictation: the recorder/transcriber, the Messages-style pill that
     /// replaces the two control-key rows while recording, and a reference to
@@ -172,10 +181,10 @@ final class TerminalAccessoryBar: UIInputView {
             makeEscButton(),
             makeKeyButton(title: "tab", payload: Data([0x09])),
             makeKeyButton(title: "⇧⇥", payload: Data("\u{1B}[Z".utf8)),
-            makeKeyButton(title: "home", payload: Data("\u{1B}[H".utf8)),
-            makeKeyButton(title: "↑", payload: Data("\u{1B}[A".utf8), repeats: true),
-            makeKeyButton(title: "end", payload: Data("\u{1B}[F".utf8)),
             makeScrollEdgeButton(title: "⤒", edge: .top),
+            makeKeyButton(title: "↑", payload: Data("\u{1B}[A".utf8), repeats: true),
+            makeScrollEdgeButton(title: "⤓", edge: .bottom),
+            makeKeyButton(title: "^C", payload: Data([0x03])),
         ])
         let bottom = makeRow([
             attachButton,
@@ -184,8 +193,9 @@ final class TerminalAccessoryBar: UIInputView {
             makeKeyButton(title: "←", payload: Data("\u{1B}[D".utf8), repeats: true),
             makeKeyButton(title: "↓", payload: Data("\u{1B}[B".utf8), repeats: true),
             makeKeyButton(title: "→", payload: Data("\u{1B}[C".utf8), repeats: true),
-            makeScrollEdgeButton(title: "⤓", edge: .bottom),
+            makeDismissKeyboardButton(),
         ])
+        keyRows = [top, bottom]
 
         let plane = UIStackView(arrangedSubviews: [top, bottom])
         plane.axis = .vertical
@@ -193,12 +203,24 @@ final class TerminalAccessoryBar: UIInputView {
         plane.translatesAutoresizingMaskIntoConstraints = false
         addSubview(plane)
         keyPlane = plane
+        let topConstraint = plane.topAnchor.constraint(equalTo: topAnchor, constant: 4)
+        let bottomConstraint = plane.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4)
+        planeTopConstraint = topConstraint
+        planeBottomConstraint = bottomConstraint
         NSLayoutConstraint.activate([
-            plane.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            plane.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            plane.topAnchor.constraint(equalTo: topAnchor, constant: 6),
-            plane.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
+            plane.leadingAnchor.constraint(equalTo: safeAreaLayoutGuide.leadingAnchor, constant: 8),
+            plane.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor, constant: -8),
+            topConstraint,
+            bottomConstraint,
         ])
+
+        let swipeDown = UISwipeGestureRecognizer(target: self, action: #selector(dismissKeyboardGesture))
+        swipeDown.direction = .down
+        addGestureRecognizer(swipeDown)
+
+        registerForTraitChanges([UITraitVerticalSizeClass.self]) { (self: Self, _: UITraitCollection) in
+            self.applyCompactMetrics()
+        }
 
         // The recording pill fills the bar band. It's hidden until Voice is
         // picked; then the two key rows hide and it takes their place — the
@@ -206,10 +228,10 @@ final class TerminalAccessoryBar: UIInputView {
         voiceBar.translatesAutoresizingMaskIntoConstraints = false
         addSubview(voiceBar)
         NSLayoutConstraint.activate([
-            voiceBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            voiceBar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            voiceBar.topAnchor.constraint(equalTo: topAnchor, constant: 6),
-            voiceBar.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
+            voiceBar.leadingAnchor.constraint(equalTo: safeAreaLayoutGuide.leadingAnchor, constant: 8),
+            voiceBar.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor, constant: -8),
+            voiceBar.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+            voiceBar.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
         ])
         voiceBar.onCancel = { [weak self] in
             self?.voice.cancel()
@@ -303,8 +325,36 @@ final class TerminalAccessoryBar: UIInputView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
+    private var isCompactHeight: Bool {
+        traitCollection.verticalSizeClass == .compact
+    }
+
     override var intrinsicContentSize: CGSize {
-        CGSize(width: UIView.noIntrinsicMetric, height: Self.barHeight)
+        CGSize(width: UIView.noIntrinsicMetric, height: isCompactHeight ? Self.compactBarHeight : Self.barHeight)
+    }
+
+    private func applyCompactMetrics() {
+        let compact = isCompactHeight
+        let spacing = compact ? Self.compactKeySpacing : Self.keySpacing
+        let height = compact ? Self.compactKeyHeight : Self.keyHeight
+        let verticalInset: CGFloat = compact ? 3 : 4
+        keyPlane?.spacing = spacing
+        for row in keyRows { row.spacing = spacing }
+        for constraint in keyHeightConstraints { constraint.constant = height }
+        planeTopConstraint?.constant = verticalInset
+        planeBottomConstraint?.constant = -verticalInset
+        invalidateIntrinsicContentSize()
+    }
+
+    private func registerKeyHeight(_ button: UIButton) {
+        let constraint = button.heightAnchor.constraint(equalToConstant: Self.keyHeight)
+        constraint.isActive = true
+        keyHeightConstraints.append(constraint)
+    }
+
+    @objc private func dismissKeyboardGesture() {
+        haptic.impactOccurred()
+        onDismissKeyboard?()
     }
 
     private func makeRow(_ keys: [UIView]) -> UIStackView {
@@ -335,7 +385,7 @@ final class TerminalAccessoryBar: UIInputView {
         // removed — the grid must not reflow around it.
         attachButton.alpha = 0
         attachButton.isEnabled = false
-        attachButton.heightAnchor.constraint(equalToConstant: Self.keyHeight).isActive = true
+        registerKeyHeight(attachButton)
         // The custom card, not a system UIMenu: only a hand-placed view can be
         // bigger than a menu's fixed rows, carry Hugeicon glyphs, and sit lower
         // toward the thumb — the three things asked for here. It keeps the
@@ -604,7 +654,7 @@ final class TerminalAccessoryBar: UIInputView {
         }
         let button = UIButton(configuration: config)
         button.accessibilityLabel = title
-        button.heightAnchor.constraint(equalToConstant: Self.keyHeight).isActive = true
+        registerKeyHeight(button)
         button.addAction(UIAction { [weak self] _ in
             self?.haptic.impactOccurred()
             self?.onSticky?(key)
@@ -626,10 +676,10 @@ final class TerminalAccessoryBar: UIInputView {
         config.cornerStyle = .medium
         // Slim insets: the grid fixes each cell's width, so word keys like
         // "home" need every point for their glyphs.
-        config.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: 2, bottom: 4, trailing: 2)
+        config.contentInsets = NSDirectionalEdgeInsets(top: 2, leading: 2, bottom: 2, trailing: 2)
         config.titleTextAttributesTransformer = .init { attributes in
             var attributes = attributes
-            attributes.font = .systemFont(ofSize: 14)
+            attributes.font = .systemFont(ofSize: 13, weight: .medium)
             return attributes
         }
         return config
@@ -652,7 +702,7 @@ final class TerminalAccessoryBar: UIInputView {
         }
         button.accessibilityLabel = title
         button.titleLabel?.numberOfLines = 1
-        button.heightAnchor.constraint(equalToConstant: Self.keyHeight).isActive = true
+        registerKeyHeight(button)
         return button
     }
 
@@ -666,7 +716,31 @@ final class TerminalAccessoryBar: UIInputView {
             self?.onScrollEdge?(edge)
         }
         button.accessibilityLabel = edge == .top ? localized("Scroll to top") : localized("Scroll to bottom")
-        button.heightAnchor.constraint(equalToConstant: Self.keyHeight).isActive = true
+        registerKeyHeight(button)
+        return button
+    }
+
+    private func makeDismissKeyboardButton() -> UIButton {
+        var config: UIButton.Configuration = if #available(iOS 26.0, *) {
+            .glass()
+        } else {
+            .gray()
+        }
+        config.image = UIImage(
+            systemName: "keyboard.chevron.compact.down",
+            withConfiguration: UIImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+        )
+        config.baseForegroundColor = .label
+        config.cornerStyle = .medium
+        config.contentInsets = NSDirectionalEdgeInsets(top: 2, leading: 2, bottom: 2, trailing: 2)
+        let button = UIButton(configuration: config)
+        button.accessibilityLabel = localized("Hide Keyboard")
+        button.accessibilityIdentifier = "terminal.keyboard.dismiss"
+        registerKeyHeight(button)
+        button.addAction(UIAction { [weak self] _ in
+            self?.haptic.impactOccurred()
+            self?.onDismissKeyboard?()
+        }, for: .touchUpInside)
         return button
     }
 

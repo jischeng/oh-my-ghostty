@@ -160,9 +160,12 @@ final class RuntimeConnection {
         requestedViewport = grid
         viewportGeneration &+= 1
         let generation = viewportGeneration
-        // Same 150 ms settled-viewport rule as Termio's TermiodSession: keyboard
-        // animations must not become a burst of SIGWINCH and TUI repaints.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+        if sentViewport == nil {
+            sentViewport = grid
+            sendResize(grid)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
             guard let self, isWriter, snapshotApplied, generation == viewportGeneration,
                   grid == requestedViewport, grid != sentViewport else { return }
             sentViewport = grid

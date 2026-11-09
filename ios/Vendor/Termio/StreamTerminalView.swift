@@ -69,6 +69,8 @@ final class StreamTerminalView: UIView, UITextInput {
         addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(panned(_:))))
         addGestureRecognizer(UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:))))
         addGestureRecognizer(UILongPressGestureRecognizer(target: self, action: #selector(longPressed(_:))))
+        inputAssistantItem.leadingBarButtonGroups = []
+        inputAssistantItem.trailingBarButtonGroups = []
     }
 
     @available(*, unavailable)
@@ -172,9 +174,11 @@ final class StreamTerminalView: UIView, UITextInput {
         gesture.setTranslation(.zero, in: self)
         scrollRemainder += translation.y
         let cell = max(1, renderer.cellSize.height)
-        let rows = Int((scrollRemainder / cell).rounded(.towardZero))
+        let usesPageKeys = terminal.wheelGoesToProgram && !terminal.tracksMouse
+        let step = usesPageKeys ? cell * 4 : cell
+        let rows = Int((scrollRemainder / step).rounded(.towardZero))
         guard rows != 0 else { return }
-        scrollRemainder -= CGFloat(rows) * cell
+        scrollRemainder -= CGFloat(rows) * step
         let clamped = min(max(-rows, -500), 500)
         if terminal.wheelGoesToProgram {
             let location = gesture.location(in: self)
@@ -241,8 +245,12 @@ final class StreamTerminalView: UIView, UITextInput {
     /// (a composed character, an emoji) is text, as the Mac sends text an
     /// input method commits outside a keystroke.
     func insertText(_ text: String) {
-        // Committing a composition ends it; what it commits is sent below.
-        if !markedText.isEmpty { clearMarkedText() }
+        let hadMarkedText = !markedText.isEmpty
+        if hadMarkedText {
+            inputDelegate?.textWillChange(self)
+            inputDelegate?.selectionWillChange(self)
+            clearMarkedText()
+        }
         var pending = ""
         func flush() {
             guard !pending.isEmpty else { return }
@@ -258,15 +266,35 @@ final class StreamTerminalView: UIView, UITextInput {
             }
         }
         flush()
+        if hadMarkedText {
+            inputDelegate?.selectionDidChange(self)
+            inputDelegate?.textDidChange(self)
+        }
     }
 
     func deleteBackward() {
         // An input method deleting from its own composition: the program has
         // not seen that text, so nothing is sent.
         if !markedText.isEmpty {
-            markedText.removeLast()
-            markedSelection = NSRange(location: (markedText as NSString).length, length: 0)
+            inputDelegate?.textWillChange(self)
+            inputDelegate?.selectionWillChange(self)
+            let mutable = NSMutableString(string: markedText)
+            let clamped = clampedSelectedRange(markedSelection, length: mutable.length)
+            if clamped.length > 0 {
+                mutable.deleteCharacters(in: clamped)
+                markedSelection = NSRange(location: clamped.location, length: 0)
+            } else if clamped.location > 0 {
+                let deletion = NSRange(location: clamped.location - 1, length: 1)
+                mutable.deleteCharacters(in: deletion)
+                markedSelection = NSRange(location: deletion.location, length: 0)
+            }
+            markedText = mutable as String
+            if markedText.isEmpty {
+                markedSelection = NSRange(location: 0, length: 0)
+            }
             needsFullDraw = true
+            inputDelegate?.selectionDidChange(self)
+            inputDelegate?.textDidChange(self)
             return
         }
         press(.init(key: "backspace"))
@@ -487,6 +515,14 @@ final class StreamTextRange: UITextRange {
 extension StreamTerminalView {
     private var markedLength: Int { (markedText as NSString).length }
 
+    var textInputView: UIView { self }
+
+    fileprivate func clampedSelectedRange(_ range: NSRange, length: Int) -> NSRange {
+        let location = min(max(range.location, 0), length)
+        let end = min(max(range.location + range.length, location), length)
+        return NSRange(location: location, length: end - location)
+    }
+
     func clearMarkedText() {
         markedText = ""
         markedSelection = NSRange(location: 0, length: 0)
@@ -498,8 +534,15 @@ extension StreamTerminalView {
     }
 
     var selectedTextRange: UITextRange? {
-        get { StreamTextRange(markedSelection) }
-        set { if let range = newValue as? StreamTextRange { markedSelection = range.range } }
+        get { StreamTextRange(clampedSelectedRange(markedSelection, length: markedLength)) }
+        set {
+            let next = (newValue as? StreamTextRange)?.range ?? NSRange(location: 0, length: 0)
+            let clamped = clampedSelectedRange(next, length: markedLength)
+            guard markedSelection != clamped else { return }
+            inputDelegate?.selectionWillChange(self)
+            markedSelection = clamped
+            inputDelegate?.selectionDidChange(self)
+        }
     }
 
     var markedTextStyle: [NSAttributedString.Key: Any]? {
@@ -508,14 +551,23 @@ extension StreamTerminalView {
     }
 
     func setMarkedText(_ text: String?, selectedRange: NSRange) {
-        markedText = text ?? ""
-        markedSelection = selectedRange
+        inputDelegate?.textWillChange(self)
+        inputDelegate?.selectionWillChange(self)
+        let normalized = text ?? ""
+        markedText = normalized
+        markedSelection = clampedSelectedRange(selectedRange, length: (normalized as NSString).length)
         needsFullDraw = true
+        inputDelegate?.selectionDidChange(self)
+        inputDelegate?.textDidChange(self)
     }
 
     func unmarkText() {
         let committed = markedText
+        inputDelegate?.textWillChange(self)
+        inputDelegate?.selectionWillChange(self)
         clearMarkedText()
+        inputDelegate?.selectionDidChange(self)
+        inputDelegate?.textDidChange(self)
         if !committed.isEmpty { insertText(committed) }
     }
 

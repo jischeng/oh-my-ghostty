@@ -24,14 +24,32 @@ extension NativeSettingsController {
                 }
                 self.presentAsSheet(MobilePairingSheet(
                     invitation: invitation,
+                    instructionText: self.text(
+                        "Open OMG Mobile → Settings → Devices → Scan QR Code.",
+                        "打开 OMG Mobile → 设置 → 设备 → 扫描二维码。"
+                    ),
                     copyTitle: self.text("Copy Link", "复制链接"),
                     closeTitle: self.text("Close", "关闭")
                 ))
             }
         }
-        let copyLink = SettingsActionButton(text("Copy Link", "复制链接")) { [weak mobile] in
-            mobile?.copyInvitation()
+        let copyLink = SettingsActionButton(text("Copy Link", "复制链接")) { [weak self, weak mobile] in
+            guard let self, let mobile else { return }
+            if mobile.invitation != nil {
+                mobile.copyInvitation()
+                return
+            }
+            Task { [weak self, weak mobile] in
+                guard let self, let mobile else { return }
+                await mobile.refreshInvitation()
+                if mobile.invitation != nil {
+                    mobile.copyInvitation()
+                } else if let message = mobile.errorMessage {
+                    self.showError(message)
+                }
+            }
         }
+        let addressValue = valueLabel(mobile.listenAddress ?? text("Unavailable", "不可用"))
 
         form.section(
             text("iPhone", "iPhone"),
@@ -64,7 +82,7 @@ extension NativeSettingsController {
         )
         form.row(
             text("Address", "地址"),
-            control: valueLabel(mobile.listenAddress ?? text("Unavailable", "不可用"))
+            control: addressValue
         )
         form.section(text("Pairing", "配对"))
         form.row(
@@ -101,31 +119,31 @@ extension NativeSettingsController {
         form.row(text("Browse and edit project files", "浏览与编辑项目文件"), control: permissionBadge(text("Allowed", "允许")))
         form.row(text("Create and close sessions", "创建与关闭会话"), control: permissionBadge(text("Allowed", "允许")))
 
-        let update = { [weak self, weak allow, weak availability, weak showQR, weak copyLink, weak mobile] in
+        let update = { [weak self, weak allow, weak availability, weak addressValue, weak showQR, weak copyLink, weak mobile] in
             guard let self, let mobile else { return }
             allow?.state = mobile.state == .starting || mobile.state.isRunning ? .on : .off
             allow?.isEnabled = mobile.state != .starting
+            addressValue?.stringValue = mobile.listenAddress ?? self.text("Unavailable", "不可用")
             switch mobile.state {
             case .stopped:
                 availability?.stringValue = self.text("Stopped", "已停止")
                 availability?.textColor = .secondaryLabelColor
+                availability?.toolTip = mobile.errorMessage
             case .starting:
                 availability?.stringValue = self.text("Starting…", "正在启动…")
                 availability?.textColor = .systemOrange
+                availability?.toolTip = nil
             case .running:
                 availability?.stringValue = self.text("Ready", "已就绪")
                 availability?.textColor = .systemGreen
-            case .failed:
+                availability?.toolTip = mobile.errorMessage
+            case .failed(let reason):
                 availability?.stringValue = self.text("Unavailable", "不可用")
                 availability?.textColor = .systemRed
-            }
-            if let error = mobile.errorMessage, case .failed = mobile.state {
-                availability?.toolTip = error
-            } else {
-                availability?.toolTip = nil
+                availability?.toolTip = mobile.errorMessage ?? reason
             }
             showQR?.isEnabled = mobile.state.isRunning
-            copyLink?.isEnabled = mobile.invitation != nil
+            copyLink?.isEnabled = mobile.state.isRunning || mobile.invitation != nil
         }
         update()
         let tokens = mobile.objectWillChange.receive(on: RunLoop.main).sink { _ in update() }
@@ -157,11 +175,13 @@ extension NativeSettingsController {
 
 private final class MobilePairingSheet: NSViewController {
     private let invitation: String
+    private let instructionText: String
     private let copyTitle: String
     private let closeTitle: String
 
-    init(invitation: String, copyTitle: String, closeTitle: String) {
+    init(invitation: String, instructionText: String, copyTitle: String, closeTitle: String) {
         self.invitation = invitation
+        self.instructionText = instructionText
         self.copyTitle = copyTitle
         self.closeTitle = closeTitle
         super.init(nibName: nil, bundle: nil)
@@ -178,8 +198,7 @@ private final class MobilePairingSheet: NSViewController {
         qr.imageScaling = .scaleProportionallyUpOrDown
         qr.widthAnchor.constraint(equalToConstant: 280).isActive = true
         qr.heightAnchor.constraint(equalToConstant: 280).isActive = true
-        let instruction = NSTextField(wrappingLabelWithString:
-            "Open OMG Mobile → Settings → Devices → Scan QR Code.")
+        let instruction = NSTextField(wrappingLabelWithString: instructionText)
         instruction.textColor = .secondaryLabelColor
         instruction.alignment = .center
         let link = NSTextField(wrappingLabelWithString: invitation)

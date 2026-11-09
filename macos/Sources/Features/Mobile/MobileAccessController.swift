@@ -73,12 +73,17 @@ final class MobileAccessController: ObservableObject {
 
     func start() {
         guard !state.isRunning, state != .starting else { return }
+        address = addressProvider()
         guard FileManager.default.isExecutableFile(atPath: executable.path) else {
-            state = .failed("The bundled mobile runtime is missing.")
+            let reason = "The bundled mobile runtime is missing."
+            errorMessage = reason
+            state = .failed(reason)
             return
         }
         guard let listenAddress else {
-            state = .failed("No private IPv4 LAN address is available.")
+            let reason = "No private IPv4 LAN address is available."
+            errorMessage = reason
+            state = .failed(reason)
             return
         }
         do {
@@ -116,6 +121,7 @@ final class MobileAccessController: ObservableObject {
                         let reason = finished.terminationStatus == 0
                             ? "The mobile gateway stopped."
                             : "The mobile gateway exited with status \(finished.terminationStatus). Check that port \(self.port) is available."
+                        self.errorMessage = reason
                         self.state = .failed(reason)
                     }
                 }
@@ -127,13 +133,14 @@ final class MobileAccessController: ObservableObject {
             log = handle
             state = .starting
             try process.run()
-            Task { [weak self] in
+            Task { [weak self, weak process] in
                 try? await Task.sleep(for: .milliseconds(450))
-                guard let self, let running = self.process, running.isRunning else { return }
+                guard let self, let process, self.process === process, process.isRunning else { return }
                 self.state = .running
                 await self.refreshInvitation()
             }
         } catch {
+            errorMessage = error.localizedDescription
             state = .failed(error.localizedDescription)
             try? log?.close()
             log = nil
@@ -147,49 +154,56 @@ final class MobileAccessController: ObservableObject {
         try? log?.close()
         log = nil
         invitation = nil
+        errorMessage = nil
         connectedDevices = 0
         state = .stopped
     }
 
     func refreshInvitation() async {
+        address = addressProvider()
         guard let listenAddress else {
             errorMessage = "No private IPv4 LAN address is available."
             return
         }
+        let executable = self.executable
+        let support = self.support
+        let tokenFile = self.tokenFile
         do {
             try FileManager.default.createDirectory(
                 at: support, withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o700]
             )
-            let process = Process()
-            let output = Pipe()
-            let errors = Pipe()
-            process.executableURL = executable
-            process.arguments = [
-                "mobile", "--listen", listenAddress,
-                "--app-support", support.path,
-                "--token-file", tokenFile.path,
-                "--print-invite",
-            ]
-            process.standardOutput = output
-            process.standardError = errors
-            try process.run()
-            process.waitUntilExit()
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            guard process.terminationStatus == 0,
-                  let text = String(data: data, encoding: .utf8)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines),
-                  text.hasPrefix("omg://device?") else {
-                let message = String(
-                    data: errors.fileHandleForReading.readDataToEndOfFile(),
-                    encoding: .utf8
-                )?.trimmingCharacters(in: .whitespacesAndNewlines)
-                throw NSError(
-                    domain: "OMGMobileAccess", code: 1,
-                    userInfo: [NSLocalizedDescriptionKey: message?.isEmpty == false
-                        ? message! : "Could not create a pairing invitation."]
-                )
-            }
+            let text = try await Task.detached { () -> String in
+                let process = Process()
+                let output = Pipe()
+                let errors = Pipe()
+                process.executableURL = executable
+                process.arguments = [
+                    "mobile", "--listen", listenAddress,
+                    "--app-support", support.path,
+                    "--token-file", tokenFile.path,
+                    "--print-invite",
+                ]
+                process.standardOutput = output
+                process.standardError = errors
+                try process.run()
+                let data = output.fileHandleForReading.readDataToEndOfFile()
+                let errorData = errors.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                guard process.terminationStatus == 0,
+                      let text = String(data: data, encoding: .utf8)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines),
+                      text.hasPrefix("omg://device?") else {
+                    let message = String(data: errorData, encoding: .utf8)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    throw NSError(
+                        domain: "OMGMobileAccess", code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: message?.isEmpty == false
+                            ? message! : "Could not create a pairing invitation."]
+                    )
+                }
+                return text
+            }.value
             errorMessage = nil
             invitation = text
         } catch {

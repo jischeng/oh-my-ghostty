@@ -115,7 +115,7 @@ struct NativeSettingsTests {
             window.close()
         }
         let add = try #require(descendants(controller.view).compactMap { $0 as? NSButton }
-            .first { $0.accessibilityLabel() == "Add a host" })
+            .first { $0.accessibilityLabel() == "Add a machine" })
         add.performClick(nil)
         try await Task.sleep(for: .milliseconds(150))
         let sheet = try #require(window.attachedSheet)

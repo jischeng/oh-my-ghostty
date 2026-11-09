@@ -11,6 +11,55 @@ struct SettingsControlsTests {
         ) != nil)
     }
 
+    @Test func mobileAccessRefreshesAddressAndReportsFailureReasons() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let executable = directory.appendingPathComponent("fake-omgd")
+        var currentAddress: String?
+        let controller = MobileAccessController(
+            executable: executable,
+            support: directory,
+            port: 18791,
+            addressProvider: { currentAddress }
+        )
+        #expect(controller.listenAddress == nil)
+        controller.start()
+        #expect(controller.state == .failed("The bundled mobile runtime is missing."))
+        #expect(controller.errorMessage == "The bundled mobile runtime is missing.")
+
+        let script = """
+        #!/bin/sh
+        for arg in "$@"; do
+            if [ "$arg" = "--print-invite" ]; then
+                printf 'omg://device?url=ws://192.168.1.9:18791&token=testtoken\\n'
+                exit 0
+            fi
+        done
+        exit 0
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        controller.start()
+        #expect(controller.state == .failed("No private IPv4 LAN address is available."))
+        #expect(controller.errorMessage == "No private IPv4 LAN address is available.")
+
+        currentAddress = "192.168.1.9"
+        await controller.refreshInvitation()
+        #expect(controller.listenAddress == "192.168.1.9:18791")
+        #expect(controller.invitation == "omg://device?url=ws://192.168.1.9:18791&token=testtoken")
+        #expect(controller.errorMessage == nil)
+
+        let tokenFile = directory.appendingPathComponent("mobile-pair.token")
+        try Data("token".utf8).write(to: tokenFile)
+        #expect(controller.hasPairing)
+        controller.revokePairings()
+        #expect(!controller.hasPairing)
+        #expect(controller.invitation == nil)
+        #expect(controller.state == .stopped)
+    }
+
     @Test func pickerUsesNativeMenuAndPreservesSelectionSemantics() throws {
         var value: String?
         let binding = Binding<String?>(get: { value }, set: { value = $0 })

@@ -150,7 +150,7 @@ def main():
         if path.name != 'manifest.json': shutil.copy2(path, output/path.name)
     if args.macos == 'all':
         for path in (output/f'macos-{native}').iterdir():
-            if path.name not in ('omgd',) and path.suffix != '.dylib': continue
+            if path.name not in ('omgd', 'omg-mobile-support') and path.suffix != '.dylib': continue
             run(['/usr/bin/lipo', '-create', str(output/'macos-aarch64'/path.name),
                  str(output/'macos-x86_64'/path.name), '-output', str(output/path.name)])
             sign_adhoc([output/path.name])

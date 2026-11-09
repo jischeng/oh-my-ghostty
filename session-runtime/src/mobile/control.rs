@@ -317,7 +317,7 @@ fn device_identity(config: &Config) -> io::Result<String> {
 }
 
 fn computer_name() -> String {
-    let mut bytes = [0_i8; 256];
+    let mut bytes = [0 as libc::c_char; 256];
     if unsafe { libc::gethostname(bytes.as_mut_ptr(), 255) } == 0 {
         return unsafe { std::ffi::CStr::from_ptr(bytes.as_ptr()) }
             .to_string_lossy()

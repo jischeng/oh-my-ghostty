@@ -51,6 +51,14 @@ struct SettingsControlsTests {
         #expect(controller.invitation == "omg://device?url=ws://192.168.1.9:18791&token=testtoken")
         #expect(controller.errorMessage == nil)
 
+        #expect(!controller.setPublicURL("ws://119.29.60.90:18791"))
+        #expect(controller.publicURL.isEmpty)
+        #expect(controller.setPublicURL("https://119.29.60.90:18791/"))
+        #expect(controller.publicURL == "wss://119.29.60.90:18791")
+        #expect(controller.invitation == "omg://device?url=wss://119.29.60.90:18791&token=testtoken")
+        #expect(controller.setPublicURL(""))
+        #expect(controller.invitation == "omg://device?url=ws://192.168.1.9:18791&token=testtoken")
+
         let tokenFile = directory.appendingPathComponent("mobile-pair.token")
         try Data("token".utf8).write(to: tokenFile)
         #expect(controller.hasPairing)
@@ -73,7 +81,7 @@ struct SettingsControlsTests {
         defer { window.close() }
         settingsController.view.layoutSubtreeIfNeeded()
         let form = try #require(settingsController.children.compactMap { $0 as? NativeSettingsForm }.first)
-        #expect(form.rowTitles == ["允许 iPhone 连接", "网关状态", "配对密钥"])
+        #expect(form.rowTitles == ["允许 iPhone 连接", "网关状态", "外部 WSS 入口", "配对密钥"])
 
         controller.revokePairings()
         #expect(!controller.hasPairing)

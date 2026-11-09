@@ -49,10 +49,34 @@ struct Config {
     origin: Option<String>,
     control: control::State,
 }
+#[derive(Debug, PartialEq, Eq)]
 enum Route {
     Catalogue,
     Control,
     Session(PathBuf),
+}
+
+fn parse_route(path: &str, destinations: &[Endpoint]) -> Option<Route> {
+    if path.is_empty() || path.contains("..") || path.contains('\\') {
+        return None;
+    }
+    let clean = path.trim_end_matches('/');
+    if clean == "/catalogue" || clean.ends_with("/catalogue") {
+        return Some(Route::Catalogue);
+    }
+    if clean == "/control" || clean.ends_with("/control") {
+        return Some(Route::Control);
+    }
+    let id = clean
+        .strip_prefix("/ws/")
+        .or_else(|| clean.rsplit_once("/ws/").map(|(_, id)| id))?;
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    destinations
+        .iter()
+        .find(|e| e.id == id)
+        .map(|e| Route::Session(e.socket.clone()))
 }
 impl Config {
     fn endpoints(&self) -> io::Result<Vec<Endpoint>> {
@@ -218,21 +242,49 @@ pub fn run(args: &[String]) -> io::Result<()> {
     }
     tokio::runtime::Runtime::new()?.block_on(async move {
         let listener = tokio::net::TcpListener::bind(address).await?;
-        eprintln!(
-            "OMG mobile listening on ws://{}/catalogue",
-            listener.local_addr()?
-        );
+        let bound = listener.local_addr()?;
+        eprintln!("OMG mobile listening on ws://{bound}/catalogue");
+        let loopback_listener = if !bound.ip().is_loopback() && bound.port() != 0 {
+            let lo = SocketAddr::new(IpAddr::V4( std::net::Ipv4Addr::LOCALHOST), bound.port());
+            tokio::net::TcpListener::bind(lo).await.ok()
+        } else {
+            None
+        };
+        if let Some(ref lo) = loopback_listener {
+            if let Ok(addr) = lo.local_addr() {
+                eprintln!("OMG mobile also listening on ws://{addr}/catalogue");
+            }
+        }
         eprintln!("Pairing token file: {}", key.display());
-        let permits = Arc::new(tokio::sync::Semaphore::new(16));
+        let handshake_permits = Arc::new(tokio::sync::Semaphore::new(64));
+        let session_permits = Arc::new(tokio::sync::Semaphore::new(16));
+        let auth_failure_permits = Arc::new(tokio::sync::Semaphore::new(8));
         loop {
-            let (stream, _) = listener.accept().await?;
-            let Ok(permit) = permits.clone().try_acquire_owned() else {
+            let accepted = if let Some(ref lo) = loopback_listener {
+                tokio::select! {
+                    res = listener.accept() => res,
+                    res = lo.accept() => res,
+                }
+            } else {
+                listener.accept().await
+            };
+            let (stream, _) = accepted?;
+            let Ok(handshake_permit) = handshake_permits.clone().try_acquire_owned() else {
                 continue;
             };
             let config = config.clone();
+            let session_permits = session_permits.clone();
+            let auth_failure_permits = auth_failure_permits.clone();
             tokio::spawn(async move {
-                let _permit = permit;
-                if let Err(error) = serve(stream, config).await {
+                if let Err(error) = serve(
+                    stream,
+                    config,
+                    handshake_permit,
+                    session_permits,
+                    auth_failure_permits,
+                )
+                .await
+                {
                     eprintln!("OMG mobile connection ended: {error}");
                 }
             });
@@ -240,13 +292,21 @@ pub fn run(args: &[String]) -> io::Result<()> {
     })
 }
 
-async fn serve(stream: tokio::net::TcpStream, config: Arc<Config>) -> io::Result<()> {
+async fn serve(
+    stream: tokio::net::TcpStream,
+    config: Arc<Config>,
+    handshake_permit: tokio::sync::OwnedSemaphorePermit,
+    session_permits: Arc<tokio::sync::Semaphore>,
+    auth_failure_permits: Arc<tokio::sync::Semaphore>,
+) -> io::Result<()> {
     let endpoints = config.endpoints()?;
     let destinations = endpoints.clone();
     let key = config.token.clone();
     let allowed_origin = config.origin.clone();
     let (tx, rx) = tokio::sync::oneshot::channel();
     let mut tx = Some(tx);
+    let auth_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let auth_failed_cb = auth_failed.clone();
     let handshake = tokio_tungstenite::accept_hdr_async_with_config(
         stream,
         #[allow(clippy::result_large_err)]
@@ -263,32 +323,21 @@ async fn serve(stream: tokio::net::TcpStream, config: Arc<Config>) -> io::Result
                     .and_then(|v| v.to_str().ok()),
                 &key,
             )
-            .ok_or_else(|| refuse(StatusCode::UNAUTHORIZED))?;
+            .ok_or_else(|| {
+                auth_failed_cb.store(true, std::sync::atomic::Ordering::Relaxed);
+                refuse(StatusCode::UNAUTHORIZED)
+            })?;
             // Native clients send no Origin. Browser clients must be explicitly allowed.
             if let Some(origin) = request.headers().get("origin") {
                 if origin.to_str().ok() != allowed_origin.as_deref() {
                     return Err(refuse(StatusCode::FORBIDDEN));
                 }
             }
-            let destination = if request.uri().path() == "/catalogue" {
-                Route::Catalogue
-            } else if request.uri().path() == "/control" {
-                Route::Control
-            } else {
-                let id = request
-                    .uri()
-                    .path()
-                    .strip_prefix("/ws/")
-                    .ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
-                Route::Session(
-                    destinations
-                        .iter()
-                        .find(|e| e.id == id)
-                        .ok_or_else(|| refuse(StatusCode::NOT_FOUND))?
-                        .socket
-                        .clone(),
-                )
-            };
+            if request.uri().query().is_some() {
+                return Err(refuse(StatusCode::BAD_REQUEST));
+            }
+            let destination = parse_route(request.uri().path(), &destinations)
+                .ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
             response.headers_mut().insert(
                 "sec-websocket-protocol",
                 HeaderValue::from_str(&selected).map_err(|_| refuse(StatusCode::BAD_REQUEST))?,
@@ -304,10 +353,23 @@ async fn serve(stream: tokio::net::TcpStream, config: Arc<Config>) -> io::Result
                 .max_frame_size(Some(omg_session_runtime::MAX_FRAME)),
         ),
     );
-    let mut ws = tokio::time::timeout(Duration::from_secs(10), handshake)
-        .await
-        .map_err(io::Error::other)?
-        .map_err(io::Error::other)?;
+    let ws = match tokio::time::timeout(Duration::from_secs(5), handshake).await {
+        Ok(Ok(ws)) => ws,
+        Ok(Err(error)) => {
+            if auth_failed.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Ok(_tarpit) = auth_failure_permits.try_acquire() {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+            return Err(io::Error::other(error));
+        }
+        Err(error) => return Err(io::Error::other(error)),
+    };
+    drop(handshake_permit);
+    let _session_permit = session_permits
+        .try_acquire_owned()
+        .map_err(|_| io::Error::other("Too many active mobile connections"))?;
+    let mut ws = ws;
     let destination = rx.await.map_err(io::Error::other)?;
     let destination = match destination {
         Route::Control => return control::serve(ws, config).await,
@@ -373,5 +435,29 @@ mod tests {
         );
         assert!(select_subprotocol(Some("omg.secreu"), "secret").is_none());
         assert!(select_subprotocol(Some("termiod.secret"), "secret").is_none());
+    }
+
+    #[test]
+    fn route_accepts_direct_and_reverse_proxy_subpaths_while_rejecting_traversal() {
+        let endpoints = vec![Endpoint {
+            id: "a1b2c3".into(),
+            name: "This Mac".into(),
+            socket: PathBuf::from("/tmp/host.sock"),
+        }];
+        assert_eq!(parse_route("/control", &endpoints), Some(Route::Control));
+        assert_eq!(
+            parse_route("/omg/control/", &endpoints),
+            Some(Route::Control)
+        );
+        assert_eq!(
+            parse_route("/catalogue", &endpoints),
+            Some(Route::Catalogue)
+        );
+        assert_eq!(
+            parse_route("/omg/ws/a1b2c3", &endpoints),
+            Some(Route::Session(PathBuf::from("/tmp/host.sock")))
+        );
+        assert_eq!(parse_route("/omg/../control", &endpoints), None);
+        assert_eq!(parse_route("/ws/not-hex!", &endpoints), None);
     }
 }

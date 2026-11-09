@@ -835,14 +835,22 @@ fn request_control(config: &Config, request: &Value) -> io::Result<Value> {
             if bytes.len() > 8 * FILE_LIMIT {
                 return Err(io::Error::other("Upload exceeds 8 MiB"));
             }
-            let directory = project.root.join(".omg-mobile-uploads");
-            fs::create_dir_all(&directory)?;
-            let directory = confine(&project.root, &directory.to_string_lossy())?;
+            let root = fs::canonicalize(&project.root)?;
+            let directory = root.join(".omg-mobile-uploads");
+            if let Ok(meta) = fs::symlink_metadata(&directory) {
+                if meta.file_type().is_symlink() || !meta.is_dir() {
+                    return Err(io::Error::other("Path escapes project"));
+                }
+            } else {
+                fs::DirBuilder::new().mode(0o700).create(&directory)?;
+            }
+            let directory = confine(&root, ".omg-mobile-uploads")?;
             let target = directory.join(format!("{}-{name}", record::nonce()?));
             fs::OpenOptions::new()
                 .create_new(true)
                 .write(true)
                 .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
                 .open(&target)?
                 .write_all(&bytes)?;
             Ok(json!({"t":"uploaded","path":target}))

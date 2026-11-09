@@ -86,7 +86,7 @@ extension NativeSettingsController {
                 }
                 self.presentAsSheet(MobilePairingSheet(
                     invitation: invitation,
-                    endpoint: mobile.listenAddress ?? self.text("LAN", "局域网"),
+                    endpoint: mobile.displayEndpoint ?? self.text("LAN", "局域网"),
                     titleText: self.text("Pair iPhone with OMG", "配对 iPhone"),
                     instructionText: self.text(
                         "Open OMG Mobile → Settings → Devices → Scan QR Code.",
@@ -98,6 +98,17 @@ extension NativeSettingsController {
                 ))
             }
         }
+
+        let publicURLField = SettingsTextField(
+            mobile.publicURL,
+            placeholder: "wss://example.com:18791"
+        ) { [weak self, weak mobile] value in
+            guard let self, let mobile else { return }
+            if !mobile.setPublicURL(value), let message = mobile.errorMessage {
+                self.showError(message)
+            }
+        }
+        publicURLField.action = #selector(NSTextField.selectText(_:))
 
         form.section(text("LAN Gateway", "局域网网关"))
         form.row(
@@ -116,6 +127,14 @@ extension NativeSettingsController {
             ),
             control: statusControl
         )
+        form.row(
+            text("External WSS URL", "外部 WSS 入口"),
+            subtitle: text(
+                "Optional. If exposed via your own VPS / Nginx reverse proxy, enter its wss:// URL so the QR code uses that TLS endpoint.",
+                "可选。若通过自有 VPS / Nginx 反向代理暴露网关（本地转发 127.0.0.1:8791），填写 wss:// 地址后二维码将使用该加密入口。"
+            ),
+            control: publicURLField
+        )
         let statusSubtitle = statusRow?.labels.arrangedSubviews.dropFirst().first as? NSTextField
 
         form.section(text("Device Pairing", "设备配对"))
@@ -130,16 +149,20 @@ extension NativeSettingsController {
         )
 
         var refreshingInvite = false
-        let update = { [weak self, weak allow, weak statusControl, weak statusSubtitle, weak pairingCard, weak showQR, weak copyLink, weak revokeButton, weak mobile] in
+        let update = { [weak self, weak allow, weak statusControl, weak statusSubtitle, weak publicURLField, weak pairingCard, weak showQR, weak copyLink, weak revokeButton, weak mobile] in
             guard let self, let mobile else { return }
             allow?.state = mobile.state == .starting || mobile.state.isRunning ? .on : .off
             allow?.isEnabled = mobile.state != .starting
+            if publicURLField?.currentEditor() == nil {
+                publicURLField?.stringValue = mobile.publicURL
+            }
             let endpoint = mobile.listenAddress ?? self.text("Unavailable", "不可用")
+            let activeEndpoint = mobile.publicURL.isEmpty ? ("LAN · " + endpoint) : mobile.publicURL
 
             switch mobile.state {
             case .stopped:
                 statusControl?.configure(
-                    endpoint: endpoint,
+                    endpoint: mobile.displayEndpoint ?? endpoint,
                     statusText: self.text("Stopped", "未启用"),
                     color: .secondaryLabelColor
                 )
@@ -156,7 +179,7 @@ extension NativeSettingsController {
                 )
             case .starting:
                 statusControl?.configure(
-                    endpoint: endpoint,
+                    endpoint: mobile.displayEndpoint ?? endpoint,
                     statusText: self.text("Starting…", "正在启动…"),
                     color: .systemOrange
                 )
@@ -173,14 +196,19 @@ extension NativeSettingsController {
                 )
             case .running:
                 statusControl?.configure(
-                    endpoint: "LAN · " + endpoint,
+                    endpoint: activeEndpoint,
                     statusText: self.text("Ready", "已就绪"),
                     color: .systemGreen
                 )
-                statusSubtitle?.stringValue = self.text(
-                    "Listening on local network. Keep your iPhone and this Mac on the same Wi-Fi / LAN.",
-                    "正在局域网监听连接，请确保 iPhone 与当前 Mac 处于同一局域网（Wi-Fi）。"
-                )
+                statusSubtitle?.stringValue = mobile.publicURL.isEmpty
+                    ? self.text(
+                        "Listening on local network (and 127.0.0.1:8791). Keep your iPhone and this Mac on the same Wi-Fi / LAN.",
+                        "正在局域网（及 127.0.0.1:8791）监听连接，请确保 iPhone 与当前 Mac 处于同一局域网。"
+                    )
+                    : self.text(
+                        "Listening locally on \(endpoint) & 127.0.0.1:8791; QR code uses \(mobile.publicURL).",
+                        "本地监听 \(endpoint) 与 127.0.0.1:8791；配对二维码使用 \(mobile.publicURL)。"
+                    )
                 statusSubtitle?.textColor = .secondaryLabelColor
                 if let invitation = mobile.invitation, let qr = MobileAccessController.qrImage(for: invitation) {
                     pairingCard?.update(

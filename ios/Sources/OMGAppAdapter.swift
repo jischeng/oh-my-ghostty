@@ -52,10 +52,32 @@ enum OMGPairing {
     }
 
     static func valid(url: URL, token: String) -> Bool {
-        ["ws", "wss"].contains(url.scheme ?? "") && url.host != nil &&
-            url.user == nil && url.password == nil && url.query == nil && url.fragment == nil &&
-            (url.path.isEmpty || url.path == "/") && (32...256).contains(token.utf8.count) &&
-            token.utf8.allSatisfy { (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) }
+        guard let scheme = url.scheme?.lowercased(), ["ws", "wss"].contains(scheme),
+              let host = url.host, !host.isEmpty,
+              url.user == nil, url.password == nil, url.query == nil, url.fragment == nil,
+              !url.path.contains(".."), !url.path.contains("\\"),
+              (32...256).contains(token.utf8.count),
+              token.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) })
+        else { return false }
+        if scheme == "ws" && !isPrivateOrLoopbackHost(host) {
+            return false
+        }
+        return true
+    }
+
+    static func isPrivateOrLoopbackHost(_ host: String) -> Bool {
+        let lower = host.lowercased()
+        if lower == "localhost" || lower == "::1" || lower.hasSuffix(".local") {
+            return true
+        }
+        let octets = lower.split(separator: ".", omittingEmptySubsequences: false).compactMap { Int($0) }
+        guard octets.count == 4, octets.allSatisfy({ (0...255).contains($0) }) else { return false }
+        return octets[0] == 127 ||
+            octets[0] == 10 ||
+            (octets[0] == 172 && (16...31).contains(octets[1])) ||
+            (octets[0] == 192 && octets[1] == 168) ||
+            (octets[0] == 169 && octets[1] == 254) ||
+            (octets[0] == 100 && (64...127).contains(octets[1]))
     }
 
     static func verify(url: URL, token: String,

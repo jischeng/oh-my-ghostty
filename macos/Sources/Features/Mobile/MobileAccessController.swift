@@ -24,11 +24,13 @@ final class MobileAccessController: ObservableObject {
     @Published private(set) var invitation: String?
     @Published private(set) var errorMessage: String?
     @Published private(set) var address: String?
+    @Published private(set) var publicURL: String = ""
     @Published private(set) var connectedDevices = 0
 
     private let executable: URL
     private let support: URL
     private let tokenFile: URL
+    private let publicURLFile: URL
     private let port: Int
     private let addressProvider: () -> String?
     private var process: Process?
@@ -37,7 +39,14 @@ final class MobileAccessController: ObservableObject {
     private var terminationObserver: NSObjectProtocol?
 
     var listenAddress: String? {
-        address.map { "\($0):\(port)" }
+        if let address { return "\(address):\(port)" }
+        if !publicURL.isEmpty { return "127.0.0.1:\(port)" }
+        return nil
+    }
+
+    var displayEndpoint: String? {
+        if !publicURL.isEmpty { return publicURL }
+        return listenAddress
     }
 
     var hasPairing: Bool {
@@ -56,6 +65,12 @@ final class MobileAccessController: ObservableObject {
         self.port = port
         self.addressProvider = addressProvider
         tokenFile = support.appendingPathComponent("mobile-pair.token")
+        publicURLFile = support.appendingPathComponent("mobile-public-url.txt")
+        if let saved = try? String(contentsOf: publicURLFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           let normalized = Self.validatedPublicURL(saved) {
+            publicURL = normalized
+        }
         address = addressProvider()
         terminationObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
@@ -205,11 +220,104 @@ final class MobileAccessController: ObservableObject {
                 return text
             }.value
             errorMessage = nil
-            invitation = text
+            invitation = applyPublicURL(to: text)
         } catch {
             invitation = nil
             errorMessage = error.localizedDescription
         }
+    }
+
+    @discardableResult
+    func setPublicURL(_ rawValue: String) -> Bool {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            publicURL = ""
+            errorMessage = nil
+            try? FileManager.default.removeItem(at: publicURLFile)
+            if let current = invitation {
+                invitation = applyPublicURL(to: current)
+            }
+            return true
+        }
+        guard let normalized = Self.validatedPublicURL(trimmed) else {
+            errorMessage = "Public endpoints must use wss:// (TLS) with a valid host and no query or credentials."
+            return false
+        }
+        do {
+            try FileManager.default.createDirectory(
+                at: support, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            try Data(normalized.utf8).write(to: publicURLFile, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: publicURLFile.path)
+            publicURL = normalized
+            errorMessage = nil
+            if let current = invitation {
+                invitation = applyPublicURL(to: current)
+            }
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    private func applyPublicURL(to rawInvite: String) -> String {
+        guard let components = URLComponents(string: rawInvite),
+              let items = components.queryItems,
+              let token = items.first(where: { $0.name == "token" })?.value else {
+            return rawInvite
+        }
+        let targetURL: String
+        if !publicURL.isEmpty {
+            targetURL = publicURL
+        } else if let listenAddress {
+            targetURL = "ws://\(listenAddress)"
+        } else {
+            return rawInvite
+        }
+        return "omg://device?url=\(targetURL)&token=\(token)"
+    }
+
+    static func validatedPublicURL(_ rawValue: String) -> String? {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, var components = URLComponents(string: trimmed) else { return nil }
+        switch components.scheme?.lowercased() {
+        case "wss", "https":
+            components.scheme = "wss"
+        case "ws", "http":
+            guard let host = components.host, isPrivateOrLoopbackHost(host) else { return nil }
+            components.scheme = "ws"
+        default:
+            return nil
+        }
+        guard let host = components.host, !host.isEmpty,
+              components.user == nil, components.password == nil,
+              components.query == nil, components.fragment == nil,
+              !components.path.contains(".."), !components.path.contains("\\") else {
+            return nil
+        }
+        if components.path == "/" {
+            components.path = ""
+        } else if components.path.hasSuffix("/") {
+            components.path = String(components.path.dropLast())
+        }
+        return components.string
+    }
+
+    static func isPrivateOrLoopbackHost(_ host: String) -> Bool {
+        let lower = host.lowercased()
+        if lower == "localhost" || lower == "::1" || lower.hasSuffix(".local") {
+            return true
+        }
+        let octets = lower.split(separator: ".", omittingEmptySubsequences: false).compactMap { Int($0) }
+        guard octets.count == 4, octets.allSatisfy({ (0...255).contains($0) }) else { return false }
+        return octets[0] == 127 ||
+            octets[0] == 10 ||
+            (octets[0] == 172 && (16...31).contains(octets[1])) ||
+            (octets[0] == 192 && octets[1] == 168) ||
+            (octets[0] == 169 && octets[1] == 254) ||
+            (octets[0] == 100 && (64...127).contains(octets[1]))
     }
 
     func revokePairings() {

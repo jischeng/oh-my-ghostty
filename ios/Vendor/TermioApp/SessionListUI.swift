@@ -32,11 +32,19 @@ struct SessionRow: View {
     let session: MockSession
     let isCurrent: Bool
     var showsProject = false
+    var isTreeChild = false
+    var isLastTreeChild = false
     var isFirst = false
     var isLast = false
 
+    private static let treeIndent: CGFloat = 24
+
     var body: some View {
         HStack(alignment: .center, spacing: ListCard.tileSpacing) {
+            if isTreeChild {
+                Color.clear
+                    .frame(width: Self.treeIndent, height: 1)
+            }
             OMGAgentMark(agent: session.agent.id, status: session.status)
                 .frame(width: ListCard.tileSize, height: ListCard.tileSize)
             VStack(alignment: .leading, spacing: 1) {
@@ -60,7 +68,19 @@ struct SessionRow: View {
             }
             ListChevron()
         }
-        .listCard(isFirst: isFirst, isLast: isLast, isHighlighted: isCurrent)
+        .listCard(
+            isFirst: isFirst,
+            isLast: isLast,
+            isHighlighted: isCurrent,
+            separatorLeadingInset: isTreeChild ? ListCard.separatorInset + Self.treeIndent : ListCard.separatorInset
+        )
+        .overlay(alignment: .leading) {
+            if isTreeChild {
+                TreeBranchConnector(continuesDown: !isLastTreeChild)
+                    .padding(.leading, ListCard.horizontalPadding)
+                    .allowsHitTesting(false)
+            }
+        }
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("session.\(session.omgAccessibilityID)")
         .accessibilityLabel("\(session.agent.name), \(session.title), \(subtitle)")
@@ -85,6 +105,106 @@ struct SessionRow: View {
         if let branch = session.worktreeBranch { parts.append(branch) }
         if !session.subtitle.isEmpty { parts.append(session.subtitle) }
         return parts.joined(separator: " · ")
+    }
+}
+
+/// Draws the vertical and elbow tree guide line under a parent `ProjectRow`'s
+/// 32pt `ListTile` folder icon, connecting each expanded child `SessionRow`.
+private struct TreeBranchConnector: View {
+    let continuesDown: Bool
+
+    var body: some View {
+        Canvas { context, size in
+            let x = ListCard.tileSize / 2
+            let midY = size.height / 2
+            let armEnd = ListCard.tileSize - 2
+            let cornerRadius: CGFloat = 6
+
+            var path = Path()
+            if continuesDown {
+                path.move(to: CGPoint(x: x, y: 0))
+                path.addLine(to: CGPoint(x: x, y: size.height))
+                path.move(to: CGPoint(x: x, y: midY))
+                path.addLine(to: CGPoint(x: armEnd, y: midY))
+            } else {
+                path.move(to: CGPoint(x: x, y: 0))
+                path.addLine(to: CGPoint(x: x, y: max(0, midY - cornerRadius)))
+                path.addQuadCurve(
+                    to: CGPoint(x: x + cornerRadius, y: midY),
+                    control: CGPoint(x: x, y: midY)
+                )
+                path.addLine(to: CGPoint(x: armEnd, y: midY))
+            }
+            context.stroke(
+                path,
+                with: .color(Color(uiColor: .tertiaryLabel).opacity(0.65)),
+                style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round)
+            )
+        }
+        .frame(width: ListCard.tileSize)
+    }
+}
+
+// MARK: - Project row (shared by Projects and Agent tabs)
+
+/// One project folder card row: the glass folder tile leading, the project name
+/// over its git branch, the aggregated status indicator, and a disclosure
+/// chevron that points down (`⌄`) when its drawer of sessions is expanded.
+struct ProjectRow: View {
+    let project: MockProject
+    var isExpanded = false
+    var isFirst = false
+    var isLast = false
+    var accessibilityID: String? = nil
+
+    var body: some View {
+        HStack(alignment: .center, spacing: ListCard.tileSpacing) {
+            ListTile {
+                if let folder = HugeIcon.folder.solidImage(boxSize: 18) {
+                    Image(uiImage: folder)
+                        .renderingMode(.template)
+                        .foregroundStyle(Color.primary.opacity(0.85))
+                }
+            }
+            VStack(alignment: .leading, spacing: 1) {
+                Text(project.kind == "chats" ? localized("Agent") : project.name)
+                    .font(.body)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if let branch = project.branch, !branch.isEmpty {
+                    Text(branch)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
+            Spacer(minLength: 4)
+            summary
+            ListChevron(isExpanded: isExpanded)
+        }
+        .listCard(isFirst: isFirst, isLast: isLast)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier(accessibilityID ?? "project.\(project.path.isEmpty ? project.stableKey : project.path)")
+    }
+
+    @ViewBuilder
+    private var summary: some View {
+        let attention = project.sessions.count { $0.status == .needsAttention }
+        let working = project.sessions.count { $0.status == .working }
+        let done = project.sessions.count { $0.status == .done }
+        if attention > 0 {
+            HStack(spacing: 4) {
+                Circle().fill(.orange).frame(width: 7, height: 7)
+                Text("\(attention)")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.orange)
+            }
+        } else if working > 0 {
+            WorkingIndicator(tint: .secondary)
+        } else if done > 0 {
+            Circle().fill(.green).frame(width: 7, height: 7)
+        }
     }
 }
 
@@ -143,17 +263,26 @@ struct ListTile<Content: View>: View {
 }
 
 struct ListChevron: View {
+    var isExpanded = false
+
     var body: some View {
         Image(systemName: "chevron.right")
             .font(.footnote.weight(.semibold))
             .foregroundStyle(.tertiary)
+            .rotationEffect(.degrees(isExpanded ? 90 : 0))
+            .animation(.snappy(duration: 0.2), value: isExpanded)
     }
 }
 
 extension View {
     /// One row's slice of its group's card: only the group's outer corners
     /// round, and the hairline runs under every row but the last.
-    func listCard(isFirst: Bool, isLast: Bool, isHighlighted: Bool = false) -> some View {
+    func listCard(
+        isFirst: Bool,
+        isLast: Bool,
+        isHighlighted: Bool = false,
+        separatorLeadingInset: CGFloat = ListCard.separatorInset
+    ) -> some View {
         let radius = ListCard.cornerRadius
         let shape = UnevenRoundedRectangle(
             topLeadingRadius: isFirst ? radius : 0,
@@ -171,7 +300,7 @@ extension View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay(alignment: .bottom) {
                 if !isLast {
-                    RowSeparator(leadingInset: ListCard.separatorInset)
+                    RowSeparator(leadingInset: separatorLeadingInset)
                         .padding(.trailing, ListCard.horizontalPadding)
                 }
             }

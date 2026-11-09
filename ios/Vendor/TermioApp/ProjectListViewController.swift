@@ -27,7 +27,7 @@ final class ProjectListViewController: UIViewController {
 
     private enum Section {
         case needsYou
-        case projects
+        case project(MockProject)
     }
 
     /// The sections currently on screen, rebuilt on every roster change.
@@ -37,6 +37,8 @@ final class ProjectListViewController: UIViewController {
     /// The workspace's projects, in roster order. Chats- and Terminals-kind
     /// containers are excluded: they have their own tabs.
     private var projects: [MockProject] = []
+    /// Projects whose session drawers are currently unfolded inline.
+    private var expandedProjects: Set<String> = []
 
     /// Mirrors the Mac sidebar's sort pull-down. The roster arrives in the
     /// Mac's recent-activity order, so "Recent Activity" means "as pushed";
@@ -44,6 +46,7 @@ final class ProjectListViewController: UIViewController {
     private var sortByName = UserDefaults.standard.string(forKey: "sessions.sortOrder") == "name"
 
     private let filterButton = UIButton(type: .system)
+    private let newSessionButton = UIButton(type: .system)
     /// Opens the workspace rail: the title itself is the control, Slack's shape.
     /// Disabled whenever the rail is absent (one workspace, or none yet), so the
     /// common case keeps exactly the title bar it had.
@@ -84,9 +87,11 @@ final class ProjectListViewController: UIViewController {
         // A full page, not a drawer. Tinted to the terminal theme so the whole
         // app reads as one canvas (the rows/table draw clear over it).
         themeObserver = installThemeBackdrop()
+        configureNewSessionButton()
         let topBar = configureTopBar()
         configureTable(below: topBar)
         configureEmptyState(below: topBar)
+        configureFab()
         navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .add, primaryAction: UIAction { [weak self] _ in
             guard let self else { return }
             OMGProjectPicker.present(from: self, store: store)
@@ -309,10 +314,53 @@ final class ProjectListViewController: UIViewController {
         if sortByName {
             projects.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         }
-        sections = (attention.isEmpty ? [] : [.needsYou]) + (projects.isEmpty ? [] : [.projects])
+        sections = (attention.isEmpty ? [] : [.needsYou]) + projects.map(Section.project)
+        newSessionButton.isHidden = store.deviceEndpoint == nil || projects.filter({ $0.rosterID != nil }).isEmpty
         updateTitle()
         tableView.reloadData()
         updateEmptyState()
+    }
+
+    private func configureFab() {
+        newSessionButton.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(newSessionButton)
+        NSLayoutConstraint.activate([
+            newSessionButton.trailingAnchor.constraint(
+                equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
+            newSessionButton.bottomAnchor.constraint(
+                equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
+            newSessionButton.widthAnchor.constraint(equalToConstant: 52),
+            newSessionButton.heightAnchor.constraint(equalToConstant: 52),
+        ])
+    }
+
+    private func configureNewSessionButton() {
+        newSessionButton.applyGlassIcon(.add, boxSize: 24)
+        newSessionButton.accessibilityLabel = localized("New Session")
+        newSessionButton.accessibilityIdentifier = "projects.newSession"
+        newSessionButton.showsMenuAsPrimaryAction = true
+        newSessionButton.menu = UIMenu(children: [
+            UIDeferredMenuElement.uncached { [weak self] completion in
+                completion(self?.composeMenuItems() ?? [])
+            },
+        ])
+    }
+
+    private func composeMenuItems() -> [UIMenuElement] {
+        let targets = projects.filter { $0.rosterID != nil }
+        guard !targets.isEmpty else { return [] }
+        if targets.count == 1 {
+            return store.newSessionActions(in: targets[0])
+        }
+        return targets.compactMap { project in
+            let actions = store.newSessionActions(in: project)
+            guard !actions.isEmpty else { return nil }
+            return UIMenu(
+                title: project.name,
+                image: UIImage(systemName: "folder"),
+                children: actions
+            )
+        }
     }
 
     /// The title names the workspace on screen, with its machine underneath when
@@ -467,42 +515,53 @@ extension ProjectListViewController: UITableViewDataSource, UITableViewDelegate 
 
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
         switch sections[section] {
-        case .needsYou: attention.count
-        case .projects: projects.count
+        case .needsYou:
+            return attention.count
+        case .project(let project):
+            let isExpanded = expandedProjects.contains(project.stableKey)
+            return isExpanded ? 1 + project.sessions.count : 1
         }
     }
 
     func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
         guard showsHeaders else { return nil }
-        guard let header = tableView.dequeueReusableHeaderFooterView(
-            withIdentifier: SectionCapView.reuseID
-        ) as? SectionCapView else { return nil }
         switch sections[section] {
         case .needsYou:
+            guard let header = tableView.dequeueReusableHeaderFooterView(
+                withIdentifier: SectionCapView.reuseID
+            ) as? SectionCapView else { return nil }
             header.configure(title: localized("Needs You"))
-        case .projects:
-            // "Projects", never the workspace's name: the title above already
-            // says which workspace this is, and a caption repeating it is the
-            // section header the title replaced.
+            return header
+        case .project:
+            guard section == (attention.isEmpty ? 0 : 1),
+                  let header = tableView.dequeueReusableHeaderFooterView(
+                      withIdentifier: SectionCapView.reuseID
+                  ) as? SectionCapView else { return nil }
             header.configure(title: localized("Projects"))
+            return header
         }
-        return header
     }
 
     /// Headers only earn their space once the strip splits the page in two —
     /// with a single section the caption would name what the title just named.
     private var showsHeaders: Bool {
-        sections.count > 1
+        !attention.isEmpty && !projects.isEmpty
     }
 
     func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat {
-        showsHeaders ? WorkspaceSectionHeaderView.height : 0
+        guard showsHeaders else { return 0 }
+        switch sections[section] {
+        case .needsYou:
+            return WorkspaceSectionHeaderView.height
+        case .project:
+            return section == (attention.isEmpty ? 0 : 1) ? WorkspaceSectionHeaderView.height : 0
+        }
     }
 
     /// A whitespace gap below each group — the divider-free separator,
     /// matching the macOS sidebar's spacing-based grouping.
     func tableView(_ tableView: UITableView, heightForFooterInSection section: Int) -> CGFloat {
-        12
+        10
     }
 
     /// An empty (transparent) footer view, so the gap above is just whitespace.
@@ -528,16 +587,37 @@ extension ProjectListViewController: UITableViewDataSource, UITableViewDelegate 
             }
             .margins(.horizontal, ListCard.outerMargin)
             .margins(.vertical, 0)
-        case .projects:
-            cell.contentConfiguration = UIHostingConfiguration {
-                ProjectRow(
-                    project: projects[indexPath.row],
-                    isFirst: indexPath.row == 0,
-                    isLast: indexPath.row == projects.count - 1
-                )
+        case .project(let project):
+            let isExpanded = expandedProjects.contains(project.stableKey)
+            if indexPath.row == 0 {
+                cell.contentConfiguration = UIHostingConfiguration {
+                    ProjectRow(
+                        project: project,
+                        isExpanded: isExpanded,
+                        isFirst: true,
+                        isLast: !isExpanded || project.sessions.isEmpty
+                    )
+                }
+                .margins(.horizontal, ListCard.outerMargin)
+                .margins(.vertical, 0)
+            } else {
+                let sessionIndex = indexPath.row - 1
+                let session = project.sessions[sessionIndex]
+                let isLast = sessionIndex == project.sessions.count - 1
+                cell.contentConfiguration = UIHostingConfiguration {
+                    SessionRow(
+                        session: session,
+                        isCurrent: session.key == store.currentSessionKey,
+                        showsProject: false,
+                        isTreeChild: true,
+                        isLastTreeChild: isLast,
+                        isFirst: false,
+                        isLast: isLast
+                    )
+                }
+                .margins(.horizontal, ListCard.outerMargin)
+                .margins(.vertical, 0)
             }
-            .margins(.horizontal, ListCard.outerMargin)
-            .margins(.vertical, 0)
         }
         return cell
     }
@@ -545,26 +625,49 @@ extension ProjectListViewController: UITableViewDataSource, UITableViewDelegate 
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         switch sections[indexPath.section] {
         case .needsYou:
-            // Straight to the terminal — the strip exists so the blocked
-            // session is one tap away, never behind its project page.
             store.openSession(attention[indexPath.row])
-        case .projects:
-            navigationController?.pushViewController(
-                ProjectDetailViewController(store: store, project: projects[indexPath.row]),
-                animated: true
-            )
+        case .project(let project):
+            if indexPath.row == 0 {
+                toggleProjectExpansion(project, inSection: indexPath.section)
+            } else {
+                store.openSession(project.sessions[indexPath.row - 1])
+            }
         }
     }
 
-    /// Trailing swipe on a strip row: the Mac session menu's "Close Session".
+    private func toggleProjectExpansion(_ project: MockProject, inSection section: Int) {
+        let nowExpanded = expandedProjects.insert(project.stableKey).inserted
+        if !nowExpanded {
+            expandedProjects.remove(project.stableKey)
+        }
+        let childPaths = (0..<project.sessions.count).map { IndexPath(row: $0 + 1, section: section) }
+        guard !childPaths.isEmpty else {
+            tableView.reloadRows(at: [IndexPath(row: 0, section: section)], with: .none)
+            return
+        }
+        tableView.performBatchUpdates {
+            if nowExpanded {
+                tableView.insertRows(at: childPaths, with: .fade)
+            } else {
+                tableView.deleteRows(at: childPaths, with: .fade)
+            }
+            tableView.reloadRows(at: [IndexPath(row: 0, section: section)], with: .none)
+        }
+    }
+
+    /// Trailing swipe on a session row: the Mac session menu's "Close Session".
     func tableView(
         _ tableView: UITableView,
         trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath
     ) -> UISwipeActionsConfiguration? {
-        guard case .needsYou = sections[indexPath.section],
-              store.deviceEndpoint != nil,
-              let sessionID = attention[indexPath.row].rosterID
-        else { return nil }
+        guard store.deviceEndpoint != nil else { return nil }
+        let sessionID: String? = switch sections[indexPath.section] {
+        case .needsYou:
+            attention[indexPath.row].rosterID
+        case .project(let project):
+            indexPath.row > 0 ? project.sessions[indexPath.row - 1].rosterID : nil
+        }
+        guard let sessionID else { return nil }
         let close = UIContextualAction(style: .destructive, title: localized("Close")) { [weak self] _, _, done in
             self?.store.stopSession(sessionID)
             done(true)
@@ -573,82 +676,32 @@ extension ProjectListViewController: UITableViewDataSource, UITableViewDelegate 
         return UISwipeActionsConfiguration(actions: [close])
     }
 
-    /// Long-press a project: the new-session menu, so starting an agent does
-    /// not require drilling in first.
+    /// Long-press a project for its new-session menu, or a session to close it.
     func tableView(
         _ tableView: UITableView,
         contextMenuConfigurationForRowAt indexPath: IndexPath,
         point: CGPoint
     ) -> UIContextMenuConfiguration? {
-        guard case .projects = sections[indexPath.section] else { return nil }
-        let project = projects[indexPath.row]
-        guard store.deviceEndpoint != nil, project.rosterID != nil else { return nil }
+        guard case .project(let project) = sections[indexPath.section],
+              store.deviceEndpoint != nil else { return nil }
+        if indexPath.row == 0 {
+            guard project.rosterID != nil else { return nil }
+            return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
+                UIMenu(title: project.name, children: self?.store.newSessionActions(in: project) ?? [])
+            }
+        }
+        let session = project.sessions[indexPath.row - 1]
+        guard let sessionID = session.rosterID else { return nil }
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
-            UIMenu(title: project.name, children: self?.store.newSessionActions(in: project) ?? [])
-        }
-    }
-}
-
-// MARK: - Project row
-
-/// One project: the folder mark, the name over the branch (repos only — the
-/// row collapses to one line otherwise), and a status summary trailing — the
-/// most urgent state wins (attention count in orange, else a working spinner,
-/// else the done dot), so a glance down the list covers every project without
-/// opening one.
-private struct ProjectRow: View {
-    let project: MockProject
-    var isFirst = false
-    var isLast = false
-
-    var body: some View {
-        HStack(alignment: .center, spacing: ListCard.tileSpacing) {
-            ListTile {
-                // Filled, like the selected Projects tab and the folders in Files.
-                if let folder = HugeIcon.folder.solidImage(boxSize: 18) {
-                    Image(uiImage: folder)
-                        .renderingMode(.template)
-                        .foregroundStyle(Color.primary.opacity(0.85))
-                }
-            }
-            VStack(alignment: .leading, spacing: 1) {
-                Text(project.name)
-                    .font(.body)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                if let branch = project.branch {
-                    Text(branch)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
-            }
-            Spacer(minLength: 4)
-            summary
-            ListChevron()
-        }
-        .listCard(isFirst: isFirst, isLast: isLast)
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("project.\(project.path)")
-    }
-
-    @ViewBuilder
-    private var summary: some View {
-        let attention = project.sessions.count { $0.status == .needsAttention }
-        let working = project.sessions.count { $0.status == .working }
-        let done = project.sessions.count { $0.status == .done }
-        if attention > 0 {
-            HStack(spacing: 4) {
-                Circle().fill(.orange).frame(width: 7, height: 7)
-                Text("\(attention)")
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(.orange)
-            }
-        } else if working > 0 {
-            WorkingIndicator(tint: .secondary)
-        } else if done > 0 {
-            Circle().fill(.green).frame(width: 7, height: 7)
+            UIMenu(title: session.title, children: [
+                UIAction(
+                    title: localized("Close Session"),
+                    image: UIImage(systemName: "xmark.circle"),
+                    attributes: .destructive
+                ) { _ in
+                    self?.store.stopSession(sessionID)
+                },
+            ])
         }
     }
 }

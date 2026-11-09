@@ -41,7 +41,7 @@ struct OMGAgentMark: View {
 final class OMGAgentListViewController: UIViewController {
     private let store: RosterStore
     private var projects: [MockProject] = []
-    private var collapsed: Set<String> = []
+    private var expandedProjects: Set<String> = []
     private let newAgentButton = UIButton(type: .system)
     private let tableView = UITableView(frame: .zero, style: .grouped)
     private let emptyState = ListEmptyStateView()
@@ -221,116 +221,102 @@ extension OMGAgentListViewController: UITableViewDataSource, UITableViewDelegate
     }
 
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        collapsed.contains(projects[section].stableKey) ? 0 : projects[section].sessions.count
+        let project = projects[section]
+        let isExpanded = expandedProjects.contains(project.stableKey)
+        return isExpanded ? 1 + project.sessions.count : 1
     }
 
     func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat {
-        36
+        0
+    }
+
+    func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
+        nil
     }
 
     func tableView(_ tableView: UITableView, heightForFooterInSection section: Int) -> CGFloat {
-        12
+        10
     }
 
     func tableView(_ tableView: UITableView, viewForFooterInSection section: Int) -> UIView? {
         UIView()
     }
 
-    func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
-        let project = projects[section]
-        let isCollapsed = collapsed.contains(project.stableKey)
-        let container = UIView()
-
-        let button = UIButton(type: .system)
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.accessibilityIdentifier = "agent.folder.\(project.stableKey)"
-        button.contentHorizontalAlignment = .leading
-        button.tintColor = .secondaryLabel
-
-        let iconName = isCollapsed ? "folder" : "folder.fill"
-        let chevronName = isCollapsed ? "chevron.right" : "chevron.down"
-        let folderImage = UIImage(
-            systemName: iconName,
-            withConfiguration: UIImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
-        )
-        let chevronImage = UIImage(
-            systemName: chevronName,
-            withConfiguration: UIImage.SymbolConfiguration(pointSize: 11, weight: .bold)
-        )
-
-        let iconView = UIImageView(image: folderImage)
-        iconView.tintColor = .secondaryLabel
-        iconView.contentMode = .scaleAspectFit
-
-        let titleLabel = UILabel()
-        titleLabel.text = project.kind == "chats" ? localized("Agent") : project.name
-        titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
-        titleLabel.textColor = .secondaryLabel
-        titleLabel.lineBreakMode = .byTruncatingTail
-
-        let chevronView = UIImageView(image: chevronImage)
-        chevronView.tintColor = .tertiaryLabel
-        chevronView.contentMode = .scaleAspectFit
-
-        let stack = UIStackView(arrangedSubviews: [iconView, titleLabel, chevronView, UIView()])
-        stack.axis = .horizontal
-        stack.alignment = .center
-        stack.spacing = 6
-        stack.isUserInteractionEnabled = false
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        button.addSubview(stack)
-
-        button.addAction(UIAction { [weak self] _ in
-            guard let self else { return }
-            if !collapsed.insert(project.stableKey).inserted {
-                collapsed.remove(project.stableKey)
-            }
-            tableView.reloadSections(IndexSet(integer: section), with: .automatic)
-        }, for: .touchUpInside)
-
-        container.addSubview(button)
-        NSLayoutConstraint.activate([
-            button.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: ListCard.headerInset),
-            button.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -ListCard.headerInset),
-            button.topAnchor.constraint(equalTo: container.topAnchor),
-            button.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -4),
-            stack.leadingAnchor.constraint(equalTo: button.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: button.trailingAnchor),
-            stack.centerYAnchor.constraint(equalTo: button.centerYAnchor),
-        ])
-        return container
-    }
-
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let sessions = projects[indexPath.section].sessions
-        let session = sessions[indexPath.row]
+        let project = projects[indexPath.section]
+        let isExpanded = expandedProjects.contains(project.stableKey)
         let cell = tableView.dequeueReusableCell(withIdentifier: "agent", for: indexPath)
         cell.selectionStyle = .none
         cell.backgroundColor = .clear
-        cell.contentConfiguration = UIHostingConfiguration {
-            SessionRow(
-                session: session,
-                isCurrent: store.currentSessionKey == session.key,
-                showsProject: false,
-                isFirst: indexPath.row == 0,
-                isLast: indexPath.row == sessions.count - 1
-            )
+        if indexPath.row == 0 {
+            cell.contentConfiguration = UIHostingConfiguration {
+                ProjectRow(
+                    project: project,
+                    isExpanded: isExpanded,
+                    isFirst: true,
+                    isLast: !isExpanded || project.sessions.isEmpty,
+                    accessibilityID: "agent.folder.\(project.stableKey)"
+                )
+            }
+            .margins(.horizontal, ListCard.outerMargin)
+            .margins(.vertical, 0)
+        } else {
+            let sessionIndex = indexPath.row - 1
+            let session = project.sessions[sessionIndex]
+            let isLast = sessionIndex == project.sessions.count - 1
+            cell.contentConfiguration = UIHostingConfiguration {
+                SessionRow(
+                    session: session,
+                    isCurrent: store.currentSessionKey == session.key,
+                    showsProject: false,
+                    isTreeChild: true,
+                    isLastTreeChild: isLast,
+                    isFirst: false,
+                    isLast: isLast
+                )
+            }
+            .margins(.horizontal, ListCard.outerMargin)
+            .margins(.vertical, 0)
         }
-        .margins(.horizontal, ListCard.outerMargin)
-        .margins(.vertical, 0)
         return cell
     }
 
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-        store.openSession(projects[indexPath.section].sessions[indexPath.row])
+        let project = projects[indexPath.section]
+        if indexPath.row == 0 {
+            toggleProjectExpansion(project, inSection: indexPath.section)
+        } else {
+            store.openSession(project.sessions[indexPath.row - 1])
+        }
+    }
+
+    private func toggleProjectExpansion(_ project: MockProject, inSection section: Int) {
+        let nowExpanded = expandedProjects.insert(project.stableKey).inserted
+        if !nowExpanded {
+            expandedProjects.remove(project.stableKey)
+        }
+        let childPaths = (0..<project.sessions.count).map { IndexPath(row: $0 + 1, section: section) }
+        guard !childPaths.isEmpty else {
+            tableView.reloadRows(at: [IndexPath(row: 0, section: section)], with: .none)
+            return
+        }
+        tableView.performBatchUpdates {
+            if nowExpanded {
+                tableView.insertRows(at: childPaths, with: .fade)
+            } else {
+                tableView.deleteRows(at: childPaths, with: .fade)
+            }
+            tableView.reloadRows(at: [IndexPath(row: 0, section: section)], with: .none)
+        }
     }
 
     func tableView(
         _ tableView: UITableView,
         trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath
     ) -> UISwipeActionsConfiguration? {
-        guard store.deviceEndpoint != nil,
-              let sessionID = projects[indexPath.section].sessions[indexPath.row].rosterID
+        guard indexPath.row > 0,
+              store.deviceEndpoint != nil,
+              let sessionID = projects[indexPath.section].sessions[indexPath.row - 1].rosterID
         else { return nil }
         let close = UIContextualAction(style: .destructive, title: localized("Close")) { [weak self] _, _, done in
             self?.store.stopSession(sessionID)
@@ -345,12 +331,18 @@ extension OMGAgentListViewController: UITableViewDataSource, UITableViewDelegate
         contextMenuConfigurationForRowAt indexPath: IndexPath,
         point: CGPoint
     ) -> UIContextMenuConfiguration? {
-        guard store.deviceEndpoint != nil,
-              let sessionID = projects[indexPath.section].sessions[indexPath.row].rosterID
-        else { return nil }
-        let title = projects[indexPath.section].sessions[indexPath.row].title
+        guard store.deviceEndpoint != nil else { return nil }
+        let project = projects[indexPath.section]
+        if indexPath.row == 0 {
+            guard project.rosterID != nil else { return nil }
+            return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
+                UIMenu(title: project.name, children: self?.store.newSessionActions(in: project) ?? [])
+            }
+        }
+        let session = project.sessions[indexPath.row - 1]
+        guard let sessionID = session.rosterID else { return nil }
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
-            UIMenu(title: title, children: [
+            UIMenu(title: session.title, children: [
                 UIAction(
                     title: localized("Close Session"),
                     image: UIImage(systemName: "xmark.circle"),

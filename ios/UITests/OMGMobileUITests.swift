@@ -32,6 +32,7 @@ final class OMGMobileUITests: XCTestCase {
     }
 
     private func openProject(_ app: XCUIApplication) {
+        if row(app).exists && row(app).isHittable { return }
         let path = info.object(forInfoDictionaryKey: "OMGTestProject") as? String ?? ""
         let project = path.isEmpty
             ? app.descendants(matching: .any).matching(
@@ -85,7 +86,7 @@ final class OMGMobileUITests: XCTestCase {
         if usingVM {
             app.buttons["terminal.back"].tap()
             assertRow(app, agent: "Claude Code", state: "Needs You")
-            app.buttons["project.back"].tap()
+            if app.buttons["project.back"].exists { app.buttons["project.back"].tap() }
             XCTAssertTrue(app.descendants(matching: .any).matching(
                 NSPredicate(format: "label == %@", "Needs You")).firstMatch.waitForExistence(timeout: 10))
             capture(app, "Upstream Needs You populated by the omgd holder facts")
@@ -166,7 +167,7 @@ final class OMGMobileUITests: XCTestCase {
         app.buttons["file.close"].tap()
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.03, dy: 0.4)).tap()
         app.buttons["terminal.back"].tap()
-        app.buttons["project.back"].tap()
+        if app.buttons["project.back"].exists { app.buttons["project.back"].tap() }
         XCTAssertTrue(app.buttons["projects.add"].exists)
         XCTAssertTrue(app.buttons["home.workspaceRail"].exists)
         app.buttons["projects.add"].tap()

@@ -173,6 +173,12 @@ fn select_subprotocol(offered: Option<&str>, expected: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn is_allowed_listen_ipv4(ip: std::net::Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    let is_cgnat = octets[0] == 100 && (64..=127).contains(&octets[1]);
+    ip.is_loopback() || ip.is_private() || ip.is_link_local() || is_cgnat
+}
+
 pub fn run(args: &[String]) -> io::Result<()> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("{HELP}");
@@ -206,7 +212,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         ));
     }
     if let IpAddr::V4(ip) = address.ip() {
-        if !ip.is_loopback() && !ip.is_private() && !ip.is_link_local() {
+        if !is_allowed_listen_ipv4(ip) {
             return Err(io::Error::other("The first mobile transport is LAN-only"));
         }
     } else if !address.ip().is_loopback() {
@@ -459,5 +465,17 @@ mod tests {
         );
         assert_eq!(parse_route("/omg/../control", &endpoints), None);
         assert_eq!(parse_route("/ws/not-hex!", &endpoints), None);
+    }
+
+    #[test]
+    fn allows_private_loopback_and_tailscale_cgnat_ipv4() {
+        assert!(is_allowed_listen_ipv4("127.0.0.1".parse().unwrap()));
+        assert!(is_allowed_listen_ipv4("10.24.34.144".parse().unwrap()));
+        assert!(is_allowed_listen_ipv4("192.168.1.20".parse().unwrap()));
+        assert!(is_allowed_listen_ipv4("100.64.0.1".parse().unwrap()));
+        assert!(is_allowed_listen_ipv4("100.127.255.254".parse().unwrap()));
+        assert!(!is_allowed_listen_ipv4("100.63.255.255".parse().unwrap()));
+        assert!(!is_allowed_listen_ipv4("100.128.0.1".parse().unwrap()));
+        assert!(!is_allowed_listen_ipv4("119.29.60.90".parse().unwrap()));
     }
 }

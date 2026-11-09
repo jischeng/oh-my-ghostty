@@ -99,6 +99,21 @@ extension NativeSettingsController {
             }
         }
 
+        let networkTitles: () -> [String] = { [weak self, weak mobile] in
+            guard let self else { return ["LAN", "Tailscale"] }
+            let lanText = mobile?.lanAddress.map { self.text("Wi-Fi / LAN (\($0))", "局域网 (\($0))") }
+                ?? self.text("Wi-Fi / LAN", "局域网")
+            let tsText = mobile?.tailscaleAddress.map { "Tailscale (\($0))" }
+                ?? self.text("Tailscale (Not Connected)", "Tailscale（未连接）")
+            return [lanText, tsText]
+        }
+        let networkPopup = SettingsPopup(
+            titles: networkTitles(),
+            selected: mobile.networkMode == .tailscale ? 1 : 0
+        ) { [weak mobile] index in
+            mobile?.setNetworkMode(index == 1 ? .tailscale : .lan)
+        }
+
         let publicURLField = SettingsTextField(
             mobile.publicURL,
             placeholder: "wss://example.com:18791"
@@ -128,6 +143,14 @@ extension NativeSettingsController {
             control: statusControl
         )
         form.row(
+            text("Network Interface", "网络接口"),
+            subtitle: text(
+                "Choose Wi-Fi / LAN for local access, or Tailscale (100.64.0.0/10) for zero-config encrypted remote access.",
+                "同 Wi-Fi 下选择「局域网」；异地连接无需公网主机，开启 Tailscale 即可直接互联。"
+            ),
+            control: networkPopup
+        )
+        form.row(
             text("External WSS URL", "外部 WSS 入口"),
             subtitle: text(
                 "Optional. If exposed via your own VPS / Nginx reverse proxy, enter its wss:// URL so the QR code uses that TLS endpoint.",
@@ -149,15 +172,22 @@ extension NativeSettingsController {
         )
 
         var refreshingInvite = false
-        let update = { [weak self, weak allow, weak statusControl, weak statusSubtitle, weak publicURLField, weak pairingCard, weak showQR, weak copyLink, weak revokeButton, weak mobile] in
+        let update = { [weak self, weak allow, weak statusControl, weak statusSubtitle, weak networkPopup, weak publicURLField, weak pairingCard, weak showQR, weak copyLink, weak revokeButton, weak mobile] in
             guard let self, let mobile else { return }
             allow?.state = mobile.state == .starting || mobile.state.isRunning ? .on : .off
             allow?.isEnabled = mobile.state != .starting
+            let titles = networkTitles()
+            if networkPopup?.numberOfItems == 2 {
+                networkPopup?.item(at: 0)?.title = titles[0]
+                networkPopup?.item(at: 1)?.title = titles[1]
+                networkPopup?.selectItem(at: mobile.networkMode == .tailscale ? 1 : 0)
+            }
             if publicURLField?.currentEditor() == nil {
                 publicURLField?.stringValue = mobile.publicURL
             }
             let endpoint = mobile.listenAddress ?? self.text("Unavailable", "不可用")
-            let activeEndpoint = mobile.publicURL.isEmpty ? ("LAN · " + endpoint) : mobile.publicURL
+            let modePrefix = mobile.isUsingTailscale ? "Tailscale · " : "LAN · "
+            let activeEndpoint = mobile.publicURL.isEmpty ? (modePrefix + endpoint) : mobile.publicURL
 
             switch mobile.state {
             case .stopped:

@@ -17,14 +17,18 @@ struct SettingsControlsTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let executable = directory.appendingPathComponent("fake-omgd")
         var currentAddress: String?
+        var currentTailscaleAddress: String?
         let controller = MobileAccessController(
             executable: executable,
             support: directory,
             port: 18791,
-            addressProvider: { currentAddress }
+            addressProvider: { currentAddress },
+            tailscaleAddressProvider: { currentTailscaleAddress }
         )
         #expect(controller.listenAddress == nil)
+        #expect(!controller.isEnabledPreference)
         controller.start()
+        #expect(controller.isEnabledPreference)
         #expect(controller.state == .failed("The bundled mobile runtime is missing."))
         #expect(controller.errorMessage == "The bundled mobile runtime is missing.")
 
@@ -46,10 +50,24 @@ struct SettingsControlsTests {
         #expect(controller.errorMessage == "No private IPv4 LAN address is available.")
 
         currentAddress = "192.168.1.9"
+        currentTailscaleAddress = "100.90.1.2"
         await controller.refreshInvitation()
         #expect(controller.listenAddress == "192.168.1.9:18791")
+        #expect(!controller.isUsingTailscale)
         #expect(controller.invitation == "omg://device?url=ws://192.168.1.9:18791&token=testtoken")
         #expect(controller.errorMessage == nil)
+
+        controller.setNetworkMode(.tailscale)
+        await controller.refreshInvitation()
+        #expect(controller.networkMode == .tailscale)
+        #expect(controller.listenAddress == "100.90.1.2:18791")
+        #expect(controller.isUsingTailscale)
+        #expect(controller.invitation == "omg://device?url=ws://100.90.1.2:18791&token=testtoken")
+
+        controller.setNetworkMode(.lan)
+        await controller.refreshInvitation()
+        #expect(controller.networkMode == .lan)
+        #expect(controller.listenAddress == "192.168.1.9:18791")
 
         #expect(!controller.setPublicURL("ws://119.29.60.90:18791"))
         #expect(controller.publicURL.isEmpty)
@@ -58,6 +76,9 @@ struct SettingsControlsTests {
         #expect(controller.invitation == "omg://device?url=wss://119.29.60.90:18791&token=testtoken")
         #expect(controller.setPublicURL(""))
         #expect(controller.invitation == "omg://device?url=ws://192.168.1.9:18791&token=testtoken")
+
+        controller.stop(persist: false)
+        #expect(controller.isEnabledPreference)
 
         let tokenFile = directory.appendingPathComponent("mobile-pair.token")
         try Data("token".utf8).write(to: tokenFile)
@@ -81,9 +102,10 @@ struct SettingsControlsTests {
         defer { window.close() }
         settingsController.view.layoutSubtreeIfNeeded()
         let form = try #require(settingsController.children.compactMap { $0 as? NativeSettingsForm }.first)
-        #expect(form.rowTitles == ["允许 iPhone 连接", "网关状态", "外部 WSS 入口", "配对密钥"])
+        #expect(form.rowTitles == ["允许 iPhone 连接", "网关状态", "网络接口", "外部 WSS 入口", "配对密钥"])
 
         controller.revokePairings()
+        #expect(!controller.isEnabledPreference)
         #expect(!controller.hasPairing)
         #expect(controller.invitation == nil)
         #expect(controller.state == .stopped)

@@ -18,11 +18,20 @@ final class MobileAccessController: ObservableObject {
         var isRunning: Bool { self == .running }
     }
 
+    enum NetworkMode: String, Equatable {
+        case lan
+        case tailscale
+    }
+
     static let shared = MobileAccessController()
 
     @Published private(set) var state: State = .stopped
+    @Published private(set) var isEnabledPreference = false
+    @Published private(set) var networkMode: NetworkMode = .lan
     @Published private(set) var invitation: String?
     @Published private(set) var errorMessage: String?
+    @Published private(set) var lanAddress: String?
+    @Published private(set) var tailscaleAddress: String?
     @Published private(set) var address: String?
     @Published private(set) var publicURL: String = ""
     @Published private(set) var connectedDevices = 0
@@ -30,9 +39,12 @@ final class MobileAccessController: ObservableObject {
     private let executable: URL
     private let support: URL
     private let tokenFile: URL
+    private let enabledFile: URL
+    private let networkModeFile: URL
     private let publicURLFile: URL
     private let port: Int
     private let addressProvider: () -> String?
+    private let tailscaleAddressProvider: () -> String?
     private var process: Process?
     private var log: FileHandle?
     private var intentionalStop = false
@@ -49,6 +61,11 @@ final class MobileAccessController: ObservableObject {
         return listenAddress
     }
 
+    var isUsingTailscale: Bool {
+        guard let address else { return false }
+        return Self.isTailscaleIPv4(address)
+    }
+
     var hasPairing: Bool {
         FileManager.default.fileExists(atPath: tokenFile.path)
     }
@@ -57,25 +74,38 @@ final class MobileAccessController: ObservableObject {
         executable: URL? = nil,
         support: URL = OMGApplicationEnvironment.applicationSupportURL(),
         port: Int = 8791,
-        addressProvider: @escaping () -> String? = MobileAccessController.lanIPv4Address
+        addressProvider: @escaping () -> String? = MobileAccessController.lanIPv4Address,
+        tailscaleAddressProvider: @escaping () -> String? = MobileAccessController.tailscaleIPv4Address
     ) {
         self.executable = executable ?? Bundle.main.resourceURL!
             .appendingPathComponent("session-runtime/omgd")
         self.support = support
         self.port = port
         self.addressProvider = addressProvider
+        self.tailscaleAddressProvider = tailscaleAddressProvider
         tokenFile = support.appendingPathComponent("mobile-pair.token")
+        enabledFile = support.appendingPathComponent("mobile-enabled.txt")
+        networkModeFile = support.appendingPathComponent("mobile-network-mode.txt")
         publicURLFile = support.appendingPathComponent("mobile-public-url.txt")
+        if let savedEnabled = try? String(contentsOf: enabledFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines) {
+            isEnabledPreference = savedEnabled == "1" || savedEnabled.lowercased() == "true"
+        }
+        if let savedMode = try? String(contentsOf: networkModeFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           let parsedMode = NetworkMode(rawValue: savedMode) {
+            networkMode = parsedMode
+        }
         if let saved = try? String(contentsOf: publicURLFile, encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines),
            let normalized = Self.validatedPublicURL(saved) {
             publicURL = normalized
         }
-        address = addressProvider()
+        refreshAddresses()
         terminationObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.stop() }
+            MainActor.assumeIsolated { self?.stop(persist: false) }
         }
     }
 
@@ -86,9 +116,66 @@ final class MobileAccessController: ObservableObject {
         process?.terminate()
     }
 
+    func resumeIfEnabled() {
+        guard isEnabledPreference, !state.isRunning, state != .starting else { return }
+        start()
+    }
+
+    func refreshAddresses() {
+        lanAddress = addressProvider()
+        tailscaleAddress = tailscaleAddressProvider()
+        switch networkMode {
+        case .lan:
+            address = lanAddress ?? tailscaleAddress
+        case .tailscale:
+            address = tailscaleAddress ?? lanAddress
+        }
+    }
+
+    func setNetworkMode(_ mode: NetworkMode) {
+        guard networkMode != mode else {
+            refreshAddresses()
+            return
+        }
+        networkMode = mode
+        if mode == .lan {
+            try? FileManager.default.removeItem(at: networkModeFile)
+        } else {
+            try? FileManager.default.createDirectory(
+                at: support, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            try? Data(mode.rawValue.utf8).write(to: networkModeFile, options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: networkModeFile.path)
+        }
+        let previousAddress = address
+        refreshAddresses()
+        if state.isRunning || state == .starting {
+            if address != previousAddress {
+                stop(persist: false)
+                start()
+            }
+        }
+    }
+
+    private func saveEnabledPreference(_ enabled: Bool) {
+        isEnabledPreference = enabled
+        if enabled {
+            try? FileManager.default.createDirectory(
+                at: support, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            try? Data("1\n".utf8).write(to: enabledFile, options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: enabledFile.path)
+        } else {
+            try? FileManager.default.removeItem(at: enabledFile)
+        }
+    }
+
     func start() {
+        saveEnabledPreference(true)
         guard !state.isRunning, state != .starting else { return }
-        address = addressProvider()
+        refreshAddresses()
         guard FileManager.default.isExecutableFile(atPath: executable.path) else {
             let reason = "The bundled mobile runtime is missing."
             errorMessage = reason
@@ -162,7 +249,10 @@ final class MobileAccessController: ObservableObject {
         }
     }
 
-    func stop() {
+    func stop(persist: Bool = true) {
+        if persist {
+            saveEnabledPreference(false)
+        }
         intentionalStop = true
         process?.terminate()
         process = nil
@@ -175,7 +265,7 @@ final class MobileAccessController: ObservableObject {
     }
 
     func refreshInvitation() async {
-        address = addressProvider()
+        refreshAddresses()
         guard let listenAddress else {
             errorMessage = "No private IPv4 LAN address is available."
             return
@@ -305,6 +395,12 @@ final class MobileAccessController: ObservableObject {
         return components.string
     }
 
+    static func isTailscaleIPv4(_ host: String) -> Bool {
+        let octets = host.split(separator: ".", omittingEmptySubsequences: false).compactMap { Int($0) }
+        guard octets.count == 4, octets.allSatisfy({ (0...255).contains($0) }) else { return false }
+        return octets[0] == 100 && (64...127).contains(octets[1])
+    }
+
     static func isPrivateOrLoopbackHost(_ host: String) -> Bool {
         let lower = host.lowercased()
         if lower == "localhost" || lower == "::1" || lower.hasSuffix(".local") {
@@ -317,7 +413,7 @@ final class MobileAccessController: ObservableObject {
             (octets[0] == 172 && (16...31).contains(octets[1])) ||
             (octets[0] == 192 && octets[1] == 168) ||
             (octets[0] == 169 && octets[1] == 254) ||
-            (octets[0] == 100 && (64...127).contains(octets[1]))
+            isTailscaleIPv4(lower)
     }
 
     func revokePairings() {
@@ -344,8 +440,30 @@ final class MobileAccessController: ObservableObject {
     }
 
     private static func lanIPv4Address() -> String? {
+        let candidates = activeIPv4Interfaces { components in
+            components[0] == 10 ||
+                (components[0] == 172 && (16...31).contains(components[1])) ||
+                (components[0] == 192 && components[1] == 168) ||
+                (components[0] == 169 && components[1] == 254)
+        }
+        return candidates.first { $0.name == "en0" }?.address ??
+            candidates.first { $0.name == "en1" }?.address ??
+            candidates.first?.address
+    }
+
+    private static func tailscaleIPv4Address() -> String? {
+        let candidates = activeIPv4Interfaces { components in
+            components[0] == 100 && (64...127).contains(components[1])
+        }
+        return candidates.first { $0.name.hasPrefix("utun") }?.address ??
+            candidates.first?.address
+    }
+
+    private static func activeIPv4Interfaces(
+        matching predicate: ([Int]) -> Bool
+    ) -> [(name: String, address: String)] {
         var head: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&head) == 0, let head else { return nil }
+        guard getifaddrs(&head) == 0, let head else { return [] }
         defer { freeifaddrs(head) }
         var candidates: [(name: String, address: String)] = []
         var cursor: UnsafeMutablePointer<ifaddrs>? = head
@@ -363,16 +481,9 @@ final class MobileAccessController: ObservableObject {
             guard result == 0 else { continue }
             let address = String(cString: host)
             let components = address.split(separator: ".").compactMap { Int($0) }
-            guard components.count == 4 else { continue }
-            let isPrivate = components[0] == 10 ||
-                (components[0] == 172 && (16...31).contains(components[1])) ||
-                (components[0] == 192 && components[1] == 168) ||
-                (components[0] == 169 && components[1] == 254)
-            guard isPrivate else { continue }
+            guard components.count == 4, predicate(components) else { continue }
             candidates.append((String(cString: current.pointee.ifa_name), address))
         }
-        return candidates.first { $0.name == "en0" }?.address ??
-            candidates.first { $0.name == "en1" }?.address ??
-            candidates.first?.address
+        return candidates
     }
 }

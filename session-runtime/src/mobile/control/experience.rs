@@ -1,6 +1,4 @@
 use super::*;
-use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
 
 #[derive(Serialize, Deserialize)]
 struct SavedProject {
@@ -11,16 +9,20 @@ struct SavedProject {
     name: String,
 }
 
-pub(super) fn quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "'\\''"))
-}
-
 fn projects_path(config: &Config) -> io::Result<PathBuf> {
     config
         .support
         .as_ref()
         .map(|p| p.join("mobile-projects.json"))
-        .ok_or_else(|| io::Error::other("A desktop Application Support directory is required"))
+        .or_else(|| {
+            config
+                .endpoints
+                .first()?
+                .socket
+                .parent()
+                .map(|p| p.join("mobile-projects.json"))
+        })
+        .ok_or_else(|| io::Error::other("A mobile state directory is required"))
 }
 
 fn load_projects(config: &Config) -> Vec<SavedProject> {
@@ -38,6 +40,9 @@ pub(super) fn append_projects(
     projects: &mut BTreeMap<String, (Project, Value)>,
 ) -> io::Result<()> {
     for saved in load_projects(config).into_iter().take(1000) {
+        if saved.host != "local" {
+            continue;
+        }
         let Some((_, workspace_name)) = desktop
             .workspaces
             .iter()
@@ -46,7 +51,6 @@ pub(super) fn append_projects(
             continue;
         };
         let id = saved.id;
-        let host = (saved.host != "local").then_some(saved.host);
         projects.insert(
             id.clone(),
             (
@@ -55,7 +59,7 @@ pub(super) fn append_projects(
                     root: saved.path.clone(),
                     workspace: saved.workspace.clone(),
                     endpoint: endpoint.cloned(),
-                    host,
+                    host: None,
                 },
                 json!({"id":id,"name":saved.name,"path":saved.path,"workspaceID":saved.workspace,
             "workspaceName":workspace_name,"branch":"","kind":"folder","sessions":[]}),
@@ -65,75 +69,48 @@ pub(super) fn append_projects(
     Ok(())
 }
 
-fn helper(config: &Config, mut request: Value) -> io::Result<Value> {
-    let executable = std::env::current_exe()?
-        .parent()
-        .unwrap()
-        .join("omg-mobile-support");
-    let domain = match config
-        .support
-        .as_ref()
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str())
+fn local_directories(path: &str) -> io::Result<Value> {
+    if !path.is_empty()
+        && (!path.starts_with('/')
+            || path.contains('\0')
+            || path.contains('\n')
+            || path.len() > 4096)
     {
-        Some("OMG") => "com.jischeng.omg",
-        Some("OMG Dev Workspace") => "com.jischeng.omg.debug.workspace",
-        _ => "com.jischeng.omg.debug",
+        return Err(io::Error::other("Invalid folder path"));
+    }
+    let candidate = if path.is_empty() {
+        home()?
+    } else {
+        PathBuf::from(path)
     };
-    request["domain"] = domain.into();
-    let mut child = Command::new(executable)
-        .process_group(0)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let input = serde_json::to_vec(&request)?;
-    if input.len() > 16384 {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(io::Error::other("Request too large"));
+    let root = fs::canonicalize(&candidate)?;
+    if !root.is_dir() {
+        return Err(io::Error::other("Not a folder"));
     }
-    child.stdin.take().unwrap().write_all(&input)?;
-    let output = child.stdout.take().unwrap();
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    let reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let result = output
-            .take((2 * FILE_LIMIT + 1) as u64)
-            .read_to_end(&mut bytes);
-        let _ = tx.send(result.map(|_| bytes));
-    });
-    let result = rx.recv_timeout(Duration::from_secs(12));
-    let deadline = Instant::now() + Duration::from_secs(1);
-    let mut status = child.try_wait()?;
-    while status.is_none() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
-        status = child.try_wait()?;
-    }
-    if status.is_none() || !matches!(&result, Ok(Ok(data)) if data.len() <= 2 * FILE_LIMIT) {
-        unsafe {
-            libc::kill(-(child.id() as i32), libc::SIGKILL);
+    let mut names = Vec::new();
+    for entry in fs::read_dir(&root)?.take(1000).flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if name.starts_with('.') {
+            continue;
+        }
+        if entry.path().is_dir() {
+            names.push(name);
         }
     }
-    let status = child.wait()?;
-    let _ = reader.join();
-    let bytes = result.map_err(|_| io::Error::other("Desktop operation timed out"))??;
-    if !status.success() || bytes.len() > 2 * FILE_LIMIT {
-        return Err(io::Error::other("Desktop operation failed"));
-    }
-    let result: Value = serde_json::from_slice(&bytes)?;
-    if result["t"] == "error" {
-        return Err(io::Error::other(
-            result["message"]
-                .as_str()
-                .unwrap_or("Desktop operation failed"),
-        ));
-    }
-    Ok(result)
-}
-
-pub(super) fn ssh_command(config: &Config, host: &str) -> io::Result<Value> {
-    helper(config, json!({"operation":"sshCommand","host":host}))
+    names.sort();
+    let parent = root
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| "/".into());
+    Ok(json!({
+        "t": "directories",
+        "path": root.to_string_lossy(),
+        "parent": parent,
+        "names": names,
+    }))
 }
 
 pub(super) fn request(config: &Config, request: &Value) -> io::Result<Value> {
@@ -141,12 +118,16 @@ pub(super) fn request(config: &Config, request: &Value) -> io::Result<Value> {
         "workspaces" => Ok(
             json!({"t":"workspaces","workspaces":desktop(config).workspaces.into_iter().map(|(id,name)|json!({"id":id,"name":name})).collect::<Vec<_>>()}),
         ),
-        "hosts" => helper(config, json!({"operation":"hosts"})),
-        "directories" => helper(
-            config,
-            json!({"operation":"directories","host":text(request,"host")?,
-            "path":request["path"].as_str().unwrap_or("")}),
-        ),
+        "hosts" => Ok(json!({"t":"hosts","hosts":[{"id":"local","name":"Local Machine"}]})),
+        "directories" => {
+            let host = text(request, "host")?;
+            if host != "local" {
+                return Err(io::Error::other(
+                    "Mobile gateway only exposes the local machine; run omg +mobile on the SSH server directly",
+                ));
+            }
+            local_directories(request["path"].as_str().unwrap_or(""))
+        }
         "addProject" => {
             let workspace = text(request, "workspace")?;
             if !desktop(config)
@@ -157,10 +138,12 @@ pub(super) fn request(config: &Config, request: &Value) -> io::Result<Value> {
                 return Err(io::Error::other("Workspace no longer exists"));
             }
             let host = text(request, "host")?;
-            let resolved = helper(
-                config,
-                json!({"operation":"directories","host":host,"path":text(request,"path")?}),
-            )?;
+            if host != "local" {
+                return Err(io::Error::other(
+                    "Mobile gateway only exposes the local machine; run omg +mobile on the SSH server directly",
+                ));
+            }
+            let resolved = local_directories(text(request, "path")?)?;
             let path = PathBuf::from(text(&resolved, "path")?);
             let id = format!(
                 "mobile-project-{}",
@@ -179,7 +162,7 @@ pub(super) fn request(config: &Config, request: &Value) -> io::Result<Value> {
             saved.push(SavedProject {
                 id: id.clone(),
                 workspace: workspace.into(),
-                host: host.into(),
+                host: "local".into(),
                 path,
                 name,
             });
@@ -210,19 +193,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn saved_projects_keep_workspace_and_host_binding() {
+    fn saved_projects_expose_only_local_machine_and_ignore_ssh_cloud_entries() {
         let directory =
             std::env::temp_dir().join(format!("omg-mobile-project-{}", record::nonce().unwrap()));
         fs::create_dir(&directory).unwrap();
+        let demo_dir = directory.join("demo-local");
+        fs::create_dir(&demo_dir).unwrap();
         fs::write(
             directory.join("mobile-projects.json"),
-            serde_json::to_vec(&vec![SavedProject {
-                id: "mobile-project-demo".into(),
-                workspace: "workspace-a".into(),
-                host: "ssh-host-demo".into(),
-                path: PathBuf::from("/srv/demo"),
-                name: "demo".into(),
-            }])
+            serde_json::to_vec(&vec![
+                SavedProject {
+                    id: "mobile-project-ssh".into(),
+                    workspace: "workspace-a".into(),
+                    host: "ssh-host-demo".into(),
+                    path: PathBuf::from("/srv/demo"),
+                    name: "demo-ssh".into(),
+                },
+                SavedProject {
+                    id: "mobile-project-local".into(),
+                    workspace: "workspace-a".into(),
+                    host: "local".into(),
+                    path: demo_dir.clone(),
+                    name: "demo-local".into(),
+                },
+            ])
             .unwrap(),
         )
         .unwrap();
@@ -239,10 +233,28 @@ mod tests {
         };
         let mut projects = BTreeMap::new();
         append_projects(&config, &desktop, None, &mut projects).unwrap();
-        let (project, roster) = projects.get("mobile-project-demo").unwrap();
+        assert!(!projects.contains_key("mobile-project-ssh"));
+        let (project, roster) = projects.get("mobile-project-local").unwrap();
         assert_eq!(project.workspace, "workspace-a");
-        assert_eq!(project.host.as_deref(), Some("ssh-host-demo"));
+        assert_eq!(project.host, None);
         assert_eq!(roster["workspaceName"], "Alpha");
+
+        let hosts = request(&config, &json!({"t": "hosts"})).unwrap();
+        assert_eq!(
+            hosts["hosts"],
+            json!([{"id": "local", "name": "Local Machine"}])
+        );
+        let dirs = request(
+            &config,
+            &json!({"t": "directories", "host": "local", "path": directory.to_string_lossy()}),
+        )
+        .unwrap();
+        assert_eq!(dirs["names"], json!(["demo-local"]));
+        assert!(request(
+            &config,
+            &json!({"t": "directories", "host": "ssh-host-demo", "path": "/"})
+        )
+        .is_err());
         let _ = fs::remove_dir_all(directory);
     }
 }

@@ -28,9 +28,29 @@ unsigned unless `OMG_IOS_DEVELOPMENT_TEAM` names an existing development team;
 physical installation requires matching provisioning. Generated projects,
 headers, libraries and build products remain ignored. The minimum OS is iOS 17.
 
-## LAN pairing
+## CLI and LAN pairing
 
-Build the runtime and start its separate gateway on the Mac:
+Pair directly from the terminal on a Mac (without opening the Mac GUI) or on a
+remote SSH server where `omgd` is installed:
+
+```sh
+omg +mobile
+omg +mobile pair --tailscale
+omg +mobile status
+omg +mobile revoke
+omg +mobile stop
+```
+
+`omg +mobile` (or `omgd mobile`) starts or reuses this machine's background
+mobile gateway, prints a scannable Unicode QR code directly in the terminal, and
+outputs the `omg://device?url=...&token=...` pairing link. Use `--lan`,
+`--tailscale`, `--listen IP:PORT`, or `--public-url wss://...` to control the
+advertised address. Each machine exposes **only its own local sessions**—a Mac
+with registered SSH Cloud hosts never bridges to those remote hosts; instead, run
+`omg +mobile` (or `omgd mobile`) on the SSH server itself to pair that server
+with OMG Mobile.
+
+To build the runtime from source and run the helper script on a Mac:
 
 ```sh
 ios/scripts/build-vt.sh macos

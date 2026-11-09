@@ -399,7 +399,17 @@ fn build_view(config: &Config) -> io::Result<View> {
         }
     }
     endpoints.sort_by_key(|(_, _, presentation)| !*presentation);
-    let preferred = endpoints.first().map(|(endpoint, _, _)| endpoint.clone());
+    let preferred = endpoints
+        .iter()
+        .find(|(_, _, presentation)| *presentation)
+        .or_else(|| {
+            config
+                .support
+                .is_none()
+                .then(|| endpoints.first())
+                .flatten()
+        })
+        .map(|(endpoint, _, _)| endpoint.clone());
     let phone_guard = config.control.phone(config);
     let phone = phone_guard.as_ref().unwrap();
     let mut projects: BTreeMap<String, (Project, Value)> = BTreeMap::new();
@@ -586,6 +596,7 @@ fn build_view(config: &Config) -> io::Result<View> {
         .as_ref()
         .and_then(|p| p.file_name())
         .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| s != "mobile")
         .unwrap_or_else(|| "OMG".into());
     let roster = json!({"t":"roster","wire":2,"macID":identity,
         "macName":format!("{} · {channel}",computer_name()),
@@ -959,13 +970,21 @@ fn start(config: &Config, view: &View, request: &Value) -> io::Result<Value> {
     let shell = std::env::var("SHELL")
         .ok()
         .filter(|s| s.starts_with('/') && Path::new(s).is_file())
-        .unwrap_or_else(|| "/bin/zsh".into());
+        .unwrap_or_else(|| {
+            if Path::new("/bin/zsh").is_file() {
+                "/bin/zsh".into()
+            } else if Path::new("/bin/bash").is_file() {
+                "/bin/bash".into()
+            } else {
+                "/bin/sh".into()
+            }
+        });
     let agent = if kind == "start" {
         request["agent"].as_str().unwrap_or("codex")
     } else {
         "terminal"
     };
-    let mut argv = if kind == "startSSH" {
+    let argv = if kind == "startSSH" {
         let host = text(request, "host")?;
         if !ssh_hosts()
             .iter()
@@ -986,34 +1005,6 @@ fn start(config: &Config, view: &View, request: &Value) -> io::Result<Value> {
         };
         vec![shell, "-lic".into(), format!("exec {command}")]
     };
-    if let Some(host) = &project.host {
-        let remote = experience::ssh_command(config, host)?;
-        let destination = text(&remote, "destination")?;
-        let mut ssh = vec!["/usr/bin/ssh".into(), "-t".into()];
-        ssh.extend(
-            remote["options"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|v| v.as_str().map(str::to_owned)),
-        );
-        ssh.push(destination.into());
-        let remote_command = if agent == "terminal" {
-            "${SHELL:-/bin/sh} -l".to_owned()
-        } else {
-            let command = argv.last().cloned().unwrap_or_default();
-            format!(
-                "${{SHELL:-/bin/sh}} -lic {}",
-                experience::quote(command.strip_prefix("exec ").unwrap_or(&command))
-            )
-        };
-        ssh.push(format!(
-            "cd {} && exec {}",
-            experience::quote(&project.root.to_string_lossy()),
-            remote_command
-        ));
-        argv = ssh;
-    }
     let nonce = record::nonce()?;
     let id = format!(
         "{}-{}-{}-{}-{}",
@@ -1041,8 +1032,17 @@ fn start(config: &Config, view: &View, request: &Value) -> io::Result<Value> {
         omg_session_runtime::lifecycle::Policy::default()
     };
     policy.validate()?;
-    let request = json!({"id":id,"create":true,"policy":policy,
-        "launch":{"argv":argv,"env":environment,"cwd":if project.host.is_some() { home()? } else { project.root.clone() },"cols":100,"rows":30,"pixel_width":0,"pixel_height":0}});
+    let supports_launch = inventory(&endpoint).map(|(_, p)| p).unwrap_or(true);
+    let request = if supports_launch {
+        json!({"id":id,"create":true,"policy":policy,
+            "launch":{"argv":argv,"env":environment,"cwd":project.root.clone(),"cols":100,"rows":30,"pixel_width":0,"pixel_height":0}})
+    } else if agent == "terminal" && kind != "startSSH" {
+        json!({"id":id,"create":true,"policy":policy,"cwd":project.root.clone()})
+    } else {
+        return Err(io::Error::other(
+            "Agent launch requires a local session broker",
+        ));
+    };
     let mut socket = UnixStream::connect(&endpoint.socket)?;
     socket.set_read_timeout(Some(Duration::from_secs(8)))?;
     socket.set_write_timeout(Some(Duration::from_secs(2)))?;
@@ -1102,104 +1102,113 @@ fn start(config: &Config, view: &View, request: &Value) -> io::Result<Value> {
     )
 }
 
+fn ensure_local_broker(binary: &Path, support: &Path, revision: &str) -> io::Result<Endpoint> {
+    let root = home()?
+        .join(".omg/run")
+        .join(&hash(&format!("{}\0{revision}", support.display()))[..20]);
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&root)?;
+    super::private(&root, true)?;
+    let socket = root.join("host.sock");
+    let running = match UnixStream::connect(&socket) {
+        Ok(_) => true,
+        Err(error) if holder::listener_is_gone(&error) => false,
+        Err(error) => return Err(error),
+    };
+    if !running {
+        let log_path = root.join("host.log");
+        let command = vec![
+            binary.to_string_lossy().into_owned(),
+            "host-local".into(),
+            root.to_string_lossy().into_owned(),
+            "--".into(),
+            "/bin/sh".into(),
+        ];
+        if omg_session_runtime::launchd::spawn(binary, &command, &log_path)?.is_none() {
+            use std::os::unix::process::CommandExt;
+            let log = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&log_path)?;
+            let mut child = std::process::Command::new(binary);
+            child
+                .args(&command[1..])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(log);
+            unsafe {
+                child.pre_exec(|| {
+                    if libc::setsid() < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    libc::signal(libc::SIGHUP, libc::SIG_IGN);
+                    Ok(())
+                });
+            }
+            let mut child = child.spawn()?;
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        let mut ready = false;
+        for _ in 0..100 {
+            if UnixStream::connect(&socket).is_ok() {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if !ready {
+            return Err(io::Error::other("Local broker did not start"));
+        }
+    }
+    Ok(Endpoint {
+        id: hash(&socket.to_string_lossy()),
+        name: "This Machine".into(),
+        socket,
+    })
+}
+
 fn restart_endpoint(config: &Config) -> io::Result<Endpoint> {
     let support = config
         .support
         .as_ref()
         .ok_or_else(|| io::Error::other("No app channel"))?;
-    let archive: Value = serde_json::from_slice(&bounded(
-        &support.join("session-runtime/endpoints.json"),
-        4 * FILE_LIMIT,
-    )?)?;
-    for entry in archive["endpoints"].as_array().into_iter().flatten().rev() {
-        let descriptor = &entry["descriptor"];
-        if !descriptor["connection"].is_null() {
-            continue;
-        }
-        let Some(revision) = descriptor["revision"].as_str().filter(|s| {
-            !s.is_empty()
-                && !matches!(*s, "." | "..")
-                && s.len() <= 128
-                && s.bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-        }) else {
-            continue;
-        };
-        let binary = support
-            .join("session-runtime/versions")
-            .join(revision)
-            .join("omgd");
-        if !binary.is_file() {
-            continue;
-        }
-        let root = home()?
-            .join(".omg/run")
-            .join(&hash(&format!("{}\0{revision}", support.display()))[..20]);
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&root)?;
-        super::private(&root, true)?;
-        let socket = root.join("host.sock");
-        let running = match UnixStream::connect(&socket) {
-            Ok(_) => true,
-            Err(error) if holder::listener_is_gone(&error) => false,
-            Err(error) => return Err(error),
-        };
-        if !running {
-            let log_path = root.join("host.log");
-            let command = vec![
-                binary.to_string_lossy().into_owned(),
-                "host-local".into(),
-                root.to_string_lossy().into_owned(),
-                "--".into(),
-                "/bin/sh".into(),
-            ];
-            if omg_session_runtime::launchd::spawn(&binary, &command, &log_path)?.is_none() {
-                use std::os::unix::process::CommandExt;
-                let log = fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .mode(0o600)
-                    .custom_flags(libc::O_NOFOLLOW)
-                    .open(&log_path)?;
-                let mut child = std::process::Command::new(&binary);
-                child
-                    .args(&command[1..])
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(log);
-                unsafe {
-                    child.pre_exec(|| {
-                        if libc::setsid() < 0 {
-                            return Err(io::Error::last_os_error());
-                        }
-                        libc::signal(libc::SIGHUP, libc::SIG_IGN);
-                        Ok(())
-                    });
-                }
-                let mut child = child.spawn()?;
-                std::thread::spawn(move || {
-                    let _ = child.wait();
-                });
+    let archive_path = support.join("session-runtime/endpoints.json");
+    if archive_path.exists() {
+        let archive: Value = serde_json::from_slice(&bounded(&archive_path, 4 * FILE_LIMIT)?)?;
+        for entry in archive["endpoints"].as_array().into_iter().flatten().rev() {
+            let descriptor = &entry["descriptor"];
+            if !descriptor["connection"].is_null() {
+                continue;
             }
-            let mut ready = false;
-            for _ in 0..100 {
-                if UnixStream::connect(&socket).is_ok() {
-                    ready = true;
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(20));
+            let Some(revision) = descriptor["revision"].as_str().filter(|s| {
+                !s.is_empty()
+                    && !matches!(*s, "." | "..")
+                    && s.len() <= 128
+                    && s.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            }) else {
+                continue;
+            };
+            let binary = support
+                .join("session-runtime/versions")
+                .join(revision)
+                .join("omgd");
+            if !binary.is_file() {
+                continue;
             }
-            if !ready {
-                return Err(io::Error::other("Local broker did not start"));
-            }
+            return ensure_local_broker(&binary, support, revision);
         }
-        return Ok(Endpoint {
-            id: hash(&socket.to_string_lossy()),
-            name: "This Mac".into(),
-            socket,
-        });
+    }
+    let current = std::env::current_exe()?;
+    if current.is_file() {
+        let revision = crate::session_cli::current_revision();
+        return ensure_local_broker(&current, support, &revision);
     }
     Err(io::Error::other("No installed local runtime"))
 }

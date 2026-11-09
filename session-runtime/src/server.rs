@@ -372,6 +372,15 @@ pub fn serve_managed(
         command.env_remove("OMG_RUNTIME_REMOTE");
     } else {
         command.env("OMG_RUNTIME_REMOTE", "1");
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent().filter(|d| d.join("omg").is_file()) {
+                let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
+                let dir_str = dir.to_string_lossy();
+                if !path.split(':').any(|entry| entry == dir_str) {
+                    command.env("PATH", format!("{path}:{dir_str}"));
+                }
+            }
+        }
         if let (Some(managed), Some(tty)) = (managed.as_ref(), tty_name.as_deref()) {
             let original = std::env::var("VISUAL")
                 .ok()

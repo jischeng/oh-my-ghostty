@@ -418,16 +418,21 @@ qualify for completion-driven cleanup; process TTL can still end their session.
 
 ### Mobile LAN transport (internal, experimental)
 
-`omgd mobile` exposes existing local runtime endpoints over an explicitly
-selected loopback/private IPv4 listener. The gateway and its private pairing
-token are independent of the macOS GUI. Authentication uses the `omg.<token>`
-WebSocket subprotocol, never a query parameter. Native clients omit Origin;
-browser origins require an explicit allowlist entry. The authenticated
-`/catalogue` socket returns endpoint IDs/names, and `/ws/<endpoint>` splices
-the existing host byte protocol to that endpoint's Unix socket. WebSocket
-messages are transport chunks, not protocol-frame boundaries. Discovery is
-channel/revision scoped, does not start shells, and does not export saved SSH
-credentials. See `ios/README.md`.
+`omgd mobile` (and `omg +mobile`) exposes existing local runtime endpoints over a
+loopback, private LAN, or Tailscale IPv4 listener. The gateway and its private pairing
+token are independent of the macOS GUI: users can run `omg +mobile` (or
+`omg +mobile pair | start | serve | status | stop | revoke`) directly from the
+terminal on a Mac or on a remote SSH server where `omgd` is installed, rendering
+an in-terminal Unicode QR code and `omg://device?url=...&token=...` link.
+Authentication uses the `omg.<token>` WebSocket subprotocol, never a query
+parameter. Native clients omit Origin; browser origins require an explicit
+allowlist entry. The authenticated `/catalogue` socket returns endpoint
+IDs/names, and `/ws/<endpoint>` splices the existing host byte protocol to that
+endpoint's Unix socket. WebSocket messages are transport chunks, not
+protocol-frame boundaries. Discovery is strictly scoped to the local machine
+where `omgd` runs (channel/revision scoped on macOS, or `~/.omg/run/*/host.sock`
+and `~/.omg/mobile` on standalone/SSH hosts), does not bridge to registered SSH
+Cloud hosts, and does not export saved SSH credentials. See `ios/README.md`.
 
 Settings → Mobile Devices owns the desktop-facing lifecycle of that gateway.
 While OMG is running, it can start or stop the LAN listener, show the selected
@@ -465,14 +470,14 @@ workspace checkpoint metadata, including empty workspaces with directory hints.
 The persisted private `mobile-device-id` identifies this gateway's support
 directory independently of another machine or channel.
 
-Mobile workspace/project discovery is host-owned: `workspaces` returns the
-desktop catalog, `hosts` combines the local machine with the desktop's persisted
-SSH registry, `directories` performs a bounded folder listing on that exact host,
-and `addProject` stores the workspace/host/canonical-path tuple in private
-`mobile-projects.json`. A remote project launches `/usr/bin/ssh` on the runtime
-host and does not pretend its remote paths are local file-plane roots. Operations
-receive `_request` identities so asynchronous roster pushes cannot be mistaken
-for replies.
+Mobile workspace/project discovery is host-owned and local to the paired machine:
+`workspaces` returns the catalog, `hosts` exposes only the local machine (`local`),
+`directories` performs a bounded native folder listing on that machine, and
+`addProject` stores the workspace/local/canonical-path tuple in private
+`mobile-projects.json`. To connect a phone to an SSH server, run `omg +mobile`
+(or `omgd mobile`) directly on that SSH server so it pairs as its own device.
+Operations receive `_request` identities so asynchronous roster pushes cannot be
+mistaken for replies.
 
 The small `omg-mobile-support` helper only serves host and folder discovery for
 Add Project; it does not parse Agent history or credentials. Opening any Agent

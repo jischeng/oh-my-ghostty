@@ -503,3 +503,136 @@ fn full_ui_control_projects_roster_without_taking_input_and_serves_real_files() 
         .iter()
         .any(|s| s.id == parts[1] && s.ended.is_none()));
 }
+
+#[test]
+fn cli_pair_status_revoke_and_stop_manage_standalone_or_ssh_gateway() {
+    let base = std::path::PathBuf::from("/tmp").join(format!(
+        "omg-mcli-{}",
+        &omg_session_runtime::record::nonce().unwrap()[..12]
+    ));
+    let run_dir = base.join(".omg/run/sshhost01");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(base.join(".omg"), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(base.join(".omg/run"), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&run_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let state_dir = base.join(".omg/mobile");
+    let mut fixture = Fixture {
+        children: vec![],
+        dir: run_dir.clone(),
+        owned: vec![],
+    };
+    let binary = env!("CARGO_BIN_EXE_omgd");
+    fixture.children.push(
+        Command::new(binary)
+            .args(["host"])
+            .arg(&run_dir)
+            .args(["--", "/bin/sh", "-i"])
+            .env("HOME", &base)
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let host = run_dir.join("host.sock");
+    let _ = (0..300)
+        .find_map(|_| {
+            UnixStream::connect(&host).ok().or_else(|| {
+                std::thread::sleep(Duration::from_millis(10));
+                None
+            })
+        })
+        .unwrap();
+
+    let pair_out = Command::new(binary)
+        .args(["mobile", "pair", "--listen", "127.0.0.1:0", "--state-dir"])
+        .arg(&state_dir)
+        .env("HOME", &base)
+        .output()
+        .unwrap();
+    assert!(
+        pair_out.status.success(),
+        "pair failed: {}",
+        String::from_utf8_lossy(&pair_out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&pair_out.stdout);
+    assert!(stdout.contains('█'));
+    let invite_line = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("Pairing URL:  "))
+        .unwrap();
+    let (ws_url, token1) = invite_line
+        .strip_prefix("omg://device?url=ws://")
+        .unwrap()
+        .split_once("&token=")
+        .unwrap();
+
+    let status_out = Command::new(binary)
+        .args(["mobile", "status", "--json", "--state-dir"])
+        .arg(&state_dir)
+        .env("HOME", &base)
+        .output()
+        .unwrap();
+    assert!(status_out.status.success());
+    let status_json: serde_json::Value = serde_json::from_slice(&status_out.stdout).unwrap();
+    assert_eq!(status_json["running"], true);
+    assert_eq!(status_json["listen"], ws_url);
+    assert_eq!(status_json["endpoints"].as_array().unwrap().len(), 1);
+
+    let mut phone = connect(ws_url, "/control", token1).unwrap();
+    let roster = json_reply(&mut phone, "roster");
+    assert_eq!(roster["wire"], 2);
+    phone
+        .send(Message::Text(
+            serde_json::json!({"t":"hosts"}).to_string().into(),
+        ))
+        .unwrap();
+    let hosts = json_reply(&mut phone, "hosts");
+    assert_eq!(
+        hosts["hosts"],
+        serde_json::json!([{"id": "local", "name": "Local Machine"}])
+    );
+    phone.close(None).unwrap();
+
+    let revoke_out = Command::new(binary)
+        .args([
+            "mobile",
+            "revoke",
+            "--no-qr",
+            "--json",
+            "--listen",
+            "127.0.0.1:0",
+            "--state-dir",
+        ])
+        .arg(&state_dir)
+        .env("HOME", &base)
+        .output()
+        .unwrap();
+    assert!(revoke_out.status.success());
+    let revoke_json: serde_json::Value = serde_json::from_slice(&revoke_out.stdout).unwrap();
+    let new_listen = revoke_json["listen"].as_str().unwrap();
+    let new_invite = revoke_json["invite_url"].as_str().unwrap();
+    let (_, token2) = new_invite.split_once("&token=").unwrap();
+    assert_ne!(token1, token2);
+    assert!(connect(new_listen, "/control", token1).is_err());
+    let mut phone2 = connect(new_listen, "/control", token2).unwrap();
+    assert_eq!(json_reply(&mut phone2, "roster")["wire"], 2);
+    phone2.close(None).unwrap();
+
+    let stop_out = Command::new(binary)
+        .args(["mobile", "stop", "--state-dir"])
+        .arg(&state_dir)
+        .env("HOME", &base)
+        .output()
+        .unwrap();
+    assert!(stop_out.status.success());
+    let after_stop = Command::new(binary)
+        .args(["mobile", "status", "--json", "--state-dir"])
+        .arg(&state_dir)
+        .env("HOME", &base)
+        .output()
+        .unwrap();
+    let after_json: serde_json::Value = serde_json::from_slice(&after_stop.stdout).unwrap();
+    assert_eq!(after_json["running"], false);
+    drop(fixture);
+    let _ = fs::remove_dir_all(&base);
+}

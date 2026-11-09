@@ -85,6 +85,21 @@ fn valid_revision(value: &str) -> bool {
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
 }
+pub(crate) fn current_revision() -> String {
+    if let Ok(exe) = env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for name in ["revision", "verified"] {
+                if let Ok(text) = fs::read_to_string(dir.join(name)) {
+                    let trimmed = text.trim();
+                    if valid_revision(trimmed) {
+                        return trimmed.to_owned();
+                    }
+                }
+            }
+        }
+    }
+    env!("CARGO_PKG_VERSION").to_owned()
+}
 pub(crate) fn default_support() -> io::Result<PathBuf> {
     let executable = env::current_exe()?;
     let contents = executable
@@ -109,43 +124,103 @@ pub(crate) fn default_support() -> io::Result<PathBuf> {
     };
     Ok(home()?.join("Library/Application Support").join(name))
 }
+pub(crate) fn default_mobile_support() -> io::Result<PathBuf> {
+    if let Ok(support) = default_support() {
+        return Ok(support);
+    }
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    let omg_dir = home()?.join(".omg");
+    if !omg_dir.exists() {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&omg_dir)?;
+    }
+    let mobile_dir = omg_dir.join("mobile");
+    if !mobile_dir.exists() {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&mobile_dir)?;
+    }
+    fs::set_permissions(&mobile_dir, fs::Permissions::from_mode(0o700))?;
+    let meta = fs::symlink_metadata(&mobile_dir)?;
+    if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 {
+        return Err(io::Error::other(
+            "Mobile state directory must be private and owned by the current user",
+        ));
+    }
+    Ok(mobile_dir)
+}
+
+fn check_runtime_root(root: &Path) -> io::Result<Option<PathBuf>> {
+    if !root.exists() {
+        return Ok(None);
+    }
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::symlink_metadata(root)?;
+    if !metadata.is_dir()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0
+    {
+        return Err(io::Error::other(
+            "Runtime directory must be private and owned by the current user",
+        ));
+    }
+    let socket = root.join("host.sock");
+    Ok(socket.exists().then_some(socket))
+}
 
 /// Mobile uses the same channel/revision namespaces as the management CLI.
 /// Discovery never launches shells, installs runtimes, or includes SSH credentials.
 pub(crate) fn mobile_targets(support: &Path) -> io::Result<Vec<(String, PathBuf)>> {
     let path = support.join("session-runtime/endpoints.json");
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    if fs::metadata(&path)?.len() > 4 * 1024 * 1024 {
-        return Err(io::Error::other("Catalogue is too large"));
-    }
-    let archive: Archive = serde_json::from_slice(&fs::read(path)?)?;
-    if archive.version != 1 || archive.endpoints.len() > 512 {
-        return Err(io::Error::other("Invalid catalogue"));
-    }
     let mut targets = BTreeMap::new();
-    for endpoint in archive.endpoints {
-        let d = endpoint.descriptor;
-        if d.connection.is_some() || !valid_revision(&d.revision) {
-            continue;
+    let run_root = home()?.join(".omg/run");
+    if path.exists() {
+        if fs::metadata(&path)?.len() > 4 * 1024 * 1024 {
+            return Err(io::Error::other("Catalogue is too large"));
         }
-        let key = digest(&format!("{}\0{}", support.display(), d.revision));
-        let root = home()?.join(".omg/run").join(&key[..20]);
-        if root.exists() {
-            use std::os::unix::fs::MetadataExt;
-            let metadata = fs::symlink_metadata(&root)?;
-            if !metadata.is_dir()
-                || metadata.uid() != unsafe { libc::geteuid() }
-                || metadata.mode() & 0o077 != 0
-            {
-                return Err(io::Error::other(
-                    "Runtime directory must be private and owned by the current user",
-                ));
+        let archive: Archive = serde_json::from_slice(&fs::read(&path)?)?;
+        if archive.version != 1 || archive.endpoints.len() > 512 {
+            return Err(io::Error::other("Invalid catalogue"));
+        }
+        for endpoint in archive.endpoints {
+            let d = endpoint.descriptor;
+            if d.connection.is_some() || !valid_revision(&d.revision) {
+                continue;
             }
-            let socket = root.join("host.sock");
-            if socket.exists() {
-                targets.insert(socket, format!("This Mac · {}", d.revision));
+            let key = digest(&format!("{}\0{}", support.display(), d.revision));
+            let root = run_root.join(&key[..20]);
+            if let Some(socket) = check_runtime_root(&root)? {
+                targets.insert(socket, format!("This Machine · {}", d.revision));
+            }
+        }
+    }
+    let revision = current_revision();
+    let current_key = digest(&format!("{}\0{revision}", support.display()));
+    if let Some(socket) = check_runtime_root(&run_root.join(&current_key[..20]))? {
+        targets
+            .entry(socket)
+            .or_insert_with(|| format!("This Machine · {revision}"));
+    }
+    if !path.exists() && run_root.exists() {
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::symlink_metadata(&run_root)?;
+        if meta.is_dir() && meta.uid() == unsafe { libc::geteuid() } && meta.mode() & 0o077 == 0 {
+            let mut entries: Vec<_> = fs::read_dir(&run_root)?
+                .take(256)
+                .filter_map(Result::ok)
+                .collect();
+            entries.sort_by_key(|e| e.file_name());
+            for entry in entries {
+                let candidate = entry.path();
+                if let Ok(Some(socket)) = check_runtime_root(&candidate) {
+                    let label = entry.file_name().to_string_lossy().into_owned();
+                    targets
+                        .entry(socket)
+                        .or_insert_with(|| format!("This Machine · {label}"));
+                }
             }
         }
     }

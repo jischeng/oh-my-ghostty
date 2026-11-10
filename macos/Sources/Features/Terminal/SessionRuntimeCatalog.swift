@@ -141,6 +141,73 @@ final class SessionRuntimeCatalog: ObservableObject {
         return descriptor.displayEndpoint
     }
 
+    nonisolated static func compatibleLocalDescriptors(
+        policy: SessionRuntimePolicy,
+        applicationSupportRoot: URL? = nil
+    ) -> [SessionRuntimeDescriptor] {
+        let supportURL = applicationSupportRoot ?? OMGApplicationEnvironment.applicationSupportURL()
+        let currentRevision = (try? String(
+            contentsOf: SessionRuntimeConnections.resources.appendingPathComponent("revision"),
+            encoding: .utf8
+        ))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let currentSnapshot = (try? String(
+            contentsOf: SessionRuntimeConnections.resources.appendingPathComponent("snapshot-revision"),
+            encoding: .utf8
+        )).map(SessionRuntimeConnections.canonicalSnapshotRevision)
+
+        var result: [SessionRuntimeDescriptor] = []
+        var seen = Set<String>()
+        if let currentRevision, !currentRevision.isEmpty {
+            seen.insert(currentRevision)
+            result.append(SessionRuntimeDescriptor(connection: nil, revision: currentRevision, policy: policy))
+        }
+        let versionsDir = supportURL.appendingPathComponent("session-runtime/versions", isDirectory: true)
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: versionsDir,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return result
+        }
+        for entry in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            let rev = entry.lastPathComponent
+            guard !rev.isEmpty, rev.utf8.count <= 128,
+                  rev.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || "._-".contains($0)) }),
+                  seen.insert(rev).inserted else { continue }
+            if let currentSnapshot {
+                let snapURL = entry.appendingPathComponent("snapshot-revision")
+                let cachedSnap = (try? String(contentsOf: snapURL, encoding: .utf8))
+                    .map(SessionRuntimeConnections.canonicalSnapshotRevision)
+                guard cachedSnap == currentSnapshot else { continue }
+            }
+            result.append(SessionRuntimeDescriptor(connection: nil, revision: rev, policy: policy))
+        }
+        return result
+    }
+
+    nonisolated static func resolveLocalRevisionDescriptor(
+        forPaneID paneID: UUID,
+        fallback: SessionRuntimeDescriptor,
+        applicationSupportRoot: URL? = nil
+    ) -> SessionRuntimeDescriptor {
+        guard fallback.isLocal else { return fallback }
+        let supportURL = applicationSupportRoot ?? OMGApplicationEnvironment.applicationSupportURL()
+        let fileName = "\(paneID.uuidString.lowercased()).json"
+        for candidate in [fallback] + compatibleLocalDescriptors(policy: fallback.policy, applicationSupportRoot: supportURL) {
+            let root = SessionRuntimeConnections.localStateDirectory(
+                for: candidate,
+                applicationSupportRoot: supportURL
+            )
+            let recordURL = root.appendingPathComponent("sessions/\(fileName)")
+            if FileManager.default.fileExists(atPath: recordURL.path) {
+                var resolved = fallback
+                resolved.revision = candidate.revision
+                return resolved
+            }
+        }
+        return fallback
+    }
+
     private static func normalized(_ values: [SessionRuntimeCatalogEndpoint]) -> [SessionRuntimeCatalogEndpoint] {
         var byKey: [String: SessionRuntimeCatalogEndpoint] = [:]
         for endpoint in values {
@@ -376,7 +443,10 @@ final class SessionRuntimeLibraryModel: ObservableObject {
               selectedSessionID == session.id,
               sessions.contains(session),
               session.ended == nil else { return }
-        try closeQueue.enqueue([SessionRuntimeCloseRequest(pane: pane, descriptor: endpoint.descriptor)])
+        let targetDescriptor = endpoint.descriptor.isLocal
+            ? SessionRuntimeCatalog.resolveLocalRevisionDescriptor(forPaneID: pane, fallback: endpoint.descriptor)
+            : endpoint.descriptor
+        try closeQueue.enqueue([SessionRuntimeCloseRequest(pane: pane, descriptor: targetDescriptor)])
         closeQueue.start()
         closeQueue.retry()
         refresh()
@@ -385,13 +455,46 @@ final class SessionRuntimeLibraryModel: ObservableObject {
     private static func loadSessions(
         _ descriptor: SessionRuntimeDescriptor
     ) async throws -> [SessionRuntimeCatalogSession] {
-        let effectiveDescriptor: SessionRuntimeDescriptor
-        if descriptor.isLocal,
-           let currentLocal = try? SessionRuntimeConnections.localDescriptor(policy: descriptor.policy) {
-            effectiveDescriptor = currentLocal
-        } else {
-            effectiveDescriptor = descriptor
+        if descriptor.isLocal {
+            let candidates = SessionRuntimeCatalog.compatibleLocalDescriptors(policy: descriptor.policy)
+            let supportURL = OMGApplicationEnvironment.applicationSupportURL()
+            var merged: [SessionRuntimeCatalogSession] = []
+            var seen = Set<String>()
+            var firstError: Error?
+            var anyQueried = false
+            for (index, candidate) in candidates.enumerated() {
+                if index > 0 {
+                    let root = SessionRuntimeConnections.localStateDirectory(
+                        for: candidate,
+                        applicationSupportRoot: supportURL
+                    )
+                    let sessionsDir = root.appendingPathComponent("sessions", isDirectory: true)
+                    guard FileManager.default.fileExists(atPath: sessionsDir.path) else { continue }
+                }
+                do {
+                    let batch = try await loadSingleDescriptorSessions(candidate)
+                    anyQueried = true
+                    for item in batch {
+                        let key = "\(item.id.lowercased()):\(item.generation)"
+                        if seen.insert(key).inserted {
+                            merged.append(item)
+                        }
+                    }
+                } catch {
+                    if firstError == nil { firstError = error }
+                }
+            }
+            if !anyQueried, let firstError {
+                throw firstError
+            }
+            return merged
         }
+        return try await loadSingleDescriptorSessions(descriptor)
+    }
+
+    private static func loadSingleDescriptorSessions(
+        _ effectiveDescriptor: SessionRuntimeDescriptor
+    ) async throws -> [SessionRuntimeCatalogSession] {
         let socket = try SessionRuntimeConnections.shared.prepareBatch(effectiveDescriptor)
         let helper = SessionRuntimeConnections.resources.appendingPathComponent("omgd")
         let result: GitExecutionResult

@@ -237,6 +237,37 @@ pub(crate) fn mobile_targets(support: &Path) -> io::Result<Vec<(String, PathBuf)
             }
         }
     }
+    let versions_dir = support.join("session-runtime/versions");
+    if let Ok(entries) = fs::read_dir(&versions_dir) {
+        let mut dirs: Vec<_> = entries.take(256).filter_map(Result::ok).collect();
+        dirs.sort_by_key(|e| e.file_name());
+        for entry in dirs {
+            let Some(rev) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if !valid_revision(&rev) {
+                continue;
+            }
+            if rev != revision {
+                if let Some(expected) = &expected_snapshot {
+                    let snap_path = entry.path().join("snapshot-revision");
+                    let compatible = fs::read_to_string(snap_path)
+                        .ok()
+                        .is_some_and(|s| canonical_snapshot_revision(&s) == expected);
+                    if !compatible {
+                        continue;
+                    }
+                }
+            }
+            let key = digest(&format!("{}\0{rev}", support.display()));
+            let root = run_root.join(&key[..20]);
+            if let Some(socket) = check_runtime_root(&root)? {
+                if seen.insert(socket.clone()) {
+                    ordered.push((format!("This Machine · {rev}"), socket));
+                }
+            }
+        }
+    }
     let is_headless_mobile = support == home()?.join(".omg/mobile");
     if !path.exists() && is_headless_mobile && run_root.exists() {
         use std::os::unix::fs::MetadataExt;

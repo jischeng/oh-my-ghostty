@@ -244,8 +244,14 @@ enum SessionRuntimeLibrary {
         }
         if focusExisting(paneID: paneID, in: controllers) { return nil }
         let inlineOwner = SessionRuntimeHandoff.shared.inlineOwner(for: paneID)
-        let attachedDescriptor = inlineOwner?.localDescriptor ?? descriptor
         let attachedPane = inlineOwner?.localPane ?? paneID
+        var attachedDescriptor = inlineOwner?.localDescriptor ?? descriptor
+        if attachedDescriptor.isLocal {
+            attachedDescriptor = SessionRuntimeCatalog.resolveLocalRevisionDescriptor(
+                forPaneID: attachedPane,
+                fallback: attachedDescriptor
+            )
+        }
 
         guard let delegate = NSApp.delegate as? AppDelegate,
               let nativeApp = delegate.ghostty.app else {
@@ -949,6 +955,11 @@ final class SessionRuntimeBackgroundStore: ObservableObject {
         for endpoint in SessionRuntimeCatalog.shared.endpoints where endpoint.descriptor.isLocal {
             if seenIdentities.insert(endpoint.descriptor.identity).inserted {
                 descriptors.append(endpoint.descriptor)
+            }
+        }
+        for candidate in SessionRuntimeCatalog.compatibleLocalDescriptors(policy: SessionRuntimePolicy()) {
+            if seenIdentities.insert(candidate.identity).inserted {
+                descriptors.append(candidate)
             }
         }
         guard !descriptors.isEmpty else {

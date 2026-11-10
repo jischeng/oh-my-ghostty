@@ -87,6 +87,9 @@ pub fn request(ssh: &str, args: &[String], remote_cwd: Option<&str>) -> io::Resu
             if approval.is_empty() {
                 return Ok(0);
             }
+            if approval == b"passthrough" {
+                return Ok(64);
+            }
             let approval: Approval = serde_json::from_slice(&approval)?;
             let result = run_inline(&approval);
             crate::inline::forget_context(&approval.context);

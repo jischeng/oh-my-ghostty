@@ -97,8 +97,17 @@ struct SessionRuntimeLibraryStrings: Equatable, Sendable {
         }
     }
 
-    func endpointName(_ endpoint: SessionRuntimeCatalogEndpoint) -> String {
-        endpoint.descriptor.isLocal ? thisMac : endpoint.descriptor.displayEndpoint
+    @MainActor
+    func endpointName(
+        _ endpoint: SessionRuntimeCatalogEndpoint,
+        registry: SSHHostRegistry = .shared
+    ) -> String {
+        if endpoint.descriptor.isLocal { return thisMac }
+        if let connection = endpoint.descriptor.connection,
+           let host = registry.host(registry.targetID(for: connection)) {
+            return host.name
+        }
+        return endpoint.descriptor.displayEndpoint
     }
 }
 
@@ -296,13 +305,16 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
     private let endpointHeader = NSTextField(labelWithString: "ENDPOINTS")
     private let titleLabel = NSTextField(labelWithString: "Sessions")
     private let selectedEndpointLabel = NSTextField(labelWithString: "")
-    private let statusLabel = NSTextField(wrappingLabelWithString: "")
-    private let errorLabel = NSTextField(wrappingLabelWithString: "")
+    private let statusLabel = NSTextField(labelWithString: "")
     private let refreshButton = NSButton(title: "Refresh", target: nil, action: nil)
     private let openButton = NSButton(title: "Open Existing", target: nil, action: nil)
     private let endButton = NSButton(title: "End Session…", target: nil, action: nil)
     private var observers: Set<AnyCancellable> = []
     private var selectingEndpoint = false
+    private var refreshScheduled = false
+    private var renderedEndpointKeys: [String] = []
+    private var renderedSessions: [SessionRuntimeCatalogSession] = []
+    private var renderedLanguage: OhMyGhosttyLanguage?
     private var strings: SessionRuntimeLibraryStrings {
         SessionRuntimeLibraryStrings(language: OhMyGhosttySettings.shared.language)
     }
@@ -402,11 +414,6 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
         selectedEndpointLabel.textColor = .secondaryLabelColor
         statusLabel.font = .systemFont(ofSize: 12)
         statusLabel.textColor = .secondaryLabelColor
-        statusLabel.maximumNumberOfLines = 2
-        errorLabel.font = .systemFont(ofSize: 12)
-        errorLabel.textColor = .systemRed
-        errorLabel.maximumNumberOfLines = 2
-        errorLabel.isHidden = true
         refreshButton.bezelStyle = .rounded
         refreshButton.target = self
         refreshButton.action = #selector(refreshOrCancel)
@@ -464,11 +471,9 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
         titleRow.spacing = 10
         titleRow.translatesAutoresizingMaskIntoConstraints = false
 
-        let metaStack = NSStackView(views: [statusLabel, errorLabel])
-        metaStack.orientation = .vertical
-        metaStack.alignment = .leading
-        metaStack.spacing = 4
-        metaStack.translatesAutoresizingMaskIntoConstraints = false
+        statusLabel.maximumNumberOfLines = 1
+        statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
 
         sessionScroll.documentView = sessionTable
         sessionScroll.hasVerticalScroller = true
@@ -486,21 +491,20 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
         actionRow.translatesAutoresizingMaskIntoConstraints = false
 
         pane.addSubview(titleRow)
-        pane.addSubview(metaStack)
+        pane.addSubview(statusLabel)
         pane.addSubview(sessionScroll)
         pane.addSubview(actionRow)
         NSLayoutConstraint.activate([
             titleRow.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: 20),
             titleRow.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -20),
             titleRow.topAnchor.constraint(equalTo: pane.topAnchor, constant: 15),
-            metaStack.leadingAnchor.constraint(equalTo: titleRow.leadingAnchor),
-            metaStack.trailingAnchor.constraint(equalTo: titleRow.trailingAnchor),
-            metaStack.topAnchor.constraint(equalTo: titleRow.bottomAnchor, constant: 6),
-            statusLabel.widthAnchor.constraint(equalTo: metaStack.widthAnchor),
-            errorLabel.widthAnchor.constraint(equalTo: metaStack.widthAnchor),
+            statusLabel.leadingAnchor.constraint(equalTo: titleRow.leadingAnchor),
+            statusLabel.trailingAnchor.constraint(equalTo: titleRow.trailingAnchor),
+            statusLabel.topAnchor.constraint(equalTo: titleRow.bottomAnchor, constant: 6),
+            statusLabel.heightAnchor.constraint(equalToConstant: 18),
             sessionScroll.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: 20),
             sessionScroll.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -20),
-            sessionScroll.topAnchor.constraint(equalTo: metaStack.bottomAnchor, constant: 10),
+            sessionScroll.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 10),
             actionRow.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: 20),
             actionRow.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -20),
             actionRow.topAnchor.constraint(equalTo: sessionScroll.bottomAnchor, constant: 12),
@@ -510,42 +514,63 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
     }
 
     private func bindModel() {
-        model.$endpoints.sink { [weak self] _ in self?.refreshViews() }.store(in: &observers)
-        model.$sessions.sink { [weak self] _ in self?.refreshViews() }.store(in: &observers)
-        model.$loadState.sink { [weak self] _ in self?.refreshViews() }.store(in: &observers)
-        model.$selectedEndpointID.sink { [weak self] _ in self?.refreshViews() }.store(in: &observers)
-        model.$selectedSessionID.sink { [weak self] _ in self?.refreshViews() }.store(in: &observers)
-        model.$persistenceError.sink { [weak self] _ in self?.refreshViews() }.store(in: &observers)
-        OhMyGhosttySettings.shared.$language.sink { [weak self] _ in self?.refreshViews() }.store(in: &observers)
+        model.objectWillChange.sink { [weak self] _ in self?.scheduleRefreshViews() }.store(in: &observers)
+        SSHHostRegistry.shared.objectWillChange.sink { [weak self] _ in self?.scheduleRefreshViews() }.store(in: &observers)
+        OhMyGhosttySettings.shared.$language.sink { [weak self] _ in self?.scheduleRefreshViews() }.store(in: &observers)
+    }
+
+    private func scheduleRefreshViews() {
+        guard isViewLoaded, !refreshScheduled else { return }
+        refreshScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.refreshScheduled = false
+            self.refreshViews()
+        }
     }
 
     private func refreshViews() {
         guard isViewLoaded else { return }
-        endpointTable.reloadData()
+        let language = OhMyGhosttySettings.shared.language
+        let languageChanged = renderedLanguage != language
+        renderedLanguage = language
+
+        let endpointKeys = model.endpoints.map { "\($0.id):\(strings.endpointName($0))" }
+        if endpointKeys != renderedEndpointKeys || languageChanged {
+            renderedEndpointKeys = endpointKeys
+            endpointTable.reloadData()
+        }
         endpointHeader.stringValue = strings.endpointsHeader
         titleLabel.stringValue = strings.sessionsTitle
-        for (identifier, title) in [
-            ("session", strings.sessionColumn),
-            ("agent", strings.agentColumn),
-            ("conversation", strings.conversationColumn),
-            ("status", strings.statusColumn),
-            ("cwd", strings.workingDirectoryColumn),
-            ("pid", strings.pidColumn),
-            ("updated", strings.updatedColumn)
-        ] {
-            sessionTable.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(identifier))?.title = title
+        if languageChanged {
+            for (identifier, title) in [
+                ("session", strings.sessionColumn),
+                ("agent", strings.agentColumn),
+                ("conversation", strings.conversationColumn),
+                ("status", strings.statusColumn),
+                ("cwd", strings.workingDirectoryColumn),
+                ("pid", strings.pidColumn),
+                ("updated", strings.updatedColumn)
+            ] {
+                sessionTable.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(identifier))?.title = title
+            }
         }
-        sessionTable.reloadData()
+        if model.sessions != renderedSessions || languageChanged {
+            renderedSessions = model.sessions
+            sessionTable.reloadData()
+        }
         selectingEndpoint = true
         if let id = model.selectedEndpointID,
            let row = model.endpoints.firstIndex(where: { $0.id == id }) {
-            endpointTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-        } else {
+            if endpointTable.selectedRow != row {
+                endpointTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            }
+        } else if endpointTable.selectedRow >= 0 {
             endpointTable.deselectAll(nil)
         }
         selectingEndpoint = false
 
-        selectedEndpointLabel.stringValue = model.selectedEndpoint.map(strings.endpointName) ?? ""
+        selectedEndpointLabel.stringValue = model.selectedEndpoint.map { strings.endpointName($0) } ?? ""
         refreshButton.title = model.isLoading ? strings.cancel : strings.refresh
         openButton.title = strings.openExisting
         endButton.title = strings.endSession
@@ -555,27 +580,32 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
         openButton.isEnabled = canActOnSession && selectedSession?.isAttachable == true
         endButton.isEnabled = canActOnSession && selectedSession?.ended == nil && selectedSession != nil
 
+        var statusText = ""
+        var isError = false
         switch model.loadState {
         case .idle:
             if model.selectedEndpoint == nil {
-                statusLabel.stringValue = strings.emptyCatalog(model.endpoints.isEmpty)
+                statusText = strings.emptyCatalog(model.endpoints.isEmpty)
             } else {
-                statusLabel.stringValue = strings.refreshHint
+                statusText = strings.refreshHint
             }
         case .loading:
-            statusLabel.stringValue = strings.connecting
+            statusText = strings.connecting
         case .loaded:
-            statusLabel.stringValue = model.sessions.isEmpty
+            statusText = model.sessions.isEmpty
                 ? strings.noSessions
                 : strings.sessionCount(model.sessions.count)
         case .failed(let message):
-            statusLabel.stringValue = strings.loadFailure
-            errorLabel.stringValue = strings.localizedError(message)
+            statusText = "\(strings.loadFailure) \(strings.localizedError(message))"
+            isError = true
         }
-        if case .failed = model.loadState {} else {
-            errorLabel.stringValue = model.persistenceError.map(strings.localizedError) ?? ""
+        if !isError, let persistenceError = model.persistenceError {
+            statusText = strings.localizedError(persistenceError)
+            isError = true
         }
-        errorLabel.isHidden = errorLabel.stringValue.isEmpty
+        statusLabel.stringValue = statusText
+        statusLabel.toolTip = statusText
+        statusLabel.textColor = isError ? .systemRed : .secondaryLabelColor
         view.window?.title = strings.windowTitle
     }
 

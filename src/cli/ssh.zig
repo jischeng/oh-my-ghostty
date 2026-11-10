@@ -325,7 +325,8 @@ fn runInner(
                     else
                         &.{ helper, "handoff", opts.ssh };
                     const request = try std.mem.concat(alloc, []const u8, &.{ prefix, opts._ssh_args.items });
-                    return try childExec(request);
+                    const code = childExec(request) catch 64;
+                    if (code != 64) return code;
                 }
             }
         }

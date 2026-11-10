@@ -191,14 +191,18 @@ final class SessionRuntimeLibraryModel: ObservableObject {
     @Published var selectedEndpointID: String? {
         didSet {
             guard selectedEndpointID != oldValue else { return }
-            cancelRefresh()
-            sessions = []
-            selectedSessionID = nil
-            if selectedEndpointID != nil { refresh() }
+            if selectedEndpointID != nil {
+                refresh()
+            } else {
+                cancelRefresh()
+                sessions = []
+                selectedSessionID = nil
+            }
         }
     }
 
     private let catalog: SessionRuntimeCatalog
+    private let registry: SSHHostRegistry?
     private let closeQueue: SessionRuntimeCloseQueue
     private let loader: Loader
     private var generation: UInt64 = 0
@@ -207,27 +211,96 @@ final class SessionRuntimeLibraryModel: ObservableObject {
 
     init(
         catalog: SessionRuntimeCatalog? = nil,
+        registry: SSHHostRegistry? = nil,
         closeQueue: SessionRuntimeCloseQueue? = nil,
         loader: Loader? = nil
     ) {
-        let catalog = catalog ?? SessionRuntimeCatalog.shared
-        self.catalog = catalog
+        let resolvedCatalog = catalog ?? SessionRuntimeCatalog.shared
+        let resolvedRegistry = registry ?? (catalog == nil ? SSHHostRegistry.shared : nil)
+        self.catalog = resolvedCatalog
+        self.registry = resolvedRegistry
         self.closeQueue = closeQueue ?? SessionRuntimeCloseQueue.shared
         self.loader = loader ?? { descriptor in
             try await Self.loadSessions(descriptor)
         }
-        endpoints = catalog.endpoints
-        persistenceError = catalog.persistenceError
-        catalog.$endpoints.sink { [weak self] value in
+        endpoints = Self.resolvedEndpoints(
+            catalogEndpoints: resolvedCatalog.endpoints,
+            registry: resolvedRegistry
+        )
+        persistenceError = resolvedCatalog.persistenceError
+        resolvedCatalog.$endpoints.sink { [weak self] value in
             guard let self else { return }
-            endpoints = value
-            if let selectedEndpointID, !value.contains(where: { $0.id == selectedEndpointID }) {
-                self.selectedEndpointID = nil
-            }
+            self.syncEndpoints(catalogEndpoints: value, hosts: self.registry?.hosts)
         }.store(in: &catalogObservers)
-        catalog.$persistenceError.sink { [weak self] value in
+        if let resolvedRegistry {
+            resolvedRegistry.$hosts.sink { [weak self] hosts in
+                guard let self else { return }
+                self.syncEndpoints(catalogEndpoints: self.catalog.endpoints, hosts: hosts)
+            }.store(in: &catalogObservers)
+        }
+        resolvedCatalog.$persistenceError.sink { [weak self] value in
             self?.persistenceError = value
         }.store(in: &catalogObservers)
+    }
+
+    private func syncEndpoints(
+        catalogEndpoints: [SessionRuntimeCatalogEndpoint],
+        hosts: [RegisteredSSHHost]?
+    ) {
+        let next = Self.resolvedEndpoints(
+            catalogEndpoints: catalogEndpoints,
+            registry: registry,
+            hostsOverride: hosts
+        )
+        if endpoints != next {
+            endpoints = next
+        }
+        if let selectedEndpointID, !next.contains(where: { $0.id == selectedEndpointID }) {
+            self.selectedEndpointID = next.first?.id
+        }
+    }
+
+    private static func resolvedEndpoints(
+        catalogEndpoints: [SessionRuntimeCatalogEndpoint],
+        registry: SSHHostRegistry?,
+        hostsOverride: [RegisteredSSHHost]? = nil
+    ) -> [SessionRuntimeCatalogEndpoint] {
+        guard let registry else { return catalogEndpoints }
+        let hosts = hostsOverride ?? registry.hosts
+        var result: [SessionRuntimeCatalogEndpoint] = []
+
+        if let local = catalogEndpoints.first(where: { $0.descriptor.isLocal }) {
+            result.append(local)
+        } else if let localDescriptor = try? SessionRuntimeConnections.localDescriptor(
+            policy: OhMyGhosttySettings.shared.runtimePolicy
+        ) {
+            result.append(SessionRuntimeCatalogEndpoint(descriptor: localDescriptor, lastUsedAt: .distantPast))
+        }
+
+        let currentRevision = (try? String(
+            contentsOf: SessionRuntimeConnections.resources.appendingPathComponent("revision"),
+            encoding: .utf8
+        ))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "current"
+
+        for host in hosts where host.autoInstallRuntime ?? true {
+            if let existing = catalogEndpoints.first(where: { endpoint in
+                guard let connection = endpoint.descriptor.connection else { return false }
+                return registry.targetID(for: connection) == host.id
+            }) {
+                result.append(existing)
+            } else {
+                let descriptor = (try? SessionRuntimeConnections.descriptor(
+                    connection: host.connection,
+                    policy: OhMyGhosttySettings.shared.runtimePolicy
+                )) ?? SessionRuntimeDescriptor(
+                    connection: host.connection,
+                    revision: currentRevision,
+                    policy: OhMyGhosttySettings.shared.runtimePolicy
+                )
+                result.append(SessionRuntimeCatalogEndpoint(descriptor: descriptor, lastUsedAt: host.capturedAt))
+            }
+        }
+        return result
     }
 
     var selectedEndpoint: SessionRuntimeCatalogEndpoint? {

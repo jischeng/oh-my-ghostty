@@ -23,6 +23,17 @@ struct SessionRuntimeCatalogSession: Decodable, Equatable, Identifiable, Sendabl
         }
     }
 
+    struct SshTarget: Decodable, Equatable, Sendable {
+        let destination: String
+        var options: [String]?
+        var remoteCwd: String?
+
+        enum CodingKeys: String, CodingKey {
+            case destination, options
+            case remoteCwd = "remote_cwd"
+        }
+    }
+
     let id: String
     let generation: String
     let createdAt: UInt64
@@ -31,9 +42,10 @@ struct SessionRuntimeCatalogSession: Decodable, Equatable, Identifiable, Sendabl
     let ended: String?
     let resume: Resume?
     let cwd: String?
+    var ssh: SshTarget?
 
     enum CodingKeys: String, CodingKey {
-        case id, generation, pid, ended, resume, cwd
+        case id, generation, pid, ended, resume, cwd, ssh
         case createdAt = "created_at"
         case updatedAt = "updated_at"
     }

@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import Darwin
 import Foundation
 import GhosttyKit
 
@@ -213,11 +214,23 @@ enum SessionRuntimeLibrary {
             .filter { seen.insert(ObjectIdentifier($0)).inserted }
     }
 
-    static func openPaneIDs(in controllers: [TerminalController]? = nil) -> Set<UUID> {
+    static func controllers(
+        forWindowOf controller: TerminalController?,
+        in controllers: [TerminalController]? = nil
+    ) -> [TerminalController] {
         let candidates = controllersIncludingParked(controllers ?? TerminalController.all)
+        guard let windowSessionID = controller?.windowSessionID else { return candidates }
+        return candidates.filter { $0.windowSessionID == windowSessionID }
+    }
+
+    static func openPaneIDs(
+        forWindowOf controller: TerminalController? = nil,
+        in controllers: [TerminalController]? = nil
+    ) -> Set<UUID> {
+        let candidates = Self.controllers(forWindowOf: controller, in: controllers)
         var result = Set<UUID>()
-        for controller in candidates where controller.isAvailableForWorkspace {
-            for surface in controller.surfaceTree {
+        for candidate in candidates where candidate.isAvailableForWorkspace {
+            for surface in candidate.surfaceTree {
                 result.insert(surface.id)
                 if let inlinePane = surface.runtimeInlineSession?.pane {
                     result.insert(inlinePane)
@@ -235,6 +248,7 @@ enum SessionRuntimeLibrary {
         controllers: [TerminalController]? = nil
     ) throws -> TerminalController? {
         let parentWindow = parent ?? TerminalController.preferredParent?.window
+        let parentController = parentWindow?.windowController as? TerminalController
         guard session.isAttachable, let paneID = session.paneID else {
             throw NSError(
                 domain: "OMGSessionRuntime",
@@ -242,7 +256,8 @@ enum SessionRuntimeLibrary {
                 userInfo: [NSLocalizedDescriptionKey: "This session has already ended and cannot be attached."]
             )
         }
-        if focusExisting(paneID: paneID, in: controllers) { return nil }
+        let focusScope = controllers ?? (parentController.map { Self.controllers(forWindowOf: $0) })
+        if focusExisting(paneID: paneID, in: focusScope) { return nil }
         let inlineOwner = SessionRuntimeHandoff.shared.inlineOwner(for: paneID)
         let attachedPane = inlineOwner?.localPane ?? paneID
         var attachedDescriptor = inlineOwner?.localDescriptor ?? descriptor
@@ -928,9 +943,7 @@ final class SessionRuntimeBackgroundStore: ObservableObject {
     }
 
     func markOpened(paneID: UUID) {
-        let raw = paneID.uuidString.lowercased()
-        suppressedSessionIDs.insert(raw)
-        items.removeAll { $0.session.id.lowercased() == raw }
+        objectWillChange.send()
     }
 
     func close(_ item: SessionRuntimeBackgroundItem) {
@@ -942,6 +955,120 @@ final class SessionRuntimeBackgroundStore: ObservableObject {
                 SessionRuntimeCloseRequest(pane: paneID, descriptor: item.descriptor)
             ])
         }
+    }
+
+    nonisolated private static func processArgv(_ pid: Int32) -> [String]? {
+        guard pid > 1 else { return nil }
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        var size: Int = 32 * 1024
+        var buf = [UInt8](repeating: 0, count: size)
+        guard sysctl(&mib, 3, &buf, &size, nil, 0) == 0, size >= 4 else { return nil }
+        let argc = buf.withUnsafeBytes { $0.load(as: Int32.self) }
+        guard argc > 0, argc <= 512 else { return nil }
+        var cursor = 4
+        while cursor < size && buf[cursor] != 0 { cursor += 1 }
+        while cursor < size && buf[cursor] == 0 { cursor += 1 }
+        var args: [String] = []
+        args.reserveCapacity(min(Int(argc), 64))
+        for _ in 0..<argc {
+            guard cursor < size else { break }
+            let start = cursor
+            while cursor < size && buf[cursor] != 0 { cursor += 1 }
+            guard let arg = String(bytes: buf[start..<cursor], encoding: .utf8) else { return nil }
+            args.append(arg)
+            cursor += 1
+        }
+        return args.isEmpty ? nil : args
+    }
+
+    nonisolated private static func parseSSHDestination(_ argv: [String]) -> String? {
+        guard let first = argv.first else { return nil }
+        let exe = URL(fileURLWithPath: first).lastPathComponent
+        guard exe == "ssh" else { return nil }
+        let flags = Set("46AaCfGgKkMNnqsTtVvXxYy")
+        let values = Set("BbcDEeFIiJLlmOoPpQRSWw")
+        let nonInteractive = Set("GNOQTVWfns")
+        let args = Array(argv.dropFirst())
+        var idx = 0
+        var forcedTTY = false
+        while idx < args.count {
+            let arg = args[idx]
+            if arg == "--" {
+                idx += 1
+                break
+            }
+            if !arg.hasPrefix("-") || arg == "-" {
+                break
+            }
+            var chars = arg.dropFirst()[...]
+            while let ch = chars.popFirst() {
+                if nonInteractive.contains(ch) { return nil }
+                if ch == "t" { forcedTTY = true }
+                if values.contains(ch) {
+                    let value: String
+                    if chars.isEmpty {
+                        idx += 1
+                        guard idx < args.count else { return nil }
+                        value = args[idx]
+                    } else {
+                        value = String(chars)
+                    }
+                    if ch == "o" {
+                        let lower = value.trimmingCharacters(in: .whitespaces).lowercased()
+                        if lower.hasPrefix("batchmode=yes") ||
+                            lower.hasPrefix("controlmaster=check") ||
+                            (lower.hasPrefix("remotecommand=") && lower != "remotecommand=none") {
+                            return nil
+                        }
+                    }
+                    break
+                }
+                if !flags.contains(ch) { return nil }
+            }
+            idx += 1
+        }
+        guard idx < args.count else { return nil }
+        let destination = args[idx].trimmingCharacters(in: .whitespaces)
+        guard !destination.isEmpty, !destination.hasPrefix("-") else { return nil }
+        let trailing = args[(idx + 1)...]
+        if !trailing.isEmpty && !forcedTTY {
+            return nil
+        }
+        return destination
+    }
+
+    nonisolated private static func activeSSHDestinations(forLeaderPIDs leaders: Set<Int>) -> [Int: String] {
+        guard !leaders.isEmpty else { return [:] }
+        let totalBytes = proc_listpids(UInt32(PROC_ALL_PIDS), 0, nil, 0)
+        guard totalBytes > 0 else { return [:] }
+        let maxCount = min(16_384, Int(totalBytes) / MemoryLayout<Int32>.size + 64)
+        var allPIDs = [Int32](repeating: 0, count: maxCount)
+        let bytes = proc_listpids(
+            UInt32(PROC_ALL_PIDS),
+            0,
+            &allPIDs,
+            Int32(maxCount * MemoryLayout<Int32>.size)
+        )
+        guard bytes > 0 else { return [:] }
+        let count = Int(bytes) / MemoryLayout<Int32>.size
+        var sessionPIDsByLeader: [Int: [Int32]] = [:]
+        for idx in 0..<count {
+            let pid = allPIDs[idx]
+            guard pid > 1 else { continue }
+            let sid = Int(getsid(pid))
+            guard leaders.contains(sid) else { continue }
+            sessionPIDsByLeader[sid, default: []].append(pid)
+        }
+        var result: [Int: String] = [:]
+        for (leader, pids) in sessionPIDsByLeader {
+            for pid in pids.sorted(by: >) {
+                if let argv = processArgv(pid), let dest = parseSSHDestination(argv) {
+                    result[leader] = dest
+                    break
+                }
+            }
+        }
+        return result
     }
 
     func refresh() {
@@ -957,10 +1084,9 @@ final class SessionRuntimeBackgroundStore: ObservableObject {
                 descriptors.append(endpoint.descriptor)
             }
         }
-        for candidate in SessionRuntimeCatalog.compatibleLocalDescriptors(policy: SessionRuntimePolicy()) {
-            if seenIdentities.insert(candidate.identity).inserted {
-                descriptors.append(candidate)
-            }
+        for candidate in SessionRuntimeCatalog.compatibleLocalDescriptors(policy: SessionRuntimePolicy())
+        where seenIdentities.insert(candidate.identity).inserted {
+            descriptors.append(candidate)
         }
         guard !descriptors.isEmpty else {
             if !items.isEmpty { items = [] }
@@ -1027,24 +1153,24 @@ final class SessionRuntimeBackgroundStore: ObservableObject {
             }
 
             guard !Task.isCancelled else { return }
+            let leaderPIDs = Set(discovered.compactMap { $0.0.ssh == nil ? $0.0.pid : nil })
+            let sshByLeader = Self.activeSSHDestinations(forLeaderPIDs: leaderPIDs)
             let snapshot = discovered
             await MainActor.run { [weak self] in
                 guard let self else { return }
-                let openPanes = SessionRuntimeLibrary.openPaneIDs()
                 let liveRawIDs = Set(snapshot.map { $0.0.id.lowercased() })
                 self.suppressedSessionIDs.formIntersection(liveRawIDs)
-                for pane in openPanes {
-                    self.suppressedSessionIDs.remove(pane.uuidString.lowercased())
-                }
                 var next: [SessionRuntimeBackgroundItem] = []
                 for (session, descriptor, meta) in snapshot {
-                    guard let paneID = session.paneID else { continue }
+                    guard session.paneID != nil else { continue }
                     let raw = session.id.lowercased()
-                    if openPanes.contains(paneID) || self.suppressedSessionIDs.contains(raw) {
+                    if self.suppressedSessionIDs.contains(raw) {
                         continue
                     }
                     let agent = meta?.agent ?? session.resume?.agent
-                    let cwd = session.workingDirectory
+                    let sshDestination = session.ssh?.destination
+                        ?? session.pid.flatMap { sshByLeader[$0] }
+                    let cwd = session.ssh?.remoteCwd ?? session.workingDirectory
                     let dirLabel: String = {
                         guard let cwd, !cwd.isEmpty else { return String(session.id.prefix(8)) }
                         if cwd == homePath { return "~" }
@@ -1057,11 +1183,15 @@ final class SessionRuntimeBackgroundStore: ObservableObject {
                     case "pi": "Pi"
                     default: nil
                     }
-                    let title = if let agentPrefix {
-                        "\(agentPrefix) · \(dirLabel)"
-                    } else {
-                        dirLabel
+                    var parts: [String] = []
+                    if let agentPrefix {
+                        parts.append(agentPrefix)
                     }
+                    if let sshDestination, !sshDestination.isEmpty {
+                        parts.append("SSH (\(sshDestination))")
+                    }
+                    parts.append(dirLabel)
+                    let title = parts.joined(separator: " · ")
                     next.append(SessionRuntimeBackgroundItem(
                         id: "\(descriptor.identity)/\(session.id)/\(session.generation)",
                         session: session,
@@ -1090,9 +1220,13 @@ final class SessionRuntimeBackgroundStore: ObservableObject {
     }
 
     func items(for controller: TerminalController) -> [SessionRuntimeBackgroundItem] {
+        let openPanes = SessionRuntimeLibrary.openPaneIDs(forWindowOf: controller)
         let knownWorkspaces = Set(controller.workspaceCoordinator.store.workspaces.map { $0.id.uuidString.lowercased() })
         let currentWorkspaceID = controller.workspaceID.uuidString.lowercased()
         return items.filter { item in
+            if let paneID = item.session.paneID, openPanes.contains(paneID) {
+                return false
+            }
             guard let ws = item.workspaceID?.lowercased(), knownWorkspaces.contains(ws) else { return true }
             return ws == currentWorkspaceID
         }
@@ -1451,13 +1585,19 @@ final class SessionRuntimeBackgroundPopover: NSViewController {
 
     private func activeItems() -> [SessionRuntimeBackgroundItem] {
         if selectedTargetID == "local" {
-            return controller.map { SessionRuntimeBackgroundStore.shared.items(for: $0) }
-                ?? SessionRuntimeBackgroundStore.shared.items
+            if let controller {
+                return SessionRuntimeBackgroundStore.shared.items(for: controller)
+            }
+            let openPanes = SessionRuntimeLibrary.openPaneIDs()
+            return SessionRuntimeBackgroundStore.shared.items.filter { item in
+                guard let paneID = item.session.paneID else { return false }
+                return !openPanes.contains(paneID)
+            }
         }
         guard let endpoint = libraryModel.endpoints.first(where: { $0.id == selectedTargetID }) else {
             return []
         }
-        let openPanes = SessionRuntimeLibrary.openPaneIDs()
+        let openPanes = SessionRuntimeLibrary.openPaneIDs(forWindowOf: controller)
         let homePath = FileManager.default.homeDirectoryForCurrentUser.path
         return libraryModel.sessions.compactMap { session in
             guard session.isAttachable, let paneID = session.paneID, !openPanes.contains(paneID) else {

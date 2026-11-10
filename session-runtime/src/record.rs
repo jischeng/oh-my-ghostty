@@ -234,7 +234,16 @@ impl From<&Record> for SessionSummary {
                 .cwd
                 .clone()
                 .or_else(|| record.resume.as_ref().map(|resume| resume.cwd.clone())),
-            ssh: record.ssh.clone(),
+            ssh: record.ssh.clone().or_else(|| {
+                if record.ended.is_none() {
+                    record
+                        .pid
+                        .filter(|&p| p > 0)
+                        .and_then(crate::location::leader_ssh)
+                } else {
+                    None
+                }
+            }),
         }
     }
 }

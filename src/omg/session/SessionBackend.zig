@@ -850,7 +850,12 @@ fn readLoop(self: *Self, io: *HostIO, epoch: u64, attached: *bool, connected_onc
             },
             'B' => {
                 self.invalidateStartupInput();
-                try self.publishState(io, "{\"state\":\"attention\",\"attempt\":0,\"message\":\"This session is attached in another terminal. It is available here as read-only.\"}");
+                if (self.writer_transfer.load(.acquire)) {
+                    connected_once.* = true;
+                    try self.publishState(io, "{\"state\":\"ready\",\"attempt\":0}");
+                } else {
+                    try self.publishState(io, "{\"state\":\"attention\",\"attempt\":0,\"message\":\"This session is attached in another terminal. It is available here as read-only.\"}");
+                }
             },
             'E' => {
                 self.invalidateStartupInput();

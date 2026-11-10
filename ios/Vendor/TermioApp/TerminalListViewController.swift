@@ -20,6 +20,8 @@ final class TerminalListViewController: UIViewController {
     /// The store's loose terminal containers, grouped by workspace in roster
     /// order — one section each.
     private var groups: [WorkspaceGroup] = []
+    /// Workspaces whose detached "Background Sessions" drawer is currently expanded.
+    private var expandedBackgroundWorkspaces: Set<String> = []
 
     private let newTerminalButton = UIButton(type: .system)
     private let tableView = UITableView(frame: .zero, style: .grouped)
@@ -245,12 +247,60 @@ final class TerminalListViewController: UIViewController {
 // MARK: - Table data source / delegate
 
 extension TerminalListViewController: UITableViewDataSource, UITableViewDelegate {
+    private func splitSessions(in section: Int) -> (active: [MockSession], detached: [MockSession]) {
+        let all = groups[section].sessions
+        let currentKey = store.currentSessionKey
+        var active: [MockSession] = []
+        var detached: [MockSession] = []
+        for session in all {
+            if !session.isBackground || session.isMobileCreated || session.key == currentKey {
+                active.append(session)
+            } else {
+                detached.append(session)
+            }
+        }
+        return (active, detached)
+    }
+
+    private func isBackgroundExpanded(in section: Int) -> Bool {
+        expandedBackgroundWorkspaces.contains(groups[section].id)
+    }
+
+    private func backgroundHeaderProject(for group: WorkspaceGroup, detached: [MockSession]) -> MockProject {
+        MockProject(
+            name: localized("Background Sessions"),
+            path: "",
+            branch: "\(detached.count)",
+            workspaceID: group.id,
+            workspaceName: group.name,
+            deviceAlias: group.deviceAlias,
+            sessions: detached
+        )
+    }
+
+    private func session(at indexPath: IndexPath) -> MockSession? {
+        let (active, detached) = splitSessions(in: indexPath.section)
+        if indexPath.row < active.count {
+            return active[indexPath.row]
+        }
+        guard !detached.isEmpty else { return nil }
+        if indexPath.row == active.count {
+            return nil
+        }
+        let childIndex = indexPath.row - active.count - 1
+        guard detached.indices.contains(childIndex) else { return nil }
+        return detached[childIndex]
+    }
+
     func numberOfSections(in tableView: UITableView) -> Int {
         groups.count
     }
 
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        groups[section].sessions.count
+        let (active, detached) = splitSessions(in: section)
+        guard !detached.isEmpty else { return active.count }
+        let expandedCount = isBackgroundExpanded(in: section) ? detached.count : 0
+        return active.count + 1 + expandedCount
     }
 
     func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
@@ -282,15 +332,55 @@ extension TerminalListViewController: UITableViewDataSource, UITableViewDelegate
         let cell = tableView.dequeueReusableCell(withIdentifier: "row", for: indexPath)
         cell.selectionStyle = .none
         cell.backgroundColor = .clear
-        let sessions = groups[indexPath.section].sessions
-        let session = sessions[indexPath.row]
+        let group = groups[indexPath.section]
+        let (active, detached) = splitSessions(in: indexPath.section)
+        let expanded = isBackgroundExpanded(in: indexPath.section)
+        let totalRows = active.count + (detached.isEmpty ? 0 : (1 + (expanded ? detached.count : 0)))
+
+        if indexPath.row < active.count {
+            let session = active[indexPath.row]
+            cell.contentConfiguration = UIHostingConfiguration {
+                SessionRow(
+                    session: session,
+                    isCurrent: session.key == store.currentSessionKey,
+                    showsProject: false,
+                    isFirst: indexPath.row == 0,
+                    isLast: indexPath.row == totalRows - 1
+                )
+            }
+            .margins(.horizontal, ListCard.outerMargin)
+            .margins(.vertical, 0)
+            return cell
+        }
+
+        if indexPath.row == active.count, !detached.isEmpty {
+            let headerProject = backgroundHeaderProject(for: group, detached: detached)
+            cell.contentConfiguration = UIHostingConfiguration {
+                ProjectRow(
+                    project: headerProject,
+                    isExpanded: expanded,
+                    isFirst: active.isEmpty,
+                    isLast: !expanded,
+                    accessibilityID: "terminals.background.\(group.id)"
+                )
+            }
+            .margins(.horizontal, ListCard.outerMargin)
+            .margins(.vertical, 0)
+            return cell
+        }
+
+        let childIndex = indexPath.row - active.count - 1
+        let session = detached[childIndex]
+        let isLastChild = childIndex == detached.count - 1
         cell.contentConfiguration = UIHostingConfiguration {
             SessionRow(
                 session: session,
                 isCurrent: session.key == store.currentSessionKey,
                 showsProject: false,
-                isFirst: indexPath.row == 0,
-                isLast: indexPath.row == sessions.count - 1
+                isTreeChild: true,
+                isLastTreeChild: isLastChild,
+                isFirst: false,
+                isLast: isLastChild
             )
         }
         .margins(.horizontal, ListCard.outerMargin)
@@ -299,8 +389,39 @@ extension TerminalListViewController: UITableViewDataSource, UITableViewDelegate
     }
 
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-        // The row IS the session — straight to its terminal.
-        store.openSession(groups[indexPath.section].sessions[indexPath.row])
+        let group = groups[indexPath.section]
+        let (active, detached) = splitSessions(in: indexPath.section)
+        if !detached.isEmpty, indexPath.row == active.count {
+            let nowExpanded = !expandedBackgroundWorkspaces.contains(group.id)
+            if nowExpanded {
+                expandedBackgroundWorkspaces.insert(group.id)
+            } else {
+                expandedBackgroundWorkspaces.remove(group.id)
+            }
+            let headerProject = backgroundHeaderProject(for: group, detached: detached)
+            tableView.animateDrawerToggle(
+                inSection: indexPath.section,
+                headerRow: active.count,
+                childCount: detached.count,
+                nowExpanded: nowExpanded
+            ) { headerCell in
+                headerCell.contentConfiguration = UIHostingConfiguration {
+                    ProjectRow(
+                        project: headerProject,
+                        isExpanded: nowExpanded,
+                        isFirst: active.isEmpty,
+                        isLast: !nowExpanded,
+                        accessibilityID: "terminals.background.\(group.id)"
+                    )
+                }
+                .margins(.horizontal, ListCard.outerMargin)
+                .margins(.vertical, 0)
+            }
+            return
+        }
+        if let session = session(at: indexPath) {
+            store.openSession(session)
+        }
     }
 
     /// Trailing swipe: the Mac session menu's "Close Session".
@@ -309,7 +430,7 @@ extension TerminalListViewController: UITableViewDataSource, UITableViewDelegate
         trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath
     ) -> UISwipeActionsConfiguration? {
         guard store.deviceEndpoint != nil,
-              let sessionID = groups[indexPath.section].sessions[indexPath.row].rosterID
+              let sessionID = session(at: indexPath)?.rosterID
         else { return nil }
         let close = UIContextualAction(style: .destructive, title: localized("Close")) { [weak self] _, _, done in
             self?.store.stopSession(sessionID)

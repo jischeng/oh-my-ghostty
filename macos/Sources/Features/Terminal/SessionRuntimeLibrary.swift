@@ -192,6 +192,20 @@ enum SessionRuntimeLibrary {
             .filter { seen.insert(ObjectIdentifier($0)).inserted }
     }
 
+    static func openPaneIDs(in controllers: [TerminalController]? = nil) -> Set<UUID> {
+        let candidates = controllersIncludingParked(controllers ?? TerminalController.all)
+        var result = Set<UUID>()
+        for controller in candidates where controller.isAvailableForWorkspace {
+            for surface in controller.surfaceTree {
+                result.insert(surface.id)
+                if let inlinePane = surface.runtimeInlineSession?.pane {
+                    result.insert(inlinePane)
+                }
+            }
+        }
+        return result
+    }
+
     @discardableResult
     static func openExisting(
         _ session: SessionRuntimeCatalogSession,
@@ -617,4 +631,198 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
         formatter.timeStyle = .short
         return formatter
     }()
+}
+
+struct SessionRuntimeBackgroundItem: Equatable, Identifiable, Sendable {
+    let id: String
+    let session: SessionRuntimeCatalogSession
+    let descriptor: SessionRuntimeDescriptor
+    let workspaceID: String?
+    let agent: String?
+    let title: String
+    let workingDirectory: String?
+    let isMobileCreated: Bool
+}
+
+@MainActor
+final class SessionRuntimeBackgroundStore: ObservableObject {
+    static let shared = SessionRuntimeBackgroundStore()
+
+    @Published private(set) var items: [SessionRuntimeBackgroundItem] = []
+    var isEnabledInTests = false
+    private var timer: Timer?
+    private var refreshTask: Task<Void, Never>?
+    private var suppressedSessionIDs: Set<String> = []
+    private var observers: Set<AnyCancellable> = []
+
+    private struct MobileSessionMeta: Decodable, Sendable {
+        let generation: String
+        let workspace: String
+        let agent: String
+        let project: String?
+    }
+
+    private init() {
+        guard !OMGApplicationEnvironment.isRunningTests else { return }
+        startMonitoring()
+    }
+
+    func startMonitoringIfNeeded() {
+        guard !OMGApplicationEnvironment.isRunningTests || isEnabledInTests else { return }
+        guard timer == nil else { return }
+        startMonitoring()
+    }
+
+    private func startMonitoring() {
+        SessionRuntimeCatalog.shared.$endpoints
+            .sink { [weak self] _ in self?.refresh() }
+            .store(in: &observers)
+        NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in self?.refresh() }
+            .store(in: &observers)
+        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refresh()
+            }
+        }
+        refresh()
+    }
+
+    func markOpened(paneID: UUID) {
+        let raw = paneID.uuidString.lowercased()
+        suppressedSessionIDs.insert(raw)
+        items.removeAll { $0.session.id.lowercased() == raw }
+    }
+
+    func close(_ item: SessionRuntimeBackgroundItem) {
+        let raw = item.session.id.lowercased()
+        suppressedSessionIDs.insert(raw)
+        items.removeAll { $0.id == item.id || $0.session.id.lowercased() == raw }
+        if let paneID = item.session.paneID {
+            try? SessionRuntimeCloseQueue.shared.enqueue([
+                SessionRuntimeCloseRequest(pane: paneID, descriptor: item.descriptor)
+            ])
+        }
+    }
+
+    func refresh() {
+        guard !OMGApplicationEnvironment.isRunningTests || isEnabledInTests else { return }
+        var descriptors: [SessionRuntimeDescriptor] = []
+        var seenIdentities = Set<String>()
+        if let local = try? SessionRuntimeConnections.localDescriptor(policy: SessionRuntimePolicy()) {
+            seenIdentities.insert(local.identity)
+            descriptors.append(local)
+        }
+        for endpoint in SessionRuntimeCatalog.shared.endpoints where endpoint.descriptor.isLocal {
+            if seenIdentities.insert(endpoint.descriptor.identity).inserted {
+                descriptors.append(endpoint.descriptor)
+            }
+        }
+        guard !descriptors.isEmpty else {
+            if !items.isEmpty { items = [] }
+            return
+        }
+        let supportURL = OMGApplicationEnvironment.applicationSupportURL()
+        let homePath = FileManager.default.homeDirectoryForCurrentUser.path
+        refreshTask?.cancel()
+        refreshTask = Task.detached(priority: .utility) { [descriptors, supportURL, homePath] in
+            let mobileFile = supportURL.appendingPathComponent("mobile-sessions.json")
+            let mobileMap: [String: MobileSessionMeta] = (try? Data(contentsOf: mobileFile))
+                .flatMap { try? JSONDecoder().decode([String: MobileSessionMeta].self, from: $0) } ?? [:]
+            var discovered: [(SessionRuntimeCatalogSession, SessionRuntimeDescriptor, MobileSessionMeta?)] = []
+            var seenSessions = Set<String>()
+            let decoder = JSONDecoder()
+
+            for descriptor in descriptors {
+                if Task.isCancelled { return }
+                let root = SessionRuntimeConnections.localStateDirectory(
+                    for: descriptor,
+                    applicationSupportRoot: supportURL
+                )
+                let sessionsDir = root.appendingPathComponent("sessions", isDirectory: true)
+                guard let entries = try? FileManager.default.contentsOfDirectory(
+                    at: sessionsDir,
+                    includingPropertiesForKeys: nil,
+                    options: [.skipsHiddenFiles]
+                ) else { continue }
+                for entry in entries where entry.pathExtension == "json" {
+                    let stem = entry.deletingPathExtension().lastPathComponent
+                    let closedMarker = sessionsDir.appendingPathComponent("\(stem).closed")
+                    if FileManager.default.fileExists(atPath: closedMarker.path) { continue }
+                    guard let data = try? Data(contentsOf: entry),
+                          data.count <= 65_536,
+                          let session = try? decoder.decode(SessionRuntimeCatalogSession.self, from: data),
+                          session.ended == nil,
+                          session.isAttachable,
+                          let pid = session.pid, pid > 0,
+                          kill(pid_t(pid), 0) == 0 else { continue }
+                    let key = "\(session.id.lowercased()):\(session.generation)"
+                    guard seenSessions.insert(key).inserted else { continue }
+                    let meta = mobileMap[session.id].flatMap { $0.generation == session.generation ? $0 : nil }
+                    discovered.append((session, descriptor, meta))
+                }
+            }
+
+            guard !Task.isCancelled else { return }
+            let snapshot = discovered
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                let openPanes = SessionRuntimeLibrary.openPaneIDs()
+                let liveRawIDs = Set(snapshot.map { $0.0.id.lowercased() })
+                self.suppressedSessionIDs.formIntersection(liveRawIDs)
+                for pane in openPanes {
+                    self.suppressedSessionIDs.remove(pane.uuidString.lowercased())
+                }
+                var next: [SessionRuntimeBackgroundItem] = []
+                for (session, descriptor, meta) in snapshot {
+                    guard let paneID = session.paneID else { continue }
+                    let raw = session.id.lowercased()
+                    if openPanes.contains(paneID) || self.suppressedSessionIDs.contains(raw) {
+                        continue
+                    }
+                    let agent = meta?.agent ?? session.resume?.agent
+                    let cwd = session.workingDirectory
+                    let dirLabel: String = {
+                        guard let cwd, !cwd.isEmpty else { return String(session.id.prefix(8)) }
+                        if cwd == homePath { return "~" }
+                        let last = URL(fileURLWithPath: cwd).lastPathComponent
+                        return last.isEmpty ? cwd : last
+                    }()
+                    let agentPrefix: String? = switch agent {
+                    case "claude": "Claude Code"
+                    case "codex": "Codex"
+                    case "pi": "Pi"
+                    default: nil
+                    }
+                    let title = if let agentPrefix {
+                        "\(agentPrefix) · \(dirLabel)"
+                    } else {
+                        dirLabel
+                    }
+                    next.append(SessionRuntimeBackgroundItem(
+                        id: "\(descriptor.identity)/\(session.id)/\(session.generation)",
+                        session: session,
+                        descriptor: descriptor,
+                        workspaceID: meta?.workspace,
+                        agent: agent,
+                        title: title,
+                        workingDirectory: cwd,
+                        isMobileCreated: meta != nil
+                    ))
+                }
+                next.sort { lhs, rhs in
+                    if lhs.isMobileCreated != rhs.isMobileCreated {
+                        return lhs.isMobileCreated && !rhs.isMobileCreated
+                    }
+                    if lhs.session.updatedAt != rhs.session.updatedAt {
+                        return lhs.session.updatedAt > rhs.session.updatedAt
+                    }
+                    return lhs.session.id < rhs.session.id
+                }
+                if self.items != next {
+                    self.items = next
+                }
+            }
+        }
+    }
 }

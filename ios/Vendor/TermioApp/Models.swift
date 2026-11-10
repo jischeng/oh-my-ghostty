@@ -25,6 +25,11 @@ struct MockSession: Identifiable {
     /// when the session lives off the project's main checkout, so rows label
     /// worktree sessions without repeating the project branch on every line.
     var worktreeBranch: String?
+    /// True when the session is running in the background without an open
+    /// desktop window/tab attached.
+    var isBackground: Bool = false
+    /// True when the session was spawned from the phone app.
+    var isMobileCreated: Bool = false
 
     static let samples: [MockSession] = [
         .init(title: "fix-sidebar", project: "termio", agent: .sampleClaude,
@@ -178,7 +183,9 @@ extension MockSession {
             // The terminal top bar shows where the session actually runs, so
             // a worktree's branch wins over the project checkout's.
             branch: worktreeBranch ?? projectBranch,
-            worktreeBranch: worktreeBranch
+            worktreeBranch: worktreeBranch,
+            isBackground: roster.background ?? false,
+            isMobileCreated: roster.mobileCreated ?? false
         )
     }
 }

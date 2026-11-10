@@ -464,12 +464,11 @@ fn build_view(config: &Config) -> io::Result<View> {
             .filter(|s| s.ended.is_none())
             .take(2048)
         {
-            let record_path = endpoint
-                .socket
-                .parent()
-                .unwrap()
-                .join("sessions")
-                .join(format!("{}.json", session.id));
+            let sessions_dir = endpoint.socket.parent().unwrap().join("sessions");
+            if sessions_dir.join(format!("{}.closed", session.id)).exists() {
+                continue;
+            }
+            let record_path = sessions_dir.join(format!("{}.json", session.id));
             let record = record::Record::load(&record_path).ok().filter(|r| {
                 r.generation == session.generation && r.pid == session.pid && r.ended.is_none()
             });
@@ -580,10 +579,22 @@ fn build_view(config: &Config) -> io::Result<View> {
                             .into()
                     }
                 });
+            let is_background = config.support.is_some() && owner.is_none();
+            let mobile_created = saved.is_some();
             value["sessions"].as_array_mut().unwrap().push(json!({
                 "id":format!("{}/{}/{}",endpoint.id,session.id,session.generation),"title":title,"agent":agent,
                 "status":state,"subtitle":subtitle,"branch":branch,
+                "background":is_background,"mobileCreated":mobile_created,
             }));
+        }
+    }
+    for (_, value) in projects.values_mut() {
+        if let Some(sessions) = value["sessions"].as_array_mut() {
+            sessions.sort_by_key(|s| {
+                let bg = s["background"].as_bool().unwrap_or(false);
+                let mobile = s["mobileCreated"].as_bool().unwrap_or(false);
+                bg && !mobile
+            });
         }
     }
     let agents = AGENTS.iter().map(|(id, name, icon)| json!({
@@ -646,6 +657,15 @@ pub(super) async fn serve(
                     if !reply.is_null() {
                         tokio::time::timeout(Duration::from_secs(5), ws.send(Message::Text(reply.to_string().into())))
                             .await.map_err(io::Error::other)?.map_err(io::Error::other)?;
+                    }
+                    let source = config.clone();
+                    if let Ok(Ok(view)) = tokio::task::spawn_blocking(move || source.control.view(&source)).await {
+                        let next_roster = view.roster.to_string();
+                        if next_roster != previous {
+                            tokio::time::timeout(Duration::from_secs(5), ws.send(Message::Text(next_roster.clone().into())))
+                                .await.map_err(io::Error::other)?.map_err(io::Error::other)?;
+                            previous = next_roster;
+                        }
                     }
                 }
                 _ => break,
@@ -728,6 +748,28 @@ fn request_control(config: &Config, request: &Value) -> io::Result<Value> {
             return Err(io::Error::other(
                 String::from_utf8_lossy(&reply.data).into_owned(),
             ));
+        }
+        {
+            let mut phone = config.control.phone(config);
+            if let Some(phone) = phone.as_mut() {
+                if phone.remove(&id).is_some() {
+                    if let Some(path) = index_path(config) {
+                        if let Ok(nonce) = record::nonce() {
+                            let temporary = path.with_extension(format!("{nonce}.tmp"));
+                            let _ = (|| -> io::Result<()> {
+                                let mut file = fs::OpenOptions::new()
+                                    .create_new(true)
+                                    .write(true)
+                                    .mode(0o600)
+                                    .open(&temporary)?;
+                                file.write_all(&serde_json::to_vec(phone)?)?;
+                                fs::rename(&temporary, &path)
+                            })();
+                            let _ = fs::remove_file(temporary);
+                        }
+                    }
+                }
+            }
         }
         config.control.invalidate();
         return Ok(Value::Null);

@@ -61,6 +61,14 @@ struct SessionRow: View {
                 }
             }
             Spacer(minLength: 4)
+            if session.isBackground {
+                Text(localized("Background"))
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.primary.opacity(0.08), in: Capsule())
+            }
             // The dot only enters the layout when it has something to say, so
             // idle rows don't reserve invisible width.
             if session.status == .done || session.status == .needsAttention {
@@ -270,7 +278,7 @@ struct ListChevron: View {
             .font(.footnote.weight(.semibold))
             .foregroundStyle(.tertiary)
             .rotationEffect(.degrees(isExpanded ? 90 : 0))
-            .animation(.snappy(duration: 0.18), value: isExpanded)
+            .animation(.easeOut(duration: 0.1), value: isExpanded)
     }
 }
 
@@ -314,16 +322,19 @@ extension UITableView {
     /// as a single rigid drawer without UIKit's multi-cell cross-fade or cell squashing.
     func animateDrawerToggle(
         inSection section: Int,
+        headerRow: Int = 0,
         childCount: Int,
         nowExpanded: Bool,
         updateHeaderCell: (UITableViewCell) -> Void
     ) {
-        let headerPath = IndexPath(row: 0, section: section)
-        let childPaths = (0..<childCount).map { IndexPath(row: $0 + 1, section: section) }
+        let headerPath = IndexPath(row: headerRow, section: section)
+        let childPaths = (0..<childCount).map { IndexPath(row: headerRow + $0 + 1, section: section) }
+        if let headerCell = cellForRow(at: headerPath) {
+            headerCell.layer.zPosition = 10
+            updateHeaderCell(headerCell)
+            headerCell.layoutIfNeeded()
+        }
         guard !childPaths.isEmpty else {
-            if let headerCell = cellForRow(at: headerPath) {
-                updateHeaderCell(headerCell)
-            }
             return
         }
 
@@ -336,11 +347,6 @@ extension UITableView {
                 }
             }
             layoutIfNeeded()
-        }
-
-        if let headerCell = cellForRow(at: headerPath) {
-            headerCell.layer.zPosition = 10
-            updateHeaderCell(headerCell)
         }
 
         if nowExpanded {

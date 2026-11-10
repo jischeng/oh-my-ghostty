@@ -126,8 +126,10 @@ final class NativeTabSidebarController: NSViewController {
             config.controller.workspaceCoordinator.store.objectWillChange.eraseToAnyPublisher(),
             config.controller.workspaceCoordinator.objectWillChange.eraseToAnyPublisher(),
             OhMyGhosttySettings.shared.objectWillChange.eraseToAnyPublisher(),
+            SessionRuntimeBackgroundStore.shared.objectWillChange.eraseToAnyPublisher(),
         ]
         Publishers.MergeMany(changes).sink { [weak self] _ in self?.scheduleRefresh() }.store(in: &subscriptions)
+        SessionRuntimeBackgroundStore.shared.startMonitoringIfNeeded()
         themeObserver.sourceWindow = config.controller.window
     }
 
@@ -135,6 +137,7 @@ final class NativeTabSidebarController: NSViewController {
         let ids = tabs.map(ObjectIdentifier.init)
         guard ids != tabIDs else { return }
         tabIDs = ids
+        SessionRuntimeBackgroundStore.shared.refresh()
         metadataSubscriptions.removeAll()
         for tab in tabs {
             tab.objectWillChange.sink { [weak self] _ in
@@ -206,12 +209,19 @@ final class NativeTabSidebarController: NSViewController {
 
     private func outlineConfiguration() -> NativeTabOutlineConfiguration {
         let config = configuration
+        let knownWorkspaces = Set(config.controller.workspaceCoordinator.store.workspaces.map { $0.id.uuidString.lowercased() })
+        let currentWorkspaceID = config.controller.workspaceID.uuidString.lowercased()
+        let backgroundSessions = SessionRuntimeBackgroundStore.shared.items.filter { item in
+            guard let ws = item.workspaceID?.lowercased(), knownWorkspaces.contains(ws) else { return true }
+            return ws == currentWorkspaceID
+        }
         return NativeTabOutlineConfiguration(
             groups: organization.groups(tabs: tabs, grouping: config.layoutState.groupingMode, ordering: config.layoutState.orderingMode),
             selectedID: config.layoutState.pendingSelectedTabID ?? config.layoutState.tabSnapshot.selectedID,
             layoutState: config.layoutState, controller: config.controller,
             rowHeight: OhMyGhosttySettings.shared.tabRowDensity.rowHeight,
-            presentation: { [weak self] in self?.presentation(for: $0) }
+            presentation: { [weak self] in self?.presentation(for: $0) },
+            backgroundSessions: backgroundSessions
         )
     }
 

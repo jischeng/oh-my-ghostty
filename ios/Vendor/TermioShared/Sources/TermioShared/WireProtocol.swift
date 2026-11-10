@@ -663,10 +663,16 @@ public struct RosterSession: Codable, Sendable, Equatable {
     /// for sessions in the project's main checkout, so the phone can label
     /// only the rows that live somewhere other than the project's own branch.
     public let branch: String?
+    /// True when the session is running in `omgd` in the background (not
+    /// currently attached to any open desktop window/tab).
+    public let background: Bool?
+    /// True when the session was spawned from a paired mobile client.
+    public let mobileCreated: Bool?
 
     public init(
         id: String, title: String, agent: String, status: String,
-        subtitle: String? = nil, branch: String? = nil
+        subtitle: String? = nil, branch: String? = nil,
+        background: Bool? = nil, mobileCreated: Bool? = nil
     ) {
         self.id = id
         self.title = title
@@ -674,6 +680,8 @@ public struct RosterSession: Codable, Sendable, Equatable {
         self.status = status
         self.subtitle = subtitle
         self.branch = branch
+        self.background = background
+        self.mobileCreated = mobileCreated
     }
 }
 

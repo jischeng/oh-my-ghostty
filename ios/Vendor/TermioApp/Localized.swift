@@ -13,6 +13,8 @@ func localized(_ key: String.LocalizationValue) -> String {
         "Agent": "Agent",
         "Acknowledgements": "致谢",
         "Add Project": "添加项目",
+        "Background": "后台",
+        "Background Sessions": "后台会话",
         "Conversation": "对话",
         "Send": "发送",
         "Workspaces": "工作区",

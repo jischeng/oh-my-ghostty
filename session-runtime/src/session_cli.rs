@@ -199,12 +199,14 @@ pub(crate) fn mobile_targets(support: &Path) -> io::Result<Vec<(String, PathBuf)
     }
     let revision = current_revision();
     let current_key = digest(&format!("{}\0{revision}", support.display()));
-    if let Some(socket) = check_runtime_root(&run_root.join(&current_key[..20]))? {
+    let current_socket = check_runtime_root(&run_root.join(&current_key[..20]))?;
+    if let Some(socket) = &current_socket {
         targets
-            .entry(socket)
+            .entry(socket.clone())
             .or_insert_with(|| format!("This Machine · {revision}"));
     }
-    if !path.exists() && run_root.exists() {
+    let is_headless_mobile = support == home()?.join(".omg/mobile");
+    if !path.exists() && is_headless_mobile && run_root.exists() {
         use std::os::unix::fs::MetadataExt;
         let meta = fs::symlink_metadata(&run_root)?;
         if meta.is_dir() && meta.uid() == unsafe { libc::geteuid() } && meta.mode() & 0o077 == 0 {
@@ -224,10 +226,14 @@ pub(crate) fn mobile_targets(support: &Path) -> io::Result<Vec<(String, PathBuf)
             }
         }
     }
-    Ok(targets
+    let mut ordered: Vec<(String, PathBuf)> = targets
         .into_iter()
         .map(|(path, name)| (name, path))
-        .collect())
+        .collect();
+    if let Some(current) = &current_socket {
+        ordered.sort_by_key(|(_, path)| path != current);
+    }
+    Ok(ordered)
 }
 fn home() -> io::Result<PathBuf> {
     env::var_os("HOME")

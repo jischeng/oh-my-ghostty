@@ -171,6 +171,7 @@ final class RosterStore {
                     self.client = nil
                     // Switching peers must not leave the old one's projects on
                     // screen while the new socket dials.
+                    self.stoppingSessionIDs.removeAll()
                     self.projects = []
                     self.enabledAgents = []
                     self.sshHosts = []
@@ -286,8 +287,26 @@ final class RosterStore {
         client?.startSSH(host: host, workspaceID: currentWorkspace?.id)
     }
 
-    /// Close on the Mac; the next roster push drops the row everywhere.
+    /// Sessions optimistically removed on swipe-to-close before the Mac echoes
+    /// an updated roster without them.
+    private var stoppingSessionIDs: Set<String> = []
+
+    /// Close on the Mac; optimistically remove the row immediately so swipe-to-delete
+    /// responds with zero perceived delay, while suppressing it from any in-flight
+    /// roster frames until the Mac drops it.
     func stopSession(_ sessionID: String) {
+        stoppingSessionIDs.insert(sessionID)
+        var changed = false
+        projects = projects.map { project in
+            var copy = project
+            let before = copy.sessions.count
+            copy.sessions.removeAll { $0.rosterID == sessionID }
+            if copy.sessions.count != before { changed = true }
+            return copy
+        }
+        if changed {
+            NotificationCenter.default.post(name: Self.didChange, object: nil)
+        }
         client?.stopSession(id: sessionID)
     }
 
@@ -347,8 +366,22 @@ final class RosterStore {
             if connectionIsPersisted, let deviceID = roster.deviceID {
                 CompanionLink.adoptIdentity(macID: deviceID, name: roster.deviceName)
             }
+            let liveIDs = Set(roster.projects.flatMap { $0.sessions.compactMap(\.rosterID) })
+            stoppingSessionIDs.formIntersection(liveIDs)
             enabledAgents = roster.agents
-            projects = roster.projects
+            if stoppingSessionIDs.isEmpty {
+                projects = roster.projects
+            } else {
+                let stopping = stoppingSessionIDs
+                projects = roster.projects.map { project in
+                    var copy = project
+                    copy.sessions.removeAll { session in
+                        guard let id = session.rosterID else { return false }
+                        return stopping.contains(id)
+                    }
+                    return copy
+                }
+            }
             NotificationCenter.default.post(name: Self.didChange, object: nil)
             // Open terminals track their session's live status from here —
             // the roster socket is the app's only status feed.
@@ -397,6 +430,7 @@ final class RosterStore {
         client = nil
         deviceEndpoint = nil
         CompanionLink.state = .unpaired
+        stoppingSessionIDs.removeAll()
         projects = []
         enabledAgents = []
         sshHosts = []
@@ -424,7 +458,9 @@ final class RosterStore {
             rosterID: sessionID,
             projectRosterID: pending.project.rosterID,
             projectPath: pending.project.path,
-            branch: pending.project.branch
+            branch: pending.project.branch,
+            isBackground: true,
+            isMobileCreated: true
         )
         onOpenSession?(session, deviceEndpoint)
     }

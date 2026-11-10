@@ -343,7 +343,11 @@ pub fn serve_managed(
     let mut command = Command::new(&argv[0]);
     if let Some(launch) = local_launch.as_ref() {
         command.env_clear().envs(launch.env.iter());
-        if !launch.env.contains_key("TERM") {
+        if launch
+            .env
+            .get("TERM")
+            .is_none_or(|term| term.trim().is_empty() || term == "dumb")
+        {
             command.env("TERM", "xterm-256color");
         }
         if let Some(cwd) = launch.cwd.as_deref() {

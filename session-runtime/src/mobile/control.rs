@@ -405,18 +405,23 @@ fn build_view(config: &Config) -> io::Result<View> {
             .join(&hash(&format!("{}\0{rev}", support.display()))[..20])
             .join("host.sock")
     });
-    let preferred = if let Some(expected_socket) = &current_rev_socket {
-        endpoints
-            .iter()
-            .find(|(endpoint, _, presentation)| *presentation && &endpoint.socket == expected_socket)
-            .map(|(endpoint, _, _)| endpoint.clone())
-    } else {
-        endpoints
-            .iter()
-            .find(|(_, _, presentation)| *presentation)
-            .or_else(|| endpoints.first())
-            .map(|(endpoint, _, _)| endpoint.clone())
-    };
+    let preferred = current_rev_socket
+        .as_ref()
+        .and_then(|expected_socket| {
+            endpoints
+                .iter()
+                .find(|(endpoint, _, presentation)| {
+                    *presentation && &endpoint.socket == expected_socket
+                })
+                .map(|(endpoint, _, _)| endpoint.clone())
+        })
+        .or_else(|| {
+            endpoints
+                .iter()
+                .find(|(_, _, presentation)| *presentation)
+                .or_else(|| endpoints.first())
+                .map(|(endpoint, _, _)| endpoint.clone())
+        });
     let phone_guard = config.control.phone(config);
     let phone = phone_guard.as_ref().unwrap();
     let mut projects: BTreeMap<String, (Project, Value)> = BTreeMap::new();
@@ -504,15 +509,12 @@ fn build_view(config: &Config) -> io::Result<View> {
                         }
                     })
                     .unwrap_or_else(|| "terminal".into());
-                (
-                    agent,
-                    "idle".into(),
-                    if facts.is_some() {
-                        String::new()
-                    } else {
-                        "Activity unavailable on this runtime".into()
-                    },
-                )
+                let subtitle = if facts.is_some() || agent == "terminal" {
+                    String::new()
+                } else {
+                    "Activity unavailable on this runtime".into()
+                };
+                (agent, "idle".into(), subtitle)
             });
             let owner = desktop.panes.get(&session.id.to_ascii_lowercase());
             let workspace = saved
@@ -1091,7 +1093,7 @@ fn start(config: &Config, view: &View, request: &Value) -> io::Result<Value> {
         &nonce[16..20],
         &nonce[20..]
     );
-    let environment = std::env::vars()
+    let mut environment = std::env::vars()
         .filter(|(k, _)| {
             !k.starts_with("OMG_MOBILE_")
                 && !k.starts_with("OMG_RUNTIME_")
@@ -1099,6 +1101,12 @@ fn start(config: &Config, view: &View, request: &Value) -> io::Result<Value> {
                 && k != "GHOSTTY_SURFACE_ID"
         })
         .collect::<BTreeMap<_, _>>();
+    if environment
+        .get("TERM")
+        .is_none_or(|term| term.trim().is_empty() || term == "dumb")
+    {
+        environment.insert("TERM".into(), "xterm-256color".into());
+    }
     let policy_path = endpoint.socket.parent().unwrap().join("policy.json");
     let policy = if policy_path.exists() {
         serde_json::from_slice::<omg_session_runtime::lifecycle::Policy>(&bounded(
@@ -1219,6 +1227,7 @@ fn ensure_local_broker(binary: &Path, support: &Path, revision: &str) -> io::Res
             let mut child = std::process::Command::new(binary);
             child
                 .args(&command[1..])
+                .env("TERM", "xterm-256color")
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(log);
@@ -1307,11 +1316,9 @@ fn restart_endpoint(config: &Config) -> io::Result<Endpoint> {
                     continue;
                 }
             }
-            let binary = support
-                .join("session-runtime/versions")
-                .join(revision)
-                .join("omgd");
-            if !binary.is_file() {
+            let version_dir = support.join("session-runtime/versions").join(revision);
+            let binary = version_dir.join("omgd");
+            if !binary.is_file() || !version_dir.join("omg-mobile-support").is_file() {
                 continue;
             }
             return ensure_local_broker(&binary, support, revision);

@@ -86,7 +86,17 @@ pub fn environment(vars: impl Iterator<Item = (String, String)>) -> Vec<(String,
     let mut vars: Vec<_> = vars
         .filter(|(key, _)| key != "XPC_SERVICE_NAME" && !key.starts_with("__CF"))
         .filter(|(key, value)| escape(key).is_ok() && escape(value).is_ok())
+        .map(|(key, value)| {
+            if key == "TERM" && (value.trim().is_empty() || value == "dumb") {
+                (key, "xterm-256color".into())
+            } else {
+                (key, value)
+            }
+        })
         .collect();
+    if !vars.iter().any(|(key, _)| key == "TERM") {
+        vars.push(("TERM".into(), "xterm-256color".into()));
+    }
     vars.sort();
     vars
 }
@@ -241,11 +251,18 @@ mod tests {
                 ("XPC_SERVICE_NAME", "application.com.x"),
                 ("__CFBundleIdentifier", "com.x"),
                 ("PATH", "/bin"),
+                ("TERM", "dumb"),
                 ("BAD", "a\u{1}"),
             ]
             .into_iter()
             .map(|(k, v)| (k.to_string(), v.to_string())),
         );
-        assert_eq!(env, vec![("PATH".to_string(), "/bin".to_string())]);
+        assert_eq!(
+            env,
+            vec![
+                ("PATH".to_string(), "/bin".to_string()),
+                ("TERM".to_string(), "xterm-256color".to_string()),
+            ]
+        );
     }
 }

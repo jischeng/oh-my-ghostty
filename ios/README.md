@@ -45,10 +45,15 @@ omg +mobile stop
 mobile gateway, prints a scannable Unicode QR code directly in the terminal, and
 outputs the `omg://device?url=...&token=...` pairing link. Use `--lan`,
 `--tailscale`, `--listen IP:PORT`, or `--public-url wss://...` to control the
-advertised address. Each machine exposes **only its own local sessions**—a Mac
-with registered SSH Cloud hosts never bridges to those remote hosts; instead, run
-`omg +mobile` (or `omgd mobile`) on the SSH server itself to pair that server
-with OMG Mobile.
+advertised address. Two complementary topologies are supported:
+
+1. **Mac as companion & SSH jump host**: Pair the phone with your Mac (`omg +mobile`
+   or Settings → Mobile Devices). It attaches to local Mac sessions and can also
+   use the Mac as a jump box to open terminals/Agents on your Mac's registered
+   SSH hosts.
+2. **Direct SSH server pairing (Mac off / standalone)**: Run `omg +mobile` (or
+   `omgd mobile`) directly on the SSH server to pair the phone straight to that
+   server's `omgd`, so it stays reachable even when the Mac is asleep or powered off.
 
 To build the runtime from source and run the helper script on a Mac:
 

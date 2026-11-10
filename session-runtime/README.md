@@ -131,11 +131,12 @@ omg +mobile revoke
 omg +mobile stop
 ```
 
-Running `omg +mobile` on a Mac exposes only that Mac's local sessions, ignoring
-any registered SSH Cloud hosts. Running `omg +mobile` (or `omgd mobile`) on an
-SSH host discovers that host's local `~/.omg/run/*/host.sock` sessions and
-stores mobile pairing state under `~/.omg/mobile`, printing a terminal QR code
-and `omg://device?...` invitation link for OMG Mobile.
+Pairing with a Mac exposes that Mac's local sessions and allows the Mac to act
+as an SSH jump host for its registered remote hosts. Running `omg +mobile` (or
+`omgd mobile`) directly on an SSH server discovers that server's local
+`~/.omg/run/*/host.sock` sessions and stores mobile pairing state under
+`~/.omg/mobile`, allowing the phone to connect directly to the SSH server even
+when the Mac is powered off.
 
 ## Remote Quick Input
 

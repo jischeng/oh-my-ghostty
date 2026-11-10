@@ -470,14 +470,18 @@ workspace checkpoint metadata, including empty workspaces with directory hints.
 The persisted private `mobile-device-id` identifies this gateway's support
 directory independently of another machine or channel.
 
-Mobile workspace/project discovery is host-owned and local to the paired machine:
-`workspaces` returns the catalog, `hosts` exposes only the local machine (`local`),
-`directories` performs a bounded native folder listing on that machine, and
-`addProject` stores the workspace/local/canonical-path tuple in private
-`mobile-projects.json`. To connect a phone to an SSH server, run `omg +mobile`
-(or `omgd mobile`) directly on that SSH server so it pairs as its own device.
-Operations receive `_request` identities so asynchronous roster pushes cannot be
-mistaken for replies.
+Mobile workspace/project discovery is host-owned: `workspaces` returns the
+desktop catalog, `hosts` combines the local machine with the desktop's persisted
+SSH registry when `omg-mobile-support` is present (and falls back to `local` on
+standalone/Linux SSH servers), `directories` performs a bounded native folder
+listing on `local` or via SSH on a registered host, and `addProject` stores the
+workspace/host/canonical-path tuple in private `mobile-projects.json`. When
+paired with a Mac, a remote project launches `/usr/bin/ssh` on the Mac as a jump
+host and does not pretend its remote paths are local file-plane roots; when the
+Mac is off, users can instead run `omg +mobile` (or `omgd mobile`) directly on
+the SSH server to pair that server as an independent device. Operations receive
+`_request` identities so asynchronous roster pushes cannot be mistaken for
+replies.
 
 The small `omg-mobile-support` helper only serves host and folder discovery for
 Add Project; it does not parse Agent history or credentials. Opening any Agent

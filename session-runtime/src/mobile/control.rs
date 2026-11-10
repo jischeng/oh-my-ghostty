@@ -984,7 +984,7 @@ fn start(config: &Config, view: &View, request: &Value) -> io::Result<Value> {
     } else {
         "terminal"
     };
-    let argv = if kind == "startSSH" {
+    let mut argv = if kind == "startSSH" {
         let host = text(request, "host")?;
         if !ssh_hosts()
             .iter()
@@ -1005,6 +1005,34 @@ fn start(config: &Config, view: &View, request: &Value) -> io::Result<Value> {
         };
         vec![shell, "-lic".into(), format!("exec {command}")]
     };
+    if let Some(host) = &project.host {
+        let remote = experience::ssh_command(config, host)?;
+        let destination = text(&remote, "destination")?;
+        let mut ssh = vec!["/usr/bin/ssh".into(), "-t".into()];
+        ssh.extend(
+            remote["options"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str().map(str::to_owned)),
+        );
+        ssh.push(destination.into());
+        let remote_command = if agent == "terminal" {
+            "${SHELL:-/bin/sh} -l".to_owned()
+        } else {
+            let command = argv.last().cloned().unwrap_or_default();
+            format!(
+                "${{SHELL:-/bin/sh}} -lic {}",
+                experience::quote(command.strip_prefix("exec ").unwrap_or(&command))
+            )
+        };
+        ssh.push(format!(
+            "cd {} && exec {}",
+            experience::quote(&project.root.to_string_lossy()),
+            remote_command
+        ));
+        argv = ssh;
+    }
     let nonce = record::nonce()?;
     let id = format!(
         "{}-{}-{}-{}-{}",
@@ -1033,11 +1061,16 @@ fn start(config: &Config, view: &View, request: &Value) -> io::Result<Value> {
     };
     policy.validate()?;
     let supports_launch = inventory(&endpoint).map(|(_, p)| p).unwrap_or(true);
+    let cwd = if project.host.is_some() {
+        home()?
+    } else {
+        project.root.clone()
+    };
     let request = if supports_launch {
         json!({"id":id,"create":true,"policy":policy,
-            "launch":{"argv":argv,"env":environment,"cwd":project.root.clone(),"cols":100,"rows":30,"pixel_width":0,"pixel_height":0}})
-    } else if agent == "terminal" && kind != "startSSH" {
-        json!({"id":id,"create":true,"policy":policy,"cwd":project.root.clone()})
+            "launch":{"argv":argv,"env":environment,"cwd":cwd,"cols":100,"rows":30,"pixel_width":0,"pixel_height":0}})
+    } else if agent == "terminal" && kind != "startSSH" && project.host.is_none() {
+        json!({"id":id,"create":true,"policy":policy,"cwd":cwd})
     } else {
         return Err(io::Error::other(
             "Agent launch requires a local session broker",

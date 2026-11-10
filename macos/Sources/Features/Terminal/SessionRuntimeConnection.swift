@@ -477,7 +477,7 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
     private var relays: [String: Relay] = [:]
     private var installationTasks: [String: Task<Void, Error>] = [:]
 
-    static var resources: URL {
+    nonisolated static var resources: URL {
         Bundle.main.resourceURL!.appendingPathComponent("session-runtime", isDirectory: true)
     }
 

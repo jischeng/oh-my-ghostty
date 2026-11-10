@@ -1125,7 +1125,7 @@ final class SessionRuntimeBackgroundHeaderButton: NativeActionControl {
         setPresentationActive(isPresented)
         guard count != currentCount else { return }
         currentCount = count
-        let symbol = count > 0 ? "tray.full" : "tray"
+        let symbol = count > 0 ? "rectangle.stack.fill" : "rectangle.stack"
         symbolView.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
             .flatMap { $0.withSymbolConfiguration(.init(pointSize: 12, weight: .medium)) }
         countLabel.stringValue = count > 0 ? "\(count)" : ""
@@ -1157,13 +1157,16 @@ final class SessionRuntimeBackgroundHeaderButton: NativeActionControl {
 
 @MainActor
 final class SessionRuntimeBackgroundPopover: NSViewController {
-    private static let popoverWidth: CGFloat = 316
+    private static let popoverWidth: CGFloat = 324
 
     private weak var controller: TerminalController?
     private let onDismiss: () -> Void
+    private let libraryModel = SessionRuntimeLibraryModel()
     private let root = OMGNativeSurfaceView()
     private let titleLabel = NSTextField(labelWithString: "")
-    private let libraryButton = NativeActionControl()
+    private let refreshButton = NativeActionControl()
+    private let targetStack = NSStackView()
+    private var targetButtons: [String: NativeActionControl] = [:]
     private let listStack = NSStackView()
     private let scroll = NSScrollView()
     private let emptyContainer = NSView()
@@ -1172,6 +1175,8 @@ final class SessionRuntimeBackgroundPopover: NSViewController {
     private let emptyHintLabel = NSTextField(wrappingLabelWithString: "")
     private var scrollHeightConstraint: NSLayoutConstraint?
     private var subscriptions = Set<AnyCancellable>()
+    private var selectedTargetID = "local"
+    private var renderedTargetIDs: [String] = []
     var onPreferredSizeChange: ((NSSize) -> Void)?
 
     init(controller: TerminalController, onDismiss: @escaping () -> Void) {
@@ -1197,22 +1202,34 @@ final class SessionRuntimeBackgroundPopover: NSViewController {
         header.alignment = .centerY
         header.spacing = 8
         header.translatesAutoresizingMaskIntoConstraints = false
-        header.heightAnchor.constraint(equalToConstant: 28).isActive = true
+        header.heightAnchor.constraint(equalToConstant: 26).isActive = true
 
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let strings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
-        libraryButton.title = strings.t("Library…", "会话库…")
-        libraryButton.controlStyle = .bordered
-        libraryButton.controlSize = .small
-        libraryButton.target = self
-        libraryButton.action = #selector(openLibrary)
+        refreshButton.configure(
+            title: "",
+            symbol: "arrow.clockwise",
+            help: SettingsStrings(language: OhMyGhosttySettings.shared.language).t("Refresh", "刷新"),
+            enabled: true,
+            style: .plain,
+            identifier: "background.sessions.refresh"
+        )
+        refreshButton.widthAnchor.constraint(equalToConstant: 24).isActive = true
+        refreshButton.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        refreshButton.target = self
+        refreshButton.action = #selector(refreshTapped)
 
         header.addArrangedSubview(titleLabel)
         header.addArrangedSubview(NSView())
-        header.addArrangedSubview(libraryButton)
+        header.addArrangedSubview(refreshButton)
+
+        targetStack.orientation = .horizontal
+        targetStack.alignment = .centerY
+        targetStack.spacing = 6
+        targetStack.translatesAutoresizingMaskIntoConstraints = false
+        targetStack.heightAnchor.constraint(equalToConstant: 26).isActive = true
 
         listStack.orientation = .vertical
         listStack.alignment = .leading
@@ -1242,7 +1259,7 @@ final class SessionRuntimeBackgroundPopover: NSViewController {
         scrollHeightConstraint = heightConstraint
         heightConstraint.isActive = true
 
-        emptyIconView.image = NSImage(systemSymbolName: "tray", accessibilityDescription: nil)
+        emptyIconView.image = NSImage(systemSymbolName: "rectangle.stack", accessibilityDescription: nil)
             .flatMap { $0.withSymbolConfiguration(.init(pointSize: 18, weight: .regular)) }
         emptyIconView.imageScaling = .scaleProportionallyDown
         emptyIconView.translatesAutoresizingMaskIntoConstraints = false
@@ -1273,7 +1290,7 @@ final class SessionRuntimeBackgroundPopover: NSViewController {
             emptyStack.trailingAnchor.constraint(lessThanOrEqualTo: emptyContainer.trailingAnchor, constant: -8),
         ])
 
-        let mainStack = NSStackView(views: [header, scroll, emptyContainer])
+        let mainStack = NSStackView(views: [header, targetStack, scroll, emptyContainer])
         mainStack.orientation = .vertical
         mainStack.distribution = .fill
         mainStack.alignment = .leading
@@ -1286,6 +1303,7 @@ final class SessionRuntimeBackgroundPopover: NSViewController {
             mainStack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -14),
             mainStack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -12),
             header.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
+            targetStack.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
             scroll.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
             emptyContainer.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
         ])
@@ -1299,6 +1317,12 @@ final class SessionRuntimeBackgroundPopover: NSViewController {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.render() }
             .store(in: &subscriptions)
+        libraryModel.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                DispatchQueue.main.async { self?.render() }
+            }
+            .store(in: &subscriptions)
         OhMyGhosttySettings.shared.objectWillChange
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.render() }
@@ -1309,18 +1333,140 @@ final class SessionRuntimeBackgroundPopover: NSViewController {
 
     private func applyThemeColors(_ theme: OMGNativeTheme) {
         titleLabel.textColor = theme.foreground
+        refreshButton.applyTheme(theme)
         emptyIconView.contentTintColor = theme.secondary
         emptyLabel.textColor = theme.foreground
         emptyHintLabel.textColor = theme.secondary
+        for button in targetButtons.values {
+            button.applyTheme(theme)
+        }
         for case let row as BackgroundSessionRowView in listStack.arrangedSubviews {
             row.applyTheme(theme)
         }
     }
 
-    @objc private func openLibrary() {
-        let window = controller?.window
-        onDismiss()
-        SessionRuntimeLibrary.show(from: window)
+    @objc private func refreshTapped() {
+        if selectedTargetID == "local" {
+            SessionRuntimeBackgroundStore.shared.refresh()
+        } else if libraryModel.isLoading {
+            libraryModel.cancelRefresh()
+        } else {
+            libraryModel.refresh()
+        }
+    }
+
+    @objc private func selectTarget(_ sender: NativeActionControl) {
+        guard let raw = sender.identifier?.rawValue,
+              raw.hasPrefix("background.target.") else { return }
+        let targetID = String(raw.dropFirst("background.target.".count))
+        guard targetID != selectedTargetID else { return }
+        selectedTargetID = targetID
+        if targetID == "local" {
+            libraryModel.cancelRefresh()
+            SessionRuntimeBackgroundStore.shared.refresh()
+        } else {
+            libraryModel.selectedEndpointID = targetID
+        }
+        render()
+    }
+
+    private func rebuildTargetBarIfNeeded(strings: SessionRuntimeLibraryStrings) {
+        let remoteEndpoints = libraryModel.endpoints.filter { !$0.descriptor.isLocal }
+        if remoteEndpoints.isEmpty {
+            if selectedTargetID != "local" {
+                selectedTargetID = "local"
+                libraryModel.cancelRefresh()
+            }
+            targetStack.isHidden = true
+            return
+        }
+        targetStack.isHidden = false
+        let ids = ["local"] + remoteEndpoints.map { "\($0.id):\(strings.endpointName($0))" }
+        if ids != renderedTargetIDs {
+            renderedTargetIDs = ids
+            targetButtons.removeAll()
+            for subview in targetStack.arrangedSubviews {
+                targetStack.removeArrangedSubview(subview)
+                subview.removeFromSuperview()
+            }
+            let localBtn = makeTargetPill(
+                id: "local",
+                title: strings.thisMac,
+                symbol: "laptopcomputer"
+            )
+            targetStack.addArrangedSubview(localBtn)
+            targetButtons["local"] = localBtn
+
+            for endpoint in remoteEndpoints {
+                let btn = makeTargetPill(
+                    id: endpoint.id,
+                    title: strings.endpointName(endpoint),
+                    symbol: "server.rack"
+                )
+                targetStack.addArrangedSubview(btn)
+                targetButtons[endpoint.id] = btn
+            }
+            targetStack.addArrangedSubview(NSView())
+        }
+        if selectedTargetID != "local", !remoteEndpoints.contains(where: { $0.id == selectedTargetID }) {
+            selectedTargetID = "local"
+        }
+        for (id, button) in targetButtons {
+            button.setPresentationActive(id == selectedTargetID)
+        }
+    }
+
+    private func makeTargetPill(id: String, title: String, symbol: String) -> NativeActionControl {
+        let button = NativeActionControl()
+        button.title = title
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            .flatMap { $0.withSymbolConfiguration(.init(pointSize: 11, weight: .medium)) }
+        button.imagePosition = .imageLeading
+        button.controlStyle = .bordered
+        button.controlSize = .small
+        button.identifier = NSUserInterfaceItemIdentifier("background.target.\(id)")
+        button.target = self
+        button.action = #selector(selectTarget(_:))
+        return button
+    }
+
+    private func activeItems() -> [SessionRuntimeBackgroundItem] {
+        if selectedTargetID == "local" {
+            return controller.map { SessionRuntimeBackgroundStore.shared.items(for: $0) }
+                ?? SessionRuntimeBackgroundStore.shared.items
+        }
+        guard let endpoint = libraryModel.endpoints.first(where: { $0.id == selectedTargetID }) else {
+            return []
+        }
+        let openPanes = SessionRuntimeLibrary.openPaneIDs()
+        let homePath = FileManager.default.homeDirectoryForCurrentUser.path
+        return libraryModel.sessions.compactMap { session in
+            guard session.isAttachable, let paneID = session.paneID, !openPanes.contains(paneID) else {
+                return nil
+            }
+            let cwd = session.workingDirectory
+            let dirLabel: String = {
+                guard let cwd, !cwd.isEmpty else { return String(session.id.prefix(8)) }
+                if cwd == homePath { return "~" }
+                let last = URL(fileURLWithPath: cwd).lastPathComponent
+                return last.isEmpty ? cwd : last
+            }()
+            let title = if let agentLabel = session.agentLabel {
+                "\(agentLabel) · \(dirLabel)"
+            } else {
+                dirLabel
+            }
+            return SessionRuntimeBackgroundItem(
+                id: "\(endpoint.id)/\(session.id)/\(session.generation)",
+                session: session,
+                descriptor: endpoint.descriptor,
+                workspaceID: nil,
+                agent: session.resume?.agent,
+                title: title,
+                workingDirectory: cwd,
+                isMobileCreated: false
+            )
+        }
     }
 
     func fittingSize() -> NSSize {
@@ -1329,28 +1475,58 @@ final class SessionRuntimeBackgroundPopover: NSViewController {
 
     private func render() {
         let strings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
-        libraryButton.title = strings.t("Library…", "会话库…")
-        let items = controller.map { SessionRuntimeBackgroundStore.shared.items(for: $0) }
-            ?? SessionRuntimeBackgroundStore.shared.items
+        let libStrings = SessionRuntimeLibraryStrings(language: OhMyGhosttySettings.shared.language)
+        rebuildTargetBarIfNeeded(strings: libStrings)
+
+        let items = activeItems()
+        let isRemoteLoading = selectedTargetID != "local" && libraryModel.isLoading
+        refreshButton.configure(
+            title: "",
+            symbol: isRemoteLoading ? "xmark" : "arrow.clockwise",
+            help: isRemoteLoading ? libStrings.cancel : libStrings.refresh,
+            enabled: true,
+            style: .plain,
+            identifier: "background.sessions.refresh"
+        )
+
         titleLabel.stringValue = items.isEmpty
             ? strings.t("Background Sessions", "后台会话")
             : strings.t("Background Sessions (\(items.count))", "后台会话 (\(items.count))")
-        emptyLabel.stringValue = strings.t("No background sessions running", "当前没有后台运行的会话")
-        emptyHintLabel.stringValue = strings.t(
-            "Sessions kept after closing a tab or created on Mobile appear here.",
-            "关闭标签页后保留的会话或手机端新建的会话会显示在此。"
-        )
+
+        if selectedTargetID == "local" {
+            emptyLabel.stringValue = strings.t("No background sessions running", "当前没有后台运行的会话")
+            emptyHintLabel.stringValue = strings.t(
+                "Sessions kept after closing a tab or created on Mobile appear here.",
+                "关闭标签页后保留的会话或手机端新建的会话会显示在此。"
+            )
+        } else {
+            switch libraryModel.loadState {
+            case .loading:
+                emptyLabel.stringValue = libStrings.connecting
+                emptyHintLabel.stringValue = ""
+            case .failed(let message):
+                emptyLabel.stringValue = libStrings.loadFailure
+                emptyHintLabel.stringValue = libStrings.localizedError(message)
+            case .idle, .loaded:
+                emptyLabel.stringValue = strings.t("No background sessions running", "当前没有后台运行的会话")
+                emptyHintLabel.stringValue = strings.t(
+                    "Detached background sessions on this remote machine appear here.",
+                    "此远程机器上未在当前窗口打开的后台会话会显示在此。"
+                )
+            }
+        }
 
         for subview in listStack.arrangedSubviews {
             listStack.removeArrangedSubview(subview)
             subview.removeFromSuperview()
         }
 
+        let targetBarHeight: CGFloat = targetStack.isHidden ? 0 : (26 + 8)
         let targetSize: NSSize
         if items.isEmpty {
             scroll.isHidden = true
             emptyContainer.isHidden = false
-            targetSize = NSSize(width: Self.popoverWidth, height: 12 + 28 + 8 + 88 + 12)
+            targetSize = NSSize(width: Self.popoverWidth, height: 12 + 26 + targetBarHeight + 8 + 88 + 12)
         } else {
             emptyContainer.isHidden = true
             scroll.isHidden = false
@@ -1371,8 +1547,12 @@ final class SessionRuntimeBackgroundPopover: NSViewController {
                         )
                         SessionRuntimeBackgroundStore.shared.refresh()
                     },
-                    onClose: {
+                    onClose: { [weak self] in
+                        guard let self else { return }
                         SessionRuntimeBackgroundStore.shared.close(item)
+                        if self.selectedTargetID != "local" {
+                            self.libraryModel.refresh()
+                        }
                     }
                 )
                 row.translatesAutoresizingMaskIntoConstraints = false
@@ -1383,7 +1563,7 @@ final class SessionRuntimeBackgroundPopover: NSViewController {
             let totalHeight = CGFloat(items.count) * rowHeight + CGFloat(max(0, items.count - 1)) * 4
             let clampedScrollHeight = min(280, max(rowHeight, totalHeight))
             scrollHeightConstraint?.constant = clampedScrollHeight
-            targetSize = NSSize(width: Self.popoverWidth, height: 12 + 28 + 8 + clampedScrollHeight + 12)
+            targetSize = NSSize(width: Self.popoverWidth, height: 12 + 26 + targetBarHeight + 8 + clampedScrollHeight + 12)
         }
         applyThemeColors(root.theme)
         if preferredContentSize != targetSize {

@@ -724,8 +724,16 @@ final class SessionRuntimeBackgroundStore: ObservableObject {
         }
         let supportURL = OMGApplicationEnvironment.applicationSupportURL()
         let homePath = FileManager.default.homeDirectoryForCurrentUser.path
+        let currentRevision = (try? String(
+            contentsOf: SessionRuntimeConnections.resources.appendingPathComponent("revision"),
+            encoding: .utf8
+        ))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let currentSnapshotRevision = (try? String(
+            contentsOf: SessionRuntimeConnections.resources.appendingPathComponent("snapshot-revision"),
+            encoding: .utf8
+        ))?.trimmingCharacters(in: .whitespacesAndNewlines)
         refreshTask?.cancel()
-        refreshTask = Task.detached(priority: .utility) { [descriptors, supportURL, homePath] in
+        refreshTask = Task.detached(priority: .utility) { [descriptors, supportURL, homePath, currentRevision, currentSnapshotRevision] in
             let mobileFile = supportURL.appendingPathComponent("mobile-sessions.json")
             let mobileMap: [String: MobileSessionMeta] = (try? Data(contentsOf: mobileFile))
                 .flatMap { try? JSONDecoder().decode([String: MobileSessionMeta].self, from: $0) } ?? [:]
@@ -735,6 +743,17 @@ final class SessionRuntimeBackgroundStore: ObservableObject {
 
             for descriptor in descriptors {
                 if Task.isCancelled { return }
+                if let currentSnapshotRevision, descriptor.revision != currentRevision {
+                    let snapURL = supportURL
+                        .appendingPathComponent("session-runtime/versions")
+                        .appendingPathComponent(descriptor.revision)
+                        .appendingPathComponent("snapshot-revision")
+                    let cachedSnap = (try? String(contentsOf: snapURL, encoding: .utf8))?
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if cachedSnap != currentSnapshotRevision {
+                        continue
+                    }
+                }
                 let root = SessionRuntimeConnections.localStateDirectory(
                     for: descriptor,
                     applicationSupportRoot: supportURL
@@ -824,5 +843,402 @@ final class SessionRuntimeBackgroundStore: ObservableObject {
                 }
             }
         }
+    }
+
+    func items(for controller: TerminalController) -> [SessionRuntimeBackgroundItem] {
+        let knownWorkspaces = Set(controller.workspaceCoordinator.store.workspaces.map { $0.id.uuidString.lowercased() })
+        let currentWorkspaceID = controller.workspaceID.uuidString.lowercased()
+        return items.filter { item in
+            guard let ws = item.workspaceID?.lowercased(), knownWorkspaces.contains(ws) else { return true }
+            return ws == currentWorkspaceID
+        }
+    }
+}
+
+@MainActor
+final class SessionRuntimeBackgroundHeaderButton: NativeActionControl {
+    private let symbolView = NSImageView()
+    private let countLabel = NSTextField(labelWithString: "")
+    private var currentCount = -1
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        title = ""
+        bezelStyle = .recessed
+        isBordered = false
+        setButtonType(.momentaryPushIn)
+        wantsLayer = true
+        symbolView.imageScaling = .scaleProportionallyDown
+        countLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+        countLabel.alignment = .center
+        let row = NSStackView(views: [symbolView, countLabel])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 3
+        row.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(row)
+        NSLayoutConstraint.activate([
+            symbolView.widthAnchor.constraint(equalToConstant: 14),
+            symbolView.heightAnchor.constraint(equalToConstant: 14),
+            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            row.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        countLabel.isHidden = true
+        setAccessibilityIdentifier("tabs.background.sessions")
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let superview, bounds.contains(convert(point, from: superview)) else { return nil }
+        return self
+    }
+
+    func update(count: Int, isPresented: Bool) {
+        setPresentationActive(isPresented)
+        guard count != currentCount else { return }
+        currentCount = count
+        let symbol = count > 0 ? "tray.full" : "tray"
+        symbolView.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            .flatMap { $0.withSymbolConfiguration(.init(pointSize: 12, weight: .medium)) }
+        countLabel.stringValue = count > 0 ? "\(count)" : ""
+        countLabel.isHidden = count == 0
+        let strings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
+        let tip = count > 0
+            ? strings.t("Background Sessions (\(count))", "后台会话 (\(count))")
+            : strings.t("Background Sessions", "后台会话")
+        toolTip = tip
+        setAccessibilityLabel(tip)
+        needsLayout = true
+        invalidateIntrinsicContentSize()
+    }
+
+    override func applyTheme(_ theme: OMGNativeTheme) {
+        super.applyTheme(theme)
+        symbolView.contentTintColor = currentCount > 0 ? theme.foreground : theme.secondary
+        countLabel.textColor = theme.foreground
+    }
+
+    var preferredWidth: CGFloat {
+        guard currentCount > 0 else { return 26 }
+        let textWidth = ceil((countLabel.stringValue as NSString).size(
+            withAttributes: [.font: countLabel.font ?? .systemFont(ofSize: 11)]
+        ).width)
+        return 12 + 14 + 3 + max(8, textWidth)
+    }
+}
+
+@MainActor
+final class SessionRuntimeBackgroundPopoverController: NSViewController {
+    private weak var controller: TerminalController?
+    private let onDismiss: () -> Void
+    private let root = OMGNativeSurfaceView()
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let libraryButton = NativeActionControl()
+    private let listStack = NSStackView()
+    private let scroll = NSScrollView()
+    private let emptyLabel = NSTextField(labelWithString: "")
+    private var scrollHeightConstraint: NSLayoutConstraint?
+    private var subscriptions = Set<AnyCancellable>()
+    var onPreferredSizeChange: ((NSSize) -> Void)?
+
+    init(controller: TerminalController, onDismiss: @escaping () -> Void) {
+        self.controller = controller
+        self.onDismiss = onDismiss
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func bindTheme(to window: NSWindow?) {
+        _ = view
+        root.bindTheme(to: window)
+    }
+
+    override func loadView() {
+        root.wantsLayer = true
+        root.setAccessibilityIdentifier("background.sessions.popover")
+
+        let header = NSStackView()
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 8
+        header.heightAnchor.constraint(equalToConstant: 26).isActive = true
+
+        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.lineBreakMode = .byTruncatingTail
+
+        let strings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
+        libraryButton.title = strings.t("Library…", "会话库…")
+        libraryButton.controlStyle = .bordered
+        libraryButton.controlSize = .small
+        libraryButton.target = self
+        libraryButton.action = #selector(openLibrary)
+
+        header.addArrangedSubview(titleLabel)
+        header.addArrangedSubview(NSView())
+        header.addArrangedSubview(libraryButton)
+
+        listStack.orientation = .vertical
+        listStack.alignment = .width
+        listStack.spacing = 4
+        listStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let document = FlippedDocumentView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(listStack)
+        NSLayoutConstraint.activate([
+            listStack.topAnchor.constraint(equalTo: document.topAnchor),
+            listStack.leadingAnchor.constraint(equalTo: document.leadingAnchor),
+            listStack.trailingAnchor.constraint(equalTo: document.trailingAnchor),
+            listStack.bottomAnchor.constraint(equalTo: document.bottomAnchor),
+            listStack.widthAnchor.constraint(equalTo: document.widthAnchor),
+        ])
+
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
+        scroll.documentView = document
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        let heightConstraint = scroll.heightAnchor.constraint(equalToConstant: 120)
+        scrollHeightConstraint = heightConstraint
+        heightConstraint.isActive = true
+
+        emptyLabel.font = .systemFont(ofSize: 12)
+        emptyLabel.alignment = .center
+        emptyLabel.textColor = .secondaryLabelColor
+        emptyLabel.heightAnchor.constraint(equalToConstant: 56).isActive = true
+
+        let mainStack = NSStackView(views: [header, scroll, emptyLabel])
+        mainStack.orientation = .vertical
+        mainStack.alignment = .width
+        mainStack.spacing = 8
+        mainStack.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(mainStack)
+        NSLayoutConstraint.activate([
+            mainStack.topAnchor.constraint(equalTo: root.topAnchor, constant: 12),
+            mainStack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
+            mainStack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
+            mainStack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -12),
+            root.widthAnchor.constraint(equalToConstant: 300),
+        ])
+
+        root.onThemeChange = { [weak self] theme in
+            self?.titleLabel.textColor = theme.foreground
+            self?.emptyLabel.textColor = theme.secondary
+        }
+        view = root
+
+        SessionRuntimeBackgroundStore.shared.$items
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.render() }
+            .store(in: &subscriptions)
+        OhMyGhosttySettings.shared.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.render() }
+            .store(in: &subscriptions)
+        SessionRuntimeBackgroundStore.shared.refresh()
+        render()
+    }
+
+    @objc private func openLibrary() {
+        let window = controller?.window
+        onDismiss()
+        SessionRuntimeLibrary.show(from: window)
+    }
+
+    func fittingSize() -> NSSize {
+        view.layoutSubtreeIfNeeded()
+        return view.fittingSize
+    }
+
+    private func render() {
+        let strings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
+        libraryButton.title = strings.t("Library…", "会话库…")
+        let items = controller.map { SessionRuntimeBackgroundStore.shared.items(for: $0) }
+            ?? SessionRuntimeBackgroundStore.shared.items
+        titleLabel.stringValue = items.isEmpty
+            ? strings.t("Background Sessions", "后台会话")
+            : strings.t("Background Sessions (\(items.count))", "后台会话 (\(items.count))")
+        emptyLabel.stringValue = strings.t("No background sessions running", "当前没有后台运行的会话")
+
+        for subview in listStack.arrangedSubviews {
+            listStack.removeArrangedSubview(subview)
+            subview.removeFromSuperview()
+        }
+
+        if items.isEmpty {
+            scroll.isHidden = true
+            emptyLabel.isHidden = false
+            onPreferredSizeChange?(NSSize(width: 300, height: 112))
+            return
+        }
+
+        emptyLabel.isHidden = true
+        scroll.isHidden = false
+        for item in items {
+            let row = BackgroundSessionRowView(
+                item: item,
+                onOpen: { [weak self] in
+                    guard let self else { return }
+                    let window = self.controller?.window
+                    self.onDismiss()
+                    if let paneID = item.session.paneID {
+                        SessionRuntimeBackgroundStore.shared.markOpened(paneID: paneID)
+                    }
+                    _ = try? SessionRuntimeLibrary.openExisting(
+                        item.session,
+                        descriptor: item.descriptor,
+                        from: window
+                    )
+                    SessionRuntimeBackgroundStore.shared.refresh()
+                },
+                onClose: {
+                    SessionRuntimeBackgroundStore.shared.close(item)
+                }
+            )
+            listStack.addArrangedSubview(row)
+        }
+        let rowHeight: CGFloat = 42
+        let totalHeight = CGFloat(items.count) * rowHeight + CGFloat(max(0, items.count - 1)) * 4
+        let clampedScrollHeight = min(280, max(rowHeight, totalHeight))
+        scrollHeightConstraint?.constant = clampedScrollHeight
+        onPreferredSizeChange?(NSSize(width: 300, height: 12 + 26 + 8 + clampedScrollHeight + 12))
+    }
+}
+
+private final class FlippedDocumentView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+@MainActor
+private final class BackgroundSessionRowView: NSView {
+    private let item: SessionRuntimeBackgroundItem
+    private let onOpen: () -> Void
+    private let onClose: () -> Void
+    private let iconView = NSImageView()
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let subtitleLabel = NSTextField(labelWithString: "")
+    private let badgeLabel = NSTextField(labelWithString: "")
+    private let closeButton = NativeActionControl()
+    private var trackingArea: NSTrackingArea?
+    private var hovered = false {
+        didSet {
+            guard oldValue != hovered else { return }
+            updateAppearance()
+        }
+    }
+
+    init(item: SessionRuntimeBackgroundItem, onOpen: @escaping () -> Void, onClose: @escaping () -> Void) {
+        self.item = item
+        self.onOpen = onOpen
+        self.onClose = onClose
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 6
+
+        let symbol = (item.agent != nil && item.agent != "terminal") ? "sparkles" : "terminal"
+        iconView.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            .flatMap { $0.withSymbolConfiguration(.init(pointSize: 13, weight: .medium)) }
+        iconView.imageScaling = .scaleProportionallyDown
+
+        titleLabel.stringValue = item.title
+        titleLabel.font = .systemFont(ofSize: 12.5, weight: .medium)
+        titleLabel.lineBreakMode = .byTruncatingMiddle
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        subtitleLabel.stringValue = item.workingDirectory ?? String(item.session.id.prefix(8))
+        subtitleLabel.font = .systemFont(ofSize: 10.5)
+        subtitleLabel.lineBreakMode = .byTruncatingMiddle
+        subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let textStack = NSStackView(views: [titleLabel, subtitleLabel])
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 1
+
+        badgeLabel.stringValue = "Mobile"
+        badgeLabel.font = .systemFont(ofSize: 10, weight: .medium)
+        badgeLabel.isHidden = !item.isMobileCreated
+
+        closeButton.configure(
+            title: "",
+            symbol: "xmark",
+            help: SettingsStrings(language: OhMyGhosttySettings.shared.language).t("End Session", "结束会话"),
+            enabled: true,
+            style: .plain,
+            identifier: "background.session.close.\(item.session.id)"
+        )
+        closeButton.target = self
+        closeButton.action = #selector(closeTapped)
+
+        let row = NSStackView(views: [iconView, textStack, NSView(), badgeLabel, closeButton])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(row)
+
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 42),
+            iconView.widthAnchor.constraint(equalToConstant: 18),
+            iconView.heightAnchor.constraint(equalToConstant: 18),
+            closeButton.widthAnchor.constraint(equalToConstant: 22),
+            closeButton.heightAnchor.constraint(equalToConstant: 22),
+            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            row.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        updateAppearance()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingArea { removeTrackingArea(trackingArea) }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovered = true }
+    override func mouseExited(with event: NSEvent) { hovered = false }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = closeButton.convert(event.locationInWindow, from: nil)
+        if closeButton.bounds.contains(point) {
+            super.mouseDown(with: event)
+            return
+        }
+        onOpen()
+    }
+
+    @objc private func closeTapped() {
+        onClose()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateAppearance()
+    }
+
+    private func updateAppearance() {
+        let theme = OMGNativeTheme.resolve(for: self)
+        layer?.backgroundColor = (hovered ? theme.hoverFill : .clear).cgColor
+        iconView.contentTintColor = theme.foreground
+        titleLabel.textColor = theme.foreground
+        subtitleLabel.textColor = theme.secondary
+        badgeLabel.textColor = theme.secondary
     }
 }

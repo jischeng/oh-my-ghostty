@@ -100,6 +100,13 @@ pub(crate) fn current_revision() -> String {
     }
     env!("CARGO_PKG_VERSION").to_owned()
 }
+pub(crate) fn current_snapshot_revision() -> Option<String> {
+    let exe = env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let text = fs::read_to_string(dir.join("snapshot-revision")).ok()?;
+    let trimmed = text.trim();
+    valid_revision(trimmed).then(|| trimmed.to_owned())
+}
 pub(crate) fn default_support() -> io::Result<PathBuf> {
     let executable = env::current_exe()?;
     let contents = executable
@@ -175,8 +182,17 @@ fn check_runtime_root(root: &Path) -> io::Result<Option<PathBuf>> {
 /// Discovery never launches shells, installs runtimes, or includes SSH credentials.
 pub(crate) fn mobile_targets(support: &Path) -> io::Result<Vec<(String, PathBuf)>> {
     let path = support.join("session-runtime/endpoints.json");
-    let mut targets = BTreeMap::new();
+    let mut ordered: Vec<(String, PathBuf)> = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
     let run_root = home()?.join(".omg/run");
+    let revision = current_revision();
+    let expected_snapshot = current_snapshot_revision();
+    let current_key = digest(&format!("{}\0{revision}", support.display()));
+    if let Some(socket) = check_runtime_root(&run_root.join(&current_key[..20]))? {
+        if seen.insert(socket.clone()) {
+            ordered.push((format!("This Machine · {revision}"), socket));
+        }
+    }
     if path.exists() {
         if fs::metadata(&path)?.len() > 4 * 1024 * 1024 {
             return Err(io::Error::other("Catalogue is too large"));
@@ -190,20 +206,28 @@ pub(crate) fn mobile_targets(support: &Path) -> io::Result<Vec<(String, PathBuf)
             if d.connection.is_some() || !valid_revision(&d.revision) {
                 continue;
             }
+            if d.revision != revision {
+                if let Some(expected) = &expected_snapshot {
+                    let snap_path = support
+                        .join("session-runtime/versions")
+                        .join(&d.revision)
+                        .join("snapshot-revision");
+                    let compatible = fs::read_to_string(snap_path)
+                        .ok()
+                        .is_some_and(|s| s.trim() == expected);
+                    if !compatible {
+                        continue;
+                    }
+                }
+            }
             let key = digest(&format!("{}\0{}", support.display(), d.revision));
             let root = run_root.join(&key[..20]);
             if let Some(socket) = check_runtime_root(&root)? {
-                targets.insert(socket, format!("This Machine · {}", d.revision));
+                if seen.insert(socket.clone()) {
+                    ordered.push((format!("This Machine · {}", d.revision), socket));
+                }
             }
         }
-    }
-    let revision = current_revision();
-    let current_key = digest(&format!("{}\0{revision}", support.display()));
-    let current_socket = check_runtime_root(&run_root.join(&current_key[..20]))?;
-    if let Some(socket) = &current_socket {
-        targets
-            .entry(socket.clone())
-            .or_insert_with(|| format!("This Machine · {revision}"));
     }
     let is_headless_mobile = support == home()?.join(".omg/mobile");
     if !path.exists() && is_headless_mobile && run_root.exists() {
@@ -218,20 +242,13 @@ pub(crate) fn mobile_targets(support: &Path) -> io::Result<Vec<(String, PathBuf)
             for entry in entries {
                 let candidate = entry.path();
                 if let Ok(Some(socket)) = check_runtime_root(&candidate) {
-                    let label = entry.file_name().to_string_lossy().into_owned();
-                    targets
-                        .entry(socket)
-                        .or_insert_with(|| format!("This Machine · {label}"));
+                    if seen.insert(socket.clone()) {
+                        let label = entry.file_name().to_string_lossy().into_owned();
+                        ordered.push((format!("This Machine · {label}"), socket));
+                    }
                 }
             }
         }
-    }
-    let mut ordered: Vec<(String, PathBuf)> = targets
-        .into_iter()
-        .map(|(path, name)| (name, path))
-        .collect();
-    if let Some(current) = &current_socket {
-        ordered.sort_by_key(|(_, path)| path != current);
     }
     Ok(ordered)
 }

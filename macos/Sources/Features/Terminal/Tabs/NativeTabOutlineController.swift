@@ -11,7 +11,7 @@ struct NativeTabOutlineConfiguration {
     let controller: TerminalController
     let rowHeight: CGFloat
     let presentation: (GhosttyOrganizedTab) -> GhosttyTabPresentation?
-    var backgroundSessions: [SessionRuntimeBackgroundItem] = []
+
 }
 
 @MainActor
@@ -20,7 +20,6 @@ final class NativeTabNode: NSObject {
     var title: String?
     var icon: GhosttyTabIcon?
     var tab: GhosttyOrganizedTab?
-    var backgroundSession: SessionRuntimeBackgroundItem?
     var children: [NativeTabNode] = []
     init(key: String) { self.key = key }
 }
@@ -28,7 +27,6 @@ final class NativeTabNode: NSObject {
 @MainActor
 final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate {
     static let tabType = NSPasteboard.PasteboardType("com.jischeng.omg.native-sidebar-tab")
-    static let backgroundGroupID = "omg-background-sessions"
     let outline: NativeTabOutline
     let scrollView = NSScrollView()
     var configuration: NativeTabOutlineConfiguration
@@ -144,20 +142,8 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
     }
 
     private func activate(row: Int) {
-        guard row >= 0, let item = outline.item(atRow: row) as? NativeTabNode else { return }
-        if let bg = item.backgroundSession {
-            if let paneID = bg.session.paneID {
-                SessionRuntimeBackgroundStore.shared.markOpened(paneID: paneID)
-            }
-            _ = try? SessionRuntimeLibrary.openExisting(
-                bg.session,
-                descriptor: bg.descriptor,
-                from: configuration.controller.window
-            )
-            SessionRuntimeBackgroundStore.shared.refresh()
-            return
-        }
-        guard let tab = item.tab else { return }
+        guard row >= 0, let item = outline.item(atRow: row) as? NativeTabNode,
+              let tab = item.tab else { return }
         let controller = tab.controller
         selectionChangeGeneration += 1
         lastSelectedID = tab.id
@@ -172,7 +158,7 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
         updating = true
         defer { updating = false }
         let oldRoots = roots.map(\.key)
-        let oldChildren = Dictionary(uniqueKeysWithValues: roots.filter { $0.tab == nil && $0.backgroundSession == nil }.map {
+        let oldChildren = Dictionary(uniqueKeysWithValues: roots.filter { $0.tab == nil }.map {
             ($0.key, $0.children.map(\.key))
         })
         var nextNodes: [String: NativeTabNode] = [:]
@@ -187,8 +173,6 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
             let children = group.tabs.map { tab -> NativeTabNode in
                 let item = node("tab:\(tab.controller.tabSessionID)")
                 item.tab = tab
-                item.backgroundSession = nil
-                item.children = []
                 nextStructure.append("\(group.id)/\(item.key)")
                 return item
             }
@@ -196,36 +180,12 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
                 let item = node("group:\(group.id)")
                 item.title = title
                 item.icon = group.icon
-                item.tab = nil
-                item.backgroundSession = nil
                 item.children = children
                 nextRoots.append(item)
                 nextStructure.append(item.key)
             } else {
                 nextRoots.append(contentsOf: children)
             }
-        }
-        if !value.backgroundSessions.isEmpty {
-            let bgChildren = value.backgroundSessions.map { bg -> NativeTabNode in
-                let item = node("bg:\(bg.id)")
-                item.tab = nil
-                item.backgroundSession = bg
-                item.children = []
-                nextStructure.append("\(Self.backgroundGroupID)/\(item.key)")
-                return item
-            }
-            let bgGroup = node("group:\(Self.backgroundGroupID)")
-            let strings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
-            bgGroup.title = strings.t(
-                "Background (\(value.backgroundSessions.count))",
-                "后台会话 (\(value.backgroundSessions.count))"
-            )
-            bgGroup.icon = .systemSymbol("tray.full")
-            bgGroup.tab = nil
-            bgGroup.backgroundSession = nil
-            bgGroup.children = bgChildren
-            nextRoots.append(bgGroup)
-            nextStructure.append(bgGroup.key)
         }
         roots = nextRoots
         nodes = nextNodes
@@ -234,7 +194,7 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
             structure = nextStructure
             let newRoots = roots.map(\.key)
             let changedGroups = roots.filter {
-                $0.tab == nil && $0.backgroundSession == nil && oldChildren[$0.key] != $0.children.map(\.key)
+                $0.tab == nil && oldChildren[$0.key] != $0.children.map(\.key)
             }
             if oldChildren.isEmpty, roots.allSatisfy({ $0.tab != nil }),
                let (source, destination) = Self.singleMove(from: oldRoots, to: newRoots) {
@@ -264,13 +224,6 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
                 outline.expandItem(item)
             } else {
                 outline.collapseItem(item)
-            }
-        }
-        if let bgItem = nodes["group:\(Self.backgroundGroupID)"] {
-            if !value.layoutState.collapsedGroupIDs.contains(Self.backgroundGroupID) {
-                outline.expandItem(bgItem)
-            } else {
-                outline.collapseItem(bgItem)
             }
         }
         if let selected = nodes.values.first(where: {
@@ -314,8 +267,7 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
-        guard let node = item as? NativeTabNode else { return false }
-        return node.tab == nil && node.backgroundSession == nil
+        (item as? NativeTabNode)?.tab == nil
     }
 
     func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? { NativeTabRowView() }
@@ -334,19 +286,6 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
     }
 
     private func configure(_ cell: NativeTabCell, item: NativeTabNode) {
-        if let bg = item.backgroundSession {
-            cell.configureBackgroundSession(
-                bg,
-                select: { [weak self, weak item] in
-                    guard let self, let item else { return }
-                    self.activate(row: self.outline.row(forItem: item))
-                },
-                close: {
-                    SessionRuntimeBackgroundStore.shared.close(bg)
-                }
-            )
-            return
-        }
         cell.configure(tab: item.tab, title: item.title, presentation: configuration.presentation,
                        groupIcon: item.icon,
                        canClose: configuration.groups.reduce(0) { $0 + $1.tabs.count } > 1,
@@ -361,27 +300,6 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
     }
 
     private func menu(for row: Int) -> NSMenu? {
-        if let bg = (outline.item(atRow: row) as? NativeTabNode)?.backgroundSession {
-            let strings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
-            return NativeActionMenu.make([
-                .action(strings.t("Open Session", "打开会话"), symbol: "arrow.up.forward.app") { [weak self] in
-                    guard let self else { return }
-                    if let paneID = bg.session.paneID {
-                        SessionRuntimeBackgroundStore.shared.markOpened(paneID: paneID)
-                    }
-                    _ = try? SessionRuntimeLibrary.openExisting(
-                        bg.session,
-                        descriptor: bg.descriptor,
-                        from: self.configuration.controller.window
-                    )
-                    SessionRuntimeBackgroundStore.shared.refresh()
-                },
-                .separator,
-                .action(strings.t("End Session", "结束会话"), symbol: "xmark") {
-                    SessionRuntimeBackgroundStore.shared.close(bg)
-                },
-            ])
-        }
         guard let tab = (outline.item(atRow: row) as? NativeTabNode)?.tab?.controller else { return nil }
         return NativeActionMenu.make([
             .action("New Tab", symbol: "plus") { [weak tab] in tab?.newVerticalTab() },
@@ -586,8 +504,7 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
             update(NativeTabOutlineConfiguration(
                 groups: groups, selectedID: configuration.layoutState.tabSnapshot.selectedID,
                 layoutState: configuration.layoutState, controller: configuration.controller,
-                rowHeight: configuration.rowHeight, presentation: configuration.presentation,
-                backgroundSessions: configuration.backgroundSessions
+                rowHeight: configuration.rowHeight, presentation: configuration.presentation
             ))
         }
         return true
@@ -845,37 +762,6 @@ final class NativeTabCell: NSTableCellView {
             observe(tab.controller)
         }
         refreshNow()
-    }
-
-    func configureBackgroundSession(
-        _ item: SessionRuntimeBackgroundItem,
-        select: @escaping () -> Void,
-        close: @escaping () -> Void
-    ) {
-        observations.removeAll()
-        surfaceObservations.removeAll()
-        configuredTab = nil
-        presentation = nil
-        selected = false
-        selectAction = select
-        closeAction = close
-        canClose = true
-        updateHoverAppearance()
-        let theme = OMGNativeTheme.resolve(for: self)
-        label.stringValue = item.title
-        label.font = .systemFont(ofSize: 13)
-        label.textColor = theme.foreground.withAlphaComponent(0.85)
-        let resolvedIcon: GhosttyTabIcon = if let agent = item.agent, agent != "terminal" {
-            .systemSymbol("sparkles")
-        } else {
-            .systemSymbol("terminal")
-        }
-        icon.configure(controller: nil, icon: resolvedIcon, selected: false, activity: nil)
-        shortcut.stringValue = item.isMobileCreated ? "Mobile" : ""
-        shortcut.textColor = theme.secondary
-        status.isHidden = true
-        toolTip = item.workingDirectory ?? item.title
-        setAccessibilityLabel(item.title)
     }
 
     private func observe(_ controller: TerminalController) {

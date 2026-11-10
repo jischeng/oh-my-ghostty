@@ -399,17 +399,24 @@ fn build_view(config: &Config) -> io::Result<View> {
         }
     }
     endpoints.sort_by_key(|(_, _, presentation)| !*presentation);
-    let preferred = endpoints
-        .iter()
-        .find(|(_, _, presentation)| *presentation)
-        .or_else(|| {
-            config
-                .support
-                .is_none()
-                .then(|| endpoints.first())
-                .flatten()
-        })
-        .map(|(endpoint, _, _)| endpoint.clone());
+    let current_rev_socket = config.support.as_ref().map(|support| {
+        let rev = crate::session_cli::current_revision();
+        home.join(".omg/run")
+            .join(&hash(&format!("{}\0{rev}", support.display()))[..20])
+            .join("host.sock")
+    });
+    let preferred = if let Some(expected_socket) = &current_rev_socket {
+        endpoints
+            .iter()
+            .find(|(endpoint, _, presentation)| *presentation && &endpoint.socket == expected_socket)
+            .map(|(endpoint, _, _)| endpoint.clone())
+    } else {
+        endpoints
+            .iter()
+            .find(|(_, _, presentation)| *presentation)
+            .or_else(|| endpoints.first())
+            .map(|(endpoint, _, _)| endpoint.clone())
+    };
     let phone_guard = config.control.phone(config);
     let phone = phone_guard.as_ref().unwrap();
     let mut projects: BTreeMap<String, (Project, Value)> = BTreeMap::new();
@@ -1253,10 +1260,28 @@ fn restart_endpoint(config: &Config) -> io::Result<Endpoint> {
         .support
         .as_ref()
         .ok_or_else(|| io::Error::other("No app channel"))?;
+    let current_rev = crate::session_cli::current_revision();
+    let expected_snapshot = crate::session_cli::current_snapshot_revision();
+    let current_cached = support
+        .join("session-runtime/versions")
+        .join(&current_rev)
+        .join("omgd");
+    if current_cached.is_file() {
+        return ensure_local_broker(&current_cached, support, &current_rev);
+    }
+    if let Ok(current_exe) = std::env::current_exe() {
+        if current_exe.is_file()
+            && current_exe
+                .parent()
+                .is_some_and(|dir| dir.join("revision").is_file() || dir.join("verified").is_file())
+        {
+            return ensure_local_broker(&current_exe, support, &current_rev);
+        }
+    }
     let archive_path = support.join("session-runtime/endpoints.json");
     if archive_path.exists() {
         let archive: Value = serde_json::from_slice(&bounded(&archive_path, 4 * FILE_LIMIT)?)?;
-        for entry in archive["endpoints"].as_array().into_iter().flatten().rev() {
+        for entry in archive["endpoints"].as_array().into_iter().flatten() {
             let descriptor = &entry["descriptor"];
             if !descriptor["connection"].is_null() {
                 continue;
@@ -1270,6 +1295,18 @@ fn restart_endpoint(config: &Config) -> io::Result<Endpoint> {
             }) else {
                 continue;
             };
+            if let Some(expected) = &expected_snapshot {
+                let snap_path = support
+                    .join("session-runtime/versions")
+                    .join(revision)
+                    .join("snapshot-revision");
+                if fs::read_to_string(snap_path)
+                    .ok()
+                    .is_none_or(|s| s.trim() != expected)
+                {
+                    continue;
+                }
+            }
             let binary = support
                 .join("session-runtime/versions")
                 .join(revision)
@@ -1282,8 +1319,7 @@ fn restart_endpoint(config: &Config) -> io::Result<Endpoint> {
     }
     let current = std::env::current_exe()?;
     if current.is_file() {
-        let revision = crate::session_cli::current_revision();
-        return ensure_local_broker(&current, support, &revision);
+        return ensure_local_broker(&current, support, &current_rev);
     }
     Err(io::Error::other("No installed local runtime"))
 }

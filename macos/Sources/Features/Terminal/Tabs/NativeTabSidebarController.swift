@@ -28,23 +28,29 @@ final class NativeTabSidebarHostingView: NSView {
     func configure(_ configuration: NativeTabSidebarConfiguration) { sidebar.configure(configuration) }
 }
 
-final class NativeTabSidebarController: NSViewController {
+final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
     private(set) var configuration: NativeTabSidebarConfiguration
     private(set) var list: NativeTabOutlineController!
     private let workspaceButton = TerminalWorkspaceHeaderButton()
+    private let backgroundButton = SessionRuntimeBackgroundHeaderButton()
     private let optionsButton = NativeOptionsControl()
+    private let backgroundPopover = NSPopover()
     private let organization = GhosttyTabOrganizationModel()
     private var subscriptions = Set<AnyCancellable>()
     private var metadataSubscriptions = Set<AnyCancellable>()
     private var tabIDs: [ObjectIdentifier] = []
     private var scheduled = false
     private var workspaceWidth: NSLayoutConstraint?
+    private var backgroundWidth: NSLayoutConstraint?
     private let themeObserver = OMGNativeThemeObserver()
     private(set) var refreshCount = 0
 
     init(configuration: NativeTabSidebarConfiguration) {
         self.configuration = configuration
         super.init(nibName: nil, bundle: nil)
+        backgroundPopover.behavior = .transient
+        backgroundPopover.animates = false
+        backgroundPopover.delegate = self
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
@@ -53,11 +59,13 @@ final class NativeTabSidebarController: NSViewController {
         root.wantsLayer = true
         root.clipsToBounds = true
         root.setAccessibilityIdentifier("native.tab.sidebar")
-        let header = NSStackView(views: [workspaceButton, NSView(), optionsButton])
+        let header = NSStackView(views: [workspaceButton, NSView(), backgroundButton, optionsButton])
         header.orientation = .horizontal
         header.distribution = .fill
         header.spacing = 4
         header.translatesAutoresizingMaskIntoConstraints = false
+        backgroundButton.target = self
+        backgroundButton.action = #selector(toggleBackgroundPopover)
         optionsButton.configure(title: "", symbol: "ellipsis", help: "Organize Tabs",
                                 enabled: true, style: .plain, identifier: "tabs.organize")
         list = NativeTabOutlineController(outlineConfiguration())
@@ -69,11 +77,15 @@ final class NativeTabSidebarController: NSViewController {
         let width = workspaceButton.widthAnchor.constraint(equalToConstant: 160)
         width.priority = .defaultHigh
         workspaceWidth = width
+        let bgWidth = backgroundButton.widthAnchor.constraint(equalToConstant: 26)
+        backgroundWidth = bgWidth
         NSLayoutConstraint.activate([
             header.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10),
             header.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -10),
             header.topAnchor.constraint(equalTo: root.topAnchor),
             header.heightAnchor.constraint(equalToConstant: 32),
+            bgWidth,
+            backgroundButton.heightAnchor.constraint(equalToConstant: 24),
             optionsButton.widthAnchor.constraint(equalToConstant: 24),
             optionsButton.heightAnchor.constraint(equalToConstant: 24),
             workspaceButton.heightAnchor.constraint(equalToConstant: 28),
@@ -95,6 +107,7 @@ final class NativeTabSidebarController: NSViewController {
             configuration.statusStore !== next.statusStore
         if configuration.controller !== next.controller {
             optionsButton.dismiss()
+            backgroundPopover.close()
             configuration.controller.workspacePopover.close()
         }
         configuration = next
@@ -105,7 +118,33 @@ final class NativeTabSidebarController: NSViewController {
 
     override func viewDidLayout() {
         super.viewDidLayout()
-        workspaceWidth?.constant = workspaceButton.fittingSize(proposedWidth: max(50, view.bounds.width - 52)).width
+        let bgw = backgroundButton.preferredWidth
+        backgroundWidth?.constant = bgw
+        workspaceWidth?.constant = workspaceButton.fittingSize(proposedWidth: max(50, view.bounds.width - 56 - bgw)).width
+    }
+
+    @objc private func toggleBackgroundPopover() {
+        if backgroundPopover.isShown {
+            backgroundPopover.close()
+            backgroundButton.setPresentationActive(false)
+            return
+        }
+        SessionRuntimeBackgroundStore.shared.refresh()
+        let content = SessionRuntimeBackgroundPopoverController(controller: configuration.controller) { [weak self] in
+            self?.backgroundPopover.close()
+        }
+        content.onPreferredSizeChange = { [weak popover = backgroundPopover] size in
+            popover?.contentSize = size
+        }
+        content.bindTheme(to: configuration.controller.window)
+        backgroundPopover.contentViewController = content
+        backgroundPopover.contentSize = content.fittingSize()
+        backgroundButton.setPresentationActive(true)
+        backgroundPopover.show(relativeTo: backgroundButton.bounds, of: backgroundButton, preferredEdge: .maxY)
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        backgroundButton.setPresentationActive(false)
     }
 
     private var tabs: [TerminalController] {
@@ -194,6 +233,9 @@ final class NativeTabSidebarController: NSViewController {
                                   controller: config.controller) { [weak controller = config.controller] in
             controller?.workspaceSwitcherIsPresented.toggle()
         }
+        let bgCount = SessionRuntimeBackgroundStore.shared.items(for: config.controller).count
+        backgroundButton.update(count: bgCount, isPresented: backgroundPopover.isShown)
+        backgroundWidth?.constant = backgroundButton.preferredWidth
         optionsButton.entries = [.action("GROUP", enabled: false) {}] + GhosttyTabGroupingMode.allCases.map { mode in
             .action(mode.title, checked: config.layoutState.groupingMode == mode) { [weak controller = config.controller] in
                 controller?.setTabGroupingMode(mode)
@@ -209,19 +251,12 @@ final class NativeTabSidebarController: NSViewController {
 
     private func outlineConfiguration() -> NativeTabOutlineConfiguration {
         let config = configuration
-        let knownWorkspaces = Set(config.controller.workspaceCoordinator.store.workspaces.map { $0.id.uuidString.lowercased() })
-        let currentWorkspaceID = config.controller.workspaceID.uuidString.lowercased()
-        let backgroundSessions = SessionRuntimeBackgroundStore.shared.items.filter { item in
-            guard let ws = item.workspaceID?.lowercased(), knownWorkspaces.contains(ws) else { return true }
-            return ws == currentWorkspaceID
-        }
         return NativeTabOutlineConfiguration(
             groups: organization.groups(tabs: tabs, grouping: config.layoutState.groupingMode, ordering: config.layoutState.orderingMode),
             selectedID: config.layoutState.pendingSelectedTabID ?? config.layoutState.tabSnapshot.selectedID,
             layoutState: config.layoutState, controller: config.controller,
             rowHeight: OhMyGhosttySettings.shared.tabRowDensity.rowHeight,
-            presentation: { [weak self] in self?.presentation(for: $0) },
-            backgroundSessions: backgroundSessions
+            presentation: { [weak self] in self?.presentation(for: $0) }
         )
     }
 

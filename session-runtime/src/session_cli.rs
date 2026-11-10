@@ -100,11 +100,19 @@ pub(crate) fn current_revision() -> String {
     }
     env!("CARGO_PKG_VERSION").to_owned()
 }
+pub(crate) fn canonical_snapshot_revision(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    if trimmed == "9c4d662347abb5857b04" {
+        "59c5cc7b4d1fe408faf5"
+    } else {
+        trimmed
+    }
+}
 pub(crate) fn current_snapshot_revision() -> Option<String> {
     let exe = env::current_exe().ok()?;
     let dir = exe.parent()?;
     let text = fs::read_to_string(dir.join("snapshot-revision")).ok()?;
-    let trimmed = text.trim();
+    let trimmed = canonical_snapshot_revision(&text);
     valid_revision(trimmed).then(|| trimmed.to_owned())
 }
 pub(crate) fn default_support() -> io::Result<PathBuf> {
@@ -214,7 +222,7 @@ pub(crate) fn mobile_targets(support: &Path) -> io::Result<Vec<(String, PathBuf)
                         .join("snapshot-revision");
                     let compatible = fs::read_to_string(snap_path)
                         .ok()
-                        .is_some_and(|s| s.trim() == expected);
+                        .is_some_and(|s| canonical_snapshot_revision(&s) == expected);
                     if !compatible {
                         continue;
                     }

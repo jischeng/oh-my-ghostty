@@ -1302,7 +1302,7 @@ fn restart_endpoint(config: &Config) -> io::Result<Endpoint> {
                     .join("snapshot-revision");
                 if fs::read_to_string(snap_path)
                     .ok()
-                    .is_none_or(|s| s.trim() != expected)
+                    .is_none_or(|s| crate::session_cli::canonical_snapshot_revision(&s) != expected)
                 {
                     continue;
                 }

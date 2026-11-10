@@ -92,6 +92,14 @@ struct SessionRuntimeLibraryStrings: Equatable, Sendable {
         case "Could not attach the existing session in a native terminal tab.":
             return t("Could not attach the existing session in a native terminal tab.",
                      "无法在原生终端标签中附加现有会话。")
+        case "The runtime version for this session is unavailable. Its remote process has not been restarted.":
+            return t("The runtime version for this session is unavailable. Its remote process has not been restarted.",
+                     "此会话对应的运行时版本不可用，其后台进程仍在运行且未被重启。")
+        case "This session uses an incompatible terminal snapshot version. Its remote process is preserved; reopen it with the matching app version.":
+            return t(
+                "This session uses an incompatible terminal snapshot version. Its remote process is preserved; reopen it with the matching app version.",
+                "此会话使用了不兼容的终端快照版本，其后台进程已保留，请使用匹配的应用版本重新打开。"
+            )
         default:
             return settings.isChinese ? "详细信息：\(message)" : message
         }
@@ -956,7 +964,7 @@ final class SessionRuntimeBackgroundStore: ObservableObject {
         let currentSnapshotRevision = (try? String(
             contentsOf: SessionRuntimeConnections.resources.appendingPathComponent("snapshot-revision"),
             encoding: .utf8
-        ))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        )).map(SessionRuntimeConnections.canonicalSnapshotRevision)
         refreshTask?.cancel()
         refreshTask = Task.detached(priority: .utility) { [descriptors, supportURL, homePath, currentRevision, currentSnapshotRevision] in
             let mobileFile = supportURL.appendingPathComponent("mobile-sessions.json")
@@ -973,8 +981,8 @@ final class SessionRuntimeBackgroundStore: ObservableObject {
                         .appendingPathComponent("session-runtime/versions")
                         .appendingPathComponent(descriptor.revision)
                         .appendingPathComponent("snapshot-revision")
-                    let cachedSnap = (try? String(contentsOf: snapURL, encoding: .utf8))?
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    let cachedSnap = (try? String(contentsOf: snapURL, encoding: .utf8))
+                        .map(SessionRuntimeConnections.canonicalSnapshotRevision)
                     if cachedSnap != currentSnapshotRevision {
                         continue
                     }
@@ -1269,7 +1277,7 @@ final class SessionRuntimeBackgroundPopover: NSViewController {
 
         emptyHintLabel.font = .systemFont(ofSize: 11)
         emptyHintLabel.alignment = .center
-        emptyHintLabel.maximumNumberOfLines = 2
+        emptyHintLabel.maximumNumberOfLines = 3
 
         let emptyStack = NSStackView(views: [emptyIconView, emptyLabel, emptyHintLabel])
         emptyStack.orientation = .vertical
@@ -1281,7 +1289,7 @@ final class SessionRuntimeBackgroundPopover: NSViewController {
         emptyContainer.translatesAutoresizingMaskIntoConstraints = false
         emptyContainer.addSubview(emptyStack)
         NSLayoutConstraint.activate([
-            emptyContainer.heightAnchor.constraint(equalToConstant: 88),
+            emptyContainer.heightAnchor.constraint(equalToConstant: 96),
             emptyIconView.widthAnchor.constraint(equalToConstant: 22),
             emptyIconView.heightAnchor.constraint(equalToConstant: 22),
             emptyStack.centerXAnchor.constraint(equalTo: emptyContainer.centerXAnchor),
@@ -1526,7 +1534,7 @@ final class SessionRuntimeBackgroundPopover: NSViewController {
         if items.isEmpty {
             scroll.isHidden = true
             emptyContainer.isHidden = false
-            targetSize = NSSize(width: Self.popoverWidth, height: 12 + 26 + targetBarHeight + 8 + 88 + 12)
+            targetSize = NSSize(width: Self.popoverWidth, height: 12 + 26 + targetBarHeight + 8 + 96 + 12)
         } else {
             emptyContainer.isHidden = true
             scroll.isHidden = false

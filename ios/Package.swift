@@ -9,9 +9,14 @@ let package = Package(
     targets: [
         .systemLibrary(name: "GhosttyVt", path: "GhosttyVt"),
         .target(name: "OMGMobileCore", path: "Core"),
-        .target(name: "OMGTerminal", dependencies: [
-            "GhosttyVt", .product(name: "TermioShared", package: "TermioShared"),
-        ], path: "Vendor/TermioStream"),
+        .target(
+            name: "OMGTerminal",
+            dependencies: [
+                "GhosttyVt", .product(name: "TermioShared", package: "TermioShared"),
+            ],
+            path: "Vendor/TermioStream",
+            resources: [.process("Resources")]
+        ),
         .testTarget(name: "OMGMobileCoreTests", dependencies: ["OMGMobileCore"], path: "Tests/Core"),
         .testTarget(name: "OMGTerminalTests", dependencies: ["OMGTerminal", "GhosttyVt"], path: "Tests/Terminal"),
     ]

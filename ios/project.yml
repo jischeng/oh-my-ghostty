@@ -22,7 +22,11 @@ targets:
   TermioStream:
     type: framework
     platform: iOS
-    sources: [Vendor/TermioStream]
+    sources:
+      - path: Vendor/TermioStream
+        excludes: ["Resources"]
+      - path: Vendor/TermioStream/Resources/SymbolsNerdFontMono-Regular.ttf
+        buildPhase: resources
     dependencies:
       - package: TermioShared
     settings:
@@ -42,6 +46,8 @@ targets:
       - path: Vendor/Termio
         excludes: ["*.md", "LICENSE.termio"]
       - path: Vendor/TermioApp
+      - path: Vendor/TermioStream/Resources/SymbolsNerdFontMono-Regular.ttf
+        buildPhase: resources
       - path: Vendor/Termio/LICENSE.termio
         buildPhase: resources
       - path: ../LICENSE
@@ -71,6 +77,8 @@ targets:
         CFBundleShortVersionString: "0.1.0"
         CFBundleVersion: "1"
         LSRequiresIPhoneOS: true
+        UIAppFonts:
+          - SymbolsNerdFontMono-Regular.ttf
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false

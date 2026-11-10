@@ -1,4 +1,6 @@
 import XCTest
+import CoreText
+import Metal
 import GhosttyVt
 @testable import OMGTerminal
 
@@ -69,6 +71,63 @@ final class TerminalTests: XCTestCase {
             as: UTF8.self
         )
         XCTAssertTrue(wheelUp.hasPrefix("\u{1b}[<64;"), "Expected SGR wheel-up sequence, got: \(wheelUp.debugDescription)")
+    }
+
+    @MainActor
+    func testBundledNerdFontRasterizesPowerlineAndPromptSymbolsWithinCellBounds() throws {
+        TermiodGlyphAtlas.registerBundledSymbolFonts()
+        let descriptor = CTFontDescriptorCreateWithAttributes(
+            [kCTFontFamilyNameAttribute: TermiodGlyphAtlas.symbolsFontFamily] as CFDictionary
+        )
+        let symbolFont = CTFontCreateWithFontDescriptor(descriptor, 16, nil)
+        XCTAssertEqual(CTFontCopyFamilyName(symbolFont) as String, TermiodGlyphAtlas.symbolsFontFamily)
+
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("Metal device unavailable")
+        }
+        let appearance = TermiodStreamRenderer.Appearance(
+            fontFamily: "Menlo",
+            fallbackFamilies: [],
+            fontSize: 16,
+            paddingX: 0,
+            paddingY: 0,
+            backgroundOpacity: 1
+        )
+        let atlas = try TermiodGlyphAtlas(device: device, appearance: appearance, scale: 2.0, size: 1024)
+        let cellSize = SIMD2(UInt16(atlas.metrics.width), UInt16(atlas.metrics.height))
+
+        func readAlpha(_ slot: TermiodGlyphAtlas.Slot) -> [UInt8] {
+            let w = Int(slot.size.x)
+            let h = Int(slot.size.y)
+            var bytes = [UInt8](repeating: 0, count: w * h * 4)
+            atlas.texture.getBytes(
+                &bytes,
+                bytesPerRow: w * 4,
+                from: MTLRegionMake2D(Int(slot.origin.x), Int(slot.origin.y), w, h),
+                mipmapLevel: 0
+            )
+            return stride(from: 3, to: bytes.count, by: 4).map { bytes[$0] }
+        }
+
+        // Powerline separators (, , , ) fill the cell edge-to-edge.
+        for codepoint: UInt32 in [0xE0B0, 0xE0B2, 0xE0B4, 0xE0B6] {
+            let slot = try XCTUnwrap(atlas.slot(graphemes: [codepoint], bold: false, italic: false, cells: 1))
+            XCTAssertEqual(slot.size, cellSize, "Powerline U+\(String(codepoint, radix: 16)) must fill cell")
+            XCTAssertEqual(slot.offset, SIMD2(0, 0))
+            XCTAssertFalse(slot.colored)
+            let alpha = readAlpha(slot)
+            XCTAssertTrue(alpha.contains(where: { $0 == 255 }))
+        }
+
+        // Starship Nerd Font PUA icons (󰀵, , , , ) are constrained to the cell width.
+        for codepoint: UInt32 in [0xF0035, 0xF418, 0xF43A, 0xEAF4, 0xE0A0] {
+            let slot = try XCTUnwrap(atlas.slot(graphemes: [codepoint], bold: false, italic: false, cells: 1))
+            XCTAssertEqual(slot.size, cellSize, "Icon U+\(String(codepoint, radix: 16)) must fit within cell")
+            XCTAssertEqual(slot.offset, SIMD2(0, 0))
+            XCTAssertFalse(slot.colored)
+            let alpha = readAlpha(slot)
+            XCTAssertTrue(alpha.contains(where: { $0 > 128 }), "Icon U+\(String(codepoint, radix: 16)) must draw visible pixels")
+        }
     }
 
 }

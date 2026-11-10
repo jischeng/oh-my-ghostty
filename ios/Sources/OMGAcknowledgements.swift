@@ -15,6 +15,7 @@ final class OMGAcknowledgements: UITableViewController {
         ("Herdr", "Inline terminal viewer portions adapted for OMG", "https://github.com/herdrdev/herdr-core"),
         ("libghostty-swift", "Original mobile terminal integration", "https://github.com/termio-sh/libghostty-swift"),
         ("Highlightr", "Syntax highlighting", "https://github.com/raspu/Highlightr"),
+        ("Nerd Fonts", "Bundled terminal symbol font (Symbols Nerd Font Mono)", "https://github.com/ryanoasis/nerd-fonts"),
     ]
     init() { super.init(style: .insetGrouped) }
     required init?(coder: NSCoder) { fatalError() }

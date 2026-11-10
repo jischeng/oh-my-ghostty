@@ -1134,6 +1134,7 @@ final class TerminalViewController: UIViewController {
     /// mirror the Mac's, ending on `PingFang SC` so hanzi never fall to an
     /// arbitrary system face.
     private static func terminalFontChain() -> [String] {
+        TermiodGlyphAtlas.registerBundledSymbolFonts()
         var chain = ["SF Mono", "Menlo"]
         let cjkCandidates = [
             "Sarasa Term SC", "Sarasa Mono SC", "Sarasa Fixed SC",
@@ -1147,6 +1148,7 @@ final class TerminalViewController: UIViewController {
         if UIFont(name: "PingFang SC", size: 12) != nil {
             chain.append("PingFang SC")
         }
+        chain.append(TermiodGlyphAtlas.symbolsFontFamily)
         return chain
     }
 
@@ -1240,7 +1242,7 @@ final class TerminalViewController: UIViewController {
     /// dots per inch, not 72 (`default_dpi` in its `font/face.zig`), so the
     /// same setting draws a third larger there.
     private func streamAppearance() -> TermiodStreamRenderer.Appearance {
-        let installed = Set(UIFont.familyNames)
+        let installed = Set(UIFont.familyNames).union([TermiodGlyphAtlas.symbolsFontFamily])
         let chain = Self.terminalFontChain().filter(installed.contains)
         return TermiodStreamRenderer.Appearance(
             fontFamily: chain.first ?? "", fallbackFamilies: Array(chain.dropFirst()),

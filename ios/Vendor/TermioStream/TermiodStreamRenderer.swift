@@ -591,10 +591,43 @@ public final class TermiodGlyphAtlas {
     /// sprite: anything built from an older generation must be rebuilt.
     public private(set) var generation = 0
 
+    /// Bundled Nerd Font symbol family used as a fallback for PUA/Powerline glyphs.
+    public static let symbolsFontFamily = "Symbols Nerd Font Mono"
+
+    private static let didRegisterBundledFonts: Bool = {
+        let filename = "SymbolsNerdFontMono-Regular"
+        var urls: [URL] = []
+        #if SWIFT_PACKAGE
+        if let url = Bundle.module.url(forResource: filename, withExtension: "ttf") {
+            urls.append(url)
+        }
+        #endif
+        for bundle in [Bundle.main, Bundle(for: TermiodGlyphAtlas.self)] {
+            if let url = bundle.url(forResource: filename, withExtension: "ttf") {
+                urls.append(url)
+            }
+        }
+        for url in urls {
+            CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
+        }
+        return true
+    }()
+
+    /// Registers bundled symbol fonts with CoreText so `UIFont` and `CTFont`
+    /// fallback chains can resolve Nerd Font and Powerline codepoints.
+    public static func registerBundledSymbolFonts() {
+        _ = didRegisterBundledFonts
+    }
+
     public init(device: MTLDevice, appearance: TermiodStreamRenderer.Appearance, scale: CGFloat, size: Int = 4096) throws {
+        Self.registerBundledSymbolFonts()
         let pointSize = appearance.fontSize * scale
         let primary = Self.font(family: appearance.fontFamily, size: pointSize)
-        let cascade = appearance.fallbackFamilies.map { family in
+        var fallbackFamilies = appearance.fallbackFamilies
+        if !fallbackFamilies.contains(Self.symbolsFontFamily) {
+            fallbackFamilies.append(Self.symbolsFontFamily)
+        }
+        let cascade = fallbackFamilies.map { family in
             CTFontDescriptorCreateWithAttributes([kCTFontFamilyNameAttribute: family] as CFDictionary)
         }
         let base = CTFontCreateCopyWithAttributes(
@@ -750,13 +783,78 @@ public final class TermiodGlyphAtlas {
             || (0x1CC00...0x1CEBF).contains(codepoint)
     }
 
+    private static func isPowerlineCell(_ codepoint: UInt32) -> Bool {
+        (0xE0B0...0xE0D7).contains(codepoint) && codepoint != 0xE0CF
+    }
+
+    private static func isConstrainedSymbol(_ graphemes: [UInt32]) -> Bool {
+        guard graphemes.count == 1, let codepoint = graphemes.first else { return false }
+        return !isPowerlineCell(codepoint)
+            && ((0xE000...0xF8FF).contains(codepoint) || (0xF0000...0x10FFFF).contains(codepoint))
+    }
+
     private static func fillsCell(_ graphemes: [UInt32]) -> Bool {
         guard graphemes.count == 1, let codepoint = graphemes.first else { return false }
-        return (0x2500...0x259F).contains(codepoint) || (0xE0B0...0xE0B3).contains(codepoint)
+        return (0x2500...0x259F).contains(codepoint) || isPowerlineCell(codepoint)
+    }
+
+    private static func drawPowerlineCap(_ codepoint: UInt32, in context: CGContext, width: CGFloat, height: CGFloat) -> Bool {
+        let path = CGMutablePath()
+        switch codepoint {
+        case 0xE0B0:
+            path.move(to: CGPoint(x: 0, y: 0))
+            path.addLine(to: CGPoint(x: width, y: height / 2))
+            path.addLine(to: CGPoint(x: 0, y: height))
+            path.closeSubpath()
+        case 0xE0B2:
+            path.move(to: CGPoint(x: width, y: 0))
+            path.addLine(to: CGPoint(x: 0, y: height / 2))
+            path.addLine(to: CGPoint(x: width, y: height))
+            path.closeSubpath()
+        case 0xE0B4:
+            let radius = min(width, height / 2)
+            let c = (CGFloat(2).squareRoot() - 1) * 4 / 3
+            path.move(to: CGPoint(x: 0, y: 0))
+            path.addCurve(
+                to: CGPoint(x: radius, y: radius),
+                control1: CGPoint(x: radius * c, y: 0),
+                control2: CGPoint(x: radius, y: radius - radius * c)
+            )
+            path.addLine(to: CGPoint(x: radius, y: height - radius))
+            path.addCurve(
+                to: CGPoint(x: 0, y: height),
+                control1: CGPoint(x: radius, y: height - radius + radius * c),
+                control2: CGPoint(x: radius * c, y: height)
+            )
+            path.closeSubpath()
+        case 0xE0B6:
+            let radius = min(width, height / 2)
+            let c = (CGFloat(2).squareRoot() - 1) * 4 / 3
+            path.move(to: CGPoint(x: width, y: 0))
+            path.addCurve(
+                to: CGPoint(x: width - radius, y: radius),
+                control1: CGPoint(x: width - radius * c, y: 0),
+                control2: CGPoint(x: width - radius, y: radius - radius * c)
+            )
+            path.addLine(to: CGPoint(x: width - radius, y: height - radius))
+            path.addCurve(
+                to: CGPoint(x: width, y: height),
+                control1: CGPoint(x: width - radius, y: height - radius + radius * c),
+                control2: CGPoint(x: width - radius * c, y: height)
+            )
+            path.closeSubpath()
+        default:
+            return false
+        }
+        context.addPath(path)
+        context.fillPath()
+        return true
     }
 
     private func rasterizeFillingCell(_ key: Key) -> Slot? {
         guard let scalar = key.graphemes.first.flatMap(Unicode.Scalar.init) else { return nil }
+        let width = metrics.width
+        let height = metrics.height
         var font = fonts[key.bold ? 1 : 0]
         let utf16 = Array(String(scalar).utf16)
         var glyphs = [CGGlyph](repeating: 0, count: utf16.count)
@@ -767,11 +865,18 @@ public final class TermiodGlyphAtlas {
         var glyph = glyphs[0]
         // The face's own full block is the box every block and line glyph is
         // drawn against; the font's ascent sits above it, so it cannot be.
-        var blockCharacter: UniChar = 0x2588
-        var block = CGGlyph(0)
+        // Powerline glyphs use their own bounding rect so left/right caps and
+        // triangles stretch edge-to-edge across the cell.
         var box = CGRect.zero
-        if CTFontGetGlyphsForCharacters(font, &blockCharacter, &block, 1) {
-            box = CTFontGetBoundingRectsForGlyphs(font, .horizontal, &block, nil, 1)
+        if Self.isPowerlineCell(scalar.value) {
+            let rawBox = CTFontGetBoundingRectsForGlyphs(font, .horizontal, &glyph, nil, 1)
+            box = rawBox.insetBy(dx: rawBox.width * 0.03, dy: rawBox.height * 0.005)
+        } else {
+            var blockCharacter: UniChar = 0x2588
+            var block = CGGlyph(0)
+            if CTFontGetGlyphsForCharacters(font, &blockCharacter, &block, 1) {
+                box = CTFontGetBoundingRectsForGlyphs(font, .horizontal, &block, nil, 1)
+            }
         }
         if box.width <= 0 || box.height <= 0 {
             var advance = CGSize.zero
@@ -780,8 +885,6 @@ public final class TermiodGlyphAtlas {
                          height: CTFontGetAscent(font) + CTFontGetDescent(font))
         }
         guard box.width > 0, box.height > 0 else { return nil }
-        let width = metrics.width
-        let height = metrics.height
         guard let origin = allocate(width: width, height: height) else { return nil }
         var pixels = [UInt8](repeating: 0, count: width * height * 4)
         let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
@@ -792,9 +895,11 @@ public final class TermiodGlyphAtlas {
             ) else { return false }
             context.setShouldAntialias(true)
             context.setFillColor(gray: 1, alpha: 1)
-            context.scaleBy(x: CGFloat(width) / box.width, y: CGFloat(height) / box.height)
-            var position = CGPoint(x: -box.minX, y: -box.minY)
-            CTFontDrawGlyphs(font, &glyph, &position, 1, context)
+            if !Self.drawPowerlineCap(scalar.value, in: context, width: CGFloat(width), height: CGFloat(height)) {
+                context.scaleBy(x: CGFloat(width) / box.width, y: CGFloat(height) / box.height)
+                var position = CGPoint(x: -box.minX, y: -box.minY)
+                CTFontDrawGlyphs(font, &glyph, &position, 1, context)
+            }
             return true
         }
         guard drawn else { return nil }
@@ -828,16 +933,23 @@ public final class TermiodGlyphAtlas {
         }
         guard let (line, bounds) = layout(font), bounds.width > 0, bounds.height > 0 else { return nil }
         let colored = Self.usesColorFont(line)
+        let constrained = colored || Self.isConstrainedSymbol(key.graphemes)
         let padding = 1
-        // An emoji is drawn at the font's size, which is taller than a cell on
-        // most fonts. Its bitmap is its cells exactly, with the emoji scaled
-        // and centred inside, so no pixel can reach the rows around it.
+        // Emoji and Nerd Font PUA icons are drawn at the font's em-square size,
+        // which is wider than a monospaced cell. Their bitmap is the cell span
+        // exactly, with the glyph scaled to fit and centred inside so no pixel
+        // overflows into neighbouring cells.
         let span = metrics.width * max(1, cells)
         let placement = GlyphPlacement(bounds: bounds, padding: padding)
-        let width = colored ? span : placement.width
-        let height = colored ? metrics.height : placement.height
-        let fit = colored
-            ? min(1, CGFloat(span - 2) / bounds.width, CGFloat(metrics.height - 2) / bounds.height)
+        let width = constrained ? span : placement.width
+        let height = constrained ? metrics.height : placement.height
+        let horizontalInset: CGFloat = colored ? 2 : 1
+        let fit = constrained
+            ? min(
+                1,
+                max(1, CGFloat(span) - horizontalInset) / bounds.width,
+                max(1, CGFloat(metrics.height - 2)) / bounds.height
+            )
             : 1
         guard let origin = allocate(width: width, height: height) else { return nil }
         var pixels = [UInt8](repeating: 0, count: width * height * 4)
@@ -849,7 +961,7 @@ public final class TermiodGlyphAtlas {
             ) else { return false }
             context.setShouldAntialias(true)
             context.setShouldSmoothFonts(false)
-            if colored {
+            if constrained {
                 context.translateBy(
                     x: (CGFloat(width) - bounds.width * fit) / 2, y: (CGFloat(height) - bounds.height * fit) / 2)
                 context.scaleBy(x: fit, y: fit)
@@ -865,9 +977,9 @@ public final class TermiodGlyphAtlas {
             region: MTLRegionMake2D(origin.x, origin.y, width, height),
             mipmapLevel: 0, withBytes: pixels, bytesPerRow: width * 4
         )
-        // An emoji's bitmap is its cells.
-        let top = colored ? 0 : metrics.baseline - placement.ascent
-        let left = colored ? 0 : placement.left
+        // A constrained glyph's bitmap is its cells.
+        let top = constrained ? 0 : metrics.baseline - placement.ascent
+        let left = constrained ? 0 : placement.left
         return Slot(
             origin: SIMD2(UInt16(origin.x), UInt16(origin.y)),
             size: SIMD2(UInt16(width), UInt16(height)),

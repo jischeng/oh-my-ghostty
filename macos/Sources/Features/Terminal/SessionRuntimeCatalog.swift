@@ -136,18 +136,24 @@ final class SessionRuntimeCatalog: ObservableObject {
         }
     }
 
+    static func logicalEndpointKey(for descriptor: SessionRuntimeDescriptor) -> String {
+        if descriptor.isLocal { return "local" }
+        return descriptor.displayEndpoint
+    }
+
     private static func normalized(_ values: [SessionRuntimeCatalogEndpoint]) -> [SessionRuntimeCatalogEndpoint] {
-        var byID: [String: SessionRuntimeCatalogEndpoint] = [:]
+        var byKey: [String: SessionRuntimeCatalogEndpoint] = [:]
         for endpoint in values {
             guard endpoint.descriptor.revision.utf8.count <= 128,
                   endpoint.descriptor.revision.allSatisfy({
                       $0.isASCII && ($0.isLetter || $0.isNumber || "._-".contains($0))
                   }) else { continue }
-            if byID[endpoint.id].map({ $0.lastUsedAt < endpoint.lastUsedAt }) ?? true {
-                byID[endpoint.id] = endpoint
+            let key = logicalEndpointKey(for: endpoint.descriptor)
+            if byKey[key].map({ $0.lastUsedAt < endpoint.lastUsedAt }) ?? true {
+                byKey[key] = endpoint
             }
         }
-        return byID.values.sorted { $0.lastUsedAt > $1.lastUsedAt }.prefix(512).map { $0 }
+        return byKey.values.sorted { $0.lastUsedAt > $1.lastUsedAt }.prefix(512).map { $0 }
     }
 
     private func persist(_ values: [SessionRuntimeCatalogEndpoint]) throws {
@@ -306,7 +312,14 @@ final class SessionRuntimeLibraryModel: ObservableObject {
     private static func loadSessions(
         _ descriptor: SessionRuntimeDescriptor
     ) async throws -> [SessionRuntimeCatalogSession] {
-        let socket = try SessionRuntimeConnections.shared.prepareBatch(descriptor)
+        let effectiveDescriptor: SessionRuntimeDescriptor
+        if descriptor.isLocal,
+           let currentLocal = try? SessionRuntimeConnections.localDescriptor(policy: descriptor.policy) {
+            effectiveDescriptor = currentLocal
+        } else {
+            effectiveDescriptor = descriptor
+        }
+        let socket = try SessionRuntimeConnections.shared.prepareBatch(effectiveDescriptor)
         let helper = SessionRuntimeConnections.resources.appendingPathComponent("omgd")
         let result: GitExecutionResult
         do {

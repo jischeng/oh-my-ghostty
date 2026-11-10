@@ -130,7 +130,7 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
             return
         }
         SessionRuntimeBackgroundStore.shared.refresh()
-        let content = SessionRuntimeBackgroundPopoverController(controller: configuration.controller) { [weak self] in
+        let content = SessionRuntimeBackgroundPopover(controller: configuration.controller) { [weak self] in
             self?.backgroundPopover.close()
         }
         content.onPreferredSizeChange = { [weak popover = backgroundPopover] size in

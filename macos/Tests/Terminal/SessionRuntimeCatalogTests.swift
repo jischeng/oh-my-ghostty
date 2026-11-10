@@ -266,6 +266,32 @@ struct SessionRuntimeCatalogTests {
         #expect(queue.requests.isEmpty)
     }
 
+    @MainActor
+    @Test func catalogDeduplicatesEndpointsByLogicalHostKeepingLatestRevision() throws {
+        let catalog = SessionRuntimeCatalog(url: nil)
+        let localOld = SessionRuntimeDescriptor(connection: nil, revision: "rev-old", policy: .init())
+        let localNew = SessionRuntimeDescriptor(connection: nil, revision: "rev-new", policy: .init())
+        let sshOld = SessionRuntimeDescriptor(
+            connection: try GitSSHConnection(destination: "cloud"),
+            revision: "rev-old",
+            policy: .init()
+        )
+        let sshNew = SessionRuntimeDescriptor(
+            connection: try GitSSHConnection(destination: "cloud"),
+            revision: "rev-new",
+            policy: .init()
+        )
+
+        catalog.remember(localOld)
+        catalog.remember(sshOld)
+        catalog.remember(localNew)
+        catalog.remember(sshNew)
+
+        #expect(catalog.endpoints.count == 2)
+        #expect(catalog.endpoints.first(where: { $0.descriptor.isLocal })?.descriptor.revision == "rev-new")
+        #expect(catalog.endpoints.first(where: { !$0.descriptor.isLocal })?.descriptor.revision == "rev-new")
+    }
+
     private func endpoint(_ destination: String) throws -> SessionRuntimeDescriptor {
         SessionRuntimeDescriptor(
             connection: try GitSSHConnection(destination: destination),

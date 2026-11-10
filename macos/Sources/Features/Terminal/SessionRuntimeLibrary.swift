@@ -129,7 +129,11 @@ enum SessionRuntimeLibrary {
             window.makeKeyAndOrderFront(nil)
         }
         NSApp.activate(ignoringOtherApps: true)
-        controller.model.refreshIfSelected()
+        if controller.model.selectedEndpointID == nil {
+            controller.model.selectedEndpointID = controller.model.endpoints.first?.id
+        } else {
+            controller.model.refreshIfSelected()
+        }
     }
 
     @discardableResult
@@ -342,16 +346,31 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
     private func configureEndpointTable() {
         endpointHeader.stringValue = strings.endpointsHeader
         endpointTable.headerView = nil
-        endpointTable.rowHeight = 42
+        endpointTable.style = .plain
+        endpointTable.selectionHighlightStyle = .regular
+        endpointTable.focusRingType = .none
+        endpointTable.rowHeight = 36
+        endpointTable.intercellSpacing = NSSize(width: 0, height: 2)
+        endpointTable.backgroundColor = .clear
         endpointTable.allowsEmptySelection = true
         endpointTable.allowsMultipleSelection = false
+        endpointTable.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         endpointTable.dataSource = self
         endpointTable.delegate = self
-        endpointTable.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("endpoint")))
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("endpoint"))
+        column.resizingMask = .autoresizingMask
+        endpointTable.addTableColumn(column)
     }
 
     private func configureSessionTable() {
-        sessionTable.rowHeight = 30
+        sessionTable.style = .plain
+        sessionTable.selectionHighlightStyle = .regular
+        sessionTable.focusRingType = .none
+        sessionTable.rowHeight = 32
+        sessionTable.intercellSpacing = NSSize(width: 0, height: 1)
+        sessionTable.backgroundColor = .clear
+        sessionTable.usesAlternatingRowBackgroundColors = false
+        sessionTable.gridStyleMask = []
         sessionTable.allowsEmptySelection = true
         sessionTable.allowsMultipleSelection = false
         sessionTable.doubleAction = #selector(openSelectedSession)
@@ -359,12 +378,12 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
         sessionTable.dataSource = self
         sessionTable.delegate = self
         for (identifier, title, width) in [
-            ("session", strings.sessionColumn, CGFloat(110)),
-            ("agent", strings.agentColumn, CGFloat(100)),
+            ("session", strings.sessionColumn, CGFloat(100)),
+            ("agent", strings.agentColumn, CGFloat(96)),
             ("conversation", strings.conversationColumn, CGFloat(190)),
-            ("status", strings.statusColumn, CGFloat(130)),
-            ("cwd", strings.workingDirectoryColumn, CGFloat(330)),
-            ("pid", strings.pidColumn, CGFloat(70)),
+            ("status", strings.statusColumn, CGFloat(120)),
+            ("cwd", strings.workingDirectoryColumn, CGFloat(310)),
+            ("pid", strings.pidColumn, CGFloat(68)),
             ("updated", strings.updatedColumn, CGFloat(140))
         ] {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(identifier))
@@ -372,15 +391,14 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
             column.width = width
             sessionTable.addTableColumn(column)
         }
-        sessionTable.usesAlternatingRowBackgroundColors = true
     }
 
     private func configureControls() {
         titleLabel.stringValue = strings.sessionsTitle
-        endpointHeader.font = .systemFont(ofSize: 11, weight: .bold)
+        endpointHeader.font = .systemFont(ofSize: 11, weight: .semibold)
         endpointHeader.textColor = .secondaryLabelColor
-        titleLabel.font = .systemFont(ofSize: 22, weight: .semibold)
-        selectedEndpointLabel.font = .systemFont(ofSize: 12)
+        titleLabel.font = .systemFont(ofSize: 20, weight: .semibold)
+        selectedEndpointLabel.font = .systemFont(ofSize: 12, weight: .medium)
         selectedEndpointLabel.textColor = .secondaryLabelColor
         statusLabel.font = .systemFont(ofSize: 12)
         statusLabel.textColor = .secondaryLabelColor
@@ -388,10 +406,12 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
         errorLabel.font = .systemFont(ofSize: 12)
         errorLabel.textColor = .systemRed
         errorLabel.maximumNumberOfLines = 2
+        errorLabel.isHidden = true
         refreshButton.bezelStyle = .rounded
         refreshButton.target = self
         refreshButton.action = #selector(refreshOrCancel)
         openButton.bezelStyle = .rounded
+        openButton.keyEquivalent = "\r"
         openButton.target = self
         openButton.action = #selector(openSelectedSession)
         endButton.bezelStyle = .rounded
@@ -404,20 +424,32 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 10
+        stack.spacing = 8
         stack.translatesAutoresizingMaskIntoConstraints = false
         pane.addSubview(stack)
         endpointScroll.documentView = endpointTable
         endpointScroll.hasVerticalScroller = true
+        endpointScroll.autohidesScrollers = true
         endpointScroll.drawsBackground = false
+        endpointScroll.borderType = .noBorder
+        endpointScroll.focusRingType = .none
         endpointScroll.translatesAutoresizingMaskIntoConstraints = false
-        stack.addArrangedSubview(endpointHeader)
+        endpointHeader.translatesAutoresizingMaskIntoConstraints = false
+        let headerContainer = NSView()
+        headerContainer.translatesAutoresizingMaskIntoConstraints = false
+        headerContainer.addSubview(endpointHeader)
+        stack.addArrangedSubview(headerContainer)
         stack.addArrangedSubview(endpointScroll)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: 14),
-            stack.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -8),
-            stack.topAnchor.constraint(equalTo: pane.topAnchor, constant: 15),
-            stack.bottomAnchor.constraint(equalTo: pane.bottomAnchor, constant: -14),
+            headerContainer.heightAnchor.constraint(equalToConstant: 20),
+            endpointHeader.leadingAnchor.constraint(equalTo: headerContainer.leadingAnchor, constant: 6),
+            endpointHeader.trailingAnchor.constraint(equalTo: headerContainer.trailingAnchor),
+            endpointHeader.centerYAnchor.constraint(equalTo: headerContainer.centerYAnchor),
+            stack.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: 10),
+            stack.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -10),
+            stack.topAnchor.constraint(equalTo: pane.topAnchor, constant: 14),
+            stack.bottomAnchor.constraint(equalTo: pane.bottomAnchor, constant: -12),
+            headerContainer.widthAnchor.constraint(equalTo: stack.widthAnchor),
             endpointScroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
             endpointScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 180)
         ])
@@ -428,13 +460,23 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
         let pane = NSView()
         let titleRow = NSStackView(views: [titleLabel, selectedEndpointLabel, NSView(), refreshButton])
         titleRow.orientation = .horizontal
-        titleRow.alignment = .centerY
-        titleRow.spacing = 12
+        titleRow.alignment = .firstBaseline
+        titleRow.spacing = 10
         titleRow.translatesAutoresizingMaskIntoConstraints = false
+
+        let metaStack = NSStackView(views: [statusLabel, errorLabel])
+        metaStack.orientation = .vertical
+        metaStack.alignment = .leading
+        metaStack.spacing = 4
+        metaStack.translatesAutoresizingMaskIntoConstraints = false
 
         sessionScroll.documentView = sessionTable
         sessionScroll.hasVerticalScroller = true
         sessionScroll.hasHorizontalScroller = true
+        sessionScroll.autohidesScrollers = true
+        sessionScroll.drawsBackground = false
+        sessionScroll.borderType = .noBorder
+        sessionScroll.focusRingType = .none
         sessionScroll.translatesAutoresizingMaskIntoConstraints = false
 
         let actionRow = NSStackView(views: [NSView(), endButton, openButton])
@@ -443,26 +485,22 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
         actionRow.spacing = 8
         actionRow.translatesAutoresizingMaskIntoConstraints = false
 
-        statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        errorLabel.translatesAutoresizingMaskIntoConstraints = false
         pane.addSubview(titleRow)
-        pane.addSubview(statusLabel)
-        pane.addSubview(errorLabel)
+        pane.addSubview(metaStack)
         pane.addSubview(sessionScroll)
         pane.addSubview(actionRow)
         NSLayoutConstraint.activate([
             titleRow.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: 20),
             titleRow.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -20),
             titleRow.topAnchor.constraint(equalTo: pane.topAnchor, constant: 15),
-            statusLabel.leadingAnchor.constraint(equalTo: titleRow.leadingAnchor),
-            statusLabel.trailingAnchor.constraint(equalTo: titleRow.trailingAnchor),
-            statusLabel.topAnchor.constraint(equalTo: titleRow.bottomAnchor, constant: 10),
-            errorLabel.leadingAnchor.constraint(equalTo: titleRow.leadingAnchor),
-            errorLabel.trailingAnchor.constraint(equalTo: titleRow.trailingAnchor),
-            errorLabel.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 3),
+            metaStack.leadingAnchor.constraint(equalTo: titleRow.leadingAnchor),
+            metaStack.trailingAnchor.constraint(equalTo: titleRow.trailingAnchor),
+            metaStack.topAnchor.constraint(equalTo: titleRow.bottomAnchor, constant: 6),
+            statusLabel.widthAnchor.constraint(equalTo: metaStack.widthAnchor),
+            errorLabel.widthAnchor.constraint(equalTo: metaStack.widthAnchor),
             sessionScroll.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: 20),
             sessionScroll.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -20),
-            sessionScroll.topAnchor.constraint(equalTo: errorLabel.bottomAnchor, constant: 10),
+            sessionScroll.topAnchor.constraint(equalTo: metaStack.bottomAnchor, constant: 10),
             actionRow.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: 20),
             actionRow.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -20),
             actionRow.topAnchor.constraint(equalTo: sessionScroll.bottomAnchor, constant: 12),
@@ -537,6 +575,7 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
         if case .failed = model.loadState {} else {
             errorLabel.stringValue = model.persistenceError.map(strings.localizedError) ?? ""
         }
+        errorLabel.isHidden = errorLabel.stringValue.isEmpty
         view.window?.title = strings.windowTitle
     }
 
@@ -544,25 +583,149 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
         tableView === endpointTable ? model.endpoints.count : model.sessions.count
     }
 
-    func tableView(_ tableView: NSTableView, objectValueFor tableColumn: NSTableColumn?, row: Int) -> Any? {
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        SessionLibrarySelectionRowView(isEndpointList: tableView === endpointTable)
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard let identifier = tableColumn?.identifier.rawValue else { return nil }
         if tableView === endpointTable {
             guard model.endpoints.indices.contains(row) else { return nil }
             let endpoint = model.endpoints[row]
-            return strings.endpointName(endpoint)
+            return makeEndpointCell(endpoint: endpoint)
         }
         guard model.sessions.indices.contains(row) else { return nil }
         let session = model.sessions[row]
         switch identifier {
-        case "session": return session.id.prefix(8).description
-        case "agent": return session.agentLabel ?? "—"
-        case "conversation": return session.resume?.conversationID ?? "—"
-        case "status": return session.statusLabel(using: strings)
-        case "cwd": return session.workingDirectory ?? "—"
-        case "pid": return session.pid.map(String.init) ?? "—"
-        case "updated": return Self.dateFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(session.updatedAt)))
-        default: return nil
+        case "session":
+            return makeSessionTextCell(
+                identifier: identifier,
+                text: String(session.id.prefix(8)),
+                font: .monospacedSystemFont(ofSize: 12, weight: .medium),
+                color: .labelColor
+            )
+        case "agent":
+            return makeSessionTextCell(
+                identifier: identifier,
+                text: session.agentLabel ?? "—",
+                font: .systemFont(ofSize: 12.5, weight: session.agentLabel != nil ? .medium : .regular),
+                color: session.agentLabel != nil ? .labelColor : .tertiaryLabelColor
+            )
+        case "conversation":
+            return makeSessionTextCell(
+                identifier: identifier,
+                text: session.resume?.conversationID ?? "—",
+                font: .systemFont(ofSize: 12),
+                color: session.resume?.conversationID != nil ? .secondaryLabelColor : .tertiaryLabelColor
+            )
+        case "status":
+            return makeSessionStatusCell(session: session)
+        case "cwd":
+            return makeSessionTextCell(
+                identifier: identifier,
+                text: session.workingDirectory ?? "—",
+                font: .systemFont(ofSize: 12),
+                color: session.workingDirectory != nil ? .secondaryLabelColor : .tertiaryLabelColor,
+                lineBreakMode: .byTruncatingMiddle
+            )
+        case "pid":
+            return makeSessionTextCell(
+                identifier: identifier,
+                text: session.pid.map(String.init) ?? "—",
+                font: .monospacedDigitSystemFont(ofSize: 12, weight: .regular),
+                color: .secondaryLabelColor
+            )
+        case "updated":
+            return makeSessionTextCell(
+                identifier: identifier,
+                text: Self.dateFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(session.updatedAt))),
+                font: .monospacedDigitSystemFont(ofSize: 12, weight: .regular),
+                color: .secondaryLabelColor
+            )
+        default:
+            return nil
         }
+    }
+
+    private func makeEndpointCell(endpoint: SessionRuntimeCatalogEndpoint) -> NSView {
+        let cell = NSTableCellView()
+        let iconView = NSImageView()
+        let symbol = endpoint.descriptor.isLocal ? "laptopcomputer" : "server.rack"
+        iconView.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            .flatMap { $0.withSymbolConfiguration(.init(pointSize: 13, weight: .medium)) }
+        iconView.contentTintColor = .secondaryLabelColor
+        iconView.imageScaling = .scaleProportionallyDown
+
+        let label = NSTextField(labelWithString: strings.endpointName(endpoint))
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.textColor = .labelColor
+        label.lineBreakMode = .byTruncatingTail
+
+        let row = NSStackView(views: [iconView, label])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(row)
+        NSLayoutConstraint.activate([
+            iconView.widthAnchor.constraint(equalToConstant: 18),
+            iconView.heightAnchor.constraint(equalToConstant: 18),
+            row.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 10),
+            row.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -10),
+            row.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+        ])
+        return cell
+    }
+
+    private func makeSessionTextCell(
+        identifier: String,
+        text: String,
+        font: NSFont,
+        color: NSColor,
+        lineBreakMode: NSLineBreakMode = .byTruncatingTail
+    ) -> NSView {
+        let cell = NSTableCellView()
+        let label = NSTextField(labelWithString: text)
+        label.font = font
+        label.textColor = color
+        label.lineBreakMode = lineBreakMode
+        label.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+            label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+            label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+        ])
+        return cell
+    }
+
+    private func makeSessionStatusCell(session: SessionRuntimeCatalogSession) -> NSView {
+        let cell = NSTableCellView()
+        let dot = NSView()
+        dot.wantsLayer = true
+        dot.layer?.cornerRadius = 3.5
+        dot.layer?.backgroundColor = (session.ended == nil ? NSColor.systemGreen : NSColor.tertiaryLabelColor).cgColor
+        dot.translatesAutoresizingMaskIntoConstraints = false
+
+        let label = NSTextField(labelWithString: session.statusLabel(using: strings))
+        label.font = .systemFont(ofSize: 12, weight: session.ended == nil ? .medium : .regular)
+        label.textColor = session.ended == nil ? .labelColor : .secondaryLabelColor
+        label.lineBreakMode = .byTruncatingTail
+
+        let row = NSStackView(views: [dot, label])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 6
+        row.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(row)
+        NSLayoutConstraint.activate([
+            dot.widthAnchor.constraint(equalToConstant: 7),
+            dot.heightAnchor.constraint(equalToConstant: 7),
+            row.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+            row.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+            row.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+        ])
+        return cell
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -633,6 +796,30 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
     }()
 }
 
+private final class SessionLibrarySelectionRowView: NSTableRowView {
+    private let isEndpointList: Bool
+
+    init(isEndpointList: Bool) {
+        self.isEndpointList = isEndpointList
+        super.init(frame: .zero)
+        wantsLayer = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }
+
+    override func drawSelection(in dirtyRect: NSRect) {
+        guard selectionHighlightStyle != .none else { return }
+        let theme = OMGNativeTheme.resolve(for: self)
+        theme.selectedFill.setFill()
+        let insetX: CGFloat = isEndpointList ? 2 : 0
+        let radius: CGFloat = isEndpointList ? 7 : 5
+        NSBezierPath(roundedRect: bounds.insetBy(dx: insetX, dy: 1), xRadius: radius, yRadius: radius).fill()
+    }
+}
+
 struct SessionRuntimeBackgroundItem: Equatable, Identifiable, Sendable {
     let id: String
     let session: SessionRuntimeCatalogSession
@@ -679,6 +866,14 @@ final class SessionRuntimeBackgroundStore: ObservableObject {
             .store(in: &observers)
         NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
             .sink { [weak self] _ in self?.refresh() }
+            .store(in: &observers)
+        NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)
+            .sink { [weak self] _ in
+                self?.refresh()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                    self?.refresh()
+                }
+            }
             .store(in: &observers)
         timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -931,7 +1126,9 @@ final class SessionRuntimeBackgroundHeaderButton: NativeActionControl {
 }
 
 @MainActor
-final class SessionRuntimeBackgroundPopoverController: NSViewController {
+final class SessionRuntimeBackgroundPopover: NSViewController {
+    private static let popoverWidth: CGFloat = 316
+
     private weak var controller: TerminalController?
     private let onDismiss: () -> Void
     private let root = OMGNativeSurfaceView()
@@ -939,7 +1136,10 @@ final class SessionRuntimeBackgroundPopoverController: NSViewController {
     private let libraryButton = NativeActionControl()
     private let listStack = NSStackView()
     private let scroll = NSScrollView()
+    private let emptyContainer = NSView()
+    private let emptyIconView = NSImageView()
     private let emptyLabel = NSTextField(labelWithString: "")
+    private let emptyHintLabel = NSTextField(wrappingLabelWithString: "")
     private var scrollHeightConstraint: NSLayoutConstraint?
     private var subscriptions = Set<AnyCancellable>()
     var onPreferredSizeChange: ((NSSize) -> Void)?
@@ -966,10 +1166,12 @@ final class SessionRuntimeBackgroundPopoverController: NSViewController {
         header.orientation = .horizontal
         header.alignment = .centerY
         header.spacing = 8
-        header.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        header.translatesAutoresizingMaskIntoConstraints = false
+        header.heightAnchor.constraint(equalToConstant: 28).isActive = true
 
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let strings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
         libraryButton.title = strings.t("Library…", "会话库…")
@@ -983,7 +1185,7 @@ final class SessionRuntimeBackgroundPopoverController: NSViewController {
         header.addArrangedSubview(libraryButton)
 
         listStack.orientation = .vertical
-        listStack.alignment = .width
+        listStack.alignment = .leading
         listStack.spacing = 4
         listStack.translatesAutoresizingMaskIntoConstraints = false
 
@@ -999,6 +1201,8 @@ final class SessionRuntimeBackgroundPopoverController: NSViewController {
         ])
 
         scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.focusRingType = .none
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.scrollerStyle = .overlay
@@ -1008,28 +1212,56 @@ final class SessionRuntimeBackgroundPopoverController: NSViewController {
         scrollHeightConstraint = heightConstraint
         heightConstraint.isActive = true
 
-        emptyLabel.font = .systemFont(ofSize: 12)
-        emptyLabel.alignment = .center
-        emptyLabel.textColor = .secondaryLabelColor
-        emptyLabel.heightAnchor.constraint(equalToConstant: 56).isActive = true
+        emptyIconView.image = NSImage(systemSymbolName: "tray", accessibilityDescription: nil)
+            .flatMap { $0.withSymbolConfiguration(.init(pointSize: 18, weight: .regular)) }
+        emptyIconView.imageScaling = .scaleProportionallyDown
+        emptyIconView.translatesAutoresizingMaskIntoConstraints = false
 
-        let mainStack = NSStackView(views: [header, scroll, emptyLabel])
+        emptyLabel.font = .systemFont(ofSize: 12.5, weight: .medium)
+        emptyLabel.alignment = .center
+
+        emptyHintLabel.font = .systemFont(ofSize: 11)
+        emptyHintLabel.alignment = .center
+        emptyHintLabel.maximumNumberOfLines = 2
+
+        let emptyStack = NSStackView(views: [emptyIconView, emptyLabel, emptyHintLabel])
+        emptyStack.orientation = .vertical
+        emptyStack.alignment = .centerX
+        emptyStack.spacing = 4
+        emptyStack.setCustomSpacing(6, after: emptyIconView)
+        emptyStack.translatesAutoresizingMaskIntoConstraints = false
+
+        emptyContainer.translatesAutoresizingMaskIntoConstraints = false
+        emptyContainer.addSubview(emptyStack)
+        NSLayoutConstraint.activate([
+            emptyContainer.heightAnchor.constraint(equalToConstant: 88),
+            emptyIconView.widthAnchor.constraint(equalToConstant: 22),
+            emptyIconView.heightAnchor.constraint(equalToConstant: 22),
+            emptyStack.centerXAnchor.constraint(equalTo: emptyContainer.centerXAnchor),
+            emptyStack.centerYAnchor.constraint(equalTo: emptyContainer.centerYAnchor),
+            emptyStack.leadingAnchor.constraint(greaterThanOrEqualTo: emptyContainer.leadingAnchor, constant: 8),
+            emptyStack.trailingAnchor.constraint(lessThanOrEqualTo: emptyContainer.trailingAnchor, constant: -8),
+        ])
+
+        let mainStack = NSStackView(views: [header, scroll, emptyContainer])
         mainStack.orientation = .vertical
-        mainStack.alignment = .width
+        mainStack.distribution = .fill
+        mainStack.alignment = .leading
         mainStack.spacing = 8
         mainStack.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(mainStack)
         NSLayoutConstraint.activate([
             mainStack.topAnchor.constraint(equalTo: root.topAnchor, constant: 12),
-            mainStack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
-            mainStack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
+            mainStack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
+            mainStack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -14),
             mainStack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -12),
-            root.widthAnchor.constraint(equalToConstant: 300),
+            header.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
+            scroll.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
+            emptyContainer.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
         ])
 
         root.onThemeChange = { [weak self] theme in
-            self?.titleLabel.textColor = theme.foreground
-            self?.emptyLabel.textColor = theme.secondary
+            self?.applyThemeColors(theme)
         }
         view = root
 
@@ -1045,6 +1277,16 @@ final class SessionRuntimeBackgroundPopoverController: NSViewController {
         render()
     }
 
+    private func applyThemeColors(_ theme: OMGNativeTheme) {
+        titleLabel.textColor = theme.foreground
+        emptyIconView.contentTintColor = theme.secondary
+        emptyLabel.textColor = theme.foreground
+        emptyHintLabel.textColor = theme.secondary
+        for case let row as BackgroundSessionRowView in listStack.arrangedSubviews {
+            row.applyTheme(theme)
+        }
+    }
+
     @objc private func openLibrary() {
         let window = controller?.window
         onDismiss()
@@ -1052,8 +1294,7 @@ final class SessionRuntimeBackgroundPopoverController: NSViewController {
     }
 
     func fittingSize() -> NSSize {
-        view.layoutSubtreeIfNeeded()
-        return view.fittingSize
+        preferredContentSize.width > 0 ? preferredContentSize : NSSize(width: Self.popoverWidth, height: 148)
     }
 
     private func render() {
@@ -1065,49 +1306,60 @@ final class SessionRuntimeBackgroundPopoverController: NSViewController {
             ? strings.t("Background Sessions", "后台会话")
             : strings.t("Background Sessions (\(items.count))", "后台会话 (\(items.count))")
         emptyLabel.stringValue = strings.t("No background sessions running", "当前没有后台运行的会话")
+        emptyHintLabel.stringValue = strings.t(
+            "Sessions kept after closing a tab or created on Mobile appear here.",
+            "关闭标签页后保留的会话或手机端新建的会话会显示在此。"
+        )
 
         for subview in listStack.arrangedSubviews {
             listStack.removeArrangedSubview(subview)
             subview.removeFromSuperview()
         }
 
+        let targetSize: NSSize
         if items.isEmpty {
             scroll.isHidden = true
-            emptyLabel.isHidden = false
-            onPreferredSizeChange?(NSSize(width: 300, height: 112))
-            return
-        }
-
-        emptyLabel.isHidden = true
-        scroll.isHidden = false
-        for item in items {
-            let row = BackgroundSessionRowView(
-                item: item,
-                onOpen: { [weak self] in
-                    guard let self else { return }
-                    let window = self.controller?.window
-                    self.onDismiss()
-                    if let paneID = item.session.paneID {
-                        SessionRuntimeBackgroundStore.shared.markOpened(paneID: paneID)
+            emptyContainer.isHidden = false
+            targetSize = NSSize(width: Self.popoverWidth, height: 12 + 28 + 8 + 88 + 12)
+        } else {
+            emptyContainer.isHidden = true
+            scroll.isHidden = false
+            for item in items {
+                let row = BackgroundSessionRowView(
+                    item: item,
+                    onOpen: { [weak self] in
+                        guard let self else { return }
+                        let window = self.controller?.window
+                        self.onDismiss()
+                        if let paneID = item.session.paneID {
+                            SessionRuntimeBackgroundStore.shared.markOpened(paneID: paneID)
+                        }
+                        _ = try? SessionRuntimeLibrary.openExisting(
+                            item.session,
+                            descriptor: item.descriptor,
+                            from: window
+                        )
+                        SessionRuntimeBackgroundStore.shared.refresh()
+                    },
+                    onClose: {
+                        SessionRuntimeBackgroundStore.shared.close(item)
                     }
-                    _ = try? SessionRuntimeLibrary.openExisting(
-                        item.session,
-                        descriptor: item.descriptor,
-                        from: window
-                    )
-                    SessionRuntimeBackgroundStore.shared.refresh()
-                },
-                onClose: {
-                    SessionRuntimeBackgroundStore.shared.close(item)
-                }
-            )
-            listStack.addArrangedSubview(row)
+                )
+                row.translatesAutoresizingMaskIntoConstraints = false
+                listStack.addArrangedSubview(row)
+                row.widthAnchor.constraint(equalTo: listStack.widthAnchor).isActive = true
+            }
+            let rowHeight: CGFloat = 44
+            let totalHeight = CGFloat(items.count) * rowHeight + CGFloat(max(0, items.count - 1)) * 4
+            let clampedScrollHeight = min(280, max(rowHeight, totalHeight))
+            scrollHeightConstraint?.constant = clampedScrollHeight
+            targetSize = NSSize(width: Self.popoverWidth, height: 12 + 28 + 8 + clampedScrollHeight + 12)
         }
-        let rowHeight: CGFloat = 42
-        let totalHeight = CGFloat(items.count) * rowHeight + CGFloat(max(0, items.count - 1)) * 4
-        let clampedScrollHeight = min(280, max(rowHeight, totalHeight))
-        scrollHeightConstraint?.constant = clampedScrollHeight
-        onPreferredSizeChange?(NSSize(width: 300, height: 12 + 26 + 8 + clampedScrollHeight + 12))
+        applyThemeColors(root.theme)
+        if preferredContentSize != targetSize {
+            preferredContentSize = targetSize
+            onPreferredSizeChange?(targetSize)
+        }
     }
 }
 
@@ -1116,7 +1368,7 @@ private final class FlippedDocumentView: NSView {
 }
 
 @MainActor
-private final class BackgroundSessionRowView: NSView {
+private final class BackgroundSessionRowView: NSView, OMGNativeThemeApplying {
     private let item: SessionRuntimeBackgroundItem
     private let onOpen: () -> Void
     private let onClose: () -> Void
@@ -1184,11 +1436,11 @@ private final class BackgroundSessionRowView: NSView {
         addSubview(row)
 
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 42),
+            heightAnchor.constraint(equalToConstant: 44),
             iconView.widthAnchor.constraint(equalToConstant: 18),
             iconView.heightAnchor.constraint(equalToConstant: 18),
-            closeButton.widthAnchor.constraint(equalToConstant: 22),
-            closeButton.heightAnchor.constraint(equalToConstant: 22),
+            closeButton.widthAnchor.constraint(equalToConstant: 24),
+            closeButton.heightAnchor.constraint(equalToConstant: 24),
             row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             row.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -1233,12 +1485,16 @@ private final class BackgroundSessionRowView: NSView {
         updateAppearance()
     }
 
-    private func updateAppearance() {
-        let theme = OMGNativeTheme.resolve(for: self)
+    func applyTheme(_ theme: OMGNativeTheme) {
         layer?.backgroundColor = (hovered ? theme.hoverFill : .clear).cgColor
         iconView.contentTintColor = theme.foreground
         titleLabel.textColor = theme.foreground
         subtitleLabel.textColor = theme.secondary
         badgeLabel.textColor = theme.secondary
+        closeButton.applyTheme(theme)
+    }
+
+    private func updateAppearance() {
+        applyTheme(OMGNativeTheme.resolve(for: self))
     }
 }

@@ -40,6 +40,7 @@ struct TerminalWorkspaceSessionState: Codable, Equatable {
             agentResumeDescriptor = view.agentResumeDescriptor
             sshResumeDescriptor = view.sshResumeDescriptor
             runtimeDescriptor = view.runtimeDescriptor
+            runtimeCreateOnRestore = view.runtimeNeedsCreationOnRestore ? true : nil
         }
     }
 

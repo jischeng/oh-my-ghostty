@@ -194,16 +194,69 @@ impl Registry {
     pub fn set_containment_root(&mut self, root: Option<PathBuf>) {
         self.containment_root = root;
     }
-    fn session_socket(&self, id: &str) -> PathBuf {
+    fn session_socket_in(sessions_root: &Path, id: &str) -> PathBuf {
         use sha2::{Digest, Sha256};
         let key = format!("{:x}", Sha256::digest(id.as_bytes()));
-        self.root
+        sessions_root
             .parent()
             .unwrap()
             .join(format!("{}.sock", &key[..16]))
     }
+    #[cfg(test)]
+    fn session_socket(&self, id: &str) -> PathBuf {
+        Self::session_socket_in(&self.root, id)
+    }
+    fn is_private_owned_dir(path: &Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(meta) = fs::symlink_metadata(path) else {
+            return false;
+        };
+        meta.file_type().is_dir()
+            && meta.uid() == unsafe { libc::geteuid() }
+            && (meta.mode() & 0o077) == 0
+    }
+    fn find_sibling_local_session_root(&self, id: &str) -> Option<PathBuf> {
+        if self.mode != RuntimeMode::Local {
+            return None;
+        }
+        let current_state_dir = self.root.parent()?;
+        let run_root = current_state_dir.parent()?;
+        if !Self::is_private_owned_dir(run_root) {
+            return None;
+        }
+        let mut created_fallback = None;
+        for entry in fs::read_dir(run_root).ok()?.flatten() {
+            let state_dir = entry.path();
+            if state_dir == current_state_dir || !Self::is_private_owned_dir(&state_dir) {
+                continue;
+            }
+            let sessions_dir = state_dir.join("sessions");
+            if !Self::is_private_owned_dir(&sessions_dir) {
+                continue;
+            }
+            if sessions_dir.join(format!("{id}.closed")).exists()
+                || sessions_dir.join(format!("{id}.json")).exists()
+            {
+                return Some(sessions_dir);
+            }
+            if created_fallback.is_none() && sessions_dir.join(format!("{id}.created")).exists() {
+                created_fallback = Some(sessions_dir);
+            }
+        }
+        created_fallback
+    }
     fn probe_and_adopt(
         &mut self,
+        record: &Record,
+        timeout: Duration,
+        verify_owned_child: bool,
+    ) -> io::Result<()> {
+        let root = self.root.clone();
+        self.probe_and_adopt_in(&root, record, timeout, verify_owned_child)
+    }
+    fn probe_and_adopt_in(
+        &mut self,
+        sessions_root: &Path,
         record: &Record,
         timeout: Duration,
         verify_owned_child: bool,
@@ -229,8 +282,8 @@ impl Registry {
             Err(error) if !verify_owned_child => return Err(error),
             _ => {}
         }
-        let session_socket = self.session_socket(&record.id);
-        let record_path = self.root.join(format!("{}.json", record.id));
+        let session_socket = Self::session_socket_in(sessions_root, &record.id);
+        let record_path = sessions_root.join(format!("{}.json", record.id));
         let attempts = if verify_owned_child { 3 } else { 1 };
         for attempt in 0..attempts {
             match crate::holder::probe_with_timeout(
@@ -316,6 +369,16 @@ impl Registry {
     }
 
     fn mark_local_lost(&mut self, record: &mut Record, path: &std::path::Path) -> io::Result<bool> {
+        let root = self.root.clone();
+        self.mark_local_lost_in(&root, record, path)
+    }
+
+    fn mark_local_lost_in(
+        &mut self,
+        sessions_root: &Path,
+        record: &mut Record,
+        path: &std::path::Path,
+    ) -> io::Result<bool> {
         let mut current = Record::load(path)?;
         if current.id != record.id
             || current.generation != record.generation
@@ -329,7 +392,7 @@ impl Registry {
         current.save(path)?;
         *record = current;
         self.local_holders.remove(&record.id);
-        let socket = self.session_socket(&record.id);
+        let socket = Self::session_socket_in(sessions_root, &record.id);
         let _ = fs::remove_file(socket.with_extension("evt"));
         let _ = fs::remove_file(crate::holder::control_path(&socket));
         let _ = fs::remove_file(socket);
@@ -463,16 +526,32 @@ impl Registry {
             return Ok(false);
         }
         self.maintenance();
-        let path = self.root.join(format!("{id}.json"));
+        let own_path = self.root.join(format!("{id}.json"));
+        let (target_root, path) = if own_path.exists() {
+            (self.root.clone(), own_path)
+        } else if let Some(sibling_root) = self.find_sibling_local_session_root(id) {
+            let sibling_marker = sibling_root.join(format!("{id}.closed"));
+            let sibling_file = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(sibling_marker)?;
+            sibling_file.sync_all()?;
+            fs::File::open(&sibling_root)?.sync_all()?;
+            let sibling_path = sibling_root.join(format!("{id}.json"));
+            (sibling_root, sibling_path)
+        } else {
+            (self.root.clone(), own_path)
+        };
         if let Ok(mut record) = Record::load(&path) {
             if self.mode == RuntimeMode::Local && (record.ended.is_none() || record.pid.is_some()) {
-                match self.probe_and_adopt(&record, Duration::from_secs(1), true) {
+                match self.probe_and_adopt_in(&target_root, &record, Duration::from_secs(1), true) {
                     Ok(()) => return Ok(false),
                     Err(error)
                         if crate::holder::listener_is_gone(&error)
                             && self.local_holder_startup_grace_elapsed(&record) =>
                     {
-                        if self.mark_local_lost(&mut record, &path)? {
+                        if self.mark_local_lost_in(&target_root, &mut record, &path)? {
                             return Err(io::Error::other(
                                 "local holder is unavailable; cleanup is unconfirmed",
                             ));
@@ -773,16 +852,40 @@ impl Registry {
         options: ConnectOptions<'_>,
     ) -> io::Result<UnixStream> {
         let launch = options.launch;
-        if path.exists() {
-            let mut record = Record::load(path)?;
+        let existing_target = if path.exists() {
+            Some((self.root.clone(), path.to_path_buf(), socket.to_path_buf()))
+        } else if let Some(sibling_root) = self.find_sibling_local_session_root(id) {
+            if sibling_root.join(format!("{id}.closed")).exists() {
+                return Err(io::Error::other("session explicitly closed"));
+            }
+            let sibling_path = sibling_root.join(format!("{id}.json"));
+            if sibling_path.exists() {
+                let sibling_socket = Self::session_socket_in(&sibling_root, id);
+                Some((sibling_root, sibling_path, sibling_socket))
+            } else {
+                if !create {
+                    return Err(io::Error::other("unknown local session; cannot attach"));
+                }
+                if sibling_root.join(format!("{id}.created")).exists() {
+                    return Err(io::Error::other(
+                        "local session identity was already used; refusing to create a new shell",
+                    ));
+                }
+                None
+            }
+        } else {
+            None
+        };
+        if let Some((target_root, target_path, target_socket)) = existing_target {
+            let mut record = Record::load(&target_path)?;
             if record.ended.is_none() {
-                match self.probe_and_adopt(&record, Duration::from_secs(1), true) {
-                    Ok(()) => return UnixStream::connect(socket),
+                match self.probe_and_adopt_in(&target_root, &record, Duration::from_secs(1), true) {
+                    Ok(()) => return UnixStream::connect(&target_socket),
                     Err(error)
                         if crate::holder::listener_is_gone(&error)
                             && self.local_holder_startup_grace_elapsed(&record) =>
                     {
-                        self.mark_local_lost(&mut record, path)?;
+                        self.mark_local_lost_in(&target_root, &mut record, &target_path)?;
                     }
                     Err(error) if crate::holder::listener_is_gone(&error) => {
                         return Err(io::Error::other(
@@ -790,7 +893,7 @@ impl Registry {
                         ));
                     }
                     Err(error) => {
-                        let current = Record::load(path)?;
+                        let current = Record::load(&target_path)?;
                         if current.generation == record.generation && current.ended.is_some() {
                             return Err(io::Error::other(format!(
                                 "local session ended: {:?}; it will not be recreated",
@@ -806,7 +909,7 @@ impl Registry {
             }
             return Err(io::Error::other(format!(
                 "local session ended: {:?}; it will not be recreated",
-                Record::load(path)?.ended
+                Record::load(&target_path)?.ended
             )));
         }
         if !create {
@@ -1074,5 +1177,38 @@ mod tests {
         assert!(crate::holder::control_path(&session_socket).exists());
         assert!(Record::load(&record_path).unwrap().ended.is_none());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sibling_local_session_root_locates_private_sibling_revisions() {
+        use std::os::unix::fs::PermissionsExt;
+        let run_root = PathBuf::from(format!("/tmp/omg-run-{}", &nonce().unwrap()[..8]));
+        let older_sessions = run_root.join("older-rev/sessions");
+        let current_sessions = run_root.join("current-rev/sessions");
+        fs::create_dir_all(&older_sessions).unwrap();
+        fs::create_dir_all(&current_sessions).unwrap();
+        for dir in [
+            &run_root,
+            &run_root.join("older-rev"),
+            &older_sessions,
+            &run_root.join("current-rev"),
+            &current_sessions,
+        ] {
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let id = "33333333-3333-3333-3333-333333333333";
+        let mut record = Record::new(id, Policy::default()).unwrap();
+        record.save(&older_sessions.join(format!("{id}.json"))).unwrap();
+
+        let registry = Registry::new_local(
+            current_sessions.clone(),
+            vec!["/bin/sh".into()],
+            Policy::default(),
+        );
+        assert_eq!(
+            registry.find_sibling_local_session_root(id),
+            Some(older_sessions)
+        );
+        fs::remove_dir_all(run_root).unwrap();
     }
 }

@@ -224,4 +224,62 @@ struct SessionRuntimeQuitTests {
         #expect(live.paneIDs == [surface.id])
         #expect(live.surfaceTree.root?.panes.first?.runtimeCreateOnRestore == nil)
     }
+
+    @Test func unconfirmedFailedLocalCreatePersistsCreateOnRestoreAndUnrecordedLocalPaneSelfHeals() throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let native = try #require(app.app)
+        let unavailableLocal = try descriptor(local: true)
+        var createConfig = Ghostty.SurfaceConfiguration()
+        try unavailableLocal.configure(&createConfig)
+        let failedCreateView = Ghostty.SurfaceView(native, baseConfig: createConfig)
+        #expect(failedCreateView.runtimeNeedsCreationOnRestore)
+        let failedPane = TerminalWorkspaceSessionState.Pane(failedCreateView)
+        #expect(failedPane.runtimeCreateOnRestore == true)
+
+        var attachConfig = Ghostty.SurfaceConfiguration()
+        try unavailableLocal.configureAttachExisting(&attachConfig)
+        let failedAttachView = Ghostty.SurfaceView(native, baseConfig: attachConfig)
+        #expect(!failedAttachView.runtimeNeedsCreationOnRestore)
+        #expect(TerminalWorkspaceSessionState.Pane(failedAttachView).runtimeCreateOnRestore == nil)
+
+        let tempHome = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let tempSupport = tempHome.appendingPathComponent("Support", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempHome) }
+        let stateDir = SessionRuntimeConnections.localStateDirectory(
+            for: unavailableLocal,
+            applicationSupportRoot: tempSupport,
+            homeDirectory: tempHome
+        )
+        let sessionsDir = stateDir.appendingPathComponent("sessions", isDirectory: true)
+        let paneID = UUID()
+        // Without any initialized local sessions directory, do not assume unrecorded.
+        #expect(!SessionRuntimeConnections.shouldCreateUnrecordedLocalSessionOnRestore(
+            for: unavailableLocal,
+            pane: paneID,
+            applicationSupportRoot: tempSupport,
+            homeDirectory: tempHome,
+            isRunningTests: false
+        ))
+        try FileManager.default.createDirectory(at: sessionsDir, withIntermediateDirectories: true)
+        #expect(SessionRuntimeConnections.shouldCreateUnrecordedLocalSessionOnRestore(
+            for: unavailableLocal,
+            pane: paneID,
+            applicationSupportRoot: tempSupport,
+            homeDirectory: tempHome,
+            isRunningTests: false
+        ))
+        let siblingSessions = stateDir
+            .deletingLastPathComponent()
+            .appendingPathComponent("older-revision/sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: siblingSessions, withIntermediateDirectories: true)
+        let marker = siblingSessions.appendingPathComponent("\(paneID.uuidString.lowercased()).created")
+        try Data().write(to: marker)
+        #expect(!SessionRuntimeConnections.shouldCreateUnrecordedLocalSessionOnRestore(
+            for: unavailableLocal,
+            pane: paneID,
+            applicationSupportRoot: tempSupport,
+            homeDirectory: tempHome,
+            isRunningTests: false
+        ))
+    }
 }

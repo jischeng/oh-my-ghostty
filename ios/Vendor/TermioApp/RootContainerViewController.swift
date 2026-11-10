@@ -130,6 +130,7 @@ final class RootContainerViewController: UIViewController {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.workspaceScope.reconcile(against: self.store.projects)
+                self.syncCachedTerminalsWithRoster()
             }
         }
         configureWorkspaceRailGesture()
@@ -151,6 +152,7 @@ final class RootContainerViewController: UIViewController {
             // agent's TUI is already the conversation UI, keys go straight in.
             let screen: UIViewController
             if let parked = recentTerminals[session.key] {
+                (parked as? TerminalViewController)?.updateSession(session)
                 screen = parked
             } else if let endpoint {
                 screen = TerminalViewController(endpoint: endpoint, session: session)
@@ -187,6 +189,21 @@ final class RootContainerViewController: UIViewController {
         }
         // No longer in the cache, so goHome tears the active one down too.
         if activeScreen != nil { goHome() }
+    }
+
+    private func syncCachedTerminalsWithRoster() {
+        guard !recentTerminals.isEmpty else { return }
+        var sessionsByKey: [String: MockSession] = [:]
+        for project in store.projects {
+            for session in project.sessions {
+                sessionsByKey[session.key] = session
+            }
+        }
+        for (key, screen) in recentTerminals {
+            if let latest = sessionsByKey[key] {
+                (screen as? TerminalViewController)?.updateSession(latest)
+            }
+        }
     }
 
     /// Under memory pressure, shed every parked terminal except the one on

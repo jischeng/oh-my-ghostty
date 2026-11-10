@@ -30,6 +30,10 @@ struct MockSession: Identifiable {
     var isBackground: Bool = false
     /// True when the session was spawned from the phone app.
     var isMobileCreated: Bool = false
+    /// Active SSH host when the session is connected to a remote machine.
+    var remoteHost: String?
+    /// Active remote directory on the SSH target machine.
+    var remotePath: String?
 
     static let samples: [MockSession] = [
         .init(title: "fix-sidebar", project: "termio", agent: .sampleClaude,
@@ -170,6 +174,8 @@ extension MockSession {
         let projectBranch = project.branch.isEmpty ? nil : project.branch
         // "—" is the desktop's placeholder for "no branch"; drop it here.
         let worktreeBranch = roster.branch.flatMap { $0 == "—" || $0.isEmpty ? nil : $0 }
+        let activeRemoteHost = roster.remoteHost ?? project.deviceAlias
+        let activeRemotePath = roster.remotePath ?? (activeRemoteHost != nil && !project.path.isEmpty ? project.path : nil)
         self.init(
             title: roster.title,
             project: project.name,
@@ -178,14 +184,16 @@ extension MockSession {
             subtitle: roster.subtitle ?? "",
             time: "",
             rosterID: roster.id,
-            projectRosterID: project.id,
-            projectPath: project.path,
+            projectRosterID: roster.remoteProjectID ?? project.id,
+            projectPath: activeRemotePath ?? project.path,
             // The terminal top bar shows where the session actually runs, so
             // a worktree's branch wins over the project checkout's.
             branch: worktreeBranch ?? projectBranch,
             worktreeBranch: worktreeBranch,
             isBackground: roster.background ?? false,
-            isMobileCreated: roster.mobileCreated ?? false
+            isMobileCreated: roster.mobileCreated ?? false,
+            remoteHost: activeRemoteHost,
+            remotePath: activeRemotePath
         )
     }
 }

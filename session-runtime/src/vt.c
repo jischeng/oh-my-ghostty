@@ -3,6 +3,8 @@
 #include <string.h>
 #ifdef __APPLE__
 #include <libproc.h>
+#include <sys/sysctl.h>
+#include <unistd.h>
 int omg_process_cwd(int pid, unsigned char *buffer, size_t capacity) {
     struct proc_vnodepathinfo info;
     int result = proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, sizeof(info));
@@ -11,6 +13,45 @@ int omg_process_cwd(int pid, unsigned char *buffer, size_t capacity) {
     if (len >= capacity) return -1;
     memcpy(buffer, info.pvi_cdir.vip_path, len);
     return (int)len;
+}
+int omg_group_pids(int pgid, int *pids, size_t capacity) {
+    if (pgid <= 1 || !pids || capacity == 0) return -1;
+    int bytes = proc_listpids(PROC_PGRP_ONLY, (uint32_t)pgid, pids, (int)(capacity * sizeof(int)));
+    if (bytes < 0) return -1;
+    return bytes / (int)sizeof(int);
+}
+int omg_session_pids(int leader, int *pids, size_t capacity) {
+    if (leader <= 1 || !pids || capacity == 0) return -1;
+    int total_bytes = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
+    if (total_bytes <= 0) return -1;
+    size_t max_count = (size_t)(total_bytes / (int)sizeof(int)) + 64;
+    if (max_count > 16384) max_count = 16384;
+    int *all = calloc(max_count, sizeof(int));
+    if (!all) return -1;
+    int bytes = proc_listpids(PROC_ALL_PIDS, 0, all, (int)(max_count * sizeof(int)));
+    if (bytes <= 0) {
+        free(all);
+        return -1;
+    }
+    int count = bytes / (int)sizeof(int);
+    size_t out = 0;
+    for (int i = 0; i < count && out < capacity; i++) {
+        int pid = all[i];
+        if (pid > 1 && getsid(pid) == leader) {
+            pids[out++] = pid;
+        }
+    }
+    free(all);
+    return (int)out;
+}
+int omg_process_args(int pid, unsigned char *buffer, size_t capacity) {
+    if (pid <= 1 || !buffer || capacity < sizeof(int)) return -1;
+    int mib[3] = {CTL_KERN, KERN_PROCARGS2, pid};
+    size_t size = capacity;
+    if (sysctl(mib, 3, buffer, &size, NULL, 0) != 0 || size < sizeof(int)) {
+        return -1;
+    }
+    return (int)size;
 }
 #endif
 

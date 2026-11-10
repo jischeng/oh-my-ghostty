@@ -115,6 +115,8 @@ pub struct Record {
     pub updated_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<crate::location::SshTarget>,
     pub pid: Option<u32>,
     pub ended: Option<EndReason>,
     pub resume: Option<Resume>,
@@ -136,6 +138,7 @@ impl Record {
             created_at: unix_time(),
             updated_at: unix_time(),
             cwd: None,
+            ssh: None,
             pid: None,
             ended: None,
             resume: None,
@@ -212,6 +215,8 @@ pub struct SessionSummary {
     pub policy: Policy,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<crate::location::SshTarget>,
 }
 
 impl From<&Record> for SessionSummary {
@@ -229,6 +234,7 @@ impl From<&Record> for SessionSummary {
                 .cwd
                 .clone()
                 .or_else(|| record.resume.as_ref().map(|resume| resume.cwd.clone())),
+            ssh: record.ssh.clone(),
         }
     }
 }

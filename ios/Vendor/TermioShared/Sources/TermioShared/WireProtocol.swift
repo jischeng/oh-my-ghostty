@@ -668,11 +668,20 @@ public struct RosterSession: Codable, Sendable, Equatable {
     public let background: Bool?
     /// True when the session was spawned from a paired mobile client.
     public let mobileCreated: Bool?
+    /// Active SSH target host when the session is currently connected over SSH.
+    public let remoteHost: String?
+    /// Current remote working directory on the SSH target host.
+    public let remotePath: String?
+    /// Synthetic project ID on `omgd` representing the remote SSH directory, so
+    /// the Inspector drawer and file uploads follow the active SSH session.
+    public let remoteProjectID: String?
 
     public init(
         id: String, title: String, agent: String, status: String,
         subtitle: String? = nil, branch: String? = nil,
-        background: Bool? = nil, mobileCreated: Bool? = nil
+        background: Bool? = nil, mobileCreated: Bool? = nil,
+        remoteHost: String? = nil, remotePath: String? = nil,
+        remoteProjectID: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -682,6 +691,9 @@ public struct RosterSession: Codable, Sendable, Equatable {
         self.branch = branch
         self.background = background
         self.mobileCreated = mobileCreated
+        self.remoteHost = remoteHost
+        self.remotePath = remotePath
+        self.remoteProjectID = remoteProjectID
     }
 }
 

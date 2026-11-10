@@ -470,7 +470,13 @@ fn build_view(config: &Config) -> io::Result<View> {
             "branch":branch,"kind":"folder","sessions":[]})));
     }
     experience::append_projects(config, &desktop, preferred.as_ref(), &mut projects)?;
+    let mut remote_projects: HashMap<String, Project> = HashMap::new();
     for (endpoint, sessions, supports_presentation) in endpoints {
+        let endpoint_is_remote = endpoint
+            .socket
+            .parent()
+            .and_then(|p| p.parent())
+            .is_some_and(|p| p.file_name().is_some_and(|n| n == "bridges"));
         for session in sessions
             .into_iter()
             .filter(|s| s.ended.is_none())
@@ -494,11 +500,47 @@ fn build_view(config: &Config) -> io::Result<View> {
                         .join(format!("{}.sock", &hash(&session.id)[..16]));
                     holder::presentation(&socket, record).ok()
                 });
+            let mut active_ssh = session
+                .ssh
+                .clone()
+                .or_else(|| record.as_ref().and_then(|r| r.ssh.clone()));
+            if active_ssh.is_none() && !endpoint_is_remote {
+                if let Some(pid) = session.pid.filter(|&p| p > 0) {
+                    active_ssh = omg_session_runtime::location::leader_ssh(pid);
+                }
+            }
+            if active_ssh.is_none() {
+                if let Some(host) = facts
+                    .as_ref()
+                    .and_then(|f| f.remote_host.as_deref())
+                    .filter(|h| !h.is_empty())
+                {
+                    active_ssh = Some(omg_session_runtime::location::SshTarget {
+                        destination: host.to_owned(),
+                        options: Vec::new(),
+                        remote_cwd: facts.as_ref().and_then(|f| f.remote_cwd.clone()),
+                    });
+                } else if endpoint_is_remote {
+                    active_ssh = Some(omg_session_runtime::location::SshTarget {
+                        destination: endpoint.id.clone(),
+                        options: Vec::new(),
+                        remote_cwd: session.cwd.clone(),
+                    });
+                }
+            }
+            if let Some(ssh) = active_ssh.as_mut() {
+                if ssh.remote_cwd.is_none() {
+                    ssh.remote_cwd = facts
+                        .as_ref()
+                        .and_then(|f| f.remote_cwd.clone())
+                        .or_else(|| endpoint_is_remote.then(|| session.cwd.clone()).flatten());
+                }
+            }
             let observed = facts.as_ref().and_then(presentation);
             let saved = phone
                 .get(&session.id)
                 .filter(|m| m.generation == session.generation);
-            let (agent, state, subtitle) = observed.unwrap_or_else(|| {
+            let (agent, state, mut subtitle) = observed.unwrap_or_else(|| {
                 let agent = saved
                     .map(|m| m.agent.clone())
                     .or_else(|| {
@@ -559,7 +601,7 @@ fn build_view(config: &Config) -> io::Result<View> {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned();
-            let (_, value) = projects.entry(id.clone()).or_insert_with(|| {
+            let (project_entry, value) = projects.entry(id.clone()).or_insert_with(|| {
                 (
                     Project {
                         id: id.clone(),
@@ -572,7 +614,18 @@ fn build_view(config: &Config) -> io::Result<View> {
                 "workspaceName":workspace_name,"branch":branch,"kind":kind,"sessions":[]}),
                 )
             });
-            let title = owner
+            if active_ssh.is_none() {
+                if let Some(host) = project_entry.host.as_deref() {
+                    active_ssh = experience::resolve_remote_ssh(config, host).ok().map(
+                        |(destination, options)| omg_session_runtime::location::SshTarget {
+                            destination,
+                            options,
+                            remote_cwd: Some(project_entry.root.to_string_lossy().into_owned()),
+                        },
+                    );
+                }
+            }
+            let mut title = owner
                 .and_then(|o| o.1.as_deref())
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned)
@@ -588,13 +641,72 @@ fn build_view(config: &Config) -> io::Result<View> {
                             .into()
                     }
                 });
+            let (remote_host, remote_path, remote_project_id) = if let Some(ssh) = active_ssh.as_ref() {
+                experience::remember_ssh_target(config, ssh);
+                let host_label = experience::host_display_name(&ssh.destination);
+                let r_path = ssh
+                    .remote_cwd
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "~".into());
+                let r_project_id = format!(
+                    "ssh-session-{}",
+                    &hash(&format!(
+                        "{}\0{}\0{}",
+                        ssh.destination,
+                        ssh.options.join("\0"),
+                        r_path
+                    ))[..24]
+                );
+                remote_projects
+                    .entry(r_project_id.clone())
+                    .or_insert_with(|| Project {
+                        id: r_project_id.clone(),
+                        root: PathBuf::from(&r_path),
+                        workspace: workspace.into(),
+                        endpoint: Some(endpoint.clone()),
+                        host: serde_json::to_string(ssh).ok(),
+                    });
+                if agent == "terminal" && (title == name || title == "Terminal" || title.is_empty()) {
+                    let tail = Path::new(&r_path)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .filter(|s| !s.is_empty() && *s != "~");
+                    title = match tail {
+                        Some(folder) => format!("{host_label} · {folder}"),
+                        None => host_label.clone(),
+                    };
+                }
+                if subtitle.is_empty() {
+                    subtitle = if r_path != "~" {
+                        format!("SSH · {host_label}:{r_path}")
+                    } else {
+                        format!("SSH · {host_label}")
+                    };
+                }
+                (Some(host_label), Some(r_path), Some(r_project_id))
+            } else {
+                (None, None, None)
+            };
             let is_background = config.support.is_some() && owner.is_none();
             let mobile_created = saved.is_some();
-            value["sessions"].as_array_mut().unwrap().push(json!({
+            let mut session_json = json!({
                 "id":format!("{}/{}/{}",endpoint.id,session.id,session.generation),"title":title,"agent":agent,
                 "status":state,"subtitle":subtitle,"branch":branch,
                 "background":is_background,"mobileCreated":mobile_created,
-            }));
+            });
+            if let Some(object) = session_json.as_object_mut() {
+                if let Some(host) = remote_host {
+                    object.insert("remoteHost".into(), json!(host));
+                }
+                if let Some(path) = remote_path {
+                    object.insert("remotePath".into(), json!(path));
+                }
+                if let Some(pid) = remote_project_id {
+                    object.insert("remoteProjectID".into(), json!(pid));
+                }
+            }
+            value["sessions"].as_array_mut().unwrap().push(session_json);
         }
     }
     for (_, value) in projects.values_mut() {
@@ -621,7 +733,9 @@ fn build_view(config: &Config) -> io::Result<View> {
     let roster = json!({"t":"roster","wire":2,"macID":identity,
         "macName":format!("{} · {channel}",computer_name()),
         "agents":agents,"projects":projects.values().map(|(_,p)| p).collect::<Vec<_>>()});
-    let projects = projects.into_iter().map(|(id, (p, _))| (id, p)).collect();
+    let mut projects: HashMap<String, Project> =
+        projects.into_iter().map(|(id, (p, _))| (id, p)).collect();
+    projects.extend(remote_projects);
     Ok(View { roster, projects })
 }
 
@@ -745,7 +859,7 @@ fn request_control(config: &Config, request: &Value) -> io::Result<Value> {
         return Ok(Value::Null);
     }
     if kind == "sshConfigHosts" {
-        return Ok(json!({"t":"sshConfigList","hosts":ssh_hosts()}));
+        return Ok(json!({"t":"sshConfigList","hosts":ssh_hosts_for_config(config)}));
     }
     if kind == "stop" {
         let (endpoint, id, _) = route(config, text(request, "session")?)?;
@@ -791,14 +905,12 @@ fn request_control(config: &Config, request: &Value) -> io::Result<Value> {
         .projects
         .get(text(request, "project")?)
         .ok_or_else(|| io::Error::other("Project is no longer in the roster"))?;
-    if project.host.is_some() {
-        return Err(io::Error::other(
-            "Remote file tools are not available for this project; use its SSH terminal.",
-        ));
-    }
     let path = request["path"].as_str().unwrap_or("");
     if path.len() > 4096 || path.contains('\0') {
         return Err(io::Error::other("Invalid project path"));
+    }
+    if let Some(host) = &project.host {
+        return experience::remote_project_control(config, project, host, kind, path, request);
     }
     match kind {
         "listFiles" => {
@@ -1000,6 +1112,29 @@ fn ssh_hosts() -> Vec<Value> {
         .collect()
 }
 
+fn ssh_hosts_for_config(config: &Config) -> Vec<Value> {
+    let mut hosts = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for remembered in experience::load_remembered_ssh_hosts(config) {
+        if seen.insert(remembered.alias.clone()) {
+            hosts.push(json!({
+                "alias": remembered.alias,
+                "hostName": remembered.host_name,
+                "user": remembered.user,
+                "port": remembered.port,
+            }));
+        }
+    }
+    for entry in ssh_hosts() {
+        if let Some(alias) = entry["alias"].as_str() {
+            if seen.insert(alias.to_owned()) {
+                hosts.push(entry);
+            }
+        }
+    }
+    hosts
+}
+
 fn start(config: &Config, view: &View, request: &Value) -> io::Result<Value> {
     let kind = text(request, "t")?;
     let project = if kind == "start" {
@@ -1037,13 +1172,21 @@ fn start(config: &Config, view: &View, request: &Value) -> io::Result<Value> {
     };
     let mut argv = if kind == "startSSH" {
         let host = text(request, "host")?;
-        if !ssh_hosts()
+        if !ssh_hosts_for_config(config)
             .iter()
             .any(|h| h["alias"].as_str() == Some(host))
         {
             return Err(io::Error::other("Choose an existing SSH host alias"));
         }
-        vec!["/usr/bin/ssh".into(), host.into()]
+        let mut cmd = vec!["/usr/bin/ssh".into()];
+        if let Some(remembered) = experience::load_remembered_ssh_hosts(config)
+            .into_iter()
+            .find(|h| h.alias == host)
+        {
+            cmd.extend(remembered.options);
+        }
+        cmd.push(host.into());
+        cmd
     } else if agent == "terminal" {
         vec![shell, "-l".into()]
     } else {

@@ -19,7 +19,7 @@ final class TerminalViewController: UIViewController {
         case device(DeviceEndpoint)
     }
 
-    private let session: MockSession
+    private var session: MockSession
     private let backend: Backend
 
     /// Set by RootContainerViewController: the session DIED (exit or lost
@@ -75,6 +75,7 @@ final class TerminalViewController: UIViewController {
     private let contextLabel = UILabel()
     private let titleLabel = UILabel()
     private let statusLabel = UILabel()
+    private let overflowButton = UIButton(type: .system)
     private var headerButtonSizeConstraints: [NSLayoutConstraint] = []
     private var surfaceConfigured = false
     private var backendStarted = false
@@ -474,13 +475,47 @@ final class TerminalViewController: UIViewController {
     /// floating system bar. Line 1: where you are (project · branch). Line 2:
     /// what the session is doing (live from the agent's OSC titles). While
     /// the link is in doubt the status line stands in for the context line.
-    private func configureHeader() {
-        contextLabel.font = .preferredFont(forTextStyle: .caption2)
-        contextLabel.textColor = .secondaryLabel
-        contextLabel.text = [session.project, session.branch]
+    private static func headerContextText(for session: MockSession) -> String {
+        if let remoteHost = session.remoteHost, !remoteHost.isEmpty {
+            let remotePath = session.remotePath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !remotePath.isEmpty, remotePath != "~" {
+                return "🌐 \(remoteHost) · \(remotePath)"
+            }
+            return "🌐 \(remoteHost)"
+        }
+        return [session.project, session.branch]
             .compactMap { $0 }
             .filter { !$0.isEmpty }
             .joined(separator: " · ")
+    }
+
+    func updateSession(_ newSession: MockSession) {
+        let oldTitle = session.title
+        let remoteChanged = session.remoteHost != newSession.remoteHost
+            || session.remotePath != newSession.remotePath
+        session = newSession
+        if isViewLoaded {
+            contextLabel.text = Self.headerContextText(for: newSession)
+            if statusLabel.isHidden {
+                let compact = traitCollection.verticalSizeClass == .compact
+                contextLabel.isHidden = compact || (contextLabel.text?.isEmpty ?? true)
+            }
+            if titleLabel.text == oldTitle || remoteChanged {
+                titleLabel.text = newSession.title
+            }
+            let menu = makeOverflowMenu()
+            overflowButton.menu = menu
+            let hasActions = !menu.children.isEmpty
+            overflowButton.alpha = hasActions ? 1 : 0
+            overflowButton.isUserInteractionEnabled = hasActions
+        }
+        inspector.updateSession(newSession)
+    }
+
+    private func configureHeader() {
+        contextLabel.font = .preferredFont(forTextStyle: .caption2)
+        contextLabel.textColor = .secondaryLabel
+        contextLabel.text = Self.headerContextText(for: session)
         titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
         titleLabel.textColor = .label
         titleLabel.lineBreakMode = .byTruncatingTail
@@ -529,17 +564,16 @@ final class TerminalViewController: UIViewController {
         // and holds an overflow menu of per-session actions — Copy Path for a
         // companion session. With nothing to offer (the demo shell has no Mac
         // project path) it stays an invisible spacer.
-        let overflow = UIButton(type: .system)
+        let overflow = overflowButton
         overflow.applyGlassSymbol("ellipsis", pointSize: 16)
         overflow.accessibilityIdentifier = "terminal.overflow"
         overflow.tintColor = ThemeChrome.secondaryInk
         overflow.showsMenuAsPrimaryAction = true
         let menu = makeOverflowMenu()
         overflow.menu = menu
-        if menu.children.isEmpty {
-            overflow.alpha = 0
-            overflow.isUserInteractionEnabled = false
-        }
+        let hasActions = !menu.children.isEmpty
+        overflow.alpha = hasActions ? 1 : 0
+        overflow.isUserInteractionEnabled = hasActions
         headerBar.addArrangedSubview(back)
         headerBar.addArrangedSubview(titles)
         headerBar.addArrangedSubview(overflow)

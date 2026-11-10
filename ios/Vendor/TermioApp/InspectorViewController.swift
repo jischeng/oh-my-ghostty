@@ -13,7 +13,7 @@ import UIKit
 final class InspectorViewController: UIViewController {
     private enum Pane: Int { case changes = 0, files = 1 }
 
-    private let session: MockSession
+    private var session: MockSession
     private let endpoint: DeviceEndpoint?
     private let tableView = UITableView(frame: .zero, style: .plain)
     private let segment = UISegmentedControl(items: [localized("Changes"), localized("Files")])
@@ -139,6 +139,32 @@ final class InspectorViewController: UIViewController {
         }
     }
 
+    func updateSession(_ newSession: MockSession) {
+        let projectChanged = session.projectRosterID != newSession.projectRosterID
+            || session.projectPath != newSession.projectPath
+            || session.remoteHost != newSession.remoteHost
+        session = newSession
+        guard projectChanged, isViewLoaded else { return }
+        if isSearching { endSearch() }
+        navigationController?.popToViewController(self, animated: false)
+        listingHandlers.removeAll()
+        rootEntries = []
+        changes = []
+        changesLoaded = false
+        tableView.reloadData()
+        guard let projectID = session.projectRosterID else { return }
+        if client == nil {
+            connectFilePlane()
+        } else {
+            setLoading(true)
+            client?.listChanges(projectID: projectID)
+            listEntries(at: "") { [weak self] entries in
+                self?.rootEntries = entries
+                if self?.pane == .files { self?.tableView.reloadData() }
+            }
+        }
+    }
+
     /// Show/hide the nav-bar spinner, attaching its bar button only while busy so no
     /// empty glass capsule lingers in the header when idle.
     private func setLoading(_ loading: Bool) {
@@ -226,11 +252,11 @@ final class InspectorViewController: UIViewController {
     /// A dedicated control connection for browsing — the terminal's own socket is a raw
     /// PTY byte stream once attached, so it can't carry these.
     private func connectFilePlane() {
-        guard let endpoint, let projectID = session.projectRosterID else { return }
+        guard let endpoint, session.projectRosterID != nil else { return }
         setLoading(true)
         let client = DeviceBackends.client(for: endpoint)
         client.onConnected = { [weak self] connected in
-            guard let self, connected else { return }
+            guard let self, connected, let projectID = self.session.projectRosterID else { return }
             client.listChanges(projectID: projectID)
             if rootEntries.isEmpty {
                 listEntries(at: "") { [weak self] entries in

@@ -98,6 +98,13 @@ pub fn request(ssh: &str, args: &[String], remote_cwd: Option<&str>) -> io::Resu
             }
             return result;
         }
+        if !accepted.exists()
+            && directory.contains("/session-runtime/bridges/")
+            && start.elapsed() > Duration::from_millis(800)
+        {
+            let _ = std::fs::remove_file(&path);
+            return headless_handoff(&id, &directory, ssh, args, remote_cwd);
+        }
         if !accepted.exists() && start.elapsed() > Duration::from_secs(60) {
             break;
         }
@@ -108,6 +115,138 @@ pub fn request(ssh: &str, args: &[String], remote_cwd: Option<&str>) -> io::Resu
         io::ErrorKind::TimedOut,
         "OMG native SSH handoff timed out",
     ))
+}
+
+fn headless_handoff(
+    id: &str,
+    directory: &str,
+    ssh: &str,
+    args: &[String],
+    remote_cwd: Option<&str>,
+) -> io::Result<i32> {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let Some(target) = crate::location::parse_ssh_args(args) else {
+        return Ok(64);
+    };
+    let mut cursor = Some(std::path::Path::new(directory));
+    let mut runtime_dir = None;
+    while let Some(dir) = cursor {
+        if dir.file_name().and_then(|s| s.to_str()) == Some("session-runtime") {
+            runtime_dir = Some(dir.to_path_buf());
+            break;
+        }
+        cursor = dir.parent();
+    }
+    let Some(runtime_dir) = runtime_dir else {
+        return Ok(64);
+    };
+    let endpoints_path = runtime_dir.join("endpoints.json");
+    let Ok(bytes) = std::fs::read(&endpoints_path) else {
+        return Ok(64);
+    };
+    let Ok(archive) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return Ok(64);
+    };
+    let matched = archive["endpoints"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|entry| {
+            entry["descriptor"]["connection"]["destination"].as_str()
+                == Some(target.destination.as_str())
+        });
+    let Some(entry) = matched else {
+        return Ok(64);
+    };
+    let descriptor = &entry["descriptor"];
+    let Some(revision) = descriptor["revision"].as_str() else {
+        return Ok(64);
+    };
+    let bundle = runtime_dir.join("versions").join(revision);
+    let helper = bundle.join("omgd");
+    if !helper.is_file() {
+        return Ok(64);
+    }
+    let policy: crate::lifecycle::Policy = serde_json::from_value(descriptor["policy"].clone())
+        .unwrap_or_default();
+    let uid = unsafe { libc::getuid() };
+    let root = std::path::PathBuf::from(format!("/tmp/omg-inline-{uid}-{id}"));
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&root)?;
+    let socket = root.join("relay.sock");
+    let configuration = root.join("connection.json");
+    let local_cwd = env::current_dir()?
+        .to_string_lossy()
+        .into_owned();
+    let mut ssh_args = target.options.clone();
+    ssh_args.push(target.destination.clone());
+    let connection = crate::deploy::Connection {
+        auto_install: true,
+        transport: crate::deploy::TransportKind::Ssh,
+        executable: if ssh.starts_with('/') {
+            ssh.to_owned()
+        } else {
+            "/usr/bin/ssh".to_owned()
+        },
+        arguments: ssh_args,
+        cwd: local_cwd.clone(),
+        bundle,
+        policy: policy.clone(),
+        revision: Some(revision.to_owned()),
+        local_state_directory: None,
+        local_shell: Some("/bin/zsh".to_owned()),
+        hooks: None,
+        tty_authentication: true,
+    };
+    let mut cfg_file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&configuration)?;
+    cfg_file.write_all(&serde_json::to_vec(&connection)?)?;
+    cfg_file.sync_all()?;
+    let pane_nonce = crate::record::nonce()?;
+    let pane_id = format!(
+        "{}-{}-{}-{}-{}",
+        &pane_nonce[..8],
+        &pane_nonce[8..12],
+        &pane_nonce[12..16],
+        &pane_nonce[16..20],
+        &pane_nonce[20..]
+    );
+    let host_label = target
+        .destination
+        .rsplit('@')
+        .next()
+        .unwrap_or(&target.destination)
+        .to_owned();
+    let approval = Approval {
+        helper,
+        configuration,
+        socket,
+        open: serde_json::json!({
+            "id": pane_id,
+            "policy": policy,
+            "create": true,
+            "cwd": remote_cwd,
+            "inline_viewer": true,
+        }),
+        context: crate::inline::Context {
+            connection_id: format!("omg-ssh-inline-{id}"),
+            target: host_label,
+            local_cwd,
+            active_record: None,
+            owner_record: None,
+        },
+    };
+    let result = run_inline(&approval);
+    crate::inline::forget_context(&approval.context);
+    if result.is_err() {
+        crate::inline::end_context(&approval.context, 255);
+    }
+    result
 }
 
 pub(crate) fn read_private(path: &std::path::Path) -> io::Result<Vec<u8>> {

@@ -21,6 +21,10 @@ pub struct Snapshot {
     pub revision: u64,
     pub records: Vec<Signal>,
     pub pending: Option<Vec<Signal>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_cwd: Option<String>,
 }
 impl Snapshot {
     pub fn decode(bytes: &[u8]) -> io::Result<Self> {
@@ -83,8 +87,43 @@ pub struct State {
     pending: Option<Vec<Record>>,
     remote: bool,
     remote_id: Option<String>,
+    remote_host: Option<String>,
+    remote_cwd: Option<String>,
     pub local: bool,
     pub foreground: Option<i32>,
+}
+
+fn decode_percent(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    out.push(byte);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn decode_hex(value: &str) -> Option<String> {
+    if value.len() % 2 != 0 || value.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(value.len() / 2);
+    let bytes = value.as_bytes();
+    for chunk in bytes.chunks_exact(2) {
+        let hex = std::str::from_utf8(chunk).ok()?;
+        out.push(u8::from_str_radix(hex, 16).ok()?);
+    }
+    String::from_utf8(out).ok()
 }
 
 fn field<'a>(metadata: &'a str, separator: char, key: &str) -> Option<&'a str> {
@@ -110,9 +149,18 @@ impl State {
     pub fn revision(&self) -> u64 {
         self.revision
     }
+    pub fn remote_host(&self) -> Option<&str> {
+        self.remote_host.as_deref()
+    }
+    pub fn remote_cwd(&self) -> Option<&str> {
+        self.remote_cwd.as_deref()
+    }
     pub fn replace(&mut self, snapshot: Snapshot) {
         self.records.clear();
         self.pending = None;
+        self.remote_host = snapshot.remote_host;
+        self.remote_cwd = snapshot.remote_cwd;
+        self.remote = self.remote_host.is_some() || self.remote_cwd.is_some();
         for signal in snapshot.records {
             self.consume(false, &signal.id, &signal.metadata);
         }
@@ -133,6 +181,8 @@ impl State {
                 .pending
                 .as_ref()
                 .map(|r| r.iter().map(|r| r.signal.clone()).collect()),
+            remote_host: self.remote_host.clone(),
+            remote_cwd: self.remote_cwd.clone(),
         }
     }
     pub fn consume(&mut self, ended: bool, id: &str, metadata: &str) {
@@ -160,11 +210,28 @@ impl State {
                 }
                 self.remote = false;
                 self.remote_id = None;
+                self.remote_host = None;
+                self.remote_cwd = None;
                 self.pending = None;
                 self.clear_remote();
+                self.revision = self.revision.saturating_add(1);
             } else {
                 self.remote = true;
                 self.remote_id = Some(id.into());
+                if let Some(host) = field(metadata, ';', "targethost")
+                    .map(decode_percent)
+                    .filter(|s| !s.is_empty() && s.len() <= 256)
+                {
+                    self.remote_host = Some(host);
+                }
+                if let Some(cwd) = field(metadata, ';', "cwdhex")
+                    .and_then(decode_hex)
+                    .or_else(|| field(metadata, ';', "cwd").map(decode_percent))
+                    .filter(|s| (s.starts_with('/') || s.starts_with('~')) && s.len() <= 4096)
+                {
+                    self.remote_cwd = Some(cwd);
+                }
+                self.revision = self.revision.saturating_add(1);
                 // Prompt cwd signals clear remote contexts. Runtime attachment
                 // metadata is explicitly marked and never means shell return.
                 if !id.starts_with("omg-ssh-inline-")

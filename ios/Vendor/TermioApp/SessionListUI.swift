@@ -107,6 +107,10 @@ struct SessionRow: View {
     private var subtitle: String {
         var parts: [String] = []
         if showsProject, !session.project.isEmpty { parts.append(session.project) }
+        if let remoteHost = session.remoteHost, !remoteHost.isEmpty,
+           !session.subtitle.hasPrefix("SSH · ") {
+            parts.append("🌐 \(remoteHost)")
+        }
         // The worktree's branch, verbatim like the Mac sidebar's label — only
         // set for sessions living off the main checkout, so plain rows don't
         // repeat the project branch.

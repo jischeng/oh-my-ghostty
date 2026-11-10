@@ -222,6 +222,86 @@ impl Drop for SocketGuard {
         let _ = fs::remove_file(&self.0);
     }
 }
+
+fn sniff_remote_cwd(bytes: &[u8], current: &mut Option<String>) {
+    let mut i = 0;
+    while i + 4 < bytes.len() {
+        if bytes[i] == 0x1b && bytes[i + 1] == b']' {
+            let mut end = i + 2;
+            while end < bytes.len()
+                && bytes[end] != 0x07
+                && !(bytes[end] == 0x1b && end + 1 < bytes.len() && bytes[end + 1] == b'\\')
+            {
+                end += 1;
+            }
+            if end < bytes.len() {
+                if let Ok(osc) = std::str::from_utf8(&bytes[i + 2..end]) {
+                    if let Some(rest) = osc.strip_prefix("7;") {
+                        let url = rest.trim();
+                        if let Some(after_scheme) = url
+                            .strip_prefix("file://")
+                            .or_else(|| url.strip_prefix("kitty-shell-cwd://"))
+                        {
+                            if let Some(slash) = after_scheme.find('/') {
+                                let raw_path = &after_scheme[slash..];
+                                if !raw_path.is_empty() && raw_path.len() <= 4096 {
+                                    *current = Some(raw_path.to_owned());
+                                }
+                            }
+                        }
+                    } else if let Some(title) = osc
+                        .strip_prefix("0;")
+                        .or_else(|| osc.strip_prefix("2;"))
+                    {
+                        if let Some((prefix, candidate)) = title.rsplit_once(':') {
+                            let prefix = prefix.trim();
+                            let candidate = candidate.trim();
+                            if !prefix.is_empty()
+                                && (candidate == "~"
+                                    || candidate.starts_with("~/")
+                                    || candidate.starts_with('/'))
+                                && candidate.len() <= 4096
+                                && !candidate.chars().any(char::is_control)
+                            {
+                                *current = Some(candidate.to_owned());
+                            }
+                        }
+                    }
+                }
+            }
+            i = end + 1;
+        } else {
+            i += 1;
+        }
+    }
+}
+
+fn resolve_session_ssh(
+    master: i32,
+    leader: u32,
+    vt: &Vt,
+    sniffed_cwd: &mut Option<String>,
+) -> Option<crate::location::SshTarget> {
+    let mut target = crate::location::session_ssh(master, leader).or_else(|| {
+        vt.activity()
+            .remote_host()
+            .map(|host| crate::location::SshTarget {
+                destination: host.to_owned(),
+                options: Vec::new(),
+                remote_cwd: None,
+            })
+    });
+    if let Some(ref mut ssh) = target {
+        if let Some(cwd) = vt.activity().remote_cwd() {
+            ssh.remote_cwd = Some(cwd.to_owned());
+        } else if let Some(cwd) = sniffed_cwd.as_ref() {
+            ssh.remote_cwd = Some(cwd.clone());
+        }
+    } else {
+        *sniffed_cwd = None;
+    }
+    target
+}
 /// Prototype intentionally has one session, created explicitly at daemon startup.
 /// Disconnect never touches the PTY; only Close or child exit ends the session.
 pub fn serve(path: &Path, argv: &[String]) -> io::Result<()> {
@@ -520,6 +600,8 @@ pub fn serve_managed(
             .as_ref()
             .and_then(|session| session.record.cwd.clone())
     });
+    let mut sniffed_remote_cwd: Option<String> = None;
+    let mut last_ssh = resolve_session_ssh(master, child.id(), &vt, &mut sniffed_remote_cwd);
     let mut last_foreground = local_mode
         .then(|| foreground_session_group(master, child.id()))
         .flatten();
@@ -527,8 +609,9 @@ pub fn serve_managed(
     let mut cwd_checked = Instant::now();
     let mut password_checked = Instant::now();
     if let Some(session) = &mut managed {
-        if session.record.cwd != last_cwd {
+        if session.record.cwd != last_cwd || session.record.ssh != last_ssh {
             session.record.cwd = last_cwd.clone();
+            session.record.ssh = last_ssh.clone();
             session.record.save(&session.path)?;
         }
     }
@@ -550,20 +633,24 @@ pub fn serve_managed(
                 }
             }
             let cwd = crate::location::session_cwd(master, child.id());
+            let ssh = resolve_session_ssh(master, child.id(), &vt, &mut sniffed_remote_cwd);
             let foreground = local_mode
                 .then(|| foreground_session_group(master, child.id()))
                 .flatten();
-            if cwd != last_cwd || foreground != last_foreground {
+            if cwd != last_cwd || foreground != last_foreground || ssh != last_ssh {
                 last_cwd = cwd;
                 last_foreground = foreground;
+                last_ssh = ssh;
                 if let Some(session) = &mut managed {
-                    if session.record.cwd != last_cwd {
+                    if session.record.cwd != last_cwd || session.record.ssh != last_ssh {
                         session.record.cwd = last_cwd.clone();
+                        session.record.ssh = last_ssh.clone();
                         session.record.save(&session.path)?;
                     }
                 }
                 let metadata = serde_json::to_vec(&serde_json::json!({
                     "cwd": last_cwd,
+                    "ssh": last_ssh,
                     "foreground_pid": foreground,
                     "tty_name": if local_mode { tty_name.as_deref() } else { None },
                     "password_input": last_password_input,
@@ -837,8 +924,19 @@ pub fn serve_managed(
             vt.activity_mut().foreground = foreground.and_then(|pid| i32::try_from(pid).ok());
             if local_mode && foreground != last_foreground {
                 last_foreground = foreground;
+                let ssh = resolve_session_ssh(master, child.id(), &vt, &mut sniffed_remote_cwd);
+                if ssh != last_ssh {
+                    last_ssh = ssh;
+                    if let Some(session) = &mut managed {
+                        if session.record.ssh != last_ssh {
+                            session.record.ssh = last_ssh.clone();
+                            session.record.save(&session.path)?;
+                        }
+                    }
+                }
                 let metadata = serde_json::to_vec(&serde_json::json!({
                     "cwd": last_cwd,
+                    "ssh": last_ssh,
                     "foreground_pid": foreground,
                     "tty_name": tty_name.as_deref(),
                     "password_input": last_password_input,
@@ -852,6 +950,9 @@ pub fn serve_managed(
             match pty.read(&mut bytes) {
                 Ok(0) => eof = true,
                 Ok(n) => {
+                    if last_ssh.is_some() {
+                        sniff_remote_cwd(&bytes[..n], &mut sniffed_remote_cwd);
+                    }
                     let visible = output.feed(
                         &mut OutputScreen {
                             vt: &mut vt,

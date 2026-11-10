@@ -22,10 +22,29 @@ extension Ghostty {
         }
 
         var runtimeDescriptor: SessionRuntimeDescriptor?
-        @Published var runtimeConnectionState: SessionRuntimeConnectionState?
+        @Published var runtimeConnectionState: SessionRuntimeConnectionState? {
+            didSet {
+                switch runtimeConnectionState {
+                case .ready, .reconnecting, .attention, .exited:
+                    runtimeConfirmedSession = true
+                default:
+                    break
+                }
+            }
+        }
         var runtimeInlineSession: SessionRuntimeInlineSession?
         @Published var runtimeConnectionError: String?
         private(set) var runtimeAttachmentSuspended = false
+        private var runtimeStartedWithCreate = false
+        private var runtimeConfirmedSession = false
+
+        var runtimeNeedsCreationOnRestore: Bool {
+            guard runtimeDescriptor != nil, runtimeStartedWithCreate, !runtimeConfirmedSession else {
+                return false
+            }
+            if case .failed = runtimeConnectionState { return true }
+            return surface == nil
+        }
 
         func suspendRuntimeAttachment() {
             guard runtimeDescriptor != nil,
@@ -446,6 +465,7 @@ extension Ghostty {
                     runtimeConnectionState = .connecting(attempt: 0)
                     let attachExisting =
                         surface_cfg.environmentVariables[SessionRuntimeDescriptor.attachExistingEnvironmentKey] == "1"
+                    runtimeStartedWithCreate = !attachExisting
                     let socket: URL
                     if attachExisting {
                         socket = try SessionRuntimeConnections.shared.prepareBatch(descriptor)
@@ -2148,9 +2168,13 @@ extension Ghostty {
             config.environmentVariables["OH_MY_GHOSTTY_CHANNEL"] =
                 OMGApplicationEnvironment.channel()
             config.workingDirectory = try container.decode(String?.self, forKey: .pwd)
-            let createRuntime = try container.decodeIfPresent(Bool.self, forKey: .runtimeCreateOnRestore) == true
+            let archivedCreateRuntime = try container.decodeIfPresent(Bool.self, forKey: .runtimeCreateOnRestore) == true
             if let runtime = try container.decodeIfPresent(SessionRuntimeDescriptor.self, forKey: .runtimeDescriptor),
-               !(createRuntime && runtime.isLocal && !OhMyGhosttySettings.shared.localRuntimeEnabled) {
+               !(archivedCreateRuntime && runtime.isLocal && !OhMyGhosttySettings.shared.localRuntimeEnabled) {
+                let createRuntime = archivedCreateRuntime || SessionRuntimeConnections.shouldCreateUnrecordedLocalSessionOnRestore(
+                    for: runtime,
+                    pane: uuid
+                )
                 if SessionRuntimeRestorationPolicy.attachesSavedRuntime(for: startupMode) {
                     if createRuntime {
                         try runtime.configure(&config)
@@ -2276,6 +2300,7 @@ extension Ghostty {
             try container.encode(runtimeInlineSession?.descriptor.launchWorkingDirectory ?? pwd, forKey: .pwd)
             try container.encode(id.uuidString, forKey: .uuid)
             try container.encodeIfPresent(runtimeDescriptor, forKey: .runtimeDescriptor)
+            try container.encodeIfPresent(runtimeNeedsCreationOnRestore ? true : nil, forKey: .runtimeCreateOnRestore)
             try container.encode(title, forKey: .title)
             try container.encode(titleFromTerminal != nil, forKey: .isUserSetTitle)
             try container.encodeIfPresent(

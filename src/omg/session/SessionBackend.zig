@@ -151,7 +151,7 @@ pub fn setSessionAttached(self: *Self, attached: bool) bool {
     if (!self.attachment_enabled.load(.acquire)) return true;
     self.attachment_enabled.store(false, .release);
     _ = self.attachment_epoch.fetchAdd(1, .acq_rel);
-    self.force_attach.store(true, .release);
+    if (!self.is_local or !self.creating) self.force_attach.store(true, .release);
     self.ready.store(false, .release);
     self.disableStartupInputLocked();
     self.clearProcessInfo();
@@ -1144,8 +1144,13 @@ test "local session confirms creation without retaining startup secrets" {
     defer backend.deinit();
     try backend.appendInitialInput("echo one-time\n");
     try std.testing.expect(backend.acceptsInitialInput());
+    try std.testing.expect(backend.setSessionAttached(false));
+    try std.testing.expect(!backend.force_attach.load(.acquire));
+    try std.testing.expect(backend.setSessionAttached(true));
     try backend.confirmCreation();
     try std.testing.expect(!backend.acceptsInitialInput());
+    try std.testing.expect(backend.setSessionAttached(false));
+    try std.testing.expect(backend.force_attach.load(.acquire));
     try std.testing.expect(std.mem.indexOf(u8, backend.pane_id.?, "SECRET") == null);
     try std.testing.expect(std.mem.indexOf(u8, backend.pane_id.?, "launch") == null);
     try std.testing.expectEqual(@as(usize, 0), backend.initial_input.items.len);

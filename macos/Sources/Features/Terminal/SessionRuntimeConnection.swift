@@ -613,6 +613,40 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
         return home.appendingPathComponent(".omg/run/\(hash)")
     }
 
+    nonisolated static func shouldCreateUnrecordedLocalSessionOnRestore(
+        for descriptor: SessionRuntimeDescriptor,
+        pane: UUID?,
+        applicationSupportRoot: URL? = nil,
+        homeDirectory: URL? = nil,
+        isRunningTests: Bool = OMGApplicationEnvironment.isRunningTests
+    ) -> Bool {
+        guard !isRunningTests, descriptor.isLocal, let pane else { return false }
+        let stateDirectory = localStateDirectory(
+            for: descriptor,
+            applicationSupportRoot: applicationSupportRoot,
+            homeDirectory: homeDirectory
+        )
+        let primarySessions = stateDirectory.appendingPathComponent("sessions", isDirectory: true)
+        let runRoot = stateDirectory.deletingLastPathComponent()
+        let siblingSessions: [URL] = (try? FileManager.default.contentsOfDirectory(
+            at: runRoot,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ))?.map { $0.appendingPathComponent("sessions", isDirectory: true) } ?? []
+        let existingSessionsDirs = ([primarySessions] + siblingSessions).filter {
+            FileManager.default.fileExists(atPath: $0.path)
+        }
+        guard !existingSessionsDirs.isEmpty else { return false }
+        let id = pane.uuidString.lowercased()
+        let markers = ["\(id).json", "\(id).created", "\(id).closed"]
+        for directory in existingSessionsDirs {
+            for marker in markers where FileManager.default.fileExists(atPath: directory.appendingPathComponent(marker).path) {
+                return false
+            }
+        }
+        return true
+    }
+
     private func artifactDirectory(revision: String, applicationSupportRoot: URL? = nil) throws -> URL {
         guard !revision.isEmpty, revision.count <= 128,
               revision.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || "._-".contains($0)) }) else {

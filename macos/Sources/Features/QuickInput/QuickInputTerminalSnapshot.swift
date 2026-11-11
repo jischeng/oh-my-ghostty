@@ -23,6 +23,7 @@ final class QuickInputTerminalSnapshot {
     private var overlay: NSImageView?
     private weak var surfaceLayer: CALayer?
     private var timeout: Task<Void, Never>?
+    private var redrawRemovalTask: Task<Void, Never>?
     private var frameObserver: NSObjectProtocol?
 
     init(surface: NSView, maximumDuration: Duration = .seconds(6)) {
@@ -131,9 +132,12 @@ final class QuickInputTerminalSnapshot {
     }
 
     func removeAfterRedraw() {
+        guard !isRemoved else { return }
+        redrawRemovalTask?.cancel()
         // Retain until the delayed removal even when the import task returns.
-        Task { @MainActor in
+        redrawRemovalTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(100))
+            guard !Task.isCancelled else { return }
             self.remove()
         }
     }
@@ -141,6 +145,7 @@ final class QuickInputTerminalSnapshot {
     deinit {
         if let frameObserver { NotificationCenter.default.removeObserver(frameObserver) }
         timeout?.cancel()
+        redrawRemovalTask?.cancel()
         let overlay = self.overlay
         let surfaceLayer = self.surfaceLayer
         let restoredOpacity = self.restoredOpacity
@@ -172,6 +177,8 @@ final class QuickInputTerminalSnapshot {
         frameObserver = nil
         timeout?.cancel()
         timeout = nil
+        redrawRemovalTask?.cancel()
+        redrawRemovalTask = nil
         if Self.activeSnapshots[surfaceKey]?.value === self {
             Self.activeSnapshots.removeValue(forKey: surfaceKey)
         }

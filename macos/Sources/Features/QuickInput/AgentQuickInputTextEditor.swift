@@ -49,7 +49,7 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
             height: CGFloat.greatestFiniteMagnitude
         )
         editor.string = text
-        configureTypography(for: editor)
+        configureTypography(for: editor, coordinator: context.coordinator, force: true)
         editor.onPasteImage = onPasteImage
         editor.onSend = onSend
         editor.onQueue = onQueue
@@ -80,11 +80,13 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
         editor.onRecallHistory = onRecallHistory
         editor.onNavigateHistory = onNavigateHistory
         editor.onHistoryCaretMoved = onHistoryCaretMoved
+        var needsTypographyRefresh = false
         if !editor.hasMarkedText(), editor.string != text {
             editor.restoreHistorySnapshot(.init(text: text,
                 selection: NSRange(location: (text as NSString).length, length: 0)))
+            needsTypographyRefresh = true
         }
-        configureTypography(for: editor)
+        configureTypography(for: editor, coordinator: context.coordinator, force: needsTypographyRefresh)
         if isPresented,
            focusRequestID != context.coordinator.handledFocusRequestID {
             let request = focusRequestID
@@ -111,22 +113,12 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
         }
     }
 
-    private func configureTypography(for editor: NSTextView) {
-        let paragraphStyle = NSMutableParagraphStyle()
-        paragraphStyle.lineSpacing = AgentQuickInputMetrics.editorLineSpacing
-        editor.font = font
-        editor.textColor = textColor
-        editor.insertionPointColor = textColor
-        editor.defaultParagraphStyle = paragraphStyle
-        editor.typingAttributes[.font] = font
-        editor.typingAttributes[.foregroundColor] = textColor
-        editor.typingAttributes[.paragraphStyle] = paragraphStyle
-        if let storage = editor.textStorage, storage.length > 0 {
-            storage.addAttributes(
-                [.font: font, .foregroundColor: textColor, .paragraphStyle: paragraphStyle],
-                range: NSRange(location: 0, length: storage.length)
-            )
-        }
+    private func configureTypography(
+        for editor: NSTextView,
+        coordinator: Coordinator,
+        force: Bool
+    ) {
+        coordinator.applyTypography(to: editor, font: font, textColor: textColor, force: force)
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -134,14 +126,64 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
         weak var editor: ComposerTextView?
         var handledFocusRequestID = 0
         var pendingFocusRequestID: Int?
+        private var appliedFont: NSFont?
+        private var appliedTextColor: NSColor?
+        private var deferredTypography: (font: NSFont, textColor: NSColor)?
         private var lastSelection: NSRange?
 
         init(text: Binding<String>) {
             self._text = text
         }
 
+        func applyTypography(
+            to editor: NSTextView,
+            font: NSFont,
+            textColor: NSColor,
+            force: Bool
+        ) {
+            let typographyChanged = appliedFont != font || appliedTextColor != textColor
+            guard force || typographyChanged || deferredTypography != nil else { return }
+
+            // Never mutate NSTextView.font/textColor or textStorage attributes while an
+            // IME marked-text composition is active; AppKit's textColor setter rewrites
+            // the entire storage range and disrupts active marked-text presentation.
+            if editor.hasMarkedText() {
+                deferredTypography = (font, textColor)
+                return
+            }
+            deferredTypography = nil
+
+            let paragraphStyle = NSMutableParagraphStyle()
+            paragraphStyle.lineSpacing = AgentQuickInputMetrics.editorLineSpacing
+            editor.font = font
+            editor.textColor = textColor
+            editor.insertionPointColor = textColor
+            editor.defaultParagraphStyle = paragraphStyle
+            editor.typingAttributes[.font] = font
+            editor.typingAttributes[.foregroundColor] = textColor
+            editor.typingAttributes[.paragraphStyle] = paragraphStyle
+            appliedFont = font
+            appliedTextColor = textColor
+
+            if let storage = editor.textStorage, storage.length > 0 {
+                storage.addAttributes(
+                    [.font: font, .foregroundColor: textColor, .paragraphStyle: paragraphStyle],
+                    range: NSRange(location: 0, length: storage.length)
+                )
+            }
+        }
+
         func textDidChange(_ notification: Notification) {
-            guard let editor, !editor.isRestoringHistory, text != editor.string else { return }
+            guard let editor else { return }
+            if let pending = deferredTypography, !editor.hasMarkedText() {
+                applyTypography(
+                    to: editor,
+                    font: pending.font,
+                    textColor: pending.textColor,
+                    force: true
+                )
+            }
+            guard !editor.isRestoringHistory, text != editor.string else { return }
             text = editor.string
         }
 

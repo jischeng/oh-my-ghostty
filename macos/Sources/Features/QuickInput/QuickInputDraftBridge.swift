@@ -25,9 +25,32 @@ final class QuickInputDraftBridge {
     ) {
         self.applicationSupportRoot = applicationSupportRoot
         self.homeDirectory = homeDirectory
-        self.temporaryDirectory = temporaryDirectory ?? FileManager.default.temporaryDirectory
+        let resolvedTemporaryDirectory = temporaryDirectory ?? FileManager.default.temporaryDirectory
             .appendingPathComponent("omg-quick-input-\(UUID().uuidString)", isDirectory: true)
+        self.temporaryDirectory = resolvedTemporaryDirectory
         self.pythonExecutable = pythonExecutable
+        if temporaryDirectory == nil {
+            Self.pruneStaleTemporaryDirectories(excluding: resolvedTemporaryDirectory)
+        }
+    }
+
+    nonisolated private static func pruneStaleTemporaryDirectories(excluding current: URL) {
+        let base = FileManager.default.temporaryDirectory
+        let cutoff = Date().addingTimeInterval(-86_400)
+        DispatchQueue.global(qos: .utility).async {
+            guard let items = try? FileManager.default.contentsOfDirectory(
+                at: base,
+                includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            ) else { return }
+            for item in items where item != current && item.lastPathComponent.hasPrefix("omg-quick-input-") {
+                guard let values = try? item.resourceValues(forKeys: [.isDirectoryKey, .contentModificationDateKey]),
+                      values.isDirectory == true,
+                      let modified = values.contentModificationDate,
+                      modified < cutoff else { continue }
+                try? FileManager.default.removeItem(at: item)
+            }
+        }
     }
 
     static func keys(_ value: String) -> [Ghostty.Input.KeyEvent]? {
@@ -79,6 +102,18 @@ final class QuickInputDraftBridge {
         guard setting != "auto" || agent != nil || hasAgentActivity else { return nil }
         if setting == "auto", let agent, reprintsTranscriptAfterEditor(agent) { return nil }
         return keys(shortcut(setting: setting, agent: agent))
+    }
+
+    static func sendKeys(_ keys: [Ghostty.Input.KeyEvent], to terminal: Ghostty.Surface) {
+        for key in keys {
+            terminal.sendKeyEvent(key)
+            terminal.sendKeyEvent(.init(
+                key: key.key,
+                action: .release,
+                mods: key.mods,
+                unshiftedCodepoint: key.unshiftedCodepoint
+            ))
+        }
     }
 
     static func canImportDraft(
@@ -198,6 +233,22 @@ final class QuickInputDraftBridge {
         }
         try? FileManager.default.removeItem(at: request.output)
         try? FileManager.default.removeItem(at: request.replacement)
+    }
+
+    func awaitResponse(
+        _ request: Request,
+        pollCount: Int = 200,
+        pollInterval: Duration = .milliseconds(20),
+        validateTarget: () throws -> Void
+    ) async throws -> String? {
+        for _ in 0..<pollCount {
+            try await Task.sleep(for: pollInterval)
+            try validateTarget()
+            if let text = try receive(request) {
+                return text
+            }
+        }
+        return nil
     }
 
     static func installHelper(in directory: URL, pythonExecutable: String) throws -> URL {

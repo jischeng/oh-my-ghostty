@@ -1,6 +1,41 @@
 import Foundation
 
 extension TerminalController {
+    private struct RemoteDraftTargetResolution {
+        let target: QuickInputRemoteDraftBridge.Target
+        let foregroundAgent: SupportedAgent?
+    }
+
+    private func resolveRemoteDraftTarget(
+        connection: GitSSHConnection,
+        ssh: PaneSessionContext.SSH,
+        runtime: SessionRuntimeDescriptor?,
+        pane: UUID,
+        probeForegroundAgent: Bool
+    ) async throws -> RemoteDraftTargetResolution {
+        if let runtime {
+            let target = try await QuickInputRemoteDraftBridge.runtimeTarget(
+                connection: connection, revision: runtime.revision, pane: pane
+            )
+            let agent = probeForegroundAgent
+                ? target.commands.flatMap { LocalAgentProcessDetector.detect(in: $0) }
+                : nil
+            return .init(target: target, foregroundAgent: agent)
+        }
+        guard ssh.connectionID.hasPrefix("omg-ssh-"),
+              ssh.localProcessGroupID == nil,
+              let tty = ssh.remoteTTY else {
+            throw CocoaError(.featureUnsupported)
+        }
+        let target = QuickInputRemoteDraftBridge.Target(session: ssh.connectionID, tty: tty)
+        let agent = probeForegroundAgent
+            ? try await QuickInputRemoteDraftBridge.foregroundAgent(
+                connection: connection, session: target.session, tty: target.tty
+            )
+            : nil
+        return .init(target: target, foregroundAgent: agent)
+    }
+
     /// The external editor replaces the CLI's whole input and acknowledges the
     /// exact bytes. Never infer that an old imported prefix is still present.
     func replaceQuickInputAgentDraft(_ text: String, for surface: Ghostty.SurfaceView, shortcut: String) async throws {
@@ -15,14 +50,8 @@ extension TerminalController {
                   surfaceTree.contains(where: { $0 === surface }),
                   paneSessionContext(for: surface)?.state == context?.state,
                   (surface.runtimeInlineSession?.descriptor ?? surface.runtimeDescriptor)?.identity == runtimeIdentity,
-                  terminal.foregroundPID == foregroundPID else { throw CancellationError() }
-        }
-        func invokeEditor() throws {
-            try checkTarget()
-            for key in keys {
-                terminal.sendKeyEvent(key)
-                terminal.sendKeyEvent(.init(key: key.key, action: .release, mods: key.mods,
-                                            unshiftedCodepoint: key.unshiftedCodepoint))
+                  terminal.foregroundPID == foregroundPID else {
+                throw CancellationError()
             }
         }
         if let context, context.isSSHSession {
@@ -31,46 +60,54 @@ extension TerminalController {
                 throw CocoaError(.fileReadUnknown)
             }
             let descriptor = surface.runtimeInlineSession?.descriptor ?? surface.runtimeDescriptor
-            let target: QuickInputRemoteDraftBridge.Target
-            if let descriptor, !descriptor.isLocal {
-                target = try await QuickInputRemoteDraftBridge.runtimeTarget(
-                    connection: connection, revision: descriptor.revision,
-                    pane: surface.runtimeInlineSession?.pane ?? surface.id)
-            } else {
-                guard ssh.connectionID.hasPrefix("omg-ssh-"), ssh.localProcessGroupID == nil,
-                      let tty = ssh.remoteTTY else { throw CocoaError(.featureUnsupported) }
-                target = .init(session: ssh.connectionID, tty: tty)
-            }
+            let runtime = descriptor.flatMap { $0.isLocal ? nil : $0 }
+            let target = try await resolveRemoteDraftTarget(
+                connection: connection,
+                ssh: ssh,
+                runtime: runtime,
+                pane: surface.runtimeInlineSession?.pane ?? surface.id,
+                probeForegroundAgent: false
+            ).target
             let request = UUID().uuidString
+            var snapshot: QuickInputTerminalSnapshot?
+            defer { snapshot?.removeAfterRedraw() }
             do {
                 try await QuickInputRemoteDraftBridge.begin(
                     connection: connection, session: target.session, request: request, tty: target.tty,
-                    root: target.root, generation: target.generation, replacement: text)
-                try invokeEditor()
+                    root: target.root, generation: target.generation, replacement: text
+                )
+                try checkTarget()
+                snapshot = QuickInputTerminalSnapshot(surface: surface, maximumDuration: .seconds(2))
+                QuickInputDraftBridge.sendKeys(keys, to: terminal)
                 let received = try await QuickInputRemoteDraftBridge.receive(
-                    connection: connection, session: target.session, request: request, root: target.root)
+                    connection: connection, session: target.session, request: request, root: target.root
+                )
                 guard received == text else { throw CocoaError(.fileReadCorruptFile) }
                 try checkTarget()
             } catch {
                 await QuickInputRemoteDraftBridge.finish(
-                    connection: connection, session: target.session, request: request, root: target.root)
+                    connection: connection, session: target.session, request: request, root: target.root
+                )
                 throw error
             }
             await QuickInputRemoteDraftBridge.finish(
-                connection: connection, session: target.session, request: request, root: target.root)
+                connection: connection, session: target.session, request: request, root: target.root
+            )
         } else {
             let request = try QuickInputDraftBridge.shared.begin(surfaceID: surface.id, replacement: text)
-            defer { QuickInputDraftBridge.shared.finish(request) }
-            try invokeEditor()
-            for _ in 0..<40 {
-                try await Task.sleep(for: .milliseconds(100))
-                try checkTarget()
-                if let received = try QuickInputDraftBridge.shared.receive(request) {
-                    guard received == text else { throw CocoaError(.fileReadCorruptFile) }
-                    return
-                }
+            let snapshot = QuickInputTerminalSnapshot(surface: surface, maximumDuration: .milliseconds(600))
+            defer {
+                QuickInputDraftBridge.shared.finish(request)
+                snapshot.removeAfterRedraw()
             }
-            throw CocoaError(.fileReadUnknown)
+            try checkTarget()
+            QuickInputDraftBridge.sendKeys(keys, to: terminal)
+            guard let received = try await QuickInputDraftBridge.shared.awaitResponse(
+                request, validateTarget: checkTarget
+            ) else {
+                throw CocoaError(.fileReadUnknown)
+            }
+            guard received == text else { throw CocoaError(.fileReadCorruptFile) }
         }
     }
 
@@ -96,62 +133,66 @@ extension TerminalController {
                 snapshot?.removeAfterRedraw()
                 self?.quickInputDraftImportTask = nil
             }
-            do {
-                let resolved: QuickInputRemoteDraftBridge.Target
-                let foregroundAgent: SupportedAgent?
-                if let runtime {
-                    resolved = try await QuickInputRemoteDraftBridge.runtimeTarget(
-                        connection: connection, revision: runtime.revision, pane: runtimePane)
-                    foregroundAgent = resolved.commands.flatMap { LocalAgentProcessDetector.detect(in: $0) }
-                } else {
-                    guard ssh.connectionID.hasPrefix("omg-ssh-"), ssh.localProcessGroupID == nil,
-                          let tty = ssh.remoteTTY else { return }
-                    resolved = .init(session: ssh.connectionID, tty: tty)
-                    foregroundAgent = try await QuickInputRemoteDraftBridge.foregroundAgent(
-                        connection: connection, session: resolved.session, tty: resolved.tty)
-                }
-                target = resolved
-                guard !Task.isCancelled,
-                      let keys = QuickInputDraftBridge.importKeys(
-                        setting: setting, agent: foregroundAgent ?? agent, hasAgentActivity: hasAgentActivity
-                      ) else { return }
-                try await QuickInputRemoteDraftBridge.begin(
-                    connection: connection, session: resolved.session, request: request, tty: resolved.tty, root: resolved.root,
-                    generation: resolved.generation
-                )
+            @MainActor func isStillTargetingSurface() -> Bool {
                 guard !Task.isCancelled, let self, let surface,
                       self.quickInputModel.isPresented,
                       self.quickInputModel.targetSurfaceID == surface.id,
                       self.paneSessionContext(for: surface)?.state == context.state,
                       surface.runtimeInlineSession?.pane == inlinePane,
                       (surface.runtimeInlineSession?.descriptor ?? surface.runtimeDescriptor)?.identity == runtimeIdentity,
-                      !SecureInput.shared.enabled, let terminal = surface.surfaceModel else {
-                    await QuickInputRemoteDraftBridge.finish(connection: connection, session: resolved.session, request: request, root: resolved.root)
+                      !SecureInput.shared.enabled else { return false }
+                return true
+            }
+            do {
+                guard let self else { return }
+                let resolution: RemoteDraftTargetResolution
+                do {
+                    resolution = try await self.resolveRemoteDraftTarget(
+                        connection: connection,
+                        ssh: ssh,
+                        runtime: runtime,
+                        pane: runtimePane,
+                        probeForegroundAgent: true
+                    )
+                } catch CocoaError.featureUnsupported {
+                    return
+                }
+                let resolved = resolution.target
+                let foregroundAgent = resolution.foregroundAgent
+                target = resolved
+                guard !Task.isCancelled,
+                      let keys = QuickInputDraftBridge.importKeys(
+                        setting: setting, agent: foregroundAgent ?? agent, hasAgentActivity: hasAgentActivity
+                      ) else { return }
+                try await QuickInputRemoteDraftBridge.begin(
+                    connection: connection, session: resolved.session, request: request, tty: resolved.tty,
+                    root: resolved.root, generation: resolved.generation
+                )
+                guard isStillTargetingSurface(), let surface, let terminal = surface.surfaceModel else {
+                    await QuickInputRemoteDraftBridge.finish(
+                        connection: connection, session: resolved.session, request: request, root: resolved.root
+                    )
                     return
                 }
                 snapshot = QuickInputTerminalSnapshot(surface: surface, maximumDuration: .seconds(2))
                 let importForegroundPID = terminal.foregroundPID
-                for key in keys {
-                    terminal.sendKeyEvent(key)
-                    terminal.sendKeyEvent(.init(key: key.key, action: .release, mods: key.mods,
-                                                unshiftedCodepoint: key.unshiftedCodepoint))
-                }
+                QuickInputDraftBridge.sendKeys(keys, to: terminal)
                 let text = try await QuickInputRemoteDraftBridge.receive(
                     connection: connection, session: resolved.session, request: request, root: resolved.root
                 )
-                guard !Task.isCancelled, self.quickInputModel.isPresented,
-                      self.quickInputModel.targetSurfaceID == surface.id,
-                      self.paneSessionContext(for: surface)?.state == context.state,
-                      surface.runtimeInlineSession?.pane == inlinePane,
-                      (surface.runtimeInlineSession?.descriptor ?? surface.runtimeDescriptor)?.identity == runtimeIdentity,
-                      terminal.foregroundPID == importForegroundPID,
-                      !SecureInput.shared.enabled else {
-                    await QuickInputRemoteDraftBridge.finish(connection: connection, session: resolved.session, request: request, root: resolved.root)
+                guard isStillTargetingSurface(), terminal.foregroundPID == importForegroundPID else {
+                    await QuickInputRemoteDraftBridge.finish(
+                        connection: connection, session: resolved.session, request: request, root: resolved.root
+                    )
                     return
                 }
-                self.quickInputModel.importAgentDraft(text, shortcut: QuickInputDraftBridge.shortcut(
-                    setting: setting, agent: foregroundAgent ?? agent), processID: importForegroundPID)
-                self.quickInputModel.setStatusMessage(SettingsStrings(language: OhMyGhosttySettings.shared.language).quickInputDraftImported)
+                self.quickInputModel.importAgentDraft(
+                    text,
+                    shortcut: QuickInputDraftBridge.shortcut(setting: setting, agent: foregroundAgent ?? agent),
+                    processID: importForegroundPID
+                )
+                let strings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
+                self.quickInputModel.setStatusMessage(strings.quickInputDraftImported)
             } catch {
                 if !Task.isCancelled, let self, let surface, self.quickInputModel.isPresented,
                    self.quickInputModel.targetSurfaceID == surface.id {
@@ -165,7 +206,9 @@ extension TerminalController {
                 }
             }
             if let target {
-                await QuickInputRemoteDraftBridge.finish(connection: connection, session: target.session, request: request, root: target.root)
+                await QuickInputRemoteDraftBridge.finish(
+                    connection: connection, session: target.session, request: request, root: target.root
+                )
             }
         }
     }

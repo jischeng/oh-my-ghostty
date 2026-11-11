@@ -131,6 +131,62 @@ struct QuickInputPresentationTests {
         #expect(host.bounds.width == 820)
     }
 
+    @Test func editorPreservesMarkedTextAttributesAcrossSwiftUIUpdates() throws {
+        var currentText = ""
+        let textBinding = Binding(get: { currentText }, set: { currentText = $0 })
+        let font = QuickInputTypography.font(family: "Menlo", size: 13)
+        let initialForeground = NSColor(srgbRed: 0.90, green: 0.92, blue: 0.96, alpha: 1)
+        let updatedForeground = NSColor(srgbRed: 0.72, green: 0.86, blue: 0.98, alpha: 1)
+        let makeEditor = { (color: NSColor) in
+            AgentQuickInputTextEditor(
+                text: textBinding,
+                placeholder: "Type here…",
+                isPresented: true,
+                focusRequestID: 0,
+                font: font,
+                textColor: color,
+                onPasteImage: nil,
+                onSend: {},
+                onQueue: {},
+                onCancel: {}
+            )
+        }
+        let host = NSHostingView(rootView: makeEditor(initialForeground))
+        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 620, height: 90),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer { window.contentView = nil; window.close() }
+        host.layoutSubtreeIfNeeded()
+
+        func find(_ view: NSView) -> ComposerTextView? {
+            (view as? ComposerTextView) ?? view.subviews.lazy.compactMap(find).first
+        }
+        let editor = try #require(find(host))
+        let marked = NSAttributedString(
+            string: "nihao",
+            attributes: [.underlineStyle: NSUnderlineStyle.single.rawValue]
+        )
+        editor.setMarkedText(marked, selectedRange: NSRange(location: 5, length: 0),
+                             replacementRange: NSRange(location: 0, length: 0))
+        #expect(editor.hasMarkedText())
+
+        // Trigger a SwiftUI update with a changed foreground color while IME marked text is active.
+        host.rootView = makeEditor(updatedForeground)
+        host.layoutSubtreeIfNeeded()
+        #expect(editor.hasMarkedText())
+        let colorDuringIME = editor.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+        #expect(colorDuringIME != updatedForeground)
+
+        // Commit the IME text and verify deferred storage typography applies the new foreground color.
+        editor.insertText("你好", replacementRange: editor.markedRange())
+        #expect(!editor.hasMarkedText())
+        host.rootView = makeEditor(updatedForeground)
+        host.layoutSubtreeIfNeeded()
+        let committedColor = editor.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+        #expect(committedColor == updatedForeground)
+    }
+
     private func capture(_ host: NSView, name: String) throws {
         host.layoutSubtreeIfNeeded()
         let bitmap = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))

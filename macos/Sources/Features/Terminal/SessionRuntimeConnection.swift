@@ -685,7 +685,12 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
 
     nonisolated static func canonicalSnapshotRevision(_ raw: String) -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed == "9c4d662347abb5857b04" ? "59c5cc7b4d1fe408faf5" : trimmed
+        switch trimmed {
+        case "9c4d662347abb5857b04", "28eb8860dee53f323499", "fa3d1581b35d56a5313b":
+            return "59c5cc7b4d1fe408faf5"
+        default:
+            return trimmed
+        }
     }
 
     func cachedHelper(

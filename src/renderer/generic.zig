@@ -1238,6 +1238,21 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 state.lockDemand(global.io());
                 defer state.unlockDemand(global.io());
 
+                // If we're in a synchronized output state, we pause all rendering.
+                // Check this BEFORE consuming `state.terminal_generation` so a
+                // resize during synchronized output does not deinitialize the
+                // frozen `terminal_state` before we are ready to rebuild it.
+                if (state.terminal.modes.get(.synchronized_output)) {
+                    // Stop the renderer-thread animation timer as well. Keep the
+                    // physics velocity intact so the next normal renderer wake
+                    // can resume the coast without rebuilding the frozen frame
+                    // at 120 Hz for the duration of synchronized output.
+                    self.smooth_scroll_moving = false;
+                    self.smooth_scroll_last_tick = null;
+                    log.debug("synchronized output started, skipping render", .{});
+                    return;
+                }
+
                 if (self.terminal_generation != state.terminal_generation) {
                     self.terminal_generation = state.terminal_generation;
                     self.terminal_state.deinit(self.alloc);
@@ -1251,18 +1266,6 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         self.last_bottom_node = @intFromPtr(br.node);
                         self.last_bottom_y = br.y;
                     }
-                }
-
-                // If we're in a synchronized output state, we pause all rendering.
-                if (state.terminal.modes.get(.synchronized_output)) {
-                    // Stop the renderer-thread animation timer as well. Keep the
-                    // physics velocity intact so the next normal renderer wake
-                    // can resume the coast without rebuilding the frozen frame
-                    // at 120 Hz for the duration of synchronized output.
-                    self.smooth_scroll_moving = false;
-                    self.smooth_scroll_last_tick = null;
-                    log.debug("synchronized output started, skipping render", .{});
-                    return;
                 }
 
                 // If scroll-to-bottom on output is enabled, check if the final line

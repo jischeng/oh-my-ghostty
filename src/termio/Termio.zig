@@ -587,7 +587,7 @@ pub fn resizeTerminalLocked(
     const pre_cursor_y = self.terminal.screens.active.cursor.y;
 
     var resize_opts = opts;
-    if (was_primary and (pre_sb.total > pre_sb.len) and
+    if (was_primary and opts.rows > self.terminal.rows and (pre_sb.total > pre_sb.len) and
         (self.terminal_stream.handler.seen_synchronized_output or
             activeHasContentBelowCursor(self.terminal.screens.active)))
     {

@@ -89,7 +89,7 @@ pub const StreamHandler = struct {
     post_resize: PostResizeState = .{},
 
     pub const PostResizeState = struct {
-        pub const window_ms = 500;
+        pub const window_ms = 1000;
 
         pub const ScrollSave = struct {
             offset: usize,
@@ -742,6 +742,11 @@ pub const StreamHandler = struct {
             // We need to start a timer to prevent the emulator being hung
             // forever.
             .synchronized_output => self.setSynchronizedOutput(enabled),
+
+            // BubbleTea v2 (`googleCursedRenderer`, used by `agy`) wraps its
+            // screen redraws and `writePrepend` history reprints in
+            // `\x1b[?25l` .. `\x1b[?25h` instead of DEC mode 2026.
+            .cursor_visible => if (enabled) self.notePostResizeCursorVisible(),
 
             .linefeed => {
                 self.messageWriter(.{ .linefeed_mode = enabled });
@@ -1549,7 +1554,32 @@ pub const StreamHandler = struct {
         } else if (self.post_resize.active and
             (self.post_resize.saw_full_clear or self.post_resize.saw_erase_below))
         {
+            if (self.post_resize.saw_full_clear) {
+                self.finishPostResize();
+            } else {
+                self.restorePostResizeScroll();
+            }
+        }
+    }
+
+    pub fn notePostResizeCursorVisible(self: *StreamHandler) void {
+        self.terminal.modes.set(.cursor_visible, true);
+        if (!self.postResizeIsActive()) return;
+        if (!self.post_resize.saw_full_clear and !self.post_resize.saw_erase_below) return;
+
+        if (self.shouldHoldPostResizeSyncOutput()) {
+            self.terminal.modes.set(.synchronized_output, true);
+            self.messageWriter(.{ .start_synchronized_output = {} });
+            return;
+        }
+
+        if (self.terminal.modes.get(.synchronized_output)) {
+            self.terminal.modes.set(.synchronized_output, false);
+        }
+        if (self.post_resize.saw_full_clear) {
             self.finishPostResize();
+        } else {
+            self.restorePostResizeScroll();
         }
     }
 
@@ -1563,6 +1593,8 @@ pub const StreamHandler = struct {
         const deadline = now.addDuration(.fromMilliseconds(PostResizeState.window_ms));
         const existing_save = if (self.post_resize.active) self.post_resize.scroll_save else null;
         const existing_had_sb = if (self.post_resize.active) self.post_resize.had_scrollback else false;
+        const existing_saw_erase = if (self.post_resize.active) self.post_resize.saw_erase_below else false;
+        const existing_saw_clear = if (self.post_resize.active) self.post_resize.saw_full_clear else false;
 
         const max_pre = pre_sb.total -| pre_sb.len;
         const new_save: ?PostResizeState.ScrollSave = if (existing_save) |s|
@@ -1582,8 +1614,8 @@ pub const StreamHandler = struct {
                 self.post_resize.pre_cursor_y
             else
                 pre_cursor_y,
-            .saw_erase_below = false,
-            .saw_full_clear = false,
+            .saw_erase_below = existing_saw_erase,
+            .saw_full_clear = existing_saw_clear,
             .scroll_save = new_save,
         };
     }
@@ -1609,17 +1641,29 @@ pub const StreamHandler = struct {
         switch (mode) {
             .below => {
                 self.post_resize.saw_erase_below = true;
-            },
-            .complete, .scrollback, .scroll_complete => {
-                self.post_resize.saw_full_clear = true;
-                // Ink-based TUIs (`agy`, `claude`) emit a standalone
-                // `\x1b[2J\x1b[3J\x1b[H` chunk outside mode 2026 right before
-                // their debounced `<Static>` history reprint. Freeze rendering
-                // before the clear executes so the blank screen is never drawn.
-                if (!self.terminal.modes.get(.synchronized_output)) {
+                // BubbleTea v2 (`googleCursedRenderer`, used by `agy`) moves
+                // the cursor to row 0/1 and emits `\x1b[J` outside mode 2026
+                // during both its immediate flush and its intermediate
+                // `handleResizeRedraw` partial wipe. Freeze rendering before
+                // the erase executes so the blank screen is never drawn.
+                const screen = self.terminal.screens.active;
+                if (!self.terminal.modes.get(.synchronized_output) and
+                    (self.post_resize.had_scrollback or self.post_resize.pre_cursor_y > 3) and
+                    screen.cursor.y <= 3)
+                {
                     self.terminal.modes.set(.synchronized_output, true);
                     self.messageWriter(.{ .start_synchronized_output = {} });
                 }
+            },
+            .complete, .scrollback, .scroll_complete => {
+                self.post_resize.saw_full_clear = true;
+                // Ink and BubbleTea v2 TUIs (`agy`, `claude`) emit a standalone
+                // `\x1b[2J\x1b[3J\x1b[H` chunk outside mode 2026 right before
+                // their debounced history reprint. Freeze rendering before the
+                // clear executes and refresh the sync-reset timer so it does
+                // not expire mid-reprint.
+                self.terminal.modes.set(.synchronized_output, true);
+                self.messageWriter(.{ .start_synchronized_output = {} });
             },
             .above => {},
         }
@@ -1632,8 +1676,9 @@ pub const StreamHandler = struct {
 
         if (!self.post_resize.saw_full_clear) {
             // Intermediate partial wipe (e.g. Ink `log-update` `\r\x1b[37A\x1b[J`
-            // erasing the screen and drawing only the 3-line prompt while
-            // waiting 150ms for its resize debounce timer).
+            // or `agy` `handleResizeRedraw` `\r\x1b[20A\x1b[J` erasing the
+            // screen and drawing only the status/prompt while waiting for its
+            // resize debounce timer).
             if (self.post_resize.saw_erase_below) {
                 if (self.post_resize.had_scrollback and screen.cursor.y + 4 < pages.rows) {
                     return true;
@@ -1647,7 +1692,7 @@ pub const StreamHandler = struct {
 
         // After `\x1b[2J` / `\x1b[3J`, hold if the history reprint hasn't
         // repopulated the screen yet (e.g. a 1-line status update arrived
-        // right before the `<Static>` history dump).
+        // right before the history dump).
         if (self.post_resize.had_scrollback) {
             if (pages.total_rows <= pages.rows and screen.cursor.y + 4 < pages.rows) {
                 return true;
@@ -1660,13 +1705,11 @@ pub const StreamHandler = struct {
         return false;
     }
 
-    pub fn finishPostResize(self: *StreamHandler) void {
+    pub fn restorePostResizeScroll(self: *StreamHandler) void {
         if (!self.post_resize.active) return;
-        const saved_opt = self.post_resize.scroll_save;
-        self.post_resize = .{};
-
         if (self.terminal.screens.active_key != .primary) return;
-        if (saved_opt) |saved| {
+
+        if (self.post_resize.scroll_save) |saved| {
             const fresh = self.terminal.screens.active.pages.scrollbar();
             const max_fresh = fresh.total -| fresh.len;
             if (max_fresh > 0) {
@@ -1695,6 +1738,12 @@ pub const StreamHandler = struct {
             }
         }
         self.renderer_state.terminal_generation +%= 1;
+    }
+
+    pub fn finishPostResize(self: *StreamHandler) void {
+        if (!self.post_resize.active) return;
+        self.restorePostResizeScroll();
+        self.post_resize = .{};
     }
 };
 
@@ -1800,5 +1849,125 @@ test "StreamHandler: coalesces Ink post-resize wipes and restores scrolled-up vi
     try testing.expect(!handler.post_resize.active);
     try testing.expect(!t.screens.active.viewportIsBottom());
     try testing.expectEqual(@as(usize, 6), t.screens.active.pages.scrollbar().offset);
+    try testing.expect(!renderer_state.scroll.pinned_to_bottom);
+}
+
+test "StreamHandler: coalesces BubbleTea v2 (agy) post-resize wipes without mode 2026 and restores viewport" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try terminal.Terminal.init(testing.io, alloc, .{
+        .cols = 40,
+        .rows = 10,
+    });
+    defer t.deinit(alloc);
+
+    var mutex: std.Io.Mutex = .init;
+    var renderer_state: renderer.State = .{
+        .mutex = &mutex,
+        .terminal = &t,
+    };
+    var size: renderer.Size = .{
+        .screen = .{ .width = 400, .height = 200 },
+        .cell = .{ .width = 10, .height = 20 },
+        .padding = .{},
+    };
+    var termio_mailbox = try termio.Mailbox.initSPSC(alloc);
+    defer termio_mailbox.deinit(alloc);
+    var renderer_mailbox: renderer.Thread.Mailbox = .{};
+    var wakeup = try xev.Async.init();
+    defer wakeup.deinit();
+
+    var handler: StreamHandler = .{
+        .alloc = alloc,
+        .remote_session = true,
+        .size = &size,
+        .terminal = &t,
+        .termio_mailbox = &termio_mailbox,
+        .surface_mailbox = undefined,
+        .renderer_state = &renderer_state,
+        .renderer_mailbox = &renderer_mailbox,
+        .renderer_wakeup = wakeup,
+        .enquiry_response = "",
+        .osc_color_report_format = .none,
+        .clipboard_write = .deny,
+    };
+    defer handler.deinit();
+
+    var s = t.vtStream();
+    defer s.deinit();
+
+    // Populate 30 lines of output using only `\x1b[?25l` .. `\x1b[?25h` (no mode 2026).
+    t.modes.set(.cursor_visible, false);
+    for (0..30) |i| {
+        var buf: [32]u8 = undefined;
+        const line = try std.fmt.bufPrint(&buf, "history-{d:0>2}\r\n", .{i});
+        s.nextSlice(line);
+    }
+    s.nextSlice("prompt-top\r\nprompt-input\r\nprompt-bottom\r\n? for shortcuts\x1b[2A\x1b[2C");
+    handler.notePostResizeCursorVisible();
+    try testing.expect(!handler.seen_synchronized_output);
+
+    // User scrolls up into history (offset = 8).
+    t.scrollViewport(.{ .row = 8 });
+    try testing.expect(!t.screens.active.viewportIsBottom());
+    const pre_sb = t.screens.active.pages.scrollbar();
+    try testing.expectEqual(@as(usize, 8), pre_sb.offset);
+
+    // Simulate vertical split resize (40x10 -> 25x10) while scrolled up.
+    const pre_cursor_y = t.screens.active.cursor.y;
+    try t.resize(alloc, .{ .cols = 25, .rows = 10 });
+    handler.noteTerminalResize(true, pre_sb, pre_cursor_y);
+
+    // Phase 1 (+1ms): BubbleTea v2 `googleCursedRenderer` immediate flush:
+    // hides cursor, moves up to top of screen, erases below (`\x1b[J`), redraws active screen, shows cursor (`\x1b[?25h`).
+    t.modes.set(.cursor_visible, false);
+    s.nextSlice("\r\x1b[7A");
+    handler.noteEraseDisplay(.below);
+    s.nextSlice("\x1b[J");
+    try testing.expect(t.modes.get(.synchronized_output));
+    s.nextSlice("line1\r\nline2\r\nline3\r\nline4\r\nline5\r\nline6\r\nprompt-top\r\nprompt-input\r\nprompt-bottom\r\n? for shortcuts\x1b[2A\x1b[2C");
+    handler.notePostResizeCursorVisible();
+    // Immediate active-screen flush finishes, releasing sync output while keeping `post_resize` armed!
+    try testing.expect(!t.modes.get(.synchronized_output));
+    try testing.expect(handler.post_resize.active);
+
+    // Phase 2 (+18ms): `agy` `handleResizeRedraw` partial wipe before debounce timer:
+    // hides cursor, moves up, wipes screen (`\x1b[J`), prints only 1-line status bar on row 0, and leaves cursor hidden!
+    t.modes.set(.cursor_visible, false);
+    s.nextSlice("\x1b[0 q\r\x1b[7A");
+    handler.noteEraseDisplay(.below);
+    s.nextSlice("\x1b[J? for shortcuts\r\x1b[m");
+    // Must hold synchronized output across the 150-250ms debounce gap so the wiped screen never flashes!
+    try testing.expect(t.modes.get(.synchronized_output));
+    try testing.expect(handler.post_resize.active);
+
+    // Phase 3 (+267ms): `handleResizeRedraw` debounced full wipe (`\x1b[2J\x1b[3J\x1b[H`) + 1-line status update:
+    handler.noteEraseDisplay(.complete);
+    t.scrollViewport(.{ .bottom = {} });
+    s.nextSlice("\x1b[2J");
+    handler.noteEraseDisplay(.scrollback);
+    s.nextSlice("\x1b[3J\x1b[H");
+    handler.noteEraseDisplay(.below);
+    s.nextSlice("\x1b[J? for shortcuts\x1b[m\r");
+    try testing.expect(t.modes.get(.synchronized_output));
+    try testing.expect(handler.post_resize.saw_full_clear);
+
+    // Phase 4 (+284ms..+292ms): `writePrepend` multi-chunk history dump followed by active screen and `\x1b[?25h`:
+    for (0..30) |i| {
+        var buf: [32]u8 = undefined;
+        const line = try std.fmt.bufPrint(&buf, "\r\x1b[Khistory-{d:0>2}\r\n", .{i});
+        s.nextSlice(line);
+    }
+    s.nextSlice("\x1b[?5W\x1b[0 q");
+    handler.noteEraseDisplay(.below);
+    s.nextSlice("\x1b[Jprompt-top\r\nprompt-input\r\nprompt-bottom\r\n? for shortcuts\x1b[2A\x1b[2C");
+    handler.notePostResizeCursorVisible();
+
+    // Synchronized output is released on the final `\x1b[?25h` and the scrolled-up viewport is restored!
+    try testing.expect(!t.modes.get(.synchronized_output));
+    try testing.expect(!handler.post_resize.active);
+    try testing.expect(!t.screens.active.viewportIsBottom());
+    try testing.expectEqual(@as(usize, 8), t.screens.active.pages.scrollbar().offset);
     try testing.expect(!renderer_state.scroll.pinned_to_bottom);
 }

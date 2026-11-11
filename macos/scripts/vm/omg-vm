@@ -81,11 +81,13 @@ vm_up() {
     omg_vm_wait_for_ssh
     omg_vm_wait_for_gui
     if omg_vm_ssh "test -d '/Volumes/My Shared Files/repo'"; then
-        omg_vm_ssh "sudo -n mkdir -p '$(dirname "$OMG_VM_REPO_ROOT")' && sudo -n ln -sfn '/Volumes/My Shared Files/repo' '$OMG_VM_REPO_ROOT'"
+        omg_vm_ssh "if test -d '$OMG_VM_REPO_ROOT' && ! test -L '$OMG_VM_REPO_ROOT'; then sudo -n rm -rf '$OMG_VM_REPO_ROOT'; fi && sudo -n mkdir -p '$(dirname "$OMG_VM_REPO_ROOT")' && sudo -n ln -sfn '/Volumes/My Shared Files/repo' '$OMG_VM_REPO_ROOT'"
     fi
     if [[ -n "$git_common" && "$git_common" != "$OMG_VM_REPO_ROOT/.git" ]] &&
         omg_vm_ssh "test -d '/Volumes/My Shared Files/gitcommon'"; then
-        omg_vm_ssh "sudo -n mkdir -p '$(dirname "$git_common")' && sudo -n ln -sfn '/Volumes/My Shared Files/gitcommon' '$git_common'"
+        local git_common_parent
+        git_common_parent="$(dirname "$git_common")"
+        omg_vm_ssh "if test -L '$git_common_parent'; then sudo -n rm -f '$git_common_parent'; fi && sudo -n mkdir -p '$git_common_parent' && sudo -n ln -sfn '/Volumes/My Shared Files/gitcommon' '$git_common'"
     fi
     if [[ -f "$OMG_VM_DISPLAY_FILE" ]]; then
         vm_display "$(cat "$OMG_VM_DISPLAY_FILE")"

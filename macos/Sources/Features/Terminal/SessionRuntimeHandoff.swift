@@ -4,24 +4,30 @@ import AppKit
 /// or authority: the request must match this local pane's random capability.
 @MainActor
 final class SessionRuntimeHandoff {
-    static let shared = SessionRuntimeHandoff()
+    static let shared = SessionRuntimeHandoff(requiresRegisteredHost: !OMGApplicationEnvironment.isRunningTests)
     private var tokens: [UUID: String] = [:]
     private let directory: URL
     private let resources: URL
     private let applicationSupportRoot: URL?
     private let homeDirectory: URL?
+    private let requiresRegisteredHost: Bool
+    private let registry: SSHHostRegistry?
 
     init(
         resources: URL? = nil,
         directory: URL? = nil,
         applicationSupportRoot: URL? = nil,
-        homeDirectory: URL? = nil
+        homeDirectory: URL? = nil,
+        requiresRegisteredHost: Bool = false,
+        registry: SSHHostRegistry? = nil
     ) {
         self.resources = resources ?? SessionRuntimeConnections.resources
         self.directory = directory ?? FileManager.default.temporaryDirectory
             .appendingPathComponent("omg-ssh-handoff-" + UUID().uuidString)
         self.applicationSupportRoot = applicationSupportRoot
         self.homeDirectory = homeDirectory
+        self.requiresRegisteredHost = requiresRegisteredHost
+        self.registry = registry
     }
 
     func restoredInlineSession(for local: SessionRuntimeDescriptor?, pane: UUID) -> SessionRuntimeInlineSession? {
@@ -154,6 +160,21 @@ final class SessionRuntimeHandoff {
             }
             let connection = try GitSSHConnection(destination: destination, options: parsed.options.flatMap(\.arguments),
                 executablePath: executable, localWorkingDirectory: request.cwd)
+            if requiresRegisteredHost {
+                let hostRegistry = registry ?? SSHHostRegistry.shared
+                guard SessionRuntimeConnections.shouldUseRuntime(for: connection, registry: hostRegistry) else {
+                    try SessionRuntimeBridgeStorage.writePrivateFile(
+                        at: requestDirectory.appendingPathComponent(name + ".accepted"),
+                        data: Data("passthrough".utf8),
+                        permissions: 0o600
+                    )
+                    return true
+                }
+                if hostRegistry.host(hostRegistry.targetID(for: connection)) == nil,
+                   hostRegistry.automaticallyRegister {
+                    hostRegistry.prepareSetup(connection)
+                }
+            }
             var descriptor = try SessionRuntimeConnections.descriptor(connection: connection, policy: OhMyGhosttySettings.shared.runtimePolicy)
             if let cwd = request.remoteWorkingDirectory {
                 guard let valid = SessionRuntimeDescriptor.validWorkingDirectory(cwd) else {

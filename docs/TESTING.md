@@ -171,6 +171,49 @@ Selection safety:
 
 ## Non-Swift and release gates
 
+### iOS client selection
+
+The iOS app is a separate product and is not part of the routine macOS sweep.
+Neither a macOS release nor `--test-modules all` starts an iOS build, Simulator
+or VM mobile acceptance. For releases, compare against the previous published
+tag; for development, compare against the integration base:
+
+```bash
+python3 dist/omg_mobile_test_plan.py --changed-since <base-ref>
+ios/scripts/test.sh --changed-since <base-ref>
+ios/scripts/test-vm.sh --changed-since <base-ref>
+```
+
+`dist/omg_mobile_test_plan.py` is the executable source of truth. If there are no
+mobile implementation or shared dependency changes, both gated runners exit
+before invoking mobile build tools or starting the VM/Simulator. Documentation,
+macOS UI features and macOS version bumps alone do not select mobile tests.
+iOS-only changes also do not force a broad macOS Swift sweep; run their separate
+mobile checks instead.
+
+| Changed area | Mobile checks |
+| --- | --- |
+| `ios/` implementation, assets, build or UI-test scripts | Native core, Simulator build, VM + Simulator acceptance |
+| Mobile/host/session wire protocol, session backend, VT C API, terminal/input core or runtime packaging | Same mobile checks, alongside the affected macOS/runtime checks |
+| Unrelated macOS feature, release metadata, documentation | No mobile build, Simulator launch or mobile acceptance |
+
+Native mobile checks run locally without GUI. The integration runner uses the
+actual OMG Dev GUI inside Tart and the iOS app in Simulator: mobile takeover,
+Mac GUI reclaim and mobile relaunch/reattach must execute in the same session
+UUID, generation and shell PID. The full Termio UI suite also covers live agent
+rows/Needs You, opening the existing TUI directly, grid reflow after the phone
+takes the writer, project navigation, drawer Files/Diff, versioned editing,
+workspace/add-project controls, acknowledgements, settings, and
+creating/explicitly closing a terminal. Agent status transitions are synthetic;
+provider inference and hooks require separate acceptance. Reuse the retained `omg-test`
+VM for mainline mobile work, without a separate clone. The runner owns its guest
+gateway and disposable sessions, saves receipts/screenshots and shuts the VM down. See
+[ios/README.md](../ios/README.md#vm--simulator-acceptance).
+Physical-device provisioning and acceptance are separate; ordinary macOS releases
+do not require them.
+
+### Other layer checks
+
 The selector runs **Swift tests only**. It does not rebuild GhosttyKit or run Zig,
 Python, shell, browser, lint, code-signature, or artifact launch checks.
 Continue running the checks relevant to those changed layers, strictly serially:

@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import Darwin
 import Foundation
 import GhosttyKit
 
@@ -92,13 +93,30 @@ struct SessionRuntimeLibraryStrings: Equatable, Sendable {
         case "Could not attach the existing session in a native terminal tab.":
             return t("Could not attach the existing session in a native terminal tab.",
                      "无法在原生终端标签中附加现有会话。")
+        case "The runtime version for this session is unavailable. Its remote process has not been restarted.":
+            return t("The runtime version for this session is unavailable. Its remote process has not been restarted.",
+                     "此会话对应的运行时版本不可用，其后台进程仍在运行且未被重启。")
+        case "This session uses an incompatible terminal snapshot version. Its remote process is preserved; reopen it with the matching app version.":
+            return t(
+                "This session uses an incompatible terminal snapshot version. Its remote process is preserved; reopen it with the matching app version.",
+                "此会话使用了不兼容的终端快照版本，其后台进程已保留，请使用匹配的应用版本重新打开。"
+            )
         default:
             return settings.isChinese ? "详细信息：\(message)" : message
         }
     }
 
-    func endpointName(_ endpoint: SessionRuntimeCatalogEndpoint) -> String {
-        endpoint.descriptor.isLocal ? thisMac : endpoint.descriptor.displayEndpoint
+    @MainActor
+    func endpointName(
+        _ endpoint: SessionRuntimeCatalogEndpoint,
+        registry: SSHHostRegistry = .shared
+    ) -> String {
+        if endpoint.descriptor.isLocal { return thisMac }
+        if let connection = endpoint.descriptor.connection,
+           let host = registry.host(registry.targetID(for: connection)) {
+            return host.name
+        }
+        return endpoint.descriptor.displayEndpoint
     }
 }
 
@@ -129,7 +147,11 @@ enum SessionRuntimeLibrary {
             window.makeKeyAndOrderFront(nil)
         }
         NSApp.activate(ignoringOtherApps: true)
-        controller.model.refreshIfSelected()
+        if controller.model.selectedEndpointID == nil {
+            controller.model.selectedEndpointID = controller.model.endpoints.first?.id
+        } else {
+            controller.model.refreshIfSelected()
+        }
     }
 
     @discardableResult
@@ -192,6 +214,32 @@ enum SessionRuntimeLibrary {
             .filter { seen.insert(ObjectIdentifier($0)).inserted }
     }
 
+    static func controllers(
+        forWindowOf controller: TerminalController?,
+        in controllers: [TerminalController]? = nil
+    ) -> [TerminalController] {
+        let candidates = controllersIncludingParked(controllers ?? TerminalController.all)
+        guard let windowSessionID = controller?.windowSessionID else { return candidates }
+        return candidates.filter { $0.windowSessionID == windowSessionID }
+    }
+
+    static func openPaneIDs(
+        forWindowOf controller: TerminalController? = nil,
+        in controllers: [TerminalController]? = nil
+    ) -> Set<UUID> {
+        let candidates = Self.controllers(forWindowOf: controller, in: controllers)
+        var result = Set<UUID>()
+        for candidate in candidates where candidate.isAvailableForWorkspace {
+            for surface in candidate.surfaceTree {
+                result.insert(surface.id)
+                if let inlinePane = surface.runtimeInlineSession?.pane {
+                    result.insert(inlinePane)
+                }
+            }
+        }
+        return result
+    }
+
     @discardableResult
     static func openExisting(
         _ session: SessionRuntimeCatalogSession,
@@ -200,6 +248,7 @@ enum SessionRuntimeLibrary {
         controllers: [TerminalController]? = nil
     ) throws -> TerminalController? {
         let parentWindow = parent ?? TerminalController.preferredParent?.window
+        let parentController = parentWindow?.windowController as? TerminalController
         guard session.isAttachable, let paneID = session.paneID else {
             throw NSError(
                 domain: "OMGSessionRuntime",
@@ -207,10 +256,17 @@ enum SessionRuntimeLibrary {
                 userInfo: [NSLocalizedDescriptionKey: "This session has already ended and cannot be attached."]
             )
         }
-        if focusExisting(paneID: paneID, in: controllers) { return nil }
+        let focusScope = controllers ?? (parentController.map { Self.controllers(forWindowOf: $0) })
+        if focusExisting(paneID: paneID, in: focusScope) { return nil }
         let inlineOwner = SessionRuntimeHandoff.shared.inlineOwner(for: paneID)
-        let attachedDescriptor = inlineOwner?.localDescriptor ?? descriptor
         let attachedPane = inlineOwner?.localPane ?? paneID
+        var attachedDescriptor = inlineOwner?.localDescriptor ?? descriptor
+        if attachedDescriptor.isLocal {
+            attachedDescriptor = SessionRuntimeCatalog.resolveLocalRevisionDescriptor(
+                forPaneID: attachedPane,
+                fallback: attachedDescriptor
+            )
+        }
 
         guard let delegate = NSApp.delegate as? AppDelegate,
               let nativeApp = delegate.ghostty.app else {
@@ -278,13 +334,16 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
     private let endpointHeader = NSTextField(labelWithString: "ENDPOINTS")
     private let titleLabel = NSTextField(labelWithString: "Sessions")
     private let selectedEndpointLabel = NSTextField(labelWithString: "")
-    private let statusLabel = NSTextField(wrappingLabelWithString: "")
-    private let errorLabel = NSTextField(wrappingLabelWithString: "")
+    private let statusLabel = NSTextField(labelWithString: "")
     private let refreshButton = NSButton(title: "Refresh", target: nil, action: nil)
     private let openButton = NSButton(title: "Open Existing", target: nil, action: nil)
     private let endButton = NSButton(title: "End Session…", target: nil, action: nil)
     private var observers: Set<AnyCancellable> = []
     private var selectingEndpoint = false
+    private var refreshScheduled = false
+    private var renderedEndpointKeys: [String] = []
+    private var renderedSessions: [SessionRuntimeCatalogSession] = []
+    private var renderedLanguage: OhMyGhosttyLanguage?
     private var strings: SessionRuntimeLibraryStrings {
         SessionRuntimeLibraryStrings(language: OhMyGhosttySettings.shared.language)
     }
@@ -328,16 +387,31 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
     private func configureEndpointTable() {
         endpointHeader.stringValue = strings.endpointsHeader
         endpointTable.headerView = nil
-        endpointTable.rowHeight = 42
+        endpointTable.style = .plain
+        endpointTable.selectionHighlightStyle = .regular
+        endpointTable.focusRingType = .none
+        endpointTable.rowHeight = 36
+        endpointTable.intercellSpacing = NSSize(width: 0, height: 2)
+        endpointTable.backgroundColor = .clear
         endpointTable.allowsEmptySelection = true
         endpointTable.allowsMultipleSelection = false
+        endpointTable.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         endpointTable.dataSource = self
         endpointTable.delegate = self
-        endpointTable.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("endpoint")))
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("endpoint"))
+        column.resizingMask = .autoresizingMask
+        endpointTable.addTableColumn(column)
     }
 
     private func configureSessionTable() {
-        sessionTable.rowHeight = 30
+        sessionTable.style = .plain
+        sessionTable.selectionHighlightStyle = .regular
+        sessionTable.focusRingType = .none
+        sessionTable.rowHeight = 32
+        sessionTable.intercellSpacing = NSSize(width: 0, height: 1)
+        sessionTable.backgroundColor = .clear
+        sessionTable.usesAlternatingRowBackgroundColors = false
+        sessionTable.gridStyleMask = []
         sessionTable.allowsEmptySelection = true
         sessionTable.allowsMultipleSelection = false
         sessionTable.doubleAction = #selector(openSelectedSession)
@@ -345,12 +419,12 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
         sessionTable.dataSource = self
         sessionTable.delegate = self
         for (identifier, title, width) in [
-            ("session", strings.sessionColumn, CGFloat(110)),
-            ("agent", strings.agentColumn, CGFloat(100)),
+            ("session", strings.sessionColumn, CGFloat(100)),
+            ("agent", strings.agentColumn, CGFloat(96)),
             ("conversation", strings.conversationColumn, CGFloat(190)),
-            ("status", strings.statusColumn, CGFloat(130)),
-            ("cwd", strings.workingDirectoryColumn, CGFloat(330)),
-            ("pid", strings.pidColumn, CGFloat(70)),
+            ("status", strings.statusColumn, CGFloat(120)),
+            ("cwd", strings.workingDirectoryColumn, CGFloat(310)),
+            ("pid", strings.pidColumn, CGFloat(68)),
             ("updated", strings.updatedColumn, CGFloat(140))
         ] {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(identifier))
@@ -358,26 +432,22 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
             column.width = width
             sessionTable.addTableColumn(column)
         }
-        sessionTable.usesAlternatingRowBackgroundColors = true
     }
 
     private func configureControls() {
         titleLabel.stringValue = strings.sessionsTitle
-        endpointHeader.font = .systemFont(ofSize: 11, weight: .bold)
+        endpointHeader.font = .systemFont(ofSize: 11, weight: .semibold)
         endpointHeader.textColor = .secondaryLabelColor
-        titleLabel.font = .systemFont(ofSize: 22, weight: .semibold)
-        selectedEndpointLabel.font = .systemFont(ofSize: 12)
+        titleLabel.font = .systemFont(ofSize: 20, weight: .semibold)
+        selectedEndpointLabel.font = .systemFont(ofSize: 12, weight: .medium)
         selectedEndpointLabel.textColor = .secondaryLabelColor
         statusLabel.font = .systemFont(ofSize: 12)
         statusLabel.textColor = .secondaryLabelColor
-        statusLabel.maximumNumberOfLines = 2
-        errorLabel.font = .systemFont(ofSize: 12)
-        errorLabel.textColor = .systemRed
-        errorLabel.maximumNumberOfLines = 2
         refreshButton.bezelStyle = .rounded
         refreshButton.target = self
         refreshButton.action = #selector(refreshOrCancel)
         openButton.bezelStyle = .rounded
+        openButton.keyEquivalent = "\r"
         openButton.target = self
         openButton.action = #selector(openSelectedSession)
         endButton.bezelStyle = .rounded
@@ -390,20 +460,32 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 10
+        stack.spacing = 8
         stack.translatesAutoresizingMaskIntoConstraints = false
         pane.addSubview(stack)
         endpointScroll.documentView = endpointTable
         endpointScroll.hasVerticalScroller = true
+        endpointScroll.autohidesScrollers = true
         endpointScroll.drawsBackground = false
+        endpointScroll.borderType = .noBorder
+        endpointScroll.focusRingType = .none
         endpointScroll.translatesAutoresizingMaskIntoConstraints = false
-        stack.addArrangedSubview(endpointHeader)
+        endpointHeader.translatesAutoresizingMaskIntoConstraints = false
+        let headerContainer = NSView()
+        headerContainer.translatesAutoresizingMaskIntoConstraints = false
+        headerContainer.addSubview(endpointHeader)
+        stack.addArrangedSubview(headerContainer)
         stack.addArrangedSubview(endpointScroll)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: 14),
-            stack.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -8),
-            stack.topAnchor.constraint(equalTo: pane.topAnchor, constant: 15),
-            stack.bottomAnchor.constraint(equalTo: pane.bottomAnchor, constant: -14),
+            headerContainer.heightAnchor.constraint(equalToConstant: 20),
+            endpointHeader.leadingAnchor.constraint(equalTo: headerContainer.leadingAnchor, constant: 6),
+            endpointHeader.trailingAnchor.constraint(equalTo: headerContainer.trailingAnchor),
+            endpointHeader.centerYAnchor.constraint(equalTo: headerContainer.centerYAnchor),
+            stack.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: 10),
+            stack.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -10),
+            stack.topAnchor.constraint(equalTo: pane.topAnchor, constant: 14),
+            stack.bottomAnchor.constraint(equalTo: pane.bottomAnchor, constant: -12),
+            headerContainer.widthAnchor.constraint(equalTo: stack.widthAnchor),
             endpointScroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
             endpointScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 180)
         ])
@@ -414,13 +496,21 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
         let pane = NSView()
         let titleRow = NSStackView(views: [titleLabel, selectedEndpointLabel, NSView(), refreshButton])
         titleRow.orientation = .horizontal
-        titleRow.alignment = .centerY
-        titleRow.spacing = 12
+        titleRow.alignment = .firstBaseline
+        titleRow.spacing = 10
         titleRow.translatesAutoresizingMaskIntoConstraints = false
+
+        statusLabel.maximumNumberOfLines = 1
+        statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
 
         sessionScroll.documentView = sessionTable
         sessionScroll.hasVerticalScroller = true
         sessionScroll.hasHorizontalScroller = true
+        sessionScroll.autohidesScrollers = true
+        sessionScroll.drawsBackground = false
+        sessionScroll.borderType = .noBorder
+        sessionScroll.focusRingType = .none
         sessionScroll.translatesAutoresizingMaskIntoConstraints = false
 
         let actionRow = NSStackView(views: [NSView(), endButton, openButton])
@@ -429,11 +519,8 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
         actionRow.spacing = 8
         actionRow.translatesAutoresizingMaskIntoConstraints = false
 
-        statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        errorLabel.translatesAutoresizingMaskIntoConstraints = false
         pane.addSubview(titleRow)
         pane.addSubview(statusLabel)
-        pane.addSubview(errorLabel)
         pane.addSubview(sessionScroll)
         pane.addSubview(actionRow)
         NSLayoutConstraint.activate([
@@ -442,13 +529,11 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
             titleRow.topAnchor.constraint(equalTo: pane.topAnchor, constant: 15),
             statusLabel.leadingAnchor.constraint(equalTo: titleRow.leadingAnchor),
             statusLabel.trailingAnchor.constraint(equalTo: titleRow.trailingAnchor),
-            statusLabel.topAnchor.constraint(equalTo: titleRow.bottomAnchor, constant: 10),
-            errorLabel.leadingAnchor.constraint(equalTo: titleRow.leadingAnchor),
-            errorLabel.trailingAnchor.constraint(equalTo: titleRow.trailingAnchor),
-            errorLabel.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 3),
+            statusLabel.topAnchor.constraint(equalTo: titleRow.bottomAnchor, constant: 6),
+            statusLabel.heightAnchor.constraint(equalToConstant: 18),
             sessionScroll.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: 20),
             sessionScroll.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -20),
-            sessionScroll.topAnchor.constraint(equalTo: errorLabel.bottomAnchor, constant: 10),
+            sessionScroll.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 10),
             actionRow.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: 20),
             actionRow.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -20),
             actionRow.topAnchor.constraint(equalTo: sessionScroll.bottomAnchor, constant: 12),
@@ -458,42 +543,63 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
     }
 
     private func bindModel() {
-        model.$endpoints.sink { [weak self] _ in self?.refreshViews() }.store(in: &observers)
-        model.$sessions.sink { [weak self] _ in self?.refreshViews() }.store(in: &observers)
-        model.$loadState.sink { [weak self] _ in self?.refreshViews() }.store(in: &observers)
-        model.$selectedEndpointID.sink { [weak self] _ in self?.refreshViews() }.store(in: &observers)
-        model.$selectedSessionID.sink { [weak self] _ in self?.refreshViews() }.store(in: &observers)
-        model.$persistenceError.sink { [weak self] _ in self?.refreshViews() }.store(in: &observers)
-        OhMyGhosttySettings.shared.$language.sink { [weak self] _ in self?.refreshViews() }.store(in: &observers)
+        model.objectWillChange.sink { [weak self] _ in self?.scheduleRefreshViews() }.store(in: &observers)
+        SSHHostRegistry.shared.objectWillChange.sink { [weak self] _ in self?.scheduleRefreshViews() }.store(in: &observers)
+        OhMyGhosttySettings.shared.$language.sink { [weak self] _ in self?.scheduleRefreshViews() }.store(in: &observers)
+    }
+
+    private func scheduleRefreshViews() {
+        guard isViewLoaded, !refreshScheduled else { return }
+        refreshScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.refreshScheduled = false
+            self.refreshViews()
+        }
     }
 
     private func refreshViews() {
         guard isViewLoaded else { return }
-        endpointTable.reloadData()
+        let language = OhMyGhosttySettings.shared.language
+        let languageChanged = renderedLanguage != language
+        renderedLanguage = language
+
+        let endpointKeys = model.endpoints.map { "\($0.id):\(strings.endpointName($0))" }
+        if endpointKeys != renderedEndpointKeys || languageChanged {
+            renderedEndpointKeys = endpointKeys
+            endpointTable.reloadData()
+        }
         endpointHeader.stringValue = strings.endpointsHeader
         titleLabel.stringValue = strings.sessionsTitle
-        for (identifier, title) in [
-            ("session", strings.sessionColumn),
-            ("agent", strings.agentColumn),
-            ("conversation", strings.conversationColumn),
-            ("status", strings.statusColumn),
-            ("cwd", strings.workingDirectoryColumn),
-            ("pid", strings.pidColumn),
-            ("updated", strings.updatedColumn)
-        ] {
-            sessionTable.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(identifier))?.title = title
+        if languageChanged {
+            for (identifier, title) in [
+                ("session", strings.sessionColumn),
+                ("agent", strings.agentColumn),
+                ("conversation", strings.conversationColumn),
+                ("status", strings.statusColumn),
+                ("cwd", strings.workingDirectoryColumn),
+                ("pid", strings.pidColumn),
+                ("updated", strings.updatedColumn)
+            ] {
+                sessionTable.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(identifier))?.title = title
+            }
         }
-        sessionTable.reloadData()
+        if model.sessions != renderedSessions || languageChanged {
+            renderedSessions = model.sessions
+            sessionTable.reloadData()
+        }
         selectingEndpoint = true
         if let id = model.selectedEndpointID,
            let row = model.endpoints.firstIndex(where: { $0.id == id }) {
-            endpointTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-        } else {
+            if endpointTable.selectedRow != row {
+                endpointTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            }
+        } else if endpointTable.selectedRow >= 0 {
             endpointTable.deselectAll(nil)
         }
         selectingEndpoint = false
 
-        selectedEndpointLabel.stringValue = model.selectedEndpoint.map(strings.endpointName) ?? ""
+        selectedEndpointLabel.stringValue = model.selectedEndpoint.map { strings.endpointName($0) } ?? ""
         refreshButton.title = model.isLoading ? strings.cancel : strings.refresh
         openButton.title = strings.openExisting
         endButton.title = strings.endSession
@@ -503,26 +609,32 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
         openButton.isEnabled = canActOnSession && selectedSession?.isAttachable == true
         endButton.isEnabled = canActOnSession && selectedSession?.ended == nil && selectedSession != nil
 
+        var statusText = ""
+        var isError = false
         switch model.loadState {
         case .idle:
             if model.selectedEndpoint == nil {
-                statusLabel.stringValue = strings.emptyCatalog(model.endpoints.isEmpty)
+                statusText = strings.emptyCatalog(model.endpoints.isEmpty)
             } else {
-                statusLabel.stringValue = strings.refreshHint
+                statusText = strings.refreshHint
             }
         case .loading:
-            statusLabel.stringValue = strings.connecting
+            statusText = strings.connecting
         case .loaded:
-            statusLabel.stringValue = model.sessions.isEmpty
+            statusText = model.sessions.isEmpty
                 ? strings.noSessions
                 : strings.sessionCount(model.sessions.count)
         case .failed(let message):
-            statusLabel.stringValue = strings.loadFailure
-            errorLabel.stringValue = strings.localizedError(message)
+            statusText = "\(strings.loadFailure) \(strings.localizedError(message))"
+            isError = true
         }
-        if case .failed = model.loadState {} else {
-            errorLabel.stringValue = model.persistenceError.map(strings.localizedError) ?? ""
+        if !isError, let persistenceError = model.persistenceError {
+            statusText = strings.localizedError(persistenceError)
+            isError = true
         }
+        statusLabel.stringValue = statusText
+        statusLabel.toolTip = statusText
+        statusLabel.textColor = isError ? .systemRed : .secondaryLabelColor
         view.window?.title = strings.windowTitle
     }
 
@@ -530,25 +642,149 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
         tableView === endpointTable ? model.endpoints.count : model.sessions.count
     }
 
-    func tableView(_ tableView: NSTableView, objectValueFor tableColumn: NSTableColumn?, row: Int) -> Any? {
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        SessionLibrarySelectionRowView(isEndpointList: tableView === endpointTable)
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard let identifier = tableColumn?.identifier.rawValue else { return nil }
         if tableView === endpointTable {
             guard model.endpoints.indices.contains(row) else { return nil }
             let endpoint = model.endpoints[row]
-            return strings.endpointName(endpoint)
+            return makeEndpointCell(endpoint: endpoint)
         }
         guard model.sessions.indices.contains(row) else { return nil }
         let session = model.sessions[row]
         switch identifier {
-        case "session": return session.id.prefix(8).description
-        case "agent": return session.agentLabel ?? "—"
-        case "conversation": return session.resume?.conversationID ?? "—"
-        case "status": return session.statusLabel(using: strings)
-        case "cwd": return session.workingDirectory ?? "—"
-        case "pid": return session.pid.map(String.init) ?? "—"
-        case "updated": return Self.dateFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(session.updatedAt)))
-        default: return nil
+        case "session":
+            return makeSessionTextCell(
+                identifier: identifier,
+                text: String(session.id.prefix(8)),
+                font: .monospacedSystemFont(ofSize: 12, weight: .medium),
+                color: .labelColor
+            )
+        case "agent":
+            return makeSessionTextCell(
+                identifier: identifier,
+                text: session.agentLabel ?? "—",
+                font: .systemFont(ofSize: 12.5, weight: session.agentLabel != nil ? .medium : .regular),
+                color: session.agentLabel != nil ? .labelColor : .tertiaryLabelColor
+            )
+        case "conversation":
+            return makeSessionTextCell(
+                identifier: identifier,
+                text: session.resume?.conversationID ?? "—",
+                font: .systemFont(ofSize: 12),
+                color: session.resume?.conversationID != nil ? .secondaryLabelColor : .tertiaryLabelColor
+            )
+        case "status":
+            return makeSessionStatusCell(session: session)
+        case "cwd":
+            return makeSessionTextCell(
+                identifier: identifier,
+                text: session.workingDirectory ?? "—",
+                font: .systemFont(ofSize: 12),
+                color: session.workingDirectory != nil ? .secondaryLabelColor : .tertiaryLabelColor,
+                lineBreakMode: .byTruncatingMiddle
+            )
+        case "pid":
+            return makeSessionTextCell(
+                identifier: identifier,
+                text: session.pid.map(String.init) ?? "—",
+                font: .monospacedDigitSystemFont(ofSize: 12, weight: .regular),
+                color: .secondaryLabelColor
+            )
+        case "updated":
+            return makeSessionTextCell(
+                identifier: identifier,
+                text: Self.dateFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(session.updatedAt))),
+                font: .monospacedDigitSystemFont(ofSize: 12, weight: .regular),
+                color: .secondaryLabelColor
+            )
+        default:
+            return nil
         }
+    }
+
+    private func makeEndpointCell(endpoint: SessionRuntimeCatalogEndpoint) -> NSView {
+        let cell = NSTableCellView()
+        let iconView = NSImageView()
+        let symbol = endpoint.descriptor.isLocal ? "laptopcomputer" : "server.rack"
+        iconView.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            .flatMap { $0.withSymbolConfiguration(.init(pointSize: 13, weight: .medium)) }
+        iconView.contentTintColor = .secondaryLabelColor
+        iconView.imageScaling = .scaleProportionallyDown
+
+        let label = NSTextField(labelWithString: strings.endpointName(endpoint))
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.textColor = .labelColor
+        label.lineBreakMode = .byTruncatingTail
+
+        let row = NSStackView(views: [iconView, label])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(row)
+        NSLayoutConstraint.activate([
+            iconView.widthAnchor.constraint(equalToConstant: 18),
+            iconView.heightAnchor.constraint(equalToConstant: 18),
+            row.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 10),
+            row.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -10),
+            row.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+        ])
+        return cell
+    }
+
+    private func makeSessionTextCell(
+        identifier: String,
+        text: String,
+        font: NSFont,
+        color: NSColor,
+        lineBreakMode: NSLineBreakMode = .byTruncatingTail
+    ) -> NSView {
+        let cell = NSTableCellView()
+        let label = NSTextField(labelWithString: text)
+        label.font = font
+        label.textColor = color
+        label.lineBreakMode = lineBreakMode
+        label.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+            label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+            label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+        ])
+        return cell
+    }
+
+    private func makeSessionStatusCell(session: SessionRuntimeCatalogSession) -> NSView {
+        let cell = NSTableCellView()
+        let dot = NSView()
+        dot.wantsLayer = true
+        dot.layer?.cornerRadius = 3.5
+        dot.layer?.backgroundColor = (session.ended == nil ? NSColor.systemGreen : NSColor.tertiaryLabelColor).cgColor
+        dot.translatesAutoresizingMaskIntoConstraints = false
+
+        let label = NSTextField(labelWithString: session.statusLabel(using: strings))
+        label.font = .systemFont(ofSize: 12, weight: session.ended == nil ? .medium : .regular)
+        label.textColor = session.ended == nil ? .labelColor : .secondaryLabelColor
+        label.lineBreakMode = .byTruncatingTail
+
+        let row = NSStackView(views: [dot, label])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 6
+        row.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(row)
+        NSLayoutConstraint.activate([
+            dot.widthAnchor.constraint(equalToConstant: 7),
+            dot.heightAnchor.constraint(equalToConstant: 7),
+            row.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+            row.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+            row.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+        ])
+        return cell
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -617,4 +853,1017 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
         formatter.timeStyle = .short
         return formatter
     }()
+}
+
+private final class SessionLibrarySelectionRowView: NSTableRowView {
+    private let isEndpointList: Bool
+
+    init(isEndpointList: Bool) {
+        self.isEndpointList = isEndpointList
+        super.init(frame: .zero)
+        wantsLayer = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }
+
+    override func drawSelection(in dirtyRect: NSRect) {
+        guard selectionHighlightStyle != .none else { return }
+        let theme = OMGNativeTheme.resolve(for: self)
+        theme.selectedFill.setFill()
+        let insetX: CGFloat = isEndpointList ? 2 : 0
+        let radius: CGFloat = isEndpointList ? 7 : 5
+        NSBezierPath(roundedRect: bounds.insetBy(dx: insetX, dy: 1), xRadius: radius, yRadius: radius).fill()
+    }
+}
+
+struct SessionRuntimeBackgroundItem: Equatable, Identifiable, Sendable {
+    let id: String
+    let session: SessionRuntimeCatalogSession
+    let descriptor: SessionRuntimeDescriptor
+    let workspaceID: String?
+    let agent: String?
+    let title: String
+    let workingDirectory: String?
+    let isMobileCreated: Bool
+}
+
+@MainActor
+final class SessionRuntimeBackgroundStore: ObservableObject {
+    static let shared = SessionRuntimeBackgroundStore()
+
+    @Published private(set) var items: [SessionRuntimeBackgroundItem] = []
+    var isEnabledInTests = false
+    private var timer: Timer?
+    private var refreshTask: Task<Void, Never>?
+    private var suppressedSessionIDs: Set<String> = []
+    private var observers: Set<AnyCancellable> = []
+
+    private struct MobileSessionMeta: Decodable, Sendable {
+        let generation: String
+        let workspace: String
+        let agent: String
+        let project: String?
+    }
+
+    private init() {
+        guard !OMGApplicationEnvironment.isRunningTests else { return }
+        startMonitoring()
+    }
+
+    func startMonitoringIfNeeded() {
+        guard !OMGApplicationEnvironment.isRunningTests || isEnabledInTests else { return }
+        guard timer == nil else { return }
+        startMonitoring()
+    }
+
+    private func startMonitoring() {
+        SessionRuntimeCatalog.shared.$endpoints
+            .sink { [weak self] _ in self?.refresh() }
+            .store(in: &observers)
+        NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in self?.refresh() }
+            .store(in: &observers)
+        NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)
+            .sink { [weak self] _ in
+                self?.refresh()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                    self?.refresh()
+                }
+            }
+            .store(in: &observers)
+        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refresh()
+            }
+        }
+        refresh()
+    }
+
+    func markOpened(paneID: UUID) {
+        objectWillChange.send()
+    }
+
+    func close(_ item: SessionRuntimeBackgroundItem) {
+        let raw = item.session.id.lowercased()
+        suppressedSessionIDs.insert(raw)
+        items.removeAll { $0.id == item.id || $0.session.id.lowercased() == raw }
+        if let paneID = item.session.paneID {
+            try? SessionRuntimeCloseQueue.shared.enqueue([
+                SessionRuntimeCloseRequest(pane: paneID, descriptor: item.descriptor)
+            ])
+        }
+    }
+
+    nonisolated private static func processArgv(_ pid: Int32) -> [String]? {
+        guard pid > 1 else { return nil }
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        var size: Int = 32 * 1024
+        var buf = [UInt8](repeating: 0, count: size)
+        guard sysctl(&mib, 3, &buf, &size, nil, 0) == 0, size >= 4 else { return nil }
+        let argc = buf.withUnsafeBytes { $0.load(as: Int32.self) }
+        guard argc > 0, argc <= 512 else { return nil }
+        var cursor = 4
+        while cursor < size && buf[cursor] != 0 { cursor += 1 }
+        while cursor < size && buf[cursor] == 0 { cursor += 1 }
+        var args: [String] = []
+        args.reserveCapacity(min(Int(argc), 64))
+        for _ in 0..<argc {
+            guard cursor < size else { break }
+            let start = cursor
+            while cursor < size && buf[cursor] != 0 { cursor += 1 }
+            guard let arg = String(bytes: buf[start..<cursor], encoding: .utf8) else { return nil }
+            args.append(arg)
+            cursor += 1
+        }
+        return args.isEmpty ? nil : args
+    }
+
+    nonisolated private static func parseSSHDestination(_ argv: [String]) -> String? {
+        guard let first = argv.first else { return nil }
+        let exe = URL(fileURLWithPath: first).lastPathComponent
+        guard exe == "ssh" else { return nil }
+        let flags = Set("46AaCfGgKkMNnqsTtVvXxYy")
+        let values = Set("BbcDEeFIiJLlmOoPpQRSWw")
+        let nonInteractive = Set("GNOQTVWfns")
+        let args = Array(argv.dropFirst())
+        var idx = 0
+        var forcedTTY = false
+        while idx < args.count {
+            let arg = args[idx]
+            if arg == "--" {
+                idx += 1
+                break
+            }
+            if !arg.hasPrefix("-") || arg == "-" {
+                break
+            }
+            var chars = arg.dropFirst()[...]
+            while let ch = chars.popFirst() {
+                if nonInteractive.contains(ch) { return nil }
+                if ch == "t" { forcedTTY = true }
+                if values.contains(ch) {
+                    let value: String
+                    if chars.isEmpty {
+                        idx += 1
+                        guard idx < args.count else { return nil }
+                        value = args[idx]
+                    } else {
+                        value = String(chars)
+                    }
+                    if ch == "o" {
+                        let lower = value.trimmingCharacters(in: .whitespaces).lowercased()
+                        if lower.hasPrefix("batchmode=yes") ||
+                            lower.hasPrefix("controlmaster=check") ||
+                            (lower.hasPrefix("remotecommand=") && lower != "remotecommand=none") {
+                            return nil
+                        }
+                    }
+                    break
+                }
+                if !flags.contains(ch) { return nil }
+            }
+            idx += 1
+        }
+        guard idx < args.count else { return nil }
+        let destination = args[idx].trimmingCharacters(in: .whitespaces)
+        guard !destination.isEmpty, !destination.hasPrefix("-") else { return nil }
+        let trailing = args[(idx + 1)...]
+        if !trailing.isEmpty && !forcedTTY {
+            return nil
+        }
+        return destination
+    }
+
+    nonisolated private static func activeSSHDestinations(forLeaderPIDs leaders: Set<Int>) -> [Int: String] {
+        guard !leaders.isEmpty else { return [:] }
+        let totalBytes = proc_listpids(UInt32(PROC_ALL_PIDS), 0, nil, 0)
+        guard totalBytes > 0 else { return [:] }
+        let maxCount = min(16_384, Int(totalBytes) / MemoryLayout<Int32>.size + 64)
+        var allPIDs = [Int32](repeating: 0, count: maxCount)
+        let bytes = proc_listpids(
+            UInt32(PROC_ALL_PIDS),
+            0,
+            &allPIDs,
+            Int32(maxCount * MemoryLayout<Int32>.size)
+        )
+        guard bytes > 0 else { return [:] }
+        let count = Int(bytes) / MemoryLayout<Int32>.size
+        var sessionPIDsByLeader: [Int: [Int32]] = [:]
+        for idx in 0..<count {
+            let pid = allPIDs[idx]
+            guard pid > 1 else { continue }
+            let sid = Int(getsid(pid))
+            guard leaders.contains(sid) else { continue }
+            sessionPIDsByLeader[sid, default: []].append(pid)
+        }
+        var result: [Int: String] = [:]
+        for (leader, pids) in sessionPIDsByLeader {
+            for pid in pids.sorted(by: >) {
+                if let argv = processArgv(pid), let dest = parseSSHDestination(argv) {
+                    result[leader] = dest
+                    break
+                }
+            }
+        }
+        return result
+    }
+
+    func refresh() {
+        guard !OMGApplicationEnvironment.isRunningTests || isEnabledInTests else { return }
+        var descriptors: [SessionRuntimeDescriptor] = []
+        var seenIdentities = Set<String>()
+        if let local = try? SessionRuntimeConnections.localDescriptor(policy: SessionRuntimePolicy()) {
+            seenIdentities.insert(local.identity)
+            descriptors.append(local)
+        }
+        for endpoint in SessionRuntimeCatalog.shared.endpoints where endpoint.descriptor.isLocal {
+            if seenIdentities.insert(endpoint.descriptor.identity).inserted {
+                descriptors.append(endpoint.descriptor)
+            }
+        }
+        for candidate in SessionRuntimeCatalog.compatibleLocalDescriptors(policy: SessionRuntimePolicy())
+        where seenIdentities.insert(candidate.identity).inserted {
+            descriptors.append(candidate)
+        }
+        guard !descriptors.isEmpty else {
+            if !items.isEmpty { items = [] }
+            return
+        }
+        let supportURL = OMGApplicationEnvironment.applicationSupportURL()
+        let homePath = FileManager.default.homeDirectoryForCurrentUser.path
+        let currentRevision = (try? String(
+            contentsOf: SessionRuntimeConnections.resources.appendingPathComponent("revision"),
+            encoding: .utf8
+        ))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let currentSnapshotRevision = (try? String(
+            contentsOf: SessionRuntimeConnections.resources.appendingPathComponent("snapshot-revision"),
+            encoding: .utf8
+        )).map(SessionRuntimeConnections.canonicalSnapshotRevision)
+        refreshTask?.cancel()
+        refreshTask = Task.detached(priority: .utility) { [descriptors, supportURL, homePath, currentRevision, currentSnapshotRevision] in
+            let mobileFile = supportURL.appendingPathComponent("mobile-sessions.json")
+            let mobileMap: [String: MobileSessionMeta] = (try? Data(contentsOf: mobileFile))
+                .flatMap { try? JSONDecoder().decode([String: MobileSessionMeta].self, from: $0) } ?? [:]
+            var discovered: [(SessionRuntimeCatalogSession, SessionRuntimeDescriptor, MobileSessionMeta?)] = []
+            var seenSessions = Set<String>()
+            let decoder = JSONDecoder()
+
+            for descriptor in descriptors {
+                if Task.isCancelled { return }
+                if let currentSnapshotRevision, descriptor.revision != currentRevision {
+                    let snapURL = supportURL
+                        .appendingPathComponent("session-runtime/versions")
+                        .appendingPathComponent(descriptor.revision)
+                        .appendingPathComponent("snapshot-revision")
+                    let cachedSnap = (try? String(contentsOf: snapURL, encoding: .utf8))
+                        .map(SessionRuntimeConnections.canonicalSnapshotRevision)
+                    if cachedSnap != currentSnapshotRevision {
+                        continue
+                    }
+                }
+                let root = SessionRuntimeConnections.localStateDirectory(
+                    for: descriptor,
+                    applicationSupportRoot: supportURL
+                )
+                let sessionsDir = root.appendingPathComponent("sessions", isDirectory: true)
+                guard let entries = try? FileManager.default.contentsOfDirectory(
+                    at: sessionsDir,
+                    includingPropertiesForKeys: nil,
+                    options: [.skipsHiddenFiles]
+                ) else { continue }
+                for entry in entries where entry.pathExtension == "json" {
+                    let stem = entry.deletingPathExtension().lastPathComponent
+                    let closedMarker = sessionsDir.appendingPathComponent("\(stem).closed")
+                    if FileManager.default.fileExists(atPath: closedMarker.path) { continue }
+                    guard let data = try? Data(contentsOf: entry),
+                          data.count <= 65_536,
+                          let session = try? decoder.decode(SessionRuntimeCatalogSession.self, from: data),
+                          session.ended == nil,
+                          session.isAttachable,
+                          let pid = session.pid, pid > 0,
+                          kill(pid_t(pid), 0) == 0 else { continue }
+                    let key = "\(session.id.lowercased()):\(session.generation)"
+                    guard seenSessions.insert(key).inserted else { continue }
+                    let meta = mobileMap[session.id].flatMap { $0.generation == session.generation ? $0 : nil }
+                    discovered.append((session, descriptor, meta))
+                }
+            }
+
+            guard !Task.isCancelled else { return }
+            let leaderPIDs = Set(discovered.compactMap { $0.0.ssh == nil ? $0.0.pid : nil })
+            let sshByLeader = Self.activeSSHDestinations(forLeaderPIDs: leaderPIDs)
+            let snapshot = discovered
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                let liveRawIDs = Set(snapshot.map { $0.0.id.lowercased() })
+                self.suppressedSessionIDs.formIntersection(liveRawIDs)
+                var next: [SessionRuntimeBackgroundItem] = []
+                for (session, descriptor, meta) in snapshot {
+                    guard session.paneID != nil else { continue }
+                    let raw = session.id.lowercased()
+                    if self.suppressedSessionIDs.contains(raw) {
+                        continue
+                    }
+                    let agent = meta?.agent ?? session.resume?.agent
+                    let sshDestination = session.ssh?.destination
+                        ?? session.pid.flatMap { sshByLeader[$0] }
+                    let cwd = session.ssh?.remoteCwd ?? session.workingDirectory
+                    let dirLabel: String = {
+                        guard let cwd, !cwd.isEmpty else { return String(session.id.prefix(8)) }
+                        if cwd == homePath { return "~" }
+                        let last = URL(fileURLWithPath: cwd).lastPathComponent
+                        return last.isEmpty ? cwd : last
+                    }()
+                    let agentPrefix: String? = switch agent {
+                    case "claude": "Claude Code"
+                    case "codex": "Codex"
+                    case "pi": "Pi"
+                    default: nil
+                    }
+                    var parts: [String] = []
+                    if let agentPrefix {
+                        parts.append(agentPrefix)
+                    }
+                    if let sshDestination, !sshDestination.isEmpty {
+                        parts.append("SSH (\(sshDestination))")
+                    }
+                    parts.append(dirLabel)
+                    let title = parts.joined(separator: " · ")
+                    next.append(SessionRuntimeBackgroundItem(
+                        id: "\(descriptor.identity)/\(session.id)/\(session.generation)",
+                        session: session,
+                        descriptor: descriptor,
+                        workspaceID: meta?.workspace,
+                        agent: agent,
+                        title: title,
+                        workingDirectory: cwd,
+                        isMobileCreated: meta != nil
+                    ))
+                }
+                next.sort { lhs, rhs in
+                    if lhs.isMobileCreated != rhs.isMobileCreated {
+                        return lhs.isMobileCreated && !rhs.isMobileCreated
+                    }
+                    if lhs.session.updatedAt != rhs.session.updatedAt {
+                        return lhs.session.updatedAt > rhs.session.updatedAt
+                    }
+                    return lhs.session.id < rhs.session.id
+                }
+                if self.items != next {
+                    self.items = next
+                }
+            }
+        }
+    }
+
+    func items(for controller: TerminalController) -> [SessionRuntimeBackgroundItem] {
+        let openPanes = SessionRuntimeLibrary.openPaneIDs(forWindowOf: controller)
+        let knownWorkspaces = Set(controller.workspaceCoordinator.store.workspaces.map { $0.id.uuidString.lowercased() })
+        let currentWorkspaceID = controller.workspaceID.uuidString.lowercased()
+        return items.filter { item in
+            if let paneID = item.session.paneID, openPanes.contains(paneID) {
+                return false
+            }
+            guard let ws = item.workspaceID?.lowercased(), knownWorkspaces.contains(ws) else { return true }
+            return ws == currentWorkspaceID
+        }
+    }
+}
+
+@MainActor
+final class SessionRuntimeBackgroundHeaderButton: NativeActionControl {
+    private let symbolView = NSImageView()
+    private let countLabel = NSTextField(labelWithString: "")
+    private var currentCount = -1
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        title = ""
+        bezelStyle = .recessed
+        isBordered = false
+        setButtonType(.momentaryPushIn)
+        wantsLayer = true
+        symbolView.imageScaling = .scaleProportionallyDown
+        countLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+        countLabel.alignment = .center
+        let row = NSStackView(views: [symbolView, countLabel])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 3
+        row.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(row)
+        NSLayoutConstraint.activate([
+            symbolView.widthAnchor.constraint(equalToConstant: 14),
+            symbolView.heightAnchor.constraint(equalToConstant: 14),
+            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            row.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        countLabel.isHidden = true
+        setAccessibilityIdentifier("tabs.background.sessions")
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let superview, bounds.contains(convert(point, from: superview)) else { return nil }
+        return self
+    }
+
+    func update(count: Int, isPresented: Bool) {
+        setPresentationActive(isPresented)
+        guard count != currentCount else { return }
+        currentCount = count
+        let symbol = count > 0 ? "rectangle.stack.fill" : "rectangle.stack"
+        symbolView.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            .flatMap { $0.withSymbolConfiguration(.init(pointSize: 12, weight: .medium)) }
+        countLabel.stringValue = count > 0 ? "\(count)" : ""
+        countLabel.isHidden = count == 0
+        let strings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
+        let tip = count > 0
+            ? strings.t("Background Sessions (\(count))", "后台会话 (\(count))")
+            : strings.t("Background Sessions", "后台会话")
+        toolTip = tip
+        setAccessibilityLabel(tip)
+        needsLayout = true
+        invalidateIntrinsicContentSize()
+    }
+
+    override func applyTheme(_ theme: OMGNativeTheme) {
+        super.applyTheme(theme)
+        symbolView.contentTintColor = currentCount > 0 ? theme.foreground : theme.secondary
+        countLabel.textColor = theme.foreground
+    }
+
+    var preferredWidth: CGFloat {
+        guard currentCount > 0 else { return 26 }
+        let textWidth = ceil((countLabel.stringValue as NSString).size(
+            withAttributes: [.font: countLabel.font ?? .systemFont(ofSize: 11)]
+        ).width)
+        return 12 + 14 + 3 + max(8, textWidth)
+    }
+}
+
+@MainActor
+final class SessionRuntimeBackgroundPopover: NSViewController {
+    private static let popoverWidth: CGFloat = 324
+
+    private weak var controller: TerminalController?
+    private let onDismiss: () -> Void
+    private let libraryModel = SessionRuntimeLibraryModel()
+    private let root = OMGNativeSurfaceView()
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let refreshButton = NativeActionControl()
+    private let targetStack = NSStackView()
+    private var targetButtons: [String: NativeActionControl] = [:]
+    private let listStack = NSStackView()
+    private let scroll = NSScrollView()
+    private let emptyContainer = NSView()
+    private let emptyIconView = NSImageView()
+    private let emptyLabel = NSTextField(labelWithString: "")
+    private let emptyHintLabel = NSTextField(wrappingLabelWithString: "")
+    private var scrollHeightConstraint: NSLayoutConstraint?
+    private var subscriptions = Set<AnyCancellable>()
+    private var selectedTargetID = "local"
+    private var renderedTargetIDs: [String] = []
+    var onPreferredSizeChange: ((NSSize) -> Void)?
+
+    init(controller: TerminalController, onDismiss: @escaping () -> Void) {
+        self.controller = controller
+        self.onDismiss = onDismiss
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func bindTheme(to window: NSWindow?) {
+        _ = view
+        root.bindTheme(to: window)
+    }
+
+    override func loadView() {
+        root.wantsLayer = true
+        root.setAccessibilityIdentifier("background.sessions.popover")
+
+        let header = NSStackView()
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 8
+        header.translatesAutoresizingMaskIntoConstraints = false
+        header.heightAnchor.constraint(equalToConstant: 26).isActive = true
+
+        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        refreshButton.configure(
+            title: "",
+            symbol: "arrow.clockwise",
+            help: SettingsStrings(language: OhMyGhosttySettings.shared.language).t("Refresh", "刷新"),
+            enabled: true,
+            style: .plain,
+            identifier: "background.sessions.refresh"
+        )
+        refreshButton.widthAnchor.constraint(equalToConstant: 24).isActive = true
+        refreshButton.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        refreshButton.target = self
+        refreshButton.action = #selector(refreshTapped)
+
+        header.addArrangedSubview(titleLabel)
+        header.addArrangedSubview(NSView())
+        header.addArrangedSubview(refreshButton)
+
+        targetStack.orientation = .horizontal
+        targetStack.alignment = .centerY
+        targetStack.spacing = 6
+        targetStack.translatesAutoresizingMaskIntoConstraints = false
+        targetStack.heightAnchor.constraint(equalToConstant: 26).isActive = true
+
+        listStack.orientation = .vertical
+        listStack.alignment = .leading
+        listStack.spacing = 4
+        listStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let document = FlippedDocumentView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(listStack)
+        NSLayoutConstraint.activate([
+            listStack.topAnchor.constraint(equalTo: document.topAnchor),
+            listStack.leadingAnchor.constraint(equalTo: document.leadingAnchor),
+            listStack.trailingAnchor.constraint(equalTo: document.trailingAnchor),
+            listStack.bottomAnchor.constraint(equalTo: document.bottomAnchor),
+            listStack.widthAnchor.constraint(equalTo: document.widthAnchor),
+        ])
+
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.focusRingType = .none
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
+        scroll.documentView = document
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        let heightConstraint = scroll.heightAnchor.constraint(equalToConstant: 120)
+        scrollHeightConstraint = heightConstraint
+        heightConstraint.isActive = true
+
+        emptyIconView.image = NSImage(systemSymbolName: "rectangle.stack", accessibilityDescription: nil)
+            .flatMap { $0.withSymbolConfiguration(.init(pointSize: 18, weight: .regular)) }
+        emptyIconView.imageScaling = .scaleProportionallyDown
+        emptyIconView.translatesAutoresizingMaskIntoConstraints = false
+
+        emptyLabel.font = .systemFont(ofSize: 12.5, weight: .medium)
+        emptyLabel.alignment = .center
+
+        emptyHintLabel.font = .systemFont(ofSize: 11)
+        emptyHintLabel.alignment = .center
+        emptyHintLabel.maximumNumberOfLines = 3
+
+        let emptyStack = NSStackView(views: [emptyIconView, emptyLabel, emptyHintLabel])
+        emptyStack.orientation = .vertical
+        emptyStack.alignment = .centerX
+        emptyStack.spacing = 4
+        emptyStack.setCustomSpacing(6, after: emptyIconView)
+        emptyStack.translatesAutoresizingMaskIntoConstraints = false
+
+        emptyContainer.translatesAutoresizingMaskIntoConstraints = false
+        emptyContainer.addSubview(emptyStack)
+        NSLayoutConstraint.activate([
+            emptyContainer.heightAnchor.constraint(equalToConstant: 96),
+            emptyIconView.widthAnchor.constraint(equalToConstant: 22),
+            emptyIconView.heightAnchor.constraint(equalToConstant: 22),
+            emptyStack.centerXAnchor.constraint(equalTo: emptyContainer.centerXAnchor),
+            emptyStack.centerYAnchor.constraint(equalTo: emptyContainer.centerYAnchor),
+            emptyStack.leadingAnchor.constraint(greaterThanOrEqualTo: emptyContainer.leadingAnchor, constant: 8),
+            emptyStack.trailingAnchor.constraint(lessThanOrEqualTo: emptyContainer.trailingAnchor, constant: -8),
+        ])
+
+        let mainStack = NSStackView(views: [header, targetStack, scroll, emptyContainer])
+        mainStack.orientation = .vertical
+        mainStack.distribution = .fill
+        mainStack.alignment = .leading
+        mainStack.spacing = 8
+        mainStack.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(mainStack)
+        NSLayoutConstraint.activate([
+            mainStack.topAnchor.constraint(equalTo: root.topAnchor, constant: 12),
+            mainStack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
+            mainStack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -14),
+            mainStack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -12),
+            header.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
+            targetStack.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
+            scroll.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
+            emptyContainer.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
+        ])
+
+        root.onThemeChange = { [weak self] theme in
+            self?.applyThemeColors(theme)
+        }
+        view = root
+
+        SessionRuntimeBackgroundStore.shared.$items
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.render() }
+            .store(in: &subscriptions)
+        libraryModel.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                DispatchQueue.main.async { self?.render() }
+            }
+            .store(in: &subscriptions)
+        OhMyGhosttySettings.shared.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.render() }
+            .store(in: &subscriptions)
+        SessionRuntimeBackgroundStore.shared.refresh()
+        render()
+    }
+
+    private func applyThemeColors(_ theme: OMGNativeTheme) {
+        titleLabel.textColor = theme.foreground
+        refreshButton.applyTheme(theme)
+        emptyIconView.contentTintColor = theme.secondary
+        emptyLabel.textColor = theme.foreground
+        emptyHintLabel.textColor = theme.secondary
+        for button in targetButtons.values {
+            button.applyTheme(theme)
+        }
+        for case let row as BackgroundSessionRowView in listStack.arrangedSubviews {
+            row.applyTheme(theme)
+        }
+    }
+
+    @objc private func refreshTapped() {
+        if selectedTargetID == "local" {
+            SessionRuntimeBackgroundStore.shared.refresh()
+        } else if libraryModel.isLoading {
+            libraryModel.cancelRefresh()
+        } else {
+            libraryModel.refresh()
+        }
+    }
+
+    @objc private func selectTarget(_ sender: NativeActionControl) {
+        guard let raw = sender.identifier?.rawValue,
+              raw.hasPrefix("background.target.") else { return }
+        let targetID = String(raw.dropFirst("background.target.".count))
+        guard targetID != selectedTargetID else { return }
+        selectedTargetID = targetID
+        if targetID == "local" {
+            libraryModel.cancelRefresh()
+            SessionRuntimeBackgroundStore.shared.refresh()
+        } else {
+            libraryModel.selectedEndpointID = targetID
+        }
+        render()
+    }
+
+    private func rebuildTargetBarIfNeeded(strings: SessionRuntimeLibraryStrings) {
+        let remoteEndpoints = libraryModel.endpoints.filter { !$0.descriptor.isLocal }
+        if remoteEndpoints.isEmpty {
+            if selectedTargetID != "local" {
+                selectedTargetID = "local"
+                libraryModel.cancelRefresh()
+            }
+            targetStack.isHidden = true
+            return
+        }
+        targetStack.isHidden = false
+        let ids = ["local"] + remoteEndpoints.map { "\($0.id):\(strings.endpointName($0))" }
+        if ids != renderedTargetIDs {
+            renderedTargetIDs = ids
+            targetButtons.removeAll()
+            for subview in targetStack.arrangedSubviews {
+                targetStack.removeArrangedSubview(subview)
+                subview.removeFromSuperview()
+            }
+            let localBtn = makeTargetPill(
+                id: "local",
+                title: strings.thisMac,
+                symbol: "laptopcomputer"
+            )
+            targetStack.addArrangedSubview(localBtn)
+            targetButtons["local"] = localBtn
+
+            for endpoint in remoteEndpoints {
+                let btn = makeTargetPill(
+                    id: endpoint.id,
+                    title: strings.endpointName(endpoint),
+                    symbol: "server.rack"
+                )
+                targetStack.addArrangedSubview(btn)
+                targetButtons[endpoint.id] = btn
+            }
+            targetStack.addArrangedSubview(NSView())
+        }
+        if selectedTargetID != "local", !remoteEndpoints.contains(where: { $0.id == selectedTargetID }) {
+            selectedTargetID = "local"
+        }
+        for (id, button) in targetButtons {
+            button.setPresentationActive(id == selectedTargetID)
+        }
+    }
+
+    private func makeTargetPill(id: String, title: String, symbol: String) -> NativeActionControl {
+        let button = NativeActionControl()
+        button.title = title
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            .flatMap { $0.withSymbolConfiguration(.init(pointSize: 11, weight: .medium)) }
+        button.imagePosition = .imageLeading
+        button.controlStyle = .bordered
+        button.controlSize = .small
+        button.identifier = NSUserInterfaceItemIdentifier("background.target.\(id)")
+        button.target = self
+        button.action = #selector(selectTarget(_:))
+        return button
+    }
+
+    private func activeItems() -> [SessionRuntimeBackgroundItem] {
+        if selectedTargetID == "local" {
+            if let controller {
+                return SessionRuntimeBackgroundStore.shared.items(for: controller)
+            }
+            let openPanes = SessionRuntimeLibrary.openPaneIDs()
+            return SessionRuntimeBackgroundStore.shared.items.filter { item in
+                guard let paneID = item.session.paneID else { return false }
+                return !openPanes.contains(paneID)
+            }
+        }
+        guard let endpoint = libraryModel.endpoints.first(where: { $0.id == selectedTargetID }) else {
+            return []
+        }
+        let openPanes = SessionRuntimeLibrary.openPaneIDs(forWindowOf: controller)
+        let homePath = FileManager.default.homeDirectoryForCurrentUser.path
+        return libraryModel.sessions.compactMap { session in
+            guard session.isAttachable, let paneID = session.paneID, !openPanes.contains(paneID) else {
+                return nil
+            }
+            let cwd = session.workingDirectory
+            let dirLabel: String = {
+                guard let cwd, !cwd.isEmpty else { return String(session.id.prefix(8)) }
+                if cwd == homePath { return "~" }
+                let last = URL(fileURLWithPath: cwd).lastPathComponent
+                return last.isEmpty ? cwd : last
+            }()
+            let title = if let agentLabel = session.agentLabel {
+                "\(agentLabel) · \(dirLabel)"
+            } else {
+                dirLabel
+            }
+            return SessionRuntimeBackgroundItem(
+                id: "\(endpoint.id)/\(session.id)/\(session.generation)",
+                session: session,
+                descriptor: endpoint.descriptor,
+                workspaceID: nil,
+                agent: session.resume?.agent,
+                title: title,
+                workingDirectory: cwd,
+                isMobileCreated: false
+            )
+        }
+    }
+
+    func fittingSize() -> NSSize {
+        preferredContentSize.width > 0 ? preferredContentSize : NSSize(width: Self.popoverWidth, height: 148)
+    }
+
+    private func render() {
+        let strings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
+        let libStrings = SessionRuntimeLibraryStrings(language: OhMyGhosttySettings.shared.language)
+        rebuildTargetBarIfNeeded(strings: libStrings)
+
+        let items = activeItems()
+        let isRemoteLoading = selectedTargetID != "local" && libraryModel.isLoading
+        refreshButton.configure(
+            title: "",
+            symbol: isRemoteLoading ? "xmark" : "arrow.clockwise",
+            help: isRemoteLoading ? libStrings.cancel : libStrings.refresh,
+            enabled: true,
+            style: .plain,
+            identifier: "background.sessions.refresh"
+        )
+
+        titleLabel.stringValue = items.isEmpty
+            ? strings.t("Background Sessions", "后台会话")
+            : strings.t("Background Sessions (\(items.count))", "后台会话 (\(items.count))")
+
+        if selectedTargetID == "local" {
+            emptyLabel.stringValue = strings.t("No background sessions running", "当前没有后台运行的会话")
+            emptyHintLabel.stringValue = strings.t(
+                "Sessions kept after closing a tab or created on Mobile appear here.",
+                "关闭标签页后保留的会话或手机端新建的会话会显示在此。"
+            )
+        } else {
+            switch libraryModel.loadState {
+            case .loading:
+                emptyLabel.stringValue = libStrings.connecting
+                emptyHintLabel.stringValue = ""
+            case .failed(let message):
+                emptyLabel.stringValue = libStrings.loadFailure
+                emptyHintLabel.stringValue = libStrings.localizedError(message)
+            case .idle, .loaded:
+                emptyLabel.stringValue = strings.t("No background sessions running", "当前没有后台运行的会话")
+                emptyHintLabel.stringValue = strings.t(
+                    "Detached background sessions on this remote machine appear here.",
+                    "此远程机器上未在当前窗口打开的后台会话会显示在此。"
+                )
+            }
+        }
+
+        for subview in listStack.arrangedSubviews {
+            listStack.removeArrangedSubview(subview)
+            subview.removeFromSuperview()
+        }
+
+        let targetBarHeight: CGFloat = targetStack.isHidden ? 0 : (26 + 8)
+        let targetSize: NSSize
+        if items.isEmpty {
+            scroll.isHidden = true
+            emptyContainer.isHidden = false
+            targetSize = NSSize(width: Self.popoverWidth, height: 12 + 26 + targetBarHeight + 8 + 96 + 12)
+        } else {
+            emptyContainer.isHidden = true
+            scroll.isHidden = false
+            for item in items {
+                let row = BackgroundSessionRowView(
+                    item: item,
+                    onOpen: { [weak self] in
+                        guard let self else { return }
+                        let window = self.controller?.window
+                        self.onDismiss()
+                        if let paneID = item.session.paneID {
+                            SessionRuntimeBackgroundStore.shared.markOpened(paneID: paneID)
+                        }
+                        _ = try? SessionRuntimeLibrary.openExisting(
+                            item.session,
+                            descriptor: item.descriptor,
+                            from: window
+                        )
+                        SessionRuntimeBackgroundStore.shared.refresh()
+                    },
+                    onClose: { [weak self] in
+                        guard let self else { return }
+                        SessionRuntimeBackgroundStore.shared.close(item)
+                        if self.selectedTargetID != "local" {
+                            self.libraryModel.refresh()
+                        }
+                    }
+                )
+                row.translatesAutoresizingMaskIntoConstraints = false
+                listStack.addArrangedSubview(row)
+                row.widthAnchor.constraint(equalTo: listStack.widthAnchor).isActive = true
+            }
+            let rowHeight: CGFloat = 44
+            let totalHeight = CGFloat(items.count) * rowHeight + CGFloat(max(0, items.count - 1)) * 4
+            let clampedScrollHeight = min(280, max(rowHeight, totalHeight))
+            scrollHeightConstraint?.constant = clampedScrollHeight
+            targetSize = NSSize(width: Self.popoverWidth, height: 12 + 26 + targetBarHeight + 8 + clampedScrollHeight + 12)
+        }
+        applyThemeColors(root.theme)
+        if preferredContentSize != targetSize {
+            preferredContentSize = targetSize
+            onPreferredSizeChange?(targetSize)
+        }
+    }
+}
+
+private final class FlippedDocumentView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+@MainActor
+private final class BackgroundSessionRowView: NSView, OMGNativeThemeApplying {
+    private let item: SessionRuntimeBackgroundItem
+    private let onOpen: () -> Void
+    private let onClose: () -> Void
+    private let iconView = NSImageView()
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let subtitleLabel = NSTextField(labelWithString: "")
+    private let badgeLabel = NSTextField(labelWithString: "")
+    private let closeButton = NativeActionControl()
+    private var trackingArea: NSTrackingArea?
+    private var hovered = false {
+        didSet {
+            guard oldValue != hovered else { return }
+            updateAppearance()
+        }
+    }
+
+    init(item: SessionRuntimeBackgroundItem, onOpen: @escaping () -> Void, onClose: @escaping () -> Void) {
+        self.item = item
+        self.onOpen = onOpen
+        self.onClose = onClose
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 6
+
+        let symbol = (item.agent != nil && item.agent != "terminal") ? "sparkles" : "terminal"
+        iconView.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            .flatMap { $0.withSymbolConfiguration(.init(pointSize: 13, weight: .medium)) }
+        iconView.imageScaling = .scaleProportionallyDown
+
+        titleLabel.stringValue = item.title
+        titleLabel.font = .systemFont(ofSize: 12.5, weight: .medium)
+        titleLabel.lineBreakMode = .byTruncatingMiddle
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        subtitleLabel.stringValue = item.workingDirectory ?? String(item.session.id.prefix(8))
+        subtitleLabel.font = .systemFont(ofSize: 10.5)
+        subtitleLabel.lineBreakMode = .byTruncatingMiddle
+        subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let textStack = NSStackView(views: [titleLabel, subtitleLabel])
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 1
+
+        badgeLabel.stringValue = "Mobile"
+        badgeLabel.font = .systemFont(ofSize: 10, weight: .medium)
+        badgeLabel.isHidden = !item.isMobileCreated
+
+        closeButton.configure(
+            title: "",
+            symbol: "xmark",
+            help: SettingsStrings(language: OhMyGhosttySettings.shared.language).t("End Session", "结束会话"),
+            enabled: true,
+            style: .plain,
+            identifier: "background.session.close.\(item.session.id)"
+        )
+        closeButton.target = self
+        closeButton.action = #selector(closeTapped)
+
+        let row = NSStackView(views: [iconView, textStack, NSView(), badgeLabel, closeButton])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(row)
+
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 44),
+            iconView.widthAnchor.constraint(equalToConstant: 18),
+            iconView.heightAnchor.constraint(equalToConstant: 18),
+            closeButton.widthAnchor.constraint(equalToConstant: 24),
+            closeButton.heightAnchor.constraint(equalToConstant: 24),
+            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            row.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        updateAppearance()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingArea { removeTrackingArea(trackingArea) }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovered = true }
+    override func mouseExited(with event: NSEvent) { hovered = false }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = closeButton.convert(event.locationInWindow, from: nil)
+        if closeButton.bounds.contains(point) {
+            super.mouseDown(with: event)
+            return
+        }
+        onOpen()
+    }
+
+    @objc private func closeTapped() {
+        onClose()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateAppearance()
+    }
+
+    func applyTheme(_ theme: OMGNativeTheme) {
+        layer?.backgroundColor = (hovered ? theme.hoverFill : .clear).cgColor
+        iconView.contentTintColor = theme.foreground
+        titleLabel.textColor = theme.foreground
+        subtitleLabel.textColor = theme.secondary
+        badgeLabel.textColor = theme.secondary
+        closeButton.applyTheme(theme)
+    }
+
+    private func updateAppearance() {
+        applyTheme(OMGNativeTheme.resolve(for: self))
+    }
 }

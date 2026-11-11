@@ -13,6 +13,7 @@ const list_colors = @import("list_colors.zig");
 const list_actions = @import("list_actions.zig");
 const ssh = @import("ssh.zig");
 const sessions = @import("sessions.zig");
+const mobile = @import("mobile.zig");
 const ssh_cache = @import("ssh_cache.zig");
 const edit_config = @import("edit_config.zig");
 const show_config = @import("show_config.zig");
@@ -56,6 +57,9 @@ pub const Action = enum {
 
     /// Manage OMG background sessions.
     sessions,
+
+    /// Pair and manage OMG Mobile access for this machine.
+    mobile,
 
     /// Manage SSH terminfo cache for automatic remote host setup
     @"ssh-cache",
@@ -166,6 +170,7 @@ pub const Action = enum {
             .@"ssh-cache" => try ssh_cache.run(alloc),
             .ssh => try ssh.run(alloc),
             .sessions => try sessions.run(alloc),
+            .mobile => try mobile.run(alloc),
             .@"edit-config" => try edit_config.run(alloc),
             .@"show-config" => try show_config.run(alloc),
             .@"explain-config" => try explain_config.run(alloc),
@@ -210,6 +215,7 @@ pub const Action = enum {
                 .@"ssh-cache" => ssh_cache.Options,
                 .ssh => ssh.Options,
                 .sessions => sessions.Options,
+                .mobile => mobile.Options,
                 .@"edit-config" => edit_config.Options,
                 .@"show-config" => show_config.Options,
                 .@"explain-config" => explain_config.Options,
@@ -246,6 +252,21 @@ test "parse action sessions" {
     );
     defer iter.deinit();
     try testing.expect((try actionpkg.detectIter(Action, &iter)) == Action.sessions);
+}
+
+test "parse action mobile" {
+    const testing = std.testing;
+    var iter = try std.process.Args.IteratorGeneral(.{}).init(
+        testing.allocator,
+        "+mobile pair --tailscale",
+    );
+    defer iter.deinit();
+    try testing.expect((try actionpkg.detectIter(Action, &iter)) == Action.mobile);
+}
+
+test {
+    _ = sessions;
+    _ = mobile;
 }
 
 test "parse action version" {

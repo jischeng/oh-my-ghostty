@@ -266,6 +266,59 @@ struct SessionRuntimeCatalogTests {
         #expect(queue.requests.isEmpty)
     }
 
+    @MainActor
+    @Test func catalogDeduplicatesEndpointsByLogicalHostKeepingLatestRevision() throws {
+        let catalog = SessionRuntimeCatalog(url: nil)
+        let localOld = SessionRuntimeDescriptor(connection: nil, revision: "rev-old", policy: .init())
+        let localNew = SessionRuntimeDescriptor(connection: nil, revision: "rev-new", policy: .init())
+        let sshOld = SessionRuntimeDescriptor(
+            connection: try GitSSHConnection(destination: "cloud"),
+            revision: "rev-old",
+            policy: .init()
+        )
+        let sshNew = SessionRuntimeDescriptor(
+            connection: try GitSSHConnection(destination: "cloud"),
+            revision: "rev-new",
+            policy: .init()
+        )
+
+        catalog.remember(localOld)
+        catalog.remember(sshOld)
+        catalog.remember(localNew)
+        catalog.remember(sshNew)
+
+        #expect(catalog.endpoints.count == 2)
+        #expect(catalog.endpoints.first(where: { $0.descriptor.isLocal })?.descriptor.revision == "rev-new")
+        #expect(catalog.endpoints.first(where: { !$0.descriptor.isLocal })?.descriptor.revision == "rev-new")
+    }
+
+    @MainActor
+    @Test func libraryModelFiltersEndpointsToLocalAndRegisteredRemoteHosts() throws {
+        let suiteName = "SessionLibraryRegistryTest." + UUID().uuidString
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let registry = SSHHostRegistry(defaults: defaults, live: { [] })
+        let cloudConn = try GitSSHConnection(destination: "cloud")
+        _ = registry.addConfigured(cloudConn)
+
+        let catalog = SessionRuntimeCatalog(url: nil)
+        catalog.remember(SessionRuntimeDescriptor(connection: nil, revision: "rev-local", policy: .init()))
+        catalog.remember(try endpoint("cloud"))
+        catalog.remember(try endpoint("unregistered-work"))
+        catalog.remember(try endpoint("unregistered-jump"))
+
+        let model = SessionRuntimeLibraryModel(
+            catalog: catalog,
+            registry: registry,
+            closeQueue: SessionRuntimeCloseQueue(url: nil),
+            loader: { _ in [] }
+        )
+
+        #expect(model.endpoints.count == 2)
+        #expect(model.endpoints[0].descriptor.isLocal)
+        #expect(model.endpoints[1].descriptor.connection?.destination == "cloud")
+    }
+
     private func endpoint(_ destination: String) throws -> SessionRuntimeDescriptor {
         SessionRuntimeDescriptor(
             connection: try GitSSHConnection(destination: destination),

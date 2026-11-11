@@ -819,6 +819,7 @@ impl Registry {
                         containment_root,
                         initial_cwd: working_directory,
                         local_launch: None,
+                        presentation: None,
                     }),
                 ) {
                     if let Ok(mut r) = Record::load(&record_path) {

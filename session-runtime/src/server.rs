@@ -222,6 +222,86 @@ impl Drop for SocketGuard {
         let _ = fs::remove_file(&self.0);
     }
 }
+
+fn sniff_remote_cwd(bytes: &[u8], current: &mut Option<String>) {
+    let mut i = 0;
+    while i + 4 < bytes.len() {
+        if bytes[i] == 0x1b && bytes[i + 1] == b']' {
+            let mut end = i + 2;
+            while end < bytes.len()
+                && bytes[end] != 0x07
+                && !(bytes[end] == 0x1b && end + 1 < bytes.len() && bytes[end + 1] == b'\\')
+            {
+                end += 1;
+            }
+            if end < bytes.len() {
+                if let Ok(osc) = std::str::from_utf8(&bytes[i + 2..end]) {
+                    if let Some(rest) = osc.strip_prefix("7;") {
+                        let url = rest.trim();
+                        if let Some(after_scheme) = url
+                            .strip_prefix("file://")
+                            .or_else(|| url.strip_prefix("kitty-shell-cwd://"))
+                        {
+                            if let Some(slash) = after_scheme.find('/') {
+                                let raw_path = &after_scheme[slash..];
+                                if !raw_path.is_empty() && raw_path.len() <= 4096 {
+                                    *current = Some(raw_path.to_owned());
+                                }
+                            }
+                        }
+                    } else if let Some(title) = osc
+                        .strip_prefix("0;")
+                        .or_else(|| osc.strip_prefix("2;"))
+                    {
+                        if let Some((prefix, candidate)) = title.rsplit_once(':') {
+                            let prefix = prefix.trim();
+                            let candidate = candidate.trim();
+                            if !prefix.is_empty()
+                                && (candidate == "~"
+                                    || candidate.starts_with("~/")
+                                    || candidate.starts_with('/'))
+                                && candidate.len() <= 4096
+                                && !candidate.chars().any(char::is_control)
+                            {
+                                *current = Some(candidate.to_owned());
+                            }
+                        }
+                    }
+                }
+            }
+            i = end + 1;
+        } else {
+            i += 1;
+        }
+    }
+}
+
+fn resolve_session_ssh(
+    master: i32,
+    leader: u32,
+    vt: &Vt,
+    sniffed_cwd: &mut Option<String>,
+) -> Option<crate::location::SshTarget> {
+    let mut target = crate::location::session_ssh(master, leader).or_else(|| {
+        vt.activity()
+            .remote_host()
+            .map(|host| crate::location::SshTarget {
+                destination: host.to_owned(),
+                options: Vec::new(),
+                remote_cwd: None,
+            })
+    });
+    if let Some(ref mut ssh) = target {
+        if let Some(cwd) = vt.activity().remote_cwd() {
+            ssh.remote_cwd = Some(cwd.to_owned());
+        } else if let Some(cwd) = sniffed_cwd.as_ref() {
+            ssh.remote_cwd = Some(cwd.clone());
+        }
+    } else {
+        *sniffed_cwd = None;
+    }
+    target
+}
 /// Prototype intentionally has one session, created explicitly at daemon startup.
 /// Disconnect never touches the PTY; only Close or child exit ends the session.
 pub fn serve(path: &Path, argv: &[String]) -> io::Result<()> {
@@ -234,6 +314,7 @@ pub struct ManagedSession {
     pub containment_root: Option<PathBuf>,
     pub initial_cwd: Option<PathBuf>,
     pub local_launch: Option<LocalLaunchSpec>,
+    pub presentation: Option<std::sync::Arc<std::sync::Mutex<crate::activity::Snapshot>>>,
 }
 
 pub fn serve_managed(
@@ -342,7 +423,11 @@ pub fn serve_managed(
     let mut command = Command::new(&argv[0]);
     if let Some(launch) = local_launch.as_ref() {
         command.env_clear().envs(launch.env.iter());
-        if !launch.env.contains_key("TERM") {
+        if launch
+            .env
+            .get("TERM")
+            .is_none_or(|term| term.trim().is_empty() || term == "dumb")
+        {
             command.env("TERM", "xterm-256color");
         }
         if let Some(cwd) = launch.cwd.as_deref() {
@@ -371,6 +456,15 @@ pub fn serve_managed(
         command.env_remove("OMG_RUNTIME_REMOTE");
     } else {
         command.env("OMG_RUNTIME_REMOTE", "1");
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent().filter(|d| d.join("omg").is_file()) {
+                let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
+                let dir_str = dir.to_string_lossy();
+                if !path.split(':').any(|entry| entry == dir_str) {
+                    command.env("PATH", format!("{path}:{dir_str}"));
+                }
+            }
+        }
         if let (Some(managed), Some(tty)) = (managed.as_ref(), tty_name.as_deref()) {
             let original = std::env::var("VISUAL")
                 .ok()
@@ -472,6 +566,7 @@ pub fn serve_managed(
     )?;
     vt.activity_mut().local = local_mode;
     let mut output = crate::terminal_output::Relay::default();
+    let mut presentation_revision = None;
     let mut peers: Vec<Peer> = vec![];
     let mut close_after_flush = HashSet::new();
     let mut next_id = 1;
@@ -505,6 +600,8 @@ pub fn serve_managed(
             .as_ref()
             .and_then(|session| session.record.cwd.clone())
     });
+    let mut sniffed_remote_cwd: Option<String> = None;
+    let mut last_ssh = resolve_session_ssh(master, child.id(), &vt, &mut sniffed_remote_cwd);
     let mut last_foreground = local_mode
         .then(|| foreground_session_group(master, child.id()))
         .flatten();
@@ -512,8 +609,9 @@ pub fn serve_managed(
     let mut cwd_checked = Instant::now();
     let mut password_checked = Instant::now();
     if let Some(session) = &mut managed {
-        if session.record.cwd != last_cwd {
+        if session.record.cwd != last_cwd || session.record.ssh != last_ssh {
             session.record.cwd = last_cwd.clone();
+            session.record.ssh = last_ssh.clone();
             session.record.save(&session.path)?;
         }
     }
@@ -535,20 +633,24 @@ pub fn serve_managed(
                 }
             }
             let cwd = crate::location::session_cwd(master, child.id());
+            let ssh = resolve_session_ssh(master, child.id(), &vt, &mut sniffed_remote_cwd);
             let foreground = local_mode
                 .then(|| foreground_session_group(master, child.id()))
                 .flatten();
-            if cwd != last_cwd || foreground != last_foreground {
+            if cwd != last_cwd || foreground != last_foreground || ssh != last_ssh {
                 last_cwd = cwd;
                 last_foreground = foreground;
+                last_ssh = ssh;
                 if let Some(session) = &mut managed {
-                    if session.record.cwd != last_cwd {
+                    if session.record.cwd != last_cwd || session.record.ssh != last_ssh {
                         session.record.cwd = last_cwd.clone();
+                        session.record.ssh = last_ssh.clone();
                         session.record.save(&session.path)?;
                     }
                 }
                 let metadata = serde_json::to_vec(&serde_json::json!({
                     "cwd": last_cwd,
+                    "ssh": last_ssh,
                     "foreground_pid": foreground,
                     "tty_name": if local_mode { tty_name.as_deref() } else { None },
                     "password_input": last_password_input,
@@ -648,6 +750,7 @@ pub fn serve_managed(
                         "password_input": last_password_input,
                         "runtime_ms": runtime_millis(started_at),
                         "inline_viewer": inline_viewer,
+                        "writer_transfer": true,
                         "initial_output": initial_output.as_ref().map(|bytes| {
                             use base64::Engine;
                             base64::engine::general_purpose::STANDARD.encode(bytes)
@@ -686,6 +789,7 @@ pub fn serve_managed(
             }
         }
         let mut resizes = Vec::new();
+        let mut revoked = Vec::new();
         for peer in &mut peers {
             if close_after_flush.contains(&peer.id) {
                 continue;
@@ -707,13 +811,31 @@ pub fn serve_managed(
                     break;
                 }
                 match f.kind {
-                    CLAIM if writer.is_none() || writer == Some(peer.id) => {
-                        if !f.data.is_empty() && f.data != b"inline/1" {
+                    CLAIM
+                        if writer.is_none()
+                            || writer == Some(peer.id)
+                            || matches!(
+                                f.data.as_slice(),
+                                b"takeover/1" | b"inline-takeover/1"
+                            ) =>
+                    {
+                        if !f.data.is_empty()
+                            && !matches!(
+                                f.data.as_slice(),
+                                b"inline/1" | b"takeover/1" | b"inline-takeover/1"
+                            )
+                        {
                             peer.dead = true;
                             continue;
                         }
+                        if let Some(previous) = writer.filter(|id| *id != peer.id) {
+                            revoked.push(previous);
+                        }
                         initial_output = None;
-                        input.claim(f.data == b"inline/1");
+                        input.claim(matches!(
+                            f.data.as_slice(),
+                            b"inline/1" | b"inline-takeover/1"
+                        ));
                         writer = Some(peer.id);
                         peer.push(Frame::new(CLAIM, seq, &[]));
                     }
@@ -760,9 +882,19 @@ pub fn serve_managed(
                         terminate_group(master, child.id(), libc::SIGTERM);
                         closing = Some(Instant::now());
                     }
+                    // A former writer can have frames in flight when another
+                    // viewer takes over. Drop those frames without detaching it.
+                    INPUT | RESIZE | CLOSE => {}
                     _ => {
                         peer.dead = true;
                     }
+                }
+            }
+        }
+        for id in revoked {
+            if writer != Some(id) {
+                if let Some(peer) = peers.iter_mut().find(|p| p.id == id) {
+                    peer.push(Frame::new(b'B', seq, b"writer transferred"));
                 }
             }
         }
@@ -792,8 +924,19 @@ pub fn serve_managed(
             vt.activity_mut().foreground = foreground.and_then(|pid| i32::try_from(pid).ok());
             if local_mode && foreground != last_foreground {
                 last_foreground = foreground;
+                let ssh = resolve_session_ssh(master, child.id(), &vt, &mut sniffed_remote_cwd);
+                if ssh != last_ssh {
+                    last_ssh = ssh;
+                    if let Some(session) = &mut managed {
+                        if session.record.ssh != last_ssh {
+                            session.record.ssh = last_ssh.clone();
+                            session.record.save(&session.path)?;
+                        }
+                    }
+                }
                 let metadata = serde_json::to_vec(&serde_json::json!({
                     "cwd": last_cwd,
+                    "ssh": last_ssh,
                     "foreground_pid": foreground,
                     "tty_name": tty_name.as_deref(),
                     "password_input": last_password_input,
@@ -807,6 +950,9 @@ pub fn serve_managed(
             match pty.read(&mut bytes) {
                 Ok(0) => eof = true,
                 Ok(n) => {
+                    if last_ssh.is_some() {
+                        sniff_remote_cwd(&bytes[..n], &mut sniffed_remote_cwd);
+                    }
                     let visible = output.feed(
                         &mut OutputScreen {
                             vt: &mut vt,
@@ -856,6 +1002,14 @@ pub fn serve_managed(
                 // Escaped descendants retaining a slave cannot keep our actor forever.
                 if start.elapsed() > Duration::from_secs(policy.terminate_grace_seconds + 2) {
                     eof = true;
+                }
+            }
+        }
+        if presentation_revision != Some(vt.activity().revision()) {
+            if let Some(presentation) = managed.as_ref().and_then(|m| m.presentation.as_ref()) {
+                if let Ok(mut current) = presentation.lock() {
+                    *current = vt.activity().snapshot();
+                    presentation_revision = Some(current.revision);
                 }
             }
         }
@@ -1105,6 +1259,7 @@ mod tests {
 
     #[test]
     fn password_input_requires_canonical_mode_without_echo() {
+        let _spawn = PTY_SPAWN.lock().unwrap();
         let mut master = -1;
         let mut slave = -1;
         let mut size = unsafe { std::mem::zeroed::<libc::winsize>() };
@@ -1143,6 +1298,7 @@ mod tests {
 
     #[test]
     fn pty_enables_utf8_input_mode() {
+        let _spawn = PTY_SPAWN.lock().unwrap();
         let mut master = -1;
         let mut slave = -1;
         let mut size = unsafe { std::mem::zeroed::<libc::winsize>() };

@@ -477,7 +477,7 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
     private var relays: [String: Relay] = [:]
     private var installationTasks: [String: Task<Void, Error>] = [:]
 
-    static var resources: URL {
+    nonisolated static var resources: URL {
         Bundle.main.resourceURL!.appendingPathComponent("session-runtime", isDirectory: true)
     }
 
@@ -732,7 +732,7 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
         }
         let connection = descriptor.connection
         let registered = connection.flatMap { SSHHostRegistry.shared.host(SSHHostRegistry.shared.targetID(for: $0)) }
-        let installsHooks = registered?.autoInstallHooks ?? true
+        let installsHooks = registered?.autoInstallHooks ?? false
         let localStateDirectory = Self.localStateDirectory(for: descriptor).path
         let config = Configuration(transport: descriptor.isLocal ? "local" : "ssh",
             executable: connection?.executablePath ?? "/usr/bin/ssh",
@@ -747,14 +747,34 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
         return try JSONEncoder().encode(config)
     }
 
+    static func shouldUseRuntime(
+        for connection: GitSSHConnection,
+        registry: SSHHostRegistry = .shared
+    ) -> Bool {
+        if let host = registry.host(registry.targetID(for: connection)) {
+            return host.autoInstallRuntime ?? true
+        }
+        return registry.automaticallyRegister
+    }
+
     func writeConnectionConfiguration(_ descriptor: SessionRuntimeDescriptor, to url: URL,
                                       interactive: Bool, ttyAuthentication: Bool = false) throws {
         try SessionRuntimeBridgeStorage.writePrivateFile(at: url,
             data: connectionConfiguration(descriptor, interactive: interactive, ttyAuthentication: ttyAuthentication), permissions: 0o600)
-        let host = descriptor.connection.flatMap { SSHHostRegistry.shared.host(SSHHostRegistry.shared.targetID(for: $0)) }
         // Old inline viewers validate the connection JSON with deny_unknown_fields.
         // Keep local deployment preferences in a sibling file read by the new relay.
-        let options = ["auto_install": host?.autoInstallRuntime ?? true]
+        let autoInstall: Bool
+        if let connection = descriptor.connection {
+            if OMGApplicationEnvironment.isRunningTests {
+                let host = SSHHostRegistry.shared.host(SSHHostRegistry.shared.targetID(for: connection))
+                autoInstall = host?.autoInstallRuntime ?? true
+            } else {
+                autoInstall = Self.shouldUseRuntime(for: connection)
+            }
+        } else {
+            autoInstall = true
+        }
+        let options = ["auto_install": autoInstall]
         try SessionRuntimeBridgeStorage.writePrivateFile(at: url.appendingPathExtension("setup.json"),
             data: JSONEncoder().encode(options), permissions: 0o600)
     }

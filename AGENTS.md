@@ -40,6 +40,13 @@ See [.agents/WORKSPACE_DEV.md](.agents/WORKSPACE_DEV.md) for identity and data p
     input-to-photon latency still need a host desktop run.
 - **Test selector contract**: `python3 -m unittest discover -s dist -p 'test_omg_test_plan.py'`
   - Test tiers and mappings: `docs/TESTING.md`. Build and test strictly serially.
+- **Test (iOS, only when affected)**:
+  `python3 dist/omg_mobile_test_plan.py --changed-since <base-ref>`
+  - iOS is separate from macOS routine/release gates. Only mobile implementation
+    or its shared runtime/VT dependencies select mobile tests.
+  - Run `ios/scripts/test.sh --changed-since <base-ref>` for native core checks,
+    and `bash ios/scripts/test-vm.sh --changed-since <base-ref>` for the actual
+    guest OMG Dev + iOS Simulator flow. Unrelated changes skip both.
 - **Formatting (Zig)**: `zig fmt .`
 - **Formatting (Swift)**: `swiftlint lint --strict --fix`
 - **Formatting (other)**: `prettier -w .`

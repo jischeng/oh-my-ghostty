@@ -30,7 +30,7 @@ four-pane layouts with symbols and Agent assets.
 | Editor | File/directory destination, keymap, wrapping, pairs, inherited/catalog/builtin theme, conditional opacity/blur, typography and reset | Native rows and editor appearance |
 | Keyboard | Quick Input, inspector and workspace recorders, reset and conflicts, config link | Native recorders and secondary workspace page |
 | Git | Fetch interval, Agent/model identity, add/remove/reorder routes, prompt editing | Reuse existing native route table and sheets |
-| Remote Hosts | Explicit add/remove, SSH-config candidates, cached inventory, connection status, errors, automatic registration | Registered list, Add sheet, host details |
+| Remote Machines | Explicit add/remove, SSH-config candidates, cached inventory, connection status, errors, automatic registration | Registered list, Add sheet, machine details |
 | Agent | Local/remote target identity, discovery, Hook install/remove/repair, CLI maintenance, per-Agent policies, schedule/status, export, behavior/history/alerts | Local Agent page; per-host Agent pages |
 | Plugins | Official install/update/toggle/uninstall, GitHub package install, errors/status, capabilities | Native rows and detail sheets |
 | Advanced | Open/reveal/reload settings, Ghostty config, precedence and save errors | Native file actions and concise status |

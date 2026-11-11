@@ -62,7 +62,29 @@ def read_json(path):
     return json.loads(data)
 
 
+def runtime_binary():
+    env_bin = os.environ.get("OMG_RUNTIME_BIN")
+    if env_bin:
+        candidate = Path(env_bin)
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    versions = Path.home() / ".local/share/oh-my-ghostty/session-runtime/versions"
+    if versions.is_dir():
+        candidates = sorted(
+            (p / "omgd" for p in versions.iterdir() if (p / "verified").is_file() and (p / "omgd").is_file()),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if candidates:
+            return candidates[0]
+    raise ValueError("OMG session runtime binary (omgd) is not installed on this host")
+
+
 def main(arguments):
+    if arguments and arguments[0] in ("+mobile", "mobile", "+sessions", "sessions"):
+        binary = runtime_binary()
+        sub = arguments[0].lstrip("+")
+        os.execv(str(binary), [str(binary), sub, *arguments[1:]])
     if len(arguments) == 2 and arguments[0] == "exec":
         # Host-owned Git/files/inventory/Hook tasks retain their own protocols,
         # limits and stdin, but share OMG's remote process entry point.

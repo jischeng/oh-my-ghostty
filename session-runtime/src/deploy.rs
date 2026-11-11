@@ -320,6 +320,17 @@ elif command -v shasum >/dev/null 2>&1; then shasum -a 256 -c checksums >/dev/nu
 else echo 'No SHA-256 verifier on remote host' >&2; exit 1; fi
 chmod 700 omgd
 ./omgd version >/dev/null
+cat <<'EOF' > omg
+#!/bin/sh
+dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+case "${{1-}}" in
+  +mobile|mobile) shift; exec "$dir/omgd" mobile "$@" ;;
+  +sessions|sessions) shift; exec "$dir/omgd" sessions "$@" ;;
+  --version|+version|version) exec "$dir/omgd" version ;;
+  *) exec "$dir/omgd" "$@" ;;
+esac
+EOF
+chmod 700 omg
 printf '%s\n' {revision} > verified
 if [ ! -d "$version" ]; then mv "$staging" "$version"; fi
 "#,

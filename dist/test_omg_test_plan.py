@@ -100,6 +100,11 @@ class PlannerTests(unittest.TestCase):
     def test_all_module_retains_full_entry_point(self):
         self.assertEqual(self.plan(modules=["all"])["scope"], "all")
 
+    def test_mobile_only_changes_use_the_separate_mobile_workflow(self):
+        result = self.plan(paths=["ios/Sources/App.swift", "ios/project.yml"])
+        self.assertFalse(result["run_swift"])
+        self.assertEqual(result["unknown_paths"], [])
+
     def test_tabs_keep_policy_tests_and_defer_only_real_native_drag(self):
         result = self.plan(modules=["tabs"])
         self.assertIn("GhosttyTests/VerticalNativeTabOutlineTests", result["only_testing"])

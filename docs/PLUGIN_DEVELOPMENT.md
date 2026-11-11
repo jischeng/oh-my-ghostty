@@ -416,6 +416,104 @@ the user's pending remote-close requests. Persistence fixtures supply private UR
 The new process gets a new generation and PID. No-ID or unsupported Agents do not
 qualify for completion-driven cleanup; process TTL can still end their session.
 
+### Mobile LAN transport (internal, experimental)
+
+`omgd mobile` (and `omg +mobile`) exposes existing local runtime endpoints over a
+loopback, private LAN, or Tailscale IPv4 listener. The gateway and its private pairing
+token are independent of the macOS GUI: users can run `omg +mobile` (or
+`omg +mobile pair | start | serve | status | stop | revoke`) directly from the
+terminal on a Mac or on a remote SSH server where `omgd` is installed, rendering
+an in-terminal Unicode QR code and `omg://device?url=...&token=...` link.
+Authentication uses the `omg.<token>` WebSocket subprotocol, never a query
+parameter. Native clients omit Origin; browser origins require an explicit
+allowlist entry. The authenticated `/catalogue` socket returns endpoint
+IDs/names, and `/ws/<endpoint>` splices the existing host byte protocol to that
+endpoint's Unix socket. WebSocket messages are transport chunks, not
+protocol-frame boundaries. Discovery is strictly scoped to the local machine
+where `omgd` runs (channel/revision scoped on macOS, or `~/.omg/run/*/host.sock`
+and `~/.omg/mobile` on standalone/SSH hosts), does not bridge to registered SSH
+Cloud hosts, and does not export saved SSH credentials. See `ios/README.md`.
+
+Settings → Mobile Devices owns the desktop-facing lifecycle of that gateway.
+While OMG is running, it can start or stop the LAN listener, show the selected
+private address and readiness state, generate the private QR invitation, and
+revoke every pairing by deleting the bearer token. This is intentionally a
+separate settings destination from Remote Machines: the latter manages SSH
+compute targets, while Mobile Devices grants a paired phone access to local
+sessions. The current gateway exposes one full-access profile (session viewing,
+input/takeover, files/Git, and session creation); the page lists those grants
+explicitly and revocation is the security boundary. Granular per-capability
+tokens are not implied by these informational rows.
+
+Session INFO additionally advertises `writer_transfer: true` on new runtimes.
+Ordinary empty `W` claims retain their non-preemptive behavior. An explicit
+`W` payload `takeover/1` (or `inline-takeover/1` for delegated inline replies)
+transfers the writer while leaving the previous viewer attached; the old
+viewer receives the existing `B` event. Frames already in flight from a
+revoked writer cannot input, resize or close the session. New native clients
+only request takeover after the advertised capability and an applied snapshot;
+their first input waits for the grant and is discarded on reconnect/detach.
+Older pinned daemons are not upgraded or assumed to support takeover.
+
+The mobile viewer uses native snapshots, ACK barriers and ordered output/
+resize, initially observes without resizing, and sends no automatically
+generated terminal reports. It enables real input only after a writer grant.
+This is an internal client transport, not a stable plugin API or a
+public-internet deployment.
+
+The authenticated `/control` WebSocket adapts Termio companion wire v2 to OMG.
+It pushes a bounded project/session/agent roster and handles terminal/agent
+creation, generation-checked close, project files, uploads and git diff. Roster
+session IDs are opaque `endpoint/UUID/generation` routes; clients must never
+resolve an obsolete route to a newer generation. Projects may include Mac
+workspace checkpoint metadata, including empty workspaces with directory hints.
+The persisted private `mobile-device-id` identifies this gateway's support
+directory independently of another machine or channel.
+
+Mobile workspace/project discovery is host-owned: `workspaces` returns the
+desktop catalog, `hosts` combines the local machine with the desktop's persisted
+SSH registry when `omg-mobile-support` is present (and falls back to `local` on
+standalone/Linux SSH servers), `directories` performs a bounded native folder
+listing on `local` or via SSH on a registered host, and `addProject` stores the
+workspace/host/canonical-path tuple in private `mobile-projects.json`. When
+paired with a Mac, a remote project launches `/usr/bin/ssh` on the Mac as a jump
+host and does not pretend its remote paths are local file-plane roots; when the
+Mac is off, users can instead run `omg +mobile` (or `omgd mobile`) directly on
+the SSH server to pair that server as an independent device. Operations receive
+`_request` identities so asynchronous roster pushes cannot be mistaken for
+replies.
+
+The small `omg-mobile-support` helper only serves host and folder discovery for
+Add Project; it does not parse Agent history or credentials. Opening any Agent
+row opens the existing terminal view, fitted to the phone. Once the user starts
+interacting, the phone takes the writer and reports its viewport, so the host
+resizes/reflows the same PTY for the phone. The Mac may reclaim the writer
+later. Structured
+approval remains terminal/TUI-owned.
+
+New host probes advertise `holder-presentation/1`. Only when advertised, the
+gateway reads a bounded activity snapshot through the existing authenticated
+holder control socket (`G`, with UUID/generation/capability proof). The server
+copies committed hook/OSC facts into a mirror when the activity revision changes;
+serialization and socket I/O happen after releasing the mirror lock. Roster
+polls never attach a terminal viewer, take the writer or request a VT snapshot.
+Older runtimes show unavailable activity. The terminal's existing inner `G`
+watermark validation and VT context callbacks remain unchanged; callback effects
+are delivered after releasing the VT lock and fenced to their stream identity.
+These presentation facts never authorize input or structured approval replies.
+
+File operations are bounded, resolve canonical project roots and reject traversal
+and symlink escapes. Versioned writes report `conflict:` for the original mobile
+Reload/Overwrite flow; explicit base mtime zero permits overwrite. Git reads
+disable optional locks, external diff/textconv and fsmonitor and have bounded
+output/timeouts. Launches accept allowlisted agent commands and existing runtime
+policy; inherited runtime descriptors and GUI surface identifiers are stripped.
+An idle local broker may restart from its cached artifact through the existing
+launch helper. The gateway does not upgrade or replace running runtime binaries.
+SSH alias launch creates an ordinary local SSH PTY; it is not remote-runtime
+provisioning. `--print-invite` prints a private token-bearing pairing URL without
+starting a listener.
+
 ## Built-in Git review and commit actions
 
 Local Git filesystem events wake the visible Inspector after a short coalescing
@@ -455,10 +553,12 @@ Contributor checklist:
 
 Settings uses flat task-oriented navigation: **General**, **Appearance**,
 **Views & Tabs**, **Shell & Sessions**, **Input & Controls**, **Editor**,
-**Shortcuts**, **Agent**, **Git**, **Remote Hosts**, **Plugins**, and **Advanced**.
+**Shortcuts**, **Agent**, **Git**, **Mobile Devices**, **Remote Machines**,
+**Plugins**, and **Advanced**.
 There is no expandable Integrations group. Existing
 navigation identifiers remain valid. Git auto-fetch and AI commit-message
-configuration live under Git; registered hosts live under Remote Hosts; Agent hooks, history,
+configuration live under Git; registered machines live under Remote Machines;
+LAN pairing, mobile access permissions and gateway status live under Mobile Devices; Agent hooks, history,
 automatic Quick Input behavior and notifications live under Agent (formerly Agent Integration).
 Quick Input/history controls live under Input & Controls, with their shortcut under
 Shortcuts; startup recovery is under Shell & Sessions. Existing JSON keys are unchanged.
@@ -643,7 +743,7 @@ prevents all closes, and partial close errors stay visible. Release/Dev scopes
 remain separate. The settings exit switches use explicit close-on-quit wording
 while preserving the existing keep-on-quit storage keys through inverse bindings.
 
-**Remote Hosts** displays only registered records. SSH-config candidates appear
+**Remote Machines** displays only registered records. SSH-config candidates appear
 in **Add a host**, and explicit registration is local/offline. Host details expose
 connection actions, Agent configuration, and independent automatic `omgd`/Hook
 installation switches. Newly registered hosts default to runtime installation on
@@ -1111,7 +1211,7 @@ request sequence; failures return a typed `PluginProtocolFailure`.
 
 ### Built-in agent hook bridge (Internal)
 
-Settings → Remote Hosts → Add registers a concrete host from OpenSSH config
+Settings → Remote Machines → Add registers a concrete machine from OpenSSH config
 or a typed address, or opts into registration after successful connections.
 The chooser enumerates user/system config and Include files, deduplicates aliases,
 and uses local `ssh -G` output to display `alias · user@hostname[:port]`. Wildcard
@@ -1138,7 +1238,7 @@ registration or disconnecting before its result returns cannot publish a late
 record. Unregister removes the local record/cache and suppresses automatic
 re-registration until explicitly registered again; it does not remove remote Hooks.
 
-Settings → Agent configures **This Mac**; Remote Hosts → host → Agent configures
+Settings → Agent configures **This Mac**; Remote Machines → machine → Agent configures
 the selected registered host.
 Each Agent separates OMG status-extension actions from CLI version/update controls.
 Installed extensions always expose a reinstall action, even when CLI updates require

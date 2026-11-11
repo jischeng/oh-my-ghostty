@@ -63,6 +63,7 @@ final class SessionRuntimeCloseQueue: ObservableObject {
             Task { @MainActor in SessionRuntimeCloseQueue.shared.retry() }
         }
         retry()
+        MobileAccessController.shared.resumeIfEnabled()
     }
 
     func stop() {

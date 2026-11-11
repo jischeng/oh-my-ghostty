@@ -118,6 +118,26 @@ native confirmation before bulk close. The exit switches explicitly mean
 **Close local/SSH sessions on quit**; their values invert the existing persisted
 `sessions.keepLocalOnQuit` / `sessions.keepSSHOnQuit` booleans without migration.
 
+## Mobile pairing CLI
+
+The bundled `omg` CLI (and deployed remote `omg` / `omgd` runtime) also provides
+terminal-first mobile gateway pairing and lifecycle management:
+
+```sh
+omg +mobile
+omg +mobile pair --tailscale
+omg +mobile status --json
+omg +mobile revoke
+omg +mobile stop
+```
+
+Pairing with a Mac exposes that Mac's local sessions and allows the Mac to act
+as an SSH jump host for its registered remote hosts. Running `omg +mobile` (or
+`omgd mobile`) directly on an SSH server discovers that server's local
+`~/.omg/run/*/host.sock` sessions and stores mobile pairing state under
+`~/.omg/mobile`, allowing the phone to connect directly to the SSH server even
+when the Mac is powered off.
+
 ## Remote Quick Input
 
 New managed SSH PTYs receive a private external-editor bridge under

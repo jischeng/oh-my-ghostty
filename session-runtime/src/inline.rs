@@ -253,6 +253,7 @@ fn view_loop(
     let mut generation = 0;
     let mut sequence = None;
     let mut ready = false;
+    let mut writer = false;
     let mut raw = None;
     let mut first_picture = true;
     let mut initial_output = None;
@@ -287,6 +288,7 @@ fn view_loop(
                     let status: Value = serde_json::from_slice(&frame.data)?;
                     generation = frame.seq;
                     ready = false;
+                    writer = false;
                     sequence = None;
                     pending_password = Some(false);
                     pending_output.clear();
@@ -336,6 +338,7 @@ fn view_loop(
                     screen.take_responses();
                     first_picture = false;
                     ready = false;
+                    writer = false;
                     sequence = Some(frame.seq);
                     Frame::new(b'A', frame.seq, &generation.to_be_bytes()).send(socket)?;
                     Frame::new(b'W', generation, b"inline/1").send(socket)?;
@@ -343,7 +346,7 @@ fn view_loop(
                 b'W' if frame.seq == generation && sequence.is_some() => {
                     if raw.is_none() {
                         raw = Some(RawMode::enter()?);
-                    } else {
+                    } else if !ready {
                         // The outer PTY can still contain keys typed while this
                         // remote generation was unavailable.
                         unsafe {
@@ -351,6 +354,7 @@ fn view_loop(
                         }
                     }
                     ready = true;
+                    writer = true;
                     stdout.write_all(&pending_output)?;
                     pending_output.clear();
                     persist_record(
@@ -362,6 +366,22 @@ fn view_loop(
                     )?;
                     size = dimensions();
                     Frame::new(b'R', generation, &size).send(socket)?;
+                }
+                b'B' if sequence.is_some() => {
+                    if raw.is_none() {
+                        raw = Some(RawMode::enter()?);
+                    }
+                    ready = true;
+                    writer = false;
+                    stdout.write_all(&pending_output)?;
+                    pending_output.clear();
+                    persist_record(
+                        session,
+                        &[
+                            ("phase", Value::String("ready".into())),
+                            ("attachmentGeneration", Value::from(generation)),
+                        ],
+                    )?;
                 }
                 b'O' => {
                     let previous = sequence.ok_or_else(|| {
@@ -429,7 +449,7 @@ fn view_loop(
                         .and_then(|s| s.parse().ok())
                         .ok_or_else(|| io::Error::other("invalid remote exit status"));
                 }
-                b'E' | b'B' => {
+                b'E' => {
                     return Err(io::Error::other(
                         String::from_utf8_lossy(&frame.data).into_owned(),
                     ))
@@ -458,7 +478,7 @@ fn view_loop(
             }
             stdout.flush()?;
         }
-        if ready {
+        if ready && writer {
             let current = dimensions();
             if size != current {
                 size = current;
@@ -491,6 +511,9 @@ fn view_loop(
                     return Ok(0);
                 }
                 if ready {
+                    if !writer {
+                        Frame::new(b'W', generation, b"inline-takeover/1").send(socket)?;
+                    }
                     Frame::new(b'I', generation, &bytes[..len]).send(socket)?;
                 } else if bytes[..len].contains(&3) {
                     return Ok(130);

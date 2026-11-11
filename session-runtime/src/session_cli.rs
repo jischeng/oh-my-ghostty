@@ -85,7 +85,37 @@ fn valid_revision(value: &str) -> bool {
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
 }
-fn default_support() -> io::Result<PathBuf> {
+pub(crate) fn current_revision() -> String {
+    if let Ok(exe) = env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for name in ["revision", "verified"] {
+                if let Ok(text) = fs::read_to_string(dir.join(name)) {
+                    let trimmed = text.trim();
+                    if valid_revision(trimmed) {
+                        return trimmed.to_owned();
+                    }
+                }
+            }
+        }
+    }
+    env!("CARGO_PKG_VERSION").to_owned()
+}
+pub(crate) fn canonical_snapshot_revision(raw: &str) -> &str {
+    match raw.trim() {
+        "9c4d662347abb5857b04" | "28eb8860dee53f323499" | "fa3d1581b35d56a5313b" => {
+            "59c5cc7b4d1fe408faf5"
+        }
+        trimmed => trimmed,
+    }
+}
+pub(crate) fn current_snapshot_revision() -> Option<String> {
+    let exe = env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let text = fs::read_to_string(dir.join("snapshot-revision")).ok()?;
+    let trimmed = canonical_snapshot_revision(&text);
+    valid_revision(trimmed).then(|| trimmed.to_owned())
+}
+pub(crate) fn default_support() -> io::Result<PathBuf> {
     let executable = env::current_exe()?;
     let contents = executable
         .parent()
@@ -108,6 +138,158 @@ fn default_support() -> io::Result<PathBuf> {
         }
     };
     Ok(home()?.join("Library/Application Support").join(name))
+}
+pub(crate) fn default_mobile_support() -> io::Result<PathBuf> {
+    if let Ok(support) = default_support() {
+        return Ok(support);
+    }
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    let omg_dir = home()?.join(".omg");
+    if !omg_dir.exists() {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&omg_dir)?;
+    }
+    let mobile_dir = omg_dir.join("mobile");
+    if !mobile_dir.exists() {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&mobile_dir)?;
+    }
+    fs::set_permissions(&mobile_dir, fs::Permissions::from_mode(0o700))?;
+    let meta = fs::symlink_metadata(&mobile_dir)?;
+    if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 {
+        return Err(io::Error::other(
+            "Mobile state directory must be private and owned by the current user",
+        ));
+    }
+    Ok(mobile_dir)
+}
+
+fn check_runtime_root(root: &Path) -> io::Result<Option<PathBuf>> {
+    if !root.exists() {
+        return Ok(None);
+    }
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::symlink_metadata(root)?;
+    if !metadata.is_dir()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0
+    {
+        return Err(io::Error::other(
+            "Runtime directory must be private and owned by the current user",
+        ));
+    }
+    let socket = root.join("host.sock");
+    Ok(socket.exists().then_some(socket))
+}
+
+/// Mobile uses the same channel/revision namespaces as the management CLI.
+/// Discovery never launches shells, installs runtimes, or includes SSH credentials.
+pub(crate) fn mobile_targets(support: &Path) -> io::Result<Vec<(String, PathBuf)>> {
+    let path = support.join("session-runtime/endpoints.json");
+    let mut ordered: Vec<(String, PathBuf)> = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let run_root = home()?.join(".omg/run");
+    let revision = current_revision();
+    let expected_snapshot = current_snapshot_revision();
+    let current_key = digest(&format!("{}\0{revision}", support.display()));
+    if let Some(socket) = check_runtime_root(&run_root.join(&current_key[..20]))? {
+        if seen.insert(socket.clone()) {
+            ordered.push((format!("This Machine · {revision}"), socket));
+        }
+    }
+    if path.exists() {
+        if fs::metadata(&path)?.len() > 4 * 1024 * 1024 {
+            return Err(io::Error::other("Catalogue is too large"));
+        }
+        let archive: Archive = serde_json::from_slice(&fs::read(&path)?)?;
+        if archive.version != 1 || archive.endpoints.len() > 512 {
+            return Err(io::Error::other("Invalid catalogue"));
+        }
+        for endpoint in archive.endpoints {
+            let d = endpoint.descriptor;
+            if d.connection.is_some() || !valid_revision(&d.revision) {
+                continue;
+            }
+            if d.revision != revision {
+                if let Some(expected) = &expected_snapshot {
+                    let snap_path = support
+                        .join("session-runtime/versions")
+                        .join(&d.revision)
+                        .join("snapshot-revision");
+                    let compatible = fs::read_to_string(snap_path)
+                        .ok()
+                        .is_some_and(|s| canonical_snapshot_revision(&s) == expected);
+                    if !compatible {
+                        continue;
+                    }
+                }
+            }
+            let key = digest(&format!("{}\0{}", support.display(), d.revision));
+            let root = run_root.join(&key[..20]);
+            if let Some(socket) = check_runtime_root(&root)? {
+                if seen.insert(socket.clone()) {
+                    ordered.push((format!("This Machine · {}", d.revision), socket));
+                }
+            }
+        }
+    }
+    let versions_dir = support.join("session-runtime/versions");
+    if let Ok(entries) = fs::read_dir(&versions_dir) {
+        let mut dirs: Vec<_> = entries.take(256).filter_map(Result::ok).collect();
+        dirs.sort_by_key(|e| e.file_name());
+        for entry in dirs {
+            let Some(rev) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if !valid_revision(&rev) {
+                continue;
+            }
+            if rev != revision {
+                if let Some(expected) = &expected_snapshot {
+                    let snap_path = entry.path().join("snapshot-revision");
+                    let compatible = fs::read_to_string(snap_path)
+                        .ok()
+                        .is_some_and(|s| canonical_snapshot_revision(&s) == expected);
+                    if !compatible {
+                        continue;
+                    }
+                }
+            }
+            let key = digest(&format!("{}\0{rev}", support.display()));
+            let root = run_root.join(&key[..20]);
+            if let Some(socket) = check_runtime_root(&root)? {
+                if seen.insert(socket.clone()) {
+                    ordered.push((format!("This Machine · {rev}"), socket));
+                }
+            }
+        }
+    }
+    let is_headless_mobile = support == home()?.join(".omg/mobile");
+    if !path.exists() && is_headless_mobile && run_root.exists() {
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::symlink_metadata(&run_root)?;
+        if meta.is_dir() && meta.uid() == unsafe { libc::geteuid() } && meta.mode() & 0o077 == 0 {
+            let mut entries: Vec<_> = fs::read_dir(&run_root)?
+                .take(256)
+                .filter_map(Result::ok)
+                .collect();
+            entries.sort_by_key(|e| e.file_name());
+            for entry in entries {
+                let candidate = entry.path();
+                if let Ok(Some(socket)) = check_runtime_root(&candidate) {
+                    if seen.insert(socket.clone()) {
+                        let label = entry.file_name().to_string_lossy().into_owned();
+                        ordered.push((format!("This Machine · {label}"), socket));
+                    }
+                }
+            }
+        }
+    }
+    Ok(ordered)
 }
 fn home() -> io::Result<PathBuf> {
     env::var_os("HOME")

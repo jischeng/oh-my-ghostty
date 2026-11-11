@@ -21,7 +21,6 @@ final class InspectorHostController: NSViewController {
     private var lastContext: InspectorPaneContext?
     private var environment = EnvironmentValues()
     private var backgroundColor = Color.clear
-    private var backgroundOpacity = 0.0
 
     init(controller: TerminalController, layoutState: VerticalTabWindowLayoutState,
          registry: InspectorRegistry) {
@@ -111,12 +110,11 @@ final class InspectorHostController: NSViewController {
         navigation.addArrangedSubview(spacer)
     }
 
-    func configure(isPresented: Bool, backgroundColor: Color, backgroundOpacity: Double,
+    func configure(isPresented: Bool, backgroundColor: Color,
                    environment: EnvironmentValues) {
         _ = view
         requestedPresentation = isPresented
         self.backgroundColor = backgroundColor
-        self.backgroundOpacity = backgroundOpacity
         self.environment = environment
         scheduleRefresh()
     }
@@ -172,7 +170,9 @@ final class InspectorHostController: NSViewController {
         registry.presentationDidChange(to: visible ? paneID : nil, context: context)
         deck.reconcile(tabID: context.tabID, availableIDs: Set(registry.entries.map(\.id)))
         guard visible else { return }
-        view.layer?.backgroundColor = NSColor(backgroundColor.opacity(backgroundOpacity)).cgColor
+        // `NativeTerminalShell.chromeBackdrop` owns the Inspector fill so both
+        // sidebars share a single composited layer.
+        view.layer?.backgroundColor = NSColor.clear.cgColor
         updateNavigation()
         view.needsLayout = true
         guard visible, let paneID, let content = registry.content(for: paneID, context: context) else { return }

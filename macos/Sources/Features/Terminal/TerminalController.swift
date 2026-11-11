@@ -597,14 +597,17 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // Setup our initial derived config based on the current app config
         self.derivedConfig = DerivedConfig(ghostty.config)
         let initialBackgroundColor = ghostty.config.backgroundColor
+        let parentIsOpaque = parent?.styleMask.contains(.fullScreen) == true ||
+            (parent?.windowController as? BaseTerminalController)?.isBackgroundOpaque == true
         self.terminalBackgroundColor = initialBackgroundColor
         self.terminalBackgroundOpacity = ghostty.config.backgroundOpacity
         self.terminalChromeBackground = Self.chromeBackground(
             color: initialBackgroundColor,
             opacity: ghostty.config.backgroundOpacity,
-            windowIsOpaque: false,
+            windowIsOpaque: parentIsOpaque,
             colorspaceIsDisplayP3: ghostty.config.windowColorspaceIsDisplayP3,
-            linearBlending: ghostty.config.usesLinearAlphaBlending
+            linearBlending: ghostty.config.usesLinearAlphaBlending,
+            usesWindowGlass: ghostty.config.backgroundBlur.isGlassStyle
         )
         self.sidebarDividerColor = ghostty.config.splitDividerColor(
             for: initialBackgroundColor
@@ -3881,7 +3884,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             opacity: backgroundOpacity,
             windowIsOpaque: windowIsOpaque,
             colorspaceIsDisplayP3: ghostty.config.windowColorspaceIsDisplayP3,
-            linearBlending: ghostty.config.usesLinearAlphaBlending
+            linearBlending: ghostty.config.usesLinearAlphaBlending,
+            usesWindowGlass: surfaceConfig.backgroundBlur.isGlassStyle
         )
         let dividerColor = ghostty.config.splitDividerColor(for: backgroundColor)
         chromeAppearanceGeneration &+= 1
@@ -3953,14 +3957,16 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         opacity: Double,
         windowIsOpaque: Bool,
         colorspaceIsDisplayP3: Bool = false,
-        linearBlending: Bool = false
+        linearBlending: Bool = false,
+        usesWindowGlass: Bool = false
     ) -> Color {
         OMGThemeBackground.matchingChrome(
             color: color,
             opacity: opacity,
             windowIsOpaque: windowIsOpaque,
             colorspaceIsDisplayP3: colorspaceIsDisplayP3,
-            linearBlending: linearBlending
+            linearBlending: linearBlending,
+            usesWindowGlass: usesWindowGlass
         )
     }
 

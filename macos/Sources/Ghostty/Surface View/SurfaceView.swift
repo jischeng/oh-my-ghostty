@@ -25,9 +25,43 @@ extension Ghostty {
 
         @EnvironmentObject private var ghostty: Ghostty.App
         @Environment(\.ghosttyLastFocusedSurface) private var lastFocusedSurface
+        @Environment(\.editorTerminalController) private var terminalController
 
         private var isFocusedSurface: Bool {
             surfaceFocus || lastFocusedSurface?.value === surfaceView
+        }
+
+        private var windowIsOpaque: Bool {
+            let window = surfaceView.window
+            if let terminalController {
+                return window?.styleMask.contains(.fullScreen) == true || terminalController.isBackgroundOpaque
+            }
+            return window?.isOpaque ?? false
+        }
+
+        private var unfocusedSplitMask: OMGThemeBackground.UnfocusedSplitMask {
+            guard isSplit && !isFocusedSurface else { return .identity }
+            return OMGThemeBackground.unfocusedSplitMask(
+                dimmingAmount: ghostty.config.unfocusedSplitOpacity,
+                explicitFill: ghostty.config.explicitUnfocusedSplitFill,
+                surfaceBackground: surfaceView.backgroundColor ?? surfaceView.derivedConfig.backgroundColor,
+                backgroundOpacity: surfaceView.derivedConfig.backgroundOpacity,
+                windowIsOpaque: windowIsOpaque,
+                colorspaceIsDisplayP3: ghostty.config.windowColorspaceIsDisplayP3,
+                linearBlending: ghostty.config.usesLinearAlphaBlending,
+                usesWindowGlass: surfaceView.derivedConfig.backgroundBlur.isGlassStyle
+            )
+        }
+
+        private var surfaceFallbackBackground: Color {
+            OMGThemeBackground.matchingChrome(
+                color: surfaceView.backgroundColor ?? surfaceView.derivedConfig.backgroundColor,
+                opacity: surfaceView.derivedConfig.backgroundOpacity,
+                windowIsOpaque: windowIsOpaque,
+                colorspaceIsDisplayP3: ghostty.config.windowColorspaceIsDisplayP3,
+                linearBlending: ghostty.config.usesLinearAlphaBlending,
+                usesWindowGlass: surfaceView.derivedConfig.backgroundBlur.isGlassStyle
+            )
         }
 
         var body: some View {
@@ -42,6 +76,7 @@ extension Ghostty {
                     let pubResign = center.publisher(for: NSWindow.didResignKeyNotification)
 
                     SurfaceRepresentable(view: surfaceView, size: geo.size, lease: presentationLease)
+                        .opacity(surfaceView.healthy && surfaceView.error == nil ? unfocusedSplitMask.surfaceOpacity : 0)
                         .focused($surfaceFocus)
                         .focusedValue(\.ghosttySurfacePwd, surfaceView.pwd)
                         .focusedValue(\.ghosttySurfaceView, surfaceView)
@@ -145,25 +180,28 @@ extension Ghostty {
 
                 // If our surface is not healthy, then we render an error view over it.
                 if !surfaceView.healthy {
-                    Rectangle().fill(ghostty.config.backgroundColor)
-                    SurfaceRendererUnhealthyView()
-                } else if surfaceView.error != nil {
-                    Rectangle().fill(ghostty.config.backgroundColor)
-                    if let message = surfaceView.runtimeConnectionError {
-                        Text(message).padding().textSelection(.enabled)
-                    } else {
-                        SurfaceErrorView()
+                    ZStack {
+                        Rectangle().fill(surfaceFallbackBackground)
+                        SurfaceRendererUnhealthyView()
                     }
+                    .opacity(unfocusedSplitMask.surfaceOpacity)
+                } else if surfaceView.error != nil {
+                    ZStack {
+                        Rectangle().fill(surfaceFallbackBackground)
+                        if let message = surfaceView.runtimeConnectionError {
+                            Text(message).padding().textSelection(.enabled)
+                        } else {
+                            SurfaceErrorView()
+                        }
+                    }
+                    .opacity(unfocusedSplitMask.surfaceOpacity)
                 }
 
-                if isSplit && !isFocusedSurface {
-                    let overlayOpacity = ghostty.config.unfocusedSplitOpacity
-                    if overlayOpacity > 0 {
-                        Rectangle()
-                            .fill(ghostty.config.unfocusedSplitFill)
-                            .allowsHitTesting(false)
-                            .opacity(overlayOpacity)
-                    }
+                if unfocusedSplitMask.overlayOpacity > 0 {
+                    Rectangle()
+                        .fill(unfocusedSplitMask.overlayColor)
+                        .allowsHitTesting(false)
+                        .opacity(unfocusedSplitMask.overlayOpacity)
                 }
 
                 // Grab handle for dragging the window. We want this to appear at the very

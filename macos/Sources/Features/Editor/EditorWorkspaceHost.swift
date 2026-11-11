@@ -151,7 +151,8 @@ struct EditorWorkspaceHost<Terminal: View>: View {
             NativeEditorContentDeck(items: documentItems, selectedID: selectedContentID)
         }
         .background(EditorBackdrop(color: appearanceTheme.background, opacity: appearanceOpacity, blur: appearanceBlur,
-                                   usesWindowBlur: settings.editorSettings.followsOMG))
+                                   usesWindowBlur: settings.editorSettings.followsOMG,
+                                   windowChromeFill: followsOMGBackdropFill))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Code Editor")
     }
@@ -250,6 +251,19 @@ struct EditorWorkspaceHost<Terminal: View>: View {
     private var appearanceBlur: OhMyGhosttyBackgroundBlur {
         guard settings.editorSettings.followsOMG else { return settings.editorBlur }
         return controller.ghostty.config.editorBackgroundBlur
+    }
+
+    private var followsOMGBackdropFill: NSColor? {
+        guard settings.editorSettings.followsOMG else { return nil }
+        let windowIsOpaque = controller.window?.styleMask.contains(.fullScreen) == true || controller.isBackgroundOpaque
+        return NSColor(OMGThemeBackground.matchingChrome(
+            color: terminalColor,
+            opacity: terminalOpacity,
+            windowIsOpaque: windowIsOpaque,
+            colorspaceIsDisplayP3: controller.ghostty.config.windowColorspaceIsDisplayP3,
+            linearBlending: controller.ghostty.config.usesLinearAlphaBlending,
+            usesWindowGlass: surfaceView.derivedConfig.backgroundBlur.isGlassStyle
+        ))
     }
 
     private var terminalColor: Color {
@@ -436,11 +450,13 @@ struct EditorBackdrop: NSViewRepresentable {
     let opacity: Double
     let blur: OhMyGhosttyBackgroundBlur
     var usesWindowBlur = false
+    var windowChromeFill: NSColor?
 
     var localEffect: OhMyGhosttyBackgroundBlur {
-        // Ordinary Ghostty blur is already applied behind the whole window.
-        // A second NSVisualEffectView would introduce its own gray material.
-        usesWindowBlur && blur == .enabled ? .disabled : blur
+        // When following OMG, both ordinary Ghostty blur and macOS liquid glass
+        // are already applied at the window level. Never stack a second
+        // NSVisualEffectView or TerminalGlassView inside a split pane.
+        usesWindowBlur ? .disabled : blur
     }
 
     func makeNSView(context: Context) -> BackdropView { BackdropView() }
@@ -471,7 +487,11 @@ struct EditorBackdrop: NSViewRepresentable {
                 ])
             }
         }
-        view.fillColor = blur == .disabled ? color.withAlphaComponent(opacity) : .clear
+        if let windowChromeFill, blur == .disabled {
+            view.fillColor = windowChromeFill
+        } else {
+            view.fillColor = blur == .disabled ? color.withAlphaComponent(opacity) : .clear
+        }
 #if compiler(>=6.2)
         if #available(macOS 26.0, *), let glass = view.subviews.first as? TerminalGlassView {
             glass.configure(style: blur == .macosGlassClear ? .clear : .regular,

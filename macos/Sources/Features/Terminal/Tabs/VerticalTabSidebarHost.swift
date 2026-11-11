@@ -152,7 +152,9 @@ final class VerticalTabSidebarContainer: NSView {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        lastFrame.imageScaling = .scaleAxesIndependently
+        clipsToBounds = true
+        lastFrame.imageScaling = .scaleNone
+        lastFrame.imageAlignment = .alignTopLeft
         lastFrame.autoresizingMask = [.width, .height]
         lastFrame.frame = bounds
         addSubview(lastFrame)

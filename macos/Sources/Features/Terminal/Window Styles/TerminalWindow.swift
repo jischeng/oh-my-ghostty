@@ -576,6 +576,50 @@ class TerminalWindow: NSWindow {
         return derivedConfig.backgroundColor.withAlphaComponent(alpha)
     }
 
+    /// Renderer-matched background color for transparent titlebar layers so the
+    /// titlebar seam matches `chromeBackdrop` and the Metal surface across
+    /// Display P3 quantization, liquid glass, and fullscreen/opaque overrides.
+    var renderedTitlebarBackgroundColor: NSColor? {
+        let forceOpaque = styleMask.contains(.fullScreen) || (terminalController?.isBackgroundOpaque ?? false)
+        let colorspaceIsDisplayP3 = terminalController?.ghostty.config.windowColorspaceIsDisplayP3 ?? false
+        let linearBlending = terminalController?.ghostty.config.usesLinearAlphaBlending ?? false
+        let allowsGlassClear = derivedConfig.macosTitlebarStyle == .transparent ||
+            derivedConfig.macosTitlebarStyle == .tabs
+
+        if let terminalController, !terminalController.surfaceTree.isEmpty {
+            let surface: Ghostty.SurfaceView?
+            if let focusedSurface = terminalController.focusedSurface,
+               let treeRoot = terminalController.surfaceTree.root,
+               let focusedNode = treeRoot.node(view: focusedSurface),
+               treeRoot.spatial().doesBorder(side: .up, from: focusedNode) {
+                surface = focusedSurface
+            } else {
+                surface = terminalController.surfaceTree.root?.leftmostLeaf()
+            }
+
+            if let surface {
+                let backgroundColor = surface.backgroundColor ?? surface.derivedConfig.backgroundColor
+                return NSColor(OMGThemeBackground.matchingChrome(
+                    color: backgroundColor,
+                    opacity: surface.derivedConfig.backgroundOpacity,
+                    windowIsOpaque: forceOpaque,
+                    colorspaceIsDisplayP3: colorspaceIsDisplayP3,
+                    linearBlending: linearBlending,
+                    usesWindowGlass: allowsGlassClear && surface.derivedConfig.backgroundBlur.isGlassStyle
+                ))
+            }
+        }
+
+        return NSColor(OMGThemeBackground.matchingChrome(
+            color: Color(derivedConfig.backgroundColor),
+            opacity: derivedConfig.backgroundOpacity,
+            windowIsOpaque: forceOpaque,
+            colorspaceIsDisplayP3: colorspaceIsDisplayP3,
+            linearBlending: linearBlending,
+            usesWindowGlass: allowsGlassClear && derivedConfig.backgroundBlur.isGlassStyle
+        ))
+    }
+
     func updateColorSchemeForSurfaceTree() {
         terminalController?.updateColorSchemeForSurfaceTree()
     }

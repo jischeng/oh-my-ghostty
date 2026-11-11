@@ -4,14 +4,35 @@ import SwiftUI
 
 /// Shared terminal chrome and opaque auxiliary-window theme policy.
 enum OMGThemeBackground {
+    struct UnfocusedSplitMask: Equatable {
+        let surfaceOpacity: Double
+        let overlayColor: Color
+        let overlayOpacity: Double
+
+        static let identity = Self(surfaceOpacity: 1, overlayColor: .clear, overlayOpacity: 0)
+    }
+
     static func matchingChrome(
         color: Color,
         opacity: Double,
         windowIsOpaque: Bool,
         colorspaceIsDisplayP3: Bool,
-        linearBlending: Bool = false
+        linearBlending: Bool = false,
+        usesWindowGlass: Bool = false
     ) -> Color {
-        if windowIsOpaque || opacity >= 1 {
+        if windowIsOpaque {
+            return TerminalRenderColorQuantizer.matchingRenderedColor(
+                color, colorspaceIsDisplayP3: colorspaceIsDisplayP3
+            ).opacity(1)
+        }
+        // Window-level liquid glass (`TerminalGlassView`) already tints the entire
+        // window at `backgroundOpacity`, and the Metal renderer zeroes terminal
+        // background alpha (`src/renderer/generic.zig`). Keep adjacent chrome clear
+        // so sidebars, titlebar, quick input, and editor do not double-tint.
+        if usesWindowGlass {
+            return .clear
+        }
+        if opacity >= 1 {
             return TerminalRenderColorQuantizer.matchingRenderedColor(
                 color, colorspaceIsDisplayP3: colorspaceIsDisplayP3
             ).opacity(1)
@@ -21,6 +42,70 @@ enum OMGThemeBackground {
         if linearBlending { return color.opacity(max(0, min(1, opacity))) }
         return TerminalRenderColorQuantizer.matchingTranslucentColor(
             color, opacity: opacity, colorspaceIsDisplayP3: colorspaceIsDisplayP3
+        )
+    }
+
+    /// Computes surface and overlay opacities for an unfocused split pane so empty
+    /// background pixels retain the exact same alpha and quantized RGB as focused
+    /// splits and sidebars, while foreground glyphs fade by `dimmingAmount`.
+    static func unfocusedSplitMask(
+        dimmingAmount: Double,
+        explicitFill: Color? = nil,
+        surfaceBackground: Color,
+        backgroundOpacity: Double,
+        windowIsOpaque: Bool,
+        colorspaceIsDisplayP3: Bool,
+        linearBlending: Bool = false,
+        usesWindowGlass: Bool = false
+    ) -> UnfocusedSplitMask {
+        let dim = min(max(dimmingAmount, 0), 1)
+        guard dim > 0 else { return .identity }
+
+        if let explicitFill {
+            return .init(surfaceOpacity: 1, overlayColor: explicitFill, overlayOpacity: dim)
+        }
+
+        if windowIsOpaque || (!usesWindowGlass && backgroundOpacity >= 1) {
+            let fill = TerminalRenderColorQuantizer.matchingRenderedColor(
+                surfaceBackground, colorspaceIsDisplayP3: colorspaceIsDisplayP3
+            ).opacity(1)
+            return .init(surfaceOpacity: 1, overlayColor: fill, overlayOpacity: dim)
+        }
+
+        if usesWindowGlass {
+            return .init(surfaceOpacity: max(0, 1 - dim), overlayColor: .clear, overlayOpacity: 0)
+        }
+
+        let clampedOpacity = min(max(backgroundOpacity, 0), 1)
+        let effectiveAlpha: Double
+        let straightFill: Color
+        if linearBlending {
+            guard clampedOpacity > 0 else {
+                return .init(surfaceOpacity: max(0, 1 - dim), overlayColor: .clear, overlayOpacity: 0)
+            }
+            effectiveAlpha = clampedOpacity
+            straightFill = surfaceBackground.opacity(1)
+        } else {
+            let alphaByte = Int((clampedOpacity * 255).rounded())
+            guard alphaByte > 0 else {
+                return .init(surfaceOpacity: max(0, 1 - dim), overlayColor: .clear, overlayOpacity: 0)
+            }
+            effectiveAlpha = Double(alphaByte) / 255.0
+            let matched = NSColor(TerminalRenderColorQuantizer.matchingTranslucentColor(
+                surfaceBackground,
+                opacity: clampedOpacity,
+                colorspaceIsDisplayP3: colorspaceIsDisplayP3
+            )).withAlphaComponent(1)
+            straightFill = Color(nsColor: matched)
+        }
+
+        let overlayOpacity = effectiveAlpha * dim
+        let denominator = 1 - overlayOpacity
+        let surfaceOpacity = denominator > 1e-6 ? min(max((1 - dim) / denominator, 0), 1) : 0
+        return .init(
+            surfaceOpacity: surfaceOpacity,
+            overlayColor: straightFill,
+            overlayOpacity: overlayOpacity
         )
     }
 
@@ -62,6 +147,18 @@ extension Ghostty.Config {
         let key = "alpha-blending"
         guard ghostty_config_get(config, &value, key, UInt(key.utf8.count)), let value else { return false }
         return ["linear", "linear-corrected"].contains(String(cString: value))
+    }
+
+    var explicitUnfocusedSplitFill: Color? {
+        guard let config else { return nil }
+        var color = ghostty_config_color_s()
+        let key = "unfocused-split-fill"
+        guard ghostty_config_get(config, &color, key, UInt(key.utf8.count)) else { return nil }
+        return Color(
+            red: Double(color.r) / 255,
+            green: Double(color.g) / 255,
+            blue: Double(color.b) / 255
+        )
     }
 }
 

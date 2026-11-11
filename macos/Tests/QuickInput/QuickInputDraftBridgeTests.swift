@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import IOSurface
 import Testing
 @testable import Ghostty
 
@@ -268,6 +269,127 @@ struct QuickInputDraftBridgeTests {
         surface.setFrameSize(NSSize(width: surface.frame.width, height: surface.frame.height - 30))
         #expect(parent.subviews.count == count)
         snapshot.remove()
+    }
+
+    @Test func translucentSnapshotPreservesSingleLayerAlphaAndRestoresSurfaceOpacity() throws {
+        final class SyntheticSurfaceView: NSView {
+            let ioLayer = CALayer()
+            override init(frame frameRect: NSRect) {
+                super.init(frame: frameRect)
+                wantsLayer = true
+            }
+            required init?(coder: NSCoder) { nil }
+            override func makeBackingLayer() -> CALayer { ioLayer }
+        }
+
+        let colorSpace = try #require(CGColorSpace(name: CGColorSpace.displayP3))
+        let properties: [CFString: Any] = [
+            kIOSurfaceWidth: 160,
+            kIOSurfaceHeight: 160,
+            kIOSurfaceBytesPerElement: 4,
+            kIOSurfaceBytesPerRow: 160 * 4,
+            kIOSurfaceAllocSize: 160 * 160 * 4,
+            kIOSurfacePixelFormat: 0x42475241,
+        ]
+        let ioSurface = try #require(IOSurfaceCreate(properties as CFDictionary))
+        if let colorSpacePlist = colorSpace.copyPropertyList() {
+            IOSurfaceSetValue(ioSurface, kIOSurfaceColorSpace, colorSpacePlist)
+        }
+
+        func fillIOSurface(backgroundBGRA: [UInt8]) {
+            IOSurfaceLock(ioSurface, [], nil)
+            defer { IOSurfaceUnlock(ioSurface, [], nil) }
+            let base = IOSurfaceGetBaseAddress(ioSurface).assumingMemoryBound(to: UInt8.self)
+            for y in 0..<160 {
+                for x in 0..<160 {
+                    let offset = (y * 160 + x) * 4
+                    if y < 16 {
+                        base[offset + 0] = 0
+                        base[offset + 1] = 0
+                        base[offset + 2] = 255
+                        base[offset + 3] = 255
+                    } else {
+                        base[offset + 0] = backgroundBGRA[0]
+                        base[offset + 1] = backgroundBGRA[1]
+                        base[offset + 2] = backgroundBGRA[2]
+                        base[offset + 3] = backgroundBGRA[3]
+                    }
+                }
+            }
+        }
+        fillIOSurface(backgroundBGRA: [33, 22, 22, 204])
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 80, height: 80),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let parent = NSView(frame: NSRect(x: 0, y: 0, width: 80, height: 80))
+        parent.wantsLayer = true
+        window.contentView = parent
+
+        let surface = SyntheticSurfaceView(frame: parent.bounds)
+        surface.ioLayer.contentsScale = 2.0
+        surface.ioLayer.contentsGravity = .topLeft
+        surface.ioLayer.contents = ioSurface
+        parent.addSubview(surface)
+
+        func sampleParentRGBA() throws -> (glyph: [UInt8], background: [UInt8]) {
+            window.displayIfNeeded()
+            parent.layoutSubtreeIfNeeded()
+            parent.displayIfNeeded()
+            var pixels = [UInt8](repeating: 0, count: 160 * 160 * 4)
+            let context = try #require(CGContext(
+                data: &pixels,
+                width: 160,
+                height: 160,
+                bitsPerComponent: 8,
+                bytesPerRow: 160 * 4,
+                space: colorSpace,
+                bitmapInfo: CGBitmapInfo.byteOrder32Little.rawValue
+                    | CGImageAlphaInfo.premultipliedFirst.rawValue
+            ))
+            context.scaleBy(x: 2.0, y: 2.0)
+            try #require(parent.layer).render(in: context)
+            func pixel(_ x: Int, _ y: Int) -> [UInt8] {
+                let index = (y * 160 + x) * 4
+                return [pixels[index + 2], pixels[index + 1], pixels[index + 0], pixels[index + 3]]
+            }
+            return (pixel(40, 4), pixel(40, 80))
+        }
+
+        let baseline = try sampleParentRGBA()
+        #expect(baseline.glyph == [255, 0, 0, 255])
+        #expect(baseline.background == [22, 22, 33, 204])
+
+        let first = QuickInputTerminalSnapshot(surface: surface, maximumDuration: .seconds(5))
+        #expect(surface.ioLayer.opacity == 0)
+        let duringFirst = try sampleParentRGBA()
+        #expect(duringFirst.glyph == baseline.glyph)
+        #expect(duringFirst.background == baseline.background)
+
+        // Mutate the live swapchain IOSurface while the snapshot is active to
+        // verify the snapshot owns an independent copy of the pre-handoff pixels.
+        fillIOSurface(backgroundBGRA: [0, 180, 0, 255])
+        let afterSwapchainMutation = try sampleParentRGBA()
+        #expect(afterSwapchainMutation.background == baseline.background)
+
+        // A second overlapping snapshot must cleanly supersede the first without
+        // leaving the live surface layer stuck at opacity 0 after removal.
+        fillIOSurface(backgroundBGRA: [33, 22, 22, 204])
+        let second = QuickInputTerminalSnapshot(surface: surface, maximumDuration: .seconds(5))
+        first.remove()
+        #expect(surface.ioLayer.opacity == 0)
+        #expect(parent.subviews.count == 2)
+
+        second.remove()
+        #expect(surface.ioLayer.opacity == 1)
+        #expect(parent.subviews.count == 1)
+        let restored = try sampleParentRGBA()
+        #expect(restored.background == baseline.background)
     }
 
     @Test func importedDraftTracksEditorShortcutWithoutOwningASubmissionPrefix() {

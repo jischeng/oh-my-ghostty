@@ -602,16 +602,16 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return
         }
         let importForegroundPID = terminal.foregroundPID
-        let snapshot = QuickInputTerminalSnapshot(surface: surface, maximumDuration: .milliseconds(150))
+        let snapshot = QuickInputTerminalSnapshot(surface: surface, maximumDuration: .milliseconds(600))
         quickInputDraftImportTask = Task { @MainActor [weak self, weak surface] in
             defer {
                 QuickInputDraftBridge.shared.finish(request)
                 snapshot.removeAfterRedraw()
                 self?.quickInputDraftImportTask = nil
             }
-            for _ in 0..<40 {
+            for _ in 0..<200 {
                 do {
-                    try await Task.sleep(for: .milliseconds(100))
+                    try await Task.sleep(for: .milliseconds(20))
                     guard let self, let surface,
                           self.quickInputModel.isPresented,
                           self.quickInputModel.targetSurfaceID == surface.id,

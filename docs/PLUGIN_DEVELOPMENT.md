@@ -279,7 +279,7 @@ CLI remains a separate non-daemon command interface.
 ## Native Session Runtime hooks (Experimental)
 
 The local/SSH session runtime is an independent PTY owner, not a third-party plugin loader.
-Managed hook generation version 11 additionally reports Codex/Claude/Pi activity
+Managed hook generation version 12 additionally reports Codex/Claude/Pi activity
 through `OMG_RUNTIME_BIN report` when that variable is present. The runtime injects
 `OMG_RUNTIME_EVENT_SOCKET`, `OMG_RUNTIME_EVENT_TOKEN` and `OMG_RUNTIME_GENERATION`
 into the child environment. Events go to a private Unix datagram socket; the daemon
@@ -1545,17 +1545,29 @@ Tool permission prompts are reported through Antigravity's native OSC 7501
 attention from tool activity or emits permission grants. Tool hooks use grouped
 matcher/handler arrays; invocation/stop handlers are flat arrays. Stdout always
 contains a JSON response (`{}` or a non-blocking Stop decision); OSC 3008 goes
-only to the controlling TTY. Conversation identity is escaped and bounded.
-Without a TTY the hook safely returns JSON without emitting status.
+only to the controlling TTY. Because `agy` executes `/bin/sh -c` hook handlers in
+a dedicated child process group (`Setpgid`), the handler clears build-only
+`SDKROOT` / invalid `DEVELOPER_DIR` variables before invoking `python3` and walks
+same-session shell parents (`sh`, `bash`, `dash`, `zsh`) to attach the emitted
+`omg_liveness=pgid` context and fallback TTY lookup to `agy`'s foreground process
+group rather than the transient `/bin/sh` child group. Conversation identity is
+escaped and bounded. Without a TTY the hook safely returns JSON without emitting
+status.
 
 Local and exported SSH installers share generated handlers, preserve unrelated
 hooks, refuse a same-named unowned hook, back up existing JSON, and support
 status/update/removal. A previously installed Antigravity detector marker is
-inert; it is not sufficient to report Hooks Installed and does not cause silent
-Hook installation. Install the new Hook explicitly on each selected host.
-SSH bootstrap identity wrappers remain a fallback before the first model turn;
-native Hook events provide working/completion signals. Reconnect an SSH pane
-or restart agy after installing to reload configuration.
+inert; it is not sufficient to report Hooks Installed and does not block Hook
+adoption. When automatic Hook maintenance (`updateHooksAutomatically`) is enabled,
+both local checks and `autoInstallHooks` SSH checks discover installed Agent CLIs
+through a shell-agnostic `/bin/sh` bootstrap (so non-POSIX login shells such as
+`fish`, `tcsh`, and `nu` load user `PATH` cleanly without POSIX syntax errors),
+automatically adopt missing Hooks unless a local per-Agent removal tombstone
+(`.removed-<agent>.json` for detectors or `.removed-hook-<agent>.json` for Hooks)
+records an explicit user uninstall, and retry failed CLI discovery on subsequent
+integration revision checks. SSH bootstrap identity wrappers remain a fallback
+before the first model turn; native Hook events provide working/completion signals.
+Reconnect an SSH pane or restart `agy` after installing to reload configuration.
 
 Adapters emit OSC 3008 contexts with IDs
 `omg-agent-<allowlisted-agent>-<numeric-instance-id>`, `type=app`, a bounded
@@ -1597,17 +1609,27 @@ uses Ghostty's program-status parser (backported from upstream commit
 `c7f68a7f48c6a5b357689eb8c2328bc2dab5d8ed`) and forwards validated reports over
 the existing per-Surface context bridge as `omg-program-status`. Support queries
 (`\e]7501;?`) are answered by the owning VT (`StreamTerminal` in the session
-runtime or `StreamHandler` on the Exec terminal IO thread) with the query's BEL
+runtime or `StreamHandler` on the terminal IO thread) with the query's BEL
 or ST terminator; the runtime strips queries it answered itself and leaves
-delegated inline queries for the enclosing terminal, preventing two replies.
+delegated inline or pre-7501 preserved-holder queries for the active writer's
+`StreamHandler` (`protocol_reply`, which passive viewers drop without writer
+takeover), preventing duplicate replies.
 Local Exec shells also set `AGY_CLI_OSC7501=on` when unset so Antigravity CLI
 (`agy`) enables native OSC 7501 reporting (`working`, `blocked` with
 `permission`/`question`/`auth`, `done`, `error`, and `idle`) immediately.
 
 Known `app` values identify an Agent directly in its originating pane; this does
 not authorize commands, infer a conversation ID, or inspect a shared server's
-TTY. Native reports take presentation precedence over legacy Hook and title
-fallbacks until cleared. Reports replace their record, with at most 32 records
+TTY. Non-idle native reports take presentation precedence over legacy Hook and
+title fallbacks until cleared, while a native `idle` baseline (such as `agy`
+startup `state=idle:app=antigravity`) yields to non-idle OSC 3008 Hook states so
+mixed native+Hook CLIs still surface active and completed turns; user
+acknowledgement clears terminal `done`/`error` records across both channels and
+persists the acknowledged record identities per pane in `restoreSessions`
+workspace checkpoints (`acknowledgedAgentStatus`) so reattaching to a preserved
+local or SSH `omgd` session (`omg-agent-sync`) keeps already-cleared completions
+`idle` until a new live turn or non-matching terminal snapshot supersedes them.
+Reports replace their record, with at most 32 records
 per pane; `clear` removes the named namespace and descendants, or all records
 when no ID is supplied. Completion uses the same Quick Input completion/queue
 path as Hooks. State follows pane ownership and is removed on SSH disconnect

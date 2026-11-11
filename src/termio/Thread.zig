@@ -367,6 +367,7 @@ fn drainMailbox(
                     self.flags.linefeed_mode,
                 );
             },
+            .protocol_reply => |v| try io.queueProtocolReply(data, v),
             .omg_session_write => |v| {
                 defer v.data.deinit();
                 if (io.backend == .omg_session) {

@@ -1,5 +1,33 @@
 import Foundation
 
+/// Terminal completion (`done` / `error`) records already acknowledged on a
+/// pane. Reconnecting to a preserved `omgd` session replays its last stored
+/// activity snapshot (`omg-agent-sync`), which does not know about host-local
+/// mouse or keyboard acknowledgement; matching records stay `.idle` until a
+/// new turn or terminal signal supersedes them.
+struct AcknowledgedAgentStatus: Codable, Equatable, Sendable {
+    struct ProgramRecord: Codable, Equatable, Sendable {
+        var id: String
+        var agent: String?
+        var state: TabActivityState
+        var message: String?
+    }
+
+    struct ReducerRecord: Codable, Equatable, Sendable {
+        var contextID: String
+        var source: String
+        var state: TabActivityState
+        var message: String?
+    }
+
+    var program: ProgramRecord?
+    var reducer: ReducerRecord?
+
+    var isEmpty: Bool {
+        program == nil && reducer == nil
+    }
+}
+
 /// OSC 7501 belongs to the terminal client, including clients whose Agent runs
 /// in a shared server. It therefore needs neither a Hook PID nor a daemon TTY.
 struct AgentProgramStatus {
@@ -79,12 +107,42 @@ struct AgentProgramStatus {
         return true
     }
 
+    var acknowledgmentCandidate: AcknowledgedAgentStatus.ProgramRecord? {
+        guard let last = records.last,
+              last.state == .done || last.state == .error else { return nil }
+        return .init(
+            id: last.id,
+            agent: last.agent?.rawValue,
+            state: last.state,
+            message: last.message
+        )
+    }
+
     mutating func acknowledge() -> Bool {
         guard let last = records.indices.last,
               !records[last].acknowledged,
               records[last].state == .done || records[last].state == .error else { return false }
         records[last].acknowledged = true
         return true
+    }
+
+    /// Resolves effective pane activity when both native OSC 7501 (`program`)
+    /// and OSC 3008 / title-reconciled Hook state (`fallback`) exist.
+    ///
+    /// Non-idle native program status always wins (for example, `blocked`
+    /// permission/question prompts while a Hook only knows the turn is `working`).
+    /// When native program status is `idle`, a non-idle Hook status surfaces so
+    /// CLIs that emit `state=idle` on startup still show Hook turn transitions.
+    static func preferredActivity(
+        program: TabActivity?,
+        fallback: TabActivity?
+    ) -> TabActivity? {
+        if let program {
+            if program.state != .idle { return program }
+            if let fallback, fallback.state != .idle { return fallback }
+            return program
+        }
+        return fallback
     }
 
     private static func resolveAgent(_ raw: String) -> SupportedAgent? {

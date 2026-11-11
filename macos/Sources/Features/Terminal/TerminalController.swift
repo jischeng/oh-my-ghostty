@@ -48,6 +48,7 @@ struct PaneSessionStateSnapshot {
     let context: PaneSessionContext
     let activity: TabActivity?
     let resumeDescriptor: AgentResumeDescriptor?
+    var acknowledgedAgentStatus: AcknowledgedAgentStatus?
     let resumeContextID: String?
     let reducer: AgentContextSignalReducer?
     var programStatus: AgentProgramStatus?
@@ -818,6 +819,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             context: context,
             activity: agentActivities[surfaceID],
             resumeDescriptor: agentResumeDescriptors[surfaceID],
+            acknowledgedAgentStatus: surfaceTree.first(where: { $0.id == surfaceID })?.acknowledgedAgentStatus,
             resumeContextID: agentResumeContextIDs[surfaceID],
             reducer: agentReducers[surfaceID],
             programStatus: agentProgramStatuses[surfaceID],
@@ -850,8 +852,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         } else {
             agentResumeDescriptors.removeValue(forKey: surfaceID)
         }
-        surfaceTree.first(where: { $0.id == surfaceID })?
-            .agentResumeDescriptor = snapshot.resumeDescriptor
+        if let surface = surfaceTree.first(where: { $0.id == surfaceID }) {
+            surface.agentResumeDescriptor = snapshot.resumeDescriptor
+            surface.acknowledgedAgentStatus = snapshot.acknowledgedAgentStatus
+        }
         agentResumeContextIDs[surfaceID] = snapshot.resumeContextID
         agentReducers[surfaceID] = snapshot.reducer
         agentProgramStatuses[surfaceID] = snapshot.programStatus
@@ -1504,6 +1508,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
            status.foregroundProcessGroup == detected.processGroupID ||
                status.activity?.source == detected.agent.rawValue {
             agentProgramStatuses.removeValue(forKey: surfaceID)
+            updateAcknowledgedAgentStatus(for: surfaceID) { $0.program = nil }
         }
         if typedAgentHookContextIDs[surfaceID] == detected.id {
             typedAgentHookContextIDs.removeValue(forKey: surfaceID)
@@ -1607,6 +1612,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             agentTitleWatchers.removeValue(forKey: surfaceID)
             typedAgentHookContextIDs.removeValue(forKey: surfaceID)
             agentValidationWorkItems.removeValue(forKey: surfaceID)?.cancel()
+            setAcknowledgedAgentStatus(nil, for: surfaceID)
             clearAgentResumeDescriptor(for: surfaceID)
             if agentActivities.removeValue(forKey: surfaceID) != nil {
                 objectWillChange.send()
@@ -1620,8 +1626,15 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // Those updates do not mean the remote Agent returned to its shell.
         let isRuntimeMetadata = surfaceTree.first { $0.id == surfaceID }?
             .runtimeInlineSession?.connectionID == signal.id
-        let update = reducer.consume(signal) ?? (isRuntimeMetadata ? nil : reducer.consumeRemotePrompt(signal))
+        let consumedAgentSignal = reducer.consume(signal)
+        let remotePromptUpdate = consumedAgentSignal == nil && !isRuntimeMetadata
+            ? reducer.consumeRemotePrompt(signal)
+            : nil
+        let update = consumedAgentSignal ?? remotePromptUpdate
         agentReducers[surfaceID] = reducer
+        if consumedAgentSignal != nil || remotePromptUpdate != nil {
+            updateAcknowledgedAgentStatus(for: surfaceID) { $0.reducer = nil }
+        }
         if !hadRemoteActivity,
            reducer.hasRemoteActivity,
            let context = paneSessionContexts[surfaceID],
@@ -1648,6 +1661,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             agentReducers[surfaceID] = reducer
             if let update {
                 applyAgentActivityUpdate(update, for: surfaceID)
+            }
+        }
+        if removedProgramStatus || clearedRemoteActivity {
+            updateAcknowledgedAgentStatus(for: surfaceID) { ack in
+                if removedProgramStatus { ack.program = nil }
+                if clearedRemoteActivity { ack.reducer = nil }
             }
         }
         if clearedRemoteActivity {
@@ -1816,6 +1835,28 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         )
     }
 
+    private func setAcknowledgedAgentStatus(
+        _ next: AcknowledgedAgentStatus?,
+        for surfaceID: UUID
+    ) {
+        let normalized = next?.isEmpty == true ? nil : next
+        guard let surface = surfaceTree.first(where: { $0.id == surfaceID }),
+              surface.acknowledgedAgentStatus != normalized else { return }
+        surface.acknowledgedAgentStatus = normalized
+        invalidateRestorableState()
+        workspaceCoordinator.store.checkpointRequested?()
+    }
+
+    private func updateAcknowledgedAgentStatus(
+        for surfaceID: UUID,
+        mutate: (inout AcknowledgedAgentStatus) -> Void
+    ) {
+        guard let surface = surfaceTree.first(where: { $0.id == surfaceID }) else { return }
+        var current = surface.acknowledgedAgentStatus ?? .init()
+        mutate(&current)
+        setAcknowledgedAgentStatus(current, for: surfaceID)
+    }
+
     func acknowledgeTerminalAgentStateFromUserInput(
         on surface: Ghostty.SurfaceView
     ) {
@@ -1826,16 +1867,37 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     func acknowledgeTerminalAgentState(
         for surface: Ghostty.SurfaceView?
     ) {
-        if let surface, agentProgramStatuses[surface.id]?.acknowledge() == true,
-           let activity = agentProgramStatuses[surface.id]?.activity {
-            applyAgentActivityUpdate(.set(activity), for: surface.id)
-            return
+        guard let surface else { return }
+        let programCandidate = agentProgramStatuses[surface.id]?.acknowledgmentCandidate
+        let acknowledgedProgram = agentProgramStatuses[surface.id]?.acknowledge() == true
+        var reducerCandidate: AcknowledgedAgentStatus.ReducerRecord?
+        var acknowledgedReducerUpdate: AgentActivityUpdate?
+        if var reducer = agentReducers[surface.id] {
+            reducerCandidate = reducer.acknowledgmentCandidate
+            acknowledgedReducerUpdate = reducer.acknowledgeTerminalState()
+            if acknowledgedReducerUpdate != nil {
+                agentReducers[surface.id] = reducer
+            }
         }
-        guard let surface,
-              var reducer = agentReducers[surface.id],
-              let update = reducer.acknowledgeTerminalState() else { return }
-        agentReducers[surface.id] = reducer
-        applyAgentActivityUpdate(update, for: surface.id)
+        guard acknowledgedProgram || acknowledgedReducerUpdate != nil else { return }
+        updateAcknowledgedAgentStatus(for: surface.id) { ack in
+            if acknowledgedProgram, let programCandidate {
+                ack.program = programCandidate
+            }
+            if acknowledgedReducerUpdate != nil, let reducerCandidate {
+                ack.reducer = reducerCandidate
+            }
+        }
+        let fallback: TabActivity? = switch acknowledgedReducerUpdate {
+        case .set(let activity): activity
+        case .clear: nil
+        case nil: agentReducers[surface.id]?.currentActivity
+        }
+        let activity = AgentProgramStatus.preferredActivity(
+            program: agentProgramStatuses[surface.id]?.activity,
+            fallback: fallback
+        )
+        applyAgentActivityUpdate(activity.map(AgentActivityUpdate.set) ?? .clear, for: surface.id)
     }
 
     private func applyAgentActivityUpdate(
@@ -1843,7 +1905,14 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         for surfaceID: UUID,
         restoring: Bool = false
     ) {
-        let update = agentProgramStatuses[surfaceID]?.activity.map(AgentActivityUpdate.set) ?? update
+        let proposed: TabActivity? = switch update {
+        case .set(let activity): activity
+        case .clear: nil
+        }
+        let update = AgentProgramStatus.preferredActivity(
+            program: agentProgramStatuses[surfaceID]?.activity,
+            fallback: proposed
+        ).map(AgentActivityUpdate.set) ?? .clear
         let previousActivity = agentActivities[surfaceID]
         let previousState = previousActivity?.state
         var next = agentActivities
@@ -1914,9 +1983,29 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                         updateAgentResumeDescriptor(item, for: id)
                     }
                 }
+                if var ack = surface.acknowledgedAgentStatus {
+                    if let progAck = ack.program {
+                        if status.acknowledgmentCandidate == progAck {
+                            _ = status.acknowledge()
+                        } else if !status.records.isEmpty {
+                            ack.program = nil
+                        }
+                    }
+                    if let redAck = ack.reducer {
+                        if reducer.acknowledgmentCandidate == redAck {
+                            _ = reducer.acknowledgeTerminalState()
+                        } else if reducer.currentActivity != nil {
+                            ack.reducer = nil
+                        }
+                    }
+                    setAcknowledgedAgentStatus(ack, for: id)
+                }
                 agentReducers[id] = reducer
                 agentProgramStatuses[id] = status.records.isEmpty ? nil : status
-                let activity = status.activity ?? reducer.currentActivity
+                let activity = AgentProgramStatus.preferredActivity(
+                    program: status.activity,
+                    fallback: reducer.currentActivity
+                )
                 applyAgentActivityUpdate(activity.map(AgentActivityUpdate.set) ?? .clear, for: id, restoring: true)
                 scheduleAgentValidation(for: id)
             }
@@ -1947,7 +2036,18 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         guard AgentStatusPlugin.isEnabled else { return }
         var status = agentProgramStatuses[surface.id] ?? AgentProgramStatus()
         let previousFG = status.foregroundProcessGroup
+        let previousProgramState = status.activity?.state
         guard status.consume(body) else { return }
+        var acknowledgedReducer: AcknowledgedAgentStatus.ReducerRecord?
+        if previousProgramState == .done || previousProgramState == .error,
+           status.activity?.state == .idle,
+           var reducer = agentReducers[surface.id] {
+            let candidate = reducer.acknowledgmentCandidate
+            if reducer.acknowledgeTerminalState() != nil {
+                agentReducers[surface.id] = reducer
+                acknowledgedReducer = candidate
+            }
+        }
         status.isRemote = paneSessionContexts[surface.id]?.isSSHSession == true ||
             surface.runtimeInlineSession != nil || surface.runtimeDescriptor?.isLocal == false
         let currentFG = status.isRemote ? nil : surface.surfaceModel?.foregroundPID
@@ -1955,6 +2055,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
            status.activity?.state == .idle {
             if !Self.processGroupExists(previousFG) {
                 agentProgramStatuses.removeValue(forKey: surface.id)
+                updateAcknowledgedAgentStatus(for: surface.id) { ack in
+                    if let acknowledgedReducer { ack.reducer = acknowledgedReducer }
+                    ack.program = nil
+                }
                 let activity = agentReducers[surface.id]?.currentActivity
                 applyAgentActivityUpdate(activity.map(AgentActivityUpdate.set) ?? .clear, for: surface.id)
                 return
@@ -1964,7 +2068,16 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             status.foregroundProcessGroup = currentFG
         }
         agentProgramStatuses[surface.id] = status.records.isEmpty ? nil : status
-        let activity = status.activity ?? agentReducers[surface.id]?.currentActivity
+        updateAcknowledgedAgentStatus(for: surface.id) { ack in
+            if let acknowledgedReducer { ack.reducer = acknowledgedReducer }
+            if status.records.last?.acknowledged != true || status.acknowledgmentCandidate != ack.program {
+                ack.program = nil
+            }
+        }
+        let activity = AgentProgramStatus.preferredActivity(
+            program: status.activity,
+            fallback: agentReducers[surface.id]?.currentActivity
+        )
         applyAgentActivityUpdate(activity.map(AgentActivityUpdate.set) ?? .clear, for: surface.id)
     }
 

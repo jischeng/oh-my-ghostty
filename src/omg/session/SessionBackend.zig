@@ -324,6 +324,20 @@ pub fn queueWriteGeneration(self: *Self, generation: u64, data: []const u8, line
     try self.sendFrameLocked('I', generation, payload);
 }
 
+/// Sends a terminal-emulated protocol reply only when this viewer is already
+/// the active writer. Read-only viewers drop the reply without taking over.
+pub fn queueProtocolReply(self: *Self, data: []const u8) !void {
+    if (data.len == 0) return;
+    self.write_mutex.lockUncancelable(global.io());
+    defer self.write_mutex.unlock(global.io());
+    if (self.stopping.load(.acquire) or
+        !self.attachment_enabled.load(.acquire) or
+        !self.ready.load(.acquire)) return error.SessionNotReady;
+    const generation = self.generation.load(.acquire);
+    if (generation == 0) return error.SessionNotReady;
+    try self.sendFrameLocked('I', generation, data);
+}
+
 fn clearTakeoverInputLocked(self: *Self) void {
     self.takeover_pending = false;
     std.crypto.secureZero(u8, self.takeover_input.items);

@@ -34,6 +34,10 @@ extension Ghostty {
         // have an active agent resume descriptor.
         var sshResumeDescriptor: SSHResumeDescriptor?
 
+        // Persisted user acknowledgement for terminal agent completion (`done` /
+        // `error`) so preserved `omgd` snapshots do not resurrect cleared badges.
+        var acknowledgedAgentStatus: AcknowledgedAgentStatus?
+
         // One-shot host launch handoff; survives a CLI replay file being removed
         // before its queued start signal reaches AppKit after a fast failure.
         var pendingSSHLaunchReplay: SSHReplayDescriptor?

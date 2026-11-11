@@ -263,7 +263,7 @@ enum AgentHookRemoteAction: String {
 
 struct AgentHookInstaller {
     static let marker = "_omg_agent_status"
-    static let hookVersion = 11
+    static let hookVersion = 12
     static let detectorMarkerVersion = 1
     static let didChangeNotification = Notification.Name(
         "com.oh-my-ghostty.agentIntegrationDidChange"
@@ -295,6 +295,14 @@ struct AgentHookInstaller {
     /// reinstalled; an explicit Install clears the record and re-enables it.
     func isDetectorRemovedByUser(_ agent: SupportedAgent) -> Bool {
         Self.supportsDetector(for: agent) && hasTombstone(agent)
+    }
+
+    /// Whether the user explicitly removed this Agent's Hook integration.
+    ///
+    /// Automatic adoption consults this so an uninstalled Hook is never silently
+    /// reinstalled; an explicit Install clears the record and re-enables it.
+    func isHookRemovedByUser(_ agent: SupportedAgent) -> Bool {
+        !Self.supportsDetector(for: agent) && hasHookTombstone(agent)
     }
 
     /// Reconciles detector-only Agent markers on every launch.
@@ -850,6 +858,9 @@ else:
             try removeTombstone(agent)
             try installDetectorMarker(agent)
         }
+        if !Self.supportsDetector(for: agent) {
+            try removeHookTombstone(agent)
+        }
         notifyChanged(agent)
     }
 
@@ -878,6 +889,9 @@ else:
             }
         case .none:
             try removeDetectorMarker(agent)
+        }
+        if !Self.supportsDetector(for: agent) {
+            try writeHookTombstone(agent.rawValue)
         }
         notifyChanged(agent)
     }
@@ -1014,6 +1028,33 @@ else:
     /// with any `SupportedAgent.rawValue` marker file.
     private func detectorTombstoneURL(_ agent: String) -> URL {
         detectorDirectoryURL.appendingPathComponent(".removed-\(agent).json")
+    }
+
+    private func hookTombstoneURL(_ agent: String) -> URL {
+        detectorDirectoryURL.appendingPathComponent(".removed-hook-\(agent).json")
+    }
+
+    private func writeHookTombstone(_ agent: String) throws {
+        try writeDetectorMarker(agent: agent, to: hookTombstoneURL(agent))
+    }
+
+    private func hasHookTombstone(_ agent: SupportedAgent) -> Bool {
+        validDetectorMarker(
+            at: hookTombstoneURL(agent.rawValue),
+            expectedAgent: agent.rawValue
+        ) != nil
+    }
+
+    private func removeHookTombstone(_ agent: SupportedAgent) throws {
+        let url = hookTombstoneURL(agent.rawValue)
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        guard validDetectorMarker(
+            at: url,
+            expectedAgent: agent.rawValue
+        ) != nil else {
+            throw AgentHookInstallerError.invalidDetectorMarker(agent.rawValue)
+        }
+        try FileManager.default.removeItem(at: url)
     }
 
     private static let tomlBlockBegin =
@@ -1721,7 +1762,22 @@ try:
             attention = ";omg_attention=question"
         elif reason == "USER_CANCELED": state = "idle"
         elif payload.get("fullyIdle") is False: state = "working"
-    pgid = os.getpgid(os.getppid())
+    sid = os.getsid(0)
+    owner = os.getppid()
+    owner_tty = ""
+    for _ in range(4):
+        info = subprocess.run(["ps", "-o", "ppid=,tty=,comm=", "-p", str(owner)], capture_output=True, text=True, timeout=2).stdout.strip()
+        parts = info.split(None, 2)
+        if len(parts) < 3: break
+        ppid, tty_col, comm = int(parts[0]), parts[1], os.path.basename(parts[2].strip()).lstrip("-")
+        if re.fullmatch(r"(?:pts/[0-9]+|tty[A-Za-z0-9._-]+)", tty_col): owner_tty = tty_col
+        if comm not in ("sh", "bash", "dash", "zsh") or ppid <= 1: break
+        try:
+            if os.getsid(ppid) != sid: break
+        except OSError:
+            break
+        owner = ppid
+    pgid = os.getpgid(owner)
     scope = "remote" if (os.environ.get("SSH_CONNECTION") or os.environ.get("OMG_RUNTIME_REMOTE")) else "local"
     conversation = payload.get("conversationId", "")
     if not isinstance(conversation, str): conversation = ""
@@ -1730,9 +1786,8 @@ try:
     try:
         fd = os.open("/dev/tty", os.O_WRONLY | os.O_NOCTTY)
     except OSError:
-        tty = subprocess.run(["ps", "-o", "tty=", "-p", str(os.getppid())], capture_output=True, text=True, timeout=2).stdout.strip()
-        if not re.fullmatch(r"(?:pts/[0-9]+|tty[A-Za-z0-9._-]+)", tty): raise OSError("No controlling terminal")
-        fd = os.open("/dev/" + tty, os.O_WRONLY | os.O_NOCTTY)
+        if not owner_tty: raise OSError("No controlling terminal")
+        fd = os.open("/dev/" + owner_tty, os.O_WRONLY | os.O_NOCTTY)
     try: os.write(fd, sequence.encode())
     finally: os.close(fd)
 except (ValueError, OSError, TypeError, AttributeError, subprocess.SubprocessError):
@@ -1740,7 +1795,8 @@ except (ValueError, OSError, TypeError, AttributeError, subprocess.SubprocessErr
 print(json.dumps(response))
 """#
         let quoted = "'" + script.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        return ": \(marker); : _omg_agent_status_v\(hookVersion); python3 -c \(quoted) \(state?.rawValue ?? "done")"
+        let envCleanup = "unset SDKROOT; if [ -n \"${DEVELOPER_DIR-}\" ] && [ ! -d \"$DEVELOPER_DIR\" ]; then unset DEVELOPER_DIR; fi"
+        return ": \(marker); : _omg_agent_status_v\(hookVersion); \(envCleanup); python3 -c \(quoted) \(state?.rawValue ?? "done")"
     }
 
     private static func pluginSource(for agent: SupportedAgent) -> String? {
@@ -2274,6 +2330,18 @@ struct AgentContextSignalReducer: Sendable {
         }
         guard removedCurrent else { return nil }
         return currentRecord.map { .set($0.activity) } ?? .clear
+    }
+
+    var acknowledgmentCandidate: AcknowledgedAgentStatus.ReducerRecord? {
+        guard let current = currentRecord,
+              current.activity.state == .done ||
+                current.activity.state == .error else { return nil }
+        return .init(
+            contextID: current.id,
+            source: current.activity.source,
+            state: current.activity.state,
+            message: current.activity.message
+        )
     }
 
     mutating func acknowledgeTerminalState() -> AgentActivityUpdate? {

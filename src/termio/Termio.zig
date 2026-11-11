@@ -448,6 +448,21 @@ pub inline fn queueWrite(
     try self.backend.queueWrite(self.alloc, td, data, linefeed);
 }
 
+/// Queue a protocol query reply to the active session PTY without triggering
+/// passive-viewer takeover or linefeed conversion.
+pub fn queueProtocolReply(
+    self: *Termio,
+    td: *ThreadData,
+    data: []const u8,
+) !void {
+    switch (self.backend) {
+        .omg_session => |*session| session.queueProtocolReply(data) catch |err| switch (err) {
+            error.SessionNotReady, error.Disconnected, error.FrameTooLarge => {},
+        },
+        else => try self.backend.queueWrite(self.alloc, td, data, false),
+    }
+}
+
 /// Update the configuration.
 pub fn changeConfig(self: *Termio, td: *ThreadData, config: *DerivedConfig) !void {
     // The remainder of this function is modifying terminal state or

@@ -106,6 +106,43 @@ struct LocalPythonInterpreter: Sendable {
         )
     }
 
+    struct LoginShellInvocation: Equatable, Sendable {
+        let executablePath: String
+        let arguments: [String]
+        let environment: [String: String]
+    }
+
+    private static let bootstrapEnvironmentVariable = "OMG_SH_BOOTSTRAP"
+
+    /// Builds a login-shell invocation that evaluates `posixScript` under `/bin/sh`
+    /// after the user's configured shell (`zsh`, `bash`, `fish`, `tcsh`, `nu`, etc.)
+    /// loads its startup environment, without exposing POSIX syntax to non-POSIX shells.
+    static func loginShellInvocation(
+        shellPath: String,
+        loginShell: Bool,
+        posixScript: String,
+        environment: [String: String]
+    ) -> LoginShellInvocation {
+        var merged = environment
+        merged[bootstrapEnvironmentVariable] = "unset \(bootstrapEnvironmentVariable); \(posixScript)"
+        let shellName = URL(fileURLWithPath: shellPath).lastPathComponent.lowercased()
+        let arguments: [String]
+        switch shellName {
+        case "nu":
+            let prefix = loginShell ? ["--login", "-i", "-c"] : ["-c"]
+            arguments = prefix + ["^/bin/sh -c 'eval \"$OMG_SH_BOOTSTRAP\"'"]
+        case "csh", "tcsh":
+            arguments = ["-c", "exec /bin/sh -c 'eval \"$OMG_SH_BOOTSTRAP\"'"]
+        default:
+            arguments = [loginShell ? "-lic" : "-lc", "exec /bin/sh -c 'eval \"$OMG_SH_BOOTSTRAP\"'"]
+        }
+        return .init(
+            executablePath: shellPath,
+            arguments: arguments,
+            environment: merged
+        )
+    }
+
     /// Re-read only the login shell's PATH when the app environment has no interpreter.
     /// The shell prints the path; it never runs `python3`.
     static func resolveFromLoginShell(
@@ -118,11 +155,17 @@ struct LocalPythonInterpreter: Sendable {
             developerDirectory: validDeveloperDirectory(in: environment)
         )
         let command = "\(shellEnvironmentCleanup); printf '%s\\n%s\\n' '__OMG_LOCAL_PYTHON_PATH_V1__' \"$PATH\""
+        let invocation = loginShellInvocation(
+            shellPath: shellPath,
+            loginShell: loginShell,
+            posixScript: command,
+            environment: cleaned
+        )
         let result = try await GitProcessRunner().run(
-            executablePath: shellPath,
-            arguments: [loginShell ? "-lic" : "-lc", command],
+            executablePath: invocation.executablePath,
+            arguments: invocation.arguments,
             workingDirectory: FileManager.default.homeDirectoryForCurrentUser.path,
-            environment: cleaned,
+            environment: invocation.environment,
             maxOutputBytes: 8_192,
             timeout: 10
         )

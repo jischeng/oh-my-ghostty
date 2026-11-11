@@ -1637,6 +1637,110 @@ struct AgentStatusPluginTests {
         #expect(!installer.isInstalled(.pi))
     }
 
+    @Test func antigravityHookWalksSetpgidShellParentAndClearsInvalidSDKROOT() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let installer = AgentHookInstaller(homeURL: home)
+        try installer.install(.antigravity)
+        #expect(installer.isInstalled(.antigravity))
+        #expect(!installer.isHookRemovedByUser(.antigravity))
+
+        let configURL = home.appendingPathComponent(".gemini/config/hooks.json")
+        let root = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: configURL)) as? [String: Any]
+        )
+        let hooks = try #require(root["omg-agent-status"] as? [String: Any])
+        let stopEntries = try #require(hooks["Stop"] as? [[String: Any]])
+        let stopCommand = try #require(stopEntries.first?["command"] as? String)
+
+        // Simulate `agy`'s exact Go hook runner: a foreground TUI process group on a PTY
+        // spawning `/bin/sh -c <hook>` with `Setpgid: true` and a broken `SDKROOT`.
+        let runner = Process()
+        runner.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        runner.arguments = [
+            "-c",
+            """
+            import fcntl, json, os, pty, subprocess, sys, termios
+            master, slave = pty.openpty()
+            holder_code = '''
+            import fcntl, json, os, subprocess, sys, termios
+            os.setsid()
+            slave = int(sys.argv[1])
+            fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+            agy_pgid = os.getpgrp()
+            env = dict(os.environ, SDKROOT="/nonexistent/sdkroot", DEVELOPER_DIR="/nonexistent/devdir")
+            env.pop("SSH_CONNECTION", None)
+            proc = subprocess.Popen(
+                ["/bin/sh", "-c", sys.argv[2]],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                preexec_fn=lambda: os.setpgid(0, 0),
+            )
+            out, err = proc.communicate(b'{"conversationId":"conv-agy-local","fullyIdle":true}', timeout=5)
+            print(json.dumps({
+                "rc": proc.returncode,
+                "agy_pgid": agy_pgid,
+                "stdout": out.decode("utf-8", "replace").strip(),
+                "stderr": err.decode("utf-8", "replace").strip(),
+            }), flush=True)
+            '''
+            holder = subprocess.Popen(
+                [sys.executable, "-c", holder_code, str(slave), sys.argv[1]],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                pass_fds=(slave,),
+            )
+            line = holder.stdout.readline().decode("utf-8", "replace").strip()
+            holder_err = holder.stderr.read()
+            os.set_blocking(master, False)
+            try:
+                pty_seq = os.read(master, 65536).decode("utf-8", "replace")
+            except BlockingIOError:
+                pty_seq = ""
+            os.close(master)
+            os.close(slave)
+            assert holder.wait(timeout=5) == 0, holder_err
+            payload = json.loads(line)
+            payload["pty"] = pty_seq
+            print(json.dumps(payload))
+            """,
+            stopCommand,
+        ]
+        let outPipe = Pipe()
+        runner.environment = [
+            "HOME": home.path,
+            "PATH": "/usr/bin:/bin",
+        ]
+        runner.standardOutput = outPipe
+        runner.standardError = Pipe()
+        try runner.run()
+        runner.waitUntilExit()
+        #expect(runner.terminationStatus == 0)
+
+        let rawOutput = (String(
+            data: outPipe.fileHandleForReading.readDataToEndOfFile(),
+            encoding: .utf8
+        ) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let payload = try #require(
+            JSONSerialization.jsonObject(with: Data(rawOutput.utf8)) as? [String: Any]
+        )
+        #expect(payload["rc"] as? Int == 0)
+        #expect(payload["stderr"] as? String == "")
+        let agyPGID = try #require(payload["agy_pgid"] as? Int)
+        let ptyOutput = try #require(payload["pty"] as? String)
+        #expect(ptyOutput.contains("omg-agent-antigravity-\(agyPGID);"))
+        #expect(ptyOutput.contains("omg_liveness=pgid;omg_state=done"))
+        #expect(ptyOutput.contains("omg_conversation=conv-agy-local"))
+
+        try installer.uninstall(.antigravity)
+        #expect(installer.isHookRemovedByUser(.antigravity))
+        try installer.install(.antigravity)
+        #expect(!installer.isHookRemovedByUser(.antigravity))
+    }
+
     @MainActor
     private func renderedPixelCount(_ image: NSImage) -> Int {
         let size = 32

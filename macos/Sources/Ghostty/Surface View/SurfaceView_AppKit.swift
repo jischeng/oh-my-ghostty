@@ -2137,6 +2137,7 @@ extension Ghostty {
             case isUserSetTitle
             case agentResumeDescriptor
             case sshResumeDescriptor
+            case acknowledgedAgentStatus
             case runtimeDescriptor
             case runtimeCreateOnRestore
         }
@@ -2169,13 +2170,18 @@ extension Ghostty {
                 OMGApplicationEnvironment.channel()
             config.workingDirectory = try container.decode(String?.self, forKey: .pwd)
             let archivedCreateRuntime = try container.decodeIfPresent(Bool.self, forKey: .runtimeCreateOnRestore) == true
+            let savedAcknowledgedAgentStatus = try? container.decodeIfPresent(
+                AcknowledgedAgentStatus.self,
+                forKey: .acknowledgedAgentStatus
+            )
             if let runtime = try container.decodeIfPresent(SessionRuntimeDescriptor.self, forKey: .runtimeDescriptor),
                !(archivedCreateRuntime && runtime.isLocal && !OhMyGhosttySettings.shared.localRuntimeEnabled) {
                 let createRuntime = archivedCreateRuntime || SessionRuntimeConnections.shouldCreateUnrecordedLocalSessionOnRestore(
                     for: runtime,
                     pane: uuid
                 )
-                if SessionRuntimeRestorationPolicy.attachesSavedRuntime(for: startupMode) {
+                let attachesSavedRuntime = SessionRuntimeRestorationPolicy.attachesSavedRuntime(for: startupMode)
+                if attachesSavedRuntime {
                     if createRuntime {
                         try runtime.configure(&config)
                     } else {
@@ -2207,6 +2213,7 @@ extension Ghostty {
                     // Restore Tabs creates a new shell and a new runtime identity.
                     self.init(app, baseConfig: config, uuid: uuid)
                 }
+                self.acknowledgedAgentStatus = attachesSavedRuntime ? savedAcknowledgedAgentStatus : nil
                 if let title = try container.decodeIfPresent(String.self, forKey: .title) { self.title = title }
                 return
             }
@@ -2281,6 +2288,7 @@ extension Ghostty {
             self.init(app, baseConfig: config, uuid: uuid)
             self.agentResumeDescriptor = startupMode.restoresSessions ? resume : nil
             self.sshResumeDescriptor = startupMode.restoresSessions ? sshResume : nil
+            self.acknowledgedAgentStatus = startupMode.restoresSessions ? savedAcknowledgedAgentStatus : nil
             if startupMode.restoresSessions, sshResume?.isAwaitingReconnect != true {
                 self.pendingSSHLaunchReplay = sshResume?.sshReplay ?? resume?.sshReplay
             }
@@ -2310,6 +2318,10 @@ extension Ghostty {
             try container.encodeIfPresent(
                 sshResumeDescriptor,
                 forKey: .sshResumeDescriptor
+            )
+            try container.encodeIfPresent(
+                acknowledgedAgentStatus,
+                forKey: .acknowledgedAgentStatus
             )
         }
     }

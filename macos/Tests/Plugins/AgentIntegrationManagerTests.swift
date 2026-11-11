@@ -505,7 +505,13 @@ pathlib.Path(os.environ["UPDATE_LOG"]).write_text(json.dumps(sys.argv[1:]))
         let stale = try String(contentsOf: hooks, encoding: .utf8)
             .replacingOccurrences(of: "_omg_agent_status_v\(AgentHookInstaller.hookVersion)", with: "_omg_agent_status_v0")
         try stale.write(to: hooks, atomically: true, encoding: .utf8)
-        let manager = AgentIntegrationManager(defaults: defaults, homeURL: home)
+        let manager = AgentIntegrationManager(
+            defaults: defaults,
+            homeURL: home,
+            scriptRunner: { _, _, _ in
+                Data(#"{"codex":{"path":"/bin/codex","version":"1.0.0"}}"#.utf8)
+            }
+        )
         await manager.refresh(target: "local", automatic: true)
         // Automatic Hook maintenance is on by default: the stale adapter is repaired
         // on the very first automatic check.
@@ -513,11 +519,66 @@ pathlib.Path(os.environ["UPDATE_LOG"]).write_text(json.dumps(sys.argv[1:]))
         #expect(installer.installationState(.claude) == .missing)
         #expect(manager.snapshots["local"]?.error == nil)
         #expect(manager.policy(for: "local").lastSuccess != nil)
-        // A removed Hook is not resurrected by later maintenance.
+        // A removed Hook is not resurrected by later maintenance or discovery.
         try installer.uninstall(.codex)
+        #expect(installer.isHookRemovedByUser(.codex) == true)
         await manager.refresh(target: "local", automatic: true)
-        #expect(installer.installationState(.codex) == .updateAvailable
-            || installer.installationState(.codex) == .missing)
+        #expect(installer.installationState(.codex) == .missing)
+    }
+
+    @Test func localAutomaticRefreshAdoptsDiscoveredHooksAndRetriesAfterDiscoveryFailure() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let suite = "AgentIntegrationTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: home)
+        }
+        var shouldFailDiscovery = true
+        let installer = AgentHookInstaller(homeURL: home)
+        let manager = AgentIntegrationManager(
+            defaults: defaults,
+            homeURL: home,
+            integrationRevision: "rev-1",
+            scriptRunner: { _, _, _ in
+                if shouldFailDiscovery {
+                    throw GitExecutionError.processFailed(exitCode: 127, stderr: "fish: Missing end")
+                }
+                return Data(#"{"antigravity":{"path":"/Users/test/.local/bin/agy","version":"1.5.5"}}"#.utf8)
+            }
+        )
+        // Default local policy has `updatesCLIs == false` and `updateHooksAutomatically == true`.
+        await manager.refresh(target: "local", automatic: true)
+        #expect(manager.snapshots["local"]?.cliError != nil)
+        #expect(installer.installationState(.antigravity) == .missing)
+
+        // Upgrading OMG (`integrationRevision` bump) while `cliError != nil` must retry CLI discovery
+        // instead of stopping at `hooksOnly`, automatically adopting `~/.gemini/config/hooks.json`.
+        shouldFailDiscovery = false
+        let upgraded = AgentIntegrationManager(
+            defaults: defaults,
+            homeURL: home,
+            integrationRevision: "rev-2",
+            scriptRunner: { _, _, _ in
+                Data(#"{"antigravity":{"path":"/Users/test/.local/bin/agy","version":"1.5.5"}}"#.utf8)
+            }
+        )
+        upgraded.checkDueTargets()
+        for _ in 0..<100 where installer.installationState(.antigravity) != .current {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(installer.installationState(.antigravity) == .current)
+        #expect(upgraded.snapshots["local"]?.cliError == nil)
+
+        // Explicit uninstall writes a Hook removal tombstone that blocks automatic re-adoption,
+        // while explicit install clears the tombstone.
+        try installer.uninstall(.antigravity)
+        #expect(installer.isHookRemovedByUser(.antigravity) == true)
+        await upgraded.refresh(target: "local", automatic: true)
+        #expect(installer.installationState(.antigravity) == .missing)
+        try installer.install(.antigravity)
+        #expect(installer.isHookRemovedByUser(.antigravity) == false)
+        #expect(installer.installationState(.antigravity) == .current)
     }
 
     @Test func updatesNeverDowngradeOrMovePrereleaseChannels() {
@@ -744,6 +805,35 @@ for remote in (False, True):
     assert "omg_state=idle" in sequence
 response, sequence = execute(commands["pre"], {}, terminal=False)
 assert response == {} and not sequence
+# Simulate agy spawning `/bin/sh -c <hook>` in a separate child process group (`process_group=0`)
+# within the same PTY session: emitted `omg-agent-antigravity-<pgid>` must carry agy's pgid, not sh's!
+master, slave = pty.openpty()
+parent_code = (
+    "import fcntl, json, os, subprocess, sys, termios\n"
+    "os.setsid()\n"
+    "slave = int(sys.argv[1])\n"
+    "fcntl.ioctl(slave, termios.TIOCSCTTY, 0)\n"
+    "env = dict(os.environ)\n"
+    "env.pop('SSH_CONNECTION', None)\n"
+    "env['SDKROOT'] = '/nonexistent/SDK'\n"
+    "env['DEVELOPER_DIR'] = '/nonexistent/Developer'\n"
+    "proc = subprocess.Popen(['/bin/sh', '-c', sys.argv[2]], stdin=subprocess.PIPE,"
+    " stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, preexec_fn=lambda: os.setpgid(0, 0))\n"
+    "out, err = proc.communicate(json.dumps({'conversationId': 'pgid-check'}).encode(), timeout=10)\n"
+    "assert proc.returncode == 0, err\n"
+    "print(os.getpgrp(), proc.pid, flush=True)\n"
+)
+holder = subprocess.Popen(["python3", "-c", parent_code, str(slave), commands["pre"]],
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE, pass_fds=(slave,))
+holder_out = holder.stdout.readline()
+holder_err = holder.stderr.read()
+os.set_blocking(master, False)
+pty_seq = os.read(master, 65536).decode()
+os.close(master); os.close(slave)
+assert holder.wait(timeout=10) == 0, holder_err
+expected_pgid, child_sh_pgid = [int(x) for x in holder_out.decode().strip().split()]
+assert expected_pgid != child_sh_pgid
+assert f"start=omg-agent-antigravity-{expected_pgid};" in pty_seq, (expected_pgid, child_sh_pgid, pty_seq)
 print("PTY local/SSH and headless protocol checks passed")
 """#
         _ = try await python(driver, environment: ["HOME": home.path, "PATH": "/usr/bin:/bin"])

@@ -208,7 +208,11 @@ final class AgentIntegrationManager: ObservableObject {
         let targets = Set(policies.keys).union([Self.localID]).union(registry.hosts.map(\.id))
         for target in targets where shouldCheck(target, at: date) && !busy.contains(target)
             && automaticTasks[target] == nil && setupTasks[target] == nil {
-            let hooksOnly = !policy(for: target).isDue(at: date) && !needsConnectionCheck(target)
+            let retryFailedDiscovery = policy(for: target).updateHooksAutomatically &&
+                snapshot(for: target)?.cliError != nil
+            let hooksOnly = !policy(for: target).isDue(at: date) &&
+                !needsConnectionCheck(target) &&
+                !retryFailedDiscovery
             automaticTasks[target] = Task { [weak self] in
                 guard let self else { return }
                 await refresh(target: target, automatic: true, hooksOnly: hooksOnly)
@@ -421,9 +425,9 @@ final class AgentIntegrationManager: ObservableObject {
         }
         publish(snapshot, target: target)
         if hooksOnly { return }
-        let discoverForRemoteSetup = target != Self.localID && registry.host(target)?.autoInstallHooks == true
-            && self.policy(for: target).updateHooksAutomatically
-        if automatic && !self.policy(for: target).updatesCLIs && !discoverForRemoteSetup { return }
+        let discoverForHookSetup = self.policy(for: target).updateHooksAutomatically &&
+            (target == Self.localID || registry.host(target)?.autoInstallHooks == true)
+        if automatic && !self.policy(for: target).updatesCLIs && !discoverForHookSetup { return }
         // CLI discovery/network failures must not prevent Hook maintenance.
         snapshot.cliError = nil
         do {
@@ -504,8 +508,10 @@ final class AgentIntegrationManager: ObservableObject {
             snapshot: snapshot,
             local: local
         ) where snapshot.hooks[agent] == .missing {
-            // A detector the user removed stays removed until they re-enable it.
-            guard !(local && installer.isDetectorRemovedByUser(agent)) else { continue }
+            // Integrations the user removed stay removed until explicitly re-enabled.
+            guard !(local && (installer.isDetectorRemovedByUser(agent) || installer.isHookRemovedByUser(agent))) else {
+                continue
+            }
             guard !Task.isCancelled, allowsAutomaticWork(target),
                   policy(for: target).checkAutomatically, policy(for: target).updateHooksAutomatically,
                   target == Self.localID || registry.host(target)?.autoInstallHooks != false else { break }
@@ -615,19 +621,25 @@ final class AgentIntegrationManager: ObservableObject {
         let arguments: [String]
         let environment: [String: String]?
         if target == Self.localID {
-            executable = getpwuid(getuid())?.pointee.pw_shell.map { String(cString: $0) } ?? "/bin/zsh"
+            let shellPath = getpwuid(getuid())?.pointee.pw_shell.map { String(cString: $0) } ?? "/bin/zsh"
             let interpreter: LocalPythonInterpreter
             do {
                 interpreter = try await LocalPythonInterpreter.resolve()
             } catch LocalPythonInterpreterError.unavailable {
                 interpreter = try await LocalPythonInterpreter.resolveFromLoginShell(
-                    shellPath: executable,
+                    shellPath: shellPath,
                     loginShell: loginShell
                 )
             }
-            let invocation = "\(interpreter.shellEnvironmentPreamble); exec \(interpreter.shellQuotedExecutable) -"
-            arguments = [loginShell ? "-lic" : "-lc", invocation]
-            environment = interpreter.environment
+            let invocation = LocalPythonInterpreter.loginShellInvocation(
+                shellPath: shellPath,
+                loginShell: loginShell,
+                posixScript: "\(interpreter.shellEnvironmentPreamble); exec \(interpreter.shellQuotedExecutable) -",
+                environment: interpreter.environment
+            )
+            executable = invocation.executablePath
+            arguments = invocation.arguments
+            environment = invocation.environment
         } else {
             guard let host = registry.host(target) else { throw AgentHistoryRemoteError.unavailable }
             return try await SSHSessionTransport.python(script, connection: registry.connections[target] ?? host.connection, loginShell: loginShell)

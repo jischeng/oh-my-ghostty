@@ -1123,18 +1123,24 @@ pub const StreamHandler = struct {
         try self.terminal.semanticPrompt(cmd);
     }
 
+    fn queueProgramStatusQueryReply(
+        self: *StreamHandler,
+        signal: terminal.osc.context_signal.Command,
+    ) bool {
+        if (!std.mem.eql(u8, signal.id, "omg-program-status-query")) return false;
+        if (std.mem.eql(u8, signal.metadata, "\x07")) {
+            self.messageWriter(.{ .protocol_reply = "\x1b]7501;" ++ terminal.osc.program_status.query_reply ++ "\x07" });
+        } else {
+            self.messageWriter(.{ .protocol_reply = "\x1b]7501;" ++ terminal.osc.program_status.query_reply ++ "\x1b\\" });
+        }
+        return true;
+    }
+
     fn contextSignal(
         self: *StreamHandler,
         signal: terminal.osc.context_signal.Command,
     ) !void {
-        if (std.mem.eql(u8, signal.id, "omg-program-status-query")) {
-            if (std.mem.eql(u8, signal.metadata, "\x07")) {
-                self.messageWriter(.{ .write_stable = "\x1b]7501;" ++ terminal.osc.program_status.query_reply ++ "\x07" });
-            } else {
-                self.messageWriter(.{ .write_stable = "\x1b]7501;" ++ terminal.osc.program_status.query_reply ++ "\x1b\\" });
-            }
-            return;
-        }
+        if (self.queueProgramStatusQueryReply(signal)) return;
         const message = apprt.surface.Message.ContextSignal.init(
             self.alloc,
             signal,
@@ -2359,4 +2365,74 @@ test "StreamHandler: coalesces back-to-back agy resizes, streaming history chunk
     handler.noteTerminalResize(false, bare_sb, t.screens.active.cursor.y);
     handler.noteEraseDisplay(.complete);
     try testing.expect(!t.modes.get(.synchronized_output));
+}
+
+test "StreamHandler: omg-program-status-query emits protocol_reply even in remote_session" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t: terminal.Terminal = try .init(testing.io, alloc, .{ .cols = 40, .rows = 10 });
+    defer t.deinit(alloc);
+
+    var mutex: std.Io.Mutex = .init;
+    mutex.lockUncancelable(global.io());
+    defer mutex.unlock(global.io());
+
+    var renderer_state: renderer.State = .{
+        .mutex = &mutex,
+        .terminal = &t,
+    };
+    var size: renderer.Size = .{
+        .screen = .{ .width = 400, .height = 200 },
+        .cell = .{ .width = 10, .height = 20 },
+        .padding = .{},
+    };
+    var termio_mailbox = try termio.Mailbox.initSPSC(alloc);
+    defer termio_mailbox.deinit(alloc);
+    var renderer_mailbox: renderer.Thread.Mailbox = .{};
+    var wakeup = try xev.Async.init();
+    defer wakeup.deinit();
+
+    var handler: StreamHandler = .{
+        .alloc = alloc,
+        .remote_session = true,
+        .size = &size,
+        .terminal = &t,
+        .termio_mailbox = &termio_mailbox,
+        .surface_mailbox = undefined,
+        .renderer_state = &renderer_state,
+        .renderer_mailbox = &renderer_mailbox,
+        .renderer_wakeup = wakeup,
+        .enquiry_response = "ignored",
+        .osc_color_report_format = .none,
+        .clipboard_write = .deny,
+    };
+    defer handler.deinit();
+
+    // Normal ENQ write_stable is suppressed in `remote_session`, whereas an
+    // unanswered `\e]7501;?` forwarded from a preserved holder or inline session
+    // queues `.protocol_reply` with matching BEL / ST terminators.
+    try handler.enquiry();
+    try testing.expect(handler.queueProgramStatusQueryReply(.{
+        .action = .start,
+        .id = "omg-program-status-query",
+        .metadata = "\x07",
+    }));
+    try testing.expect(handler.queueProgramStatusQueryReply(.{
+        .action = .start,
+        .id = "omg-program-status-query",
+        .metadata = "\x1b\\",
+    }));
+
+    const first = termio_mailbox.spsc.queue.pop(global.io()).?;
+    try testing.expectEqualStrings(
+        "\x1b]7501;" ++ terminal.osc.program_status.query_reply ++ "\x07",
+        first.protocol_reply,
+    );
+    const second = termio_mailbox.spsc.queue.pop(global.io()).?;
+    try testing.expectEqualStrings(
+        "\x1b]7501;" ++ terminal.osc.program_status.query_reply ++ "\x1b\\",
+        second.protocol_reply,
+    );
+    try testing.expect(termio_mailbox.spsc.queue.pop(global.io()) == null);
 }

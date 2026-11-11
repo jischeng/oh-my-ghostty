@@ -100,6 +100,11 @@ pub const Message = union(enum) {
     /// Write where the data is allocated and must be freed.
     write_alloc: WriteReq.Alloc,
 
+    /// Protocol reply for an explicit query forwarded to the active viewer
+    /// (for example `\e]7501;?` from a pre-7501 runtime holder). Unlike user
+    /// writes, passive viewers drop this without requesting writer takeover.
+    protocol_reply: WriteReq.Stable,
+
     /// User input captured for a specific durable-session connection generation.
     /// The generation must not be refreshed when the IO thread consumes this.
     omg_session_write: struct {

@@ -237,4 +237,77 @@ struct AgentLocalPythonInterpreterTests {
             "",
         ])
     }
+
+    @Test func loginShellInvocationSupportsNonPOSIXShellWithoutLeakingBootstrap() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let shellDirectory = root.appendingPathComponent("shells", isDirectory: true)
+        let pythonDirectory = root.appendingPathComponent("pybin", isDirectory: true)
+        try FileManager.default.createDirectory(at: shellDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: pythonDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // Mock `fish`-like shell that rejects POSIX `unset` / `if [...]` syntax,
+        // prepends `pythonDirectory` to `PATH`, and only accepts `exec /bin/sh -c ...`.
+        let fakeFish = shellDirectory.appendingPathComponent("fish")
+        let fakeFishScript = """
+        #!/bin/sh
+        flag="$1"
+        cmd="$2"
+        case "$flag" in
+          -lic|-lc) ;;
+          *) echo "unexpected flag: $flag" >&2; exit 2 ;;
+        esac
+        case "$cmd" in
+          *unset*|*"["*) echo "fish syntax error: POSIX syntax passed to fish" >&2; exit 2 ;;
+          "exec /bin/sh -c 'eval \\"\\$OMG_SH_BOOTSTRAP\\"'" ) ;;
+          *) echo "unexpected command: $cmd" >&2; exit 2 ;;
+        esac
+        export PATH="\(pythonDirectory.path):$PATH"
+        exec /bin/sh -c 'eval "$OMG_SH_BOOTSTRAP"'
+        """
+        try Data(fakeFishScript.utf8).write(to: fakeFish)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fakeFish.path)
+
+        let fakePython = pythonDirectory.appendingPathComponent("python3")
+        let fakePythonScript = """
+        #!/bin/sh
+        if [ "$1" = "-" ]; then
+          cat
+          printf 'BOOTSTRAP=%s\\n' "${OMG_SH_BOOTSTRAP-UNSET}"
+          printf 'SDKROOT=%s\\n' "${SDKROOT-UNSET}"
+          exit 0
+        fi
+        exit 0
+        """
+        try Data(fakePythonScript.utf8).write(to: fakePython)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fakePython.path)
+
+        let resolved = try await LocalPythonInterpreter.resolveFromLoginShell(
+            shellPath: fakeFish.path,
+            loginShell: true,
+            environment: [
+                "PATH": "/usr/bin:/bin",
+                "SDKROOT": "/stale/sdk",
+            ]
+        )
+        #expect(resolved.executablePath == URL(fileURLWithPath: fakePython.path).resolvingSymlinksInPath().path)
+
+        let invocation = LocalPythonInterpreter.loginShellInvocation(
+            shellPath: fakeFish.path,
+            loginShell: true,
+            posixScript: "\(resolved.shellEnvironmentPreamble); exec \(resolved.shellQuotedExecutable) -",
+            environment: resolved.environment
+        )
+        let runResult = try await GitProcessRunner().run(
+            executablePath: invocation.executablePath,
+            arguments: invocation.arguments,
+            workingDirectory: "/",
+            environment: invocation.environment,
+            stdin: Data("STDIN_OK\n".utf8),
+            maxOutputBytes: 4_096,
+            timeout: 5
+        )
+        #expect(runResult.isSuccess)
+        #expect(runResult.stdoutString == "STDIN_OK\nBOOTSTRAP=UNSET\nSDKROOT=UNSET\n")
+    }
 }

@@ -11,12 +11,13 @@ struct TerminalWorkspaceSessionState: Codable, Equatable {
         var isUserSetTitle: Bool?
         var agentResumeDescriptor: AgentResumeDescriptor?
         var sshResumeDescriptor: SSHResumeDescriptor?
+        var acknowledgedAgentStatus: AcknowledgedAgentStatus?
         var runtimeDescriptor: SessionRuntimeDescriptor?
         var runtimeCreateOnRestore: Bool?
 
         enum CodingKeys: String, CodingKey {
-            case pwd, uuid, title, isUserSetTitle, agentResumeDescriptor, sshResumeDescriptor, runtimeDescriptor
-            case runtimeCreateOnRestore
+            case pwd, uuid, title, isUserSetTitle, agentResumeDescriptor, sshResumeDescriptor
+            case acknowledgedAgentStatus, runtimeDescriptor, runtimeCreateOnRestore
         }
 
         func encode(to encoder: Encoder) throws {
@@ -28,6 +29,7 @@ struct TerminalWorkspaceSessionState: Codable, Equatable {
             try container.encodeIfPresent(isUserSetTitle, forKey: .isUserSetTitle)
             try container.encodeIfPresent(agentResumeDescriptor, forKey: .agentResumeDescriptor)
             try container.encodeIfPresent(sshResumeDescriptor, forKey: .sshResumeDescriptor)
+            try container.encodeIfPresent(acknowledgedAgentStatus, forKey: .acknowledgedAgentStatus)
             try container.encodeIfPresent(runtimeDescriptor, forKey: .runtimeDescriptor)
             try container.encodeIfPresent(runtimeCreateOnRestore, forKey: .runtimeCreateOnRestore)
         }
@@ -39,6 +41,7 @@ struct TerminalWorkspaceSessionState: Codable, Equatable {
             isUserSetTitle = view.hasUserSetTitle
             agentResumeDescriptor = view.agentResumeDescriptor
             sshResumeDescriptor = view.sshResumeDescriptor
+            acknowledgedAgentStatus = view.acknowledgedAgentStatus
             runtimeDescriptor = view.runtimeDescriptor
             runtimeCreateOnRestore = view.runtimeNeedsCreationOnRestore ? true : nil
         }
@@ -124,6 +127,7 @@ struct TerminalWorkspaceSessionState: Codable, Equatable {
                 let newID = mapping[pane.uuid] ?? UUID().uuidString
                 mapping[pane.uuid] = newID
                 pane.uuid = newID
+                pane.acknowledgedAgentStatus = nil
                 self = .leaf(pane)
             case .split(var branch):
                 branch.left.remapPaneIDs(using: &mapping)

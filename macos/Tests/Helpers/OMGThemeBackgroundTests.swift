@@ -84,4 +84,84 @@ struct OMGThemeBackgroundTests {
         let expected = TerminalRenderColorQuantizer.matchingRenderedNSColor(bg, colorspaceIsDisplayP3: false)
         #expect(components(opaque) == components(Color(expected)))
     }
+
+    @Test func unfocusedSplitMaskPreservesTranslucentBackgroundBytesWhileDimmingForeground() throws {
+        // Catppuccin Mocha (#1e1e2e) at 0.85 opacity -> P3 premultiplied bytes (26, 26, 38, 217).
+        let mocha = Color(.sRGB, red: 30 / 255, green: 30 / 255, blue: 46 / 255, opacity: 1)
+        let mask = OMGThemeBackground.unfocusedSplitMask(
+            dimmingAmount: 0.25,
+            surfaceBackground: mocha,
+            backgroundOpacity: 0.85,
+            windowIsOpaque: false,
+            colorspaceIsDisplayP3: false
+        )
+        let overlay = try #require(NSColor(mask.overlayColor).usingColorSpace(.displayP3))
+        let baseAlpha = 217.0 / 255.0
+        let basePremulR = 26.0 / 255.0
+        let basePremulG = 26.0 / 255.0
+        let basePremulB = 38.0 / 255.0
+
+        // Source-over compositing of overlay (overlayColor * overlayOpacity, overlayOpacity)
+        // onto dimmed surface (basePremul * surfaceOpacity, baseAlpha * surfaceOpacity)
+        // must preserve the exact background alpha and premultiplied RGB.
+        let compositedAlpha = mask.overlayOpacity + (baseAlpha * mask.surfaceOpacity) * (1 - mask.overlayOpacity)
+        let compositedR = overlay.redComponent * mask.overlayOpacity +
+            (basePremulR * mask.surfaceOpacity) * (1 - mask.overlayOpacity)
+        let compositedG = overlay.greenComponent * mask.overlayOpacity +
+            (basePremulG * mask.surfaceOpacity) * (1 - mask.overlayOpacity)
+        let compositedB = overlay.blueComponent * mask.overlayOpacity +
+            (basePremulB * mask.surfaceOpacity) * (1 - mask.overlayOpacity)
+
+        #expect(abs(compositedAlpha - baseAlpha) < 1e-6)
+        #expect(abs(compositedR - basePremulR) < 1e-6)
+        #expect(abs(compositedG - basePremulG) < 1e-6)
+        #expect(abs(compositedB - basePremulB) < 1e-6)
+
+        // Meanwhile an opaque white glyph pixel (1.0, 1.0) dims its foreground weight to (1 - 0.25) = 0.75.
+        let glyphForegroundWeight = mask.surfaceOpacity * (1 - mask.overlayOpacity)
+        #expect(abs(glyphForegroundWeight - 0.75) < 1e-6)
+    }
+
+    @Test func unfocusedSplitMaskHandlesGlassOpaqueAndExplicitFill() throws {
+        let bg = Color(.sRGB, red: 0x28 / 255, green: 0x2c / 255, blue: 0x34 / 255, opacity: 1)
+
+        // Liquid glass zeroes the overlay so no flat sRGB slab paints over NSGlassEffectView.
+        let glass = OMGThemeBackground.unfocusedSplitMask(
+            dimmingAmount: 0.2,
+            surfaceBackground: bg,
+            backgroundOpacity: 0.8,
+            windowIsOpaque: false,
+            colorspaceIsDisplayP3: false,
+            usesWindowGlass: true
+        )
+        #expect(glass.overlayOpacity == 0)
+        #expect(abs(glass.surfaceOpacity - 0.8) < 1e-6)
+
+        // Opaque windows keep surfaceOpacity = 1 and quantize the overlay fill.
+        let opaque = OMGThemeBackground.unfocusedSplitMask(
+            dimmingAmount: 0.15,
+            surfaceBackground: bg,
+            backgroundOpacity: 0.8,
+            windowIsOpaque: true,
+            colorspaceIsDisplayP3: false
+        )
+        #expect(opaque.surfaceOpacity == 1)
+        #expect(abs(opaque.overlayOpacity - 0.15) < 1e-6)
+        let expected = TerminalRenderColorQuantizer.matchingRenderedNSColor(NSColor(bg), colorspaceIsDisplayP3: false)
+        #expect(components(opaque.overlayColor) == components(Color(expected)))
+
+        // Explicit `unfocused-split-fill` keeps Ghostty's custom fill color verbatim.
+        let custom = Color(.sRGB, red: 0.8, green: 0.1, blue: 0.2, opacity: 1)
+        let explicit = OMGThemeBackground.unfocusedSplitMask(
+            dimmingAmount: 0.3,
+            explicitFill: custom,
+            surfaceBackground: bg,
+            backgroundOpacity: 0.7,
+            windowIsOpaque: false,
+            colorspaceIsDisplayP3: false
+        )
+        #expect(explicit.surfaceOpacity == 1)
+        #expect(explicit.overlayColor == custom)
+        #expect(abs(explicit.overlayOpacity - 0.3) < 1e-6)
+    }
 }

@@ -164,8 +164,10 @@ struct EditorAppearanceTests {
         #expect(following.localEffect == .disabled)
         let independent = EditorBackdrop(color: .blue, opacity: 0.85, blur: .enabled)
         #expect(independent.localEffect == .enabled)
-        let glass = EditorBackdrop(color: .blue, opacity: 0.85, blur: .macosGlassRegular, usesWindowBlur: true)
-        #expect(glass.localEffect == .macosGlassRegular)
+        let followingGlass = EditorBackdrop(color: .blue, opacity: 0.85, blur: .macosGlassRegular, usesWindowBlur: true)
+        #expect(followingGlass.localEffect == .disabled)
+        let independentGlass = EditorBackdrop(color: .blue, opacity: 0.85, blur: .macosGlassRegular)
+        #expect(independentGlass.localEffect == .macosGlassRegular)
     }
 
     @Test func nativeEditorRendersOneSharedBackdrop() async throws {

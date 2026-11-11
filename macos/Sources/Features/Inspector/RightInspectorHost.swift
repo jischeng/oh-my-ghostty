@@ -410,7 +410,6 @@ struct TerminalShellLayoutContainer<Content: View>: View {
     @ObservedObject var inspectorRegistry: InspectorRegistry
     let showsTabSidebar: Bool
     let backgroundColor: Color
-    let backgroundOpacity: Double
     /// Effective chrome background (color with effective opacity applied).
     let chromeBackground: Color
     let content: Content
@@ -422,7 +421,6 @@ struct TerminalShellLayoutContainer<Content: View>: View {
         inspectorRegistry: InspectorRegistry,
         showsTabSidebar: Bool,
         backgroundColor: Color,
-        backgroundOpacity: Double,
         chromeBackground: Color,
         @ViewBuilder content: () -> Content
     ) {
@@ -432,7 +430,6 @@ struct TerminalShellLayoutContainer<Content: View>: View {
         self.inspectorRegistry = inspectorRegistry
         self.showsTabSidebar = showsTabSidebar
         self.backgroundColor = backgroundColor
-        self.backgroundOpacity = backgroundOpacity
         self.chromeBackground = chromeBackground
         self.content = content()
     }
@@ -449,8 +446,7 @@ struct TerminalShellLayoutContainer<Content: View>: View {
             leading: AnyView(HStack(spacing: 0) {
                 SharedTerminalTabSidebar(
                     controller: controller, layoutState: layoutState,
-                    statusStore: statusStore, backgroundColor: backgroundColor,
-                    backgroundOpacity: 0
+                    statusStore: statusStore, backgroundColor: backgroundColor
                 )
                 VerticalTabSidebarDivider(
                     controller: controller, layoutState: layoutState,
@@ -458,8 +454,7 @@ struct TerminalShellLayoutContainer<Content: View>: View {
                 )
             }),
             center: AnyView(AgentQuickInputDock(
-                controller: controller, model: controller.quickInputModel,
-                backgroundColor: backgroundColor, backgroundOpacity: backgroundOpacity
+                controller: controller, model: controller.quickInputModel
             ) {
                 VStack(spacing: 0) {
                     if !showsTabSidebar && !controller.horizontalWorkspaceInTitlebar {
@@ -485,7 +480,7 @@ struct TerminalShellLayoutContainer<Content: View>: View {
                 RightInspectorHost(
                     controller: controller, layoutState: layoutState,
                     registry: inspectorRegistry, isPresented: rightVisible,
-                    backgroundColor: backgroundColor, backgroundOpacity: 0
+                    backgroundColor: backgroundColor
                 )
             })
         )
@@ -512,7 +507,6 @@ struct RightInspectorHost: NSViewControllerRepresentable {
     let registry: InspectorRegistry
     var isPresented = true
     let backgroundColor: Color
-    let backgroundOpacity: Double
 
     func makeNSViewController(context: Context) -> InspectorHostController {
         InspectorHostController(controller: controller, layoutState: layoutState, registry: registry)
@@ -520,7 +514,7 @@ struct RightInspectorHost: NSViewControllerRepresentable {
 
     func updateNSViewController(_ host: InspectorHostController, context: Context) {
         host.configure(isPresented: isPresented, backgroundColor: backgroundColor,
-                       backgroundOpacity: backgroundOpacity, environment: context.environment)
+                       environment: context.environment)
     }
 
     static func dismantleNSViewController(_ host: InspectorHostController, coordinator: ()) {

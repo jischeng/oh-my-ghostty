@@ -42,7 +42,7 @@ struct InspectorHostControllerTests {
             })
         let hosts = fixture.controllers.map { terminal in
             let host = InspectorHostController(controller: terminal, layoutState: state, registry: registry)
-            host.configure(isPresented: true, backgroundColor: .clear, backgroundOpacity: 0, environment: EnvironmentValues())
+            host.configure(isPresented: true, backgroundColor: .clear, environment: EnvironmentValues())
             host.view.frame = .init(x: 0, y: 0, width: 320, height: 400)
             terminal.window?.contentView?.addSubview(host.view)
             return host
@@ -89,7 +89,7 @@ struct InspectorHostControllerTests {
         defer { host.stop(); window.contentView = nil; window.close() }
         func configure(_ visible: Bool) {
             host.configure(isPresented: visible, backgroundColor: .clear,
-                           backgroundOpacity: 0, environment: EnvironmentValues())
+                           environment: EnvironmentValues())
         }
         configure(true)
         try await Task.sleep(for: .milliseconds(60))

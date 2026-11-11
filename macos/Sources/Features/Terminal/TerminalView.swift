@@ -95,14 +95,6 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
         return surface.backgroundColor ?? surface.derivedConfig.backgroundColor
     }
 
-    private var terminalBackgroundOpacity: Double {
-        if let controller = viewModel as? TerminalController {
-            return controller.terminalBackgroundOpacity
-        }
-        return lastFocusedSurface?.value?.derivedConfig.backgroundOpacity ??
-            ghostty.config.backgroundOpacity
-    }
-
     @ViewBuilder
     private var terminalContent: some View {
         VStack(spacing: 0) {
@@ -159,7 +151,6 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                             inspectorRegistry: appDelegate.inspectorRegistry,
                             showsTabSidebar: viewModel.supportsSidebar,
                             backgroundColor: terminalBackground,
-                            backgroundOpacity: terminalBackgroundOpacity,
                             chromeBackground: controller.terminalChromeBackground
                         ) {
                             terminalContent

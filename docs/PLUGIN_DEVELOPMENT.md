@@ -670,6 +670,14 @@ transparent, avoiding separate background compositing paths or duplicate fills.
 The layer excludes the terminal's center rectangle, follows sidebar visibility
 and resize geometry, and updates without implicit animations. It never paints
 behind the terminal IOSurface, which continues to own its own background alpha.
+When window-level liquid glass (`macos-glass-regular` / `macos-glass-clear`) is
+active on a non-opaque window, `TerminalGlassView` already tints the entire
+window, so shell chrome, transparent titlebar layers, Quick Input, and
+`followsOMG` editors paint clear instead of stacking a second tint or glass
+view. Default unfocused-split dimming scales surface and overlay opacities
+together (`k = (1 - t) / (1 - α_bg * t)`, `α_ov = α_bg * t`) so empty
+translucent or glass background cells retain the exact same alpha and quantized
+RGB as focused panes and sidebars while foreground glyphs fade by `t`.
 
 Split reconstruction retains each terminal Surface while moving it into a new
 native scroll wrapper. The terminal controller issues a presentation lease when

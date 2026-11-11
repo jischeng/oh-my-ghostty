@@ -811,21 +811,15 @@ final class ShortcutRecorderButton: NSButton {
 struct AgentQuickInputDock<Content: View>: View {
     @ObservedObject var controller: TerminalController
     @ObservedObject var model: AgentQuickInputModel
-    let backgroundColor: Color
-    let backgroundOpacity: Double
     let content: Content
 
     init(
         controller: TerminalController,
         model: AgentQuickInputModel,
-        backgroundColor: Color,
-        backgroundOpacity: Double,
         @ViewBuilder content: () -> Content
     ) {
         self.controller = controller
         self.model = model
-        self.backgroundColor = backgroundColor
-        self.backgroundOpacity = backgroundOpacity
         self.content = content()
     }
 
@@ -852,9 +846,7 @@ struct AgentQuickInputDock<Content: View>: View {
             .zIndex(1)
             AgentQuickInputComposer(
                 controller: controller,
-                model: model,
-                backgroundColor: backgroundColor,
-                backgroundOpacity: backgroundOpacity
+                model: model
             )
             .frame(height: model.dockHeight)
         }
@@ -875,8 +867,6 @@ struct AgentQuickInputDock<Content: View>: View {
                 edit: { controller.editQueuedQuickInput($0, from: surfaceID) },
                 remove: { controller.removeQueuedQuickInput($0, from: surfaceID) },
                 dividerColor: controller.sidebarDividerColor,
-                backgroundColor: backgroundColor,
-                backgroundOpacity: backgroundOpacity,
                 chromeBackground: controller.terminalChromeBackground
             )
         }
@@ -918,8 +908,6 @@ private struct AgentQuickInputQueueLane: View {
     let edit: (UUID) -> Void
     let remove: (UUID) -> Void
     let dividerColor: Color
-    let backgroundColor: Color
-    let backgroundOpacity: Double
     /// Effective chrome background (see `TerminalController.terminalChromeBackground`).
     let chromeBackground: Color
 
@@ -1131,8 +1119,6 @@ private struct AgentQuickInputQueueDepthIndicator: View {
 private struct AgentQuickInputComposer: View {
     @ObservedObject var controller: TerminalController
     @ObservedObject var model: AgentQuickInputModel
-    let backgroundColor: Color
-    let backgroundOpacity: Double
 
     @ObservedObject private var settings = OhMyGhosttySettings.shared
     private var strings: SettingsStrings { SettingsStrings(language: settings.language) }

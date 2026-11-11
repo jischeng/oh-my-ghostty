@@ -83,4 +83,30 @@ struct TerminalChromeBackgroundTests {
         )
         #expect(Int((NSColor(high).alphaComponent * 255).rounded()) == 179)
     }
+
+    @Test func windowGlassStaysClearUntilWindowBecomesOpaque() {
+        let glassTranslucent = TerminalController.chromeBackground(
+            color: background,
+            opacity: 0.85,
+            windowIsOpaque: false,
+            usesWindowGlass: true
+        )
+        #expect(NSColor(glassTranslucent).alphaComponent == 0)
+
+        let glassFullAlpha = TerminalController.chromeBackground(
+            color: background,
+            opacity: 1,
+            windowIsOpaque: false,
+            usesWindowGlass: true
+        )
+        #expect(NSColor(glassFullAlpha).alphaComponent == 0)
+
+        let glassFullscreenOpaque = TerminalController.chromeBackground(
+            color: background,
+            opacity: 0.85,
+            windowIsOpaque: true,
+            usesWindowGlass: true
+        )
+        #expect(NSColor(glassFullscreenOpaque).cgColor.alpha == 1)
+    }
 }

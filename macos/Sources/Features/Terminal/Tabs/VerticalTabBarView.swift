@@ -877,59 +877,6 @@ struct VerticalTabMoveTransactionPlan: Equatable {
     }
 }
 
-struct VerticalTabLayoutContainer<Content: View>: View {
-    @ObservedObject var controller: TerminalController
-    @ObservedObject var layoutState: VerticalTabWindowLayoutState
-    @ObservedObject var statusStore: TabActivityStore
-    let backgroundColor: Color
-    let backgroundOpacity: Double
-    let content: Content
-
-    init(
-        controller: TerminalController,
-        layoutState: VerticalTabWindowLayoutState,
-        statusStore: TabActivityStore,
-        backgroundColor: Color,
-        backgroundOpacity: Double = 1,
-        @ViewBuilder content: () -> Content
-    ) {
-        self.controller = controller
-        self.layoutState = layoutState
-        self.statusStore = statusStore
-        self.backgroundColor = backgroundColor
-        self.backgroundOpacity = backgroundOpacity
-        self.content = content()
-    }
-
-    var body: some View {
-        HStack(spacing: 0) {
-            if layoutState.isSidebarVisible {
-                SharedTerminalTabSidebar(
-                    controller: controller,
-                    layoutState: layoutState,
-                    statusStore: statusStore,
-                    backgroundColor: backgroundColor,
-                    backgroundOpacity: backgroundOpacity
-                )
-                .frame(width: presentedSidebarWidth)
-                VerticalTabSidebarDivider(
-                    controller: controller,
-                    layoutState: layoutState,
-                    color: controller.sidebarDividerColor,
-                    background: backgroundColor.opacity(backgroundOpacity)
-                )
-            }
-            content
-        }
-    }
-
-    private var presentedSidebarWidth: CGFloat {
-        controller.selectedTabID == ObjectIdentifier(controller)
-            ? layoutState.sidebarWidth
-            : layoutState.committedSidebarWidth
-    }
-}
-
 struct VerticalTabSidebarDivider: View {
     @ObservedObject var controller: TerminalController
     @ObservedObject var layoutState: VerticalTabWindowLayoutState

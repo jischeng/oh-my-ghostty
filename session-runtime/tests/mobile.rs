@@ -432,6 +432,52 @@ fn full_ui_control_projects_roster_without_taking_input_and_serves_real_files() 
     let send = |phone: &mut Ws, value: serde_json::Value| {
         phone.send(Message::Text(value.to_string().into())).unwrap();
     };
+    // Viewing a blocked session must not pre-acknowledge a subsequent completion revision.
+    send(
+        &mut phone,
+        serde_json::json!({"t":"acknowledge","session":route}),
+    );
+    std::thread::sleep(Duration::from_millis(80));
+    Frame::new(
+        b'D',
+        1,
+        &Frame::new(
+            b'I',
+            0,
+            b"printf '\\033]7501;state=clear:id=fixture\\007\\033]3008;start=omg-agent-pi-42;type=app;omg_agent=pi;omg_scope=local;omg_state=done\\007'\r",
+        )
+        .encode(),
+    )
+    .send(&mut desktop)
+    .unwrap();
+    loop {
+        let roster = json_reply(&mut phone, "roster");
+        if roster["projects"].as_array().unwrap().iter().any(|p| {
+            p["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["id"] == route && s["agent"] == "pi" && s["status"] == "done")
+        }) {
+            break;
+        }
+    }
+    send(
+        &mut phone,
+        serde_json::json!({"t":"acknowledge","session":route}),
+    );
+    loop {
+        let roster = json_reply(&mut phone, "roster");
+        if roster["projects"].as_array().unwrap().iter().any(|p| {
+            p["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["id"] == route && s["agent"] == "pi" && s["status"] == "idle")
+        }) {
+            break;
+        }
+    }
     send(
         &mut phone,
         serde_json::json!({"t":"listFiles","project":project_id,"path":""}),
@@ -478,6 +524,33 @@ fn full_ui_control_projects_roster_without_taking_input_and_serves_real_files() 
             if frame.kind == b'O' {
                 output.extend(frame.data);
             }
+        }
+    }
+    Frame::new(
+        b'D',
+        1,
+        &Frame::new(
+            b'I',
+            0,
+            b"printf '\\033]3008;start=omg-ssh-remote;type=remote;targethost=cloud;cwd=/srv/mapping-platform\\007'\r",
+        )
+        .encode(),
+    )
+    .send(&mut desktop)
+    .unwrap();
+    loop {
+        let roster = json_reply(&mut phone, "roster");
+        if roster["projects"].as_array().unwrap().iter().any(|p| {
+            p["kind"] == "folder"
+                && p["name"] == "cloud · mapping-platform"
+                && p["deviceAlias"] == "cloud"
+                && p["sessions"].as_array().unwrap().iter().any(|s| {
+                    s["id"] == route
+                        && s["remoteHost"] == "cloud"
+                        && s["remotePath"] == "/srv/mapping-platform"
+                })
+        }) {
+            break;
         }
     }
     send(&mut phone, serde_json::json!({"t":"startTerminal"}));

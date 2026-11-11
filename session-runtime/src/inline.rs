@@ -511,6 +511,15 @@ fn view_loop(
                     return Ok(0);
                 }
                 if ready {
+                    if screen.vt.activity_mut().acknowledge() {
+                        if screen.continuation().is_ok_and(|b| b.is_empty()) {
+                            stdout.write_all(&screen.vt.activity().snapshot().inline_bytes())?;
+                            stdout.flush()?;
+                            pending_activity = false;
+                        } else {
+                            pending_activity = true;
+                        }
+                    }
                     if !writer {
                         Frame::new(b'W', generation, b"inline-takeover/1").send(socket)?;
                     }

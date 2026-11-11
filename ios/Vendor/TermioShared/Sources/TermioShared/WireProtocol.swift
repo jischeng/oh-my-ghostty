@@ -108,6 +108,9 @@ public enum CompanionControl: Codable, Sendable, Equatable {
     /// The client asks the Mac to close a session (the phone's swipe-to-remove).
     /// No success reply — the next roster push drops the row everywhere.
     case stop(sessionID: String)
+    /// The client opened or is viewing a session on screen, clearing any
+    /// completed (`done`) turn state in the shared session runtime.
+    case acknowledge(sessionID: String)
     /// The client's terminal grid changed, or it stopped showing the session.
     ///
     /// This is a *viewport* declaration, not a claim on the session: the Mac
@@ -236,6 +239,8 @@ public enum CompanionControl: Codable, Sendable, Equatable {
             return Self.json(fields)
         case .stop(let sessionID):
             return #"{"t":"stop","session":"\#(sessionID)"}"#
+        case .acknowledge(let sessionID):
+            return Self.json(["t": "acknowledge", "session": sessionID])
         case .resize(let cols, let rows, let rendering, let surface):
             var fields: [String: Any] = [
                 "t": "resize", "cols": cols, "rows": rows, "rendering": rendering,
@@ -366,6 +371,9 @@ public enum CompanionControl: Codable, Sendable, Equatable {
         case "stop":
             guard let sessionID = obj["session"] as? String else { return nil }
             return .stop(sessionID: sessionID)
+        case "acknowledge":
+            guard let sessionID = obj["session"] as? String else { return nil }
+            return .acknowledge(sessionID: sessionID)
         case "resize":
             guard let cols = obj["cols"] as? Int, let rows = obj["rows"] as? Int else { return nil }
             var surface: TerminalGrid?

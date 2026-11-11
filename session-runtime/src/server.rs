@@ -750,6 +750,7 @@ pub fn serve_managed(
                         "runtime_ms": runtime_millis(started_at),
                         "inline_viewer": inline_viewer,
                         "writer_transfer": true,
+                        "activity_acknowledge": true,
                         "initial_output": initial_output.as_ref().map(|bytes| {
                             use base64::Engine;
                             base64::engine::general_purpose::STANDARD.encode(bytes)
@@ -789,6 +790,7 @@ pub fn serve_managed(
         }
         let mut resizes = Vec::new();
         let mut revoked = Vec::new();
+        let mut activity_acknowledged = false;
         for peer in &mut peers {
             if close_after_flush.contains(&peer.id) {
                 continue;
@@ -843,10 +845,21 @@ pub fn serve_managed(
                         agent_done = false;
                         completed_group = None;
                         lifetime.activity(false, Instant::now());
+                        if vt.activity_mut().acknowledge() {
+                            activity_acknowledged = true;
+                        }
                         if input.len() + f.data.len() > 1024 * 1024 {
                             peer.dead = true;
                         } else {
                             input.extend(f.data);
+                        }
+                    }
+                    crate::ACKNOWLEDGE if f.data.is_empty() => {
+                        agent_done = false;
+                        completed_group = None;
+                        lifetime.activity(false, Instant::now());
+                        if vt.activity_mut().acknowledge() {
+                            activity_acknowledged = true;
                         }
                     }
                     RESIZE if writer == Some(peer.id) => {
@@ -900,6 +913,14 @@ pub fn serve_managed(
         for dimensions in resizes {
             for p in &mut peers {
                 p.push(Frame::new(RESIZE, seq, &dimensions));
+            }
+        }
+        if activity_acknowledged {
+            let snapshot_bytes = serde_json::to_vec(&vt.activity().snapshot())?;
+            for p in &mut peers {
+                if !close_after_flush.contains(&p.id) {
+                    p.push(Frame::new(crate::activity::FRAME, seq, &snapshot_bytes));
+                }
             }
         }
         if !input.is_empty() && !eof {

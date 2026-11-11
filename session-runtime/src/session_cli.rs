@@ -291,6 +291,207 @@ pub(crate) fn mobile_targets(support: &Path) -> io::Result<Vec<(String, PathBuf)
     }
     Ok(ordered)
 }
+
+pub(crate) fn mobile_relay_targets(
+    support: &Path,
+) -> Vec<(String, PathBuf, omg_session_runtime::location::SshTarget)> {
+    use std::os::unix::fs::MetadataExt;
+    let uid = unsafe { libc::geteuid() };
+    let prefix = format!("omg-runtime-{uid}-");
+    let versions_root = support.join("session-runtime/versions");
+    let versions_canonical = fs::canonicalize(&versions_root).ok();
+    let revision = current_revision();
+    let expected_snapshot = current_snapshot_revision();
+    let mut roots = vec![PathBuf::from("/tmp")];
+    let temp = env::temp_dir();
+    if !roots.contains(&temp) {
+        roots.push(temp);
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut relays = Vec::new();
+    for temp_root in roots {
+        let Ok(entries) = fs::read_dir(&temp_root) else {
+            continue;
+        };
+        let mut dirs: Vec<_> = entries.take(512).filter_map(Result::ok).collect();
+        dirs.sort_by_key(|e| e.file_name());
+        for entry in dirs {
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some(pid_str) = name.strip_prefix(&prefix) else {
+                continue;
+            };
+            let Ok(pid) = pid_str.parse::<i32>() else {
+                continue;
+            };
+            if pid <= 1 || unsafe { libc::kill(pid, 0) } != 0 {
+                continue;
+            }
+            let dir_path = entry.path();
+            let Ok(meta) = fs::symlink_metadata(&dir_path) else {
+                continue;
+            };
+            if !meta.is_dir()
+                || meta.uid() != uid
+                || meta.mode() & 0o077 != 0
+                || meta.file_type().is_symlink()
+            {
+                continue;
+            }
+            let Ok(files) = fs::read_dir(&dir_path) else {
+                continue;
+            };
+            let mut configs: Vec<_> = files.take(256).filter_map(Result::ok).collect();
+            configs.sort_by_key(|f| f.file_name());
+            for file in configs {
+                let Some(fname) = file.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                if fname.ends_with(".setup.json") || !fname.ends_with(".json") {
+                    continue;
+                }
+                let key = &fname[..fname.len() - 5];
+                if key.len() != 16 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    continue;
+                }
+                let cfg_path = file.path();
+                let Ok(cfg_meta) = fs::symlink_metadata(&cfg_path) else {
+                    continue;
+                };
+                if !cfg_meta.is_file() || cfg_meta.uid() != uid || cfg_meta.len() > 64 * 1024 {
+                    continue;
+                }
+                let Ok(bytes) = fs::read(&cfg_path) else {
+                    continue;
+                };
+                let Ok(cfg) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                    continue;
+                };
+                if cfg["transport"].as_str() != Some("ssh") {
+                    continue;
+                }
+                let Some(bundle) = cfg["bundle"].as_str().map(PathBuf::from) else {
+                    continue;
+                };
+                let bundle_matches = bundle.starts_with(&versions_root)
+                    || versions_canonical
+                        .as_ref()
+                        .and_then(|vc| fs::canonicalize(&bundle).ok().map(|bc| bc.starts_with(vc)))
+                        .unwrap_or(false);
+                if !bundle_matches {
+                    continue;
+                }
+                let Some(rev) = cfg["revision"].as_str() else {
+                    continue;
+                };
+                if !valid_revision(rev) {
+                    continue;
+                }
+                if rev != revision {
+                    if let Some(expected) = &expected_snapshot {
+                        let snap_path = bundle.join("snapshot-revision");
+                        let compatible = fs::read_to_string(snap_path)
+                            .ok()
+                            .is_some_and(|s| canonical_snapshot_revision(&s) == expected);
+                        if !compatible {
+                            continue;
+                        }
+                    }
+                }
+                let Some(ssh_target) = cfg["arguments"]
+                    .as_array()
+                    .and_then(|arr| parse_relay_ssh_arguments(arr, cfg["cwd"].as_str()))
+                else {
+                    continue;
+                };
+                let sock_path = dir_path.join(format!("{key}.sock"));
+                let Ok(sock_meta) = fs::symlink_metadata(&sock_path) else {
+                    continue;
+                };
+                if sock_meta.uid() != uid || sock_meta.file_type().is_symlink() {
+                    continue;
+                }
+                if seen.insert(sock_path.clone()) {
+                    relays.push((
+                        format!("SSH · {}", ssh_target.destination),
+                        sock_path,
+                        ssh_target,
+                    ));
+                }
+            }
+        }
+    }
+    relays
+}
+
+fn parse_relay_ssh_arguments(
+    raw: &[serde_json::Value],
+    cwd: Option<&str>,
+) -> Option<omg_session_runtime::location::SshTarget> {
+    let args: Vec<String> = raw
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    let sep = args.iter().rposition(|a| a == "--")?;
+    let destination = args.get(sep + 1)?.clone();
+    if destination.is_empty()
+        || destination.starts_with('-')
+        || destination.chars().any(|c| c.is_whitespace() || c == '\0')
+    {
+        return None;
+    }
+    let mut options = Vec::new();
+    let mut i = 0;
+    while i < sep {
+        let arg = &args[i];
+        if arg == "-T" {
+            i += 1;
+            continue;
+        }
+        if arg == "-S" && i + 1 < sep {
+            i += 2;
+            continue;
+        }
+        if arg == "-o" && i + 1 < sep {
+            let opt = &args[i + 1];
+            let is_internal = [
+                "BatchMode=",
+                "ConnectTimeout=",
+                "ServerAliveInterval=",
+                "ServerAliveCountMax=",
+                "ClearAllForwardings=",
+                "PermitLocalCommand=",
+                "SessionType=",
+                "RemoteCommand=",
+                "RequestTTY=",
+                "StdinNull=",
+                "ControlMaster=",
+                "ControlPersist=",
+            ]
+            .iter()
+            .any(|prefix| opt.starts_with(prefix));
+            if is_internal {
+                i += 2;
+                continue;
+            }
+            options.push(arg.clone());
+            options.push(opt.clone());
+            i += 2;
+            continue;
+        }
+        options.push(arg.clone());
+        i += 1;
+    }
+    let remote_cwd = cwd
+        .filter(|s| !s.is_empty() && (s.starts_with('/') || s.starts_with('~')))
+        .map(str::to_owned);
+    Some(omg_session_runtime::location::SshTarget {
+        destination,
+        options,
+        remote_cwd,
+    })
+}
 fn home() -> io::Result<PathBuf> {
     env::var_os("HOME")
         .map(PathBuf::from)

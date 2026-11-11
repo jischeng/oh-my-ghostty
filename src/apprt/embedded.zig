@@ -1916,6 +1916,10 @@ pub const CAPI = struct {
         return surface.core_surface.io.backend.setSessionAttached(attached);
     }
 
+    export fn ghostty_surface_acknowledge_activity(surface: *Surface) void {
+        surface.core_surface.io.backend.acknowledgeActivity();
+    }
+
     /// Update the occlusion state of a surface.
     export fn ghostty_surface_set_occlusion(surface: *Surface, visible: bool) void {
         surface.occlusionCallback(visible);

@@ -69,6 +69,7 @@ final class RuntimeConnection {
     var supportsWriterTransfer: Bool { transferSupported }
     private var snapshotApplied = false
     private var transferSupported = false
+    private var activityAcknowledge = false
     private var sentViewport: TerminalGrid?
     private var requestedViewport: TerminalGrid?
     private var viewportGeneration: UInt64 = 0
@@ -130,6 +131,7 @@ final class RuntimeConnection {
         self.session = session
         sessionEnded = false
         snapshotApplied = false
+        activityAcknowledge = false
         isWriter = false
         sentViewport = nil
         requestedViewport = nil
@@ -145,11 +147,16 @@ final class RuntimeConnection {
         if let previous = attachment.detach() { send(RuntimeFrame(81, previous)) }
         session = nil
         snapshotApplied = false
+        activityAcknowledge = false
         isWriter = false
         requestedViewport = nil
         sentViewport = nil
         viewportGeneration &+= 1
         terminal = nil
+    }
+    func acknowledge() {
+        guard snapshotApplied, activityAcknowledge else { return }
+        inner(RuntimeFrame(67, 0))
     }
     func claim() {
         guard snapshotApplied else { return }
@@ -186,6 +193,7 @@ final class RuntimeConnection {
         watermark = RuntimeWatermark()
         _ = attachment.detach()
         snapshotApplied = false
+        activityAcknowledge = false
         isWriter = false
         sentViewport = nil
         requestedViewport = nil
@@ -245,6 +253,7 @@ final class RuntimeConnection {
         case 74:
             let metadata = try JSONSerialization.jsonObject(with: frame.data) as? [String: Any]
             transferSupported = metadata?["writer_transfer"] as? Bool ?? false
+            activityAcknowledge = metadata?["activity_acknowledge"] as? Bool ?? false
         case 83:
             // Regular local sessions are answered by omgd, so this terminal's
             // automatic reports are deliberately not sent back as user input.

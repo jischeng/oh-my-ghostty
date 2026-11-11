@@ -7,8 +7,8 @@ struct MockSession: Identifiable {
     let title: String
     let project: String
     let agent: RosterAgent
-    let status: SessionStatus
-    let subtitle: String
+    var status: SessionStatus
+    var subtitle: String
     let time: String
     /// The Mac session's wire id when this row came from the live roster —
     /// what `attach` sends to bridge the real PTY. nil for bundled mock rows.

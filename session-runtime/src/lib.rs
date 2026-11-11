@@ -26,6 +26,7 @@ pub mod supervision;
 pub const CLOSE: u8 = b'K';
 pub const EXIT: u8 = b'X';
 pub const CLAIM: u8 = b'W';
+pub const ACKNOWLEDGE: u8 = b'C';
 pub mod activity;
 pub mod client;
 pub mod holder;

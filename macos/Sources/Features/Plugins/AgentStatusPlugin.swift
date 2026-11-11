@@ -2198,6 +2198,24 @@ struct AgentContextSignalReducer: Sendable {
     var currentActivity: TabActivity? { currentRecord?.activity }
     var hasRemoteActivity: Bool { activities.contains { $0.scope == .remote } }
 
+    func hasActiveLocalContext(
+        for agent: SupportedAgent,
+        processGroupID: Int,
+        isProcessAlive: (Int) -> Bool
+    ) -> Bool {
+        guard let current = currentRecord,
+              !current.terminated,
+              current.scope == .local,
+              current.activity.source == agent.rawValue else { return false }
+        if current.id == "omg-agent-\(agent.rawValue)-\(processGroupID)" {
+            return true
+        }
+        if case .process(let pid)? = current.liveness {
+            return isProcessAlive(pid)
+        }
+        return false
+    }
+
     var validationIdentity: AgentLivenessIdentity? {
         guard let current = currentRecord,
               current.scope == .local else { return nil }

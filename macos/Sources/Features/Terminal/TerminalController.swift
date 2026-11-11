@@ -990,74 +990,16 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 }
                 .store(in: &observers)
 
+            for buffered in surface.beginContextSignalObservation() {
+                processContextSignal(buffered, for: surface)
+            }
+
             surface.$contextSignal
+                .dropFirst()
                 .compactMap { $0 }
                 .sink { [weak self, weak surface] signal in
                     guard let self, let surface else { return }
-                    if consumeAgentRuntimeSnapshot(signal, for: surface) { return }
-                    if signal.id == "omg-program-status" {
-                        consumeProgramStatus(signal.metadata, for: surface)
-                        return
-                    }
-                    if SessionRuntimeHandoff.shared.accept(signal, source: surface, controller: self) { return }
-                    if signal.id == "omg-inline-password" {
-                        if surface.runtimeInlineSession != nil, signal.metadata == "0" || signal.metadata == "1" {
-                            surface.passwordInput = signal.metadata == "1"
-                        }
-                        return
-                    }
-                    if signal.action == .end, surface.runtimeInlineSession?.connectionID == signal.id {
-                        surface.runtimeInlineSession = nil
-                        surface.passwordInput = false
-                    }
-                    if signal.id == "omg-runtime-state", let runtime = surface.runtimeDescriptor {
-                        guard let state = SessionRuntimeConnectionState.decode(signal.metadata) else { return }
-                        surface.runtimeConnectionState = state
-                        var context = paneSessionContexts[surface.id] ?? .init(
-                            workingDirectory: surface.pwd,
-                            terminalTitle: surface.title
-                        )
-                        context.applyRuntimeConnection(
-                            runtime,
-                            workingDirectory: surface.pwd,
-                            state: state
-                        )
-                        updatePaneSessionContext(context, for: surface.id)
-                        return
-                    }
-                    var context = paneSessionContexts[surface.id] ?? .init(
-                        workingDirectory: surface.pwd,
-                        terminalTitle: surface.title
-                    )
-                    let wasSSHSession = context.isSSHSession
-                    let sshReplay: SSHReplayDescriptor? = if signal.action == .start,
-                       signal.id.hasPrefix("omg-ssh-") {
-                        SSHReplayStore.load(connectionID: signal.id) ?? surface.pendingSSHLaunchReplay
-                    } else {
-                        nil
-                    }
-                    if signal.action == .start, signal.id.hasPrefix("omg-ssh-"), sshReplay != nil {
-                        surface.pendingSSHLaunchReplay = nil
-                    }
-                    context.apply(
-                        signal,
-                        currentWorkingDirectory: surface.pwd,
-                        currentTerminalTitle: surface.title,
-                        sshReplay: sshReplay
-                    )
-                    if let session = AgentContextSignalReducer.sessionSignal(from: signal),
-                       session.scope == .remote,
-                       let workingDirectory = session.workingDirectory {
-                        context.applyInferredRemoteWorkingDirectory(workingDirectory)
-                    }
-                    let didEndSSHSession = wasSSHSession && !context.isSSHSession
-                    updatePaneSessionContext(context, for: surface.id)
-                    updateSSHResumeDescriptor(context, for: surface.id)
-                    registerTypedAgentHookSignal(signal, for: surface.id)
-                    updateAgentActivity(signal, for: surface.id)
-                    if didEndSSHSession {
-                        clearRemoteAgentState(for: surface.id)
-                    }
+                    self.processContextSignal(signal, for: surface)
                 }
                 .store(in: &observers)
 
@@ -1068,6 +1010,76 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 name: .terminalPaneSessionContextsDidChange,
                 object: self
             )
+        }
+    }
+
+    private func processContextSignal(
+        _ signal: Ghostty.ContextSignal,
+        for surface: Ghostty.SurfaceView
+    ) {
+        if consumeAgentRuntimeSnapshot(signal, for: surface) { return }
+        if signal.id == "omg-program-status" {
+            consumeProgramStatus(signal.metadata, for: surface)
+            return
+        }
+        if SessionRuntimeHandoff.shared.accept(signal, source: surface, controller: self) { return }
+        if signal.id == "omg-inline-password" {
+            if surface.runtimeInlineSession != nil, signal.metadata == "0" || signal.metadata == "1" {
+                surface.passwordInput = signal.metadata == "1"
+            }
+            return
+        }
+        if signal.action == .end, surface.runtimeInlineSession?.connectionID == signal.id {
+            surface.runtimeInlineSession = nil
+            surface.passwordInput = false
+        }
+        if signal.id == "omg-runtime-state", let runtime = surface.runtimeDescriptor {
+            guard let state = SessionRuntimeConnectionState.decode(signal.metadata) else { return }
+            surface.runtimeConnectionState = state
+            var context = paneSessionContexts[surface.id] ?? .init(
+                workingDirectory: surface.pwd,
+                terminalTitle: surface.title
+            )
+            context.applyRuntimeConnection(
+                runtime,
+                workingDirectory: surface.pwd,
+                state: state
+            )
+            updatePaneSessionContext(context, for: surface.id)
+            return
+        }
+        var context = paneSessionContexts[surface.id] ?? .init(
+            workingDirectory: surface.pwd,
+            terminalTitle: surface.title
+        )
+        let wasSSHSession = context.isSSHSession
+        let sshReplay: SSHReplayDescriptor? = if signal.action == .start,
+           signal.id.hasPrefix("omg-ssh-") {
+            SSHReplayStore.load(connectionID: signal.id) ?? surface.pendingSSHLaunchReplay
+        } else {
+            nil
+        }
+        if signal.action == .start, signal.id.hasPrefix("omg-ssh-"), sshReplay != nil {
+            surface.pendingSSHLaunchReplay = nil
+        }
+        context.apply(
+            signal,
+            currentWorkingDirectory: surface.pwd,
+            currentTerminalTitle: surface.title,
+            sshReplay: sshReplay
+        )
+        if let session = AgentContextSignalReducer.sessionSignal(from: signal),
+           session.scope == .remote,
+           let workingDirectory = session.workingDirectory {
+            context.applyInferredRemoteWorkingDirectory(workingDirectory)
+        }
+        let didEndSSHSession = wasSSHSession && !context.isSSHSession
+        updatePaneSessionContext(context, for: surface.id)
+        updateSSHResumeDescriptor(context, for: surface.id)
+        registerTypedAgentHookSignal(signal, for: surface.id)
+        updateAgentActivity(signal, for: surface.id)
+        if didEndSSHSession {
+            clearRemoteAgentState(for: surface.id)
         }
     }
 
@@ -1270,7 +1282,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
     }
 
-    private func applyDetectedAgent(
+    func applyDetectedAgent(
         _ agent: SupportedAgent?,
         processGroupID: Int,
         surfaceID: UUID
@@ -1303,10 +1315,18 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             launchedAt: launchedAt
         )
         // A previous Agent can terminate between foreground samples and leave
-        // an error activity behind. Only suppress the synthesized idle event
-        // when this exact context is already current; a newly detected process
-        // group must supersede any older Agent context.
-        guard agentReducers[surfaceID]?.currentContextID != id else { return }
+        // an error activity behind. Suppress the synthesized idle event when
+        // this exact context or a live PID-scoped hook context for the same
+        // Agent is already active; a newly detected process group supersedes
+        // any older or terminated Agent context.
+        if let reducer = agentReducers[surfaceID],
+           reducer.hasActiveLocalContext(
+               for: agent,
+               processGroupID: processGroupID,
+               isProcessAlive: Self.processExists
+           ) {
+            return
+        }
         updateAgentActivity(.init(
             action: .start,
             id: id,
@@ -1632,7 +1652,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             : nil
         let update = consumedAgentSignal ?? remotePromptUpdate
         agentReducers[surfaceID] = reducer
-        if consumedAgentSignal != nil || remotePromptUpdate != nil {
+        let clearsAcknowledgedReducer: Bool = switch consumedAgentSignal {
+        case .set(let activity): activity.state != .idle
+        case .clear: true
+        case nil: remotePromptUpdate != nil
+        }
+        if clearsAcknowledgedReducer {
             updateAcknowledgedAgentStatus(for: surfaceID) { $0.reducer = nil }
         }
         if !hadRemoteActivity,
@@ -1880,6 +1905,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             }
         }
         guard acknowledgedProgram || acknowledgedReducerUpdate != nil else { return }
+        surface.acknowledgeRuntimeActivity()
         updateAcknowledgedAgentStatus(for: surface.id) { ack in
             if acknowledgedProgram, let programCandidate {
                 ack.program = programCandidate

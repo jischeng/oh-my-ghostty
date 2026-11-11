@@ -669,6 +669,15 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
                                 continue;
                             }
                             peer.snapshot_acked = true;
+                        } else if frame.kind == crate::ACKNOWLEDGE {
+                            if frame.seq != peer.generation
+                                || !frame.data.is_empty()
+                                || state != State::Online
+                                || peer.remote_stream.is_none()
+                                || !peer.snapshot_acked
+                            {
+                                continue;
+                            }
                         } else if matches!(frame.kind, INPUT | RESIZE | CLAIM | CLOSE) {
                             if frame.seq != peer.generation
                                 || state != State::Online

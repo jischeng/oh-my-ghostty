@@ -38,7 +38,37 @@ final class RosterStore {
     /// be forwarded as-is: the backend needs it to answer "has this person seen
     /// the turn end", the one status call that belongs to a viewer.
     var currentSessionKey: String? {
-        didSet { client?.viewingSessionID = currentSessionKey }
+        didSet {
+            client?.viewingSessionID = currentSessionKey
+            guard let key = currentSessionKey else { return }
+            var clearedDone = false
+            projects = projects.map { project in
+                var copy = project
+                for idx in copy.sessions.indices where copy.sessions[idx].key == key && copy.sessions[idx].status == .done {
+                    copy.sessions[idx].status = .idle
+                    if copy.sessions[idx].subtitle == "Done" {
+                        copy.sessions[idx].subtitle = ""
+                    }
+                    clearedDone = true
+                }
+                return copy
+            }
+            if clearedDone {
+                NotificationCenter.default.post(name: Self.didChange, object: nil)
+                let statuses = Dictionary(
+                    projects.flatMap { project in
+                        project.sessions.compactMap { session in
+                            session.rosterID.map { ($0, session.status) }
+                        }
+                    },
+                    uniquingKeysWith: { first, _ in first }
+                )
+                NotificationCenter.default.post(
+                    name: .sessionStatusesDidChange, object: nil,
+                    userInfo: ["statuses": statuses]
+                )
+            }
+        }
     }
     /// The workspace the phone is working in: the one holding the session last
     /// opened, or the one picked in the ＋ menu. See `destinationWorkspace`,
@@ -117,7 +147,9 @@ final class RosterStore {
     /// The workspaces on the paired Mac itself — what ＋ can offer as a
     /// destination (see `destinationWorkspace`).
     var localWorkspaces: [WorkspaceGroup] {
-        workspaceGroups.filter { $0.deviceAlias == nil }
+        let groups = workspaceGroups
+        let local = groups.filter { $0.deviceAlias == nil }
+        return local.isEmpty ? groups : local
     }
 
     /// The loose-agent-sessions container in the destination workspace — the

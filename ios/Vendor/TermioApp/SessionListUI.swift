@@ -444,7 +444,7 @@ struct RowSeparator: View {
 struct WorkspaceGroup {
     let id: String
     let name: String
-    let deviceAlias: String?
+    var deviceAlias: String?
     var projects: [MockProject]
 
     /// The machine to put after the workspace name, and nil when there is
@@ -473,6 +473,9 @@ struct WorkspaceGroup {
         var indexByWorkspace: [String: Int] = [:]
         for project in projects {
             if let index = indexByWorkspace[project.workspaceID] {
+                if project.deviceAlias == nil {
+                    groups[index].deviceAlias = nil
+                }
                 groups[index].projects.append(project)
                 continue
             }

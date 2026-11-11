@@ -69,6 +69,70 @@ impl Snapshot {
         }
         bytes
     }
+
+    pub fn acknowledge(&mut self) -> bool {
+        let mut changed = false;
+        for signal in &mut self.records {
+            changed |= acknowledge_signal(signal);
+        }
+        if let Some(pending) = &mut self.pending {
+            for signal in pending {
+                changed |= acknowledge_signal(signal);
+            }
+        }
+        if changed {
+            self.revision = self.revision.saturating_add(1);
+        }
+        changed
+    }
+}
+
+fn acknowledge_signal(signal: &mut Signal) -> bool {
+    if signal.id == "omg-program-status" {
+        if !matches!(
+            field(&signal.metadata, ':', "state"),
+            Some("done" | "error")
+        ) {
+            return false;
+        }
+        let mut rewritten = Vec::new();
+        for part in signal.metadata.split(':') {
+            let Some((key, _)) = part.trim().split_once('=') else {
+                rewritten.push(part.to_owned());
+                continue;
+            };
+            match key.trim() {
+                "state" => rewritten.push("state=idle".to_owned()),
+                "msg" | "progress" | "kind" => {}
+                _ => rewritten.push(part.to_owned()),
+            }
+        }
+        signal.metadata = rewritten.join(":");
+        return true;
+    }
+    if signal.id.starts_with("omg-agent-") && signal.id != SYNC {
+        if !matches!(
+            field(&signal.metadata, ';', "omg_state"),
+            Some("done" | "completed" | "error" | "failed")
+        ) {
+            return false;
+        }
+        let mut rewritten = Vec::new();
+        for part in signal.metadata.split(';') {
+            let Some((key, _)) = part.trim().split_once('=') else {
+                rewritten.push(part.to_owned());
+                continue;
+            };
+            match key.trim() {
+                "omg_state" => rewritten.push("omg_state=idle".to_owned()),
+                "message" | "omg_phase" | "progress" | "omg_attention" => {}
+                _ => rewritten.push(part.to_owned()),
+            }
+        }
+        signal.metadata = rewritten.join(";");
+        return true;
+    }
+    false
 }
 
 #[derive(Clone)]
@@ -379,6 +443,22 @@ impl State {
             false
         }
     }
+
+    pub fn acknowledge(&mut self) -> bool {
+        let mut changed = false;
+        for record in &mut self.records {
+            changed |= acknowledge_signal(&mut record.signal);
+        }
+        if let Some(pending) = &mut self.pending {
+            for record in pending {
+                changed |= acknowledge_signal(&mut record.signal);
+            }
+        }
+        if changed {
+            self.revision = self.revision.saturating_add(1);
+        }
+        changed
+    }
 }
 
 #[cfg(test)]
@@ -512,5 +592,27 @@ mod tests {
         assert!(!bytes.windows(4).any(|s| s == b"]52;" || s == b"777;"));
         let invalid = r#"{"version":1,"revision":0,"records":[{"id":"omg-agent-pi","metadata":"\u001b]52;"}],"pending":null}"#;
         assert!(Snapshot::decode(invalid.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn acknowledging_activity_transitions_completed_and_failed_signals_to_idle() {
+        let mut vt = Vt::new(80, 24).unwrap();
+        vt.write(
+            b"\x1b]3008;start=omg-agent-pi-72155;type=app;omg_agent=pi;omg_scope=local;omg_liveness=pid;omg_state=done;message=Finished;omg_cwd=%2Ftmp%2Frepo\x07",
+        );
+        vt.write(b"\x1b]7501;state=done:app=codex:msg=RG9uZQ==:progress=100\x07");
+        vt.write(report("claude", "working").as_bytes());
+        let before = vt.activity().revision();
+        assert!(vt.activity_mut().acknowledge());
+        assert!(vt.activity().revision() > before);
+        let snapshot = vt.activity().snapshot();
+        assert_eq!(snapshot.records.len(), 3);
+        assert_eq!(
+            snapshot.records[0].metadata,
+            "type=app;omg_agent=pi;omg_scope=local;omg_liveness=pid;omg_state=idle;omg_cwd=%2Ftmp%2Frepo"
+        );
+        assert_eq!(snapshot.records[1].metadata, "state=idle:app=codex");
+        assert!(snapshot.records[2].metadata.contains("omg_state=working"));
+        assert!(!vt.activity_mut().acknowledge());
     }
 }

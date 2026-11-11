@@ -40,6 +40,7 @@ write_mutex: std.Io.Mutex = .init,
 ready: std.atomic.Value(bool) = .init(false),
 snapshot_ready: std.atomic.Value(bool) = .init(false),
 writer_transfer: std.atomic.Value(bool) = .init(false),
+activity_acknowledge: std.atomic.Value(bool) = .init(false),
 takeover_pending: bool = false,
 takeover_input: std.ArrayList(u8) = .empty,
 generation: std.atomic.Value(u64) = .init(0),
@@ -131,6 +132,7 @@ fn closeSocket(self: *Self) void {
     defer self.write_mutex.unlock(global.io());
     self.ready.store(false, .release);
     self.snapshot_ready.store(false, .release);
+    self.activity_acknowledge.store(false, .release);
     self.clearTakeoverInputLocked();
     self.disableStartupInputLocked();
     self.clearProcessInfo();
@@ -162,12 +164,24 @@ pub fn setSessionAttached(self: *Self, attached: bool) bool {
     if (!self.is_local or !self.creating) self.force_attach.store(true, .release);
     self.ready.store(false, .release);
     self.snapshot_ready.store(false, .release);
+    self.activity_acknowledge.store(false, .release);
     self.clearTakeoverInputLocked();
     self.disableStartupInputLocked();
     self.clearProcessInfo();
     if (self.fd >= 0) _ = c.shutdown(self.fd, c.SHUT_RDWR);
     self.attachment_changed.broadcast(global.io());
     return true;
+}
+
+pub fn acknowledgeActivity(self: *Self) void {
+    self.write_mutex.lockUncancelable(global.io());
+    defer self.write_mutex.unlock(global.io());
+    if (self.stopping.load(.acquire) or
+        !self.attachment_enabled.load(.acquire) or
+        self.close_requested.load(.acquire) or
+        !self.snapshot_ready.load(.acquire) or
+        !self.activity_acknowledge.load(.acquire)) return;
+    self.sendFrameLocked('C', self.generation.load(.acquire), &.{}) catch {};
 }
 
 fn attachmentIsCurrent(self: *Self, epoch: u64) bool {
@@ -765,6 +779,7 @@ fn readLoop(self: *Self, io: *HostIO, epoch: u64, attached: *bool, connected_onc
                     password_input: bool = false,
                     runtime_ms: ?u64 = null,
                     writer_transfer: bool = false,
+                    activity_acknowledge: bool = false,
                 };
                 if (bytes.len > 16 * 1024) return error.InvalidMetadata;
                 const metadata = try std.json.parseFromSlice(Metadata, self.alloc, bytes, .{ .ignore_unknown_fields = true });
@@ -772,6 +787,7 @@ fn readLoop(self: *Self, io: *HostIO, epoch: u64, attached: *bool, connected_onc
                 if (metadata.value.version != 1 and metadata.value.version != 2) return error.UnsupportedProtocol;
                 self.protocol_version.store(metadata.value.version, .release);
                 self.writer_transfer.store(metadata.value.writer_transfer, .release);
+                self.activity_acknowledge.store(metadata.value.activity_acknowledge, .release);
                 self.runtime_ms = metadata.value.runtime_ms orelse 1;
                 self.updatePasswordInputForEpoch(io, metadata.value.password_input, epoch);
                 if (!try self.updateProcessInfoForEpoch(.{
@@ -910,7 +926,7 @@ fn publishActivitySnapshot(self: *Self, io: *HostIO, bytes: []const u8) !void {
     const Signal = struct { id: []const u8, metadata: []const u8 };
     const Snapshot = struct { version: u32, revision: u64, records: []const Signal, pending: ?[]const Signal = null };
     if (bytes.len > 2 * 1024 * 1024) return error.InvalidMetadata;
-    const parsed = try std.json.parseFromSlice(Snapshot, self.alloc, bytes, .{});
+    const parsed = try std.json.parseFromSlice(Snapshot, self.alloc, bytes, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
     if (parsed.value.version != 1 or parsed.value.records.len > 64) return error.InvalidMetadata;
     const groups = [_][]const Signal{ parsed.value.records, parsed.value.pending orelse &.{} };
@@ -1341,6 +1357,33 @@ test "restored OSC 7 pwd becomes a decoded path" {
     try t.setPwd("file://host.local");
     normalizeRestoredPwd(alloc, &t);
     try std.testing.expect(t.getPwd() == null);
+}
+
+test "acknowledgeActivity sends C only when negotiated and snapshot is ready" {
+    var backend = try Self.init(std.testing.allocator, "/unused", null, .{});
+    defer backend.deinit();
+    var sockets: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF_UNIX, c.SOCK_STREAM, 0, &sockets));
+    defer _ = c.close(sockets[0]);
+    defer _ = c.close(sockets[1]);
+    backend.fd = sockets[0];
+    backend.generation.store(7, .release);
+    var probe: [1]u8 = undefined;
+
+    backend.acknowledgeActivity();
+    try std.testing.expect(c.recv(sockets[1], &probe, 1, c.MSG_DONTWAIT) < 0);
+
+    backend.snapshot_ready.store(true, .release);
+    backend.acknowledgeActivity();
+    try std.testing.expect(c.recv(sockets[1], &probe, 1, c.MSG_DONTWAIT) < 0);
+
+    backend.activity_acknowledge.store(true, .release);
+    backend.acknowledgeActivity();
+    var frame: [13]u8 = undefined;
+    try readTestBytes(sockets[1], &frame);
+    try std.testing.expectEqual(@as(u8, 'C'), frame[0]);
+    try std.testing.expectEqual(@as(u64, 7), std.mem.readInt(u64, frame[1..9], .big));
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, frame[9..13], .big));
 }
 
 test {

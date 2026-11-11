@@ -85,9 +85,10 @@ struct AgentProgramStatusTests {
         OhMyGhosttySettings.shared.agentStatusHooksEnabled = true
         defer { OhMyGhosttySettings.shared.agentStatusHooksEnabled = enabled }
         let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let coordinator = TerminalWorkspaceCoordinator(store: TerminalWorkspaceStore(fileURL: nil))
         var config = Ghostty.SurfaceConfiguration()
         config.command = "/bin/sleep 60"
-        let controller = TerminalController(app, withBaseConfig: config)
+        let controller = TerminalController(app, withBaseConfig: config, workspaceCoordinator: coordinator)
         _ = controller.window
         defer { controller.window?.delegate = nil; controller.window?.close() }
         let surface = try #require(controller.surfaceTree.first)
@@ -150,9 +151,10 @@ struct AgentProgramStatusTests {
         OhMyGhosttySettings.shared.agentStatusHooksEnabled = true
         defer { OhMyGhosttySettings.shared.agentStatusHooksEnabled = enabled }
         let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let coordinator = TerminalWorkspaceCoordinator(store: TerminalWorkspaceStore(fileURL: nil))
         var config = Ghostty.SurfaceConfiguration()
         config.command = "/bin/sleep 60"
-        let controller = TerminalController(app, withBaseConfig: config)
+        let controller = TerminalController(app, withBaseConfig: config, workspaceCoordinator: coordinator)
         _ = controller.window
         defer { controller.window?.delegate = nil; controller.window?.close() }
         let surface = try #require(controller.surfaceTree.first)
@@ -190,9 +192,10 @@ struct AgentProgramStatusTests {
         OhMyGhosttySettings.shared.agentStatusHooksEnabled = true
         defer { OhMyGhosttySettings.shared.agentStatusHooksEnabled = enabled }
         let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let coordinator = TerminalWorkspaceCoordinator(store: TerminalWorkspaceStore(fileURL: nil))
         var config = Ghostty.SurfaceConfiguration()
         config.command = "/bin/sleep 60"
-        let controller = TerminalController(app, withBaseConfig: config)
+        let controller = TerminalController(app, withBaseConfig: config, workspaceCoordinator: coordinator)
         _ = controller.window
         defer { controller.window?.delegate = nil; controller.window?.close() }
         let surface = try #require(controller.surfaceTree.first)
@@ -223,7 +226,11 @@ struct AgentProgramStatusTests {
             surface.id: .init(pane: replacementID, descriptor: remoteRuntime, create: false),
         ])
         let restoredTreeState = try archived.instantiate(restoreSessions: true)
-        let restoredController = TerminalController(app, withSurfaceTree: restoredTreeState.surfaceTree)
+        let restoredController = TerminalController(
+            app,
+            withSurfaceTree: restoredTreeState.surfaceTree,
+            workspaceCoordinator: coordinator
+        )
         _ = restoredController.window
         defer { restoredController.window?.delegate = nil; restoredController.window?.close() }
         let restoredSurface = try #require(restoredController.surfaceTree.first)
@@ -253,7 +260,11 @@ struct AgentProgramStatusTests {
 
         let secondArchive = TerminalWorkspaceSessionState(restoredController)
         let secondRestoredState = try secondArchive.instantiate(restoreSessions: true)
-        let secondController = TerminalController(app, withSurfaceTree: secondRestoredState.surfaceTree)
+        let secondController = TerminalController(
+            app,
+            withSurfaceTree: secondRestoredState.surfaceTree,
+            workspaceCoordinator: coordinator
+        )
         _ = secondController.window
         defer { secondController.window?.delegate = nil; secondController.window?.close() }
         let secondSurface = try #require(secondController.surfaceTree.first)
@@ -268,5 +279,62 @@ struct AgentProgramStatusTests {
         // Restore Tabs mode never carries acknowledged completion state into fresh tabs.
         let restoreTabsState = try archived.instantiate(restoreSessions: false)
         #expect(restoreTabsState.surfaceTree.first?.acknowledgedAgentStatus == nil)
+    }
+
+    @Test func preObserverSnapshotReplayAndPidHookPollingPreserveAcknowledgedIdleState() throws {
+        let enabled = OhMyGhosttySettings.shared.agentStatusHooksEnabled
+        OhMyGhosttySettings.shared.agentStatusHooksEnabled = true
+        defer { OhMyGhosttySettings.shared.agentStatusHooksEnabled = enabled }
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let coordinator = TerminalWorkspaceCoordinator(store: TerminalWorkspaceStore(fileURL: nil))
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let controller = TerminalController(app, withBaseConfig: config, workspaceCoordinator: coordinator)
+        _ = controller.window
+        defer { controller.window?.delegate = nil; controller.window?.close() }
+        let surface = try #require(controller.surfaceTree.first)
+
+        // PID-scoped hook agent (`pi`) completes under its own live node PID while the outer
+        // wrapper process group has a distinct PGID.
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let wrapperPGID: pid_t = pid == 42424 ? 42425 : 42424
+        surface.contextSignal = .init(action: .start, id: "omg-agent-pi-\(pid)",
+            metadata: "type=app;omg_agent=pi;omg_scope=local;omg_liveness=pid;omg_state=done")
+        #expect(controller.agentActivities[surface.id]?.state == .done)
+
+        controller.acknowledgeTerminalAgentStateFromUserInput(on: surface)
+        #expect(controller.agentActivities[surface.id]?.state == .idle)
+        #expect(surface.acknowledgedAgentStatus != nil)
+
+        // Foreground process polling with a different wrapper PGID or an incoming `.idle` signal
+        // must NOT overwrite the PID-scoped signal or wipe `acknowledgedAgentStatus`.
+        controller.applyDetectedAgent(.pi, processGroupID: Int(wrapperPGID), surfaceID: surface.id)
+        #expect(controller.agentActivities[surface.id]?.state == .idle)
+        #expect(surface.acknowledgedAgentStatus != nil)
+
+        surface.contextSignal = .init(action: .start, id: "omg-agent-pi-\(pid)",
+            metadata: "type=app;omg_agent=pi;omg_scope=local;omg_liveness=pid;omg_state=idle")
+        #expect(controller.agentActivities[surface.id]?.state == .idle)
+        #expect(surface.acknowledgedAgentStatus != nil)
+
+        // Archive workspace state and emit the replayed runtime `omg-agent-sync` batch onto
+        // `restoredSurface` BEFORE `TerminalController` loads its window and subscribes.
+        let archived = TerminalWorkspaceSessionState(controller)
+        let restoredTreeState = try archived.instantiate(restoreSessions: true)
+        let restoredSurface = try #require(restoredTreeState.surfaceTree.first)
+        restoredSurface.contextSignal = .init(action: .start, id: "omg-agent-sync", metadata: "begin")
+        restoredSurface.contextSignal = .init(action: .start, id: "omg-agent-pi-\(pid)",
+            metadata: "type=app;omg_agent=pi;omg_scope=local;omg_liveness=pid;omg_state=done")
+        restoredSurface.contextSignal = .init(action: .start, id: "omg-agent-sync", metadata: "end")
+
+        let restoredController = TerminalController(
+            app,
+            withSurfaceTree: restoredTreeState.surfaceTree,
+            workspaceCoordinator: coordinator
+        )
+        _ = restoredController.window
+        defer { restoredController.window?.delegate = nil; restoredController.window?.close() }
+        #expect(restoredController.agentActivities[restoredSurface.id]?.state == .idle)
+        #expect(restoredSurface.acknowledgedAgentStatus != nil)
     }
 }

@@ -220,7 +220,7 @@ pub fn parse_ssh_argv(argv: &[String]) -> Option<SshTarget> {
             }
             _ => None,
         },
-        "ghostty" if argv.get(1).map(String::as_str) == Some("+ssh") => {
+        "ghostty" | "omg" if argv.get(1).map(String::as_str) == Some("+ssh") => {
             if let Some(pos) = argv[2..].iter().position(|a| a == "--") {
                 parse_ssh_args(&argv[2 + pos + 1..])
             } else {
@@ -371,6 +371,15 @@ mod tests {
         assert_eq!(handoff.destination, "dev@host");
         assert_eq!(handoff.options, vec!["-p", "2200"]);
         assert_eq!(handoff.remote_cwd.as_deref(), Some("/home/dev/repo"));
+
+        let omg_ssh = parse_ssh_argv(&[
+            "/Applications/OMG Dev.app/Contents/MacOS/omg".into(),
+            "+ssh".into(),
+            "--".into(),
+            "cloud".into(),
+        ])
+        .unwrap();
+        assert_eq!(omg_ssh.destination, "cloud");
 
         assert!(parse_ssh_argv(&["ssh".into(), "-N".into(), "devbox".into()]).is_none());
         assert!(parse_ssh_argv(&[

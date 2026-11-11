@@ -75,6 +75,13 @@ pub const Backend = union(Kind) {
         };
     }
 
+    pub fn acknowledgeActivity(self: *Backend) void {
+        switch (self.*) {
+            .exec => {},
+            .omg_session => |*session| session.acknowledgeActivity(),
+        }
+    }
+
     pub fn focusGained(
         self: *Backend,
         td: *termio.Termio.ThreadData,

@@ -9,10 +9,15 @@ import TermioShared
 /// the companion protocol reached the leaf views — and a second backend would
 /// have had to impersonate it. Now the wire stops here.
 final class CompanionBackend: DeviceClient {
-    /// Recorded and unused: on this path the Mac has already applied its own
-    /// selection to every row before the roster is sent, so applying a second
-    /// rule here would be two viewers arguing about one Mac's window.
-    var viewingSessionID: String?
+    /// Forwarded to the Mac companion / `omgd mobile` control channel whenever
+    /// the phone opens a live session so completed (`done`) turns acknowledge
+    /// back to `idle` across mobile and desktop rosters.
+    var viewingSessionID: String? {
+        didSet {
+            guard viewingSessionID != oldValue else { return }
+            sendAcknowledgeIfLive(viewingSessionID)
+        }
+    }
     var onRoster: ((DeviceRoster) -> Void)?
     var onConnected: ((Bool) -> Void)?
     var onError: ((String) -> Void)?
@@ -34,7 +39,9 @@ final class CompanionBackend: DeviceClient {
         client.onRoster = { [weak self] roster in
             self?.onRoster?(DeviceRoster(companion: roster))
         }
-        client.onConnected = { [weak self] connected in self?.onConnected?(connected) }
+        client.onConnected = { [weak self] connected in
+            self?.onConnected?(connected)
+        }
         client.onError = { [weak self] reason in self?.onError?(reason) }
         client.onConnectionFailure = { [weak self] reason in self?.onConnectionFailure?(reason) }
         client.onStarted = { [weak self] sessionID, agentID in self?.onStarted?(sessionID, agentID) }
@@ -73,6 +80,13 @@ final class CompanionBackend: DeviceClient {
     }
 
     func stopSession(id: String) { client.send(.stop(sessionID: id)) }
+
+    private func sendAcknowledgeIfLive(_ sessionID: String?) {
+        guard let sessionID, !sessionID.isEmpty,
+              sessionID.split(separator: "/", omittingEmptySubsequences: false).count == 3
+        else { return }
+        client.send(.acknowledge(sessionID: sessionID))
+    }
 
     func requestSSHHosts() { client.send(.sshConfigHosts) }
 

@@ -58,10 +58,12 @@ final class OMGSession: StreamDeviceSession {
                         : "此 runtime 不支持输入权交接，请使用新版 runtime 创建的会话。"))
                 }
             }
-            connection.onState = { [weak self] state in
+            connection.onState = { [weak self, weak connection] state in
                 guard let self else { return }
                 switch state {
-                case .attached: onState?(.connected)
+                case .attached:
+                    if rendering { connection?.acknowledge() }
+                    onState?(.connected)
                 case .connecting: discardPending(); onState?(.connecting)
                 case .disconnected: discardPending(); onState?(.reconnecting)
                 case .closed: discardPending(); onState?(.closed)
@@ -137,6 +139,9 @@ final class OMGSession: StreamDeviceSession {
         let becameVisible = !rendering && showing
         rendering = showing
         if becameVisible {
+            if connection?.isAttached == true {
+                connection?.acknowledge()
+            }
             needsAutoClaim = true
             changed()
         }

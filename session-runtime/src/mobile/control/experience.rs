@@ -970,6 +970,7 @@ mod tests {
         let desktop = Desktop {
             workspaces: vec![("workspace-a".into(), "Alpha".into())],
             panes: HashMap::new(),
+            inline_owners: HashMap::new(),
         };
         let mut projects = BTreeMap::new();
         append_projects(&config, &desktop, None, &mut projects).unwrap();

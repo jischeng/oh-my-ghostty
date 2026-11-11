@@ -121,6 +121,9 @@ final class OMGMobileUITests: XCTestCase {
             openProject(app)
             assertRow(app, agent: "Pi", state: "Done")
             openSessionTerminal(app)
+            app.buttons["terminal.back"].tap()
+            assertRow(app, agent: "Pi", state: "Idle")
+            openSessionTerminal(app)
             let reconnect = "\\115\\117\\102\\111\\114\\105\\137\\122\\105\\103\\117\\116\\116\\105\\103\\124\\105\\104"
             app.typeText("printf '\(reconnect) pid=%s\\n\\033]7501;state=working:app=antigravity:id=mobile-agent-fixture\\007' \"$$\"\n")
             app.buttons["terminal.back"].tap()

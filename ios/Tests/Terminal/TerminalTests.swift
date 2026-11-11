@@ -2,6 +2,7 @@ import XCTest
 import CoreText
 import Metal
 import GhosttyVt
+import TermioShared
 @testable import OMGTerminal
 
 final class TerminalTests: XCTestCase {
@@ -128,6 +129,13 @@ final class TerminalTests: XCTestCase {
             let alpha = readAlpha(slot)
             XCTAssertTrue(alpha.contains(where: { $0 > 128 }), "Icon U+\(String(codepoint, radix: 16)) must draw visible pixels")
         }
+    }
+
+    func testCompanionControlAcknowledgeRoundTrip() {
+        let sessionID = "0123456789abcdef/session-pi/gen-1"
+        let encoded = CompanionControl.acknowledge(sessionID: sessionID).encoded()
+        let decoded = CompanionControl.decode(encoded)
+        XCTAssertEqual(decoded, .acknowledge(sessionID: sessionID))
     }
 
 }

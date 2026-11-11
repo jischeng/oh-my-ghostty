@@ -71,6 +71,8 @@ struct Endpoint {
     name: String,
     #[serde(skip)]
     socket: PathBuf,
+    #[serde(skip)]
+    relay: Option<omg_session_runtime::location::SshTarget>,
 }
 
 struct Config {
@@ -85,7 +87,7 @@ struct Config {
 enum Route {
     Catalogue,
     Control,
-    Session(PathBuf),
+    Session(PathBuf, bool),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -263,13 +265,22 @@ fn parse_route(path: &str, destinations: &[Endpoint]) -> Option<Route> {
     destinations
         .iter()
         .find(|e| e.id == id)
-        .map(|e| Route::Session(e.socket.clone()))
+        .map(|e| Route::Session(e.socket.clone(), e.relay.is_some()))
 }
 
 impl Config {
     fn endpoints(&self) -> io::Result<Vec<Endpoint>> {
         if let Some(support) = &self.support {
-            targets(super::session_cli::mobile_targets(support)?)
+            let mut result = targets(super::session_cli::mobile_targets(support)?)?;
+            for (name, socket, ssh) in super::session_cli::mobile_relay_targets(support) {
+                if let Ok(mut ep) = targets(vec![(name, socket)]) {
+                    if let Some(mut first) = ep.pop() {
+                        first.relay = Some(ssh);
+                        result.push(first);
+                    }
+                }
+            }
+            Ok(result)
         } else {
             Ok(self.endpoints.clone())
         }
@@ -294,6 +305,7 @@ fn targets(values: Vec<(String, PathBuf)>) -> io::Result<Vec<Endpoint>> {
                 id: format!("{:x}", Sha256::digest(socket.to_string_lossy().as_bytes())),
                 name,
                 socket,
+                relay: None,
             })
         })
         .collect()
@@ -1127,7 +1139,12 @@ async fn serve(
             .map_err(io::Error::other)?;
             return ws.close(None).await.map_err(io::Error::other);
         }
-        Route::Session(path) => path,
+        Route::Session(path, is_relay) => {
+            if is_relay {
+                return serve_relay_session(ws, path).await;
+            }
+            path
+        }
     };
     // Adapted from Termio's splice. WebSocket messages are transport chunks,
     // never assumed to coincide with OMG's framed messages.
@@ -1168,6 +1185,220 @@ async fn serve(
     Ok(())
 }
 
+fn take_frame(buffer: &mut Vec<u8>) -> io::Result<Option<omg_session_runtime::Frame>> {
+    if buffer.len() < 13 {
+        return Ok(None);
+    }
+    let len = u32::from_be_bytes(buffer[9..13].try_into().unwrap()) as usize;
+    if len > omg_session_runtime::MAX_FRAME {
+        return Err(io::Error::other("Relay frame exceeds limit"));
+    }
+    if buffer.len() < 13 + len {
+        return Ok(None);
+    }
+    let kind = buffer[0];
+    let seq = u64::from_be_bytes(buffer[1..9].try_into().unwrap());
+    let data = buffer[13..13 + len].to_vec();
+    buffer.drain(..13 + len);
+    Ok(Some(omg_session_runtime::Frame { kind, seq, data }))
+}
+
+async fn serve_relay_session(
+    mut ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    relay_socket: PathBuf,
+) -> io::Result<()> {
+    use omg_session_runtime::Frame;
+    let mut ws_buf = Vec::new();
+    let mut daemon_buf = Vec::new();
+    let mut read_chunk = vec![0u8; 64 * 1024];
+    let mut active: Option<(
+        u64,
+        tokio::net::unix::OwnedReadHalf,
+        tokio::net::unix::OwnedWriteHalf,
+        u64,
+        Option<String>,
+    )> = None;
+    let mut ping = tokio::time::interval(Duration::from_secs(15));
+    ping.tick().await;
+    let mut awaiting_pong = false;
+    loop {
+        tokio::select! {
+            incoming = ws.next() => match incoming {
+                Some(Ok(Message::Binary(bytes))) => {
+                    if ws_buf.len() + bytes.len() > 2 * omg_session_runtime::MAX_FRAME {
+                        break;
+                    }
+                    ws_buf.extend_from_slice(&bytes);
+                    while let Some(frame) = take_frame(&mut ws_buf)? {
+                        match frame.kind {
+                            b'P' if frame.seq == 0 => {
+                                let reply = Frame::new(b'P', 0, b"").encode();
+                                tokio::time::timeout(Duration::from_secs(10), ws.send(Message::Binary(reply.into())))
+                                    .await.map_err(io::Error::other)?.map_err(io::Error::other)?;
+                            }
+                            b'L' if frame.seq == 0 => {
+                                let sock = relay_socket.clone();
+                                let listed = tokio::time::timeout(
+                                    Duration::from_secs(4),
+                                    tokio::task::spawn_blocking(move || omg_session_runtime::client::list_local(&sock)),
+                                ).await;
+                                let out = match listed {
+                                    Ok(Ok(Ok(sessions))) => Frame::new(b'L', 0, &serde_json::to_vec(&sessions)?),
+                                    Ok(Ok(Err(err))) => Frame::new(b'E', 0, err.to_string().as_bytes()),
+                                    _ => Frame::new(b'E', 0, b"SSH relay catalogue timed out"),
+                                };
+                                tokio::time::timeout(Duration::from_secs(10), ws.send(Message::Binary(out.encode().into())))
+                                    .await.map_err(io::Error::other)?.map_err(io::Error::other)?;
+                            }
+                            b'U' if frame.seq != 0 => {
+                                active = None;
+                                daemon_buf.clear();
+                                let req: serde_json::Value = serde_json::from_slice(&frame.data)
+                                    .unwrap_or(serde_json::Value::Null);
+                                let Some(id) = req["id"].as_str().map(str::to_owned) else {
+                                    let err = Frame::new(b'E', frame.seq, b"Invalid attach request").encode();
+                                    let _ = ws.send(Message::Binary(err.into())).await;
+                                    continue;
+                                };
+                                let generation = req["generation"].as_str().map(str::to_owned);
+                                let open = omg_session_runtime::registry::OpenRequest {
+                                    id,
+                                    create: false,
+                                    policy: Default::default(),
+                                    cwd: None,
+                                    inline_viewer: false,
+                                    launch: None,
+                                };
+                                match tokio::net::UnixStream::connect(&relay_socket).await {
+                                    Ok(stream) => {
+                                        let (r, mut w) = stream.into_split();
+                                        let payload = Frame::new(b'H', 0, &serde_json::to_vec(&open)?).encode();
+                                        tokio::time::timeout(Duration::from_secs(5), w.write_all(&payload))
+                                            .await.map_err(io::Error::other)??;
+                                        active = Some((frame.seq, r, w, 0, generation));
+                                    }
+                                    Err(err) => {
+                                        let reply = Frame::new(b'E', frame.seq, err.to_string().as_bytes()).encode();
+                                        tokio::time::timeout(Duration::from_secs(10), ws.send(Message::Binary(reply.into())))
+                                            .await.map_err(io::Error::other)?.map_err(io::Error::other)?;
+                                    }
+                                }
+                            }
+                            b'Q' => {
+                                if active.as_ref().is_some_and(|(sid, _, _, _, _)| *sid == frame.seq) {
+                                    active = None;
+                                    daemon_buf.clear();
+                                }
+                            }
+                            b'D' => {
+                                if let Some((sid, _, ref mut w, peer_gen, _)) = active {
+                                    if sid == frame.seq && peer_gen != 0 {
+                                        let mut slice = frame.data.as_slice();
+                                        let inner = Frame::read(&mut slice)?;
+                                        let forwarded = if inner.kind == omg_session_runtime::ACK {
+                                            Frame::new(omg_session_runtime::ACK, inner.seq, &peer_gen.to_be_bytes())
+                                        } else {
+                                            Frame::new(inner.kind, peer_gen, &inner.data)
+                                        };
+                                        tokio::time::timeout(Duration::from_secs(10), w.write_all(&forwarded.encode()))
+                                            .await.map_err(io::Error::other)??;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Some(Ok(Message::Pong(_))) => awaiting_pong = false,
+                Some(Ok(Message::Ping(_))) => { ws.flush().await.map_err(io::Error::other)?; }
+                Some(Ok(Message::Frame(_))) => {}
+                _ => break,
+            },
+            result = async {
+                match active.as_mut() {
+                    Some((_, r, _, _, _)) => r.read(&mut read_chunk).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let count = result?;
+                if count == 0 {
+                    if let Some((sid, _, _, _, _)) = active.take() {
+                        daemon_buf.clear();
+                        let closed = Frame::new(b'Q', sid, &[]).encode();
+                        tokio::time::timeout(Duration::from_secs(10), ws.send(Message::Binary(closed.into())))
+                            .await.map_err(io::Error::other)?.map_err(io::Error::other)?;
+                    }
+                    continue;
+                }
+                if daemon_buf.len() + count > 2 * omg_session_runtime::MAX_FRAME {
+                    break;
+                }
+                daemon_buf.extend_from_slice(&read_chunk[..count]);
+                let mut drop_stream = false;
+                while let Some(frame) = take_frame(&mut daemon_buf)? {
+                    let Some((sid, _, _, ref mut peer_gen, ref expected_gen)) = active else {
+                        break;
+                    };
+                    match frame.kind {
+                        b'T' => {
+                            *peer_gen = frame.seq;
+                            if let Ok(status) = serde_json::from_slice::<serde_json::Value>(&frame.data) {
+                                if status["state"] == "attention" {
+                                    let msg = status["message"].as_str().unwrap_or("SSH relay requires attention");
+                                    let reply = Frame::new(b'E', sid, msg.as_bytes()).encode();
+                                    tokio::time::timeout(Duration::from_secs(10), ws.send(Message::Binary(reply.into())))
+                                        .await.map_err(io::Error::other)?.map_err(io::Error::other)?;
+                                    drop_stream = true;
+                                }
+                            }
+                        }
+                        b'E' => {
+                            let reply = Frame::new(b'E', sid, &frame.data).encode();
+                            tokio::time::timeout(Duration::from_secs(10), ws.send(Message::Binary(reply.into())))
+                                .await.map_err(io::Error::other)?.map_err(io::Error::other)?;
+                            drop_stream = true;
+                        }
+                        b'J' => {
+                            if let Some(expected) = expected_gen.as_deref() {
+                                let actual = serde_json::from_slice::<serde_json::Value>(&frame.data)
+                                    .ok()
+                                    .and_then(|v| v["generation"].as_str().map(str::to_owned));
+                                if actual.as_deref() != Some(expected) {
+                                    let reply = Frame::new(b'E', sid, b"Session generation changed").encode();
+                                    tokio::time::timeout(Duration::from_secs(10), ws.send(Message::Binary(reply.into())))
+                                        .await.map_err(io::Error::other)?.map_err(io::Error::other)?;
+                                    drop_stream = true;
+                                    break;
+                                }
+                            }
+                            let outer = Frame::new(b'D', sid, &frame.encode()).encode();
+                            tokio::time::timeout(Duration::from_secs(10), ws.send(Message::Binary(outer.into())))
+                                .await.map_err(io::Error::other)?.map_err(io::Error::other)?;
+                        }
+                        b'S' | b'G' | b'M' | b'O' | b'R' | b'W' | b'B' | b'X' => {
+                            let outer = Frame::new(b'D', sid, &frame.encode()).encode();
+                            tokio::time::timeout(Duration::from_secs(10), ws.send(Message::Binary(outer.into())))
+                                .await.map_err(io::Error::other)?.map_err(io::Error::other)?;
+                        }
+                        _ => {}
+                    }
+                }
+                if drop_stream {
+                    active = None;
+                    daemon_buf.clear();
+                }
+            }
+            _ = ping.tick() => {
+                if awaiting_pong { break; }
+                awaiting_pong = true;
+                tokio::time::timeout(Duration::from_secs(10), ws.send(Message::Ping(Vec::new().into())))
+                    .await.map_err(io::Error::other)?.map_err(io::Error::other)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1187,6 +1418,7 @@ mod tests {
             id: "a1b2c3".into(),
             name: "This Mac".into(),
             socket: PathBuf::from("/tmp/host.sock"),
+            relay: None,
         }];
         assert_eq!(parse_route("/control", &endpoints), Some(Route::Control));
         assert_eq!(
@@ -1199,7 +1431,7 @@ mod tests {
         );
         assert_eq!(
             parse_route("/omg/ws/a1b2c3", &endpoints),
-            Some(Route::Session(PathBuf::from("/tmp/host.sock")))
+            Some(Route::Session(PathBuf::from("/tmp/host.sock"), false))
         );
         assert_eq!(parse_route("/omg/../control", &endpoints), None);
         assert_eq!(parse_route("/ws/not-hex!", &endpoints), None);

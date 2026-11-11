@@ -25,7 +25,30 @@ extension Ghostty {
         @Published var pwd: String?
 
         // The latest typed OSC 3008 context lifecycle event.
-        @Published var contextSignal: ContextSignal?
+        @Published var contextSignal: ContextSignal? {
+            didSet {
+                guard !isObservingContextSignals, let contextSignal else { return }
+                if pendingContextSignals.count >= 128 {
+                    pendingContextSignals.removeFirst(pendingContextSignals.count - 127)
+                }
+                pendingContextSignals.append(contextSignal)
+            }
+        }
+
+        private var pendingContextSignals: [ContextSignal] = []
+        private(set) var isObservingContextSignals = false
+
+        func beginContextSignalObservation() -> [ContextSignal] {
+            isObservingContextSignals = true
+            let buffered = pendingContextSignals
+            pendingContextSignals.removeAll(keepingCapacity: false)
+            return buffered
+        }
+
+        func acknowledgeRuntimeActivity() {
+            guard let surface else { return }
+            ghostty_surface_acknowledge_activity(surface)
+        }
 
         // Typed, allowlisted launch state used only for app restoration.
         var agentResumeDescriptor: AgentResumeDescriptor?

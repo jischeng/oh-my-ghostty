@@ -35,6 +35,13 @@ const AGENTS: [(&str, &str, &str); 4] = [
 pub(super) struct State {
     cached: Mutex<Option<(Instant, Arc<View>)>>,
     phone: Mutex<Option<HashMap<String, PhoneMeta>>>,
+    acknowledged: Mutex<Option<HashMap<String, AcknowledgedSession>>>,
+    snapshots: Mutex<HashMap<(String, String), (Instant, Option<activity::Snapshot>)>>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct AcknowledgedSession {
+    generation: String,
+    max_revision: u64,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct PhoneMeta {
@@ -56,10 +63,22 @@ struct View {
     roster: Value,
     projects: HashMap<String, Project>,
 }
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+struct PaneDesktopMeta {
+    workspace: String,
+    title: Option<String>,
+    directory: Option<PathBuf>,
+    remote_cwd: Option<String>,
+    ssh_target: Option<omg_session_runtime::location::SshTarget>,
+    agent: Option<String>,
+    acknowledged_program: Option<(String, Option<String>)>,
+    acknowledged_reducer: Option<(String, String)>,
+}
 #[derive(Default)]
 struct Desktop {
     workspaces: Vec<(String, String)>,
-    panes: HashMap<String, (String, Option<String>, Option<PathBuf>)>,
+    panes: HashMap<String, PaneDesktopMeta>,
+    inline_owners: HashMap<String, omg_session_runtime::location::SshTarget>,
 }
 
 fn hash(value: &str) -> String {
@@ -133,17 +152,81 @@ fn desktop(config: &Config) -> Desktop {
                 }
             }
         }
+        collect_inline_owners(support, &mut result.inline_owners);
     }
     if result.workspaces.is_empty() {
         result.workspaces.push((PERSONAL.into(), "Personal".into()));
     }
     result
 }
+fn collect_inline_owners(
+    support: &Path,
+    out: &mut HashMap<String, omg_session_runtime::location::SshTarget>,
+) {
+    let Ok(entries) = fs::read_dir(support.join("session-runtime/inline-owners")) else {
+        return;
+    };
+    for entry in entries.take(512).flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(bytes) = bounded(&path, 32 * 1024) else {
+            continue;
+        };
+        let Ok(owner) = serde_json::from_slice::<Value>(&bytes) else {
+            continue;
+        };
+        let Some(local_pane) = owner["localPane"]
+            .as_str()
+            .filter(|id| omg_session_runtime::host::valid_id(id))
+        else {
+            continue;
+        };
+        let conn = &owner["descriptor"]["connection"];
+        let Some(destination) = conn["destination"]
+            .as_str()
+            .filter(|s| !s.is_empty() && s.len() <= 256)
+        else {
+            continue;
+        };
+        let options = conn["options"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        let active_cwd = owner["activeRecord"]
+            .as_str()
+            .map(Path::new)
+            .filter(|p| p.is_absolute())
+            .and_then(|p| bounded(p, 16 * 1024).ok())
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .and_then(|rec| {
+                rec["workingDirectory"]
+                    .as_str()
+                    .filter(|s| !s.is_empty() && s.len() <= 4096)
+                    .map(str::to_owned)
+            });
+        let launch_cwd = owner["descriptor"]["launchWorkingDirectory"]
+            .as_str()
+            .filter(|s| !s.is_empty() && (s.starts_with('/') || s.starts_with('~')))
+            .map(str::to_owned);
+        out.insert(
+            local_pane.to_ascii_lowercase(),
+            omg_session_runtime::location::SshTarget {
+                destination: destination.to_owned(),
+                options,
+                remote_cwd: active_cwd.or(launch_cwd),
+            },
+        );
+    }
+}
 fn collect_panes(
     node: &Value,
     workspace: &str,
     depth: usize,
-    result: &mut HashMap<String, (String, Option<String>, Option<PathBuf>)>,
+    result: &mut HashMap<String, PaneDesktopMeta>,
 ) {
     if depth >= 64 || result.len() >= 4096 {
         return;
@@ -156,18 +239,103 @@ fn collect_panes(
             let title = pane["title"]
                 .as_str()
                 .filter(|s| s.len() <= 512 && !s.chars().any(char::is_control));
-            let directory = if pane["runtimeDescriptor"]["connection"].is_null() {
+            let is_remote_runtime = !pane["runtimeDescriptor"]["connection"].is_null();
+            let directory = if !is_remote_runtime {
                 pane["pwd"]
                     .as_str()
+                    .or_else(|| {
+                        (pane["agentResumeDescriptor"]["scope"].as_str() != Some("remote"))
+                            .then(|| pane["agentResumeDescriptor"]["workingDirectory"].as_str())
+                            .flatten()
+                    })
                     .filter(|s| s.len() <= 4096 && Path::new(s).is_absolute())
                     .map(PathBuf::from)
                     .filter(|p| p.is_dir())
             } else {
                 None
             };
+            let remote_cwd = if is_remote_runtime {
+                pane["pwd"]
+                    .as_str()
+                    .or_else(|| pane["runtimeDescriptor"]["launchWorkingDirectory"].as_str())
+            } else {
+                pane["sshResumeDescriptor"]["remoteWorkingDirectory"]
+                    .as_str()
+                    .or_else(|| {
+                        (pane["agentResumeDescriptor"]["scope"].as_str() == Some("remote"))
+                            .then(|| pane["agentResumeDescriptor"]["workingDirectory"].as_str())
+                            .flatten()
+                    })
+            }
+            .filter(|s| {
+                !s.is_empty() && s.len() <= 4096 && (s.starts_with('/') || s.starts_with('~'))
+            })
+            .map(str::to_owned);
+            let ssh_target = if is_remote_runtime {
+                let conn = &pane["runtimeDescriptor"]["connection"];
+                conn["destination"]
+                    .as_str()
+                    .filter(|s| !s.is_empty() && s.len() <= 256)
+                    .map(|dest| omg_session_runtime::location::SshTarget {
+                        destination: dest.to_owned(),
+                        options: conn["options"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect(),
+                        remote_cwd: remote_cwd.clone(),
+                    })
+            } else {
+                pane["sshResumeDescriptor"]["sshReplay"]["args"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect::<Vec<_>>()
+                    })
+                    .and_then(|args| omg_session_runtime::location::parse_ssh_args(&args))
+                    .map(|mut t| {
+                        if t.remote_cwd.is_none() {
+                            t.remote_cwd = remote_cwd.clone();
+                        }
+                        t
+                    })
+            };
+            let agent = pane["agentResumeDescriptor"]["agent"]
+                .as_str()
+                .map(normalize_agent)
+                .filter(|s| !s.is_empty());
+            let acknowledged_program = pane["acknowledgedAgentStatus"]["program"]
+                .as_object()
+                .and_then(|prog| {
+                    let record_id = prog.get("id")?.as_str()?.to_owned();
+                    let agent = prog
+                        .get("agent")
+                        .and_then(Value::as_str)
+                        .map(normalize_agent)
+                        .filter(|s| !s.is_empty());
+                    Some((record_id, agent))
+                });
+            let acknowledged_reducer = pane["acknowledgedAgentStatus"]["reducer"]
+                .as_object()
+                .and_then(|red| {
+                    let context_id = red.get("contextID")?.as_str()?.to_owned();
+                    let source = normalize_agent(red.get("source")?.as_str()?);
+                    (!context_id.is_empty() && !source.is_empty()).then_some((context_id, source))
+                });
             result.insert(
                 id.to_ascii_lowercase(),
-                (workspace.into(), title.map(str::to_owned), directory),
+                PaneDesktopMeta {
+                    workspace: workspace.into(),
+                    title: title.map(str::to_owned),
+                    directory,
+                    remote_cwd,
+                    ssh_target,
+                    agent,
+                    acknowledged_program,
+                    acknowledged_reducer,
+                },
             );
         }
     } else if let Some(split) = node.get("split") {
@@ -210,55 +378,192 @@ fn fields(text: &str, separator: char) -> HashMap<&str, &str> {
         .map(|(k, v)| (k.trim(), v.trim()))
         .collect()
 }
-fn presentation(snapshot: &activity::Snapshot) -> Option<(String, String, String)> {
-    snapshot
-        .records
-        .iter()
-        .filter_map(|signal| {
-            let native = signal.id == "omg-program-status";
-            let fields = fields(&signal.metadata, if native { ':' } else { ';' });
-            let agent = *fields.get(if native { "app" } else { "omg_agent" })?;
-            let state = match *fields.get(if native { "state" } else { "omg_state" })? {
-                "working" | "processing" | "active" => "working",
-                "waiting" | "awaiting" | "blocked" | "needsAttention" | "error" | "failed" => {
-                    "needsAttention"
+fn normalize_agent(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "agy" | "jetski" | "jetski-cli" | "antigravity-cli" => "antigravity".into(),
+        other => other.into(),
+    }
+}
+fn decode_percent_value(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    out.push(byte);
+                    i += 3;
+                    continue;
                 }
-                "done" | "completed" => "done",
-                "idle" => "idle",
-                _ => return None,
-            };
-            let message = if native {
-                fields
-                    .get("msg")
-                    .and_then(|s| STANDARD.decode(s).ok())
-                    .and_then(|b| String::from_utf8(b).ok())
-            } else {
-                fields.get("message").map(|s| (*s).to_owned())
             }
-            .unwrap_or_else(|| {
-                match state {
-                    "working" => "Working",
-                    "needsAttention" => {
-                        if fields.get(if native { "kind" } else { "omg_attention" })
-                            == Some(&"permission")
-                        {
-                            "Waiting for permission"
-                        } else {
-                            "Waiting for you"
-                        }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+fn local_signal_cwd(snapshot: &activity::Snapshot) -> Option<PathBuf> {
+    snapshot.records.iter().rev().find_map(|signal| {
+        if !signal.id.starts_with("omg-agent-") {
+            return None;
+        }
+        let parsed = fields(&signal.metadata, ';');
+        if parsed.get("omg_scope") == Some(&"remote") {
+            return None;
+        }
+        let raw = *parsed.get("omg_cwd")?;
+        let decoded = decode_percent_value(raw);
+        let path = PathBuf::from(decoded);
+        (path.is_absolute() && path.is_dir()).then_some(path)
+    })
+}
+fn apply_desktop_acknowledgement(snap: &mut activity::Snapshot, owner: &PaneDesktopMeta) {
+    for signal in &mut snap.records {
+        if signal.id == "omg-program-status" {
+            let Some((ref ack_id, ref ack_agent)) = owner.acknowledged_program else {
+                continue;
+            };
+            let parsed = fields(&signal.metadata, ':');
+            let sig_id = parsed.get("id").copied().unwrap_or("");
+            let sig_agent = parsed
+                .get("app")
+                .map(|a| normalize_agent(a))
+                .filter(|s| !s.is_empty());
+            let is_terminal = matches!(
+                parsed.get("state").copied(),
+                Some("done" | "completed" | "error" | "failed")
+            );
+            if is_terminal && sig_id == ack_id && &sig_agent == ack_agent {
+                let mut tmp = activity::Snapshot {
+                    version: snap.version,
+                    revision: snap.revision,
+                    records: vec![signal.clone()],
+                    pending: None,
+                    remote_host: None,
+                    remote_cwd: None,
+                };
+                if tmp.acknowledge() {
+                    if let Some(updated) = tmp.records.into_iter().next() {
+                        *signal = updated;
                     }
-                    "done" => "Done",
-                    _ => "",
                 }
-                .into()
-            });
-            Some((agent.to_owned(), state.to_owned(), message))
-        })
-        .min_by_key(|(_, state, _)| match state.as_str() {
-            "needsAttention" => 0,
-            "working" => 1,
-            "idle" => 2,
-            _ => 3,
+            }
+        } else if let Some((ref ack_ctx, ref ack_source)) = owner.acknowledged_reducer {
+            let parsed = fields(&signal.metadata, ';');
+            let sig_source = parsed
+                .get("omg_agent")
+                .map(|a| normalize_agent(a))
+                .unwrap_or_default();
+            let is_terminal = matches!(
+                parsed.get("omg_state").copied(),
+                Some("done" | "completed" | "error" | "failed")
+            );
+            if is_terminal && &signal.id == ack_ctx && &sig_source == ack_source {
+                let mut tmp = activity::Snapshot {
+                    version: snap.version,
+                    revision: snap.revision,
+                    records: vec![signal.clone()],
+                    pending: None,
+                    remote_host: None,
+                    remote_cwd: None,
+                };
+                if tmp.acknowledge() {
+                    if let Some(updated) = tmp.records.into_iter().next() {
+                        *signal = updated;
+                    }
+                }
+            }
+        }
+    }
+}
+fn state_rank(state: &str) -> u8 {
+    match state {
+        "needsAttention" => 0,
+        "working" => 1,
+        "done" => 2,
+        _ => 3,
+    }
+}
+fn parse_signal_presentation(signal: &activity::Signal) -> Option<(bool, String, String, String)> {
+    let native = signal.id == "omg-program-status";
+    let fields = fields(&signal.metadata, if native { ':' } else { ';' });
+    let agent = normalize_agent(fields.get(if native { "app" } else { "omg_agent" })?);
+    let state = match *fields.get(if native { "state" } else { "omg_state" })? {
+        "working" | "processing" | "active" => "working",
+        "waiting" | "awaiting" | "blocked" | "needsAttention" | "error" | "failed" => {
+            "needsAttention"
+        }
+        "done" | "completed" => "done",
+        "idle" => "idle",
+        _ => return None,
+    };
+    let message = if native {
+        fields
+            .get("msg")
+            .and_then(|s| STANDARD.decode(s).ok())
+            .and_then(|b| String::from_utf8(b).ok())
+    } else {
+        fields.get("message").map(|s| decode_percent_value(s))
+    }
+    .filter(|s| !s.is_empty())
+    .unwrap_or_else(|| {
+        match state {
+            "working" => "Working",
+            "needsAttention" => {
+                if fields.get(if native { "kind" } else { "omg_attention" }) == Some(&"permission")
+                {
+                    "Waiting for permission"
+                } else {
+                    "Waiting for you"
+                }
+            }
+            "done" => "Done",
+            _ => "",
+        }
+        .into()
+    });
+    Some((native, agent, state.to_owned(), message))
+}
+fn presentation(snapshot: &activity::Snapshot) -> Option<(String, String, String)> {
+    let mut last_native: Option<(String, String, String)> = None;
+    let mut best_hook: Option<(String, String, String)> = None;
+    for signal in &snapshot.records {
+        let Some((native, agent, state, message)) = parse_signal_presentation(signal) else {
+            continue;
+        };
+        if native {
+            last_native = Some((agent, state, message));
+        } else if best_hook
+            .as_ref()
+            .is_none_or(|(_, prev, _)| state_rank(&state) <= state_rank(prev))
+        {
+            best_hook = Some((agent, state, message));
+        }
+    }
+    if let Some(program) = last_native {
+        if program.1 != "idle" {
+            return Some(program);
+        }
+        if let Some(fallback) = best_hook.filter(|f| f.1 != "idle") {
+            return Some(fallback);
+        }
+        return Some(program);
+    }
+    best_hook
+}
+fn acknowledged_path(config: &Config) -> Option<PathBuf> {
+    config
+        .support
+        .as_ref()
+        .map(|p| p.join("mobile-acknowledged.json"))
+        .or_else(|| {
+            config
+                .endpoints
+                .first()?
+                .socket
+                .parent()
+                .map(|p| p.join("mobile-acknowledged.json"))
         })
 }
 fn index_path(config: &Config) -> Option<PathBuf> {
@@ -325,7 +630,40 @@ fn computer_name() -> String {
     }
     "Mac".into()
 }
+fn list_relay_with_timeout(
+    socket_path: &Path,
+    timeout: Duration,
+) -> io::Result<Vec<record::SessionSummary>> {
+    let mut socket = UnixStream::connect(socket_path)?;
+    socket.set_read_timeout(Some(timeout))?;
+    socket.set_write_timeout(Some(Duration::from_millis(800)))?;
+    Frame::new(b'L', 0, &[]).send(&mut socket)?;
+    loop {
+        let frame = Frame::read(&mut socket)?;
+        match frame.kind {
+            b'T' | b'P' if frame.seq == 0 || frame.kind == b'T' => {}
+            b'L' if frame.seq == 0 => {
+                if frame.data.len() > 8 * FILE_LIMIT {
+                    return Err(io::Error::other("Catalogue exceeds limit"));
+                }
+                return Ok(serde_json::from_slice(&frame.data)?);
+            }
+            b'E' => {
+                return Err(io::Error::other(
+                    String::from_utf8_lossy(&frame.data).into_owned(),
+                ))
+            }
+            _ => return Err(io::Error::other("Invalid relay catalogue response")),
+        }
+    }
+}
 fn inventory(endpoint: &Endpoint) -> io::Result<(Vec<record::SessionSummary>, bool)> {
+    if endpoint.relay.is_some() {
+        return Ok((
+            list_relay_with_timeout(&endpoint.socket, Duration::from_millis(1200))?,
+            false,
+        ));
+    }
     let mut socket = UnixStream::connect(&endpoint.socket)?;
     socket.set_read_timeout(Some(Duration::from_secs(3)))?;
     socket.set_write_timeout(Some(Duration::from_secs(1)))?;
@@ -356,6 +694,119 @@ fn inventory(endpoint: &Endpoint) -> io::Result<(Vec<record::SessionSummary>, bo
         }
     }
 }
+fn read_session_activity(
+    endpoint: &Endpoint,
+    session_id: &str,
+    generation: &str,
+    send_acknowledge: bool,
+) -> (Option<activity::Snapshot>, bool) {
+    if endpoint.relay.is_some() {
+        let Ok(mut stream) = UnixStream::connect(&endpoint.socket) else {
+            return (None, false);
+        };
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(600)));
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(400)));
+        let open = omg_session_runtime::registry::OpenRequest {
+            id: session_id.to_owned(),
+            create: false,
+            policy: Default::default(),
+            cwd: None,
+            inline_viewer: false,
+            launch: None,
+        };
+        let Ok(open_bytes) = serde_json::to_vec(&open) else {
+            return (None, false);
+        };
+        if Frame::new(b'H', 0, &open_bytes).send(&mut stream).is_err() {
+            return (None, false);
+        }
+        let mut peer_gen = 0u64;
+        let mut snapshot_seq = None;
+        let mut can_ack = false;
+        let mut snapshot = None;
+        for _ in 0..16 {
+            let Ok(frame) = Frame::read(&mut stream) else {
+                break;
+            };
+            match frame.kind {
+                b'T' => peer_gen = frame.seq,
+                b'J' => {
+                    if let Ok(info) = serde_json::from_slice::<Value>(&frame.data) {
+                        if info["generation"].as_str() != Some(generation) {
+                            return (None, false);
+                        }
+                        can_ack = info["activity_acknowledge"] == true;
+                    }
+                }
+                b'S' => snapshot_seq = Some(frame.seq),
+                activity::FRAME => {
+                    snapshot = activity::Snapshot::decode(&frame.data).ok();
+                    break;
+                }
+                b'E' | b'X' => break,
+                _ => {}
+            }
+        }
+        let mut sent_ack = false;
+        if send_acknowledge && can_ack && peer_gen != 0 {
+            if let Some(seq) = snapshot_seq {
+                sent_ack = Frame::new(omg_session_runtime::ACK, seq, &peer_gen.to_be_bytes())
+                    .send(&mut stream)
+                    .is_ok()
+                    && Frame::new(omg_session_runtime::ACKNOWLEDGE, peer_gen, &[])
+                        .send(&mut stream)
+                        .is_ok();
+            }
+        }
+        return (snapshot, sent_ack);
+    }
+    let Some(parent) = endpoint.socket.parent() else {
+        return (None, false);
+    };
+    let session_socket = parent.join(format!("{}.sock", &hash(session_id)[..16]));
+    let Ok(mut stream) = UnixStream::connect(&session_socket) else {
+        return (None, false);
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
+    let mut snapshot_seq = None;
+    let mut can_ack = false;
+    let mut snapshot = None;
+    for _ in 0..12 {
+        let Ok(frame) = Frame::read(&mut stream) else {
+            break;
+        };
+        match frame.kind {
+            b'J' => {
+                if let Ok(info) = serde_json::from_slice::<Value>(&frame.data) {
+                    if info["generation"].as_str() != Some(generation) {
+                        return (None, false);
+                    }
+                    can_ack = info["activity_acknowledge"] == true;
+                }
+            }
+            b'S' => snapshot_seq = Some(frame.seq),
+            activity::FRAME => {
+                snapshot = activity::Snapshot::decode(&frame.data).ok();
+                break;
+            }
+            b'E' | b'X' => break,
+            _ => {}
+        }
+    }
+    let mut sent_ack = false;
+    if send_acknowledge && can_ack {
+        if let Some(seq) = snapshot_seq {
+            sent_ack = Frame::new(omg_session_runtime::ACK, seq, &[])
+                .send(&mut stream)
+                .is_ok()
+                && Frame::new(omg_session_runtime::ACKNOWLEDGE, 0, &[])
+                    .send(&mut stream)
+                    .is_ok();
+        }
+    }
+    (snapshot, sent_ack)
+}
 impl State {
     fn phone(
         &self,
@@ -371,6 +822,69 @@ impl State {
             );
         }
         guard
+    }
+    fn acknowledged(
+        &self,
+        config: &Config,
+    ) -> std::sync::MutexGuard<'_, Option<HashMap<String, AcknowledgedSession>>> {
+        let mut guard = self.acknowledged.lock().unwrap_or_else(|p| p.into_inner());
+        if guard.is_none() {
+            *guard = Some(
+                acknowledged_path(config)
+                    .and_then(|p| bounded(&p, FILE_LIMIT).ok())
+                    .and_then(|b| serde_json::from_slice(&b).ok())
+                    .unwrap_or_default(),
+            );
+        }
+        guard
+    }
+    fn save_acknowledged(config: &Config, map: &HashMap<String, AcknowledgedSession>) {
+        let Some(path) = acknowledged_path(config) else {
+            return;
+        };
+        let Ok(nonce) = record::nonce() else {
+            return;
+        };
+        let temporary = path.with_extension(format!("{nonce}.tmp"));
+        let result = (|| -> io::Result<()> {
+            let mut file = fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .open(&temporary)?;
+            file.write_all(&serde_json::to_vec(map)?)?;
+            fs::rename(&temporary, &path)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(temporary);
+        }
+    }
+    fn cached_snapshot(
+        &self,
+        endpoint: &Endpoint,
+        session_id: &str,
+        generation: &str,
+    ) -> Option<activity::Snapshot> {
+        let key = (session_id.to_owned(), generation.to_owned());
+        {
+            let guard = self.snapshots.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some((when, snap)) = guard.get(&key) {
+                if when.elapsed() < Duration::from_millis(1500) {
+                    return snap.clone();
+                }
+            }
+        }
+        let (fetched, _) = read_session_activity(endpoint, session_id, generation, false);
+        let mut guard = self.snapshots.lock().unwrap_or_else(|p| p.into_inner());
+        if guard.len() >= 1024 {
+            guard.retain(|_, (when, _)| when.elapsed() < Duration::from_secs(10));
+        }
+        guard.insert(key, (Instant::now(), fetched.clone()));
+        fetched
+    }
+    fn evict_snapshot(&self, session_id: &str, generation: &str) {
+        let mut guard = self.snapshots.lock().unwrap_or_else(|p| p.into_inner());
+        guard.remove(&(session_id.to_owned(), generation.to_owned()));
     }
     fn invalidate(&self) {
         *self.cached.lock().unwrap_or_else(|p| p.into_inner()) = None;
@@ -394,11 +908,11 @@ fn build_view(config: &Config) -> io::Result<View> {
     for endpoint in config.endpoints()? {
         match inventory(&endpoint) {
             Ok((sessions, presentation)) => endpoints.push((endpoint, sessions, presentation)),
-            Err(error) if holder::listener_is_gone(&error) => {}
+            Err(error) if holder::listener_is_gone(&error) || endpoint.relay.is_some() => {}
             Err(error) => return Err(error),
         }
     }
-    endpoints.sort_by_key(|(_, _, presentation)| !*presentation);
+    endpoints.sort_by_key(|(endpoint, _, presentation)| (endpoint.relay.is_some(), !*presentation));
     let current_rev_socket = config.support.as_ref().map(|support| {
         let rev = crate::session_cli::current_revision();
         home.join(".omg/run")
@@ -411,19 +925,26 @@ fn build_view(config: &Config) -> io::Result<View> {
             endpoints
                 .iter()
                 .find(|(endpoint, _, presentation)| {
-                    *presentation && &endpoint.socket == expected_socket
+                    endpoint.relay.is_none() && *presentation && &endpoint.socket == expected_socket
                 })
                 .map(|(endpoint, _, _)| endpoint.clone())
         })
         .or_else(|| {
             endpoints
                 .iter()
-                .find(|(_, _, presentation)| *presentation)
-                .or_else(|| endpoints.first())
+                .find(|(endpoint, _, presentation)| endpoint.relay.is_none() && *presentation)
+                .or_else(|| {
+                    endpoints
+                        .iter()
+                        .find(|(endpoint, _, _)| endpoint.relay.is_none())
+                })
                 .map(|(endpoint, _, _)| endpoint.clone())
         });
     let phone_guard = config.control.phone(config);
     let phone = phone_guard.as_ref().unwrap();
+    let mut ack_guard = config.control.acknowledged(config);
+    let acknowledged = ack_guard.as_mut().unwrap();
+    let mut ack_dirty = false;
     let mut projects: BTreeMap<String, (Project, Value)> = BTreeMap::new();
     for (workspace, name) in &desktop.workspaces {
         for (kind, label) in [("terminals", "Terminals"), ("chats", "Chats")] {
@@ -444,9 +965,14 @@ fn build_view(config: &Config) -> io::Result<View> {
             );
         }
     }
-    for (workspace, _, path) in desktop.panes.values() {
-        let Some(path) = path else { continue };
-        let Some((_, workspace_name)) = desktop.workspaces.iter().find(|(id, _)| id == workspace)
+    for meta in desktop.panes.values() {
+        let Some(path) = &meta.directory else {
+            continue;
+        };
+        let Some((_, workspace_name)) = desktop
+            .workspaces
+            .iter()
+            .find(|(id, _)| id == &meta.workspace)
         else {
             continue;
         };
@@ -456,7 +982,7 @@ fn build_view(config: &Config) -> io::Result<View> {
         }
         let id = format!(
             "project-{}",
-            &hash(&format!("{workspace}\0{}", root.display()))[..24]
+            &hash(&format!("{}\0{}", meta.workspace, root.display()))[..24]
         );
         let name = root
             .file_name()
@@ -464,53 +990,99 @@ fn build_view(config: &Config) -> io::Result<View> {
             .to_string_lossy()
             .into_owned();
         projects.entry(id.clone()).or_insert_with(|| (Project {
-            id: id.clone(), root: root.clone(), workspace: workspace.clone(), endpoint: preferred.clone(),
+            id: id.clone(), root: root.clone(), workspace: meta.workspace.clone(), endpoint: preferred.clone(),
                         host: None,
-        }, json!({"id":id,"name":name,"path":root,"workspaceID":workspace,"workspaceName":workspace_name,
+        }, json!({"id":id,"name":name,"path":root,"workspaceID":meta.workspace,"workspaceName":workspace_name,
             "branch":branch,"kind":"folder","sessions":[]})));
     }
     experience::append_projects(config, &desktop, preferred.as_ref(), &mut projects)?;
-    let mut remote_projects: HashMap<String, Project> = HashMap::new();
+    let mut seen_sessions = std::collections::BTreeSet::new();
     for (endpoint, sessions, supports_presentation) in endpoints {
-        let endpoint_is_remote = endpoint
-            .socket
-            .parent()
-            .and_then(|p| p.parent())
-            .is_some_and(|p| p.file_name().is_some_and(|n| n == "bridges"));
+        let is_relay = endpoint.relay.is_some();
+        let endpoint_is_remote = is_relay
+            || endpoint
+                .socket
+                .parent()
+                .and_then(|p| p.parent())
+                .is_some_and(|p| p.file_name().is_some_and(|n| n == "bridges"));
         for session in sessions
             .into_iter()
             .filter(|s| s.ended.is_none())
             .take(2048)
         {
-            let sessions_dir = endpoint.socket.parent().unwrap().join("sessions");
-            if sessions_dir.join(format!("{}.closed", session.id)).exists() {
+            let pane_key = session.id.to_ascii_lowercase();
+            let owner = desktop.panes.get(&pane_key);
+            let saved = phone
+                .get(&session.id)
+                .filter(|m| m.generation == session.generation);
+            if is_relay && owner.is_none() && saved.is_none() {
                 continue;
             }
-            let record_path = sessions_dir.join(format!("{}.json", session.id));
-            let record = record::Record::load(&record_path).ok().filter(|r| {
-                r.generation == session.generation && r.pid == session.pid && r.ended.is_none()
-            });
-            let facts = record
+            if !is_relay {
+                let sessions_dir = endpoint.socket.parent().unwrap().join("sessions");
+                if sessions_dir.join(format!("{}.closed", session.id)).exists() {
+                    continue;
+                }
+            }
+            if !seen_sessions.insert((session.id.clone(), session.generation.clone())) {
+                continue;
+            }
+            let record = if !is_relay {
+                let sessions_dir = endpoint.socket.parent().unwrap().join("sessions");
+                let record_path = sessions_dir.join(format!("{}.json", session.id));
+                record::Record::load(&record_path).ok().filter(|r| {
+                    r.generation == session.generation && r.pid == session.pid && r.ended.is_none()
+                })
+            } else {
+                None
+            };
+            let mut facts = record
                 .as_ref()
                 .filter(|_| supports_presentation)
-                .and_then(|record| {
+                .and_then(|rec| {
                     let socket = endpoint
                         .socket
                         .parent()?
                         .join(format!("{}.sock", &hash(&session.id)[..16]));
-                    holder::presentation(&socket, record).ok()
+                    holder::presentation(&socket, rec).ok()
+                })
+                .or_else(|| {
+                    config
+                        .control
+                        .cached_snapshot(&endpoint, &session.id, &session.generation)
                 });
+            if let Some(ref mut snap) = facts {
+                if let Some(ack) = acknowledged.get(&session.id) {
+                    if ack.generation != session.generation {
+                        acknowledged.remove(&session.id);
+                        ack_dirty = true;
+                    } else if snap.revision <= ack.max_revision {
+                        snap.acknowledge();
+                    } else {
+                        acknowledged.remove(&session.id);
+                        ack_dirty = true;
+                    }
+                }
+                if let Some(owner) = owner {
+                    apply_desktop_acknowledgement(snap, owner);
+                }
+            }
+            let inline_owner = desktop.inline_owners.get(&pane_key);
             let mut active_ssh = session
                 .ssh
                 .clone()
-                .or_else(|| record.as_ref().and_then(|r| r.ssh.clone()));
+                .or_else(|| record.as_ref().and_then(|r| r.ssh.clone()))
+                .or_else(|| endpoint.relay.clone())
+                .or_else(|| inline_owner.cloned());
             if active_ssh.is_none() && !endpoint_is_remote {
                 if let Some(pid) = session.pid.filter(|&p| p > 0) {
                     active_ssh = omg_session_runtime::location::leader_ssh(pid);
                 }
             }
             if active_ssh.is_none() {
-                if let Some(host) = facts
+                if let Some(target) = owner.and_then(|o| o.ssh_target.clone()) {
+                    active_ssh = Some(target);
+                } else if let Some(host) = facts
                     .as_ref()
                     .and_then(|f| f.remote_host.as_deref())
                     .filter(|h| !h.is_empty())
@@ -529,23 +1101,27 @@ fn build_view(config: &Config) -> io::Result<View> {
                 }
             }
             if let Some(ssh) = active_ssh.as_mut() {
-                if ssh.remote_cwd.is_none() {
-                    ssh.remote_cwd = facts
-                        .as_ref()
-                        .and_then(|f| f.remote_cwd.clone())
-                        .or_else(|| endpoint_is_remote.then(|| session.cwd.clone()).flatten());
+                let live_remote_cwd = facts
+                    .as_ref()
+                    .and_then(|f| f.remote_cwd.clone())
+                    .or_else(|| endpoint_is_remote.then(|| session.cwd.clone()).flatten())
+                    .or_else(|| inline_owner.and_then(|t| t.remote_cwd.clone()))
+                    .or_else(|| owner.and_then(|o| o.remote_cwd.clone()));
+                if live_remote_cwd.is_some() {
+                    ssh.remote_cwd = live_remote_cwd;
                 }
             }
             let observed = facts.as_ref().and_then(presentation);
-            let saved = phone
-                .get(&session.id)
-                .filter(|m| m.generation == session.generation);
             let (agent, state, mut subtitle) = observed.unwrap_or_else(|| {
                 let agent = saved
                     .map(|m| m.agent.clone())
                     .or_else(|| {
                         if facts.is_none() {
-                            session.resume.as_ref().map(|r| r.agent.clone())
+                            session
+                                .resume
+                                .as_ref()
+                                .map(|r| normalize_agent(&r.agent))
+                                .or_else(|| owner.and_then(|o| o.agent.clone()))
                         } else {
                             None
                         }
@@ -558,10 +1134,9 @@ fn build_view(config: &Config) -> io::Result<View> {
                 };
                 (agent, "idle".into(), subtitle)
             });
-            let owner = desktop.panes.get(&session.id.to_ascii_lowercase());
             let workspace = saved
                 .map(|m| m.workspace.as_str())
-                .or_else(|| owner.map(|o| o.0.as_str()))
+                .or_else(|| owner.map(|o| o.workspace.as_str()))
                 .filter(|w| desktop.workspaces.iter().any(|(id, _)| id == w))
                 .unwrap_or(&desktop.workspaces[0].0);
             let workspace_name = desktop
@@ -571,62 +1146,153 @@ fn build_view(config: &Config) -> io::Result<View> {
                 .unwrap()
                 .1
                 .clone();
-            let cwd = session.cwd.as_deref().map(Path::new).unwrap_or(&home);
-            let (root, branch) = project_root(cwd);
-            let loose = root == home || root == Path::new("/");
-            let kind = if loose {
-                if agent == "terminal" {
-                    "terminals"
-                } else {
-                    "chats"
-                }
-            } else {
-                "folder"
-            };
             let saved_project = saved
                 .and_then(|m| m.project.as_ref())
-                .filter(|id| projects.contains_key(*id));
-            let id = if let Some(id) = saved_project {
-                id.clone()
-            } else if loose {
-                format!("{workspace}-{kind}")
-            } else {
-                format!(
-                    "project-{}",
-                    &hash(&format!("{workspace}\0{}", root.display()))[..24]
-                )
-            };
-            let name = root
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned();
-            let (project_entry, value) = projects.entry(id.clone()).or_insert_with(|| {
-                (
-                    Project {
-                        id: id.clone(),
-                        root: root.clone(),
-                        workspace: workspace.into(),
-                        endpoint: Some(endpoint.clone()),
-                        host: None,
-                    },
-                    json!({"id":id,"name":name,"path":root,"workspaceID":workspace,
-                "workspaceName":workspace_name,"branch":branch,"kind":kind,"sessions":[]}),
-                )
-            });
+                .filter(|id| projects.contains_key(*id))
+                .cloned();
             if active_ssh.is_none() {
-                if let Some(host) = project_entry.host.as_deref() {
-                    active_ssh = experience::resolve_remote_ssh(config, host).ok().map(
-                        |(destination, options)| omg_session_runtime::location::SshTarget {
-                            destination,
-                            options,
-                            remote_cwd: Some(project_entry.root.to_string_lossy().into_owned()),
-                        },
-                    );
+                if let Some(ref pid) = saved_project {
+                    if let Some((proj, _)) = projects.get(pid) {
+                        if let Some(host) = proj.host.as_deref() {
+                            active_ssh = experience::resolve_remote_ssh(config, host).ok().map(
+                                |(destination, options)| omg_session_runtime::location::SshTarget {
+                                    destination,
+                                    options,
+                                    remote_cwd: Some(proj.root.to_string_lossy().into_owned()),
+                                },
+                            );
+                        }
+                    }
                 }
             }
+            let (id, name, branch, remote_host, remote_path, remote_project_id) =
+                if let Some(ssh) = active_ssh.as_ref() {
+                    experience::remember_ssh_target(config, ssh);
+                    let host_label = experience::host_display_name(&ssh.destination);
+                    let r_path = ssh
+                        .remote_cwd
+                        .clone()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "~".into());
+                    let tail = Path::new(&r_path)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .filter(|s| !s.is_empty() && *s != "~");
+                    let project_name = match tail {
+                        Some(folder) => format!("{host_label} · {folder}"),
+                        None => host_label.clone(),
+                    };
+                    let existing_remote = saved_project.clone().or_else(|| {
+                        projects.iter().find_map(|(pid, (proj, _))| {
+                            let h = proj.host.as_deref()?;
+                            (proj.workspace == workspace
+                                && experience::host_display_name(h) == host_label
+                                && proj.root == Path::new(&r_path))
+                            .then(|| pid.clone())
+                        })
+                    });
+                    let r_project_id = existing_remote.unwrap_or_else(|| {
+                        format!(
+                            "ssh-session-{}",
+                            &hash(&format!(
+                                "{workspace}\0{}\0{}\0{r_path}",
+                                ssh.destination,
+                                ssh.options.join("\0")
+                            ))[..24]
+                        )
+                    });
+                    let r_branch = format!("SSH · {host_label}");
+                    projects.entry(r_project_id.clone()).or_insert_with(|| {
+                        (
+                            Project {
+                                id: r_project_id.clone(),
+                                root: PathBuf::from(&r_path),
+                                workspace: workspace.into(),
+                                endpoint: preferred.clone(),
+                                host: serde_json::to_string(ssh).ok(),
+                            },
+                            json!({
+                                "id": r_project_id,
+                                "name": project_name,
+                                "path": r_path,
+                                "workspaceID": workspace,
+                                "workspaceName": workspace_name,
+                                "branch": r_branch,
+                                "kind": "folder",
+                                "deviceAlias": host_label,
+                                "sessions": []
+                            }),
+                        )
+                    });
+                    (
+                        r_project_id.clone(),
+                        project_name,
+                        r_branch,
+                        Some(host_label),
+                        Some(r_path),
+                        Some(r_project_id),
+                    )
+                } else {
+                    let fallback_cwd = facts
+                        .as_ref()
+                        .and_then(local_signal_cwd)
+                        .or_else(|| {
+                            session
+                                .resume
+                                .as_ref()
+                                .map(|r| PathBuf::from(&r.cwd))
+                                .filter(|p| p.is_absolute() && p.is_dir())
+                        })
+                        .or_else(|| owner.and_then(|o| o.directory.clone()));
+                    let cwd = session
+                        .cwd
+                        .as_deref()
+                        .map(Path::new)
+                        .or(fallback_cwd.as_deref())
+                        .unwrap_or(&home);
+                    let (root, branch) = project_root(cwd);
+                    let loose = root == home || root == Path::new("/");
+                    let kind = if loose {
+                        if agent == "terminal" {
+                            "terminals"
+                        } else {
+                            "chats"
+                        }
+                    } else {
+                        "folder"
+                    };
+                    let id = if let Some(id) = saved_project {
+                        id
+                    } else if loose {
+                        format!("{workspace}-{kind}")
+                    } else {
+                        format!(
+                            "project-{}",
+                            &hash(&format!("{workspace}\0{}", root.display()))[..24]
+                        )
+                    };
+                    let name = root
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned();
+                    projects.entry(id.clone()).or_insert_with(|| {
+                        (
+                            Project {
+                                id: id.clone(),
+                                root: root.clone(),
+                                workspace: workspace.into(),
+                                endpoint: preferred.clone().or_else(|| Some(endpoint.clone())),
+                                host: None,
+                            },
+                            json!({"id":id,"name":name,"path":root,"workspaceID":workspace,
+                        "workspaceName":workspace_name,"branch":branch,"kind":kind,"sessions":[]}),
+                        )
+                    });
+                    (id, name, branch, None, None, None)
+                };
             let mut title = owner
-                .and_then(|o| o.1.as_deref())
+                .and_then(|o| o.title.as_deref())
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned)
                 .unwrap_or_else(|| {
@@ -641,44 +1307,10 @@ fn build_view(config: &Config) -> io::Result<View> {
                             .into()
                     }
                 });
-            let (remote_host, remote_path, remote_project_id) = if let Some(ssh) =
-                active_ssh.as_ref()
-            {
-                experience::remember_ssh_target(config, ssh);
-                let host_label = experience::host_display_name(&ssh.destination);
-                let r_path = ssh
-                    .remote_cwd
-                    .clone()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "~".into());
-                let r_project_id = format!(
-                    "ssh-session-{}",
-                    &hash(&format!(
-                        "{}\0{}\0{}",
-                        ssh.destination,
-                        ssh.options.join("\0"),
-                        r_path
-                    ))[..24]
-                );
-                remote_projects
-                    .entry(r_project_id.clone())
-                    .or_insert_with(|| Project {
-                        id: r_project_id.clone(),
-                        root: PathBuf::from(&r_path),
-                        workspace: workspace.into(),
-                        endpoint: Some(endpoint.clone()),
-                        host: serde_json::to_string(ssh).ok(),
-                    });
-                if agent == "terminal" && (title == name || title == "Terminal" || title.is_empty())
+            if let (Some(ref host_label), Some(ref r_path)) = (&remote_host, &remote_path) {
+                if agent == "terminal" && (title == "Terminal" || title == "~" || title.is_empty())
                 {
-                    let tail = Path::new(&r_path)
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .filter(|s| !s.is_empty() && *s != "~");
-                    title = match tail {
-                        Some(folder) => format!("{host_label} · {folder}"),
-                        None => host_label.clone(),
-                    };
+                    title = name.clone();
                 }
                 if subtitle.is_empty() {
                     subtitle = if r_path != "~" {
@@ -687,10 +1319,7 @@ fn build_view(config: &Config) -> io::Result<View> {
                         format!("SSH · {host_label}")
                     };
                 }
-                (Some(host_label), Some(r_path), Some(r_project_id))
-            } else {
-                (None, None, None)
-            };
+            }
             let is_background = config.support.is_some() && owner.is_none();
             let mobile_created = saved.is_some();
             let mut session_json = json!({
@@ -709,9 +1338,15 @@ fn build_view(config: &Config) -> io::Result<View> {
                     object.insert("remoteProjectID".into(), json!(pid));
                 }
             }
-            value["sessions"].as_array_mut().unwrap().push(session_json);
+            if let Some((_, value)) = projects.get_mut(&id) {
+                value["sessions"].as_array_mut().unwrap().push(session_json);
+            }
         }
     }
+    if ack_dirty {
+        State::save_acknowledged(config, acknowledged);
+    }
+    drop(ack_guard);
     for (_, value) in projects.values_mut() {
         if let Some(sessions) = value["sessions"].as_array_mut() {
             sessions.sort_by_key(|s| {
@@ -736,9 +1371,8 @@ fn build_view(config: &Config) -> io::Result<View> {
     let roster = json!({"t":"roster","wire":2,"macID":identity,
         "macName":format!("{} · {channel}",computer_name()),
         "agents":agents,"projects":projects.values().map(|(_,p)| p).collect::<Vec<_>>()});
-    let mut projects: HashMap<String, Project> =
+    let projects: HashMap<String, Project> =
         projects.into_iter().map(|(id, (p, _))| (id, p)).collect();
-    projects.extend(remote_projects);
     Ok(View { roster, projects })
 }
 
@@ -864,17 +1498,78 @@ fn request_control(config: &Config, request: &Value) -> io::Result<Value> {
     if kind == "sshConfigHosts" {
         return Ok(json!({"t":"sshConfigList","hosts":ssh_hosts_for_config(config)}));
     }
+    if kind == "acknowledge" {
+        let Ok((endpoint, id, generation)) = route(config, text(request, "session")?) else {
+            return Ok(Value::Null);
+        };
+        let mut pre_snap: Option<activity::Snapshot> = None;
+        if endpoint.relay.is_none() {
+            let sessions_dir = endpoint.socket.parent().unwrap().join("sessions");
+            let record_path = sessions_dir.join(format!("{id}.json"));
+            if let Some(rec) = record::Record::load(&record_path)
+                .ok()
+                .filter(|r| r.generation == generation && r.ended.is_none())
+            {
+                let sock = endpoint
+                    .socket
+                    .parent()
+                    .unwrap()
+                    .join(format!("{}.sock", &hash(&id)[..16]));
+                if let Ok(snap) = holder::presentation(&sock, &rec) {
+                    pre_snap = Some(snap);
+                }
+            }
+        }
+        let (snap, sent_ack) = read_session_activity(&endpoint, &id, &generation, true);
+        let candidate = snap.or(pre_snap);
+        {
+            let mut ack_guard = config.control.acknowledged(config);
+            if let Some(map) = ack_guard.as_mut() {
+                if sent_ack {
+                    if map.remove(&id).is_some() {
+                        State::save_acknowledged(config, map);
+                    }
+                } else if let Some(mut probe) = candidate {
+                    let rev = probe.revision;
+                    if probe.acknowledge() {
+                        map.insert(
+                            id.clone(),
+                            AcknowledgedSession {
+                                generation: generation.clone(),
+                                max_revision: rev,
+                            },
+                        );
+                        State::save_acknowledged(config, map);
+                    }
+                }
+            }
+        }
+        config.control.evict_snapshot(&id, &generation);
+        config.control.invalidate();
+        return Ok(Value::Null);
+    }
     if kind == "stop" {
-        let (endpoint, id, _) = route(config, text(request, "session")?)?;
+        let (endpoint, id, generation) = route(config, text(request, "session")?)?;
         let mut socket = UnixStream::connect(&endpoint.socket)?;
         socket.set_read_timeout(Some(Duration::from_secs(5)))?;
-        Frame::new(b'K', 1, id.as_bytes()).send(&mut socket)?;
-        let reply = Frame::read(&mut socket)?;
+        Frame::new(
+            b'K',
+            if endpoint.relay.is_some() { 0 } else { 1 },
+            id.as_bytes(),
+        )
+        .send(&mut socket)?;
+        let reply = loop {
+            let frame = Frame::read(&mut socket)?;
+            if frame.kind != b'T' {
+                break frame;
+            }
+        };
         if reply.kind == b'E' {
             return Err(io::Error::other(
                 String::from_utf8_lossy(&reply.data).into_owned(),
             ));
         }
+        config.control.evict_snapshot(&id, &generation);
         {
             let mut phone = config.control.phone(config);
             if let Some(phone) = phone.as_mut() {
@@ -1223,11 +1918,16 @@ fn start(config: &Config, view: &View, request: &Value) -> io::Result<Value> {
                 experience::quote(command.strip_prefix("exec ").unwrap_or(&command))
             )
         };
-        ssh.push(format!(
-            "cd {} && exec {}",
-            experience::quote(&project.root.to_string_lossy()),
-            remote_command
-        ));
+        let root_str = project.root.to_string_lossy();
+        if root_str.is_empty() || root_str == "~" {
+            ssh.push(format!("exec {remote_command}"));
+        } else {
+            ssh.push(format!(
+                "cd {} && exec {}",
+                experience::quote(&root_str),
+                remote_command
+            ));
+        }
         argv = ssh;
     }
     let nonce = record::nonce()?;
@@ -1407,6 +2107,7 @@ fn ensure_local_broker(binary: &Path, support: &Path, revision: &str) -> io::Res
         id: hash(&socket.to_string_lossy()),
         name: "This Machine".into(),
         socket,
+        relay: None,
     })
 }
 
@@ -1827,7 +2528,16 @@ mod tests {
         assert_eq!(result.workspaces, vec![("work".into(), "Work".into())]);
         assert_eq!(
             result.panes["12345678-1234-1234-1234-123456789abc"],
-            ("work".into(), Some("My agent".into()), None)
+            PaneDesktopMeta {
+                workspace: "work".into(),
+                title: Some("My agent".into()),
+                directory: None,
+                remote_cwd: None,
+                ssh_target: None,
+                agent: None,
+                acknowledged_program: None,
+                acknowledged_reducer: None,
+            }
         );
     }
 
@@ -1840,6 +2550,11 @@ mod tests {
             "type=app;omg_agent=pi;omg_state=done",
         );
         assert_eq!(presentation(&state.snapshot()).unwrap().1, "done");
+        state.consume(false, "omg-program-status", "state=idle:app=agy");
+        assert_eq!(
+            presentation(&state.snapshot()).unwrap(),
+            ("pi".into(), "done".into(), "Done".into())
+        );
         state.consume(
             false,
             "omg-program-status",
@@ -1849,6 +2564,50 @@ mod tests {
         assert_eq!(
             (agent.as_str(), status.as_str(), preview.as_str()),
             ("claude", "needsAttention", "Waiting for permission")
+        );
+    }
+
+    #[test]
+    fn inline_owner_records_project_remote_ssh_host_and_live_cwd() {
+        let workspace = Workspace::new();
+        let owners = workspace.directory.join("session-runtime/inline-owners");
+        fs::create_dir_all(&owners).unwrap();
+        let active_path = workspace.directory.join("active.json");
+        fs::write(
+            &active_path,
+            json!({"phase":"ready","workingDirectory":"/home/dev/mapping-platform"}).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            owners.join("owner.json"),
+            json!({
+                "localPane": "3FFA2669-C134-471A-BC6B-A227DF616BF7",
+                "activeRecord": active_path,
+                "descriptor": {
+                    "connection": {
+                        "destination": "cloud",
+                        "options": ["-p", "2222"]
+                    },
+                    "launchWorkingDirectory": "~"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let config = Config {
+            endpoints: vec![],
+            support: Some(workspace.directory.clone()),
+            token: "t".repeat(64),
+            origin: None,
+            control: State::default(),
+        };
+        let result = desktop(&config);
+        let ssh = &result.inline_owners["3ffa2669-c134-471a-bc6b-a227df616bf7"];
+        assert_eq!(ssh.destination, "cloud");
+        assert_eq!(ssh.options, vec!["-p", "2222"]);
+        assert_eq!(
+            ssh.remote_cwd.as_deref(),
+            Some("/home/dev/mapping-platform")
         );
     }
 

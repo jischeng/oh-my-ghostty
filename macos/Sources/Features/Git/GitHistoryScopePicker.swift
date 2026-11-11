@@ -130,11 +130,12 @@ struct GitHistoryBranchFavorites {
     private let defaults: UserDefaults
     private let target: String
     private let identity: String
+    private let sshConnection: GitSSHConnection?
     private let commonGitDir: String
     private static let defaultsKey = "git.history.favoriteBranches.v2"
-    /// Legacy dictionaries used NUL-separated composite keys, and the property
-    /// list dropped those NULs on write. Reads still migrate the surviving
-    /// concatenated key so existing favorites are not lost.
+    /// Legacy dictionaries used NUL-separated composite keys (`local\0<gitDir>`
+    /// and `ssh\0<connection.identity>\0<gitDir>`). Binary property lists keep
+    /// NUL bytes intact, while some serialized representations strip them.
     private static let legacyDefaultsKey = "git.history.favoriteBranches"
 
     init(repository: GitRepositoryIdentity, defaults: UserDefaults = .standard) {
@@ -143,17 +144,29 @@ struct GitHistoryBranchFavorites {
         case .local:
             target = "local"
             identity = ""
+            sshConnection = nil
         case .ssh(let connection):
             target = "ssh"
-            identity = connection.identity
+            identity = Self.sshRepositoryIdentity(connection)
+            sshConnection = connection
         }
         commonGitDir = repository.commonGitDirPath
     }
 
     var refs: Set<String> {
         var store = load()
-        if let entry = store.entries.first(where: matches) {
-            return Set(entry.refs)
+        let matching = store.entries.filter(matches)
+        if !matching.isEmpty {
+            let merged = Set(matching.flatMap(\.refs))
+            if matching.count > 1 || matching.first?.identity != identity {
+                store.entries.removeAll(where: matches)
+                if !merged.isEmpty {
+                    store.entries.append(.init(target: target, identity: identity,
+                                               commonGitDir: commonGitDir, refs: merged.sorted()))
+                }
+                save(store)
+            }
+            return merged
         }
         guard let migrated = legacyRefs else { return [] }
         store.entries.append(.init(target: target, identity: identity,
@@ -180,9 +193,21 @@ struct GitHistoryBranchFavorites {
     /// branch renames and detached HEAD states.
     static func worktreeID(path: String) -> String { "worktree:" + path }
 
+    private static func sshRepositoryIdentity(_ connection: GitSSHConnection) -> String {
+        ([connection.destination] + connection.options).joined(separator: "\0")
+    }
+
+    private static func legacySSHIdentityMatches(_ candidate: String, connection: GitSSHConnection) -> Bool {
+        let parts = candidate.split(separator: "\0", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count >= 4, parts[0] == connection.destination else { return false }
+        return Array(parts.dropFirst(4)) == connection.options
+    }
+
     private func matches(_ entry: Entry) -> Bool {
-        entry.target == target && entry.identity == identity &&
-            entry.commonGitDir == commonGitDir
+        guard entry.target == target, entry.commonGitDir == commonGitDir else { return false }
+        if entry.identity == identity { return true }
+        guard let sshConnection else { return false }
+        return Self.legacySSHIdentityMatches(entry.identity, connection: sshConnection)
     }
 
     private func load() -> Store {
@@ -198,13 +223,34 @@ struct GitHistoryBranchFavorites {
         defaults.set(data, forKey: Self.defaultsKey)
     }
 
-    /// Reads the legacy `[repositoryKey: [String]]` dictionary. Its keys were
-    /// written with NUL separators, which plist serialization strips.
+    /// Reads the legacy `[repositoryKey: [String]]` dictionary, supporting both
+    /// preserved NUL-separated keys and stripped keys, and coalescing SSH keys
+    /// that only differed by local CWD or local ssh executable path.
     private var legacyRefs: [String]? {
         let repositories = defaults.dictionary(forKey: Self.legacyDefaultsKey) ?? [:]
-        let components = target == "local" ? ["local", commonGitDir] : ["ssh", identity, commonGitDir]
-        let stripped = components.joined()
-        guard let values = repositories[stripped] as? [String], !values.isEmpty else { return nil }
-        return values.sorted()
+        guard !repositories.isEmpty else { return nil }
+        var merged = Set<String>()
+        if let sshConnection {
+            let legacyFull = (["ssh", sshConnection.identity, commonGitDir]).joined(separator: "\0")
+            let legacyStripped = "ssh" + sshConnection.identity.replacingOccurrences(of: "\0", with: "") + commonGitDir
+            let normalizedStripped = "ssh" + identity.replacingOccurrences(of: "\0", with: "") + commonGitDir
+            for key in [legacyFull, legacyStripped, normalizedStripped] {
+                if let values = repositories[key] as? [String] { merged.formUnion(values) }
+            }
+            for (key, rawValues) in repositories {
+                guard let values = rawValues as? [String] else { continue }
+                let parts = key.split(separator: "\0", omittingEmptySubsequences: false).map(String.init)
+                guard parts.count >= 6, parts[0] == "ssh", parts[1] == sshConnection.destination,
+                      parts.last == commonGitDir,
+                      Array(parts[5..<(parts.count - 1)]) == sshConnection.options else { continue }
+                merged.formUnion(values)
+            }
+        } else {
+            for key in ["local\0" + commonGitDir, "local" + commonGitDir] {
+                if let values = repositories[key] as? [String] { merged.formUnion(values) }
+            }
+        }
+        guard !merged.isEmpty else { return nil }
+        return merged.sorted()
     }
 }

@@ -118,7 +118,7 @@ struct GitHistoryPickerTests {
         defer { defaults.removePersistentDomain(forName: suite) }
         let repository = GitRepositoryIdentity(worktreePath: "/repo", gitDirPath: "/repo/.git",
                                                commonGitDirPath: "/repo/.git")
-        // Property lists dropped the NUL separators the old keys were built with.
+        // Property lists dropped the NUL separators in some exports; binary plists keep them.
         defaults.set(["local/repo/.git": ["HEAD", "refs/heads/main"]],
                      forKey: "git.history.favoriteBranches")
         let store = GitHistoryBranchFavorites(repository: repository, defaults: defaults)
@@ -126,6 +126,50 @@ struct GitHistoryPickerTests {
         store.toggle(GitHistoryBranchFavorites.worktreeID(path: "/repo-feature"))
         #expect(GitHistoryBranchFavorites(repository: repository, defaults: defaults).refs
             == ["HEAD", "refs/heads/main", "worktree:/repo-feature"])
+    }
+
+    @Test func favoritesMigrateNULSeparatedLegacyKeysAndShareSSHRepositoriesAcrossLocalCWDs() throws {
+        let suite = "GitHistoryFavoritesNULMigration." + UUID().uuidString
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let localRepo = GitRepositoryIdentity(worktreePath: "/Users/me/repo", gitDirPath: "/Users/me/repo/.git",
+                                              commonGitDirPath: "/Users/me/repo/.git")
+        let sshFromDirA = try GitSSHConnection(destination: "dev@host", options: ["-p", "2222"],
+                                               workspaceID: "ssh:dev", executablePath: "/usr/bin/ssh",
+                                               localWorkingDirectory: "/Users/me/cwd-a")
+        let sshFromDirB = try GitSSHConnection(destination: "dev@host", options: ["-p", "2222"],
+                                               workspaceID: "ssh:dev-alias", executablePath: "/opt/homebrew/bin/ssh",
+                                               localWorkingDirectory: "/Users/me/cwd-b")
+        let otherSSH = try GitSSHConnection(destination: "dev@other-host", options: ["-p", "2222"],
+                                            workspaceID: "ssh:other", executablePath: "/usr/bin/ssh",
+                                            localWorkingDirectory: "/Users/me/cwd-a")
+        let remoteRepoA = GitRepositoryIdentity(target: .ssh(sshFromDirA), worktreePath: "/srv/repo",
+                                                gitDirPath: "/srv/repo/.git", commonGitDirPath: "/srv/repo/.git")
+        let remoteRepoB = GitRepositoryIdentity(target: .ssh(sshFromDirB), worktreePath: "/srv/repo",
+                                                gitDirPath: "/srv/repo/.git", commonGitDirPath: "/srv/repo/.git")
+        let otherRemoteRepo = GitRepositoryIdentity(target: .ssh(otherSSH), worktreePath: "/srv/repo",
+                                                    gitDirPath: "/srv/repo/.git", commonGitDirPath: "/srv/repo/.git")
+
+        defaults.set([
+            "local\0/Users/me/repo/.git": ["HEAD", "refs/heads/main", "refs/remotes/origin/main"],
+            "ssh\0" + sshFromDirA.identity + "\0/srv/repo/.git": ["HEAD", "refs/remotes/origin/feature-a"],
+            "ssh\0" + sshFromDirB.identity + "\0/srv/repo/.git": ["refs/heads/dev", "refs/remotes/origin/feature-a"],
+            "ssh\0" + otherSSH.identity + "\0/srv/repo/.git": ["refs/heads/unrelated"]
+        ], forKey: "git.history.favoriteBranches")
+
+        #expect(GitHistoryBranchFavorites(repository: localRepo, defaults: defaults).refs
+            == ["HEAD", "refs/heads/main", "refs/remotes/origin/main"])
+        #expect(GitHistoryBranchFavorites(repository: remoteRepoA, defaults: defaults).refs
+            == ["HEAD", "refs/heads/dev", "refs/remotes/origin/feature-a"])
+        #expect(GitHistoryBranchFavorites(repository: remoteRepoB, defaults: defaults).refs
+            == ["HEAD", "refs/heads/dev", "refs/remotes/origin/feature-a"])
+        #expect(GitHistoryBranchFavorites(repository: otherRemoteRepo, defaults: defaults).refs
+            == ["refs/heads/unrelated"])
+
+        GitHistoryBranchFavorites(repository: remoteRepoA, defaults: defaults).toggle("refs/heads/release")
+        #expect(GitHistoryBranchFavorites(repository: remoteRepoB, defaults: defaults).refs
+            == ["HEAD", "refs/heads/dev", "refs/heads/release", "refs/remotes/origin/feature-a"])
     }
 
     @Test func favoriteButtonsUpdateWithoutBrowsingAndPickerStillSelectsCurrentScope() async throws {

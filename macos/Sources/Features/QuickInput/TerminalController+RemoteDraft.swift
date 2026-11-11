@@ -129,7 +129,7 @@ extension TerminalController {
                     await QuickInputRemoteDraftBridge.finish(connection: connection, session: resolved.session, request: request, root: resolved.root)
                     return
                 }
-                snapshot = QuickInputTerminalSnapshot(surface: surface, maximumDuration: .milliseconds(150))
+                snapshot = QuickInputTerminalSnapshot(surface: surface, maximumDuration: .seconds(2))
                 let importForegroundPID = terminal.foregroundPID
                 for key in keys {
                     terminal.sendKeyEvent(key)

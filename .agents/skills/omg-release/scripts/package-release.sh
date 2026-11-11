@@ -65,7 +65,10 @@ for arch in arm64 x86_64 universal; do
     "$build_root/$arch/Release/OMG.app" \
     "$artifacts"
 done
-(cd "$artifacts" && shasum -a 256 *.dmg > SHA256SUMS.txt)
+if [[ -x "$repo_root/ios/scripts/package-release.sh" ]]; then
+  "$repo_root/ios/scripts/package-release.sh" "$omg_version" "$artifacts"
+fi
+(cd "$artifacts" && shasum -a 256 *.dmg OMG-Mobile-* > SHA256SUMS.txt)
 
 if ! gh release download "$PREVIOUS_TAG" \
   -R jischeng/oh-my-ghostty \

@@ -167,8 +167,8 @@ fn headless_handoff(
     if !helper.is_file() {
         return Ok(64);
     }
-    let policy: crate::lifecycle::Policy = serde_json::from_value(descriptor["policy"].clone())
-        .unwrap_or_default();
+    let policy: crate::lifecycle::Policy =
+        serde_json::from_value(descriptor["policy"].clone()).unwrap_or_default();
     let uid = unsafe { libc::getuid() };
     let root = std::path::PathBuf::from(format!("/tmp/omg-inline-{uid}-{id}"));
     std::fs::DirBuilder::new()
@@ -177,9 +177,7 @@ fn headless_handoff(
         .create(&root)?;
     let socket = root.join("relay.sock");
     let configuration = root.join("connection.json");
-    let local_cwd = env::current_dir()?
-        .to_string_lossy()
-        .into_owned();
+    let local_cwd = env::current_dir()?.to_string_lossy().into_owned();
     let mut ssh_args = target.options.clone();
     ssh_args.push(target.destination.clone());
     let connection = crate::deploy::Connection {

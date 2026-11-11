@@ -158,8 +158,7 @@ pub fn parse_ssh_args(args: &[String]) -> Option<SshTarget> {
                     let lower = value.trim().to_ascii_lowercase();
                     if lower.starts_with("batchmode=yes")
                         || lower.starts_with("controlmaster=check")
-                        || (lower.starts_with("remotecommand=")
-                            && lower != "remotecommand=none")
+                        || (lower.starts_with("remotecommand=") && lower != "remotecommand=none")
                     {
                         return None;
                     }

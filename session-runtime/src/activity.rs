@@ -114,7 +114,7 @@ fn decode_percent(value: &str) -> String {
 }
 
 fn decode_hex(value: &str) -> Option<String> {
-    if value.len() % 2 != 0 || value.is_empty() {
+    if !value.len().is_multiple_of(2) || value.is_empty() {
         return None;
     }
     let mut out = Vec::with_capacity(value.len() / 2);
@@ -313,14 +313,9 @@ impl State {
                 .iter()
                 .find(|r| r.signal.id == id && r.key == key)
                 .and_then(|r| r.owner);
-            if native
-                && !(self.local && remote)
-                && field(metadata, ':', "state") == Some("idle")
-            {
+            if native && !(self.local && remote) && field(metadata, ':', "state") == Some("idle") {
                 if let Some((old_pid, true)) = existing_owner {
-                    if self.foreground != Some(old_pid)
-                        && unsafe { libc::kill(-old_pid, 0) != 0 }
-                    {
+                    if self.foreground != Some(old_pid) && unsafe { libc::kill(-old_pid, 0) != 0 } {
                         records.retain(|r| r.signal.id != id || r.key != key);
                         self.revision = self.revision.saturating_add(1);
                         return;

@@ -252,10 +252,11 @@ final class MarkdownPreviewResources: NSObject, WKURLSchemeHandler {
                 let data: Data
                 let mimeType: String
                 if url.scheme == "omg-markdown", url.host == "bundle" {
-                    guard let root = Bundle.main.url(forResource: "MarkdownPreview", withExtension: nil) else {
+                    guard let rawRoot = Bundle.main.url(forResource: "MarkdownPreview", withExtension: nil) else {
                         throw URLError(.fileDoesNotExist)
                     }
-                    let file = root.appendingPathComponent(url.path).standardizedFileURL
+                    let root = rawRoot.resolvingSymlinksInPath().standardizedFileURL
+                    let file = root.appendingPathComponent(url.path).resolvingSymlinksInPath().standardizedFileURL
                     guard file.path.hasPrefix(root.path + "/") else { throw URLError(.noPermissionsToReadFile) }
                     data = try await Task.detached(priority: .utility) { try Data(contentsOf: file) }.value
                     mimeType = UTType(filenameExtension: file.pathExtension)?.preferredMIMEType ?? "application/octet-stream"

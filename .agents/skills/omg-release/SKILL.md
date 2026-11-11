@@ -166,7 +166,7 @@ source "<private-signing-directory>/signing.env"
 PREVIOUS_TAG=v<PREVIOUS_VERSION> \
 .agents/skills/omg-release/scripts/package-release.sh <OMG_VERSION>
 ```
-Produces `arm64`, `x86_64`, and `universal` DMGs, `SHA256SUMS.txt`, and `appcast.xml`.
+Produces `arm64`, `x86_64`, and `universal` DMGs, `OMG-Mobile-<OMG_VERSION>-ios-installer.tar.gz`, `OMG-Mobile-<OMG_VERSION>-ios-unsigned.ipa`, `SHA256SUMS.txt`, and `appcast.xml`.
 
 Before publishing, inspect the final signed App in each packaged DMG:
 - Require all runtime platform directories, matching manifest revisions and all
@@ -192,7 +192,7 @@ The DMGs already carry `omgd`; a separate public daemon asset is not required.
 
 ### Step 5: Commit, Tag & Push
 ```bash
-git add macos/Ghostty.xcodeproj/project.pbxproj macos/Tests/Helpers/OhMyGhosttyVersionTests.swift docs/RELEASE_NOTES_<OMG_VERSION>.md
+git add macos/Ghostty.xcodeproj/project.pbxproj macos/Tests/Helpers/OhMyGhosttyVersionTests.swift ios/project.yml docs/RELEASE_NOTES_<OMG_VERSION>.md
 git commit -m "release: prepare OMG <OMG_VERSION>"
 git push origin main
 
@@ -206,10 +206,12 @@ gh release create "v<OMG_VERSION>" \
   .release-build/<OMG_VERSION>/artifacts/OMG-<OMG_VERSION>-macos-arm64.dmg \
   .release-build/<OMG_VERSION>/artifacts/OMG-<OMG_VERSION>-macos-x86_64.dmg \
   .release-build/<OMG_VERSION>/artifacts/OMG-<OMG_VERSION>-macos-universal.dmg \
+  .release-build/<OMG_VERSION>/artifacts/OMG-Mobile-<OMG_VERSION>-ios-installer.tar.gz \
+  .release-build/<OMG_VERSION>/artifacts/OMG-Mobile-<OMG_VERSION>-ios-unsigned.ipa \
   .release-build/<OMG_VERSION>/artifacts/SHA256SUMS.txt \
   .release-build/<OMG_VERSION>/artifacts/appcast.xml \
   --repo jischeng/oh-my-ghostty \
-  --title "OMG <OMG_VERSION>" \
+  --title "OMG <OMG_VERSION> · Ghostty 1.3.2-dev" \
   --notes-file docs/RELEASE_NOTES_<OMG_VERSION>.md
 ```
 
@@ -217,9 +219,9 @@ gh release create "v<OMG_VERSION>" \
 
 ## Completion Report Checklist
 - Commit SHAs and tag name (`vX.Y.Z`).
-- Architectures built (`arm64`, `x86_64`, `universal`).
+- Architectures built (`arm64`, `x86_64`, `universal`) plus iOS installer kit and unsigned IPA.
 - Persistent certificate/DR verification, launch-probe evidence, and explicit not-notarized status.
 - Prior persistent app compatibility if supplied; report migration/omitted desktop TCC verification honestly.
 - Runtime revision/snapshot revision, bundled platform matrix and post-sign manifest checks.
 - Packaged-runtime SSH/lifecycle/containment results, actual supervisor mode, and unexecuted platform/Agent recovery cases. Report broad-suite failures and isolated retries separately.
-- GitHub Release URL and list of 5 uploaded assets.
+- GitHub Release URL and list of uploaded assets.

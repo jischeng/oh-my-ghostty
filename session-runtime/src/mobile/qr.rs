@@ -404,8 +404,8 @@ pub fn encode_matrix(payload: &[u8]) -> io::Result<Vec<Vec<bool>>> {
     }
     let format_bits = ((data << 10) | rem) ^ 0x5412;
     let fbit = |i: usize| ((format_bits >> i) & 1) != 0;
-    for i in 0..=5 {
-        modules[i][8] = fbit(i);
+    for (i, row) in modules.iter_mut().enumerate().take(6) {
+        row[8] = fbit(i);
     }
     modules[7][8] = fbit(6);
     modules[8][8] = fbit(7);

@@ -5,7 +5,7 @@ import Testing
 
 @MainActor
 struct GitHistoryResponsivenessTests {
-    @Test func metadataClicksNeverCopyAndDoubleClickExpandsTheCommit() async throws {
+    @Test func metadataClickCopiesWithInlineConfirmationAndDoubleClickExpandsTheCommit() async throws {
         let button = InspectorMetadataText(frame: NSRect(x: 0, y: 0, width: 150, height: 20))
         let board = NSPasteboard.withUniqueName()
         button.pasteboard = board
@@ -13,14 +13,12 @@ struct GitHistoryResponsivenessTests {
         var expansions = 0
         button.onDoubleClick = { expansions += 1 }
         InspectorCopyMenu.copy("original", to: board)
-        button.activate(clickCount: 1)
         button.activate(clickCount: 2)
-        try await Task.sleep(for: .seconds(NSEvent.doubleClickInterval + 0.05))
-        #expect(expansions == 1 && board.string(forType: .string) == "original")
-        button.activate(clickCount: 1)
-        try await Task.sleep(for: .seconds(NSEvent.doubleClickInterval + 0.05))
+        #expect(expansions == 1)
         #expect(board.string(forType: .string) == "original")
-        #expect(button.attributedTitle.string == "Author")
+        button.activate(clickCount: 1)
+        #expect(board.string(forType: .string) == "Full Author")
+        #expect(button.attributedTitle.string == CopyFeedback.confirmationLabel())
     }
 
     @Test func localExpansionPreservesUnrelatedCellsAndAvoidsWholeTableReloads() async throws {

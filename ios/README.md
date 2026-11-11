@@ -20,13 +20,23 @@ Rust/Cargo. No Xcode GUI is needed.
 ```sh
 ios/scripts/build.sh iphonesimulator
 ios/scripts/build.sh iphoneos
+ios/scripts/install-to-iphone.sh
+ios/scripts/package-release.sh <OMG_VERSION> <OUTPUT_DIR>
 ```
 
 The first command builds for Apple Silicon Simulator. Simulator builds use local
 ad-hoc signing so Keychain works without a device profile. Device builds are
 unsigned unless `OMG_IOS_DEVELOPMENT_TEAM` names an existing development team;
-physical installation requires matching provisioning. Generated projects,
-headers, libraries and build products remain ignored. The minimum OS is iOS 17.
+physical installation requires matching provisioning. `install-to-iphone.sh`
+auto-detects a local Xcode Apple Development team and connected physical iPhone/iPad,
+uses a per-team bundle identifier (`com.jischeng.omg.mobile.<team>`) by default so
+free Personal Teams do not collide on App ID registration, signs with
+`-allowProvisioningUpdates`, and installs via `xcrun devicectl`.
+`package-release.sh` produces both `OMG-Mobile-<version>-ios-installer.tar.gz`
+(with prebuilt `libghostty-vt.a` and generated Xcode project so end users do not
+need Zig, Rust or XcodeGen) and `OMG-Mobile-<version>-ios-unsigned.ipa`. Generated
+projects, headers, libraries and build products remain ignored. The minimum OS is
+iOS 17.
 
 ## CLI and LAN pairing
 

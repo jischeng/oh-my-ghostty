@@ -632,7 +632,7 @@ self-signed; not notarized** and disclose that macOS Gatekeeper may block the fi
 who trust the downloaded app can use macOS System Settings > Privacy & Security
 to review and allow it. Do not disable Gatekeeper globally.
 
-## 6. Package DMGs
+## 6. Package DMGs and mobile installers
 
 ```bash
 mkdir -p "$OMG_BUILD_ROOT/artifacts"
@@ -648,17 +648,25 @@ for dmg in "$OMG_BUILD_ROOT"/artifacts/*.dmg; do
   hdiutil verify "$dmg"
 done
 
-(cd "$OMG_BUILD_ROOT/artifacts" && shasum -a 256 *.dmg > SHA256SUMS.txt)
+ios/scripts/package-release.sh "$OMG_VERSION" "$OMG_BUILD_ROOT/artifacts"
+
+(cd "$OMG_BUILD_ROOT/artifacts" && shasum -a 256 *.dmg OMG-Mobile-* > SHA256SUMS.txt)
 ```
 
 The DMG script verifies bundle ID, OMG version, signature, and either one named
-architecture or the exact universal pair; it creates an `Applications` symlink
-and names artifacts:
+architecture or the exact universal pair; it creates an `Applications` symlink.
+`ios/scripts/package-release.sh` builds ReleaseFast `libghostty-vt.a` for
+`iphoneos` and `iphonesimulator`, verifies unsigned `Release` `OMGMobile.app`
+compilation, and packages both a self-contained Xcode/Agent signing kit (no Zig,
+Rust, or XcodeGen required on the user's Mac) and an unsigned IPA for sideloaders.
+Release artifacts are named:
 
 ```text
 OMG-<version>-macos-arm64.dmg
 OMG-<version>-macos-x86_64.dmg
 OMG-<version>-macos-universal.dmg
+OMG-Mobile-<version>-ios-installer.tar.gz
+OMG-Mobile-<version>-ios-unsigned.ipa
 SHA256SUMS.txt
 appcast.xml
 ```
@@ -719,6 +727,7 @@ gh release create "v$OMG_VERSION" \
 gh release upload "v$OMG_VERSION" \
   -R jischeng/oh-my-ghostty \
   "$OMG_BUILD_ROOT"/artifacts/*.dmg \
+  "$OMG_BUILD_ROOT"/artifacts/OMG-Mobile-* \
   "$OMG_BUILD_ROOT/artifacts/SHA256SUMS.txt" \
   "$OMG_BUILD_ROOT/artifacts/appcast.xml"
 ```

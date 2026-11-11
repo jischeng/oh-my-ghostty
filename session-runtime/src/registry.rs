@@ -1199,7 +1199,9 @@ mod tests {
         }
         let id = "33333333-3333-3333-3333-333333333333";
         let mut record = Record::new(id, Policy::default()).unwrap();
-        record.save(&older_sessions.join(format!("{id}.json"))).unwrap();
+        record
+            .save(&older_sessions.join(format!("{id}.json")))
+            .unwrap();
 
         let registry = Registry::new_local(
             current_sessions.clone(),

@@ -7,11 +7,17 @@ struct PluginHostTests {
     private let sessionID = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
 
     @Test func officialSSHInstallationEnablesTheWorkspaceProvider() throws {
+        let defaultsKey = "OMG.Plugin.Enabled.\(SSHPlugin.pluginID)"
+        let previous = UserDefaults.standard.object(forKey: defaultsKey)
         let support = FileManager.default.temporaryDirectory
             .appendingPathComponent("omg-official-plugin-\(UUID().uuidString)", isDirectory: true)
         defer {
             try? FileManager.default.removeItem(at: support)
-            UserDefaults.standard.removeObject(forKey: "OMG.Plugin.Enabled.\(SSHPlugin.pluginID)")
+            if let previous {
+                UserDefaults.standard.set(previous, forKey: defaultsKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: defaultsKey)
+            }
         }
         let manager = PluginInstallationManager(applicationSupport: support)
         try manager.installOfficial(SSHPlugin.pluginID)

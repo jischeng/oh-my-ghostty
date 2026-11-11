@@ -518,6 +518,15 @@ struct WorkspaceProviderTests {
         context.endDetectedSSHReconnect(processGroupID: 41)
         #expect(context.isSSHSession)
         context.applyInferredRemoteWorkingDirectory("/home/test")
+        let previousSSHEnabled = UserDefaults.standard.object(forKey: "OMG.Plugin.Enabled.builtin.ssh")
+        UserDefaults.standard.set(true, forKey: "OMG.Plugin.Enabled.builtin.ssh")
+        defer {
+            if let previousSSHEnabled {
+                UserDefaults.standard.set(previousSSHEnabled, forKey: "OMG.Plugin.Enabled.builtin.ssh")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "OMG.Plugin.Enabled.builtin.ssh")
+            }
+        }
         #expect(context.workingDirectory == "/home/test")
         #expect(context.workspace?.workingDirectory == "/home/test")
         context.endDetectedSSHReconnect(processGroupID: 42)

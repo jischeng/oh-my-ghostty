@@ -641,7 +641,9 @@ fn build_view(config: &Config) -> io::Result<View> {
                             .into()
                     }
                 });
-            let (remote_host, remote_path, remote_project_id) = if let Some(ssh) = active_ssh.as_ref() {
+            let (remote_host, remote_path, remote_project_id) = if let Some(ssh) =
+                active_ssh.as_ref()
+            {
                 experience::remember_ssh_target(config, ssh);
                 let host_label = experience::host_display_name(&ssh.destination);
                 let r_path = ssh
@@ -667,7 +669,8 @@ fn build_view(config: &Config) -> io::Result<View> {
                         endpoint: Some(endpoint.clone()),
                         host: serde_json::to_string(ssh).ok(),
                     });
-                if agent == "terminal" && (title == name || title == "Terminal" || title.is_empty()) {
+                if agent == "terminal" && (title == name || title == "Terminal" || title.is_empty())
+                {
                     let tail = Path::new(&r_path)
                         .file_name()
                         .and_then(|s| s.to_str())

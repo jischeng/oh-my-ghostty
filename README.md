@@ -53,6 +53,7 @@ replace a full IDE, every VS Code extension, or Ghostty's cross-platform release
 | Find earlier shell activity | **Command history** in Info, with navigation back to retained output when valid shell-integration anchors are available |
 | Draft a commit message from staged changes | **ACP connection to a locally installed Agent**, with configurable Agent/model routes and a prompt; review the draft before committing |
 | Work on remote machines | **SSH-aware Git, Agent session status, file browsing and port forwarding**, using OpenSSH configuration and system tools |
+| Check or steer sessions from your phone | **OMG Mobile (iOS/iPadOS)** connected to `omgd` over LAN or Tailscale, sharing the same live terminal, Agent activity, files and diffs |
 
 Agent CLIs such as Codex, Claude Code and Pi are installed separately. OMG's
 optional Agent integrations provide activity/session context; support varies by
@@ -133,6 +134,34 @@ in [Releasing OMG](docs/RELEASING.md).
 To uninstall, remove `OMG.app`. Settings, saved session data and history are not
 automatically erased. You can clear sent history in Settings before removing the
 app; see [configuration and storage](docs/settings/configuration.md).
+
+### Install OMG Mobile on iPhone / iPad (iOS 17+)
+
+Because OMG Mobile is distributed outside the App Store, iOS requires signing the
+app with **your own Apple ID** (a free Apple ID Personal Team works) before
+installing onto a physical iPhone or iPad. Each
+[GitHub release](https://github.com/jischeng/oh-my-ghostty/releases/latest)
+includes two prebuilt mobile packages so **Zig, Rust and XcodeGen are not needed**:
+
+| iOS asset | When to use it |
+| --- | --- |
+| `OMG-Mobile-<version>-ios-installer.tar.gz` | **Recommended (Agent / Xcode):** prebuilt Ghostty VT archive + Xcode project + `install-to-iphone.sh` |
+| `OMG-Mobile-<version>-ios-unsigned.ipa` | **Sideloaders:** unsigned IPA for SideStore, AltStore, Sideloadly or Feather |
+
+**Option A — Copy this prompt into your AI coding agent (Claude Code, Codex, Antigravity, Cursor):**
+
+1. On your Mac, ensure **Xcode** is installed and signed into your Apple ID (**Xcode → Settings → Accounts**).
+2. Connect your iPhone via USB, unlock it, trust the Mac, and enable **Settings → Privacy & Security → Developer Mode** on the phone.
+3. Copy and send the following prompt to your local Agent:
+
+```text
+Install the latest OMG Mobile app onto my connected iPhone from https://github.com/jischeng/oh-my-ghostty/releases/latest:
+1. Download `OMG-Mobile-<version>-ios-installer.tar.gz` and `SHA256SUMS.txt` from the latest release into a temporary directory and verify its SHA-256 checksum.
+2. Extract the archive and run `./install-to-iphone.sh` to auto-detect my Xcode Apple Development team and connected iPhone, sign with `-allowProvisioningUpdates`, and install via `xcrun devicectl`.
+3. If Xcode account sign-in, device connection, or iPhone Developer Mode / VPN & Device Management trust is needed, tell me the exact step to complete and finish launching the app.
+```
+
+4. Once installed, run `omg +mobile` in an OMG terminal (or open **Settings → Mobile Devices** in OMG on your Mac) and scan the QR code from **OMG Mobile** to pair over LAN or Tailscale. See [ios/README.md](ios/README.md) for standalone SSH server pairing and topology details.
 
 ## Your first Agent workflow
 

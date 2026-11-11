@@ -249,9 +249,8 @@ fn sniff_remote_cwd(bytes: &[u8], current: &mut Option<String>) {
                                 }
                             }
                         }
-                    } else if let Some(title) = osc
-                        .strip_prefix("0;")
-                        .or_else(|| osc.strip_prefix("2;"))
+                    } else if let Some(title) =
+                        osc.strip_prefix("0;").or_else(|| osc.strip_prefix("2;"))
                     {
                         if let Some((prefix, candidate)) = title.rsplit_once(':') {
                             let prefix = prefix.trim();

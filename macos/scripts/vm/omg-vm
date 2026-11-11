@@ -44,7 +44,7 @@ vm_up() {
     fi
 
     if [[ "$state" == running ]]; then
-        if ! omg_vm_ssh "test -d '/Volumes/My Shared Files/repo'" 2>/dev/null ||
+        if ! omg_vm_ssh "test -d '/Volumes/My Shared Files/repo' && test -L '$OMG_VM_REPO_ROOT'" 2>/dev/null ||
             { [[ -d /Applications/Xcode.app ]] && ! omg_vm_ssh "test -d '/Volumes/My Shared Files/Xcode.app'" 2>/dev/null; }; then
             vm_down
             state=stopped

@@ -391,7 +391,11 @@ pub(super) fn remember_ssh_target(
     let mut idx = 0;
     while idx < target.options.len() {
         if target.options[idx] == "-p" {
-            if let Some(p) = target.options.get(idx + 1).and_then(|s| s.parse::<u16>().ok()) {
+            if let Some(p) = target
+                .options
+                .get(idx + 1)
+                .and_then(|s| s.parse::<u16>().ok())
+            {
                 port = p;
             }
             idx += 2;
@@ -440,10 +444,7 @@ pub(super) fn host_display_name(host: &str) -> String {
     host.to_owned()
 }
 
-pub(super) fn resolve_remote_ssh(
-    config: &Config,
-    host: &str,
-) -> io::Result<(String, Vec<String>)> {
+pub(super) fn resolve_remote_ssh(config: &Config, host: &str) -> io::Result<(String, Vec<String>)> {
     if let Ok(target) = serde_json::from_str::<omg_session_runtime::location::SshTarget>(host) {
         if !target.destination.is_empty() {
             return Ok((target.destination, target.options));

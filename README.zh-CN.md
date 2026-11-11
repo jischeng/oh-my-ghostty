@@ -50,6 +50,7 @@ Ghostty、VS Code 等工具之间切换完成的任务，做到**部分替代**�
 | 找回之前执行的命令 | **命令历史**：在 Info 中查看；shell integration 锚点仍有效时可跳回保留的输出 |
 | 根据暂存修改起草提交信息 | **ACP 连接本机安装的 Agent**：可配置 Agent/模型与提示词，确认内容后再提交 |
 | 处理远程工作区 | **SSH Git 仓库识别、Agent 会话状态、文件浏览与端口转发**：使用 OpenSSH 配置及系统工具 |
+| 在手机上查看或接管会话 | **OMG Mobile（iOS/iPadOS）**：通过局域网或 Tailscale 直连 `omgd`，与桌面共享同一终端、Agent 状态、文件与 diff |
 
 Codex、Claude Code、Pi 等 Agent CLI 需要自行安装。可选的 Agent 集成用于提供活动/会话
 上下文，各 Agent 的能力不完全相同。OMG 不提供模型订阅，也不取代你的 Agent CLI。
@@ -120,6 +121,32 @@ Release 附带 `SHA256SUMS.txt`；详情见[发版规范](docs/RELEASING.md)。
 卸载时移除 `OMG.app` 即可；这不会自动删除设置、会话数据或历史。
 如需删除发送历史，可先在设置中清空；存储位置和其他配置见
 [配置说明](docs/settings/configuration.md)。
+
+### 在 iPhone / iPad 上安装 OMG Mobile（iOS 17+）
+
+由于 OMG Mobile 未上架 App Store，iOS 真机安装要求使用**你自己的 Apple ID**（普通免费 Apple ID Personal Team 即可）完成本机签名。每个
+[GitHub Release](https://github.com/jischeng/oh-my-ghostty/releases/latest)
+都附带预编译好的移动端安装包，**无需安装 Zig、Rust 或 XcodeGen**：
+
+| iOS 发布文件 | 适用方式 |
+| --- | --- |
+| `OMG-Mobile-<version>-ios-installer.tar.gz` | **推荐（让 Agent / Xcode 自动签名安装）**：内含预编译 Ghostty VT 静态库、Xcode 工程与 `install-to-iphone.sh` |
+| `OMG-Mobile-<version>-ios-unsigned.ipa` | **侧载工具安装**：供 SideStore、AltStore、Sideloadly、Feather 等工具自行重签安装 |
+
+**方式一：直接复制下面这段 Prompt 发给本机 AI Agent（Claude Code / Codex / Antigravity / Cursor）自动安装到手机**
+
+1. 确保 Mac 已安装 **Xcode**，并在 **Xcode → Settings → Accounts** 中登录你的 Apple ID（免费个人账号即可）。
+2. 用数据线将 iPhone 连接到 Mac 并保持解锁、点击“信任此电脑”，同时在手机 **设置 → 隐私与安全性 → 开发者模式** 中开启开发者模式。
+3. 复制以下 Prompt 发给你的本地 Agent：
+
+```text
+请帮我把最新版 OMG Mobile 安装到我当前连接在 Mac 上的 iPhone：
+1. 从 https://github.com/jischeng/oh-my-ghostty/releases/latest 下载最新的 `OMG-Mobile-<version>-ios-installer.tar.gz` 和 `SHA256SUMS.txt` 到临时目录，并校验 SHA-256。
+2. 解压后执行里面的 `./install-to-iphone.sh`，自动识别本机 Xcode 登录的 Apple Development Team 与已连接的 iPhone，完成签名编译并通过 `xcrun devicectl` 安装到手机。
+3. 如果遇到未登录 Xcode 账号、手机未开启开发者模式，或首次免费个人证书需要在手机「设置 → 通用 → VPN 与设备管理」中点击信任，请明确提示我操作后再完成启动验证。
+```
+
+4. 安装完成后，在 Mac 的 OMG 终端执行 `omg +mobile`（或打开 **设置 → 移动设备**），用手机上的 **OMG Mobile** 扫码即可通过局域网或 Tailscale 配对连接。更多拓扑（包括直连远程 SSH 服务器）见 [ios/README.md](ios/README.md)。
 
 ## 第一次体验 Agent 工作流
 
@@ -214,6 +241,11 @@ Ghostty 由 Mitchell Hashimoto 与贡献者创建。感谢
   及 Markdown 渲染生态：提供实时 Markdown 编辑、图表等基础能力。
 - **[Agent Client Protocol](https://agentclientprotocol.com/)** 及各 Agent 适配器作者：
   让本机 Agent 集成成为可能。
+- **[Termio](https://github.com/termio-sh/termio)**：OMG Mobile 复用的移动端应用界面、
+  终端呈现与交互基础。
+- **[Remux](https://github.com/h3nock/remux)、[Paseo](https://github.com/getpaseo/paseo)**
+  与 **[Orca](https://github.com/stablyai/orca)**：移动终端与 Agent 会话体验参考。
+- **[Herdr](https://github.com/herdrdev/herdr-core)**：按 OMG runtime 协议适配的内联终端查看器部分实现。
 
 感谢这些工具、项目与贡献者。参考或集成不代表获得官方背书；组件保留各自的许可证和声明。
 Markdown 资源的第三方声明见

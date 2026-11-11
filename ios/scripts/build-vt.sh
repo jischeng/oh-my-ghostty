@@ -13,8 +13,12 @@ mkdir -p "$root/ios/.build/headers"
 # The macOS embedder's umbrella module also owns vt.h. Isolate the VT-only
 # headers so Clang does not substitute the full GhosttyKit module on iOS.
 cp -R "$root/include/ghostty" "$root/ios/.build/headers/"
+ghostty_version="1.3.2-dev"
+if [[ -f "$root/macos/Ghostty-Info.plist" ]]; then
+  ghostty_version=$(/usr/bin/plutil -extract GhosttyBaseVersion raw "$root/macos/Ghostty-Info.plist" 2>/dev/null || echo "1.3.2-dev")
+fi
 args=(-Demit-lib-vt=true -Demit-macos-app=false -Demit-xcframework=false
-      -Doptimize=ReleaseFast -Dversion-string=1.3.2-dev)
+      -Doptimize=ReleaseFast "-Dversion-string=$ghostty_version")
 if [[ -n "$target" ]]; then args+=("-Dtarget=$target"); fi
 cd "$root"
 if [[ "$sdk" == macos ]]; then

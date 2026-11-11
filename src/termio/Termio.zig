@@ -516,6 +516,7 @@ pub fn resizeVisual(
     const grid_size = size.grid();
 
     // Enter the critical area that we want to keep small.
+    var wake_termio = false;
     {
         self.renderer_state.mutex.lockUncancelable(global.io());
         defer self.renderer_state.mutex.unlock(global.io());
@@ -537,7 +538,13 @@ pub fn resizeVisual(
                     .false,
             },
         );
+        if (self.terminal_stream.handler.termio_messaged) {
+            self.terminal_stream.handler.termio_messaged = false;
+            wake_termio = true;
+        }
     }
+
+    if (wake_termio) self.mailbox.notify();
 
     // Mail the renderer so that it can update the GPU and re-render.
     _ = self.renderer_mailbox.push(global.io(), .{ .resize = size }, .{ .forever = {} });
@@ -636,11 +643,20 @@ pub fn commitResize(
     const grid_size = size.grid();
     try self.backend.resize(grid_size, size.terminal());
 
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
-    if (self.backend != .omg_session and self.terminal.modes.get(.in_band_size_reports)) {
-        try self.sizeReportLocked(td, .mode_2048);
+    var wake_termio = false;
+    {
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
+        self.terminal_stream.handler.noteChildResizeCommitted();
+        if (self.backend != .omg_session and self.terminal.modes.get(.in_band_size_reports)) {
+            try self.sizeReportLocked(td, .mode_2048);
+        }
+        if (self.terminal_stream.handler.termio_messaged) {
+            self.terminal_stream.handler.termio_messaged = false;
+            wake_termio = true;
+        }
     }
+    if (wake_termio) self.mailbox.notify();
 }
 
 /// Make a size report.
@@ -694,6 +710,8 @@ pub fn clearScreen(self: *Termio, td: *ThreadData, history: bool) !void {
         // for alt screen, we do nothing.
         if (self.terminal.screens.active_key == .alternate) return;
 
+        self.terminal_stream.handler.cancelPostResize();
+
         // Clear our selection
         self.terminal.screens.active.clearSelection();
 
@@ -746,6 +764,7 @@ pub fn scrollViewport(
     self.renderer_state.mutex.lockUncancelable(global.io());
     defer self.renderer_state.mutex.unlock(global.io());
     self.terminal.scrollViewport(scroll);
+    self.terminal_stream.handler.noteUserScrollViewport();
 }
 
 /// Jump the viewport to the prompt.
@@ -754,6 +773,7 @@ pub fn jumpToPrompt(self: *Termio, delta: isize) !void {
         self.renderer_state.mutex.lockUncancelable(global.io());
         defer self.renderer_state.mutex.unlock(global.io());
         self.terminal.screens.active.scroll(.{ .delta_prompt = delta });
+        self.terminal_stream.handler.noteUserScrollViewport();
     }
 
     try self.renderer_wakeup.notify();
@@ -833,6 +853,8 @@ fn processOutputLocked(self: *Termio, buf: []const u8) void {
     } else {
         self.terminal_stream.nextSlice(buf);
     }
+
+    self.terminal_stream.handler.notePostResizeOutputBatch();
 
     // If our stream handling caused messages to be sent to the mailbox
     // thread, then we need to wake it up so that it processes them.

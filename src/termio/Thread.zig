@@ -43,7 +43,7 @@ const Coalesce = struct {
 /// The number of milliseconds before we reset the synchronized output flag
 /// if the running program hasn't already.
 const sync_reset_ms = 1000;
-const post_resize_sync_reset_ms = 500;
+const post_resize_sync_reset_ms = 5000;
 
 /// The number of milliseconds between each movement during selection scrolling.
 const selection_scroll_ms = 15;
@@ -418,10 +418,16 @@ fn startSynchronizedOutput(self: *Thread, cb: *CallbackData) void {
     const timeout_ms: u64 = timeout: {
         cb.io.renderer_state.mutex.lockUncancelable(global.io());
         defer cb.io.renderer_state.mutex.unlock(global.io());
-        break :timeout if (cb.io.terminal_stream.handler.post_resize.active)
-            post_resize_sync_reset_ms
-        else
-            sync_reset_ms;
+        if (!cb.io.terminal_stream.handler.post_resize.active) {
+            break :timeout sync_reset_ms;
+        }
+        if (cb.io.terminal_stream.handler.post_resize.hard_deadline) |hd| {
+            const now = std.Io.Timestamp.now(global.io(), .awake);
+            const rem_ms = now.durationTo(hd).toMilliseconds();
+            if (rem_ms <= 0) break :timeout 1;
+            break :timeout @min(post_resize_sync_reset_ms, @as(u64, @intCast(rem_ms)));
+        }
+        break :timeout post_resize_sync_reset_ms;
     };
     self.sync_reset.reset(
         &self.loop,
@@ -472,7 +478,7 @@ fn syncResetCallback(
     r: xev.Timer.RunError!void,
 ) xev.CallbackAction {
     _ = r catch |err| switch (err) {
-        error.Canceled => {},
+        error.Canceled => return .disarm,
         else => {
             log.warn("error during sync reset callback err={}", .{err});
             return .disarm;

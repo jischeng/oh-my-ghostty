@@ -86,6 +86,11 @@ struct EditorDocumentEncoding: Equatable, Sendable {
     let newline: Newline
 }
 
+struct EditorNavigationRequest: Equatable, Sendable {
+    let id = UUID()
+    let location: EditorTextLocation
+}
+
 @MainActor
 final class EditorDocument: ObservableObject {
     let id: EditorDocumentID
@@ -105,6 +110,7 @@ final class EditorDocument: ObservableObject {
     @Published var isRestoringFromGit = false
     @Published private(set) var saveErrorMessage: String?
     @Published private(set) var contentGeneration: UInt64 = 0
+    @Published private(set) var pendingNavigation: EditorNavigationRequest?
 
     private var encoding: EditorDocumentEncoding
     private var persistedText: String
@@ -113,6 +119,16 @@ final class EditorDocument: ObservableObject {
     private var autoSaveTask: Task<Void, Never>?
 
     var path: String { id.path }
+
+    func requestNavigation(_ location: EditorTextLocation) {
+        pendingNavigation = EditorNavigationRequest(location: location)
+    }
+
+    func consumeNavigation(_ id: UUID) {
+        if pendingNavigation?.id == id {
+            pendingNavigation = nil
+        }
+    }
 
     private var autoSaveSuspensionCount = 0
 

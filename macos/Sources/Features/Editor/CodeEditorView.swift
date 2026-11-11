@@ -33,6 +33,8 @@ struct CodeEditorView: View {
     var onPreviousDocument: () -> Void = {}
     var onSaveAll: () -> Void = {}
     var onHide: () -> Void = {}
+    var navigationRequest: EditorNavigationRequest?
+    var onConsumeNavigation: (UUID) -> Void = { _ in }
 
     @State private var editorState = SourceEditorState()
     @State private var editorCoordinator = EditorCoordinator()
@@ -68,7 +70,9 @@ struct CodeEditorView: View {
         onNextDocument: @escaping () -> Void = {},
         onPreviousDocument: @escaping () -> Void = {},
         onSaveAll: @escaping () -> Void = {},
-        onHide: @escaping () -> Void = {}
+        onHide: @escaping () -> Void = {},
+        navigationRequest: EditorNavigationRequest? = nil,
+        onConsumeNavigation: @escaping (UUID) -> Void = { _ in }
     ) {
         self._text = text
         self.fileURL = fileURL
@@ -91,6 +95,8 @@ struct CodeEditorView: View {
         self.onPreviousDocument = onPreviousDocument
         self.onSaveAll = onSaveAll
         self.onHide = onHide
+        self.navigationRequest = navigationRequest
+        self.onConsumeNavigation = onConsumeNavigation
     }
 
     var body: some View {
@@ -117,6 +123,7 @@ struct CodeEditorView: View {
             editorCoordinator.setIsPreview(isPreview)
             configureCommands()
             editorCoordinator.setActive(isActive)
+            editorCoordinator.setNavigationRequest(navigationRequest, onConsume: onConsumeNavigation)
         }
         .onChange(of: diffLines) { editorCoordinator.setDiffLines($0) }
         .onChange(of: isActive) { isActive in
@@ -129,6 +136,12 @@ struct CodeEditorView: View {
         }
         .onChange(of: isPreview) { isPreview in
             editorCoordinator.setIsPreview(isPreview)
+            if !isPreview {
+                editorCoordinator.setNavigationRequest(navigationRequest, onConsume: onConsumeNavigation)
+            }
+        }
+        .onChange(of: navigationRequest) { request in
+            editorCoordinator.setNavigationRequest(request, onConsume: onConsumeNavigation)
         }
         .onChange(of: settings.editorKeymapPreset) { _ in configureCommands() }
         .onChange(of: resolvedTheme) { _ in editorCoordinator.refreshBackground() }
@@ -405,6 +418,8 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
     private var onFocus: () -> Void = {}
     private var isSurfaceFocused: () -> Bool = { true }
     private var actionHandler: (EditorAction) -> Bool = { _ in false }
+    private var pendingNavigationRequest: EditorNavigationRequest?
+    private var onConsumeNavigation: (UUID) -> Void = { _ in }
 
     func setCompletionState(_ state: CompletionState) {
         self.completionState = state
@@ -688,6 +703,7 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
                 MainActor.assumeIsolated { self?.repositionCompletion(); self?.diffOverlay?.refresh() }
             }
             NotificationCenter.default.post(name: NSView.boundsDidChangeNotification, object: scroll.contentView)
+            self.applyPendingNavigationIfReady()
         }
         installMouseMonitor()
         if isActive { registerCommands() }
@@ -853,6 +869,37 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
         } else {
             applyFocus()
         }
+    }
+
+    func setNavigationRequest(
+        _ request: EditorNavigationRequest?,
+        onConsume: @escaping (UUID) -> Void
+    ) {
+        self.pendingNavigationRequest = request
+        self.onConsumeNavigation = onConsume
+        applyPendingNavigationIfReady()
+    }
+
+    private func applyPendingNavigationIfReady() {
+        guard let request = pendingNavigationRequest,
+              !isPreview,
+              let controller,
+              let textView = controller.textView,
+              textView.enclosingScrollView != nil else { return }
+        pendingNavigationRequest = nil
+        if let range = EditorTextSearch.selectionRange(for: request.location, in: textView.string) {
+            select(range, focusEditor: isActive && isSurfaceFocused())
+            let anchorStart = { [weak textView] in
+                guard let textView, range.length > 0,
+                      let startRect = textView.layoutManager.rectForOffset(range.location),
+                      !textView.visibleRect.contains(startRect) else { return }
+                textView.scrollToVisible(startRect)
+                textView.updatedViewport(textView.visibleRect)
+            }
+            anchorStart()
+            DispatchQueue.main.async { anchorStart() }
+        }
+        onConsumeNavigation(request.id)
     }
 
     func select(_ range: NSRange, focusEditor: Bool = true) {

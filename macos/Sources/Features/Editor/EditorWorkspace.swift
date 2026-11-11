@@ -84,14 +84,22 @@ final class EditorWorkspace: ObservableObject {
         }
     }
 
-    func open(path: String, filesystem: any WorkspaceFilesystem, externalFallback: Bool = false) {
+    func open(
+        path: String,
+        filesystem: any WorkspaceFilesystem,
+        location: EditorTextLocation? = nil,
+        externalFallback: Bool = false
+    ) {
         gitDiff = nil
         let wasVisible = isVisible
         isVisible = true
         errorMessage = nil
         openTask?.cancel()
         if let id = try? EditorDocumentID(descriptor: filesystem.descriptor, path: path),
-           documents.contains(where: { $0.id == id }) {
+           let existing = documents.first(where: { $0.id == id }) {
+            if let location {
+                existing.requestNavigation(location)
+            }
             selectedID = id
             isLoading = false
             return
@@ -101,6 +109,9 @@ final class EditorWorkspace: ObservableObject {
             do {
                 let document = try await EditorDocument.open(path: path, filesystem: filesystem)
                 guard !Task.isCancelled, let self else { return }
+                if let location {
+                    document.requestNavigation(location)
+                }
                 documents.append(document)
                 selectedID = document.id
                 isLoading = false
@@ -393,7 +404,12 @@ final class EditorWorkspaceStore {
         return nil
     }
 
-    func open(path: String, context: InspectorPaneContext, destination: EditorOpenDestination? = nil) {
+    func open(
+        path: String,
+        context: InspectorPaneContext,
+        destination: EditorOpenDestination? = nil,
+        location: EditorTextLocation? = nil
+    ) {
         guard let controller = NSApp.windows.compactMap({ $0.windowController as? TerminalController })
             .first(where: { $0.tabSessionID == context.tabID }),
               let source = controller.surfaceTree.first(where: { $0.id == context.surfaceID })
@@ -418,6 +434,7 @@ final class EditorWorkspaceStore {
         workspace(for: target.controller.tabSessionID, surfaceID: target.surface.id).open(
             path: path,
             filesystem: filesystem,
+            location: location,
             externalFallback: true
         )
     }

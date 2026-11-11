@@ -68,8 +68,53 @@ enum EditorTextEditing {
 
 }
 
+/// 1-based line and optional column / inclusive end-line target for opening files.
+struct EditorTextLocation: Equatable, Sendable {
+    let startLine: Int
+    let column: Int?
+    let endLine: Int?
+
+    init(startLine: Int, column: Int? = nil, endLine: Int? = nil) {
+        self.startLine = startLine
+        self.column = column
+        self.endLine = endLine
+    }
+}
+
 /// UTF-16 based search and navigation helpers for the native editor.
 enum EditorTextSearch {
+    static func selectionRange(for location: EditorTextLocation, in text: String) -> NSRange? {
+        if let endLine = location.endLine {
+            let firstLine = min(location.startLine, endLine)
+            let lastLine = max(location.startLine, endLine)
+            guard firstLine > 0,
+                  let start = range(forLine: firstLine, column: 1, in: text) else {
+                return nil
+            }
+            let source = text as NSString
+            var lineStart = start.location
+            var currentLine = firstLine
+            while currentLine < lastLine {
+                let newline = source.range(
+                    of: "\n",
+                    range: NSRange(location: lineStart, length: source.length - lineStart)
+                )
+                guard newline.location != NSNotFound else {
+                    return NSRange(location: start.location, length: max(0, source.length - start.location))
+                }
+                lineStart = NSMaxRange(newline)
+                currentLine += 1
+            }
+            let endNewline = source.range(
+                of: "\n",
+                range: NSRange(location: lineStart, length: source.length - lineStart)
+            )
+            let lineEnd = endNewline.location == NSNotFound ? source.length : endNewline.location
+            return NSRange(location: start.location, length: max(0, lineEnd - start.location))
+        }
+        return range(forLine: location.startLine, column: max(1, location.column ?? 1), in: text)
+    }
+
     static func lineRange(containing selection: NSRange, in text: String) -> NSRange? {
         let source = text as NSString
         guard selection.location != NSNotFound,

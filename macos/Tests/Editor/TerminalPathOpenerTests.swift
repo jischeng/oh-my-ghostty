@@ -21,6 +21,38 @@ struct TerminalPathOpenerTests {
         #expect(TerminalPathTarget.path("~/README.md", directory: "/remote", isRemote: true) == nil)
     }
 
+    @Test func parsesLineColumnAndRangeTargetsAcrossPathAndFileURLSyntaxes() {
+        let single = TerminalPathTarget.target("src/foo.py:12", directory: "/project", isRemote: false)
+        #expect(single?.path == "/project/src/foo.py")
+        #expect(single?.location == EditorTextLocation(startLine: 12))
+
+        let withColumn = TerminalPathTarget.target("src/foo.py:12:34", directory: "/project", isRemote: false)
+        #expect(withColumn?.path == "/project/src/foo.py")
+        #expect(withColumn?.location == EditorTextLocation(startLine: 12, column: 34))
+
+        let range = TerminalPathTarget.target("src/foo.py:1212-1223", directory: "/project", isRemote: false)
+        #expect(range?.path == "/project/src/foo.py")
+        #expect(range?.location == EditorTextLocation(startLine: 1212, endLine: 1223))
+        #expect(TerminalPathTarget.isCandidate("src/foo.py:1212-1223"))
+        #expect(TerminalPathTarget.isCandidate("README.md:12-40"))
+
+        let rangeWithCols = TerminalPathTarget.target("README.md:12:3-40:8", directory: "/project", isRemote: false)
+        #expect(rangeWithCols?.path == "/project/README.md")
+        #expect(rangeWithCols?.location == EditorTextLocation(startLine: 12, endLine: 40))
+
+        let hashRange = TerminalPathTarget.target("README.md#L12-L40", directory: "/project", isRemote: false)
+        #expect(hashRange?.path == "/project/README.md")
+        #expect(hashRange?.location == EditorTextLocation(startLine: 12, endLine: 40))
+
+        let fileURLRange = TerminalPathTarget.target("file:///tmp/README.md#L5-L9", directory: "/", isRemote: false)
+        #expect(fileURLRange?.path == "/tmp/README.md")
+        #expect(fileURLRange?.location == EditorTextLocation(startLine: 5, endLine: 9))
+
+        let fileURLSingle = TerminalPathTarget.target("file:///tmp/%E4%B8%AD%E6%96%87%20%23.md#42", directory: "/", isRemote: false)
+        #expect(fileURLSingle?.path == "/tmp/中文 #.md")
+        #expect(fileURLSingle?.location == EditorTextLocation(startLine: 42))
+    }
+
     @Test func standaloneFullStopIsNotAPathLink() {
         for remote in [false, true] {
             for value in [".", "'.'", "\".\"", ".:12"] {

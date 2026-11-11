@@ -2,13 +2,37 @@ import AppKit
 
 /// A terminal path is resolved against the clicked pane, never the process cwd.
 enum TerminalPathTarget {
+    private static let locationSuffixPattern =
+        "(?::\\d+(?::\\d+)?(?:-L?\\d+(?::\\d+)?)?|#L?\\d+(?:C\\d+)?(?:-L?\\d+(?:C\\d+)?)?)$"
+
+    private static let colonLocationRegex = try? NSRegularExpression(
+        pattern: ":(\\d+)(?::(\\d+))?(?:-L?(\\d+)(?::(\\d+))?)?$"
+    )
+    private static let fragmentLocationRegex = try? NSRegularExpression(
+        pattern: "^L?(\\d+)(?:C(\\d+))?(?:-L?(\\d+)(?:C(\\d+))?)?$",
+        options: [.caseInsensitive]
+    )
+
     static func isCandidate(_ value: String) -> Bool {
         if value.lowercased().hasPrefix("file:") { return true }
-        let path = value.replacingOccurrences(of: ":\\d+(?::\\d+)?$", with: "", options: .regularExpression)
+        var unquoted = value
+        if unquoted.count >= 2, let first = unquoted.first,
+           first == "'" || first == "\"", unquoted.last == first {
+            unquoted = String(unquoted.dropFirst().dropLast())
+        }
+        let path = unquoted.replacingOccurrences(of: locationSuffixPattern, with: "", options: .regularExpression)
         return URLComponents(string: path)?.scheme == nil
     }
 
     static func path(_ value: String, directory: String, isRemote: Bool) -> String? {
+        target(value, directory: directory, isRemote: isRemote)?.path
+    }
+
+    static func target(
+        _ value: String,
+        directory: String,
+        isRemote: Bool
+    ) -> (path: String, location: EditorTextLocation?)? {
         guard !value.isEmpty, value.utf8.count <= 16_384 else { return nil }
         var value = value
         if value.count >= 2, let first = value.first,
@@ -16,6 +40,7 @@ enum TerminalPathTarget {
             value = String(value.dropFirst().dropLast())
         }
         let path: String
+        let location: EditorTextLocation?
         if value.lowercased().hasPrefix("file:") {
             guard let url = URL(string: value), url.isFileURL else { return nil }
             // A file link never creates a connection to another machine.
@@ -25,27 +50,66 @@ enum TerminalPathTarget {
                     || host.lowercased() == local + ".local" else { return nil }
             }
             path = url.path
+            location = url.fragment.flatMap(parseFragmentLocation)
         } else {
-            let withoutLocation = value.replacingOccurrences(
-                of: ":\\d+(?::\\d+)?$", with: "", options: .regularExpression
-            )
+            let extracted = splitLocationSuffix(from: value)
+            let withoutLocation = extracted.path
             guard URLComponents(string: withoutLocation)?.scheme == nil else { return nil }
             // A prose full stop must not become a link to the pane's cwd.
             // Explicit paths such as ./ and ./README.md remain valid.
             guard withoutLocation != "." else { return nil }
             path = withoutLocation
+            location = extracted.location
         }
         guard !path.isEmpty, !path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
             return nil
         }
         if path.hasPrefix("~/") || path == "~" {
             guard !isRemote else { return nil }
-            return (path as NSString).expandingTildeInPath
+            return ((path as NSString).expandingTildeInPath, location)
         }
-        if path.hasPrefix("/") { return path }
+        if path.hasPrefix("/") { return (path, location) }
         // An empty base explicitly means the clicked output's cwd is no longer known.
         guard !directory.isEmpty else { return nil }
-        return (directory as NSString).appendingPathComponent(path)
+        return ((directory as NSString).appendingPathComponent(path), location)
+    }
+
+    private static func splitLocationSuffix(from value: String) -> (path: String, location: EditorTextLocation?) {
+        if let hashIndex = value.lastIndex(of: "#") {
+            let fragment = String(value[value.index(after: hashIndex)...])
+            if let location = parseFragmentLocation(fragment) {
+                return (String(value[..<hashIndex]), location)
+            }
+        }
+        let nsValue = value as NSString
+        let fullRange = NSRange(location: 0, length: nsValue.length)
+        if let match = colonLocationRegex?.firstMatch(in: value, range: fullRange),
+           match.range.location > 0,
+           let startLine = intGroup(1, in: match, source: nsValue), startLine > 0 {
+            let column = intGroup(2, in: match, source: nsValue).flatMap { $0 > 0 ? $0 : nil }
+            let endLine = intGroup(3, in: match, source: nsValue).flatMap { $0 > 0 ? $0 : nil }
+            let prefix = nsValue.substring(to: match.range.location)
+            return (prefix, EditorTextLocation(startLine: startLine, column: endLine == nil ? column : nil, endLine: endLine))
+        }
+        return (value, nil)
+    }
+
+    private static func parseFragmentLocation(_ fragment: String) -> EditorTextLocation? {
+        let nsFragment = fragment as NSString
+        let fullRange = NSRange(location: 0, length: nsFragment.length)
+        guard let match = fragmentLocationRegex?.firstMatch(in: fragment, range: fullRange),
+              let startLine = intGroup(1, in: match, source: nsFragment), startLine > 0 else {
+            return nil
+        }
+        let column = intGroup(2, in: match, source: nsFragment).flatMap { $0 > 0 ? $0 : nil }
+        let endLine = intGroup(3, in: match, source: nsFragment).flatMap { $0 > 0 ? $0 : nil }
+        return EditorTextLocation(startLine: startLine, column: endLine == nil ? column : nil, endLine: endLine)
+    }
+
+    private static func intGroup(_ index: Int, in match: NSTextCheckingResult, source: NSString) -> Int? {
+        let range = match.range(at: index)
+        guard range.location != NSNotFound else { return nil }
+        return Int(source.substring(with: range))
     }
 
     /// Core history contains local OSC7 directories, not remote shell/agent
@@ -71,6 +135,7 @@ enum TerminalPathOpener {
         let context: InspectorPaneContext
         let filesystem: any WorkspaceFilesystem
         let path: String
+        let location: EditorTextLocation?
     }
 
     /// Resolve a candidate against the source pane's local or SSH filesystem.
@@ -89,16 +154,21 @@ enum TerminalPathOpener {
             paneDirectory: filesystem.descriptor.workingDirectory,
             isRemote: filesystem.descriptor.kind == .ssh
         )
-        guard let path = TerminalPathTarget.path(value, directory: directory,
-                                                 isRemote: filesystem.descriptor.kind == .ssh) else { return nil }
-        return .init(controller: controller, session: session, context: context, filesystem: filesystem, path: path)
+        guard let target = TerminalPathTarget.target(
+            value, directory: directory, isRemote: filesystem.descriptor.kind == .ssh
+        ) else { return nil }
+        return .init(
+            controller: controller, session: session, context: context,
+            filesystem: filesystem, path: target.path, location: target.location
+        )
     }
 
     static func open(_ value: String, from source: Ghostty.SurfaceView, baseDirectory: String? = nil) -> Bool {
         guard TerminalPathTarget.isCandidate(value) else { return false }
         guard let resolved = resolve(value, from: source, baseDirectory: baseDirectory) else { return true }
         let controller = resolved.controller, session = resolved.session
-        let context = resolved.context, filesystem = resolved.filesystem, path = resolved.path
+        let context = resolved.context, filesystem = resolved.filesystem
+        let path = resolved.path, location = resolved.location
         Task { [weak controller, weak source] in
             do {
                 guard let kind = try await filesystem.itemType(at: path),
@@ -107,7 +177,7 @@ enum TerminalPathOpener {
                       controller.paneSessionContext(for: source)?.state == session.state else { return }
                 switch kind {
                 case .file:
-                    EditorWorkspaceStore.shared.open(path: path, context: context)
+                    EditorWorkspaceStore.shared.open(path: path, context: context, location: location)
                 case .directory:
                     try openDirectory(path, controller: controller, source: source, session: session)
                 }

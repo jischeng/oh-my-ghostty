@@ -4,6 +4,60 @@ import Testing
 @testable import Ghostty
 
 struct EditorWorkspaceTests {
+    @Test @MainActor func openingWithLineOrRangeQueuesEditorNavigationAndHandlesOutOfBoundsGracefully() async throws {
+        let sample = "line1\nline2\nline3\nline4\nline5"
+        #expect(EditorTextSearch.selectionRange(
+            for: EditorTextLocation(startLine: 2), in: sample
+        ) == NSRange(location: 6, length: 0))
+        #expect(EditorTextSearch.selectionRange(
+            for: EditorTextLocation(startLine: 2, column: 3), in: sample
+        ) == NSRange(location: 8, length: 0))
+        #expect(EditorTextSearch.selectionRange(
+            for: EditorTextLocation(startLine: 2, endLine: 4), in: sample
+        ) == NSRange(location: 6, length: 17))
+        // End line beyond EOF clamps to EOF when start line exists; start line beyond EOF returns nil (plain open).
+        #expect(EditorTextSearch.selectionRange(
+            for: EditorTextLocation(startLine: 4, endLine: 99), in: sample
+        ) == NSRange(location: 18, length: 11))
+        #expect(EditorTextSearch.selectionRange(
+            for: EditorTextLocation(startLine: 99), in: sample
+        ) == nil)
+        #expect(EditorTextSearch.selectionRange(
+            for: EditorTextLocation(startLine: 99, endLine: 120), in: sample
+        ) == nil)
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("foo.py")
+        try Data(sample.utf8).write(to: file)
+
+        let workspace = EditorWorkspace()
+        defer { workspace.cancelAndClear() }
+        let filesystem = LocalWorkspaceFilesystem(workingDirectory: root.path)
+
+        workspace.open(
+            path: file.path,
+            filesystem: filesystem,
+            location: EditorTextLocation(startLine: 2, endLine: 4)
+        )
+        await waitUntil { !workspace.isLoading }
+        let document = try #require(workspace.selectedDocument)
+        let firstNav = try #require(document.pendingNavigation)
+        #expect(firstNav.location == EditorTextLocation(startLine: 2, endLine: 4))
+        document.consumeNavigation(firstNav.id)
+        #expect(document.pendingNavigation == nil)
+
+        // Re-opening an already-open document with a new location updates pendingNavigation without error.
+        workspace.open(
+            path: file.path,
+            filesystem: filesystem,
+            location: EditorTextLocation(startLine: 999)
+        )
+        #expect(workspace.errorMessage == nil)
+        #expect(document.pendingNavigation?.location == EditorTextLocation(startLine: 999))
+    }
+
     @Test @MainActor func branchSwitchGuardOnlyDetectsDirtyDocumentsInThatWorktree() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

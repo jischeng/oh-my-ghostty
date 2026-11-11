@@ -372,7 +372,9 @@ private struct EditorDocumentView: View {
                     onNextDocument: nextDocument,
                     onPreviousDocument: previousDocument,
                     onSaveAll: saveAll,
-                    onHide: onHide
+                    onHide: onHide,
+                    navigationRequest: document.pendingNavigation,
+                    onConsumeNavigation: { document.consumeNavigation($0) }
                 )
                 .id(document.contentGeneration)
                 .opacity((isMarkdownDocument && isPreviewMode) ? 0 : 1)
@@ -429,6 +431,16 @@ private struct EditorDocumentView: View {
             .foregroundStyle(.secondary)
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
+        }
+        .onAppear {
+            if document.pendingNavigation != nil && isPreviewMode {
+                isPreviewMode = false
+            }
+        }
+        .onChange(of: document.pendingNavigation) { navigation in
+            if navigation != nil && isPreviewMode {
+                isPreviewMode = false
+            }
         }
         .onChange(of: isActive) { active in
             if !active {

@@ -114,9 +114,9 @@ pub fn needsCheck(value: []const u8) bool {
     for (path[0..colon]) |c| {
         if (!std.ascii.isAlphanumeric(c) and c != '+' and c != '.' and c != '-') return true;
     }
-    // `README.md:12:3` is a path with a location suffix, not a scheme.
+    // `README.md:12:3` and `README.md:12-40` are paths with location suffixes, not schemes.
     for (path[colon + 1 ..]) |c| {
-        if (!std.ascii.isDigit(c) and c != ':') return false;
+        if (!std.ascii.isDigit(c) and c != ':' and c != '-') return false;
     }
     return true;
 }
@@ -125,7 +125,10 @@ test "OMG link check distinguishes paths from scheme URLs" {
     const testing = std.testing;
     try testing.expect(needsCheck("shell.nix"));
     try testing.expect(needsCheck("src/main.zig:12:3"));
+    try testing.expect(needsCheck("src/main.zig:12-40"));
     try testing.expect(needsCheck("README.md:12"));
+    try testing.expect(needsCheck("README.md:12-40"));
+    try testing.expect(needsCheck("README.md#L12-L40"));
     try testing.expect(needsCheck("/tmp/file"));
     try testing.expect(needsCheck("~/file"));
     try testing.expect(needsCheck("'App icon.icon'"));

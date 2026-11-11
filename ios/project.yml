@@ -14,8 +14,8 @@ settings:
     SWIFT_VERSION: "5.9"
     SDKROOT: iphoneos
     OMG_MOBILE_BUNDLE_ID: com.jischeng.omg.mobile
-    MARKETING_VERSION: "0.20.0"
-    CURRENT_PROJECT_VERSION: "50"
+    MARKETING_VERSION: "0.20.1"
+    CURRENT_PROJECT_VERSION: "51"
     HEADER_SEARCH_PATHS: "$(SRCROOT)/.build/headers"
     SWIFT_INCLUDE_PATHS: "$(SRCROOT)/GhosttyVt"
     OTHER_LDFLAGS: "$(inherited) -lghostty-vt -lc++"

@@ -202,6 +202,103 @@ struct TerminalLinkHoverTests {
         #expect(!surface.isHoveringLink)
     }
 
+    @Test func splitZoomRestoresResponderHoverHintAndAllowsCommandLinkClick() async throws {
+        let controller = try makeController(
+            split: true,
+            command: "/bin/sh -c 'printf \"\\033]8;;https://example.com\\007zoom-link\\033]8;;\\007\\n\"; sleep 30'"
+        )
+        defer { controller.window?.delegate = nil; controller.window?.close() }
+        let window = try #require(controller.window)
+        let surface = try #require(controller.focusedSurface)
+        for _ in 0..<100 {
+            if surface.cachedScreenContents.get().contains("zoom-link") { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try #require(surface.cachedScreenContents.get().contains("zoom-link"))
+
+        #expect(surface.surfaceModel?.perform(action: "toggle_split_zoom") == true)
+        try await Task.sleep(for: .milliseconds(120))
+        window.contentView?.layoutSubtreeIfNeeded()
+        #expect(controller.surfaceTree.zoomed != nil)
+        #expect(window.firstResponder === surface)
+
+        // Simulate pointer motion inside the newly mounted zoomed surface without mouseEntered firing.
+        let exitEvent = try #require(NSEvent.enterExitEvent(
+            with: .mouseExited,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 0,
+            trackingNumber: 0,
+            userData: nil
+        ))
+        surface.mouseExited(with: exitEvent)
+        #expect(!surface.mouseOverSurface && surface.mouseLocationInSurface == nil)
+        var linkLocation = NSPoint.zero
+        for offset in stride(from: 5.0, through: 150.0, by: 5.0) {
+            linkLocation = surface.convert(NSPoint(x: 40, y: surface.bounds.height - offset), to: nil)
+            let move = try #require(NSEvent.mouseEvent(
+                with: .mouseMoved,
+                location: linkLocation,
+                modifierFlags: .command,
+                timestamp: 0,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 0,
+                clickCount: 0,
+                pressure: 0
+            ))
+            surface.mouseMoved(with: move)
+            try await Task.sleep(for: .milliseconds(20))
+            if surface.isHoveringLink { break }
+        }
+        #expect(surface.mouseOverSurface)
+        #expect(surface.mouseLocationInSurface != nil)
+        #expect(surface.linkHintCommandPressed)
+        #expect(surface.isHoveringLink)
+
+        // Even if another control temporarily owns firstResponder (or firstResponder was displaced),
+        // a pure Command-click on a hovered link must pass through instead of being swallowed.
+        let composer = NSTextView(frame: NSRect(x: 0, y: 0, width: 40, height: 20))
+        window.contentView?.addSubview(composer)
+        defer { composer.removeFromSuperview() }
+        window.makeFirstResponder(composer)
+        try #require(window.firstResponder === composer)
+
+        let cmdClick = try #require(NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: linkLocation,
+            modifierFlags: .command,
+            timestamp: 1,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 1,
+            pressure: 1
+        ))
+        let forwarded = surface.localEventLeftMouseDown(cmdClick, isAppActive: true, isKeyWindow: true)
+        #expect(forwarded === cmdClick)
+        #expect(window.firstResponder === surface)
+
+        // Contrast: a plain click without Command from another control still transfers focus only.
+        window.makeFirstResponder(composer)
+        let plainClick = try #require(NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: linkLocation,
+            modifierFlags: [],
+            timestamp: 2,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 2,
+            clickCount: 1,
+            pressure: 1
+        ))
+        #expect(surface.localEventLeftMouseDown(plainClick, isAppActive: true, isKeyWindow: true) == nil)
+        #expect(window.firstResponder === surface)
+    }
+
     @Test(.tags(.interactiveDesktop))
     func commandHoverRemainsStable() async throws {
         for split in [false, true] {

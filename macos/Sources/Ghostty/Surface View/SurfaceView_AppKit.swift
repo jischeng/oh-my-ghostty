@@ -837,6 +837,9 @@ extension Ghostty {
             // Modifier events follow first responder, which may be the composer
             // or another pane while the pointer remains over this surface.
             if !event.modifierFlags.contains(.command) || event.window === window {
+                if event.modifierFlags.contains(.command), !mouseOverSurface {
+                    _ = syncLivePointerIfInside(modifierFlags: event.modifierFlags, sendToCore: false)
+                }
                 let hovered = mouseOverSurface || isHoveringLink || hoverUrl != nil
                 updateLinkHoverModifiers(event.modifierFlags)
                 if hovered, window?.firstResponder !== self {
@@ -862,7 +865,51 @@ extension Ghostty {
             }
         }
 
-        private func localEventLeftMouseDown(_ event: NSEvent) -> NSEvent? {
+        /// Reconciles AppKit hover/focus state after `SurfaceScrollView` reparents
+        /// this surface (such as `toggle_split_zoom` rebuilding the split subtree)
+        /// while the pointer is already stationary inside the surface.
+        @discardableResult
+        func syncLivePointerIfInside(
+            modifierFlags: NSEvent.ModifierFlags = NSEvent.modifierFlags,
+            sendToCore: Bool = true
+        ) -> CGPoint? {
+            guard let window, window.isVisible, bounds.width > 0, bounds.height > 0,
+                  let contentView = window.contentView else { return nil }
+            let windowPoint = window.mouseLocationOutsideOfEventStream
+            let contentPoint = contentView.convert(windowPoint, from: nil)
+            guard contentView.hitTest(contentPoint) === self else { return nil }
+            let pos = convert(windowPoint, from: nil)
+            guard bounds.contains(pos) else { return nil }
+            let cmd = modifierFlags.contains(.command)
+            if linkHintCommandPressed != cmd { linkHintCommandPressed = cmd }
+            if !mouseOverSurface { mouseOverSurface = true }
+            mouseLocationInSurface = pos
+            if sendToCore {
+                surfaceModel?.sendMousePos(.init(
+                    x: pos.x,
+                    y: frame.height - pos.y,
+                    mods: .init(nsFlags: modifierFlags)
+                ))
+            }
+            return pos
+        }
+
+        func syncAfterScrollViewMount() {
+            guard let window else { return }
+            if let controller = window.windowController as? BaseTerminalController,
+               controller.focusedSurface === self,
+               window.firstResponder == nil || window.firstResponder === window {
+                window.makeFirstResponder(self)
+            }
+            window.invalidateCursorRects(for: self)
+            _ = syncLivePointerIfInside()
+        }
+
+        func localEventLeftMouseDown(
+            _ event: NSEvent,
+            isAppActive: Bool = NSApp.isActive,
+            isKeyWindow: Bool? = nil
+        ) -> NSEvent? {
             let isCommandPaletteVisible = (event.window?.windowController as? BaseTerminalController)?
                 .commandPaletteIsShowing == true
             guard !isCommandPaletteVisible else {
@@ -897,10 +944,17 @@ extension Ghostty {
                 return event
             }
 
+            let hasDisplacedPaneResponder =
+                (window.windowController as? BaseTerminalController)?.focusedSurface === self
+                && (window.firstResponder == nil || window.firstResponder === window)
+            let isCommandLinkClick = event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command
+                && (isHoveringLink || hoverUrl != nil)
+
             // If our window/app is already focused, then this click is only
-            // being used to transfer split focus. Consume it so it does not
-            // get forwarded to the terminal as a mouse click.
-            if NSApp.isActive && window.isKeyWindow {
+            // being used to transfer split focus, except for an explicit
+            // Command-click on a link or a reparented pane reclaiming its own
+            // displaced first responder.
+            if isAppActive && (isKeyWindow ?? window.isKeyWindow) && !hasDisplacedPaneResponder && !isCommandLinkClick {
                 window.makeFirstResponder(self)
                 suppressNextLeftMouseUp = true
                 return nil
@@ -1127,6 +1181,19 @@ extension Ghostty {
         override func mouseDown(with event: NSEvent) {
             acknowledgeAgentCompletionFromUserInput()
             guard let surface = self.surface else { return }
+            if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command {
+                let pos = self.convert(event.locationInWindow, from: nil)
+                if bounds.contains(pos) {
+                    if !mouseOverSurface { mouseOverSurface = true }
+                    if !linkHintCommandPressed { linkHintCommandPressed = true }
+                    mouseLocationInSurface = pos
+                    surfaceModel?.sendMousePos(.init(
+                        x: pos.x,
+                        y: frame.height - pos.y,
+                        mods: .init(nsFlags: event.modifierFlags)
+                    ))
+                }
+            }
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
             ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, mods)
         }
@@ -1253,6 +1320,9 @@ extension Ghostty {
         }
 
         override func mouseMoved(with event: NSEvent) {
+            if !mouseOverSurface {
+                mouseOverSurface = true
+            }
             if linkHintCommandPressed != event.modifierFlags.contains(.command) {
                 linkHintCommandPressed = event.modifierFlags.contains(.command)
             }
@@ -1695,7 +1765,9 @@ extension Ghostty {
             // leaves the core's link hover active until another modifier event.
             defer {
                 if let surfaceModel {
-                    let pos = mouseLocationInSurface ?? NSPoint(x: -1, y: -1)
+                    let pos = mouseLocationInSurface
+                        ?? syncLivePointerIfInside(modifierFlags: event.modifierFlags, sendToCore: false)
+                        ?? NSPoint(x: -1, y: -1)
                     surfaceModel.sendMousePos(.init(
                         x: pos.x,
                         y: pos.y >= 0 ? (frame.height - pos.y) : -1,

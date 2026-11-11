@@ -38,6 +38,7 @@ class SurfaceScrollView: NSView {
     private var cancellables: Set<AnyCancellable> = []
     private var isLiveScrolling = false
     private var retired = false
+    private var needsPostMountSync = false
     // Split-tree reconstruction can mount this Surface in a new wrapper before
     // SwiftUI finishes retiring the old one. Only its current parent may write
     // geometry, scroll position or renderer size.
@@ -224,6 +225,9 @@ class SurfaceScrollView: NSView {
         super.viewDidMoveToWindow()
         if window == nil, ownsSurface {
             surfaceView.presentation.finishResize()
+        } else if window != nil, ownsSurface {
+            needsPostMountSync = true
+            needsLayout = true
         }
     }
 
@@ -232,6 +236,7 @@ class SurfaceScrollView: NSView {
         guard surfaceView.presentation.mount(self, lease: lease) else { return }
         if surfaceView.superview !== documentView {
             documentView.addSubview(surfaceView)
+            needsPostMountSync = true
             needsLayout = true
         }
     }
@@ -263,6 +268,15 @@ class SurfaceScrollView: NSView {
         synchronizeScrollView()
         synchronizeSurfaceView()
         synchronizeCoreSurface()
+
+        if needsPostMountSync, window != nil {
+            needsPostMountSync = false
+            surfaceView.syncAfterScrollViewMount()
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.ownsSurface, self.window != nil else { return }
+                self.surfaceView.syncAfterScrollViewMount()
+            }
+        }
     }
 
     // MARK: Scrolling

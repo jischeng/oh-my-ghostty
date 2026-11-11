@@ -2064,7 +2064,7 @@ pub inline fn resize(
         .rows = opts.rows,
         .cols = opts.cols,
         .reflow = opts.reflow,
-        .cursor = if (opts.pull_scrollback) null else .{
+        .cursor = if (opts.pull_scrollback and opts.rows > self.pages.rows and opts.cols == self.pages.cols) null else .{
             .x = self.cursor.x,
             .y = self.cursor.y,
             .pin = self.cursor.page_pin,

@@ -43,7 +43,7 @@ const Coalesce = struct {
 /// The number of milliseconds before we reset the synchronized output flag
 /// if the running program hasn't already.
 const sync_reset_ms = 1000;
-const post_resize_sync_reset_ms = 250;
+const post_resize_sync_reset_ms = 500;
 
 /// The number of milliseconds between each movement during selection scrolling.
 const selection_scroll_ms = 15;

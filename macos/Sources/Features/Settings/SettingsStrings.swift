@@ -780,6 +780,10 @@ struct SettingsStrings: Equatable, Sendable {
     var notifyTaskCompleteLabel: String { t("Task Complete", "任务完成") }
     var notifyAttentionLabel: String { t("Attention Required", "需要注意") }
     var notificationSoundLabel: String { t("Play Sound", "播放声音") }
+    var notificationSoundToneLabel: String { t("Sound Tone", "提示音音色") }
+    func notificationSoundToneTitle(_ tone: AgentNotificationSoundTone) -> String {
+        tone == .systemDefault ? t("System Default", "系统默认") : tone.rawValue
+    }
 
     // MARK: Native Session Runtime
 

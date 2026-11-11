@@ -253,6 +253,30 @@ enum OhMyGhosttyTabRowDensity: String, CaseIterable, Identifiable {
     }
 }
 
+enum AgentNotificationSoundTone: String, CaseIterable, Codable, Identifiable {
+    case systemDefault = "default"
+    case basso = "Basso"
+    case blow = "Blow"
+    case bottle = "Bottle"
+    case frog = "Frog"
+    case funk = "Funk"
+    case glass = "Glass"
+    case hero = "Hero"
+    case morse = "Morse"
+    case ping = "Ping"
+    case pop = "Pop"
+    case purr = "Purr"
+    case sosumi = "Sosumi"
+    case submarine = "Submarine"
+    case tink = "Tink"
+
+    var id: String { rawValue }
+
+    var systemSoundPath: String? {
+        self == .systemDefault ? nil : "/System/Library/Sounds/\(rawValue).aiff"
+    }
+}
+
 @MainActor
 final class OhMyGhosttySettings: ObservableObject {
     static let shared = OhMyGhosttySettings()
@@ -393,6 +417,11 @@ final class OhMyGhosttySettings: ObservableObject {
             id: "notifications.sound", type: .boolean, defaultValue: "false",
             allowedValues: nil, minimum: nil, maximum: nil,
             description: "Play a sound for enabled agent notifications.",
+            requiresNewWindow: false, category: "plugins"),
+        .init(
+            id: "notifications.soundTone", type: .enumeration, defaultValue: "default",
+            allowedValues: AgentNotificationSoundTone.allCases.map(\.rawValue), minimum: nil, maximum: nil,
+            description: "Sound tone played for enabled agent notifications.",
             requiresNewWindow: false, category: "plugins"),
         .init(
             id: "agents.statusHooks", type: .boolean, defaultValue: "true",
@@ -775,6 +804,9 @@ final class OhMyGhosttySettings: ObservableObject {
     }
     @Published var notificationSound = false {
         didSet { persist("notifications.sound", notificationSound) }
+    }
+    @Published var notificationSoundTone: AgentNotificationSoundTone = .systemDefault {
+        didSet { persist("notifications.soundTone", notificationSoundTone.rawValue) }
     }
     @Published var agentStatusHooksEnabled = true {
         didSet { persist("agents.statusHooks", agentStatusHooksEnabled) }
@@ -1291,6 +1323,7 @@ final class OhMyGhosttySettings: ObservableObject {
             notifyTaskComplete = boolValue("notifications.taskComplete", fallback: true)
             notifyAttention = boolValue("notifications.attention", fallback: true)
             notificationSound = boolValue("notifications.sound", fallback: false)
+            notificationSoundTone = enumValue("notifications.soundTone", fallback: .systemDefault)
             agentStatusHooksEnabled = boolValue("agents.statusHooks", fallback: true)
             openQuickInputOnAgentStart = boolValue(
                 "agents.openQuickInputOnStart",

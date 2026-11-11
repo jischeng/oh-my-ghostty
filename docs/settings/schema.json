@@ -380,6 +380,29 @@
       "description": "Play a sound for enabled agent notifications.",
       "type": "boolean"
     },
+    "notifications.soundTone": {
+      "category": "agents",
+      "default": "default",
+      "description": "Sound tone played for enabled agent notifications.",
+      "enum": [
+        "default",
+        "Basso",
+        "Blow",
+        "Bottle",
+        "Frog",
+        "Funk",
+        "Glass",
+        "Hero",
+        "Morse",
+        "Ping",
+        "Pop",
+        "Purr",
+        "Sosumi",
+        "Submarine",
+        "Tink"
+      ],
+      "type": "string"
+    },
     "notifications.taskComplete": {
       "category": "agents",
       "default": true,

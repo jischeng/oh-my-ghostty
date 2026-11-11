@@ -238,6 +238,29 @@ extension NativeSettingsController {
         toggle(form, strings.notifyTaskCompleteLabel, \.notifyTaskComplete)
         toggle(form, strings.notifyAttentionLabel, \.notifyAttention)
         toggle(form, strings.notificationSoundLabel, \.notificationSound)
+        let tones = AgentNotificationSoundTone.allCases
+        let tonePopup = SettingsPopup(
+            titles: tones.map { strings.notificationSoundToneTitle($0) },
+            selected: tones.firstIndex(of: settings.notificationSoundTone) ?? 0
+        ) { [weak settings] index in
+            guard tones.indices.contains(index) else { return }
+            let tone = tones[index]
+            settings?.notificationSoundTone = tone
+            AgentActivityNotification.previewSound(tone)
+        }
+        tonePopup.isEnabled = settings.notificationSound
+        form.row(strings.notificationSoundToneLabel, control: tonePopup)
+        let syncToneControl = { [weak settings, weak tonePopup] in
+            guard let settings, let tonePopup else { return }
+            tonePopup.isEnabled = settings.notificationSound
+            tonePopup.selectItem(at: tones.firstIndex(of: settings.notificationSoundTone) ?? 0)
+        }
+        form.refreshers.append(syncToneControl)
+        form.retained.append(
+            settings.$notificationSound.combineLatest(settings.$notificationSoundTone)
+                .receive(on: RunLoop.main)
+                .sink { _ in syncToneControl() }
+        )
         more(form, strings.agentHistorySection) { [weak self] page in
             guard let self else { return }; page.section(self.strings.agentHistorySection)
             self.number(page, self.strings.agentHistoryLimitLabel, \.agentHistoryLimit, range: 100...50000, step: 100)

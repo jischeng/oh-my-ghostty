@@ -45,7 +45,7 @@ enum SettingsSearchCatalog {
             item(.agents, \.agentIntegrationSection, ["agents.statusHooks"], "hook install cli update agent integration ssh 集成 接入 安装 更新", anchor: "agentIntegrations"),
             item(.agents, \.agentBehaviorSection, ["agents.openQuickInput"], "start complete 开始 完成 快捷输入"),
             item(.agents, \.agentHistorySection, ["agents.history"], "sessions limit 历史 会话 上限"),
-            item(.agents, \.notificationsSection, ["notifications."], "notification sound permission 通知 声音 等待"),
+            item(.agents, \.notificationsSection, ["notifications."], "notification sound tone permission 通知 声音 提示音 音色 等待"),
             item(.tabs, \.layoutSection, ["tabs.layout", "tabs.sidebar", "tabs.remember"], "vertical horizontal 垂直 水平 侧栏"),
             item(.tabs, \.organizationSection, ["tabs.group", "tabs.order", "tabs.path", "tabs.show"], "group directory order 分组 路径 排序"),
             item(.tabs, \.appearanceTabsSection, ["appearance.tab"], "density icon 行高 图标 密度"),

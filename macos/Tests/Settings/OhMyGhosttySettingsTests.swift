@@ -124,6 +124,47 @@ struct OhMyGhosttySettingsTests {
         #expect(chinese.quickInputHistoryRetentionValue(7) == "7 天")
     }
 
+    @Test func agentNotificationSoundTonePersistsValidatesAndExposesSystemSounds() throws {
+        let (settings, url) = temporarySettings()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        #expect(!settings.notificationSound)
+        #expect(settings.notificationSoundTone == .systemDefault)
+        let descriptor = OhMyGhosttySettings.descriptors.first { $0.id == "notifications.soundTone" }
+        #expect(descriptor?.defaultValue == "default")
+        #expect(descriptor?.allowedValues?.count == 15)
+
+        settings.notificationSound = true
+        settings.notificationSoundTone = .glass
+        let restored = OhMyGhosttySettings(fileURL: url)
+        #expect(restored.notificationSound)
+        #expect(restored.notificationSoundTone == .glass)
+
+        try Data(#"{"notifications.sound":true,"notifications.soundTone":"nonexistent"}"#.utf8).write(to: url)
+        settings.reloadFromDisk()
+        #expect(settings.notificationSound)
+        #expect(settings.notificationSoundTone == .systemDefault)
+
+        #expect(AgentActivityNotification.soundPlan(enabled: false, tone: .glass)
+            == .init(requestBannerSound: false, customTone: nil))
+        #expect(AgentActivityNotification.soundPlan(enabled: true, tone: .systemDefault)
+            == .init(requestBannerSound: true, customTone: nil))
+        #expect(AgentActivityNotification.soundPlan(enabled: true, tone: .ping)
+            == .init(requestBannerSound: false, customTone: .ping))
+
+        for tone in AgentNotificationSoundTone.allCases where tone != .systemDefault {
+            #expect(AgentActivityNotification.makeSystemSound(for: tone) != nil)
+        }
+
+        let en = SettingsStrings(language: .english, preferredLanguages: [])
+        let zh = SettingsStrings(language: .simplifiedChinese, preferredLanguages: [])
+        #expect(en.notificationSoundToneLabel == "Sound Tone")
+        #expect(zh.notificationSoundToneLabel == "提示音音色")
+        #expect(en.notificationSoundToneTitle(.systemDefault) == "System Default")
+        #expect(zh.notificationSoundToneTitle(.systemDefault) == "系统默认")
+        #expect(zh.notificationSoundToneTitle(.sosumi) == "Sosumi")
+    }
+
     @Test func quickInputControlJNewlineDefaultsOffAndPersists() {
         let (settings, url) = temporarySettings()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }

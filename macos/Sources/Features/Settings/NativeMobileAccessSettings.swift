@@ -5,10 +5,16 @@ extension NativeSettingsController {
     func mobileAccess(_ form: NativeSettingsForm) {
         let mobile = mobileAccessController
         let allowTitle = text("Allow iPhone Connections", "允许 iPhone 连接")
+        var lastStartAttempt: ContinuousClock.Instant?
+        var pendingSwitchOff: DispatchWorkItem?
         let allow = SettingsSwitch(value: mobile.state == .starting || mobile.state.isRunning) { [weak mobile] enabled in
+            pendingSwitchOff?.cancel()
+            pendingSwitchOff = nil
             if enabled {
+                lastStartAttempt = .now
                 mobile?.start()
             } else {
+                lastStartAttempt = nil
                 mobile?.stop()
             }
         }
@@ -154,7 +160,7 @@ extension NativeSettingsController {
             text("External WSS URL", "外部 WSS 入口"),
             subtitle: text(
                 "Optional. If exposed via your own VPS / Nginx reverse proxy, enter its wss:// URL so the QR code uses that TLS endpoint.",
-                "可选。若通过自有 VPS / Nginx 反向代理暴露网关（本地转发 127.0.0.1:8791），填写 wss:// 地址后二维码将使用该加密入口。"
+                "可选。若通过自有 VPS / Nginx 反向代理暴露网关（本地转发 127.0.0.1:\(mobile.port)），填写 wss:// 地址后二维码将使用该加密入口。"
             ),
             control: publicURLField
         )
@@ -172,10 +178,40 @@ extension NativeSettingsController {
         )
 
         var refreshingInvite = false
+        let switchSettleDuration = Duration.milliseconds(200)
         let update = { [weak self, weak allow, weak statusControl, weak statusSubtitle, weak networkPopup, weak publicURLField, weak pairingCard, weak showQR, weak copyLink, weak revokeButton, weak mobile] in
             guard let self, let mobile else { return }
-            allow?.state = mobile.state == .starting || mobile.state.isRunning ? .on : .off
-            allow?.isEnabled = mobile.state != .starting
+            let desiredOn = mobile.state == .starting || mobile.state.isRunning
+            if desiredOn {
+                pendingSwitchOff?.cancel()
+                pendingSwitchOff = nil
+                if mobile.state == .starting, lastStartAttempt == nil {
+                    lastStartAttempt = .now
+                }
+                if allow?.state != .on { allow?.state = .on }
+            } else if case .failed = mobile.state,
+                      allow?.state == .on,
+                      let started = lastStartAttempt,
+                      started.duration(to: .now) < switchSettleDuration {
+                if pendingSwitchOff == nil {
+                    let remaining = switchSettleDuration - started.duration(to: .now)
+                    let seconds = Double(remaining.components.seconds)
+                        + Double(remaining.components.attoseconds) / 1e18
+                    let work = DispatchWorkItem { [weak allow, weak mobile] in
+                        pendingSwitchOff = nil
+                        lastStartAttempt = nil
+                        guard let mobile, mobile.state != .starting, !mobile.state.isRunning else { return }
+                        if allow?.state != .off { allow?.state = .off }
+                    }
+                    pendingSwitchOff = work
+                    DispatchQueue.main.asyncAfter(deadline: .now() + max(0.01, seconds), execute: work)
+                }
+            } else {
+                pendingSwitchOff?.cancel()
+                pendingSwitchOff = nil
+                lastStartAttempt = nil
+                if allow?.state != .off { allow?.state = .off }
+            }
             let titles = networkTitles()
             if networkPopup?.numberOfItems == 2 {
                 networkPopup?.item(at: 0)?.title = titles[0]
@@ -232,12 +268,12 @@ extension NativeSettingsController {
                 )
                 statusSubtitle?.stringValue = mobile.publicURL.isEmpty
                     ? self.text(
-                        "Listening on local network (and 127.0.0.1:8791). Keep your iPhone and this Mac on the same Wi-Fi / LAN.",
-                        "正在局域网（及 127.0.0.1:8791）监听连接，请确保 iPhone 与当前 Mac 处于同一局域网。"
+                        "Listening on local network (and 127.0.0.1:\(mobile.port)). Keep your iPhone and this Mac on the same Wi-Fi / LAN.",
+                        "正在局域网（及 127.0.0.1:\(mobile.port)）监听连接，请确保 iPhone 与当前 Mac 处于同一局域网。"
                     )
                     : self.text(
-                        "Listening locally on \(endpoint) & 127.0.0.1:8791; QR code uses \(mobile.publicURL).",
-                        "本地监听 \(endpoint) 与 127.0.0.1:8791；配对二维码使用 \(mobile.publicURL)。"
+                        "Listening locally on \(endpoint) & 127.0.0.1:\(mobile.port); QR code uses \(mobile.publicURL).",
+                        "本地监听 \(endpoint) 与 127.0.0.1:\(mobile.port)；配对二维码使用 \(mobile.publicURL)。"
                     )
                 statusSubtitle?.textColor = .secondaryLabelColor
                 if let invitation = mobile.invitation, let qr = MobileAccessController.qrImage(for: invitation) {

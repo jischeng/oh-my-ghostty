@@ -111,6 +111,91 @@ struct SettingsControlsTests {
         #expect(controller.state == .stopped)
     }
 
+    @Test func mobileGatewaySeparatesChannelPortsReapsOrphansAndSmoothsFailedToggle() async throws {
+        #expect(OMGApplicationEnvironment.defaultMobileGatewayPort(
+            development: false, workspaceDevelopment: false, ptyDevelopment: false
+        ) == 8791)
+        #expect(OMGApplicationEnvironment.defaultMobileGatewayPort(
+            development: true, workspaceDevelopment: false, ptyDevelopment: false
+        ) == 8792)
+        #expect(OMGApplicationEnvironment.defaultMobileGatewayPort(
+            development: true, workspaceDevelopment: true, ptyDevelopment: false
+        ) == 8793)
+        #expect(OMGApplicationEnvironment.defaultMobileGatewayPort(
+            development: true, workspaceDevelopment: false, ptyDevelopment: true
+        ) == 8794)
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let executable = directory.appendingPathComponent("fake-omgd")
+        let marker = directory.appendingPathComponent("stopped-orphan")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "mobile" ] && [ "$2" = "stop" ]; then
+            printf 'stopped\\n' > "\(marker.path)"
+            exit 0
+        fi
+        exit 1
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let lockURL = directory.appendingPathComponent("mobile-gateway.lock")
+        FileManager.default.createFile(atPath: lockURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        let flockFn: (Int32, Int32) -> Int32 = flock
+        let lockFD = Darwin.open(lockURL.path, O_RDWR)
+        #expect(lockFD >= 0)
+        defer {
+            _ = flockFn(lockFD, LOCK_UN)
+            Darwin.close(lockFD)
+        }
+        #expect(flockFn(lockFD, LOCK_EX | LOCK_NB) == 0)
+
+        let controller = MobileAccessController(
+            executable: executable,
+            support: directory,
+            port: 18792,
+            addressProvider: { "192.168.1.9" },
+            tailscaleAddressProvider: { nil }
+        )
+        let settings = OhMyGhosttySettings(fileURL: directory.appendingPathComponent("settings.json"))
+        let settingsController = NativeSettingsController(
+            settings: settings,
+            initialSelection: .mobile,
+            mobileAccessController: controller
+        )
+        settingsController.loadViewIfNeeded()
+        settingsController.view.layoutSubtreeIfNeeded()
+        let form = try #require(settingsController.children.compactMap { $0 as? NativeSettingsForm }.first)
+        func findSwitch(in view: NSView) -> NSSwitch? {
+            if let sw = view as? NSSwitch { return sw }
+            for child in view.subviews {
+                if let found = findSwitch(in: child) { return found }
+            }
+            return nil
+        }
+        let allowSwitch = try #require(findSwitch(in: form.view))
+        #expect(allowSwitch.isEnabled)
+        #expect(allowSwitch.state == .off)
+
+        allowSwitch.state = .on
+        _ = allowSwitch.sendAction(allowSwitch.action, to: allowSwitch.target)
+        #expect(FileManager.default.fileExists(atPath: marker.path))
+        #expect(allowSwitch.isEnabled)
+
+        for _ in 0..<20 {
+            if case .failed = controller.state { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(controller.state == .failed("The mobile gateway exited with status 1. Check that port 18792 is available."))
+        #expect(allowSwitch.isEnabled)
+        // Immediate exit holds the switch briefly so AppKit's click animation can finish, then settles OFF.
+        #expect(allowSwitch.state == .on)
+        try await Task.sleep(for: .milliseconds(260))
+        #expect(allowSwitch.state == .off)
+    }
+
     @Test func pickerUsesNativeMenuAndPreservesSelectionSemantics() throws {
         var value: String?
         let binding = Binding<String?>(get: { value }, set: { value = $0 })

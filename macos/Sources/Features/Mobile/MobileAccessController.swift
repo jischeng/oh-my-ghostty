@@ -4,6 +4,18 @@ import CoreImage
 import Darwin
 import Foundation
 
+extension OMGApplicationEnvironment {
+    static func defaultMobileGatewayPort(
+        development: Bool = isDevelopment,
+        workspaceDevelopment: Bool = isWorkspaceDevelopment,
+        ptyDevelopment: Bool = isPTYDevelopment
+    ) -> Int {
+        guard development else { return 8791 }
+        if ptyDevelopment { return 8794 }
+        return workspaceDevelopment ? 8793 : 8792
+    }
+}
+
 /// Owns the LAN-only mobile gateway while OMG is running. Pairing remains a
 /// single-token operation: starting the gateway allows the documented mobile
 /// capabilities, and revoking the token disconnects every paired phone.
@@ -42,7 +54,7 @@ final class MobileAccessController: ObservableObject {
     private let enabledFile: URL
     private let networkModeFile: URL
     private let publicURLFile: URL
-    private let port: Int
+    let port: Int
     private let addressProvider: () -> String?
     private let tailscaleAddressProvider: () -> String?
     private var process: Process?
@@ -73,7 +85,7 @@ final class MobileAccessController: ObservableObject {
     init(
         executable: URL? = nil,
         support: URL = OMGApplicationEnvironment.applicationSupportURL(),
-        port: Int = 8791,
+        port: Int = OMGApplicationEnvironment.defaultMobileGatewayPort(),
         addressProvider: @escaping () -> String? = MobileAccessController.lanIPv4Address,
         tailscaleAddressProvider: @escaping () -> String? = MobileAccessController.tailscaleIPv4Address
     ) {
@@ -117,8 +129,35 @@ final class MobileAccessController: ObservableObject {
     }
 
     func resumeIfEnabled() {
-        guard isEnabledPreference, !state.isRunning, state != .starting else { return }
+        guard !state.isRunning, state != .starting else { return }
+        guard isEnabledPreference else {
+            stopOrphanedGatewayIfNeeded()
+            return
+        }
         start()
+    }
+
+    /// Reaps a `mobile serve` process left behind in this profile's support
+    /// directory if the previous app instance exited without `willTerminate`.
+    func stopOrphanedGatewayIfNeeded() {
+        guard process == nil else { return }
+        let lockPath = support.appendingPathComponent("mobile-gateway.lock").path
+        let fd = Darwin.open(lockPath, O_RDWR | O_NOFOLLOW)
+        guard fd >= 0 else { return }
+        let flockFn: (Int32, Int32) -> Int32 = flock
+        let locked = flockFn(fd, LOCK_EX | LOCK_NB) != 0
+        if !locked {
+            _ = flockFn(fd, LOCK_UN)
+        }
+        Darwin.close(fd)
+        guard locked, FileManager.default.isExecutableFile(atPath: executable.path) else { return }
+        let stopper = Process()
+        stopper.executableURL = executable
+        stopper.arguments = ["mobile", "stop", "--app-support", support.path]
+        stopper.standardOutput = FileHandle.nullDevice
+        stopper.standardError = FileHandle.nullDevice
+        try? stopper.run()
+        stopper.waitUntilExit()
     }
 
     func refreshAddresses() {
@@ -193,6 +232,7 @@ final class MobileAccessController: ObservableObject {
                 at: support, withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o700]
             )
+            stopOrphanedGatewayIfNeeded()
             let logURL = support.appendingPathComponent("mobile-gateway.log")
             if !FileManager.default.fileExists(atPath: logURL.path) {
                 FileManager.default.createFile(
@@ -205,7 +245,7 @@ final class MobileAccessController: ObservableObject {
             let process = Process()
             process.executableURL = executable
             process.arguments = [
-                "mobile", "--listen", listenAddress,
+                "mobile", "serve", "--listen", listenAddress,
                 "--app-support", support.path,
                 "--token-file", tokenFile.path,
             ]

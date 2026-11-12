@@ -57,6 +57,18 @@ class RuntimeBundleTests(unittest.TestCase):
             )
             bundle.validate(root, "aarch64", all_macos=True)
 
+    def test_macos_only_validation_accepts_an_empty_linux_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_bundle(root)
+            for target in ("linux-aarch64", "linux-x86_64"):
+                for child in (root / target).iterdir():
+                    child.unlink()
+                (root / target).rmdir()
+            with self.assertRaises(FileNotFoundError):
+                bundle.validate(root, "aarch64")
+            bundle.validate(root, "aarch64", linux_archs=())
+
     def test_dev_installer_packages_and_checks_before_overwriting(self):
         script = (Path(__file__).resolve().parents[1] / ".agents/skills/omg-release/scripts/install-dev.sh").read_text()
         self.assertLess(script.index("build-session-runtime.py"), script.index('rm -rf "$target_app"'))

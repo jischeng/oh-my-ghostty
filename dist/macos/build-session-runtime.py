@@ -123,12 +123,13 @@ def main():
     rustc = subprocess.check_output(['rustup', 'which', 'rustc'], text=True).strip()
     rustc_ver = subprocess.check_output([rustc, '--version'], text=True).strip()
     native = 'aarch64' if platform.machine() == 'arm64' else 'x86_64'
+    linux_archs = tuple(arch for arch in args.linux.split(',') if arch)
     validate = load_validator()
     cache_prefix = f'{args.macos}-'
     cache_dir = CACHE_ROOT / f'{cache_prefix}{compute_cache_key(revision, args.macos, args.linux, zig_ver, rustc_ver)[:24]}'
     if use_cache and cache_dir.is_dir():
         try:
-            validate(cache_dir, native, all_macos=(args.macos == 'all'))
+            validate(cache_dir, native, all_macos=(args.macos == 'all'), linux_archs=linux_archs)
             if output.exists():
                 shutil.rmtree(output)
             shutil.copytree(cache_dir, output)
@@ -220,7 +221,7 @@ def main():
     (output/'revision').write_text(revision+'\n')
     compatibility = json.loads((ROOT/'dist/macos/session-runtime-snapshot-compatibility.json').read_text())
     (output/'snapshot-revision').write_text(snapshot_revision(snapshot_digest.hexdigest(), compatibility)+'\n')
-    validate(output, native, all_macos=(args.macos == 'all'))
+    validate(output, native, all_macos=(args.macos == 'all'), linux_archs=linux_archs)
     if use_cache:
         CACHE_ROOT.mkdir(parents=True, exist_ok=True)
         stage = Path(tempfile.mkdtemp(prefix='.stage-', dir=CACHE_ROOT))

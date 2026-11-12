@@ -8,7 +8,7 @@ import platform
 import subprocess
 
 
-def validate(root: Path, native: str, *, all_macos: bool = False):
+def validate(root: Path, native: str, *, all_macos: bool = False, linux_archs=("x86_64", "aarch64")):
     revision = (root / "revision").read_text().strip()
     snapshot = (root / "snapshot-revision").read_text().strip()
     if not revision or not snapshot:
@@ -18,7 +18,8 @@ def validate(root: Path, native: str, *, all_macos: bool = False):
         if not path.is_file() or not path.stat().st_mode & 0o111:
             raise ValueError(f"missing executable: {name}")
     macos_targets = ("macos-aarch64", "macos-x86_64") if all_macos else (f"macos-{native}",)
-    for target in (*macos_targets, "linux-x86_64", "linux-aarch64"):
+    linux_targets = tuple(f"linux-{arch}" for arch in linux_archs)
+    for target in (*macos_targets, *linux_targets):
         directory = root / target
         manifest = json.loads((directory / "manifest.json").read_text())
         if manifest["revision"] != revision or manifest["platform"] != target:
@@ -42,9 +43,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("root", type=Path)
     parser.add_argument("--all-macos", action="store_true")
+    parser.add_argument("--linux", default="x86_64,aarch64", help="comma separated Linux arches bundled in the app")
     args = parser.parse_args()
     native = "aarch64" if platform.machine() == "arm64" else "x86_64"
-    validate(args.root, native, all_macos=args.all_macos)
+    linux_archs = tuple(arch for arch in args.linux.split(",") if arch)
+    validate(args.root, native, all_macos=args.all_macos, linux_archs=linux_archs)
     if args.all_macos:
         archs = subprocess.check_output(
             ["/usr/bin/lipo", "-archs", str(args.root.resolve() / "omgd")], text=True

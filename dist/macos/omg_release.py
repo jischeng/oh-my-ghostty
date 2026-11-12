@@ -515,6 +515,19 @@ def run_parallel_static_gates(root: Path, changed: list[str]) -> list[dict[str, 
     return results
 
 
+def runtime_build_env() -> dict[str, str]:
+    """Pin Apple's toolchain for the runtime build script.
+
+    A Homebrew binutils entry on PATH shadows Apple's `ar` with GNU ar, whose
+    archives ld64 rejects as `not 8-byte aligned`, which makes every
+    session-runtime link fail.
+    """
+    env = dict(os.environ)
+    env.setdefault("OMG_RUNTIME_CC", "/usr/bin/cc")
+    env.setdefault("OMG_RUNTIME_AR", "/usr/bin/ar")
+    return env
+
+
 def run_cargo_gate_step(root: Path, cmd: list[str], *, attempts: int = 2) -> None:
     """Run one session-runtime gate command, rebuilding cached artifacts once.
 
@@ -524,8 +537,9 @@ def run_cargo_gate_step(root: Path, cmd: list[str], *, attempts: int = 2) -> Non
     Clearing this crate's cached artifacts is enough to recover, so retry once
     instead of failing the whole release.
     """
+    env = runtime_build_env()
     for attempt in range(1, attempts + 1):
-        proc = subprocess.run(cmd, cwd=root, capture_output=True, text=True)
+        proc = subprocess.run(cmd, cwd=root, capture_output=True, text=True, env=env)
         if proc.returncode == 0:
             if proc.stdout:
                 print(proc.stdout, end="")
@@ -539,6 +553,7 @@ def run_cargo_gate_step(root: Path, cmd: list[str], *, attempts: int = 2) -> Non
                 cwd=root,
                 check=True,
                 capture_output=True,
+                env=env,
             )
             continue
         raise RuntimeError(f"session-runtime gate failed (exit {proc.returncode}): {cmd}\n{combined}")

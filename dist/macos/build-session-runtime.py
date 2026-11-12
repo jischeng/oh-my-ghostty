@@ -161,6 +161,11 @@ def main():
             env = os.environ.copy()
             env['RUSTC'] = rustc
             env['OMG_VT_LIB_DIR'] = str(prefix/'lib')
+            if not rust_target:
+                # A Homebrew binutils entry on PATH shadows Apple's `ar` with GNU
+                # ar, whose archives ld64 rejects as "not 8-byte aligned".
+                env.setdefault('OMG_RUNTIME_CC', '/usr/bin/cc')
+                env.setdefault('OMG_RUNTIME_AR', '/usr/bin/ar')
             cargo = ['cargo', 'build', '--manifest-path', 'session-runtime/Cargo.toml', '--release']
             if rust_target:
                 run(['rustup', 'target', 'add', rust_target])

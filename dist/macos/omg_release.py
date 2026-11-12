@@ -212,15 +212,21 @@ def apply_version_bump(root: Path, version: str, build_number: int) -> dict[str,
 
     test_path = root / VERSION_TEST_REL
     test_text = test_path.read_text()
+    # The release metadata test asserts the app's own version, while other tests
+    # in the same file assert fixed sample versions; only rewrite the former.
     new_test, t_c1 = re.subn(
-        r'(#expect\(versions\.omg == ")[^"]+("\))',
-        rf"\g<1>{version}\2",
+        r'(func appBundlePublishesReleaseMetadata\(\) \{.*?#expect\(versions\.omg == ")[^"]+("\))',
+        rf"\g<1>{version}\g<2>",
         test_text,
+        count=1,
+        flags=re.DOTALL,
     )
     new_test, t_c2 = re.subn(
-        r'(#expect\(info\["CFBundleVersion"\] as\? String == ")[^"]+("\))',
-        rf"\g<1>{build_number}\2",
+        r'(func appBundleUsesIndependentOMGIdentity\(\) \{.*?#expect\(info\["CFBundleVersion"\] as\? String == ")[^"]+("\))',
+        rf"\g<1>{build_number}\g<2>",
         new_test,
+        count=1,
+        flags=re.DOTALL,
     )
     if t_c1 != 1 or t_c2 != 1:
         raise ValueError(f"expected version assertions in {VERSION_TEST_REL}")

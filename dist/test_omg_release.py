@@ -58,9 +58,23 @@ settings:
 
 SAMPLE_VERSION_TEST = """\
 struct OhMyGhosttyVersionTests {
-    func sample() {
+    @Test func appBundlePublishesReleaseMetadata() {
+        let versions = OhMyGhosttyVersion()
+
         #expect(versions.omg == "0.20.3")
+        #expect(versions.ghostty == "1.3.2-dev")
+    }
+
+    @Test func appBundleUsesIndependentOMGIdentity() {
+        let info = Bundle.main.infoDictionary ?? [:]
+
         #expect(info["CFBundleVersion"] as? String == "53")
+    }
+
+    @Test func readsIndependentOMGAndGhosttyVersions() {
+        let versions = OhMyGhosttyVersion(infoDictionary: ["OMGVersion": "0.4.2"])
+
+        #expect(versions.omg == "0.4.2")
     }
 }
 """
@@ -120,6 +134,8 @@ class ReleaseOrchestratorTests(unittest.TestCase):
             self.assertIn('CURRENT_PROJECT_VERSION: "54"', ios.read_text())
             self.assertIn('#expect(versions.omg == "0.20.4")', ver_test.read_text())
             self.assertIn('#expect(info["CFBundleVersion"] as? String == "54")', ver_test.read_text())
+            # Fixed sample versions in other tests are not rewritten.
+            self.assertIn('#expect(versions.omg == "0.4.2")', ver_test.read_text())
 
     def test_real_repository_pbxproj_parses_cleanly(self):
         ver, build = release.read_current_pbxproj_versions((ROOT / release.PBXPROJ_REL).read_text())

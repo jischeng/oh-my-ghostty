@@ -515,6 +515,35 @@ def run_parallel_static_gates(root: Path, changed: list[str]) -> list[dict[str, 
     return results
 
 
+def run_cargo_gate_step(root: Path, cmd: list[str], *, attempts: int = 2) -> None:
+    """Run one session-runtime gate command, rebuilding cached artifacts once.
+
+    ``cargo clippy --all-targets`` can leave a partially written
+    ``out/libomg_vt.a`` behind, and the next step then fails in the linker with
+    ``ld: ignoring archive member 'vt.o' - 64-bit mach-o not 8-byte aligned``.
+    Clearing this crate's cached artifacts is enough to recover, so retry once
+    instead of failing the whole release.
+    """
+    for attempt in range(1, attempts + 1):
+        proc = subprocess.run(cmd, cwd=root, capture_output=True, text=True)
+        if proc.returncode == 0:
+            if proc.stdout:
+                print(proc.stdout, end="")
+            return
+        combined = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+        retryable = "8-byte aligned" in combined or "libomg_vt.a" in combined
+        if attempt < attempts and retryable:
+            print(f"[runtime] {cmd[0]} failed on a cached VT archive; rebuilding the crate")
+            subprocess.run(
+                ["cargo", "clean", "--manifest-path", "session-runtime/Cargo.toml", "-p", "omg-session-runtime"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+            )
+            continue
+        raise RuntimeError(f"session-runtime gate failed (exit {proc.returncode}): {cmd}\n{combined}")
+
+
 def run_serial_test_gates(
     root: Path,
     prev_tag: str,
@@ -535,7 +564,7 @@ def run_serial_test_gates(
             ["bash", "dist/macos/dev-tool.sh", "python3", "-m", "unittest", "discover", "-s", "session-runtime/tests", "-p", "test_*.py"],
         ]
         for cmd in runtime_cmds:
-            subprocess.run(cmd, cwd=root, check=True)
+            run_cargo_gate_step(root, cmd)
         report["session_runtime"] = {"status": "passed", "seconds": round(time.monotonic() - t0, 2)}
     else:
         report["session_runtime"] = {"status": "not_selected", "seconds": 0.0}

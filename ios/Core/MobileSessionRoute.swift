@@ -22,3 +22,23 @@ public struct MobileSessionRoute: Equatable {
         }
     }
 }
+
+/// Resolves iOS session and project icons so SSH shells and SSH project folders
+/// display the cloud mark matching macOS `PaneSessionContext.tabIconSystemName`.
+public enum MobileSessionIcon {
+    public static func fallbackSystemSymbol(agent: String, remoteHost: String?) -> String {
+        guard agent == "terminal" else { return "sparkles" }
+        let isRemote = !(remoteHost?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        return isRemote ? "cloud" : "terminal"
+    }
+
+    public static func isRemoteSSHProject(deviceAlias: String?, sessionRemoteHosts: [String?]) -> Bool {
+        if let alias = deviceAlias?.trimmingCharacters(in: .whitespacesAndNewlines), !alias.isEmpty {
+            return true
+        }
+        guard !sessionRemoteHosts.isEmpty else { return false }
+        return sessionRemoteHosts.allSatisfy {
+            !($0?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        }
+    }
+}

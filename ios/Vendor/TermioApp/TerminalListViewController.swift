@@ -153,7 +153,7 @@ final class TerminalListViewController: UIViewController {
     /// host. An empty config shows a disabled hint pointing back to the Mac, so
     /// the item never dead-ends on a tap.
     private func sshMenu() -> UIMenu {
-        let icon = HugeIcon.network.strokeImage(boxSize: 22)
+        let icon = UIImage(systemName: "cloud")
         let hosts = store.sshHosts
         guard !hosts.isEmpty else {
             let hint = UIAction(title: localized("Add hosts in ~/.ssh/config on your Mac")) { _ in }

@@ -292,6 +292,55 @@ pub(crate) fn mobile_targets(support: &Path) -> io::Result<Vec<(String, PathBuf)
     Ok(ordered)
 }
 
+const RELAY_CONFIG_LIMIT: u64 = 512 * 1024;
+
+fn validate_relay_config(
+    cfg_path: &Path,
+    uid: u32,
+    versions_root: &Path,
+    versions_canonical: Option<&Path>,
+    revision: &str,
+    expected_snapshot: Option<&str>,
+) -> Option<(PathBuf, omg_session_runtime::location::SshTarget)> {
+    use std::os::unix::fs::MetadataExt;
+    let cfg_meta = fs::symlink_metadata(cfg_path).ok()?;
+    if !cfg_meta.is_file() || cfg_meta.uid() != uid || cfg_meta.len() > RELAY_CONFIG_LIMIT {
+        return None;
+    }
+    let bytes = fs::read(cfg_path).ok()?;
+    let cfg = serde_json::from_slice::<serde_json::Value>(&bytes).ok()?;
+    if cfg["transport"].as_str() != Some("ssh") {
+        return None;
+    }
+    let bundle = cfg["bundle"].as_str().map(PathBuf::from)?;
+    let bundle_matches = bundle.starts_with(versions_root)
+        || versions_canonical
+            .and_then(|vc| fs::canonicalize(&bundle).ok().map(|bc| bc.starts_with(vc)))
+            .unwrap_or(false);
+    if !bundle_matches {
+        return None;
+    }
+    let rev = cfg["revision"].as_str()?;
+    if !valid_revision(rev) {
+        return None;
+    }
+    if rev != revision {
+        if let Some(expected) = expected_snapshot {
+            let snap_path = bundle.join("snapshot-revision");
+            let compatible = fs::read_to_string(snap_path)
+                .ok()
+                .is_some_and(|s| canonical_snapshot_revision(&s) == expected);
+            if !compatible {
+                return None;
+            }
+        }
+    }
+    let ssh_target = cfg["arguments"]
+        .as_array()
+        .and_then(|arr| parse_relay_ssh_arguments(arr, cfg["cwd"].as_str()))?;
+    Some((bundle, ssh_target))
+}
+
 pub(crate) fn mobile_relay_targets(
     support: &Path,
 ) -> Vec<(String, PathBuf, omg_session_runtime::location::SshTarget)> {
@@ -356,53 +405,14 @@ pub(crate) fn mobile_relay_targets(
                     continue;
                 }
                 let cfg_path = file.path();
-                let Ok(cfg_meta) = fs::symlink_metadata(&cfg_path) else {
-                    continue;
-                };
-                if !cfg_meta.is_file() || cfg_meta.uid() != uid || cfg_meta.len() > 64 * 1024 {
-                    continue;
-                }
-                let Ok(bytes) = fs::read(&cfg_path) else {
-                    continue;
-                };
-                let Ok(cfg) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-                    continue;
-                };
-                if cfg["transport"].as_str() != Some("ssh") {
-                    continue;
-                }
-                let Some(bundle) = cfg["bundle"].as_str().map(PathBuf::from) else {
-                    continue;
-                };
-                let bundle_matches = bundle.starts_with(&versions_root)
-                    || versions_canonical
-                        .as_ref()
-                        .and_then(|vc| fs::canonicalize(&bundle).ok().map(|bc| bc.starts_with(vc)))
-                        .unwrap_or(false);
-                if !bundle_matches {
-                    continue;
-                }
-                let Some(rev) = cfg["revision"].as_str() else {
-                    continue;
-                };
-                if !valid_revision(rev) {
-                    continue;
-                }
-                if rev != revision {
-                    if let Some(expected) = &expected_snapshot {
-                        let snap_path = bundle.join("snapshot-revision");
-                        let compatible = fs::read_to_string(snap_path)
-                            .ok()
-                            .is_some_and(|s| canonical_snapshot_revision(&s) == expected);
-                        if !compatible {
-                            continue;
-                        }
-                    }
-                }
-                let Some(ssh_target) = cfg["arguments"]
-                    .as_array()
-                    .and_then(|arr| parse_relay_ssh_arguments(arr, cfg["cwd"].as_str()))
-                else {
+                let Some((_, ssh_target)) = validate_relay_config(
+                    &cfg_path,
+                    uid,
+                    &versions_root,
+                    versions_canonical.as_deref(),
+                    &revision,
+                    expected_snapshot.as_deref(),
+                ) else {
                     continue;
                 };
                 let sock_path = dir_path.join(format!("{key}.sock"));
@@ -419,6 +429,85 @@ pub(crate) fn mobile_relay_targets(
                         ssh_target,
                     ));
                 }
+            }
+        }
+    }
+    relays
+}
+
+pub(crate) fn mobile_inline_relay_targets(
+    support: &Path,
+) -> Vec<(PathBuf, PathBuf, omg_session_runtime::location::SshTarget)> {
+    use std::os::unix::fs::MetadataExt;
+    let uid = unsafe { libc::geteuid() };
+    let prefix = format!("omg-inline-{uid}-");
+    let versions_root = support.join("session-runtime/versions");
+    let versions_canonical = fs::canonicalize(&versions_root).ok();
+    let revision = current_revision();
+    let expected_snapshot = current_snapshot_revision();
+    let mut roots = Vec::new();
+    let local_test_root = support.join("session-runtime/inline-relays");
+    if local_test_root.is_dir() {
+        roots.push(local_test_root);
+    } else {
+        roots.push(PathBuf::from("/tmp"));
+        let temp = env::temp_dir();
+        if !roots.contains(&temp) {
+            roots.push(temp);
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut relays = Vec::new();
+    for temp_root in roots {
+        let Ok(entries) = fs::read_dir(&temp_root) else {
+            continue;
+        };
+        let mut dirs: Vec<_> = entries.take(512).filter_map(Result::ok).collect();
+        dirs.sort_by_key(|e| e.file_name());
+        for entry in dirs {
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some(suffix) = name.strip_prefix(&prefix) else {
+                continue;
+            };
+            if suffix.is_empty()
+                || suffix.len() > 64
+                || !suffix.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                continue;
+            }
+            let dir_path = entry.path();
+            let Ok(meta) = fs::symlink_metadata(&dir_path) else {
+                continue;
+            };
+            if !meta.is_dir()
+                || meta.uid() != uid
+                || meta.mode() & 0o077 != 0
+                || meta.file_type().is_symlink()
+            {
+                continue;
+            }
+            let cfg_path = dir_path.join("connection.json");
+            let Some((bundle, ssh_target)) = validate_relay_config(
+                &cfg_path,
+                uid,
+                &versions_root,
+                versions_canonical.as_deref(),
+                &revision,
+                expected_snapshot.as_deref(),
+            ) else {
+                continue;
+            };
+            let sock_path = dir_path.join("relay.sock");
+            let Ok(sock_meta) = fs::symlink_metadata(&sock_path) else {
+                continue;
+            };
+            if sock_meta.uid() != uid || sock_meta.file_type().is_symlink() {
+                continue;
+            }
+            if seen.insert(sock_path.clone()) {
+                relays.push((bundle, sock_path, ssh_target));
             }
         }
     }

@@ -479,9 +479,9 @@ final class TerminalViewController: UIViewController {
         if let remoteHost = session.remoteHost, !remoteHost.isEmpty {
             let remotePath = session.remotePath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !remotePath.isEmpty, remotePath != "~" {
-                return "🌐 \(remoteHost) · \(remotePath)"
+                return "SSH · \(remoteHost) · \(remotePath)"
             }
-            return "🌐 \(remoteHost)"
+            return "SSH · \(remoteHost)"
         }
         return [session.project, session.branch]
             .compactMap { $0 }

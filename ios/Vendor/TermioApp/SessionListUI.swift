@@ -45,7 +45,7 @@ struct SessionRow: View {
                 Color.clear
                     .frame(width: Self.treeIndent, height: 1)
             }
-            OMGAgentMark(agent: session.agent.id, status: session.status)
+            OMGAgentMark(agent: session.agent.id, status: session.status, remoteHost: session.remoteHost)
                 .frame(width: ListCard.tileSize, height: ListCard.tileSize)
             VStack(alignment: .leading, spacing: 1) {
                 Text(session.title)
@@ -109,7 +109,7 @@ struct SessionRow: View {
         if showsProject, !session.project.isEmpty { parts.append(session.project) }
         if let remoteHost = session.remoteHost, !remoteHost.isEmpty,
            !session.subtitle.hasPrefix("SSH · ") {
-            parts.append("🌐 \(remoteHost)")
+            parts.append("SSH · \(remoteHost)")
         }
         // The worktree's branch, verbatim like the Mac sidebar's label — only
         // set for sessions living off the main checkout, so plain rows don't
@@ -172,7 +172,14 @@ struct ProjectRow: View {
     var body: some View {
         HStack(alignment: .center, spacing: ListCard.tileSpacing) {
             ListTile {
-                if let folder = HugeIcon.folder.solidImage(boxSize: 18) {
+                if MobileSessionIcon.isRemoteSSHProject(
+                    deviceAlias: project.deviceAlias,
+                    sessionRemoteHosts: project.sessions.map(\.remoteHost)
+                ) {
+                    Image(systemName: "cloud.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Color.primary.opacity(0.85))
+                } else if let folder = HugeIcon.folder.solidImage(boxSize: 18) {
                     Image(uiImage: folder)
                         .renderingMode(.template)
                         .foregroundStyle(Color.primary.opacity(0.85))

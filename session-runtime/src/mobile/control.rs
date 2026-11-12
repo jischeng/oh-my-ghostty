@@ -74,11 +74,24 @@ struct PaneDesktopMeta {
     acknowledged_program: Option<(String, Option<String>)>,
     acknowledged_reducer: Option<(String, String)>,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InlineOwnerMeta {
+    remote_session_id: String,
+    ssh_target: omg_session_runtime::location::SshTarget,
+}
+#[derive(Clone)]
+struct InlineRemoteSession {
+    endpoint: Endpoint,
+    session_id: String,
+    generation: String,
+    cwd: Option<String>,
+    resume_agent: Option<String>,
+}
 #[derive(Default)]
 struct Desktop {
     workspaces: Vec<(String, String)>,
     panes: HashMap<String, PaneDesktopMeta>,
-    inline_owners: HashMap<String, omg_session_runtime::location::SshTarget>,
+    inline_owners: HashMap<String, InlineOwnerMeta>,
 }
 
 fn hash(value: &str) -> String {
@@ -159,10 +172,7 @@ fn desktop(config: &Config) -> Desktop {
     }
     result
 }
-fn collect_inline_owners(
-    support: &Path,
-    out: &mut HashMap<String, omg_session_runtime::location::SshTarget>,
-) {
+fn collect_inline_owners(support: &Path, out: &mut HashMap<String, InlineOwnerMeta>) {
     let Ok(entries) = fs::read_dir(support.join("session-runtime/inline-owners")) else {
         return;
     };
@@ -171,6 +181,12 @@ fn collect_inline_owners(
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
+        let remote_session_id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|id| omg_session_runtime::host::valid_id(id))
+            .unwrap_or_default()
+            .to_owned();
         let Ok(bytes) = bounded(&path, 32 * 1024) else {
             continue;
         };
@@ -214,13 +230,77 @@ fn collect_inline_owners(
             .map(str::to_owned);
         out.insert(
             local_pane.to_ascii_lowercase(),
-            omg_session_runtime::location::SshTarget {
-                destination: destination.to_owned(),
-                options,
-                remote_cwd: active_cwd.or(launch_cwd),
+            InlineOwnerMeta {
+                remote_session_id,
+                ssh_target: omg_session_runtime::location::SshTarget {
+                    destination: destination.to_owned(),
+                    options,
+                    remote_cwd: active_cwd.or(launch_cwd),
+                },
             },
         );
     }
+}
+fn resolve_inline_relays(
+    config: &Config,
+    inline_owners: &HashMap<String, InlineOwnerMeta>,
+) -> HashMap<String, InlineRemoteSession> {
+    let mut resolved = HashMap::new();
+    let Some(support) = config.support.as_deref() else {
+        return resolved;
+    };
+    let wanted: std::collections::BTreeSet<&str> = inline_owners
+        .values()
+        .map(|io| io.remote_session_id.as_str())
+        .filter(|id| !id.is_empty())
+        .collect();
+    if wanted.is_empty() {
+        return resolved;
+    }
+    let mut queried_hosts: std::collections::BTreeSet<(PathBuf, String, Vec<String>)> =
+        std::collections::BTreeSet::new();
+    for (bundle, sock_path, ssh_target) in crate::session_cli::mobile_inline_relay_targets(support)
+    {
+        let host_key = (
+            bundle,
+            ssh_target.destination.clone(),
+            ssh_target.options.clone(),
+        );
+        if queried_hosts.contains(&host_key) {
+            continue;
+        }
+        let Ok(sessions) = list_relay_with_timeout(&sock_path, Duration::from_millis(400)) else {
+            continue;
+        };
+        queried_hosts.insert(host_key);
+        let endpoint = Endpoint {
+            id: format!("inline-{}", &hash(&sock_path.to_string_lossy())[..12]),
+            name: format!("SSH · {}", ssh_target.destination),
+            socket: sock_path,
+            relay: Some(ssh_target),
+        };
+        for s in sessions {
+            if s.ended.is_none() && wanted.contains(s.id.as_str()) {
+                resolved.insert(
+                    s.id.clone(),
+                    InlineRemoteSession {
+                        endpoint: endpoint.clone(),
+                        session_id: s.id,
+                        generation: s.generation,
+                        cwd: s.cwd,
+                        resume_agent: s
+                            .resume
+                            .map(|r| normalize_agent(&r.agent))
+                            .filter(|a| !a.is_empty()),
+                    },
+                );
+            }
+        }
+        if resolved.len() >= wanted.len() {
+            break;
+        }
+    }
+    resolved
 }
 fn collect_panes(
     node: &Value,
@@ -258,6 +338,8 @@ fn collect_panes(
                 pane["pwd"]
                     .as_str()
                     .or_else(|| pane["runtimeDescriptor"]["launchWorkingDirectory"].as_str())
+                    .or_else(|| pane["runtimeDescriptor"]["initialWorkingDirectory"].as_str())
+                    .or_else(|| pane["sshResumeDescriptor"]["remoteWorkingDirectory"].as_str())
             } else {
                 pane["sshResumeDescriptor"]["remoteWorkingDirectory"]
                     .as_str()
@@ -289,6 +371,7 @@ fn collect_panes(
             } else {
                 pane["sshResumeDescriptor"]["sshReplay"]["args"]
                     .as_array()
+                    .or_else(|| pane["agentResumeDescriptor"]["sshReplay"]["args"].as_array())
                     .map(|arr| {
                         arr.iter()
                             .filter_map(|v| v.as_str().map(str::to_owned))
@@ -866,10 +949,15 @@ impl State {
         generation: &str,
     ) -> Option<activity::Snapshot> {
         let key = (session_id.to_owned(), generation.to_owned());
+        let ttl = if endpoint.relay.is_some() {
+            Duration::from_secs(5)
+        } else {
+            Duration::from_millis(1500)
+        };
         {
             let guard = self.snapshots.lock().unwrap_or_else(|p| p.into_inner());
             if let Some((when, snap)) = guard.get(&key) {
-                if when.elapsed() < Duration::from_millis(1500) {
+                if when.elapsed() < ttl {
                     return snap.clone();
                 }
             }
@@ -996,6 +1084,7 @@ fn build_view(config: &Config) -> io::Result<View> {
             "branch":branch,"kind":"folder","sessions":[]})));
     }
     experience::append_projects(config, &desktop, preferred.as_ref(), &mut projects)?;
+    let inline_relays = resolve_inline_relays(config, &desktop.inline_owners);
     let mut seen_sessions = std::collections::BTreeSet::new();
     for (endpoint, sessions, supports_presentation) in endpoints {
         let is_relay = endpoint.relay.is_some();
@@ -1036,6 +1125,10 @@ fn build_view(config: &Config) -> io::Result<View> {
             } else {
                 None
             };
+            let inline_owner = desktop.inline_owners.get(&pane_key);
+            let inline_remote = inline_owner
+                .filter(|io| !io.remote_session_id.is_empty())
+                .and_then(|io| inline_relays.get(&io.remote_session_id));
             let mut facts = record
                 .as_ref()
                 .filter(|_| supports_presentation)
@@ -1050,6 +1143,15 @@ fn build_view(config: &Config) -> io::Result<View> {
                     config
                         .control
                         .cached_snapshot(&endpoint, &session.id, &session.generation)
+                })
+                .or_else(|| {
+                    inline_remote.and_then(|remote| {
+                        config.control.cached_snapshot(
+                            &remote.endpoint,
+                            &remote.session_id,
+                            &remote.generation,
+                        )
+                    })
                 });
             if let Some(ref mut snap) = facts {
                 if let Some(ack) = acknowledged.get(&session.id) {
@@ -1067,13 +1169,12 @@ fn build_view(config: &Config) -> io::Result<View> {
                     apply_desktop_acknowledgement(snap, owner);
                 }
             }
-            let inline_owner = desktop.inline_owners.get(&pane_key);
             let mut active_ssh = session
                 .ssh
                 .clone()
                 .or_else(|| record.as_ref().and_then(|r| r.ssh.clone()))
                 .or_else(|| endpoint.relay.clone())
-                .or_else(|| inline_owner.cloned());
+                .or_else(|| inline_owner.map(|io| io.ssh_target.clone()));
             if active_ssh.is_none() && !endpoint_is_remote {
                 if let Some(pid) = session.pid.filter(|&p| p > 0) {
                     active_ssh = omg_session_runtime::location::leader_ssh(pid);
@@ -1104,8 +1205,9 @@ fn build_view(config: &Config) -> io::Result<View> {
                 let live_remote_cwd = facts
                     .as_ref()
                     .and_then(|f| f.remote_cwd.clone())
+                    .or_else(|| inline_remote.and_then(|r| r.cwd.clone()))
                     .or_else(|| endpoint_is_remote.then(|| session.cwd.clone()).flatten())
-                    .or_else(|| inline_owner.and_then(|t| t.remote_cwd.clone()))
+                    .or_else(|| inline_owner.and_then(|io| io.ssh_target.remote_cwd.clone()))
                     .or_else(|| owner.and_then(|o| o.remote_cwd.clone()));
                 if live_remote_cwd.is_some() {
                     ssh.remote_cwd = live_remote_cwd;
@@ -1116,12 +1218,22 @@ fn build_view(config: &Config) -> io::Result<View> {
                 let agent = saved
                     .map(|m| m.agent.clone())
                     .or_else(|| {
-                        if facts.is_none() {
-                            session
-                                .resume
-                                .as_ref()
-                                .map(|r| normalize_agent(&r.agent))
-                                .or_else(|| owner.and_then(|o| o.agent.clone()))
+                        if facts.is_none() || active_ssh.is_some() {
+                            owner.and_then(|o| o.agent.clone()).or_else(|| {
+                                facts
+                                    .is_none()
+                                    .then(|| {
+                                        inline_remote.and_then(|r| r.resume_agent.clone()).or_else(
+                                            || {
+                                                session
+                                                    .resume
+                                                    .as_ref()
+                                                    .map(|r| normalize_agent(&r.agent))
+                                            },
+                                        )
+                                    })
+                                    .flatten()
+                            })
                         } else {
                             None
                         }
@@ -1368,9 +1480,31 @@ fn build_view(config: &Config) -> io::Result<View> {
         .map(|s| s.to_string_lossy().into_owned())
         .filter(|s| s != "mobile")
         .unwrap_or_else(|| "OMG".into());
+    let workspace_order: HashMap<&str, usize> = desktop
+        .workspaces
+        .iter()
+        .enumerate()
+        .map(|(idx, (id, _))| (id.as_str(), idx))
+        .collect();
+    let mut project_values: Vec<Value> = projects.values().map(|(_, p)| p.clone()).collect();
+    project_values.sort_by(|a, b| {
+        let wa = a["workspaceID"]
+            .as_str()
+            .and_then(|w| workspace_order.get(w).copied())
+            .unwrap_or(usize::MAX);
+        let wb = b["workspaceID"]
+            .as_str()
+            .and_then(|w| workspace_order.get(w).copied())
+            .unwrap_or(usize::MAX);
+        let ra = a.get("deviceAlias").is_some_and(|v| !v.is_null());
+        let rb = b.get("deviceAlias").is_some_and(|v| !v.is_null());
+        wa.cmp(&wb)
+            .then_with(|| ra.cmp(&rb))
+            .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
+    });
     let roster = json!({"t":"roster","wire":2,"macID":identity,
         "macName":format!("{} · {channel}",computer_name()),
-        "agents":agents,"projects":projects.values().map(|(_,p)| p).collect::<Vec<_>>()});
+        "agents":agents,"projects":project_values});
     let projects: HashMap<String, Project> =
         projects.into_iter().map(|(id, (p, _))| (id, p)).collect();
     Ok(View { roster, projects })
@@ -1520,8 +1654,34 @@ fn request_control(config: &Config, request: &Value) -> io::Result<Value> {
                 }
             }
         }
-        let (snap, sent_ack) = read_session_activity(&endpoint, &id, &generation, true);
-        let candidate = snap.or(pre_snap);
+        let (snap, mut sent_ack) = read_session_activity(&endpoint, &id, &generation, true);
+        let mut candidate = snap.or(pre_snap);
+        if endpoint.relay.is_none() {
+            let desktop_meta = desktop(config);
+            let pane_key = id.to_ascii_lowercase();
+            if let Some(io) = desktop_meta
+                .inline_owners
+                .get(&pane_key)
+                .filter(|io| !io.remote_session_id.is_empty())
+            {
+                let inline_relays = resolve_inline_relays(config, &desktop_meta.inline_owners);
+                if let Some(remote) = inline_relays.get(&io.remote_session_id) {
+                    let (remote_snap, remote_ack) = read_session_activity(
+                        &remote.endpoint,
+                        &remote.session_id,
+                        &remote.generation,
+                        true,
+                    );
+                    config
+                        .control
+                        .evict_snapshot(&remote.session_id, &remote.generation);
+                    if candidate.is_none() {
+                        candidate = remote_snap;
+                        sent_ack |= remote_ack;
+                    }
+                }
+            }
+        }
         {
             let mut ack_guard = config.control.acknowledged(config);
             if let Some(map) = ack_guard.as_mut() {
@@ -2579,7 +2739,7 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            owners.join("owner.json"),
+            owners.join("07eb791d-6558-4ccc-9b6a-8b059ac5f6a6.json"),
             json!({
                 "localPane": "3FFA2669-C134-471A-BC6B-A227DF616BF7",
                 "activeRecord": active_path,
@@ -2602,13 +2762,238 @@ mod tests {
             control: State::default(),
         };
         let result = desktop(&config);
-        let ssh = &result.inline_owners["3ffa2669-c134-471a-bc6b-a227df616bf7"];
-        assert_eq!(ssh.destination, "cloud");
-        assert_eq!(ssh.options, vec!["-p", "2222"]);
+        let owner = &result.inline_owners["3ffa2669-c134-471a-bc6b-a227df616bf7"];
         assert_eq!(
-            ssh.remote_cwd.as_deref(),
+            owner.remote_session_id,
+            "07eb791d-6558-4ccc-9b6a-8b059ac5f6a6"
+        );
+        assert_eq!(owner.ssh_target.destination, "cloud");
+        assert_eq!(owner.ssh_target.options, vec!["-p", "2222"]);
+        assert_eq!(
+            owner.ssh_target.remote_cwd.as_deref(),
             Some("/home/dev/mapping-platform")
         );
+    }
+
+    #[test]
+    fn inline_relay_resolves_work_ssh_sessions_large_hook_configs_and_workspace_order() {
+        use std::os::unix::net::UnixListener;
+        let short_root =
+            PathBuf::from("/tmp").join(format!("omg-ir-{}", &record::nonce().unwrap()[..8]));
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&short_root)
+            .unwrap();
+        struct Guard(PathBuf);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _guard = Guard(short_root.clone());
+
+        let rev = crate::session_cli::current_revision();
+        let bundle = short_root.join("session-runtime/versions").join(&rev);
+        fs::create_dir_all(&bundle).unwrap();
+        fs::create_dir_all(short_root.join("workspaces")).unwrap();
+        let owners = short_root.join("session-runtime/inline-owners");
+        fs::create_dir_all(&owners).unwrap();
+
+        let local_pane = "3FFA2669-C134-471A-BC6B-A227DF616BF7";
+        let remote_id = "07eb791d-6558-4ccc-9b6a-8b059ac5f6a6";
+        // Simulate work tab 6: sshResumeDescriptor is absent, agentResumeDescriptor has scope=remote + sshReplay.
+        let pane = json!({"surfaceTree":{"root":{"view":{
+            "uuid": local_pane,
+            "title": "agy",
+            "pwd": "/Users/test",
+            "agentResumeDescriptor": {
+                "agent": "antigravity",
+                "scope": "remote",
+                "workingDirectory": "/home/dev/fallback",
+                "sshReplay": { "args": ["cloud"] }
+            }
+        }}}});
+        fs::write(
+            short_root.join("workspaces/state.json"),
+            json!({
+                "version": 2,
+                "catalog": { "workspaces": [
+                    { "id": PERSONAL, "name": "Personal" },
+                    { "id": "work", "name": "work" }
+                ]},
+                "tabs": [{ "workspace": "work", "state": STANDARD.encode(pane.to_string()) }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // Inline owner has activeRecord: null and launchWorkingDirectory: null (live work shape).
+        fs::write(
+            owners.join(format!("{remote_id}.json")),
+            json!({
+                "localPane": local_pane,
+                "activeRecord": null,
+                "descriptor": {
+                    "connection": { "destination": "cloud", "options": [] },
+                    "launchWorkingDirectory": null
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let uid = unsafe { libc::geteuid() };
+        let inline_dir = short_root
+            .join("session-runtime/inline-relays")
+            .join(format!("omg-inline-{uid}-abcdef012345"));
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&inline_dir)
+            .unwrap();
+        // Embed >64KB hooks payload (~100KB) like real inline connection.json files.
+        fs::write(
+            inline_dir.join("connection.json"),
+            json!({
+                "transport": "ssh",
+                "bundle": bundle,
+                "revision": rev,
+                "cwd": "/Users/test",
+                "hooks": "h".repeat(100 * 1024),
+                "arguments": ["-T", "--", "cloud"]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let relay_sock = inline_dir.join("relay.sock");
+        let relay_listener = UnixListener::bind(&relay_sock).unwrap();
+
+        let relay_thread = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut stream, _)) = relay_listener.accept() else {
+                    break;
+                };
+                let Ok(req) = Frame::read(&mut stream) else {
+                    break;
+                };
+                if req.kind == b'L' {
+                    let _ = Frame::new(b'T', 0, br#"{"attempt":0,"state":"connecting"}"#)
+                        .send(&mut stream);
+                    let list = json!([{
+                        "id": remote_id,
+                        "generation": "remgen1",
+                        "created_at": 1,
+                        "updated_at": 2,
+                        "pid": 4242,
+                        "ended": null,
+                        "resume": null,
+                        "policy": {},
+                        "cwd": "/home/dev/lance-spark"
+                    }]);
+                    let _ =
+                        Frame::new(b'L', 0, &serde_json::to_vec(&list).unwrap()).send(&mut stream);
+                } else if req.kind == b'H' {
+                    let mut st = activity::State::default();
+                    st.consume(
+                        false,
+                        "omg-agent-antigravity-99",
+                        "type=app;omg_agent=antigravity;omg_scope=remote;omg_state=done",
+                    );
+                    let _ =
+                        Frame::new(b'T', 7, br#"{"attempt":0,"state":"ready"}"#).send(&mut stream);
+                    let _ = Frame::new(
+                        b'J',
+                        1,
+                        br#"{"generation":"remgen1","activity_acknowledge":false}"#,
+                    )
+                    .send(&mut stream);
+                    let _ = Frame::new(
+                        activity::FRAME,
+                        1,
+                        &serde_json::to_vec(&st.snapshot()).unwrap(),
+                    )
+                    .send(&mut stream);
+                }
+            }
+        });
+
+        let custom = Config {
+            endpoints: vec![],
+            support: Some(short_root.clone()),
+            token: "t".repeat(64),
+            origin: None,
+            control: State::default(),
+        };
+        let desktop_meta = desktop(&custom);
+        assert_eq!(
+            desktop_meta.panes[&local_pane.to_ascii_lowercase()]
+                .ssh_target
+                .as_ref()
+                .unwrap()
+                .destination,
+            "cloud"
+        );
+        let inline_map = resolve_inline_relays(&custom, &desktop_meta.inline_owners);
+        let remote = inline_map.get(remote_id).expect("inline relay resolved");
+        assert_eq!(remote.cwd.as_deref(), Some("/home/dev/lance-spark"));
+        let snap = custom
+            .control
+            .cached_snapshot(&remote.endpoint, &remote.session_id, &remote.generation)
+            .expect("remote activity snapshot fetched");
+        assert_eq!(
+            presentation(&snap),
+            Some(("antigravity".into(), "done".into(), "Done".into()))
+        );
+
+        // Verify workspace ordering places local containers before ssh-session-* even for "work".
+        let mut sample_projects: BTreeMap<String, (Project, Value)> = BTreeMap::new();
+        sample_projects.insert(
+            "work-terminals".into(),
+            (
+                Project {
+                    id: "work-terminals".into(),
+                    root: short_root.clone(),
+                    workspace: "work".into(),
+                    endpoint: None,
+                    host: None,
+                },
+                json!({"id":"work-terminals","workspaceID":"work","workspaceName":"work","kind":"terminals","sessions":[]}),
+            ),
+        );
+        sample_projects.insert(
+            "ssh-session-123".into(),
+            (
+                Project {
+                    id: "ssh-session-123".into(),
+                    root: PathBuf::from("/home/dev/lance-spark"),
+                    workspace: "work".into(),
+                    endpoint: None,
+                    host: Some("cloud".into()),
+                },
+                json!({"id":"ssh-session-123","workspaceID":"work","workspaceName":"work","deviceAlias":"cloud","kind":"folder","sessions":[]}),
+            ),
+        );
+        let ws_order = HashMap::from([(PERSONAL, 0usize), ("work", 1usize)]);
+        let mut vals: Vec<Value> = sample_projects.values().map(|(_, p)| p.clone()).collect();
+        vals.sort_by(|a, b| {
+            let wa = a["workspaceID"]
+                .as_str()
+                .and_then(|w| ws_order.get(w).copied())
+                .unwrap_or(usize::MAX);
+            let wb = b["workspaceID"]
+                .as_str()
+                .and_then(|w| ws_order.get(w).copied())
+                .unwrap_or(usize::MAX);
+            let ra = a.get("deviceAlias").is_some_and(|v| !v.is_null());
+            let rb = b.get("deviceAlias").is_some_and(|v| !v.is_null());
+            wa.cmp(&wb)
+                .then_with(|| ra.cmp(&rb))
+                .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
+        });
+        assert_eq!(vals[0]["id"], "work-terminals");
+        assert_eq!(vals[1]["id"], "ssh-session-123");
+
+        let _ = relay_thread.join();
     }
 
     #[test]

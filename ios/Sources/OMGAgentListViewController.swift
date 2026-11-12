@@ -6,6 +6,7 @@ import UIKit
 struct OMGAgentMark: View {
     let agent: String
     let status: SessionStatus
+    var remoteHost: String? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -16,7 +17,9 @@ struct OMGAgentMark: View {
                 if UIImage(named: "OMGAgent-\(agent)") != nil {
                     Image("OMGAgent-\(agent)").renderingMode(.template).resizable().scaledToFit()
                 } else {
-                    Image(systemName: agent == "terminal" ? "terminal" : "sparkles").resizable().scaledToFit()
+                    Image(systemName: MobileSessionIcon.fallbackSystemSymbol(agent: agent, remoteHost: remoteHost))
+                        .resizable()
+                        .scaledToFit()
                 }
             }
             .frame(width: 20, height: 20)

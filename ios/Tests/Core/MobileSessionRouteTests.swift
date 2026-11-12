@@ -27,4 +27,16 @@ final class MobileSessionRouteTests: XCTestCase {
             XCTAssertNil(MobileSessionRoute(value))
         }
     }
+
+    func testMobileSessionIconUsesCloudForRemoteSSHShellsAndProjects() {
+        XCTAssertEqual(MobileSessionIcon.fallbackSystemSymbol(agent: "terminal", remoteHost: nil), "terminal")
+        XCTAssertEqual(MobileSessionIcon.fallbackSystemSymbol(agent: "terminal", remoteHost: "  "), "terminal")
+        XCTAssertEqual(MobileSessionIcon.fallbackSystemSymbol(agent: "terminal", remoteHost: "cloud"), "cloud")
+        XCTAssertEqual(MobileSessionIcon.fallbackSystemSymbol(agent: "unknown-agent", remoteHost: "cloud"), "sparkles")
+
+        XCTAssertFalse(MobileSessionIcon.isRemoteSSHProject(deviceAlias: nil, sessionRemoteHosts: []))
+        XCTAssertFalse(MobileSessionIcon.isRemoteSSHProject(deviceAlias: nil, sessionRemoteHosts: ["cloud", nil]))
+        XCTAssertTrue(MobileSessionIcon.isRemoteSSHProject(deviceAlias: "cloud", sessionRemoteHosts: []))
+        XCTAssertTrue(MobileSessionIcon.isRemoteSSHProject(deviceAlias: nil, sessionRemoteHosts: ["cloud", "devbox"]))
+    }
 }

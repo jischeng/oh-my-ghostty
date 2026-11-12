@@ -50,7 +50,10 @@ cleanup() {
     done
     omg_vm_scp_from "$(omg_vm_ip)" "$guest_directory.log" "$evidence/fixture.log" 2>/dev/null || true
   fi
-  if $vm_started; then "$vm" down || result=1; fi
+  if $vm_started; then
+    omg_vm_ssh 'rm -rf "$HOME/.config/oh-my-ghostty-dev"' >/dev/null 2>&1 || true
+    "$vm" down || result=1
+  fi
   echo "Mobile VM evidence: $evidence"
   exit "$result"
 }

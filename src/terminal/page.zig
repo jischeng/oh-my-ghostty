@@ -344,6 +344,7 @@ pub const Page = struct {
         UnmarkedHyperlinkRow,
         InvalidSpacerTailLocation,
         InvalidSpacerHeadLocation,
+        InvalidWideLocation,
         UnwrappedSpacerHead,
     };
 
@@ -511,7 +512,27 @@ pub const Page = struct {
 
                 switch (cell.wide) {
                     .narrow => {},
-                    .wide => {},
+                    .wide => {
+                        // Wide chars can't be at the end because they need a
+                        // trailing spacer tail in the same row.
+                        if (x + 1 == self.size.cols) {
+                            log.warn(
+                                "page integrity violation y={} x={} wide char at end",
+                                .{ y, x },
+                            );
+                            return IntegrityError.InvalidWideLocation;
+                        }
+
+                        // Wide chars must be followed by a spacer tail.
+                        const next = cells[x + 1];
+                        if (next.wide != .spacer_tail) {
+                            log.warn(
+                                "page integrity violation y={} x={} wide char not followed by spacer tail",
+                                .{ y, x },
+                            );
+                            return IntegrityError.InvalidWideLocation;
+                        }
+                    },
 
                     .spacer_tail => {
                         // Spacer tails can't be at the start because they follow
@@ -873,7 +894,19 @@ pub const Page = struct {
         const x_end = @min(x_end_req, cell_len);
         assert(x_start <= x_end);
         const other_cells = src_row.cells.ptr(other.memory)[x_start..x_end];
-        const cells = dst_row.cells.ptr(self.memory)[x_start..x_end];
+        const dst_all = dst_row.cells.ptr(self.memory)[0..self.size.cols];
+        const cells = dst_all[x_start..x_end];
+
+        // If our destination range splits an existing wide character at either
+        // edge, clear the orphaned half outside the range first.
+        if (x_end > x_start) {
+            if (x_start > 0 and dst_all[x_start - 1].wide == .wide) {
+                self.clearCells(dst_row, x_start - 1, x_start);
+            }
+            if (x_end < self.size.cols and dst_all[x_end].wide == .spacer_tail) {
+                self.clearCells(dst_row, x_end, x_end + 1);
+            }
+        }
 
         // If our destination has styles or graphemes then we need to
         // clear some state. This will free up the managed memory as well.
@@ -1038,12 +1071,18 @@ pub const Page = struct {
             }
         }
 
-        // If we are growing columns, then we need to ensure spacer heads
-        // are cleared.
-        if (self.size.cols > other.size.cols) {
-            const last = &cells[other.size.cols - 1];
-            if (last.wide == .spacer_head) {
-                last.wide = .narrow;
+        // Sanitize wide-cell boundaries when copying a partial or differently
+        // sized row so we never leave an orphaned wide cell, spacer tail, or
+        // interior spacer head.
+        if (cells.len > 0) {
+            if (cells[0].wide == .spacer_tail) {
+                self.clearCells(dst_row, x_start, x_start + 1);
+            }
+            if (cells[cells.len - 1].wide == .wide) {
+                self.clearCells(dst_row, x_end - 1, x_end);
+            }
+            if (x_end < self.size.cols and cells[cells.len - 1].wide == .spacer_head) {
+                cells[cells.len - 1].wide = .narrow;
             }
         }
     }

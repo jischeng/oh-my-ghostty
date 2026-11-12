@@ -713,6 +713,7 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
                 .iter_mut()
                 .filter(|(_, p)| !p.control && !p.ended && p.failed)
                 .map(|(id, p)| {
+                    clear_launch_data(p);
                     p.retry_requested = true;
                     p.writer_requested = false;
                     p.writer_ready = false;
@@ -744,6 +745,7 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
                 for id in &failed {
                     if let Some(peer) = peers.get_mut(id) {
                         if !strict_open {
+                            peer.retry_requested = false;
                             peer.peer.push(Frame::new(
                                 b'E',
                                 0,
@@ -762,6 +764,7 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
                                 send_outer_open(remote, stream, kind, &data);
                             }
                             Err(error) => {
+                                peer.retry_requested = false;
                                 peer.peer
                                     .push(Frame::new(b'E', 0, error.to_string().as_bytes()));
                             }
@@ -839,6 +842,8 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
                                         .is_some_and(|request| request.inline_viewer);
                                     if requires_local_launch && !local_launch {
                                         peer.failed = true;
+                                        peer.retry_requested = false;
+                                        clear_launch_data(peer);
                                         peer.remote_stream = None;
                                         peer.peer.push(Frame::new(
                                             b'E',
@@ -847,11 +852,15 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
                                         ));
                                     } else if requires_inline && !inline_viewer {
                                         peer.failed = true;
+                                        peer.retry_requested = false;
+                                        clear_launch_data(peer);
                                         peer.remote_stream = None;
                                         peer.peer.push(Frame::new(b'E', 0,
                                             b"runtime does not support inline viewers; no session was created"));
                                     } else if !strict_open {
                                         peer.failed = true;
+                                        peer.retry_requested = false;
+                                        clear_launch_data(peer);
                                         peer.remote_stream = None;
                                         peer.peer.push(Frame::new(
                                             b'E',
@@ -925,6 +934,7 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
                                     peer.writer_requested = false;
                                     peer.retry_requested = false;
                                     peer.failed = true;
+                                    clear_launch_data(peer);
                                     peer.peer.push(Frame::new(b'E', 0, &frame.data));
                                 }
                             }
@@ -938,7 +948,10 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
                                         peer.control_done = true;
                                         continue;
                                     }
-                                    if !peer.ended && !peer.failed {
+                                    let was_retrying = peer.retry_requested;
+                                    peer.retry_requested = false;
+                                    clear_launch_data(peer);
+                                    if !peer.ended && (!peer.failed || was_retrying) {
                                         peer.failed = true;
                                         peer.peer.push(Frame::new(
                                             b'E',
@@ -1000,8 +1013,17 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
                                 peer.writer_ready = false;
                                 inner.seq = peer.generation;
                             }
+                            b'E' => {
+                                peer.snapshot_generation = None;
+                                peer.writer_requested = false;
+                                peer.writer_ready = false;
+                                peer.retry_requested = false;
+                                peer.failed = true;
+                                clear_launch_data(peer);
+                            }
                             EXIT => {
                                 peer.ended = true;
+                                peer.retry_requested = false;
                                 peer.writer_ready = false;
                             }
                             _ => {}
@@ -1180,8 +1202,18 @@ pub fn list_local(socket: &Path) -> io::Result<Vec<SessionSummary>> {
 
 #[cfg(test)]
 mod error_classification_tests {
-    use super::attention_required;
-    use std::io;
+    use super::{attention_required, retry_local, supervise, RelayTransport};
+    use crate::{lifecycle::Policy, registry::OpenRequest, Frame};
+    use std::{
+        io,
+        os::unix::net::UnixStream,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        thread,
+        time::{Duration, Instant},
+    };
 
     #[test]
     fn malformed_proxy_banner_is_retryable_but_a_broken_private_key_is_not() {
@@ -1194,5 +1226,116 @@ mod error_classification_tests {
         assert!(attention_required(&io::Error::other(
             "Permission denied (publickey)."
         )));
+    }
+
+    #[test]
+    fn manual_retry_after_inner_snapshot_error_performs_single_attach_attempt() {
+        use std::os::unix::fs::DirBuilderExt;
+        let nonce = crate::record::nonce().unwrap();
+        let dir = std::env::temp_dir().join(format!("omg-rt-{}", &nonce[..8]));
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .unwrap();
+        let socket_path = dir.join("s.sock");
+        let open_count = Arc::new(AtomicUsize::new(0));
+        let open_creates = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let open_count_remote = open_count.clone();
+        let open_creates_remote = open_creates.clone();
+        let connector = Arc::new(move |_| {
+            let (client_side, mut server_side) = UnixStream::pair()?;
+            let open_count_thread = open_count_remote.clone();
+            let open_creates_thread = open_creates_remote.clone();
+            thread::spawn(move || {
+                Frame::new(
+                    b'P',
+                    0,
+                    b"strict-open/1,durable-close/1,local-launch/1,inline-viewer/1",
+                )
+                .send(&mut server_side)
+                .unwrap();
+                while let Ok(frame) = Frame::read(&mut server_side) {
+                    if frame.kind == b'C' {
+                        let req: OpenRequest = serde_json::from_slice(&frame.data).unwrap();
+                        open_creates_thread.lock().unwrap().push(req.create);
+                        open_count_thread.fetch_add(1, Ordering::SeqCst);
+                        let inner_err =
+                            Frame::new(b'E', 1, b"terminal snapshot is unavailable").encode();
+                        let _ = Frame::new(b'D', frame.seq, &inner_err).send(&mut server_side);
+                        let _ = Frame::new(b'Q', frame.seq, &[]).send(&mut server_side);
+                    } else if frame.kind == b'P' {
+                        let _ = Frame::new(
+                            b'P',
+                            0,
+                            b"strict-open/1,durable-close/1,local-launch/1,inline-viewer/1",
+                        )
+                        .send(&mut server_side);
+                    }
+                }
+            });
+            Ok(RelayTransport {
+                socket: client_side,
+                guard: Box::new(()),
+            })
+        });
+
+        let socket_for_supervisor = socket_path.clone();
+        thread::spawn(move || {
+            let _ = supervise(&socket_for_supervisor, connector, false);
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut peer = loop {
+            match UnixStream::connect(&socket_path) {
+                Ok(stream) => break stream,
+                Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+                Err(err) => panic!("failed to connect to local relay: {err}"),
+            }
+        };
+        peer.set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+
+        let request = OpenRequest {
+            id: "d2956168-0ade-4c3e-ade4-3bc908d7dfd6".to_string(),
+            policy: Policy::default(),
+            create: true,
+            cwd: None,
+            launch: None,
+            inline_viewer: false,
+        };
+        Frame::new(b'H', 0, &serde_json::to_vec(&request).unwrap())
+            .send(&mut peer)
+            .unwrap();
+
+        let first_err = loop {
+            let frame = Frame::read(&mut peer).unwrap();
+            if frame.kind == b'E' {
+                break frame;
+            }
+        };
+        assert_eq!(first_err.data, b"terminal snapshot is unavailable");
+        assert_eq!(open_count.load(Ordering::SeqCst), 1);
+
+        // No duplicate b'E' ("remote session stream ended") or automatic retry storm.
+        thread::sleep(Duration::from_millis(40));
+        assert_eq!(open_count.load(Ordering::SeqCst), 1);
+
+        // Manual retry triggers exactly one attach-only attempt and stops cleanly.
+        retry_local(&socket_path, true).unwrap();
+        let retry_err = loop {
+            let frame = Frame::read(&mut peer).unwrap();
+            if frame.kind == b'E' {
+                break frame;
+            }
+        };
+        assert_eq!(retry_err.data, b"terminal snapshot is unavailable");
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(open_count.load(Ordering::SeqCst), 2);
+        assert_eq!(*open_creates.lock().unwrap(), vec![true, false]);
+
+        drop(peer);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

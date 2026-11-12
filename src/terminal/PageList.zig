@@ -2214,6 +2214,7 @@ const ReflowCursor = struct {
             self.page_cell.content_tag = .codepoint;
             self.page_cell.hyperlink = false;
             self.page_cell.style_id = stylepkg.default_id;
+            if (self.page_cell.wide == .wide) self.page_cell.wide = .narrow;
 
             if (comptime build_options.kitty_graphics) {
                 // Copy Kitty virtual placeholder status
@@ -2496,6 +2497,7 @@ const ReflowCursor = struct {
             self.page_cell.style_id = id;
         }
 
+        if (cell.wide == .wide) self.page_cell.wide = .wide;
         self.cursorForward();
         return .success;
     }
@@ -2803,7 +2805,11 @@ fn resizeWithoutReflow(self: *PageList, opts: Resize) Allocator.Error!void {
                     const rows = page.rows.ptr(page.memory);
                     for (0..page.size.rows) |i| {
                         const row = &rows[i];
-                        page.clearCells(row, cols, self.cols);
+                        const clear_start = if (cols > 0 and page.getCells(row)[cols - 1].wide == .wide)
+                            cols - 1
+                        else
+                            cols;
+                        page.clearCells(row, clear_start, self.cols);
                     }
 
                     page.size.cols = cols;
@@ -18655,6 +18661,12 @@ test "PageList resize reflow less cols to wrap a multi-codepoint grapheme with a
 
         // First family emoji at (0, 0)
         {
+            const tail = page.getRowAndCell(1, 0);
+            tail.cell.* = .{
+                .content_tag = .codepoint,
+                .content = .{ .codepoint = .{ .data = 0 } },
+                .wide = .spacer_tail,
+            };
             const rac = page.getRowAndCell(0, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
@@ -18667,16 +18679,14 @@ test "PageList resize reflow less cols to wrap a multi-codepoint grapheme with a
                 0x200D, 0x1F466,
             });
         }
+        // Second family emoji at (2, 0)
         {
-            const rac = page.getRowAndCell(1, 0);
-            rac.cell.* = .{
+            const tail = page.getRowAndCell(3, 0);
+            tail.cell.* = .{
                 .content_tag = .codepoint,
                 .content = .{ .codepoint = .{ .data = 0 } },
                 .wide = .spacer_tail,
             };
-        }
-        // Second family emoji at (2, 0)
-        {
             const rac = page.getRowAndCell(2, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
@@ -18688,14 +18698,6 @@ test "PageList resize reflow less cols to wrap a multi-codepoint grapheme with a
                 0x200D, 0x1F466,
                 0x200D, 0x1F466,
             });
-        }
-        {
-            const rac = page.getRowAndCell(3, 0);
-            rac.cell.* = .{
-                .content_tag = .codepoint,
-                .content = .{ .codepoint = .{ .data = 0 } },
-                .wide = .spacer_tail,
-            };
         }
     }
 

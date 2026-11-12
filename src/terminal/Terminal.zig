@@ -1285,6 +1285,7 @@ pub fn print(self: *Terminal, c: u21) !void {
                 .ignore => return,
                 .wide => wide: {
                     if (prev.cell.wide == .wide) break :wide;
+                    if ((right_limit - self.scrolling_region.left) <= 1) break :wide;
 
                     // Move our cursor back to the previous. We'll move
                     // the cursor within this block to the proper location.
@@ -1313,24 +1314,28 @@ pub fn print(self: *Terminal, c: u21) !void {
 
                             try self.printWrap();
                             self.printCell(prev_cp, .wide);
-
-                            const new_pin = self.screens.active.cursor.page_pin.*;
-                            const new_rac = new_pin.rowAndCell();
+                            self.screens.active.cursorRight(1);
+                            self.printCell(0, .spacer_tail);
 
                             transfer_graphemes: {
                                 var old_pin = self.screens.active.cursor.page_pin.up(1) orelse break :transfer_graphemes;
                                 old_pin.x = right_limit - 1;
                                 const old_rac = old_pin.rowAndCell();
+                                const new_node = self.screens.active.cursor.page_pin.node;
 
-                                if (new_pin.node == old_pin.node) {
-                                    new_pin.node.page().moveGrapheme(prev.cell, new_rac.cell);
-                                    prev.cell.content_tag = .codepoint;
-                                    new_rac.cell.content_tag = .codepoint_grapheme;
-                                    new_rac.row.grapheme = true;
+                                if (new_node == old_pin.node) {
+                                    const new_cell = self.screens.active.cursorCellLeft(1);
+                                    new_node.page().moveGrapheme(old_rac.cell, new_cell);
+                                    old_rac.cell.content_tag = .codepoint;
+                                    new_cell.content_tag = .codepoint_grapheme;
+                                    self.screens.active.cursor.page_row.grapheme = true;
                                 } else {
                                     const cps = old_pin.node.page().lookupGrapheme(old_rac.cell).?;
                                     for (cps) |cp| {
-                                        try self.screens.active.appendGrapheme(new_rac.cell, cp);
+                                        try self.screens.active.appendGrapheme(
+                                            self.screens.active.cursorCellLeft(1),
+                                            cp,
+                                        );
                                     }
                                     old_pin.node.page().clearGrapheme(old_rac.cell);
                                 }
@@ -1340,7 +1345,7 @@ pub fn print(self: *Terminal, c: u21) !void {
 
                             // Point prev.cell to our new previous cell that
                             // we'll be appending graphemes to
-                            prev.cell = new_rac.cell;
+                            prev.cell = self.screens.active.cursorCellLeft(1);
                         } else {
                             self.printCell(
                                 0,
@@ -1348,18 +1353,18 @@ pub fn print(self: *Terminal, c: u21) !void {
                             );
                             try self.printWrap();
                             self.printCell(prev_cp, .wide);
+                            self.screens.active.cursorRight(1);
+                            self.printCell(0, .spacer_tail);
 
                             // Point prev.cell to our new previous cell that
                             // we'll be appending graphemes to
-                            prev.cell = self.screens.active.cursor.page_cell;
+                            prev.cell = self.screens.active.cursorCellLeft(1);
                         }
                     } else {
                         prev.cell.wide = .wide;
+                        self.screens.active.cursorRight(1);
+                        self.printCell(0, .spacer_tail);
                     }
-
-                    // Write our spacer, since prev.cell is now wide
-                    self.screens.active.cursorRight(1);
-                    self.printCell(0, .spacer_tail);
 
                     // Move the cursor again so we're beyond our spacer
                     if (self.screens.active.cursor.x == right_limit - 1) {
@@ -1551,7 +1556,7 @@ fn printCell(
     unmapped_c: u21,
     wide: Cell.Wide,
 ) void {
-    defer self.screens.active.assertIntegrity();
+    defer if (wide != .wide) self.screens.active.assertIntegrity();
 
     // TODO: spacers should use a bgcolor only cell
 
@@ -1595,6 +1600,12 @@ fn printCell(
             // Previous cell was wide. We need to clear the tail and head.
             .wide => wide: {
                 if (self.screens.active.cursor.x >= self.cols - 1) break :wide;
+
+                // So integrity checks pass while clearing the tail before we
+                // overwrite this cell below.
+                if (comptime build_options.slow_runtime_safety) {
+                    cell.wide = if (wide == .spacer_tail) .spacer_tail else .narrow;
+                }
 
                 const spacer_cell = self.screens.active.cursorCellRight(1);
                 self.screens.active.clearCells(
@@ -1643,6 +1654,10 @@ fn printCell(
             // terminals (xterm mainly) and see what's up.
             .spacer_head => {},
         }
+    }
+
+    if (comptime build_options.slow_runtime_safety) {
+        if (wide == .spacer_tail) cell.wide = .spacer_tail;
     }
 
     // If the prior value had graphemes, clear those
@@ -1700,11 +1715,24 @@ fn printCell(
     // We check for an active hyperlink first because setHyperlink
     // handles clearing the old hyperlink and an optimization if we're
     // overwriting the same hyperlink.
+    const hide_incomplete_wide = if (comptime build_options.slow_runtime_safety)
+        wide == .wide and
+            (self.screens.active.cursor.x + 1 == self.cols or
+                self.screens.active.cursorCellRight(1).wide != .spacer_tail)
+    else
+        false;
+    if (comptime build_options.slow_runtime_safety) {
+        if (hide_incomplete_wide) self.screens.active.cursor.page_cell.wide = .narrow;
+    }
+    defer if (comptime build_options.slow_runtime_safety) {
+        if (hide_incomplete_wide) self.screens.active.cursor.page_cell.wide = .wide;
+    };
+
     if (self.screens.active.cursor.hyperlink_id > 0) {
         self.screens.active.cursorSetHyperlink() catch |err| {
             @branchHint(.unlikely);
             log.warn("error reallocating for more hyperlink space, ignoring hyperlink err={}", .{err});
-            assert(!cell.hyperlink);
+            assert(!self.screens.active.cursor.page_cell.hyperlink);
         };
     } else if (had_hyperlink) {
         // If the previous cell had a hyperlink then we need to clear it.
@@ -3137,6 +3165,11 @@ pub fn insertBlanks(self: *Terminal, count: usize) void {
     //     self.eraseLine(.right, false);
     //     return;
     // }
+
+    self.screens.active.splitCellBoundary(self.screens.active.cursor.x);
+    if (self.scrolling_region.right == self.cols - 1) {
+        self.screens.active.cursorResetWrap();
+    }
 
     // left is just the cursor position but as a multi-pointer
     const left: [*]Cell = @ptrCast(self.screens.active.cursor.page_cell);

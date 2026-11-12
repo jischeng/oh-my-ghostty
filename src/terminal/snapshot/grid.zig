@@ -463,7 +463,6 @@ pub fn encode(
     page: *const TerminalPage,
     writer: *std.Io.Writer,
 ) EncodeError!void {
-    defer page.assertIntegrity();
     for (0..page.size.rows) |y| {
         const row = page.getRow(y);
         const cells = page.getCells(row);
@@ -598,6 +597,7 @@ pub fn encode(
     }
 
     try encodeGraphemes(page, writer);
+    page.assertIntegrity();
 }
 
 /// The encoded cell count (through the last nonzero cell) and the bitwise

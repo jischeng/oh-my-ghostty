@@ -1531,3 +1531,61 @@ test "snapshot incremental decoder exposes READY and page progress" {
     while (decoder_next(dropped_decoder) == .success) {}
     try testing.expectEqual(Result.no_value, decoder_next(dropped_decoder));
 }
+
+test "encode_alloc succeeds after shrinking non-reflowing columns across wide cells" {
+    var source: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &source,
+        96,
+        67,
+    ));
+    defer terminal_c.free(source);
+
+    // Reproduce alt-screen + DECAWM-off TUI rendering wide CJK text across
+    // column 92..93 followed by a horizontal split shrink to 93 columns.
+    const alt_setup = "\x1b[?1049h\x1b[?7l\x1b[1;92H" ++ "a中b";
+    terminal_c.vt_write(source, alt_setup.ptr, alt_setup.len);
+    try testing.expectEqual(Result.success, terminal_c.resize(
+        source,
+        93,
+        67,
+        1490,
+        2296,
+    ));
+
+    // Exit alt-screen and verify primary-screen DECAWM-off column shrink as well.
+    const primary_setup = "\x1b[?1049l\x1b[?7l\x1b[1;92H" ++ "x文";
+    terminal_c.vt_write(source, primary_setup.ptr, primary_setup.len);
+    try testing.expectEqual(Result.success, terminal_c.resize(
+        source,
+        92,
+        67,
+        1474,
+        2296,
+    ));
+
+    var ptr: ?[*]u8 = null;
+    var len: usize = 0;
+    try testing.expectEqual(Result.success, encode_alloc(
+        source,
+        &lib.alloc.test_allocator,
+        &ptr,
+        &len,
+    ));
+    const encoded = ptr.?[0..len];
+    defer lib.alloc.default(&lib.alloc.test_allocator).free(encoded);
+
+    var decoder: Decoder = null;
+    try testing.expectEqual(Result.success, decoder_new_buf(
+        &lib.alloc.test_allocator,
+        &decoder,
+        encoded.ptr,
+        encoded.len,
+    ));
+    defer decoder_free(decoder);
+
+    var restored: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, decoder_decode(decoder, &restored));
+    defer terminal_c.free(restored);
+}

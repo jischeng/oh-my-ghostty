@@ -21,6 +21,7 @@ def main [
     --test-modules: string              # Comma-separated modules, or all (Swift tests only)
     --changed-since: string             # Git ref/commit; includes staged, unstaged, untracked changes
     --include-desktop-tests             # Opt in to foreground/unlocked native interaction tests
+    --skip-build                        # Run test-without-building using existing xctestrun
     --test-plan-only                    # Print the selection as JSON without building/running tests
     --list-test-modules                 # List modules and direct dependents without building
     --marketing-version: string         # Optional local build version override
@@ -47,7 +48,7 @@ def main [
         print (test-plan [--list-modules] | to json)
         return
     }
-    if $action != "test" and ($test_modules != null or $changed_since != null or $only_testing != "" or $include_desktop_tests or $test_plan_only) {
+    if $action != "test" and ($test_modules != null or $changed_since != null or $only_testing != "" or $include_desktop_tests or $skip_build or $test_plan_only) {
         error make {msg: "Test selection flags require --action test"}
     }
     let module_args = if $test_modules == null { [] } else { [--modules $test_modules] }
@@ -97,6 +98,7 @@ def main [
 
     if $action == "test" {
         let vm_runner = ($env.FILE_PWD | path join "scripts" "vm" "omg-vm")
+        let skip_build_arg = if $skip_build { ["--skip-build"] } else { [] }
         let build_settings = ([...$version_override ...$workspace_settings ...$test_build_settings]
             | each {|setting| ["--build-setting" $setting] }
             | flatten)
@@ -113,6 +115,7 @@ def main [
             --scheme $scheme
             --configuration $configuration
             --build-dir $build_dir
+            ...$skip_build_arg
             ...$build_settings
             --
             ...$skip_testing

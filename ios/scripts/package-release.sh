@@ -26,6 +26,7 @@ output_dir=$(cd "$output_dir" && pwd)
 (unset SDKROOT; xcodegen generate --spec "$ios_dir/project.yml")
 
 actual_marketing=$(awk -F'"' '/MARKETING_VERSION:/{print $2; exit}' "$ios_dir/project.yml")
+actual_build=$(awk -F'"' '/CURRENT_PROJECT_VERSION:/{print $2; exit}' "$ios_dir/project.yml")
 [[ "$actual_marketing" == "$omg_version" ]] || {
   echo "ios/project.yml MARKETING_VERSION is $actual_marketing, expected $omg_version" >&2
   exit 1
@@ -34,6 +35,13 @@ actual_marketing=$(awk -F'"' '/MARKETING_VERSION:/{print $2; exit}' "$ios_dir/pr
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/omg-mobile-pkg.XXXXXX")
 trap 'rm -rf "$work_dir"' EXIT
 
+if [[ "${OMG_RELEASE_NO_CACHE:-0}" == "1" ]]; then
+  derived_dir="$work_dir/derived"
+else
+  derived_dir="$repo_root/.release-build/_cache/ios-derived"
+  mkdir -p "$derived_dir"
+fi
+
 # 3. Compile unsigned Release iphoneos app to verify Release compilation and package unsigned .ipa.
 unset SDKROOT
 xcodebuild \
@@ -41,20 +49,25 @@ xcodebuild \
   -scheme OMGMobile \
   -configuration Release \
   -sdk iphoneos \
-  -derivedDataPath "$work_dir/derived" \
+  -derivedDataPath "$derived_dir" \
   "ARCHS=arm64" \
   "ONLY_ACTIVE_ARCH=YES" \
   "CODE_SIGNING_ALLOWED=NO" \
   build
 
-built_app="$work_dir/derived/Build/Products/Release-iphoneos/OMGMobile.app"
+built_app="$derived_dir/Build/Products/Release-iphoneos/OMGMobile.app"
 [[ -f "$built_app/OMGMobile" ]] || {
   echo "missing built OMGMobile executable in $built_app" >&2
   exit 1
 }
 app_short_ver=$(/usr/bin/plutil -extract CFBundleShortVersionString raw "$built_app/Info.plist")
+app_build_ver=$(/usr/bin/plutil -extract CFBundleVersion raw "$built_app/Info.plist")
 [[ "$app_short_ver" == "$omg_version" ]] || {
   echo "OMGMobile.app CFBundleShortVersionString is $app_short_ver, expected $omg_version" >&2
+  exit 1
+}
+[[ -z "$actual_build" || "$app_build_ver" == "$actual_build" ]] || {
+  echo "OMGMobile.app CFBundleVersion is $app_build_ver, expected $actual_build" >&2
   exit 1
 }
 lipo -archs "$built_app/OMGMobile" | grep -qw arm64 || {

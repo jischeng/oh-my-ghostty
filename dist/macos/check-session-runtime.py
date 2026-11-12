@@ -8,7 +8,7 @@ import platform
 import subprocess
 
 
-def validate(root: Path, native: str):
+def validate(root: Path, native: str, *, all_macos: bool = False):
     revision = (root / "revision").read_text().strip()
     snapshot = (root / "snapshot-revision").read_text().strip()
     if not revision or not snapshot:
@@ -17,7 +17,8 @@ def validate(root: Path, native: str):
         path = root / name
         if not path.is_file() or not path.stat().st_mode & 0o111:
             raise ValueError(f"missing executable: {name}")
-    for target in (f"macos-{native}", "linux-x86_64", "linux-aarch64"):
+    macos_targets = ("macos-aarch64", "macos-x86_64") if all_macos else (f"macos-{native}",)
+    for target in (*macos_targets, "linux-x86_64", "linux-aarch64"):
         directory = root / target
         manifest = json.loads((directory / "manifest.json").read_text())
         if manifest["revision"] != revision or manifest["platform"] != target:
@@ -40,8 +41,16 @@ def validate(root: Path, native: str):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("root", type=Path)
+    parser.add_argument("--all-macos", action="store_true")
     args = parser.parse_args()
-    validate(args.root, "aarch64" if platform.machine() == "arm64" else "x86_64")
+    native = "aarch64" if platform.machine() == "arm64" else "x86_64"
+    validate(args.root, native, all_macos=args.all_macos)
+    if args.all_macos:
+        archs = subprocess.check_output(
+            ["/usr/bin/lipo", "-archs", str(args.root.resolve() / "omgd")], text=True
+        ).split()
+        if set(archs) != {"arm64", "x86_64"}:
+            raise SystemExit(f"expected universal local omgd, got: {' '.join(archs)}")
     subprocess.run([str(args.root.resolve() / "omgd"), "version"], check=True, timeout=10)
     print("Session runtime bundle verified")
 

@@ -50,9 +50,51 @@ not change the separately pinned signing interpreter or its Keychain ACL.
 
 ---
 
-## Workflow 2: Publish OMG Release
+## Workflow 2: Publish OMG Release (Automated via `omg_release.py`)
 
-### Step 0: Signing Preflight (Before Version Bump or Build)
+Use `dist/macos/omg_release.py` as the primary end-to-end orchestrator. It enforces SemVer & Ghostty base rules, runs signing preflight before builds, updates all three version targets atomically, runs read-only quality gates in parallel, reuses content-addressed caches under `.release-build/_cache/`, compiles a single `universal` Release App and derives `arm64`/`x86_64` via `lipo -thin`, packages DMGs in parallel, verifies post-sign `session-runtime` manifests, and stops before pushing/publishing.
+
+### Fast Path (Recommended)
+
+```bash
+# 1. Inspect previous OMG tag, suggested SemVer, selected test scope, and reclaimable space
+python3 dist/macos/omg_release.py plan
+
+# 2. Signing preflight + atomic version bump (pbxproj, ios/project.yml, OhMyGhosttyVersionTests)
+#    + scaffold docs/RELEASE_NOTES_<OMG_VERSION>.md
+python3 dist/macos/omg_release.py prepare <OMG_VERSION>
+
+# 3. Edit docs/RELEASE_NOTES_<OMG_VERSION>.md and remove the draft TODO comment marker.
+
+# 4. Run parallel static gates + change-selected tests (with --skip-build isolated flake retry)
+#    + cached build + parallel DMG packaging + appcast + summary report
+python3 dist/macos/omg_release.py run <OMG_VERSION>
+
+# 5. ONLY after explicit user authorization to publish:
+#    commits release prep, pushes main & tag v<OMG_VERSION>, creates GitHub Release,
+#    and cleans intermediate build directories in .release-build/
+python3 dist/macos/omg_release.py publish <OMG_VERSION>
+```
+
+Useful maintenance & recovery flags:
+- Reclaim `.release-build/` intermediate directories while preserving `artifacts/`, `signing-requirement.txt`, and the latest `universal/Release/OMG.app` (for `OMG_PREVIOUS_SIGNED_APP` continuity):
+  ```bash
+  python3 dist/macos/omg_release.py clean
+  ```
+- Force a cold non-cached build when diagnosing compiler/cache issues:
+  ```bash
+  python3 dist/macos/omg_release.py build <OMG_VERSION> --clean --no-cache
+  ```
+- Re-run an isolated flaky Swift suite without rebuilding or full rsync:
+  ```bash
+  macos/build.nu --action test --skip-build --only-testing GhosttyTests/<SuiteName>
+  ```
+
+---
+
+### Underlying Step Reference & Recovery Details
+
+#### Step 0: Signing Preflight (Before Version Bump or Build)
 
 Source the existing private configuration, then run:
 ```bash
@@ -86,14 +128,17 @@ identity regeneration, ad-hoc fallback, password retrieval CLI, or shell tracing
 `build-release.sh` and `package-release.sh` repeat the preflight automatically;
 resume packaging existing apps after recovery, do not rebuild just for an ACL error.
 
-### Step 1: Version & Release Notes
+### Step 1: Version & Release Notes (`omg_release.py prepare`)
 1. Ensure on `main` branch, synced with `origin/main`.
-2. Update version in `macos/Ghostty.xcodeproj/project.pbxproj` (all 3 configs: update `MARKETING_VERSION` and increment `CURRENT_PROJECT_VERSION`).
-3. Update `macos/Tests/Helpers/OhMyGhosttyVersionTests.swift` with expected version strings.
-4. Create `docs/RELEASE_NOTES_<OMG_VERSION>.md`.
+2. Run `python3 dist/macos/omg_release.py prepare <OMG_VERSION>` to update:
+   - `macos/Ghostty.xcodeproj/project.pbxproj` (all 3 OMG app configs: `MARKETING_VERSION` and monotonic `CURRENT_PROJECT_VERSION`, leaving sub-target versions intact);
+   - `ios/project.yml` (`MARKETING_VERSION` and `CURRENT_PROJECT_VERSION`);
+   - `macos/Tests/Helpers/OhMyGhosttyVersionTests.swift` (`versions.omg` and `CFBundleVersion`);
+   - `docs/RELEASE_NOTES_<OMG_VERSION>.md` scaffold.
+3. Finalize `docs/RELEASE_NOTES_<OMG_VERSION>.md` and remove the `TODO(release-notes)` marker.
 
-### Step 2: Quality Gates
-Run sequentially:
+### Step 2: Quality Gates (`omg_release.py gate`)
+`python3 dist/macos/omg_release.py gate` runs static/contract checks concurrently and build/test checks serially. Underlying commands:
 ```bash
 # 1. Lint, schema & docs
 swiftlint lint --strict --config macos/.swiftlint.yml macos
@@ -123,17 +168,13 @@ macos/build.nu --action test --changed-since "v<PREVIOUS_VERSION>"
 python3 -m unittest discover -s dist -p 'test_omg_test_plan.py'
 ```
 
-### Step 3: Build Release Binaries
+### Step 3: Build Release Binaries (`omg_release.py build`)
 ```bash
-.agents/skills/omg-release/scripts/build-release.sh <OMG_VERSION>
+.agents/skills/omg-release/scripts/build-release.sh [--clean] [--no-cache] <OMG_VERSION>
 ```
-Output placed under `.release-build/<OMG_VERSION>/`.
+Output placed under `.release-build/<OMG_VERSION>/`, with content-addressed caches under `.release-build/_cache/`.
 
-The script already invokes `dist/macos/build-session-runtime.py --macos all`
-and copies its output into **each** arm64, x86_64 and universal App. Keep builds
-serial; `TMPDIR=/tmp` may be used when the invoking environment has a short-lived
-temporary directory. Rust/Cargo, the corresponding Rust targets and Zig are
-required by the runtime builder.
+The script reuses cached universal `GhosttyKit.xcframework` and `session-runtime` bundles when their source/toolchain SHA-256 inputs are unchanged, builds the `universal` Release App once via `xcodebuild`, embeds `session-runtime`, and derives `arm64` and `x86_64` Apps via `lipo -thin` (preserving universal `Sparkle.framework` and multi-platform `session-runtime` payloads). Keep builds serial; `TMPDIR=/tmp` may be used when the invoking environment has a short-lived temporary directory. Rust/Cargo, the corresponding Rust targets and Zig are required when `session-runtime` inputs change.
 
 For runtime changes, run these checks serially before packaging:
 ```bash

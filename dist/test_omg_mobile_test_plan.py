@@ -1,7 +1,10 @@
 """Mobile selection contracts; these checks never launch Xcode, VM or Simulator."""
+from pathlib import Path
+import tempfile
 import unittest
 
-from omg_mobile_test_plan import make_plan
+from omg_mobile_test_plan import IOS_VERSION_SPEC, ios_version_only_change, make_plan
+from omg_test_plan import git
 
 
 class MobileTestPlanTests(unittest.TestCase):
@@ -45,6 +48,25 @@ class MobileTestPlanTests(unittest.TestCase):
     def test_no_changes_and_unrelated_runtime_features_skip_mobile(self):
         self.assertFalse(make_plan([])["run_mobile"])
         self.assertFalse(make_plan(["session-runtime/src/remote_draft.rs"])["run_mobile"])
+
+    def test_ios_project_version_bump_only_does_not_select_mobile(self):
+        self.assertFalse(make_plan([IOS_VERSION_SPEC], ios_version_only=True)["run_mobile"])
+        self.assertTrue(make_plan([IOS_VERSION_SPEC], ios_version_only=False)["run_mobile"])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            git(root, "init", "-q")
+            git(root, "config", "user.email", "test@example.invalid")
+            git(root, "config", "user.name", "Fixture")
+            spec = root / IOS_VERSION_SPEC
+            spec.parent.mkdir(parents=True)
+            spec.write_text('settings:\n  base:\n    MARKETING_VERSION: "0.20.3"\n    CURRENT_PROJECT_VERSION: "53"\n')
+            git(root, "add", ".")
+            git(root, "commit", "-qm", "base")
+            base_commit = git(root, "rev-parse", "HEAD").strip()
+            spec.write_text('settings:\n  base:\n    MARKETING_VERSION: "0.20.4"\n    CURRENT_PROJECT_VERSION: "54"\n')
+            self.assertTrue(ios_version_only_change(root, base_commit))
+            spec.write_text('settings:\n  base:\n    MARKETING_VERSION: "0.20.4"\n    CURRENT_PROJECT_VERSION: "54"\n    SWIFT_VERSION: "6.0"\n')
+            self.assertFalse(ios_version_only_change(root, base_commit))
 
 
 if __name__ == "__main__":

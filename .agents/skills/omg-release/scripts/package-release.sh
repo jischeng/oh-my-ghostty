@@ -21,12 +21,30 @@ signing_mode=$(bash dist/macos/signing-python.sh policy)
 if [[ "$signing_mode" == self-signed ]]; then
   bash dist/macos/signing-python.sh unlock
 fi
+
+# Auto-discover preserved previous signed app for DR continuity check when unset.
+if [[ -z "${OMG_PREVIOUS_SIGNED_APP:-}" ]]; then
+  prev_ver="${PREVIOUS_TAG#v}"
+  for candidate in \
+    "$repo_root/.release-build/$prev_ver/universal/Release/OMG.app" \
+    "$repo_root/.release-build/$prev_ver/arm64/Release/OMG.app"; do
+    if [[ -d "$candidate" ]]; then
+      if codesign -d -r- "$candidate" 2>&1 | grep -q 'designated =>' &&
+         ! codesign -d -r- "$candidate" 2>&1 | grep -q 'cdhash'; then
+        export OMG_PREVIOUS_SIGNED_APP="$candidate"
+        printf 'previous_signed_app=%s\n' "$OMG_PREVIOUS_SIGNED_APP"
+        break
+      fi
+    fi
+  done
+fi
+
 release_requirement=
 
 for arch in arm64 x86_64 universal; do
   app="$build_root/$arch/Release/OMG.app"
   [[ -x "$app/Contents/MacOS/omg" ]] || { echo "missing $app" >&2; exit 1; }
-  dist/macos/sign_omg_app.sh "$app"
+  OMG_SKIP_POST_SIGN_VERIFY=1 dist/macos/sign_omg_app.sh "$app"
   check_args=(verify "$app")
   if [[ -n "${OMG_PREVIOUS_SIGNED_APP:-}" ]]; then
     check_args+=(--previous "$OMG_PREVIOUS_SIGNED_APP")
@@ -37,12 +55,15 @@ for arch in arm64 x86_64 universal; do
   fi
   release_requirement=$current_requirement
 
+  # Post-sign runtime manifest, dependency hash, and local universal relay verification.
+  python3 dist/macos/check-session-runtime.py --all-macos "$app/Contents/Resources/session-runtime" >/dev/null
+
   if [[ "$arch" == x86_64 ]] && ! arch -x86_64 true >/dev/null 2>&1; then
     # Rosetta 2 is not installed; verify architecture and ReleaseFast marker via strings instead
     lipo -archs "$app/Contents/MacOS/omg" | grep -q 'x86_64' || { echo "$arch binary missing x86_64 slice" >&2; exit 1; }
     _strtmp=$(mktemp); /usr/bin/strings "$app/Contents/MacOS/omg" > "$_strtmp"; grep -q 'ReleaseFast' "$_strtmp"; rm -f "$_strtmp"
     [[ $? -eq 0 ]] || { echo "$arch binary does not contain ReleaseFast" >&2; exit 1; }
-    printf '[%s] signature=valid launch=skipped(no-rosetta) mode=.ReleaseFast\n' "$arch"
+    printf '[%s] signature=valid runtime=valid launch=skipped(no-rosetta) mode=.ReleaseFast\n' "$arch"
   else
     if [[ "$arch" == x86_64 ]]; then
       output=$(arch -x86_64 "$app/Contents/MacOS/omg" --version 2>&1)
@@ -51,20 +72,28 @@ for arch in arm64 x86_64 universal; do
     fi
     mode=$(awk '/build mode/{print $NF}' <<<"$output")
     [[ "$mode" == ".ReleaseFast" ]] || { echo "$arch build mode is $mode" >&2; exit 1; }
-    printf '[%s] signature=valid launch=ok mode=%s\n' "$arch" "$mode"
+    printf '[%s] signature=valid runtime=valid launch=ok mode=%s\n' "$arch" "$mode"
   fi
 done
 printf '%s\n' "$release_requirement" > "$build_root/signing-requirement.txt"
 
 rm -rf "$artifacts"
 mkdir -p "$artifacts"
+
+# Compress all 3 macOS DMGs concurrently (hdiutil is independent of Xcode build.db).
+dmg_pids=()
 for arch in arm64 x86_64 universal; do
-  dist/macos/package_omg_dmg.sh \
+  OMG_SKIP_PRE_DMG_SIGN_VERIFY=1 dist/macos/package_omg_dmg.sh \
     "$omg_version" \
     "$arch" \
     "$build_root/$arch/Release/OMG.app" \
-    "$artifacts"
+    "$artifacts" &
+  dmg_pids+=("$!")
 done
+for pid in "${dmg_pids[@]}"; do
+  wait "$pid"
+done
+
 if [[ -x "$repo_root/ios/scripts/package-release.sh" ]]; then
   "$repo_root/ios/scripts/package-release.sh" "$omg_version" "$artifacts"
 fi

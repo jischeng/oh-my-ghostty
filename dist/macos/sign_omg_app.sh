@@ -70,6 +70,12 @@ for path in pathlib.Path(sys.argv[1]).glob('*/manifest.json'):
 PY
 fi
 
+for framework in "$app_path/Contents/Frameworks"/*.framework; do
+  [[ -e "$framework" ]] || continue
+  [[ "$(basename "$framework")" == "Sparkle.framework" ]] && continue
+  codesign "${sign_options[@]}" "$framework"
+done
+
 for component in "${components[@]}"; do
   [[ -e "$component" ]] || continue
   codesign "${sign_options[@]}" "$component"
@@ -85,7 +91,9 @@ codesign \
   --entitlements "$entitlements" \
   "$app_path"
 
-codesign --verify --deep --strict --verbose=2 "$app_path"
-if [[ "$mode" == self-signed || "$mode" == developer-id ]]; then
-  bash "$repo_root/dist/macos/signing-python.sh" verify "$app_path"
+if [[ "${OMG_SKIP_POST_SIGN_VERIFY:-0}" != "1" ]]; then
+  codesign --verify --deep --strict --verbose=2 "$app_path"
+  if [[ "$mode" == self-signed || "$mode" == developer-id ]]; then
+    bash "$repo_root/dist/macos/signing-python.sh" verify "$app_path"
+  fi
 fi

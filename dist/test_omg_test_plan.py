@@ -240,11 +240,31 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(result["unknown_paths"], [])
 
     def test_version_only_project_change_does_not_force_all(self):
-        result = self.plan(paths=[planner.VERSION_PROJECT], version_only=True)
+        result = self.plan(
+            paths=[
+                planner.VERSION_PROJECT,
+                planner.VERSION_SMOKE_FILE,
+                "ios/project.yml",
+                "docs/RELEASE_NOTES_0.20.4.md",
+            ],
+            version_only=True,
+        )
         self.assertEqual(result["scope"], "changed")
         self.assertEqual(result["root_modules"], ["update"])
+        self.assertEqual(result["modules"], ["update"])
         self.assertIn(planner.SMOKE_SUITE, result["only_testing"])
         self.assertNotIn("GhosttyTests/GitDiffServiceTests", result["only_testing"])
+        self.assertNotIn("GhosttyTests/OMGThemeBackgroundTests", result["only_testing"])
+
+    def test_release_tooling_scripts_do_not_launch_xcode(self):
+        result = self.plan(paths=[
+            ".agents/skills/omg-release/scripts/build-release.sh",
+            ".agents/skills/omg-release/scripts/package-release.sh",
+            "dist/macos/omg_release.py",
+            "dist/test_omg_release.py",
+        ])
+        self.assertFalse(result["run_swift"])
+        self.assertEqual(result["unknown_paths"], [])
 
     def test_link_hover_suite_keeps_routine_methods_without_desktop(self):
         result = self.plan(only_testing=["GhosttyTests/TerminalLinkHoverTests"])
@@ -442,6 +462,15 @@ class RunnerTests(unittest.TestCase):
         args = self.capture.read_text().splitlines()
         self.assertEqual(args.count("GhosttyTests/VerticalTabMouseTests"), 1)
         self.assertEqual(args[args.index("-only-testing") + 1], "GhosttyTests/VerticalTabMouseTests")
+
+    def test_skip_build_forwards_to_vm_xctest_and_requires_test_action(self):
+        result = self.runner("--action", "test", "--only-testing", planner.SMOKE_SUITE, "--skip-build")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = self.capture.read_text().splitlines()
+        self.assertIn("--skip-build", args)
+        self.assertLess(args.index("--skip-build"), args.index("--"))
+        bad = self.runner("--action", "build", "--skip-build")
+        self.assertNotEqual(bad.returncode, 0)
 
     def test_failed_xcode_exit_is_preserved(self):
         self.env["TEST_EXIT"] = "65"

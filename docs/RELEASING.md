@@ -52,7 +52,8 @@ an OMG release path.
 
 The checked-in scripts that are authoritative for OMG are:
 
-- `macos/build.nu` — Xcode development/test wrapper;
+- `dist/macos/omg_release.py` — end-to-end release orchestrator (`plan`, `prepare`, `gate`, `build`, `package`, `run`, `publish`, `clean`);
+- `macos/build.nu` — Xcode development/test wrapper (including `--skip-build` isolated test reruns);
 - `dist/macos/sign_omg_app.sh` — consistent nested code signing;
 - `dist/macos/omg_signing.py` — persistent identity creation and release signature policy;
 - `dist/macos/omg_keychain.py` — local login-Keychain credential storage and automatic unlock;
@@ -396,8 +397,21 @@ Common failures:
 
 ## 2. Local Release builds
 
-Release artifacts are separate arm64 and x86_64 apps. Build a universal
-GhosttyKit first so Xcode cannot link the wrong static archive:
+Prefer the release orchestrator or wrapper script, which reuses content-addressed
+caches under `.release-build/_cache/` for unchanged `GhosttyKit.xcframework`,
+`session-runtime`, and iOS `libghostty-vt.a` inputs, compiles the `universal`
+`OMG.app` once, and derives single-architecture `arm64` and `x86_64` bundles via
+`lipo -thin` (pass `--clean --no-cache` to force a cold build):
+
+```bash
+python3 dist/macos/omg_release.py build "$OMG_VERSION"
+# or directly:
+.agents/skills/omg-release/scripts/build-release.sh "$OMG_VERSION"
+```
+
+Release artifacts are separate arm64, x86_64, and universal apps. Underlying
+manual steps build a universal GhosttyKit first so Xcode cannot link the wrong
+static archive:
 
 ```bash
 env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
@@ -655,7 +669,14 @@ ios/scripts/package-release.sh "$OMG_VERSION" "$OMG_BUILD_ROOT/artifacts"
 
 The DMG script verifies bundle ID, OMG version, signature, and either one named
 architecture or the exact universal pair; it creates an `Applications` symlink.
-`ios/scripts/package-release.sh` builds ReleaseFast `libghostty-vt.a` for
+`.agents/skills/omg-release/scripts/package-release.sh` compresses the three
+macOS DMGs concurrently via `hdiutil`, auto-discovers the preserved prior signed
+app under `.release-build/` when `OMG_PREVIOUS_SIGNED_APP` is unset, and
+validates post-sign `session-runtime` manifests on every bundle. Use
+`python3 dist/macos/omg_release.py clean` after publishing to prune intermediate
+`obj-*` and duplicate app directories while keeping `artifacts/`,
+`signing-requirement.txt`, and the latest `universal/Release/OMG.app`.
+`ios/scripts/package-release.sh` builds (or restores cached) ReleaseFast `libghostty-vt.a` for
 `iphoneos` and `iphonesimulator`, verifies unsigned `Release` `OMGMobile.app`
 compilation, and packages both a self-contained Xcode/Agent signing kit (no Zig,
 Rust, or XcodeGen required on the user's Mac) and an unsigned IPA for sideloaders.

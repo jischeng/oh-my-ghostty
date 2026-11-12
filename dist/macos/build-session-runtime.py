@@ -2,6 +2,7 @@
 """Build matching native and Linux runtime artifacts, serially, without remote tools."""
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,46 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
+CACHE_ROOT = ROOT / ".release-build" / "_cache" / "session-runtime"
+
+
+def load_validator():
+    spec = importlib.util.spec_from_file_location(
+        "check_session_runtime", Path(__file__).with_name("check-session-runtime.py")
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.validate
+
+
+def compute_cache_key(revision: str, macos_mode: str, linux_archs: str, zig_ver: str, rustc_ver: str) -> str:
+    h = hashlib.sha256()
+    for token in (revision, macos_mode, linux_archs, platform.machine(), zig_ver, rustc_ver):
+        h.update(token.encode())
+        h.update(b"\0")
+    for base in ("src", "include"):
+        for path in sorted((ROOT / base).rglob("*")):
+            if path.is_file():
+                h.update(str(path.relative_to(ROOT)).encode())
+                h.update(path.read_bytes())
+    for rel in ("build.zig", "build.zig.zon", "dist/macos/session-runtime-askpass.sh"):
+        p = ROOT / rel
+        if p.is_file():
+            h.update(rel.encode())
+            h.update(p.read_bytes())
+    return h.hexdigest()
+
+
+def prune_cache(prefix: str, keep: int = 2) -> None:
+    if not CACHE_ROOT.is_dir():
+        return
+    entries = sorted(
+        (p for p in CACHE_ROOT.iterdir() if p.is_dir() and p.name.startswith(prefix)),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for stale in entries[keep:]:
+        shutil.rmtree(stale, ignore_errors=True)
 
 
 def run(args, **kwargs):
@@ -49,9 +90,10 @@ def main():
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--linux', default='x86_64,aarch64')
     parser.add_argument('--macos', default='native', choices=['native', 'all'])
+    parser.add_argument('--no-cache', action='store_true')
     args = parser.parse_args()
     output = args.output.resolve()
-    output.mkdir(parents=True, exist_ok=True)
+    use_cache = not args.no_cache and os.environ.get('OMG_RELEASE_NO_CACHE') != '1'
     # Content-derived revision also distinguishes uncommitted development builds.
     digest = hashlib.sha256()
     snapshot_digest = hashlib.sha256()
@@ -77,8 +119,27 @@ def main():
         digest.update(path.read_bytes())
     revision = digest.hexdigest()[:20]
     zig = Path(subprocess.check_output(['mise', 'exec', 'zig@0.16.0', '--', 'which', 'zig'], text=True).strip())
+    zig_ver = subprocess.check_output([str(zig), 'version'], text=True).strip()
     rustc = subprocess.check_output(['rustup', 'which', 'rustc'], text=True).strip()
+    rustc_ver = subprocess.check_output([rustc, '--version'], text=True).strip()
     native = 'aarch64' if platform.machine() == 'arm64' else 'x86_64'
+    validate = load_validator()
+    cache_prefix = f'{args.macos}-'
+    cache_dir = CACHE_ROOT / f'{cache_prefix}{compute_cache_key(revision, args.macos, args.linux, zig_ver, rustc_ver)[:24]}'
+    if use_cache and cache_dir.is_dir():
+        try:
+            validate(cache_dir, native, all_macos=(args.macos == 'all'))
+            if output.exists():
+                shutil.rmtree(output)
+            shutil.copytree(cache_dir, output)
+            os.utime(cache_dir, None)
+            print(f'runtime artifacts (cached {revision}): {output}', flush=True)
+            return
+        except Exception:
+            shutil.rmtree(cache_dir, ignore_errors=True)
+    if output.exists():
+        shutil.rmtree(output)
+    output.mkdir(parents=True, exist_ok=True)
     targets = [(f'macos-{native}', None, None)]
     if args.macos == 'all':
         other = 'x86_64' if native == 'aarch64' else 'aarch64'
@@ -159,6 +220,18 @@ def main():
     (output/'revision').write_text(revision+'\n')
     compatibility = json.loads((ROOT/'dist/macos/session-runtime-snapshot-compatibility.json').read_text())
     (output/'snapshot-revision').write_text(snapshot_revision(snapshot_digest.hexdigest(), compatibility)+'\n')
+    validate(output, native, all_macos=(args.macos == 'all'))
+    if use_cache:
+        CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+        stage = Path(tempfile.mkdtemp(prefix='.stage-', dir=CACHE_ROOT))
+        try:
+            shutil.copytree(output, stage / 'bundle')
+            if cache_dir.exists():
+                shutil.rmtree(cache_dir, ignore_errors=True)
+            (stage / 'bundle').rename(cache_dir)
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
+        prune_cache(cache_prefix)
     print(f'runtime artifacts: {output}', flush=True)
 
 

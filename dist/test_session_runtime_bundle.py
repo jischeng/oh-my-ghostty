@@ -40,6 +40,23 @@ class RuntimeBundleTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 bundle.validate(root, "aarch64")
 
+    def test_all_macos_validation_requires_both_macos_platform_manifests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_bundle(root)
+            with self.assertRaises(FileNotFoundError):
+                bundle.validate(root, "aarch64", all_macos=True)
+            other = root / "macos-x86_64"
+            other.mkdir()
+            files = []
+            for name in ("omgd", "libghostty-vt.dylib"):
+                (other / name).write_bytes(b"fixture")
+                files.append({"name": name, "sha256": hashlib.sha256(b"fixture").hexdigest()})
+            (other / "manifest.json").write_text(
+                json.dumps({"revision": "revision-a", "platform": "macos-x86_64", "files": files})
+            )
+            bundle.validate(root, "aarch64", all_macos=True)
+
     def test_dev_installer_packages_and_checks_before_overwriting(self):
         script = (Path(__file__).resolve().parents[1] / ".agents/skills/omg-release/scripts/install-dev.sh").read_text()
         self.assertLess(script.index("build-session-runtime.py"), script.index('rm -rf "$target_app"'))

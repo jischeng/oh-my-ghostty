@@ -13,6 +13,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION_PROJECT = "macos/Ghostty.xcodeproj/project.pbxproj"
+VERSION_SMOKE_FILE = "macos/Tests/Helpers/OhMyGhosttyVersionTests.swift"
 
 
 @dataclass(frozen=True)
@@ -99,7 +100,9 @@ FULL_SUITE_GLOBS = (
 )
 NO_SWIFT_GLOBS = (
     "docs/**", "*.md", "LICENSE*", ".agents/skills/omg-issue-report/**",
-    ".agents/skills/*/SKILL.md", "dist/*docs*.py", ".github/ISSUE_TEMPLATE/**",
+    ".agents/skills/omg-release/**", ".agents/skills/*/SKILL.md",
+    "dist/*docs*.py", "dist/macos/omg_release.py", "dist/test_omg_release.py",
+    ".github/ISSUE_TEMPLATE/**",
     "ios/**", "dist/omg_mobile_test_plan.py", "dist/test_omg_mobile_test_plan.py",
 )
 SMOKE_SUITE = "GhosttyTests/OhMyGhosttyVersionTests"
@@ -153,6 +156,8 @@ def inventory(root):
     for name, module in MODULES.items():
         for pattern in module.tests:
             for path in root.glob(pattern):
+                if name == "foundation" and path.relative_to(root).as_posix() == VERSION_SMOKE_FILE:
+                    continue
                 groups[name].update(files.get(path, ()))
                 assigned.add(path)
     unassigned = set(files) - assigned
@@ -243,6 +248,8 @@ def make_plan(catalog, *, modules=None, paths=None, only_testing=None, include_d
             matched = {name for length, name in source_matches if length == longest}
             # Test changes select every module that owns this file (overlaps are intentional).
             for name, module in MODULES.items():
+                if name == "foundation" and path == VERSION_SMOKE_FILE:
+                    continue
                 for pattern in module.tests:
                     if test_path_matches(path, pattern):
                         matched.add(name)

@@ -31,12 +31,15 @@ const AGENTS: [(&str, &str, &str); 4] = [
     ("antigravity", "Antigravity", "antigravity-favicon"),
 ];
 
+type SnapshotKey = (String, String);
+type SnapshotEntry = (Instant, Option<activity::Snapshot>);
+
 #[derive(Default)]
 pub(super) struct State {
     cached: Mutex<Option<(Instant, Arc<View>)>>,
     phone: Mutex<Option<HashMap<String, PhoneMeta>>>,
     acknowledged: Mutex<Option<HashMap<String, AcknowledgedSession>>>,
-    snapshots: Mutex<HashMap<(String, String), (Instant, Option<activity::Snapshot>)>>,
+    snapshots: Mutex<HashMap<SnapshotKey, SnapshotEntry>>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct AcknowledgedSession {

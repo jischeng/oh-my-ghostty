@@ -52,13 +52,7 @@ final class GitCollectionCell: NSTableCellView {
         self.toggleFavorite = favorite?.toggle ?? {}
         let item = row.item
         [checkbox, favoriteButton, progress, disclosure, icon, subtitle, status, badge, rule].forEach { $0.isHidden = true }
-        let isFavoritable: Bool = switch item.kind {
-        case .branch: true
-        case .worktree: true
-        case .ref(let ref): ref.kind == .head && item.id == "HEAD"
-        default: false
-        }
-        if isFavoritable, let favorite {
+        if item.favoriteID != nil, let favorite {
             favoriteButton.isHidden = false
             favoriteButton.image = NSImage(systemSymbolName: favorite.isFavorite ? "star.fill" : "star", accessibilityDescription: nil)
             favoriteButton.contentTintColor = favorite.isFavorite ? colors.accent : colors.secondary

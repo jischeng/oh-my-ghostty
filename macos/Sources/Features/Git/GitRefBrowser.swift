@@ -64,7 +64,7 @@ struct GitRefBrowser: View {
                 mode: externalMode ?? mode, query: externalQuery ?? query, canWrite: !isBusy,
                 interaction: decorations != nil ? .references : isPicker ? .picker : .branches, state: state, stateKey: stateKey,
                 selectedID: selectedID, extraRefs: tags,
-                favoriteBranchIDs: favorites?.refs ?? [],
+                favoriteBranchIDs: favoriteBranchIDs,
                 toggleBranchFavorite: favorites.map { store in { id in
                     store.toggle(id)
                     favoritesRevision += 1
@@ -91,5 +91,10 @@ struct GitRefBrowser: View {
 
     private var favorites: GitHistoryBranchFavorites? {
         repository.map { GitHistoryBranchFavorites(repository: $0) }
+    }
+
+    private var favoriteBranchIDs: Set<String> {
+        _ = favoritesRevision
+        return favorites?.refs ?? []
     }
 }

@@ -46,6 +46,16 @@ struct GitCollectionItem: Equatable {
     var isFolder: Bool { if case .folder = kind { return true }; return false }
     var isCategory: Bool { if case .category = kind { return true }; return false }
     var isSelectable: Bool { !isCategory && { if case .notice = kind { return false }; return true }() }
+    var favoriteID: String? {
+        switch kind {
+        case .branch(let branch, _): branch.id
+        case .worktree(let worktree): GitHistoryBranchFavorites.worktreeID(path: worktree.path)
+        case .ref(let ref):
+            ref.kind == .head && (id == "HEAD" || id == GitCollectionBuilder.favoriteRowID("HEAD")) ? "HEAD" : nil
+        default: nil
+        }
+    }
+    var selectionID: String { favoriteID ?? id }
     var tooltip: String {
         if let fullPath { return fullPath }
         switch kind {
@@ -155,8 +165,9 @@ enum GitCollectionBuilder {
             let head = GitCollectionNode(.init(id: "HEAD", title: "HEAD",
                 kind: .ref(.init(name: "HEAD", kind: .head)), enabled: branchesError == nil))
             let favorites = favoriteBranchIDs.map { ids in
-                favoriteCategory(.init(branches: branches, worktrees: worktrees, head: head, ids: ids,
-                                       includesHead: includesHead && favoritesOnly, occupied: occupied,
+                favoriteCategory(.init(branches: branches, worktrees: worktrees, ids: ids,
+                                       includesHead: includesHead && favoritesOnly,
+                                       headEnabled: branchesError == nil, occupied: occupied,
                                        mode: mode, query: query,
                                        error: branchesError ?? worktreesError))
             }
@@ -191,13 +202,19 @@ enum GitCollectionBuilder {
     }
 
     static func referenceID(_ ref: GitRefDecoration) -> String { "ref:" + ref.kind.rawValue + ":" + ref.name }
+    static func favoriteRowID(_ id: String) -> String { "refs/favorites/" + id }
+    static func canonicalSelectionID(_ id: String) -> String {
+        let prefix = "refs/favorites/"
+        guard id.hasPrefix(prefix), !id.hasPrefix("refs/favorites/folder/") else { return id }
+        return String(id.dropFirst(prefix.count))
+    }
 
     private struct FavoriteContext {
         let branches: [GitBranchInfo]
         let worktrees: [GitWorktreeInfo]
-        let head: GitCollectionNode
         let ids: Set<String>
         let includesHead: Bool
+        let headEnabled: Bool
         let occupied: [String: [(String, String)]]
         let mode: GitCollectionMode
         let query: String
@@ -208,7 +225,7 @@ enum GitCollectionBuilder {
     private static func favoriteCategory(_ context: FavoriteContext) -> GitCollectionNode {
         let favorites = context.branches.filter { context.ids.contains($0.id) }
         let entries = favorites.filter { matches(context.query, text: $0.name) }.map { branch in
-            (branch.name, GitCollectionItem(id: branch.id, title: branch.name,
+            (branch.name, GitCollectionItem(id: favoriteRowID(branch.id), title: branch.name,
                 kind: .branch(branch, worktrees: context.occupied[branch.id, default: []].map(\.1)),
                 enabled: context.error == nil))
         }
@@ -216,14 +233,15 @@ enum GitCollectionBuilder {
         let hasHead = context.includesHead && context.ids.contains("HEAD") &&
             matches(context.query, text: "HEAD")
         if hasHead {
-            children.insert(context.head, at: 0)
+            children.insert(GitCollectionNode(.init(id: favoriteRowID("HEAD"), title: "HEAD",
+                kind: .ref(.init(name: "HEAD", kind: .head)), enabled: context.headEnabled)), at: 0)
         }
         let favoriteWorktrees = context.worktrees.filter {
             context.ids.contains(GitHistoryBranchFavorites.worktreeID(path: $0.path)) &&
                 matches(context.query, text: $0.branchName + " " + $0.path)
         }
         for worktree in favoriteWorktrees {
-            children.append(worktreeNode(worktree, error: context.error))
+            children.append(worktreeNode(worktree, error: context.error, favorite: true))
         }
         let count = favorites.count + (hasHead ? 1 : 0) + favoriteWorktrees.count
         return category("refs/favorites", title: GitL10n.text("Favorites"), count: count,
@@ -233,8 +251,9 @@ enum GitCollectionBuilder {
                             : GitL10n.text("No matching favorites"))
     }
 
-    private static func worktreeNode(_ worktree: GitWorktreeInfo, error: String?) -> GitCollectionNode {
-        GitCollectionNode(.init(id: "worktree:" + worktree.path,
+    private static func worktreeNode(_ worktree: GitWorktreeInfo, error: String?, favorite: Bool = false) -> GitCollectionNode {
+        let rawID = GitHistoryBranchFavorites.worktreeID(path: worktree.path)
+        return GitCollectionNode(.init(id: favorite ? favoriteRowID(rawID) : rawID,
             title: worktree.branchRef == nil
                 ? worktree.head?.shortSHA ?? GitL10n.text("No commits") : worktree.branchName,
             subtitle: worktree.path, kind: .worktree(worktree),

@@ -219,9 +219,17 @@ struct GitCollectionView: NSViewRepresentable {
                 }
             }
             if value.selectedID != old?.selectedID, let selected = value.selectedID,
-               let index = rows.firstIndex(where: { $0.id == selected }) {
+               let index = preferredRowIndex(for: selected, in: rows) {
                 table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
             }
+        }
+
+        private func preferredRowIndex(for selected: String, in rows: [GitCollectionRow]) -> Int? {
+            if let exact = rows.firstIndex(where: { $0.id == selected && $0.item.isSelectable }) {
+                return exact
+            }
+            let target = GitCollectionBuilder.canonicalSelectionID(selected)
+            return rows.firstIndex { $0.item.selectionID == target && $0.item.isSelectable }
         }
 
         func saveAnchor() {
@@ -259,13 +267,13 @@ struct GitCollectionView: NSViewRepresentable {
             updating = true
             defer { updating = false; table.updateHoverFromPointer() }
             rows = next
-            if reset || previous.isEmpty {
+            let oldSet = Set(oldIDs)
+            let newSet = Set(newIDs)
+            if reset || previous.isEmpty || oldSet.count != oldIDs.count || newSet.count != newIDs.count {
                 table.reloadData()
             } else {
                 var removed = IndexSet()
                 var inserted = IndexSet()
-                let oldSet = Set(oldIDs)
-                let newSet = Set(newIDs)
                 // Sorted collections retain the relative order of surviving
                 // rows. Avoid a quadratic diff when an external `git add .`
                 // moves thousands of entries between index sides at once.
@@ -280,7 +288,7 @@ struct GitCollectionView: NSViewRepresentable {
                         }
                     }
                 }
-                let oldRows = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
+                let oldRows = Dictionary(previous.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
                 var updated = IndexSet()
                 var resized = IndexSet()
                 for (index, row) in next.enumerated() where !inserted.contains(index) {
@@ -307,7 +315,7 @@ struct GitCollectionView: NSViewRepresentable {
                 }
                 table.selectRowIndexes(IndexSet(next.indices.filter { remapped.contains(next[$0].id) && next[$0].item.isSelectable }), byExtendingSelection: false)
                 state.selections[input.stateKey] = Set(table.selectedRowIndexes.map { next[$0].id })
-            } else if let selected = preferredSelection, let index = rows.firstIndex(where: { $0.id == selected && $0.item.isSelectable }) {
+            } else if let selected = preferredSelection, let index = preferredRowIndex(for: selected, in: rows) {
                 table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
             } else if input.interaction == .picker, let index = rows.firstIndex(where: { $0.item.isSelectable && !$0.item.isFolder && $0.item.enabled }) {
                 table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
@@ -368,11 +376,15 @@ struct GitCollectionView: NSViewRepresentable {
             var displayed = row
             if let table, table.selectedRowIndexes.count > 1, selectedRows.contains(row.id),
                let batch = selectedBatch, !batch.paths.isDisjoint(with: input?.pending ?? []) { displayed.item.enabled = false }
+            let favorite: (isFavorite: Bool, toggle: () -> Void)? = if let toggle = input?.toggleBranchFavorite,
+                                                                        let favoriteID = row.item.favoriteID {
+                (isFavorite: input?.favoriteBranchIDs.contains(favoriteID) == true, toggle: { toggle(favoriteID) })
+            } else {
+                nil
+            }
             cell.configure(displayed, colors: input?.effectiveColors ?? .init(), toggle: { [weak self] in self?.toggleFolder(row.id) },
                            stage: { [weak self] in self?.toggleStage(rowID: row.id) },
-                           favorite: input?.toggleBranchFavorite.map { toggle in
-                               (isFavorite: input?.favoriteBranchIDs.contains(row.id) == true, toggle: { toggle(row.id) })
-                           },
+                           favorite: favorite,
                            copied: input?.copiedRowID == row.id)
             cell.favoriteButton.setRowHovered(table?.hoveredRowID == row.id)
         }

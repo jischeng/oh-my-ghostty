@@ -2983,7 +2983,9 @@ legacy keys. Worktrees are favorited by their exact path (`worktree:<path>`), so
 a favorite survives branch renames and detached HEAD states. The Branches column
 shows the same favorites ahead of its normal sections once anything is starred,
 including favorited worktrees, and star toggles there and in the history picker
-share one store. Missing refs are omitted from the favorite list; favoriting
+share one store; favorite rows keep section-scoped row IDs so entries appearing
+in both Favorites and normal sections hover and diff independently while routing
+their underlying ref or worktree identity. Missing refs are omitted from the favorite list; favoriting
 never checks out a branch or changes repository files.
 
 Changes has its own remembered mode; Branches and the picker share the remembered

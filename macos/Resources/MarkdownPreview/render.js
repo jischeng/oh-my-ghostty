@@ -597,7 +597,8 @@
         document.documentElement.dataset.theme = theme;
         const hlTheme = document.getElementById('highlight-theme');
         if (hlTheme) {
-            hlTheme.href = new URL(theme === 'dark' ? 'github-dark.min.css' : 'github.min.css', assetURL).href;
+            const targetHref = new URL(theme === 'dark' ? 'github-dark.min.css' : 'github.min.css', assetURL).href;
+            if (hlTheme.href !== targetHref) hlTheme.href = targetHref;
         }
         for (const key of ['background', 'foreground']) {
             const value = options[key];

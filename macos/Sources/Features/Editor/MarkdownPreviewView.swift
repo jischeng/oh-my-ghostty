@@ -27,9 +27,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
         configuration.setURLSchemeHandler(context.coordinator.resources, forURLScheme: "omg-markdown-image")
         configuration.userContentController.add(context.coordinator, name: "markdownPreview")
         let view = MarkdownPreviewWebView(frame: .zero, configuration: configuration)
-        view.setValue(false, forKey: "drawsBackground")
-        view.wantsLayer = true
-        view.layer?.backgroundColor = terminalBackground.cgColor
+        view.applyThemeAndTransparency(terminalBackground: terminalBackground)
         view.navigationDelegate = context.coordinator
         context.coordinator.webView = view
         EditorCommandRouter.shared.register(owner: context.coordinator) { [weak coordinator = context.coordinator] event in
@@ -41,7 +39,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
     }
 
     func updateNSView(_ view: MarkdownPreviewWebView, context: Context) {
-        view.layer?.backgroundColor = terminalBackground.cgColor
+        view.applyThemeAndTransparency(terminalBackground: terminalBackground)
         context.coordinator.update(self)
     }
 
@@ -57,11 +55,12 @@ struct MarkdownPreviewView: NSViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         let resources = MarkdownPreviewResources()
-        weak var webView: WKWebView?
+        weak var webView: MarkdownPreviewWebView?
         var renderTask: Task<Void, Never>?
         private var ready = false
         private var hasRenderedOnce = false
         private var payload: String?
+        private var renderedPayload: String?
         private var payloadText: String?
         private var binding: Binding<String>?
         private var isActive = false
@@ -72,6 +71,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
         private var onOpenLink: (String) -> Void = { _ in }
 
         func update(_ preview: MarkdownPreviewView) {
+            let becameActive = preview.isActive && !isActive
             binding = preview.$text
             isActive = preview.isActive
             onFocus = preview.onFocus
@@ -100,10 +100,16 @@ struct MarkdownPreviewView: NSViewRepresentable {
                 ],
             ]
             guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]),
-                  let nextPayload = String(data: data, encoding: .utf8), nextPayload != payload else { return }
+                  let nextPayload = String(data: data, encoding: .utf8) else { return }
+            if nextPayload == payload {
+                if becameActive, renderedPayload != nextPayload {
+                    scheduleRender(immediate: true)
+                }
+                return
+            }
             payload = nextPayload
             payloadText = preview.text
-            scheduleRender()
+            scheduleRender(immediate: becameActive)
         }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -181,11 +187,13 @@ struct MarkdownPreviewView: NSViewRepresentable {
             return false
         }
 
-        private func scheduleRender() {
+        private func scheduleRender(immediate: Bool = false) {
             renderTask?.cancel()
             guard ready, let payload else { return }
-            if !hasRenderedOnce {
+            if !hasRenderedOnce || immediate {
                 hasRenderedOnce = true
+                renderedPayload = payload
+                webView?.enforceTransparentBackground()
                 webView?.evaluateJavaScript(
                     "(() => { const p = \(payload); window.renderMarkdown(p.text, p.options); })();",
                     completionHandler: nil
@@ -198,11 +206,16 @@ struct MarkdownPreviewView: NSViewRepresentable {
                 try? await Task.sleep(nanoseconds: 80_000_000)
                 guard !Task.isCancelled, let self else { return }
                 guard self.binding?.wrappedValue == text else { return }
-                self.webView?.evaluateJavaScript(
-                    "(() => { const p = \(payload); window.renderMarkdown(p.text, p.options); })();",
-                    completionHandler: nil
+                self.renderedPayload = payload
+                self.webView?.enforceTransparentBackground()
+                _ = try? await self.webView?.evaluateJavaScript(
+                    "(() => { const p = \(payload); window.renderMarkdown(p.text, p.options); })();"
                 )
             }
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            (webView as? MarkdownPreviewWebView)?.enforceTransparentBackground()
         }
 
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
@@ -235,6 +248,70 @@ enum MarkdownPreviewEdit {
 
 final class MarkdownPreviewWebView: WKWebView {
     override var mouseDownCanMoveWindow: Bool { false }
+    override var isOpaque: Bool { false }
+
+    override init(frame: CGRect, configuration: WKWebViewConfiguration) {
+        super.init(frame: frame, configuration: configuration)
+        enforceTransparentBackground()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        enforceTransparentBackground()
+    }
+
+    override func layout() {
+        super.layout()
+        enforceTransparentBackground()
+    }
+
+    override func updateLayer() {
+        super.updateLayer()
+        layer?.backgroundColor = nil
+        layer?.isOpaque = false
+    }
+
+    func applyThemeAndTransparency(terminalBackground: NSColor) {
+        let rgb = terminalBackground.usingColorSpace(.deviceRGB) ?? .black
+        let luminance = 0.2126 * rgb.redComponent + 0.7152 * rgb.greenComponent + 0.0722 * rgb.blueComponent
+        let targetName: NSAppearance.Name = luminance < 0.5 ? .darkAqua : .aqua
+        if appearance?.name != targetName {
+            appearance = NSAppearance(named: targetName)
+        }
+        enforceTransparentBackground()
+    }
+
+    /// Ensures WKWebView and any internal AppKit scroll/clip views never paint
+    /// an opaque background over EditorBackdrop's shared translucent surface.
+    func enforceTransparentBackground() {
+        setValue(false, forKey: "drawsBackground")
+        underPageBackgroundColor = .clear
+        if let layer {
+            layer.backgroundColor = nil
+            layer.isOpaque = false
+        }
+        Self.clearSubviewBackgrounds(in: self)
+    }
+
+    private static func clearSubviewBackgrounds(in root: NSView) {
+        for subview in root.subviews {
+            if let scroll = subview as? NSScrollView {
+                scroll.drawsBackground = false
+                scroll.backgroundColor = .clear
+                scroll.layer?.backgroundColor = nil
+            } else if let clip = subview as? NSClipView {
+                clip.drawsBackground = false
+                clip.backgroundColor = .clear
+                clip.layer?.backgroundColor = nil
+            }
+            clearSubviewBackgrounds(in: subview)
+        }
+    }
 
     static func ownsResponder(_ responder: NSResponder?) -> Bool {
         var view = responder as? NSView

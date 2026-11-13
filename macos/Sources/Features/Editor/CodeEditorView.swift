@@ -145,11 +145,16 @@ struct CodeEditorView: View {
         }
         .onChange(of: settings.editorKeymapPreset) { _ in configureCommands() }
         .onChange(of: resolvedTheme) { _ in editorCoordinator.refreshBackground() }
+        .onChange(of: isEditable) { _ in editorCoordinator.refreshBackground() }
+        .onChange(of: terminalBackgroundOpacity) { _ in editorCoordinator.refreshBackground() }
         .onChange(of: editorSettings) { _ in
             editorCoordinator.refreshBackground()
             editorCoordinator.invalidateWrappedLayout()
         }
-        .onChange(of: wordWrapOverride) { _ in editorCoordinator.invalidateWrappedLayout() }
+        .onChange(of: wordWrapOverride) { _ in
+            editorCoordinator.refreshBackground()
+            editorCoordinator.invalidateWrappedLayout()
+        }
         .onChange(of: findText) { _ in
             refreshSearchMatches()
             guard isFindVisible, barMode != .goToLine else { return }
@@ -730,7 +735,9 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
         // scroll backgrounds. Clear them after that update, including the
         // macOS scroll view backing layer, so the workspace backdrop is visible.
         DispatchQueue.main.async { [weak self] in
-            guard let scroll = self?.controller?.textView.enclosingScrollView else { return }
+            guard let textView = self?.controller?.textView,
+                  let scroll = textView.enclosingScrollView else { return }
+            textView.layer?.backgroundColor = nil
             scroll.drawsBackground = false
             scroll.backgroundColor = .clear
             scroll.layer?.backgroundColor = NSColor.clear.cgColor

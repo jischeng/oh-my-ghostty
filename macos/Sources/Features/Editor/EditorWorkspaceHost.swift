@@ -1191,7 +1191,7 @@ private struct EditorDocumentView: View {
                 .opacity(showsMarkdownPreview ? 0 : 1)
                 .allowsHitTesting(!showsMarkdownPreview)
 
-                if showsMarkdownPreview {
+                if document.isMarkdown {
                     MarkdownPreviewView(
                         text: $document.text,
                         fileURL: URL(fileURLWithPath: document.path),
@@ -1199,7 +1199,7 @@ private struct EditorDocumentView: View {
                         filesystem: document.filesystem,
                         terminalBackground: terminalBackground,
                         foregroundColor: terminalTheme.text.color,
-                        isActive: isActive,
+                        isActive: isActive && showsMarkdownPreview,
                         onFocus: onFocus,
                         onSave: save,
                         onSaveAll: saveAll,
@@ -1207,6 +1207,8 @@ private struct EditorDocumentView: View {
                         onOpenLink: openLink
                     )
                     .id(document.contentGeneration)
+                    .opacity(showsMarkdownPreview ? 1 : 0)
+                    .allowsHitTesting(showsMarkdownPreview)
                 }
             }
             Divider()

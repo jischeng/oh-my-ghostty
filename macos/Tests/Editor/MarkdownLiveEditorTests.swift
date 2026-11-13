@@ -292,6 +292,79 @@ struct MarkdownLiveEditorTests {
         #expect(restoredHeight < narrowHeight, "Widening a word-wrapped editor back must unwrap lines cleanly")
     }
 
+    @Test func previewRemainsTransparentAcrossInitialLoadModeSwitchAndUpdates() async throws {
+        var text = "# Translucent Backdrop Check\n\nParagraph text."
+        var isActive = true
+        var background = NSColor.black
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 420),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        func makeRoot() -> some View {
+            ZStack {
+                Color.green
+                MarkdownPreviewView(
+                    text: .constant(text),
+                    fileURL: URL(fileURLWithPath: "/tmp/translucent.md"),
+                    terminalBackground: background,
+                    foregroundColor: .white,
+                    isActive: isActive
+                )
+            }
+        }
+        let host = NSHostingView(rootView: AnyView(makeRoot()))
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer {
+            window.contentView = nil
+            window.close()
+        }
+
+        let web = try await waitForWebView(in: window)
+        try await waitUntil {
+            (try? await web.evaluateJavaScript("!!document.querySelector('#content h1')")) as? Bool == true
+        }
+
+        func assertTransparentWebView(_ stage: String) async throws {
+            #expect(!web.isOpaque, "WebView must report isOpaque == false (\(stage))")
+            #expect((web.value(forKey: "drawsBackground") as? Bool) == false, "drawsBackground must stay false (\(stage))")
+            #expect((web.underPageBackgroundColor?.alphaComponent ?? 0) == 0, "underPageBackgroundColor must stay clear (\(stage))")
+            let alpha = web.layer?.backgroundColor?.alpha ?? 0
+            #expect(alpha == 0, "WebView layer must never paint an opaque terminalBackground (\(stage)), found alpha=\(alpha)")
+            let domTransparent = try await web.evaluateJavaScript("""
+            (() => {
+                const htmlBg = getComputedStyle(document.documentElement).backgroundColor;
+                const bodyBg = getComputedStyle(document.body).backgroundColor;
+                const isClear = v => v === 'rgba(0, 0, 0, 0)' || v === 'transparent';
+                return isClear(htmlBg) && isClear(bodyBg);
+            })()
+            """) as? Bool
+            #expect(domTransparent == true, "HTML/body computed background must remain transparent (\(stage))")
+        }
+
+        // 1. Initial load must already be transparent (never start opaque)
+        try await assertTransparentWebView("initial load")
+
+        // 2. Toggle inactive -> active (Edit <-> Preview) and re-update
+        isActive = false
+        host.rootView = AnyView(makeRoot())
+        try await Task.sleep(for: .milliseconds(80))
+        try await assertTransparentWebView("after deactivating")
+
+        // 3. Subsequent SwiftUI updates (simulating periodic terminal/workspace state ticks)
+        isActive = true
+        text = "# Translucent Backdrop Check\n\nUpdated paragraph."
+        background = NSColor(deviceRed: 0.08, green: 0.10, blue: 0.14, alpha: 1.0)
+        host.rootView = AnyView(makeRoot())
+        try await waitUntil {
+            (try? await web.evaluateJavaScript("document.querySelector('#content')?.innerText.includes('Updated paragraph.')")) as? Bool == true
+        }
+        try await assertTransparentWebView("after subsequent SwiftUI updates")
+    }
+
     private func waitForWebView(in window: NSWindow) async throws -> MarkdownPreviewWebView {
         for _ in 0..<150 {
             if let found = findWebView(window.contentView) {

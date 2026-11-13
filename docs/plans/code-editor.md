@@ -90,10 +90,10 @@
 
 ### 本轮检查后仍待推进
 
-- Markdown 文件（`.md` / `.markdown`，不区分大小写）默认 Live Preview，每个文档保留独立的 Edit/Preview 选择。Live Preview 使用离线 CodeMirror 6，Markdown 源码是唯一真相：普通行通过 live decorations 呈现标题、强调、列表等样式；复杂块按源码范围复用原有 markdown-it 渲染 widget，包括表格、Mermaid、公式、GitHub alerts、admonitions 与 HTML/SVG。编辑修改同一份 CodeMirror 文档，通过 transaction 回写原生文档，沿用自动保存和冲突检测，不经过富文本解析器的整篇序列化。
-- Live Preview 的复杂块依赖源码范围模型：渲染 widget 是源码的视图，编辑应定位并修改对应源码范围；参考链接/图片定义必须保留在文档中，并作为分块渲染上下文处理，不能因定义行不产生可见块而丢失。此方案不是完整 Typora 富文本编辑器；复杂块源码编辑与普通行的直接输入属于不同交互，表格单元格、跨块选择、中文输入、撤销和窄窗口布局仍需针对实际实现验收。打开文件或仅渲染不会规范化全文或标记修改。
-- `MarkdownPreviewView` 使用透明 WKWebView 继承终端背景，渲染更新合并处理；本地和 SSH 图片通过同一个 `WorkspaceFilesystem` 异步读取，资源桥只返回图片类型。重载文档重建预览并重新请求图片。脚本、字体和样式随应用打包，远程 URL 图片仍需要网络；HTML 经 DOMPurify 过滤，Mermaid 使用 strict 模式，外部链接仅在用户点击后交给系统浏览器。
-- 预览拥有自身选区与复制快捷键；隐藏终端不抢占 WebView 快捷键。编辑消息携带基准文本，拒绝覆盖已经变化的文档；保存前取得最新编辑内容。编辑器依赖锁定和构建方式见 `dist/markdown-editor/README.md`。
+- Markdown 文件（`.md` / `.markdown`，不区分大小写）默认打开为 Preview 模式，每个文档在顶部右侧工具栏保留独立的 `Edit | Preview` 切换；收到行号定位导航请求时自动切换到 Edit 模式并默认开启软换行。Preview 使用打包的离线 `markdown-it` + `Highlight.js` + `KaTeX` + `Mermaid` + `DOMPurify` 管线渲染，支持自适应宽屏/窄屏重排、CJK 宽表格智能列宽与局部横向滚动、`file://#L...` 本地/SSH 跳转胶囊、代码块一键复制、GitHub Alerts 以及 `carousel` 多页轮播卡片。
+- Preview 中的待办复选框点击通过 `{type: "edit", text, baseText}` 版本校验桥只切换源码对应的单个字符，不经过富文本整篇序列化；仅打开或渲染不会规范化全文或标记修改。
+- `MarkdownPreviewView` 使用透明 WKWebView 继承终端背景，首次就绪立即渲染、后续编辑更新合并防抖；本地和 SSH 图片通过同一个 `WorkspaceFilesystem` 异步读取，资源桥只返回图片类型。重载文档重建预览并重新请求图片。脚本、字体和样式随应用打包，远程 URL 图片仍需要网络；HTML 经 DOMPurify 过滤，Mermaid 使用 strict 模式，外部链接仅在用户点击后交给系统浏览器。
+- 预览拥有自身选区与复制快捷键；隐藏终端不抢占 WebView 快捷键。编辑消息携带基准文本，拒绝覆盖已经变化的文档；保存前同步最新内容。前端离线测试依赖说明见 `dist/markdown-editor/README.md`。
 - buffer 补全仍只扫描文件开头 100,000 个 UTF-16 单元，大文件尾部的局部标识符可能缺失；后续应采用光标周边窗口或增量索引。
 - `EditorWorkspace.save/canClose` 在已有保存进行时直接返回 false，慢速 SSH 下缺少等待完成后继续用户操作的机制。
 - 每个打开的文档都保留原生编辑器以保存撤销历史；大量标签的内存及恢复策略需要实际测量，不能直接通过销毁隐藏编辑器优化。

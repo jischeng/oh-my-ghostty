@@ -3234,29 +3234,26 @@ Known non-text formats (including DMG, PDF and images) use the system default
 application before creating an editor pane. Binary/unsupported-encoding and
 oversized text failures also fall back to the default application. Remote
 external files reuse the bounded read-only temporary download used by Open in…;
-external changes are not uploaded. Markdown Live Preview uses offline CodeMirror 6
-with Markdown source as the sole document state. Ordinary lines use live
-decorations; complex blocks reuse the existing sanitized markdown-it renderer as
-widgets mapped to source ranges. Reference link/image definitions remain source
-and contribute to the rendering context even when they produce no visible block.
-Widgets do not own a second rich-text document or serialize the whole file.
+external changes are not uploaded. Markdown documents (`.md` / `.markdown`)
+default to Preview mode with an independent per-document `Edit | Preview` switch
+in the editor toolbar. Edit mode uses the native `CodeEditorView` with word wrap
+enabled by default, while Preview mode renders Markdown in a transparent
+`WKWebView` using the bundled offline `markdown-it`, `Highlight.js`, `KaTeX`,
+`Mermaid` (strict security level) and `DOMPurify` pipeline. Reference link/image
+definitions, GFM alerts, interactive `carousel` fences, smart horizontally
+scrollable tables and code-copy headers render without mutating source text.
 
-CodeMirror transactions update the same native editor document through the
-version-checked `{type: "edit", text, baseText}` bridge. Matching native text
-acknowledgements preserve selection and undo history; opening or rendering alone
-does not rewrite source. Save continues through the existing native document
-boundary, without granting web content direct filesystem write access. Complex
-blocks are edited through their source ranges; this is a source-based live
-preview, not a claim of complete Typora-style rich-text editing. The internal
-`window.omgLiveEditorView()` test hook returns a CodeMirror `EditorView`; it is
-not a plugin API or a ProseMirror view.
-
-Mermaid widgets distinguish DOM construction from mounting. Detached widgets wait
-outside the serialized renderer queue, live remounts can retry discarded results,
-and widget destruction cancels mount observation. Changed source cannot accept
-stale SVGs; completed widgets do not rerender merely because their DOM moves.
-Renderer/load errors are visible and terminal, not silently retried. These are
-Host-owned editor lifecycle details and do not expand plugin APIs or permissions.
+Interactive task-list checkboxes update the underlying native `EditorDocument`
+through the version-checked `{type: "edit", text, baseText}` bridge by toggling
+only the single task marker character; opening or rendering alone never rewrites
+source. Clicking `file://` links (including `#Lstart-Lend` fragments) or
+workspace-relative links resolves through `TerminalPathOpener` on the pane's
+local or SSH filesystem and switches Markdown targets into Edit mode when a line
+location is requested; external `http`/`https`/`mailto` links open via the
+system handler only on user activation. Save continues through the native
+document boundary without granting web content direct filesystem write access.
+These are Host-owned editor lifecycle details and do not expand plugin APIs or
+permissions.
 
 ### Git collection navigation
 

@@ -12,7 +12,15 @@ final class EditorLayoutDelegate: @preconcurrency TextLayoutManagerDelegate {
 
     var visibleRect: NSRect { textView?.visibleRect ?? .zero }
 
-    func textViewportSize() -> CGSize { textView?.textViewportSize() ?? .zero }
+    func textViewportSize() -> CGSize {
+        guard let textView else { return .zero }
+        let viewport = textView.textViewportSize()
+        let fallbackWidth = textView.enclosingScrollView?.contentSize.width ?? textView.bounds.width
+        let fallbackHeight = textView.enclosingScrollView?.contentSize.height ?? textView.bounds.height
+        let width = viewport.width.isFinite && viewport.width > 0 ? viewport.width : max(1, fallbackWidth)
+        let height = viewport.height.isFinite && viewport.height > 0 ? viewport.height : max(1, fallbackHeight)
+        return CGSize(width: width, height: height)
+    }
 
     func layoutManagerTypingAttributes() -> [NSAttributedString.Key: Any] {
         textView?.typingAttributes ?? [:]

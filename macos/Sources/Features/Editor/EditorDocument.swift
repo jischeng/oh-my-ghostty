@@ -111,6 +111,7 @@ final class EditorDocument: ObservableObject {
     @Published private(set) var saveErrorMessage: String?
     @Published private(set) var contentGeneration: UInt64 = 0
     @Published private(set) var pendingNavigation: EditorNavigationRequest?
+    @Published var isPreviewMode = true
 
     private var encoding: EditorDocumentEncoding
     private var persistedText: String
@@ -120,7 +121,14 @@ final class EditorDocument: ObservableObject {
 
     var path: String { id.path }
 
+    var isMarkdown: Bool {
+        ["md", "markdown"].contains((path as NSString).pathExtension.lowercased())
+    }
+
     func requestNavigation(_ location: EditorTextLocation) {
+        if isMarkdown {
+            isPreviewMode = false
+        }
         pendingNavigation = EditorNavigationRequest(location: location)
     }
 

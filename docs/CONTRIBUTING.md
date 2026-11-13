@@ -88,8 +88,7 @@ or artifact checks. For example:
 ```bash
 mise exec zig@0.16.0 -- zig build test -Dversion-string=1.3.2-dev -Dtest-filter='<affected test>'
 python3 -m unittest discover -s dist -p 'test_omg_test_plan.py'
-# When changing the Markdown renderer/source bundle:
-npm run build --prefix dist/markdown-editor
+# When changing the Markdown preview renderer:
 npm test --prefix dist/markdown-editor
 ```
 

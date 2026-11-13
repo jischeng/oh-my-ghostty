@@ -42,6 +42,18 @@ struct EditorWorkspaceHost<Terminal: View>: View {
         self.terminal = terminal()
     }
 
+    private var isChinese: Bool {
+        SettingsStrings(language: settings.language).isChinese
+    }
+
+    private var selectedMarkdownDocument: EditorDocument? {
+        guard workspace.gitDiff == nil,
+              let selectedID = workspace.selectedID,
+              let document = workspace.documents.first(where: { $0.id == selectedID }),
+              document.isMarkdown else { return nil }
+        return document
+    }
+
     var body: some View {
         NativeEditorContentDeck(items: [
             .init(id: .terminal, content: AnyView(VStack(spacing: 0) {
@@ -50,7 +62,19 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                 }
                 terminal
             }.overlay(alignment: .topTrailing) {
-                SessionRuntimeRecoveryBanner(controller: controller, surface: surfaceView)
+                VStack(alignment: .trailing, spacing: 6) {
+                    if !workspace.isVisible, !workspace.documents.isEmpty || !workspace.gitDiffs.isEmpty {
+                        EditorCollapsedPill(workspace: workspace, isChinese: isChinese) {
+                            if controller.focusedSurface !== surfaceView {
+                                controller.focusedSurface = surfaceView
+                            }
+                            workspace.isVisible = true
+                        }
+                        .padding(.top, 8)
+                        .padding(.trailing, 8)
+                    }
+                    SessionRuntimeRecoveryBanner(controller: controller, surface: surfaceView)
+                }
             })),
             .init(id: .workspace, content: AnyView(editor
                 .simultaneousGesture(TapGesture().onEnded {
@@ -64,16 +88,6 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                 Ghostty.moveFocus(to: surfaceView)
             }
         }
-        .overlay(alignment: .topTrailing) {
-            if !workspace.isVisible, !workspace.documents.isEmpty || !workspace.gitDiffs.isEmpty {
-                Button("Editor") {
-                    if controller.focusedSurface !== surfaceView {
-                        controller.focusedSurface = surfaceView
-                    }
-                    workspace.isVisible = true
-                }.padding(8)
-            }
-        }
         .onChange(of: workspace.isVisible) { visible in
             if visible {
                 if controller.focusedSurface !== surfaceView {
@@ -85,15 +99,18 @@ struct EditorWorkspaceHost<Terminal: View>: View {
 
     private var editor: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 4) {
+            HStack(spacing: 6) {
                 ScrollViewReader { proxy in
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 2) {
                             ForEach(workspace.documents, id: \.id) { document in
                                 EditorDocumentTab(
                                     document: document,
-                                    isSelected: workspace.selectedID == document.id,
-                                    select: { workspace.selectedID = document.id },
+                                    isSelected: workspace.gitDiff == nil && workspace.selectedID == document.id,
+                                    select: {
+                                        workspace.gitDiff = nil
+                                        workspace.selectedID = document.id
+                                    },
                                     close: { close(document) }
                                 )
                                 .id(document.id)
@@ -123,15 +140,28 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                         if let selected { proxy.scrollTo(selected) }
                     }
                 }
-                Button(action: openFile) { Image(systemName: "folder.badge.plus") }
-                    .help("Open File")
-                Button { workspace.isVisible = false } label: {
-                    Image(systemName: "rectangle.compress.vertical")
+                HStack(spacing: 4) {
+                    if let markdownDocument = selectedMarkdownDocument {
+                        EditorMarkdownModeSwitch(document: markdownDocument, isChinese: isChinese)
+                            .padding(.trailing, 2)
+                    }
+                    EditorToolbarIconButton(
+                        tooltip: isChinese ? "打开文件… (⌘O)" : "Open File… (⌘O)",
+                        accessibilityLabel: "Open File",
+                        icon: EditorOpenFileIcon(),
+                        action: openFile
+                    )
+                    EditorToolbarIconButton(
+                        tooltip: isChinese ? "收起编辑器 (⇧⎋)" : "Collapse Editor (⇧⎋)",
+                        accessibilityLabel: "Hide Editor",
+                        icon: EditorCodexCollapseIcon(),
+                        action: { workspace.isVisible = false }
+                    )
                 }
-                .help("Hide Editor")
             }
             .buttonStyle(.borderless)
-            .padding(6)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
             Divider()
             if let error = workspace.errorMessage {
                 HStack(alignment: .top) {
@@ -187,7 +217,8 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                     nextDocument: { workspace.selectAdjacentDocument(offset: 1) },
                     previousDocument: { workspace.selectAdjacentDocument(offset: -1) },
                     saveAll: { Task { await workspace.saveAll() } },
-                    onHide: { workspace.isVisible = false }
+                    onHide: { workspace.isVisible = false },
+                    openLink: { href in openMarkdownLink(href, document: document) }
                 )
             ))
         }
@@ -290,6 +321,25 @@ struct EditorWorkspaceHost<Terminal: View>: View {
     private func openFile() {
         EditorMenuController.shared.openFile(in: controller, surface: surfaceView)
     }
+
+    private func openMarkdownLink(_ href: String, document: EditorDocument) {
+        let trimmed = href.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let lower = trimmed.lowercased()
+        if lower.hasPrefix("https://") || lower.hasPrefix("http://") || lower.hasPrefix("mailto:"),
+           let url = URL(string: trimmed) {
+            NSWorkspace.shared.open(url)
+            return
+        }
+        let docDir = (document.path as NSString).deletingLastPathComponent
+        let candidate: String
+        if !lower.hasPrefix("file:"), !trimmed.hasPrefix("/"), !trimmed.hasPrefix("~"), docDir.hasPrefix("/") {
+            candidate = docDir == "/" ? "/" + trimmed : docDir + "/" + trimmed
+        } else {
+            candidate = trimmed
+        }
+        _ = TerminalPathOpener.open(candidate, from: surfaceView, baseDirectory: docDir)
+    }
 }
 
 private struct EditorDocumentTab: View {
@@ -297,22 +347,279 @@ private struct EditorDocumentTab: View {
     let isSelected: Bool
     let select: () -> Void
     let close: () -> Void
+    @State private var isHovered = false
+    @State private var isCloseHovered = false
 
     var body: some View {
         HStack(spacing: 6) {
             Button(action: select) {
                 HStack(spacing: 5) {
-                    if document.isDirty { Circle().frame(width: 6, height: 6) }
-                    Text((document.path as NSString).lastPathComponent).lineLimit(1)
+                    if document.isDirty {
+                        Circle()
+                            .fill(Color.orange)
+                            .frame(width: 6, height: 6)
+                    }
+                    Text((document.path as NSString).lastPathComponent)
+                        .lineLimit(1)
                 }
             }
-            Button(action: close) { Image(systemName: "xmark").font(.caption2) }
-                .help("Close File")
+            Button(action: close) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(isCloseHovered ? .primary : .secondary)
+                    .frame(width: 16, height: 16)
+                    .background(isCloseHovered ? Color.primary.opacity(0.1) : Color.clear, in: RoundedRectangle(cornerRadius: 4))
+            }
+            .onHover { isCloseHovered = $0 }
+            .help("Close File")
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(isSelected ? Color.accentColor.opacity(0.16) : Color.clear, in: RoundedRectangle(cornerRadius: 5))
+        .padding(.leading, 9)
+        .padding(.trailing, 6)
+        .padding(.vertical, 5)
+        .background(
+            isSelected
+                ? Color.accentColor.opacity(0.18)
+                : (isHovered ? Color.primary.opacity(0.06) : Color.clear),
+            in: RoundedRectangle(cornerRadius: 6)
+        )
+        .onHover { isHovered = $0 }
         .help(document.filesystem.descriptor.presentationTitle + " — " + document.path)
+    }
+}
+
+private struct EditorMarkdownModeSwitch: View {
+    @ObservedObject var document: EditorDocument
+    let isChinese: Bool
+
+    var body: some View {
+        Picker("", selection: $document.isPreviewMode) {
+            Text("Edit").tag(false)
+            Text("Preview").tag(true)
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .controlSize(.small)
+        .frame(width: 120)
+        .help(isChinese ? "切换源码编辑 / Markdown 预览" : "Switch between Source Edit and Markdown Preview")
+    }
+}
+
+private struct EditorToolbarIconButton<Icon: View>: View {
+    let tooltip: String
+    let accessibilityLabel: String
+    let icon: Icon
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            icon
+                .frame(width: 16, height: 16)
+                .foregroundStyle(isHovered ? Color.primary : Color.secondary)
+                .frame(width: 28, height: 28)
+                .background(
+                    isHovered ? Color.primary.opacity(0.10) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 6)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(isHovered ? Color.primary.opacity(0.12) : Color.clear, lineWidth: 1)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .help(tooltip)
+        .accessibilityLabel(accessibilityLabel)
+    }
+}
+
+private struct EditorOpenFileIcon: View {
+    var body: some View {
+        Canvas { context, size in
+            let scaleX = size.width / 16.0
+            let scaleY = size.height / 16.0
+            func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+                CGPoint(x: x * scaleX, y: y * scaleY)
+            }
+            let stroke = StrokeStyle(lineWidth: 1.35, lineCap: .round, lineJoin: .round)
+
+            var doc = Path()
+            doc.move(to: pt(9.4, 2.1))
+            doc.addLine(to: pt(4.6, 2.1))
+            doc.addQuadCurve(to: pt(3.4, 3.3), control: pt(3.4, 2.1))
+            doc.addLine(to: pt(3.4, 12.7))
+            doc.addQuadCurve(to: pt(4.6, 13.9), control: pt(3.4, 13.9))
+            doc.addLine(to: pt(11.4, 13.9))
+            doc.addQuadCurve(to: pt(12.6, 12.7), control: pt(12.6, 13.9))
+            doc.addLine(to: pt(12.6, 5.3))
+            doc.closeSubpath()
+            context.stroke(doc, with: .foreground, style: stroke)
+
+            var fold = Path()
+            fold.move(to: pt(9.2, 2.2))
+            fold.addLine(to: pt(9.2, 5.4))
+            fold.addLine(to: pt(12.4, 5.4))
+            context.stroke(fold, with: .foreground, style: stroke)
+
+            var arrow = Path()
+            arrow.move(to: pt(8.0, 11.4))
+            arrow.addLine(to: pt(8.0, 7.3))
+            arrow.move(to: pt(6.3, 8.9))
+            arrow.addLine(to: pt(8.0, 7.2))
+            arrow.addLine(to: pt(9.7, 8.9))
+            context.stroke(arrow, with: .foreground, style: stroke)
+        }
+    }
+}
+
+/// Codex-style inward corner brackets indicating collapse.
+private struct EditorCodexCollapseIcon: View {
+    var body: some View {
+        Canvas { context, size in
+            let scaleX = size.width / 16.0
+            let scaleY = size.height / 16.0
+            func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+                CGPoint(x: x * scaleX, y: y * scaleY)
+            }
+            var path = Path()
+            // Bottom-left inward corner (┐)
+            path.move(to: pt(3.5, 9.5))
+            path.addLine(to: pt(6.5, 9.5))
+            path.addLine(to: pt(6.5, 12.5))
+            // Top-right inward corner (└)
+            path.move(to: pt(9.5, 3.5))
+            path.addLine(to: pt(9.5, 6.5))
+            path.addLine(to: pt(12.5, 6.5))
+            context.stroke(
+                path,
+                with: .foreground,
+                style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round)
+            )
+        }
+    }
+}
+
+/// Codex-style outward corner brackets indicating expand.
+private struct EditorCodexExpandIcon: View {
+    var body: some View {
+        Canvas { context, size in
+            let scaleX = size.width / 16.0
+            let scaleY = size.height / 16.0
+            func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+                CGPoint(x: x * scaleX, y: y * scaleY)
+            }
+            var path = Path()
+            // Bottom-left outward corner (└)
+            path.move(to: pt(4.0, 8.5))
+            path.addLine(to: pt(4.0, 12.0))
+            path.addLine(to: pt(7.5, 12.0))
+            // Top-right outward corner (┐)
+            path.move(to: pt(12.0, 7.5))
+            path.addLine(to: pt(12.0, 4.0))
+            path.addLine(to: pt(8.5, 4.0))
+            context.stroke(
+                path,
+                with: .foreground,
+                style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round)
+            )
+        }
+    }
+}
+
+private struct EditorCollapsedPill: View {
+    @ObservedObject var workspace: EditorWorkspace
+    let isChinese: Bool
+    let expand: () -> Void
+    @State private var isHovered = false
+
+    private var activeDocument: EditorDocument? {
+        guard workspace.gitDiff == nil else { return nil }
+        if let selectedID = workspace.selectedID,
+           let selected = workspace.documents.first(where: { $0.id == selectedID }) {
+            return selected
+        }
+        return workspace.documents.first
+    }
+
+    private var activeTitle: String {
+        if let diff = workspace.gitDiff {
+            return diff.tabTitle
+        }
+        if let doc = activeDocument {
+            return (doc.path as NSString).lastPathComponent
+        }
+        if let firstDiff = workspace.gitDiffs.first {
+            return firstDiff.tabTitle
+        }
+        return "Editor"
+    }
+
+    private var totalItemCount: Int {
+        workspace.documents.count + workspace.gitDiffs.count
+    }
+
+    var body: some View {
+        Button(action: expand) {
+            HStack(spacing: 7) {
+                if let doc = activeDocument {
+                    EditorCollapsedStatusDot(document: doc)
+                } else {
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: 6, height: 6)
+                }
+                Text(activeTitle)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 180)
+                    .foregroundStyle(isHovered ? Color.primary : Color.primary.opacity(0.88))
+
+                if totalItemCount > 1 {
+                    Text("\(totalItemCount)")
+                        .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Color.primary.opacity(0.10), in: Capsule())
+                }
+
+                EditorCodexExpandIcon()
+                    .frame(width: 14, height: 14)
+                    .foregroundStyle(isHovered ? Color.primary : Color.secondary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5.5)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+            .background(
+                (isHovered ? Color.accentColor.opacity(0.10) : Color.black.opacity(0.14)),
+                in: RoundedRectangle(cornerRadius: 8)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(
+                        isHovered ? Color.accentColor.opacity(0.55) : Color.primary.opacity(0.16),
+                        lineWidth: 1
+                    )
+            )
+            .shadow(color: .black.opacity(0.18), radius: 6, x: 0, y: 2)
+            .contentShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .help(isChinese ? "展开编辑器" : "Expand Editor")
+        .accessibilityLabel("Editor")
+    }
+}
+
+private struct EditorCollapsedStatusDot: View {
+    @ObservedObject var document: EditorDocument
+
+    var body: some View {
+        Circle()
+            .fill(document.isDirty ? Color.orange : Color.accentColor)
+            .frame(width: 6, height: 6)
     }
 }
 
@@ -331,12 +638,10 @@ private struct EditorDocumentView: View {
     let previousDocument: () -> Void
     let saveAll: () -> Void
     let onHide: () -> Void
+    var openLink: (String) -> Void = { _ in }
 
-    // Each document has its own view identity in the workspace, preserving its chosen mode.
-    @State private var isPreviewMode = true
-
-    private var isMarkdownDocument: Bool {
-        ["md", "markdown"].contains((document.path as NSString).pathExtension.lowercased())
+    private var showsMarkdownPreview: Bool {
+        document.isMarkdown && document.isPreviewMode
     }
 
     var body: some View {
@@ -359,12 +664,13 @@ private struct EditorDocumentView: View {
                     fileURL: URL(fileURLWithPath: document.path),
                     isEditable: !document.isRestoringFromGit,
                     isActive: isActive,
-                    isPreview: isMarkdownDocument && isPreviewMode,
+                    isPreview: showsMarkdownPreview,
                     isSurfaceFocused: isSurfaceFocused,
                     terminalBackground: terminalBackground,
                     terminalBackgroundOpacity: terminalBackgroundOpacity,
                     terminalForeground: terminalTheme.text.color,
                     terminalTheme: terminalTheme,
+                    wordWrapOverride: document.isMarkdown ? true : nil,
                     onFocus: onFocus,
                     onSave: save,
                     onClose: close,
@@ -377,10 +683,10 @@ private struct EditorDocumentView: View {
                     onConsumeNavigation: { document.consumeNavigation($0) }
                 )
                 .id(document.contentGeneration)
-                .opacity((isMarkdownDocument && isPreviewMode) ? 0 : 1)
-                .allowsHitTesting(!(isMarkdownDocument && isPreviewMode))
+                .opacity(showsMarkdownPreview ? 0 : 1)
+                .allowsHitTesting(!showsMarkdownPreview)
 
-                if isMarkdownDocument && isPreviewMode {
+                if showsMarkdownPreview {
                     MarkdownPreviewView(
                         text: $document.text,
                         fileURL: URL(fileURLWithPath: document.path),
@@ -392,7 +698,8 @@ private struct EditorDocumentView: View {
                         onFocus: onFocus,
                         onSave: save,
                         onSaveAll: saveAll,
-                        onHide: onHide
+                        onHide: onHide,
+                        onOpenLink: openLink
                     )
                     .id(document.contentGeneration)
                 }
@@ -405,16 +712,6 @@ private struct EditorDocumentView: View {
                     Label(document.filesystem.descriptor.displayName, systemImage: "network")
                 }
                 Spacer(minLength: 8)
-
-                if isMarkdownDocument {
-                    Picker("", selection: $isPreviewMode) {
-                        Text("Edit").tag(false)
-                        Text("Preview").tag(true)
-                    }
-                    .pickerStyle(.segmented)
-                    .controlSize(.small)
-                    .frame(width: 120)
-                }
 
                 if document.isSaving {
                     ProgressView().controlSize(.small)
@@ -433,13 +730,13 @@ private struct EditorDocumentView: View {
             .padding(.vertical, 6)
         }
         .onAppear {
-            if document.pendingNavigation != nil && isPreviewMode {
-                isPreviewMode = false
+            if document.pendingNavigation != nil && document.isPreviewMode {
+                document.isPreviewMode = false
             }
         }
         .onChange(of: document.pendingNavigation) { navigation in
-            if navigation != nil && isPreviewMode {
-                isPreviewMode = false
+            if navigation != nil && document.isPreviewMode {
+                document.isPreviewMode = false
             }
         }
         .onChange(of: isActive) { active in
@@ -451,7 +748,6 @@ private struct EditorDocumentView: View {
             document.flushAutoSave()
         }
     }
-
 }
 
 /// Uses the same glass implementation as the terminal. A single backdrop avoids

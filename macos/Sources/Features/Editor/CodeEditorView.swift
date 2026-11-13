@@ -145,7 +145,11 @@ struct CodeEditorView: View {
         }
         .onChange(of: settings.editorKeymapPreset) { _ in configureCommands() }
         .onChange(of: resolvedTheme) { _ in editorCoordinator.refreshBackground() }
-        .onChange(of: editorSettings) { _ in editorCoordinator.refreshBackground() }
+        .onChange(of: editorSettings) { _ in
+            editorCoordinator.refreshBackground()
+            editorCoordinator.invalidateWrappedLayout()
+        }
+        .onChange(of: wordWrapOverride) { _ in editorCoordinator.invalidateWrappedLayout() }
         .onChange(of: findText) { _ in
             refreshSearchMatches()
             guard isFindVisible, barMode != .goToLine else { return }
@@ -404,6 +408,8 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
     private var textChangeObserver: NSObjectProtocol?
     private var textWillChangeObserver: NSObjectProtocol?
     private var viewportObserver: NSObjectProtocol?
+    private var frameObserver: NSObjectProtocol?
+    private var lastObservedViewportWidth: CGFloat = 0
     private var editDepth = 0
     private var groupsMultipleCarets = false
     private var startedUndoGroup = false
@@ -702,6 +708,15 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
             ) { [weak self] _ in
                 MainActor.assumeIsolated { self?.repositionCompletion(); self?.diffOverlay?.refresh() }
             }
+            if let frameObserver { NotificationCenter.default.removeObserver(frameObserver) }
+            scroll.contentView.postsFrameChangedNotifications = true
+            lastObservedViewportWidth = scroll.contentSize.width
+            frameObserver = NotificationCenter.default.addObserver(
+                forName: NSView.frameDidChangeNotification, object: scroll.contentView, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.handleViewportFrameChange() }
+            }
+            self.handleViewportFrameChange(force: true)
             NotificationCenter.default.post(name: NSView.boundsDidChangeNotification, object: scroll.contentView)
             self.applyPendingNavigationIfReady()
         }
@@ -830,6 +845,32 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
 
     private(set) var isPreview: Bool = false
 
+    func invalidateWrappedLayout() {
+        DispatchQueue.main.async { [weak self] in
+            self?.handleViewportFrameChange(force: true)
+        }
+    }
+
+    private func handleViewportFrameChange(force: Bool = false) {
+        guard let textView = controller?.textView,
+              let scroll = textView.enclosingScrollView else { return }
+        let width = scroll.contentSize.width
+        guard width.isFinite, width > 0 else { return }
+        let widthChanged = abs(width - lastObservedViewportWidth) > 0.5
+        guard force || widthChanged else { return }
+        lastObservedViewportWidth = width
+
+        _ = textView.updateFrameIfNeeded()
+        if textView.layoutManager.wrapLines {
+            textView.layoutManager.setNeedsLayout()
+            textView.updatedViewport(scroll.documentVisibleRect)
+            textView.needsLayout = true
+            textView.needsDisplay = true
+        }
+        repositionCompletion()
+        diffOverlay?.refresh()
+    }
+
     func setIsPreview(_ isPreview: Bool) {
         refreshBackground()
         let changed = self.isPreview != isPreview
@@ -841,8 +882,11 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
                    textView.window?.firstResponder === textView {
                     textView.window?.makeFirstResponder(nil)
                 }
-            } else if isActive {
-                focusIfActive(onNextRunLoop: true)
+            } else {
+                invalidateWrappedLayout()
+                if isActive {
+                    focusIfActive(onNextRunLoop: true)
+                }
             }
         }
     }
@@ -1187,6 +1231,8 @@ final class EditorCoordinator: @preconcurrency TextViewCoordinator, @preconcurre
     func destroy() {
         if let viewportObserver { NotificationCenter.default.removeObserver(viewportObserver) }
         viewportObserver = nil
+        if let frameObserver { NotificationCenter.default.removeObserver(frameObserver) }
+        frameObserver = nil
         if let textChangeObserver { NotificationCenter.default.removeObserver(textChangeObserver) }
         if let textWillChangeObserver { NotificationCenter.default.removeObserver(textWillChangeObserver) }
         textChangeObserver = nil

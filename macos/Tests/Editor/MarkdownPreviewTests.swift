@@ -16,6 +16,8 @@ struct MarkdownPreviewTests {
         ] {
             #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent(name).path), "Missing \(name)")
         }
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("live-editor.js").path))
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("live-editor.css").path))
     }
 
     @Test(arguments: ["/Users/test/本地 # 笔记", "/home/test/远程 # 笔记"])

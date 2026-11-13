@@ -16,6 +16,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
     var onSave: () -> Void = {}
     var onSaveAll: () -> Void = {}
     var onHide: () -> Void = {}
+    var onOpenLink: (String) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -40,6 +41,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
     }
 
     func updateNSView(_ view: MarkdownPreviewWebView, context: Context) {
+        view.layer?.backgroundColor = terminalBackground.cgColor
         context.coordinator.update(self)
     }
 
@@ -58,6 +60,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
         weak var webView: WKWebView?
         var renderTask: Task<Void, Never>?
         private var ready = false
+        private var hasRenderedOnce = false
         private var payload: String?
         private var payloadText: String?
         private var binding: Binding<String>?
@@ -66,6 +69,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
         private var onSave: () -> Void = {}
         private var onSaveAll: () -> Void = {}
         private var onHide: () -> Void = {}
+        private var onOpenLink: (String) -> Void = { _ in }
 
         func update(_ preview: MarkdownPreviewView) {
             binding = preview.$text
@@ -74,6 +78,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
             onSave = preview.onSave
             onSaveAll = preview.onSaveAll
             onHide = preview.onHide
+            onOpenLink = preview.onOpenLink
             let directory = preview.fileURL?.deletingLastPathComponent()
                 ?? URL(fileURLWithPath: NSTemporaryDirectory())
             // Never fall back to the local host for a disconnected SSH document.
@@ -110,6 +115,16 @@ struct MarkdownPreviewView: NSViewRepresentable {
                 scheduleRender()
             case "focus":
                 if isActive { onFocus() }
+            case "copy":
+                if let copied = body["text"], !copied.isEmpty {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(copied, forType: .string)
+                }
+            case "openLink":
+                if isActive, let href = body["href"], !href.isEmpty {
+                    onFocus()
+                    onOpenLink(href)
+                }
             case "edit":
                 guard isActive, let binding, let base = body["baseText"], let updated = body["text"],
                       MarkdownPreviewEdit.canApply(current: binding.wrappedValue, base: base, updated: updated) else {
@@ -169,10 +184,18 @@ struct MarkdownPreviewView: NSViewRepresentable {
         private func scheduleRender() {
             renderTask?.cancel()
             guard ready, let payload else { return }
+            if !hasRenderedOnce {
+                hasRenderedOnce = true
+                webView?.evaluateJavaScript(
+                    "(() => { const p = \(payload); window.renderMarkdown(p.text, p.options); })();",
+                    completionHandler: nil
+                )
+                return
+            }
             let text = payloadText
             renderTask = Task { [weak self] in
                 // Coalesce autosave/editor updates while typing.
-                try? await Task.sleep(nanoseconds: 120_000_000)
+                try? await Task.sleep(nanoseconds: 80_000_000)
                 guard !Task.isCancelled, let self else { return }
                 guard self.binding?.wrappedValue == text else { return }
                 self.webView?.evaluateJavaScript(

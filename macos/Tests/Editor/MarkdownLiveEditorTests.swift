@@ -1,4 +1,5 @@
 import AppKit
+import CodeEditTextView
 import SwiftUI
 import Testing
 import WebKit
@@ -12,206 +13,301 @@ struct MarkdownLiveEditorTests {
         #expect(!MarkdownPreviewEdit.canApply(current: "old", base: "old", updated: "bad\0text"))
     }
 
-    @Test func liveMarkdownInputUpdatesBindingCopiesAndSaves() async throws {
-        var text = ""
+    @Test func previewTaskToggleCodeCopyFileLinkSelectionAndSave() async throws {
+        var text = """
+        # Hello 中文
+
+        - [ ] Ship responsive preview
+        - [x] Keep offline security
+
+        | 场景编号 | 核心代码入口 |
+        | --- | --- |
+        | S0 | [lance_metadata.py](file:///workspace/server/lance_metadata.py#L35-L101) |
+
+        ```python
+        def answer():
+            return 42
+        ```
+
+        ````carousel
+        ### Slide One
+        First slide body
+        <!-- slide -->
+        ### Slide Two
+        Second slide body
+        ````
+        """
         var saved: String?
+        var openedLink: String?
         let binding = Binding(get: { text }, set: { text = $0 })
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 650),
-                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 920, height: 680),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: MarkdownPreviewView(
-            text: binding, fileURL: URL(fileURLWithPath: "/tmp/live.md"),
-            terminalBackground: .black, foregroundColor: .white, onSave: { saved = text }
+            text: binding,
+            fileURL: URL(fileURLWithPath: "/tmp/preview-interactive.md"),
+            terminalBackground: .black,
+            foregroundColor: .white,
+            onSave: { saved = text },
+            onOpenLink: { openedLink = $0 }
         ))
         window.makeKeyAndOrderFront(nil)
         defer {
             window.contentView = nil
             window.close()
         }
-        var found: MarkdownPreviewWebView?
-        for _ in 0..<150 {
-            found = findWebView(window.contentView)
-            if found != nil { break }
-            try await Task.sleep(for: .milliseconds(20))
+
+        let web = try await waitForWebView(in: window)
+        try await waitUntil {
+            (try? await web.evaluateJavaScript("!!document.querySelector('#content h1') && !!document.querySelector('.omg-carousel')")) as? Bool == true
         }
-        let web = try #require(found)
-        var ready = false
-        for _ in 0..<150 {
-            ready = (try? await web.evaluateJavaScript("!!window.omgLiveEditorView && !!document.querySelector('.cm-editor .cm-content')")) as? Bool == true
-            if ready { break }
-            try await Task.sleep(for: .milliseconds(100))
-        }
-        try #require(ready, "The offline live editor must load in the actual WKWebView")
         window.makeFirstResponder(web)
-        let converted = try await web.evaluateJavaScript("""
-        (() => {
-            const view = window.omgLiveEditorView();
-            view.focus();
-            view.dispatch({changes: {from: 0, insert: '# '}, selection: {anchor: 2}, userEvent: 'input'});
-            view.dispatch({changes: {from: 2, insert: 'Hello 中文'}, selection: {anchor: 10}, userEvent: 'input'});
-            return Boolean(document.querySelector('.cm-md-h1') && view.state.doc.toString() === '# Hello 中文');
-        })()
-        """)
-        #expect(converted as? Bool == true)
-        for _ in 0..<100 {
-            if text.contains("# Hello 中文") { break }
-            try await Task.sleep(for: .milliseconds(20))
-        }
-        #expect(text.contains("# Hello 中文"))
+
+        // 1. Interactive task-list checkbox toggles exact character in Markdown source
         _ = try await web.evaluateJavaScript("""
         (() => {
-            const view = window.omgLiveEditorView(); view.focus();
-            view.dispatch({selection: {anchor: 2, head: view.state.doc.length}});
+            const box = document.querySelector('#content input.task-list-item-checkbox:not(:checked)');
+            box.checked = true;
+            box.dispatchEvent(new Event('change', { bubbles: true }));
+            return true;
         })()
         """)
-        let copy = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command,
-            timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: "c", charactersIgnoringModifiers: "c",
-            isARepeat: false, keyCode: 8))
-        #expect(EditorCommandRouter.shared.handle(copy))
-        for _ in 0..<100 {
-            if NSPasteboard.general.string(forType: .string) == "Hello 中文" { break }
-            try await Task.sleep(for: .milliseconds(20))
-        }
-        #expect(NSPasteboard.general.string(forType: .string) == "Hello 中文")
-        let save = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command,
-            timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: "s", charactersIgnoringModifiers: "s",
-            isARepeat: false, keyCode: 1))
-        #expect(EditorCommandRouter.shared.handle(save))
-        for _ in 0..<100 {
-            if saved != nil { break }
-            try await Task.sleep(for: .milliseconds(20))
-        }
-        #expect(saved == text)
+        try await waitUntil { text.contains("- [x] Ship responsive preview") }
+        #expect(text.contains("- [x] Ship responsive preview"))
 
-        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let sample = try String(contentsOf: root.appendingPathComponent("dist/tests/fixtures/markdown-preview.md"), encoding: .utf8)
-        text = sample
-        _ = try await callJavaScript(web, body: "return await window.renderMarkdown(markdown, options);", arguments: [
-            "markdown": sample,
-            "options": ["theme": "dark", "background": "#202020", "foreground": "#eeeeee", "editable": true],
-        ])
-        let positionsJSON = try #require(try await web.evaluateJavaScript("""
-        JSON.stringify(window.omgMarkdownModel.parseBlocks(window.getMarkdown())
-            .filter(block => block.kind === 'code' && block.language === 'mermaid').map(block => block.from))
-        """) as? String)
-        let positions = try JSONDecoder().decode([Int].self, from: Data(positionsJSON.utf8))
-        #expect(positions.count == 2)
-        for position in positions {
-            _ = try await web.evaluateJavaScript("window.scrollMarkdownTo(\(position))")
-            var rendered = false
-            for _ in 0..<100 {
-                rendered = try await web.evaluateJavaScript("!!document.querySelector('.omg-block-widget[data-source-from=\"\(position)\"] .mermaid svg')") as? Bool == true
-                if rendered { break }
-                try await Task.sleep(for: .milliseconds(100))
-            }
-            if !rendered {
-                let diagnostics = try? await web.evaluateJavaScript("""
-                JSON.stringify({
-                    visibility: document.visibilityState, focused: document.hasFocus(),
-                    activeElement: document.activeElement?.className,
-                    position: \(position), innerHeight: window.innerHeight,
-                    selection: window.omgLiveEditorView?.()?.state.selection.main.head,
-                    viewport: window.omgLiveEditorView?.()?.viewport,
-                    visibleRanges: window.omgLiveEditorView?.()?.visibleRanges,
-                    mermaidLoaded: !!window.mermaid,
-                    widgets: Array.from(document.querySelectorAll('.omg-block-widget')).map(e => ({
-                        from: e.dataset.sourceFrom, kind: e.className,
-                        y: e.getBoundingClientRect().y, height: e.getBoundingClientRect().height,
-                        svg: !!e.querySelector('.mermaid svg'),
-                        error: e.querySelector('.render-error')?.textContent?.slice(0, 300),
-                        hasMermaidSource: !!e.querySelector('code.language-mermaid')
-                    })),
-                    scroll: Array.from(document.querySelectorAll('.cm-scroller')).map(e => ({
-                        top: e.scrollTop, height: e.clientHeight, scrollHeight: e.scrollHeight
-                    }))
-                })
-                """)
-                print("Mermaid timeout diagnostic: key=\(window.isKeyWindow) visible=\(window.isVisible) "
-                      + "occluded=\(!window.occlusionState.contains(.visible)) js=\(diagnostics ?? "unavailable")")
-            }
-            #expect(rendered, "A visible Mermaid block should render its diagram")
+        // 2. Code block Copy button writes raw code to NSPasteboard
+        NSPasteboard.general.clearContents()
+        _ = try await web.evaluateJavaScript("""
+        (() => {
+            document.querySelector('#content .omg-code-copy').click();
+            return true;
+        })()
+        """)
+        try await waitUntil {
+            NSPasteboard.general.string(forType: .string)?.contains("def answer():") == true
         }
-        _ = try await web.evaluateJavaScript("window.scrollMarkdownTo(window.getMarkdown().indexOf('| Feature'))")
-        try await Task.sleep(for: .milliseconds(300))
-        #expect(try await web.evaluateJavaScript("!!document.querySelector('.cm-editor table')") as? Bool == true)
-        _ = try await web.evaluateJavaScript("window.scrollMarkdownTo(window.getMarkdown().indexOf('## LaTeX'))")
-        try await Task.sleep(for: .milliseconds(300))
-        #expect(try await web.evaluateJavaScript("document.querySelectorAll('.cm-editor .katex').length >= 1") as? Bool == true)
-        if let html = try await web.evaluateJavaScript("document.documentElement.outerHTML") as? String {
-            try html.write(toFile: "/tmp/omg-live-editor-dom.html", atomically: true, encoding: .utf8)
+        #expect(NSPasteboard.general.string(forType: .string)?.contains("return 42") == true)
+
+        // 3. file://#L35-L101 capsule renders line badge and forwards click to native opener
+        let fileCapsuleRendered = try await web.evaluateJavaScript("""
+        (() => {
+            const link = document.querySelector('#content a.omg-file-link');
+            if (!link) return false;
+            const hasLine = link.querySelector('.omg-file-line')?.textContent === ':L35-L101';
+            link.click();
+            return hasLine;
+        })()
+        """) as? Bool
+        #expect(fileCapsuleRendered == true)
+        try await waitUntil { openedLink != nil }
+        #expect(openedLink == "file:///workspace/server/lance_metadata.py#L35-L101")
+
+        // 4. Carousel switches slides interactively
+        let switchedSlide = try await web.evaluateJavaScript("""
+        (() => {
+            const next = document.querySelector('#content .omg-carousel-btn[data-dir="1"]');
+            next.click();
+            const active = document.querySelector('#content .omg-carousel-slide.active');
+            return active?.textContent?.includes('Second slide body') ?? false;
+        })()
+        """) as? Bool
+        #expect(switchedSlide == true)
+
+        // 5. Cmd+C copies selected rendered heading and Cmd+S saves
+        _ = try await web.evaluateJavaScript("""
+        (() => {
+            const h1 = document.querySelector('#content h1');
+            const range = document.createRange();
+            range.selectNodeContents(h1);
+            const sel = window.getSelection();
+            sel.removeAllRanges();
+            sel.addRange(range);
+            return sel.toString();
+        })()
+        """)
+        let copy = try #require(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: .command,
+            timestamp: 0, windowNumber: window.windowNumber, context: nil,
+            characters: "c", charactersIgnoringModifiers: "c", isARepeat: false, keyCode: 8
+        ))
+        #expect(EditorCommandRouter.shared.handle(copy))
+        try await waitUntil { NSPasteboard.general.string(forType: .string) == "Hello 中文" }
+        #expect(NSPasteboard.general.string(forType: .string) == "Hello 中文")
+
+        let save = try #require(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: .command,
+            timestamp: 0, windowNumber: window.windowNumber, context: nil,
+            characters: "s", charactersIgnoringModifiers: "s", isARepeat: false, keyCode: 1
+        ))
+        #expect(EditorCommandRouter.shared.handle(save))
+        try await waitUntil { saved != nil }
+        #expect(saved == text)
+    }
+
+    @Test func previewReflowsFluidlyAcrossWindowResizesAndRendersWideTablesAndMermaid() async throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let fixture = try String(
+            contentsOf: root.appendingPathComponent("dist/tests/fixtures/markdown-preview.md"),
+            encoding: .utf8
+        )
+        let wideTableSection = """
+
+        ## Wide CJK Production Table
+
+        | 场景编号 | 场景名称与代表策略 | 近 14 天任务数 | 线上 Spark 耗时 (P50 / P90) | 核心代码入口 | 输入源与核心算子特征 | 结果写出目标 (Sink) |
+        | --- | --- | --- | --- | --- | --- | --- |
+        | S0 | 元数据 / Schema 探测 | 高频同步 | `< 0.2s` | [lance_metadata.py](file:///workspace/lake_search/lance_metadata.py#L35-L101) | 直调 LakeForge HTTP + 本地 `sqlglot` | 同步 HTTP JSON |
+        """
+        let sample = fixture + wideTableSection
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 700),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: MarkdownPreviewView(
+            text: .constant(sample),
+            fileURL: URL(fileURLWithPath: "/tmp/reflow.md"),
+            terminalBackground: .black,
+            foregroundColor: .white
+        ))
+        window.makeKeyAndOrderFront(nil)
+        defer {
+            window.contentView = nil
+            window.close()
         }
-        _ = try await web.evaluateJavaScript("document.activeElement.blur()")
-        try await Task.sleep(for: .milliseconds(100))
-        let snapshot = try await web.takeSnapshot(configuration: nil)
-        if let data = snapshot.tiffRepresentation,
-           let bitmap = NSBitmapImageRep(data: data), let png = bitmap.representation(using: .png, properties: [:]) {
-            try png.write(to: URL(fileURLWithPath: "/tmp/omg-live-markdown-preview.png"))
+
+        let web = try await waitForWebView(in: window)
+        try await waitUntil(attempts: 150) {
+            (try? await web.evaluateJavaScript("document.querySelectorAll('#content .mermaid svg').length === 2")) as? Bool == true
         }
+
+        let widthAt1280 = try #require(
+            try await web.evaluateJavaScript("document.getElementById('content').getBoundingClientRect().width") as? Double
+        )
+        #expect(widthAt1280 > 960, "Fluid preview container must expand with wide panes instead of freezing at 960px")
+
         for (theme, width) in [("light", 900), ("dark", 900), ("dark", 380)] {
-            window.setContentSize(NSSize(width: width, height: 650))
+            window.setContentSize(NSSize(width: width, height: 700))
             _ = try await callJavaScript(web, body: "return await window.renderMarkdown(markdown, options);", arguments: [
                 "markdown": sample,
-                "options": ["theme": theme, "background": theme == "dark" ? "#202020" : "#ffffff",
-                            "foreground": theme == "dark" ? "#eeeeee" : "#1f2328", "editable": true],
+                "options": [
+                    "theme": theme,
+                    "background": "transparent",
+                    "foreground": theme == "dark" ? "#eeeeee" : "#1f2328",
+                    "editable": true,
+                ],
             ])
-            _ = try await web.evaluateJavaScript("window.scrollMarkdownTo(0)")
-            try await Task.sleep(for: .milliseconds(300))
-            #expect(try await web.evaluateJavaScript("document.documentElement.scrollWidth <= window.innerWidth") as? Bool == true)
-            let image = try await web.takeSnapshot(configuration: nil)
-            if let data = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: data),
-               let png = bitmap.representation(using: .png, properties: [:]) {
-                try png.write(to: URL(fileURLWithPath: "/tmp/omg-live-markdown-\(theme)-\(width).png"))
+            try await Task.sleep(for: .milliseconds(120))
+            let metrics = try #require(try await web.evaluateJavaScript("""
+            (() => {
+                const headers = Array.from(document.querySelectorAll('#content .omg-table-wrap:last-of-type th'));
+                const minHeaderWidth = headers.reduce((acc, th) => Math.min(acc, th.getBoundingClientRect().width), Infinity);
+                return {
+                    noPageOverflow: document.documentElement.scrollWidth <= window.innerWidth + 1,
+                    contentWidth: document.getElementById('content').getBoundingClientRect().width,
+                    minHeaderWidth,
+                    katexCount: document.querySelectorAll('#content .katex').length,
+                };
+            })()
+            """) as? [String: Any])
+            #expect(metrics["noPageOverflow"] as? Bool == true)
+            #expect((metrics["minHeaderWidth"] as? Double ?? 0) > 40, "CJK table headers must never crush into 1-char vertical strips")
+            #expect((metrics["katexCount"] as? Int ?? 0) >= 1)
+            if width == 380 {
+                #expect((metrics["contentWidth"] as? Double ?? 999) <= 381)
             }
         }
     }
 
-    @Test func liveMermaidConstructedWhileDetachedRendersAfterMount() async throws {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 650),
-                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+    @Test func codeEditorWordWrapReflowsOnResizeAndNavigationSwitchesMarkdownToEdit() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("omg-md-nav-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let file = dir.appendingPathComponent("notes.md")
+        let longParagraph = String(repeating: "这是一段用于验证窗口缩放后自动折行重排的 Markdown 源码内容 AutomaticWordWrapReflowCheck ", count: 8)
+        try Data((longParagraph + "\n# Second Line\n").utf8).write(to: file)
+
+        let filesystem = LocalWorkspaceFilesystem(workingDirectory: dir.path)
+        let document = try await EditorDocument.open(path: file.path, filesystem: filesystem)
+        #expect(document.isMarkdown)
+        #expect(document.isPreviewMode)
+
+        document.requestNavigation(EditorTextLocation(startLine: 2, column: 1, endLine: nil))
+        #expect(!document.isPreviewMode, "Navigating to a line in a Markdown document must switch from Preview to Edit")
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 960, height: 520),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
         window.isReleasedWhenClosed = false
-        window.contentView = NSHostingView(rootView: MarkdownPreviewView(
-            text: .constant("# Warmup"), fileURL: URL(fileURLWithPath: "/tmp/delayed-mermaid.md"),
-            terminalBackground: .black, foregroundColor: .white
+        window.contentView = NSHostingView(rootView: CodeEditorView(
+            text: .constant(longParagraph),
+            fileURL: file,
+            wordWrapOverride: true
         ))
         window.makeKeyAndOrderFront(nil)
-        defer { window.contentView = nil; window.close() }
-        var web: MarkdownPreviewWebView?
-        var ready = false
-        for _ in 0..<150 {
-            web = findWebView(window.contentView)
-            if let web {
-                ready = (try? await web.evaluateJavaScript("!!window.omgLiveEditorView?.()")) as? Bool == true
-            }
-            if ready { break }
-            try await Task.sleep(for: .milliseconds(100))
+        defer {
+            window.contentView = nil
+            window.close()
         }
-        try #require(ready)
-        let preview = try #require(web)
-        let state = try await callJavaScript(preview, body: """
-        const view = window.omgLiveEditorView();
-        view.dom.remove();
-        await window.renderMarkdown(markdown, options);
-        // Let construction-time render tasks run while the DOM is detached.
-        await new Promise(resolve => setTimeout(resolve, 0));
-        const widget = view.dom.querySelector('.omg-block-widget');
-        const state = { constructedDetached: !!widget && !widget.isConnected,
-                        renderedDetached: !!widget?.querySelector('.mermaid svg') };
-        document.getElementById('content').append(view.dom);
-        return state;
-        """, arguments: [
-            "markdown": "# Delayed mount\n\n```mermaid\ngraph LR; A-->B\n```",
-            "options": ["theme": "dark", "background": "#202020", "foreground": "#eeeeee", "editable": true],
-        ])
-        let result = try #require(state as? [String: Bool])
-        #expect(result["constructedDetached"] == true)
-        #expect(result["renderedDetached"] == false)
-        var rendered = false
+
+        var textView: TextView?
         for _ in 0..<100 {
-            rendered = try await preview.evaluateJavaScript("!!document.querySelector('.omg-block-widget .mermaid svg')") as? Bool == true
-            if rendered { break }
-            try await Task.sleep(for: .milliseconds(100))
+            textView = findTextView(window.contentView)
+            if let textView, textView.enclosingScrollView != nil, textView.layoutManager.lineCount > 0 {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(20))
         }
-        #expect(rendered, "A Mermaid widget mounted after its construction task must still render")
+        let editor = try #require(textView)
+        #expect(editor.layoutManager.wrapLines)
+        try await Task.sleep(for: .milliseconds(80))
+        editor.layoutSubtreeIfNeeded()
+        let wideHeight = editor.layoutManager.estimatedHeight()
+
+        window.setContentSize(NSSize(width: 320, height: 520))
+        try await Task.sleep(for: .milliseconds(120))
+        editor.layoutSubtreeIfNeeded()
+        let narrowHeight = editor.layoutManager.estimatedHeight()
+        #expect(narrowHeight > wideHeight * 1.6, "Narrowing a word-wrapped editor must reflow lines and increase wrapped height")
+
+        window.setContentSize(NSSize(width: 960, height: 520))
+        try await Task.sleep(for: .milliseconds(120))
+        editor.layoutSubtreeIfNeeded()
+        let restoredHeight = editor.layoutManager.estimatedHeight()
+        #expect(restoredHeight < narrowHeight, "Widening a word-wrapped editor back must unwrap lines cleanly")
+    }
+
+    private func waitForWebView(in window: NSWindow) async throws -> MarkdownPreviewWebView {
+        for _ in 0..<150 {
+            if let found = findWebView(window.contentView) {
+                return found
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        throw MarkdownLiveTestError.timeout
+    }
+
+    private func waitUntil(attempts: Int = 100, condition: () async -> Bool) async throws {
+        for _ in 0..<attempts {
+            if await condition() { return }
+            try await Task.sleep(for: .milliseconds(30))
+        }
+        throw MarkdownLiveTestError.timeout
     }
 
     private func callJavaScript(_ web: WKWebView, body: String, arguments: [String: Any]) async throws -> Any {
@@ -229,4 +325,16 @@ struct MarkdownLiveEditorTests {
         }
         return nil
     }
+
+    private func findTextView(_ view: NSView?) -> TextView? {
+        if let view = view as? TextView { return view }
+        for child in view?.subviews ?? [] {
+            if let found = findTextView(child) { return found }
+        }
+        return nil
+    }
+}
+
+private enum MarkdownLiveTestError: Error {
+    case timeout
 }

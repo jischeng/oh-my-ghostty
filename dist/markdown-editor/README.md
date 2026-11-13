@@ -1,57 +1,12 @@
-# OMG live Markdown editor
+# OMG Markdown Preview Renderer Tests
 
-The Preview surface uses CodeMirror 6 with Markdown source as the single source
-of truth. Ordinary lines use live decorations for rendered styling while editing
-the underlying text. Complex blocks reuse the existing sanitized Markdown-it
-renderer in widgets mapped to source ranges: tables, Mermaid, math, alerts,
-admonitions and HTML/SVG keep the existing preview rendering path. Runtime assets
-are bundled offline, sharing Markdown-it, Mermaid, DOMPurify, KaTeX CSS and fonts
-with the read-only renderer.
+Markdown documents use two clean, zero-mutation surfaces:
+
+- **Edit mode**: OMG's native `CodeEditorView` (`CodeEditSourceEditor` + Tree-sitter + `MarkdownHighlightProvider`) with word-wrap enabled by default and full viewport resize reflow.
+- **Preview mode**: `MarkdownPreviewView` (`WKWebView` + offline `markdown-it`, `Highlight.js`, `KaTeX`, `Mermaid`, and `DOMPurify` under `macos/Resources/MarkdownPreview/`).
+
+No rich-text or CodeMirror DOM editor re-serializes the Markdown document. Opening or rendering never rewrites source text. Task-list checkboxes in active previews toggle only their exact `[ ]` / `[x]` character offset through the version-checked `{type: "edit", text, baseText}` bridge; `file://` and workspace-relative file links route through `{type: "openLink", href}`; fenced code blocks copy through `{type: "copy", text}`; and Antigravity ````carousel```` blocks render interactive slide cards.
 
 ```sh
-npm ci --prefix dist/markdown-editor
-npm run build --prefix dist/markdown-editor
 npm test --prefix dist/markdown-editor
 ```
-
-The checked-in package lock pins dependencies. Build writes `live-editor.js`,
-`live-editor.css` and bundled license notices under
-`macos/Resources/MarkdownPreview`. No runtime CDN or font service is used.
-
-`renderMarkdown(text, options)` creates/updates the live editor. Matching native
-acknowledgements do not reset selection or history. `getMarkdown()` synchronously
-returns the current source, including the last transaction. Document changes
-send `{type: "edit", text, baseText}` through `markdownPreview`; `focus` is sent
-on focus entry. `ready` is emitted only after this API is installed.
-`renderMarkdownReadonly` remains available for read-only rendering and tests.
-The internal `window.omgLiveEditorView()` hook returns a CodeMirror `EditorView`,
-not a ProseMirror view.
-
-Editing changes the same source document through CodeMirror transactions; it does
-not parse and serialize a separate rich-text document. Opening, rendering, and
-editing another block must preserve unrelated Markdown spelling and whitespace.
-Native save and conflict detection continue to operate on that same document.
-
-Complex widgets are views over source ranges, not independent editable documents.
-Editing a complex block targets its source range. Reference link/image definitions
-must remain in the source and participate in the shared rendering context even
-when they have no visible block; splitting only by visible HTML blocks is not a
-complete source-range model. Relative image sources remain unchanged in Markdown
-and resolve through the existing local/SSH image scheme.
-
-Mermaid widget construction and DOM mounting are separate lifecycle events.
-Rendering starts only once the widget is connected, using a mount observer rather
-than assuming the first construction-time microtask sees mounted DOM. Temporary
-detachment discards asynchronous results; a still-live remounted widget can retry.
-Destruction cancels the observer, changed source rejects stale results, completed
-SVGs are not rendered again on DOM movement, and terminal renderer/load errors
-are shown instead of entering a retry loop. Detached widgets do not occupy the
-shared serialized Mermaid renderer queue. Node and actual WKWebView regressions
-cover delayed attachment, in-flight detachment, and teardown.
-
-This is a source-based live preview, not a complete Typora-style rich-text editor.
-Ordinary-line input and complex-block source editing have different interactions.
-Table editing, reference definitions, nested block ranges, Chinese composition,
-cross-block selection/copy, undo, and narrow-window layout require explicit
-regression coverage; rendering a widget alone does not establish those editing
-behaviors.

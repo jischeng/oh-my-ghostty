@@ -10,15 +10,21 @@ struct GitDiffHighlightTests {
         let text = (0..<420).map { "\($0) 每行还包含 `trip_completed`、`trip_end_time_us`、`trip_end_time_cn`。" }.joined(separator: "\n")
         let workbench = MonacoWorkbenchController()
         defer { workbench.tearDown() }
-        let host = NSHostingView(rootView: CodeEditorView(
-            text: .constant(text),
-            fileURL: URL(fileURLWithPath: "/file.md"),
-            diffLines: [324: true, 325: true],
-            isEditable: false,
-            isActive: true,
-            terminalTheme: .oneDark,
-            externalController: workbench
-        ))
+        let uri = "omg-model://local/file.md"
+        var resolvedTheme = EditorTheme.oneDark
+        resolvedTheme.background = EditorTheme.transparentBackground
+        workbench.setTheme(resolvedTheme, isDark: true)
+        workbench.openOrUpdateModel(uri: uri, path: "/file.md", text: text, readOnly: true)
+        workbench.setGitDiffLines(uri: uri, lines: ["324": "added", "325": "added"])
+        workbench.activateModel(
+            uri: uri,
+            readOnly: true,
+            wordWrap: true,
+            tabSize: 4,
+            insertSpaces: true,
+            keymapProfile: .idea
+        )
+        let host = NSHostingView(rootView: MonacoWorkbenchSurface(controller: workbench))
         host.sizingOptions = []
         let window = NSWindow(
             contentRect: .init(x: 0, y: 0, width: 780, height: 650),
@@ -68,15 +74,21 @@ struct GitDiffHighlightTests {
         }
         let workbench = MonacoWorkbenchController()
         defer { workbench.tearDown() }
-        let host = NSHostingView(rootView: CodeEditorView(
-            text: .constant(text),
-            fileURL: URL(fileURLWithPath: "/api-reference.md"),
-            diffLines: [324: true, 325: false],
-            isEditable: false,
-            isActive: true,
-            terminalTheme: .oneDark,
-            externalController: workbench
-        ))
+        let uri = "omg-model://local/api-reference.md"
+        var resolvedTheme = EditorTheme.oneDark
+        resolvedTheme.background = EditorTheme.transparentBackground
+        workbench.setTheme(resolvedTheme, isDark: true)
+        workbench.openOrUpdateModel(uri: uri, path: "/api-reference.md", text: text, readOnly: true)
+        workbench.setGitDiffLines(uri: uri, lines: ["324": "added", "325": "modified"])
+        workbench.activateModel(
+            uri: uri,
+            readOnly: true,
+            wordWrap: true,
+            tabSize: 4,
+            insertSpaces: true,
+            keymapProfile: .idea
+        )
+        let host = NSHostingView(rootView: MonacoWorkbenchSurface(controller: workbench))
         host.sizingOptions = []
         let window = NSWindow(
             contentRect: .init(x: 0, y: 0, width: 540, height: 650),

@@ -22,8 +22,8 @@ struct GitCommitAIService: Sendable {
     }
 
     static func snapshot(repository: GitRepositoryIdentity) async throws -> Snapshot {
-        let index = try await git(repository, ["ls-files", "--stage", "-z"], limit: 2_000_000)
-        let patch = try await git(repository, ["diff", "--cached", "--no-ext-diff", "--no-textconv",
+        let index = try await git(repository, ["--no-optional-locks", "ls-files", "--stage", "-z"], limit: 2_000_000)
+        let patch = try await git(repository, ["--no-optional-locks", "diff", "--cached", "--no-ext-diff", "--no-textconv",
                                                "--no-color", "--submodule=short", "--unified=3", "--"], limit: 200_000)
         guard !patch.isEmpty else { throw GitCommitAIError("There are no staged changes to describe.") }
         guard String(bytes: patch, encoding: .utf8) != nil else {
@@ -35,7 +35,7 @@ struct GitCommitAIService: Sendable {
     func generate(repository: GitRepositoryIdentity, routes: [GitCommitAIRoute], customPrompt: String = "") async throws -> Output {
         guard !routes.isEmpty else { throw GitCommitAIError("Configure AI commit messages in Git settings first.") }
         let before = try await Self.snapshot(repository: repository)
-        let history = try? await Self.git(repository, ["log", "-5", "--format=%s", "--no-decorate"], limit: 8_000)
+        let history = try? await Self.git(repository, ["--no-optional-locks", "log", "-5", "--format=%s", "--no-decorate"], limit: 8_000)
         let prompt = Self.prompt(patch: before.patch, history: history ?? Data(), customPrompt: customPrompt)
         let runner = GitCommitAIService(invoke: invoke ?? { route, text in
             try await GitACPService.shared.generate(repository: repository, route: route, style: customPrompt, prompt: text)

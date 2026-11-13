@@ -24,7 +24,7 @@ struct GitDiffService: Sendable {
     /// files. This also avoids three SSH sessions for each checkbox update.
     func workingTreeFiles(for repository: GitRepositoryIdentity, paths: [String]? = nil) async throws -> (staged: [GitDiffFile], unstaged: [GitDiffFile]) {
         let result = try await run(
-            ["--literal-pathspecs", "--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--renames", "--"] + (paths ?? []),
+            ["--no-optional-locks", "--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--renames", "--"] + (paths ?? []),
             repository: repository, maxOutputBytes: 512 * 1024
         )
         return try Self.parseWorkingTreeFiles(result.stdout)
@@ -78,7 +78,7 @@ struct GitDiffService: Sendable {
         case .commit(let commit):
             let commitBase = try await commitBase(for: commit, repository: repository, parentIDs: parentIDs)
             let result = try await run(
-                ["--literal-pathspecs", "diff", "--no-ext-diff", "--raw", "--numstat", "-z", "--find-renames", commitBase.id, commit.rawValue, "--"],
+                ["--no-optional-locks", "--literal-pathspecs", "diff", "--no-ext-diff", "--raw", "--numstat", "-z", "--find-renames", commitBase.id, commit.rawValue, "--"],
                 repository: repository,
                 maxOutputBytes: 256 * 1024
             )
@@ -93,7 +93,7 @@ struct GitDiffService: Sendable {
             )
 
         case .comparison(let base, let head):
-            let result = try await run(["--literal-pathspecs", "diff", "--no-ext-diff", "--raw", "--numstat", "-z", "--find-renames",
+            let result = try await run(["--no-optional-locks", "--literal-pathspecs", "diff", "--no-ext-diff", "--raw", "--numstat", "-z", "--find-renames",
                                         base.rawValue, head.rawValue, "--"], repository: repository, maxOutputBytes: 256 * 1024)
             let changes = try GitCommitChanges(data: result.stdout)
             return GitDiffFileList(repository: repository, target: target, files: changes.files,
@@ -101,7 +101,7 @@ struct GitDiffService: Sendable {
 
         case .staged:
             let result = try await run(
-                ["--literal-pathspecs", "diff", "--cached", "--no-ext-diff", "--name-status", "-z", "--find-renames", "--"],
+                ["--no-optional-locks", "--literal-pathspecs", "diff", "--cached", "--no-ext-diff", "--name-status", "-z", "--find-renames", "--"],
                 repository: repository,
                 maxOutputBytes: 256 * 1024
             )
@@ -114,12 +114,12 @@ struct GitDiffService: Sendable {
 
         case .unstaged:
             async let tracked = run(
-                ["--literal-pathspecs", "diff", "--no-ext-diff", "--name-status", "-z", "--find-renames", "--"],
+                ["--no-optional-locks", "--literal-pathspecs", "diff", "--no-ext-diff", "--name-status", "-z", "--find-renames", "--"],
                 repository: repository,
                 maxOutputBytes: 256 * 1024
             )
             async let untracked = run(
-                ["--literal-pathspecs", "ls-files", "--others", "--exclude-standard", "-z", "--"],
+                ["--no-optional-locks", "--literal-pathspecs", "ls-files", "--others", "--exclude-standard", "-z", "--"],
                 repository: repository,
                 maxOutputBytes: 256 * 1024
             )
@@ -141,7 +141,7 @@ struct GitDiffService: Sendable {
     ) async throws -> GitCommitMetadata {
         let result = try await (executor ?? repository.executor).execute(
             arguments: [
-                "show", "--encoding=UTF-8", "--no-ext-diff", "--no-color", "--no-patch",
+                "--no-optional-locks", "show", "--encoding=UTF-8", "--no-ext-diff", "--no-color", "--no-patch",
                 "--format=%H%x00%an%x00%ae%x00%aI%x00%P%x00%B%x00",
                 commit.rawValue,
             ],
@@ -195,21 +195,21 @@ struct GitDiffService: Sendable {
                 ? GitL10n.text("empty tree")
                 : GitL10n.format("parent {0}", String(describing: GitCommitID(resolvedBase.id).shortSHA)))
             arguments = [
-                "--literal-pathspecs", "diff", "--no-ext-diff", "--no-color", "--unified=3", "--find-renames",
+                "--no-optional-locks", "--literal-pathspecs", "diff", "--no-ext-diff", "--no-color", "--unified=3", "--find-renames",
                 resolvedBase.id, commit.rawValue, "--", file.oldPath ?? file.path,
             ] + (file.oldPath == nil ? [] : [file.path])
             allowsExitCodeOne = false
 
         case .comparison(let from, let to):
             base = baseDescription ?? target.description
-            arguments = ["--literal-pathspecs", "diff", "--no-ext-diff", "--no-color", "--unified=3", "--find-renames",
+            arguments = ["--no-optional-locks", "--literal-pathspecs", "diff", "--no-ext-diff", "--no-color", "--unified=3", "--find-renames",
                          from.rawValue, to.rawValue, "--", file.oldPath ?? file.path] + (file.oldPath == nil ? [] : [file.path])
             allowsExitCodeOne = false
 
         case .staged:
             base = baseDescription ?? GitL10n.text("index vs HEAD")
             arguments = [
-                "--literal-pathspecs", "diff", "--cached", "--no-ext-diff", "--no-color", "--unified=3", "--find-renames",
+                "--no-optional-locks", "--literal-pathspecs", "diff", "--cached", "--no-ext-diff", "--no-color", "--unified=3", "--find-renames",
                 "--", file.oldPath ?? file.path,
             ] + (file.oldPath == nil ? [] : [file.path])
             allowsExitCodeOne = false
@@ -218,11 +218,11 @@ struct GitDiffService: Sendable {
             base = baseDescription ?? GitL10n.text("working tree vs index")
             if file.isUntracked {
                 let absolutePath = GitRepositoryService.absolutePath(file.path, relativeTo: repository.worktreePath)
-                arguments = ["--literal-pathspecs", "diff", "--no-index", "--no-color", "--unified=3", "/dev/null", absolutePath]
+                arguments = ["--no-optional-locks", "--literal-pathspecs", "diff", "--no-index", "--no-color", "--unified=3", "/dev/null", absolutePath]
                 allowsExitCodeOne = true
             } else {
                 arguments = [
-                    "--literal-pathspecs", "diff", "--no-ext-diff", "--no-color", "--unified=3", "--find-renames",
+                    "--no-optional-locks", "--literal-pathspecs", "diff", "--no-ext-diff", "--no-color", "--unified=3", "--find-renames",
                     "--", file.oldPath ?? file.path,
                 ] + (file.oldPath == nil ? [] : [file.path])
                 allowsExitCodeOne = false
@@ -264,7 +264,7 @@ struct GitDiffService: Sendable {
     func sourceVersions(for file: GitDiffFile, repository: GitRepositoryIdentity,
                         target: GitDiffTarget, knownBase: GitDiffCommitBase? = nil) async throws -> (before: String, after: String) {
         func blob(_ revision: String, _ path: String) async throws -> String {
-            let result = try await run(["show", "\(revision):\(path)"], repository: repository,
+            let result = try await run(["--no-optional-locks", "show", "\(revision):\(path)"], repository: repository,
                                        maxOutputBytes: sourceByteLimit)
             guard !result.stdout.contains(0), let text = String(data: result.stdout, encoding: .utf8) else {
                 throw EditorDocumentError.binaryFile
@@ -314,7 +314,7 @@ struct GitDiffService: Sendable {
         let parents: [String]
         if let parentIDs { parents = parentIDs.map(\.rawValue) } else {
             let result = try await (executor ?? repository.executor).execute(
-                arguments: ["rev-list", "--parents", "-n", "1", commit.rawValue],
+                arguments: ["--no-optional-locks", "rev-list", "--parents", "-n", "1", commit.rawValue],
                 workingDirectory: repository.worktreePath,
                 stdin: nil,
                 maxOutputBytes: 4 * 1024
@@ -330,7 +330,7 @@ struct GitDiffService: Sendable {
         }
         if let parent = parents.first { return GitDiffCommitBase(commit: commit, id: parent, isRoot: false) }
         let emptyTree = try await (executor ?? repository.executor).execute(
-            arguments: ["hash-object", "-t", "tree", "--stdin"],
+            arguments: ["--no-optional-locks", "hash-object", "-t", "tree", "--stdin"],
             workingDirectory: repository.worktreePath,
             stdin: Data(),
             maxOutputBytes: 4 * 1024

@@ -246,6 +246,17 @@ struct MarkdownLiveEditorTests {
         document.requestNavigation(EditorTextLocation(startLine: 2, column: 1, endLine: nil))
         #expect(!document.isPreviewMode, "Navigating to a line in a Markdown document must switch from Preview to Edit")
 
+        let controller = MonacoWorkbenchController()
+        let uri = "omg-model://local" + file.path
+        controller.openOrUpdateModel(uri: uri, path: file.path, text: longParagraph, readOnly: false)
+        controller.activateModel(
+            uri: uri,
+            readOnly: false,
+            wordWrap: true,
+            tabSize: 4,
+            insertSpaces: true,
+            keymapProfile: .idea
+        )
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 960, height: 520),
             styleMask: [.titled, .closable, .resizable],
@@ -253,13 +264,10 @@ struct MarkdownLiveEditorTests {
             defer: false
         )
         window.isReleasedWhenClosed = false
-        window.contentView = NSHostingView(rootView: CodeEditorView(
-            text: .constant(longParagraph),
-            fileURL: file,
-            wordWrapOverride: true
-        ))
+        window.contentView = NSHostingView(rootView: MonacoWorkbenchSurface(controller: controller))
         window.makeKeyAndOrderFront(nil)
         defer {
+            controller.tearDown()
             window.contentView = nil
             window.close()
         }
@@ -365,6 +373,69 @@ struct MarkdownLiveEditorTests {
             (try? await web.evaluateJavaScript("document.querySelector('#content')?.innerText.includes('Updated paragraph.')")) as? Bool == true
         }
         try await assertTransparentWebView("after subsequent SwiftUI updates")
+    }
+
+    @Test func markdownPreviewMountsLazilyOnlyInPreviewModeAndSharesProcessPool() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("omg-md-lazy-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let mdFile = dir.appendingPathComponent("guide.md")
+        try Data("# Lazy Preview\n\nLine two.\n".utf8).write(to: mdFile)
+
+        let workspace = EditorWorkspace()
+        defer { workspace.cancelAndClear() }
+        let filesystem = LocalWorkspaceFilesystem(workingDirectory: dir.path)
+
+        // Opening with a line location opens directly in source Edit mode (isPreviewMode == false).
+        workspace.open(
+            path: mdFile.path,
+            filesystem: filesystem,
+            location: EditorTextLocation(startLine: 2, column: 1, endLine: nil)
+        )
+        try await waitUntil { !workspace.isLoading && workspace.selectedDocument != nil }
+        let doc = try #require(workspace.selectedDocument)
+        #expect(doc.isMarkdown)
+        #expect(!doc.isPreviewMode)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 460),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        let host = NSHostingView(
+            rootView: EditorSharedWorkbenchPane(
+                workspace: workspace,
+                terminalBackground: .black,
+                terminalTheme: .oneDark
+            )
+        )
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer {
+            window.contentView = nil
+            window.close()
+        }
+
+        let monacoWeb = try await EditorTestSupport.waitForMonacoReady(in: host)
+        #expect(monacoWeb.configuration.processPool === OMGWebViewProcessPool.shared)
+        // Strictly in Edit mode: MarkdownPreviewWebView must NOT be mounted eagerly with opacity(0).
+        #expect(findWebView(host) == nil)
+
+        // Switching to Preview mode mounts MarkdownPreviewWebView lazily on the shared WKProcessPool.
+        doc.isPreviewMode = true
+        let previewWeb = try await waitForWebView(in: window)
+        #expect(previewWeb.configuration.processPool === OMGWebViewProcessPool.shared)
+        try await waitUntil {
+            (try? await previewWeb.evaluateJavaScript("!!document.querySelector('#content h1')")) as? Bool == true
+        }
+
+        // Switching back to Edit mode dismantles the preview WKWebView again.
+        doc.isPreviewMode = false
+        try await waitUntil { self.findWebView(host) == nil }
+        #expect(findWebView(host) == nil)
     }
 
     private func waitForWebView(in window: NSWindow) async throws -> MarkdownPreviewWebView {

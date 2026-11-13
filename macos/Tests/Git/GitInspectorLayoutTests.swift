@@ -126,14 +126,25 @@ struct GitInspectorLayoutTests {
         """
         let workbench = MonacoWorkbenchController()
         defer { workbench.tearDown() }
-        let view = NSHostingView(rootView: CodeEditorView(
-            text: .constant(source),
-            fileURL: URL(fileURLWithPath: "/example.swift"),
-            diffLines: [4: true],
-            isEditable: false,
-            terminalTheme: .oneDark,
-            externalController: workbench
-        ).frame(width: 640, height: 300).background(Color(NSColor.textBackgroundColor)))
+        let uri = "omg-model://local/example.swift"
+        var resolvedTheme = EditorTheme.oneDark
+        resolvedTheme.background = EditorTheme.transparentBackground
+        workbench.setTheme(resolvedTheme, isDark: true)
+        workbench.openOrUpdateModel(uri: uri, path: "/example.swift", text: source, readOnly: true)
+        workbench.setGitDiffLines(uri: uri, lines: ["4": "added"])
+        workbench.activateModel(
+            uri: uri,
+            readOnly: true,
+            wordWrap: true,
+            tabSize: 4,
+            insertSpaces: true,
+            keymapProfile: .idea
+        )
+        let view = NSHostingView(
+            rootView: MonacoWorkbenchSurface(controller: workbench)
+                .frame(width: 640, height: 300)
+                .background(Color(NSColor.textBackgroundColor))
+        )
         view.sizingOptions = []
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 300),
                               styleMask: [.borderless], backing: .buffered, defer: false)

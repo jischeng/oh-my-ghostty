@@ -282,4 +282,50 @@ struct GitHistoryServiceTests {
         #expect(text.attribute(.backgroundColor, at: secondRange.location, effectiveRange: nil) != nil)
         #expect(text.attribute(.backgroundColor, at: 0, effectiveRange: nil) == nil)
     }
+
+    @Test func allHistoryQueriesPassNoOptionalLocks() async throws {
+        let directory = createTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try runCommand(["git", "init", "-b", "main"], in: directory.path)
+        try Data("v1\n".utf8).write(to: directory.appendingPathComponent("tracked.swift"))
+        try runCommand(["git", "add", "tracked.swift"], in: directory.path)
+        try runCommand(["git", "commit", "-m", "add tracked"], in: directory.path)
+
+        let repository = try await identity(for: directory)
+        let recorder = RecordingHistoryExecutor()
+        let service = GitHistoryService(executor: recorder)
+        let snapshot = try await service.captureSnapshot(for: repository, scope: .allBranches)
+        let page = try await service.loadPage(snapshot: snapshot, repository: repository, offset: 0)
+        #expect(page.commits.count == 1)
+        let filtered = try await service.loadPage(
+            snapshot: snapshot,
+            repository: repository,
+            offset: 0,
+            query: "path:tracked.swift"
+        )
+        #expect(filtered.commits.count == 1)
+
+        let commands = await recorder.commands
+        #expect(commands.count >= 6)
+        #expect(commands.allSatisfy { $0.first == "--no-optional-locks" })
+    }
+}
+
+private actor RecordingHistoryExecutor: GitExecutor {
+    private(set) var commands: [[String]] = []
+
+    func execute(
+        arguments: [String],
+        workingDirectory: String,
+        stdin: Data?,
+        maxOutputBytes: Int?
+    ) async throws -> GitExecutionResult {
+        commands.append(arguments)
+        return try await LocalGitExecutor().execute(
+            arguments: arguments,
+            workingDirectory: workingDirectory,
+            stdin: stdin,
+            maxOutputBytes: maxOutputBytes
+        )
+    }
 }

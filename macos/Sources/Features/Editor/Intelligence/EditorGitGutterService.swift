@@ -40,6 +40,7 @@ struct EditorGitGutterService: Sendable {
             let executable = gitExecutablePath ?? "/usr/bin/env"
             let prefixArgs = gitExecutablePath == nil ? ["git"] : []
             let headArgs = prefixArgs + [
+                "--no-optional-locks",
                 "--literal-pathspecs",
                 "diff",
                 "--no-ext-diff",
@@ -66,6 +67,7 @@ struct EditorGitGutterService: Sendable {
                 // Unborn branch (`HEAD` does not exist yet): fall back to index vs working tree diff.
                 if result.exitCode == 128, result.stderrString.contains("HEAD") {
                     let indexArgs = prefixArgs + [
+                        "--no-optional-locks",
                         "--literal-pathspecs",
                         "diff",
                         "--no-ext-diff",
@@ -100,6 +102,7 @@ struct EditorGitGutterService: Sendable {
         let relativePath = WorkspaceFileActions.relativePath(path, root: repositoryRoot)
         guard !relativePath.isEmpty, !relativePath.contains("\0") else { return [:] }
         let args = [
+            "--no-optional-locks",
             "--literal-pathspecs",
             "diff",
             "--no-ext-diff",

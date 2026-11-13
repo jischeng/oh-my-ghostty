@@ -35,7 +35,7 @@ actor GitWorkingTreeReadProbe: GitExecutor {
         if let component, component == failure {
             return GitExecutionResult(exitCode: 1, stdout: Data(), stderr: Data("\(component) read failed".utf8))
         }
-        if arguments.contains("add") || arguments.contains("restore") || arguments.contains("reset") || arguments.first == "commit" { writes += 1 }
+        if arguments.contains("add") || arguments.contains("restore") || arguments.contains("reset") || arguments.contains("commit") { writes += 1 }
         return try await LocalGitExecutor().execute(arguments: arguments, workingDirectory: workingDirectory,
                                                      stdin: stdin, maxOutputBytes: maxOutputBytes)
     }
@@ -318,7 +318,7 @@ private actor ExpansionQueryRecorder: GitExecutor {
     var parentReads = 0
     func execute(arguments: [String], workingDirectory: String, stdin: Data?, maxOutputBytes: Int?) async throws -> GitExecutionResult {
         if arguments.contains("--raw") || arguments.contains("--no-patch") { detailReads += 1 }
-        if arguments.first == "rev-list" && arguments.contains("--parents") { parentReads += 1 }
+        if arguments.contains("rev-list") && arguments.contains("--parents") { parentReads += 1 }
         return try await LocalGitExecutor().execute(arguments: arguments, workingDirectory: workingDirectory,
             stdin: stdin, maxOutputBytes: maxOutputBytes)
     }

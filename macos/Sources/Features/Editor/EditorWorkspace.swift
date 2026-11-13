@@ -10,29 +10,35 @@ final class EditorWorkspace: ObservableObject {
     @Published var selectedID: EditorDocumentID? { didSet { if selectedID != nil { gitDiff = nil } } }
     @Published var gitDiff: GitEditorDiffRequest? {
         didSet {
-            if gitDiff == nil {
-                diffWorkbenchController.isActive = false
+            if gitDiff == nil && selectedID == nil {
+                workbenchController.isActive = false
             }
         }
     }
     @Published private(set) var gitDiffs: [GitEditorDiffRequest] = []
     @Published var isVisible = false {
         didSet {
+            guard isVisible != oldValue else { return }
             if !isVisible {
                 workbenchController.isActive = false
-                diffWorkbenchController.isActive = false
+                scheduleWorkbenchReapIfNeeded()
+            } else {
+                cancelWorkbenchReap()
+                rehydrateWorkbenchAfterUncollapseIfNeeded()
             }
         }
     }
     @Published var isLoading = false
     @Published var errorMessage: String?
+    @Published private(set) var workbenchRehydrationRevision = 0
     let workbenchController = MonacoWorkbenchController()
-    let diffWorkbenchController = MonacoWorkbenchController()
     private(set) var intelligenceBridge: EditorWorkspaceIntelligenceBridge!
     private let idleReapDelay: Duration
     private var openTask: Task<Void, Never>?
     private var workbenchReapTask: Task<Void, Never>?
-    private var diffWorkbenchReapTask: Task<Void, Never>?
+    private var documentCancellables: [EditorDocumentID: AnyCancellable] = [:]
+    private var wasReapedWhileHidden = false
+    private var reapedActiveDiff: MonacoWorkbenchController.ActiveDiffSnapshot?
     var onDocumentRemoved: ((EditorDocument) -> Void)?
     var onWorkspaceCleared: (() -> Void)?
 
@@ -52,8 +58,9 @@ final class EditorWorkspace: ObservableObject {
     func cancelAndClear() {
         workbenchReapTask?.cancel()
         workbenchReapTask = nil
-        diffWorkbenchReapTask?.cancel()
-        diffWorkbenchReapTask = nil
+        documentCancellables.removeAll()
+        wasReapedWhileHidden = false
+        reapedActiveDiff = nil
         openTask?.cancel()
         openTask = nil
         isLoading = false
@@ -71,12 +78,15 @@ final class EditorWorkspace: ObservableObject {
         onWorkspaceCleared?()
         intelligenceBridge.tearDown()
         workbenchController.tearDown()
-        diffWorkbenchController.tearDown()
         gitDiff = nil
         gitDiffs.removeAll()
         documents.removeAll()
         selectedID = nil
         isVisible = false
+    }
+
+    private var isIdleForWorkbenchReap: Bool {
+        (documents.isEmpty && gitDiffs.isEmpty) || !isVisible
     }
 
     private func cancelWorkbenchReap() {
@@ -86,7 +96,11 @@ final class EditorWorkspace: ObservableObject {
 
     private func scheduleWorkbenchReapIfNeeded() {
         cancelWorkbenchReap()
-        guard documents.isEmpty, workbenchController.webView != nil else { return }
+        if documents.isEmpty && gitDiffs.isEmpty {
+            wasReapedWhileHidden = false
+            reapedActiveDiff = nil
+        }
+        guard isIdleForWorkbenchReap, workbenchController.webView != nil else { return }
         let delay = idleReapDelay
         workbenchReapTask = Task { @MainActor [weak self] in
             do {
@@ -94,31 +108,116 @@ final class EditorWorkspace: ObservableObject {
             } catch {
                 return
             }
-            guard let self, !Task.isCancelled, self.documents.isEmpty else { return }
+            guard let self, !Task.isCancelled, self.isIdleForWorkbenchReap else { return }
             self.workbenchReapTask = nil
+            if !self.documents.isEmpty || !self.gitDiffs.isEmpty {
+                self.wasReapedWhileHidden = true
+                self.reapedActiveDiff = self.workbenchController.activeDiff
+            } else {
+                self.wasReapedWhileHidden = false
+                self.reapedActiveDiff = nil
+            }
             self.workbenchController.tearDown()
         }
     }
 
-    private func cancelDiffWorkbenchReap() {
-        diffWorkbenchReapTask?.cancel()
-        diffWorkbenchReapTask = nil
+    private func rehydrateWorkbenchAfterUncollapseIfNeeded() {
+        guard !documents.isEmpty || !gitDiffs.isEmpty else {
+            wasReapedWhileHidden = false
+            reapedActiveDiff = nil
+            return
+        }
+        if wasReapedWhileHidden {
+            wasReapedWhileHidden = false
+            let savedDiff = reapedActiveDiff
+            reapedActiveDiff = nil
+
+            let activeDoc = gitDiff == nil ? selectedDocument : nil
+            let activeIsPureMarkdownPreview = activeDoc.map { $0.isMarkdown && $0.isPreviewMode } ?? false
+            let allDocsPureMarkdownPreview = !documents.isEmpty && documents.allSatisfy {
+                $0.isMarkdown && $0.isPreviewMode
+            }
+            let matchingSavedDiff: MonacoWorkbenchController.ActiveDiffSnapshot? = {
+                guard let request = gitDiff, let savedDiff,
+                      savedDiff.id.hasPrefix(request.id.uuidString + ":") else {
+                    return nil
+                }
+                return savedDiff
+            }()
+
+            if !documents.isEmpty && (!allDocsPureMarkdownPreview || matchingSavedDiff != nil) {
+                _ = workbenchController.ensureWebView()
+                for openDoc in documents {
+                    workbenchController.openOrUpdateModel(
+                        uri: openDoc.id.monacoURI,
+                        path: openDoc.path,
+                        text: openDoc.text,
+                        readOnly: openDoc.isRestoringFromGit,
+                        preserveView: true
+                    )
+                }
+            }
+
+            if let snapshot = matchingSavedDiff {
+                _ = workbenchController.ensureWebView()
+                workbenchController.isPreview = false
+                workbenchController.isActive = true
+                workbenchController.activateDiff(
+                    id: snapshot.id,
+                    path: snapshot.path,
+                    originalText: snapshot.originalText,
+                    modifiedText: snapshot.modifiedText,
+                    patch: snapshot.patch,
+                    patchOnly: snapshot.patchOnly,
+                    review: snapshot.review,
+                    inline: snapshot.inline,
+                    wordWrap: snapshot.wordWrap,
+                    readOnly: snapshot.readOnly,
+                    languageHint: snapshot.languageHint,
+                    force: true
+                )
+            } else if let activeDoc, !activeIsPureMarkdownPreview {
+                _ = workbenchController.ensureWebView()
+                activateDocumentInWorkbench(activeDoc)
+            }
+
+            if workbenchController.webView != nil {
+                intelligenceBridge.rehydrateWorkbenchDecorations()
+            }
+            workbenchRehydrationRevision &+= 1
+            return
+        }
+
+        guard workbenchController.webView != nil else { return }
+        if let request = gitDiff,
+           let activeDiff = workbenchController.activeDiff,
+           activeDiff.id.hasPrefix(request.id.uuidString + ":") {
+            workbenchController.isActive = true
+        } else if gitDiff == nil,
+                  let activeDoc = selectedDocument,
+                  !(activeDoc.isMarkdown && activeDoc.isPreviewMode),
+                  workbenchController.activeURI == activeDoc.id.monacoURI {
+            workbenchController.isActive = true
+        }
     }
 
-    private func scheduleDiffWorkbenchReapIfNeeded() {
-        cancelDiffWorkbenchReap()
-        guard gitDiffs.isEmpty, diffWorkbenchController.webView != nil else { return }
-        let delay = idleReapDelay
-        diffWorkbenchReapTask = Task { @MainActor [weak self] in
-            do {
-                try await Task.sleep(for: delay)
-            } catch {
-                return
-            }
-            guard let self, !Task.isCancelled, self.gitDiffs.isEmpty else { return }
-            self.diffWorkbenchReapTask = nil
-            self.diffWorkbenchController.tearDown()
-        }
+    private func activateDocumentInWorkbench(_ document: EditorDocument) {
+        let editorSettings = OhMyGhosttySettings.shared.editorSettings
+        let showsMarkdownPreview = document.isMarkdown && document.isPreviewMode
+        let readOnly = document.isRestoringFromGit || showsMarkdownPreview
+        let wordWrap = document.isMarkdown ? true : editorSettings.wordWrap
+        let insertSpaces = !EditorLanguageMapping.usesHardTabs(forPath: document.path)
+        workbenchController.isPreview = showsMarkdownPreview
+        workbenchController.keymap = editorSettings.keymap
+        workbenchController.isActive = isVisible && !showsMarkdownPreview
+        workbenchController.activateModel(
+            uri: document.id.monacoURI,
+            readOnly: readOnly,
+            wordWrap: wordWrap,
+            tabSize: max(1, editorSettings.tabWidth),
+            insertSpaces: insertSpaces,
+            keymapProfile: editorSettings.keymapProfile
+        )
     }
 
     var selectedDocument: EditorDocument? {
@@ -185,7 +284,6 @@ final class EditorWorkspace: ObservableObject {
         cancelWorkbenchReap()
         gitDiff = nil
         let wasVisible = isVisible
-        isVisible = true
         errorMessage = nil
         openTask?.cancel()
         if let id = try? EditorDocumentID(descriptor: filesystem.descriptor, path: path),
@@ -195,8 +293,10 @@ final class EditorWorkspace: ObservableObject {
             }
             selectedID = id
             isLoading = false
+            isVisible = true
             return
         }
+        isVisible = true
         isLoading = true
         openTask = Task { [weak self] in
             do {
@@ -207,8 +307,25 @@ final class EditorWorkspace: ObservableObject {
                     document.requestNavigation(location)
                 }
                 documents.append(document)
+                documentCancellables[document.id] = document.$isPreviewMode
+                    .dropFirst()
+                    .sink { [weak self] _ in
+                        self?.objectWillChange.send()
+                    }
                 intelligenceBridge.registerDocument(document)
                 selectedID = document.id
+                if workbenchController.webView != nil {
+                    workbenchController.openOrUpdateModel(
+                        uri: document.id.monacoURI,
+                        path: document.path,
+                        text: document.text,
+                        readOnly: document.isRestoringFromGit,
+                        preserveView: false
+                    )
+                    if isVisible && gitDiff == nil && !(document.isMarkdown && document.isPreviewMode) {
+                        activateDocumentInWorkbench(document)
+                    }
+                }
                 isLoading = false
             } catch {
                 guard !Task.isCancelled, let self else { return }
@@ -231,8 +348,7 @@ final class EditorWorkspace: ObservableObject {
     }
 
     func openGitDiff(_ request: GitEditorDiffRequest) {
-        cancelDiffWorkbenchReap()
-        _ = diffWorkbenchController.ensureWebView()
+        cancelWorkbenchReap()
         openTask?.cancel()
         isLoading = false
         errorMessage = nil
@@ -242,7 +358,7 @@ final class EditorWorkspace: ObservableObject {
     }
 
     func selectGitDiff(_ request: GitEditorDiffRequest) {
-        cancelDiffWorkbenchReap()
+        cancelWorkbenchReap()
         openTask?.cancel()
         isLoading = false
         selectedID = nil
@@ -277,13 +393,21 @@ final class EditorWorkspace: ObservableObject {
     }
 
     func closeGitDiff(_ request: GitEditorDiffRequest) {
+        if let activeDiff = workbenchController.activeDiff,
+           activeDiff.id.hasPrefix(request.id.uuidString + ":") {
+            workbenchController.isActive = false
+        }
+        if let saved = reapedActiveDiff,
+           saved.id.hasPrefix(request.id.uuidString + ":") {
+            reapedActiveDiff = nil
+        }
         gitDiffs.removeAll { $0.id == request.id }
         if gitDiff?.id == request.id {
             gitDiff = nil
             if let last = gitDiffs.last { selectGitDiff(last) } else { selectedID = documents.last?.id }
         }
         if documents.isEmpty && gitDiffs.isEmpty { isVisible = false }
-        scheduleDiffWorkbenchReapIfNeeded()
+        scheduleWorkbenchReapIfNeeded()
     }
 
     func save(_ document: EditorDocument) async -> Bool {
@@ -317,7 +441,6 @@ final class EditorWorkspace: ObservableObject {
         isVisible = false
         isLoading = false
         scheduleWorkbenchReapIfNeeded()
-        scheduleDiffWorkbenchReapIfNeeded()
         return true
     }
 
@@ -398,6 +521,7 @@ final class EditorWorkspace: ObservableObject {
     }
 
     func remove(_ document: EditorDocument) {
+        documentCancellables.removeValue(forKey: document.id)
         document.suspendAutoSave()
         document.cancelAutoSave()
         intelligenceBridge.unregisterDocument(document)

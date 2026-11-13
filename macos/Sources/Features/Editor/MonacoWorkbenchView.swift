@@ -3,6 +3,12 @@ import Combine
 import SwiftUI
 import WebKit
 
+/// Shared WebContent process pool reused across Monaco editor/diff and Markdown preview WebViews.
+@MainActor
+enum OMGWebViewProcessPool {
+    static let shared = WKProcessPool()
+}
+
 /// Contextual code selection emitted by Monaco's "Ask Agent / Send to Quick Input" action.
 struct EditorAskAgentRequest: Equatable, Sendable {
     let path: String
@@ -588,6 +594,7 @@ final class MonacoWorkbenchController: NSObject, ObservableObject, WKNavigationD
         }
         isTornDown = false
         let configuration = WKWebViewConfiguration()
+        configuration.processPool = OMGWebViewProcessPool.shared
         configuration.websiteDataStore = .nonPersistent()
         configuration.setURLSchemeHandler(
             MonacoEditorResources(customRootURL: customResourceRootURL),
@@ -614,11 +621,6 @@ final class MonacoWorkbenchController: NSObject, ObservableObject, WKNavigationD
         updateCommandRegistration()
         created.load(URLRequest(url: MonacoEditorResources.entryURL))
         return created
-    }
-
-    func preloadIfNeeded() {
-        guard webView == nil, !isTornDown else { return }
-        _ = ensureWebView()
     }
 
     func tearDown() {
@@ -1251,13 +1253,63 @@ final class MonacoWorkbenchController: NSObject, ObservableObject, WKNavigationD
     }
 }
 
-/// Hosts a `MonacoWorkbenchController`'s single `MonacoEditorWebView` inside SwiftUI
-/// without recreating the underlying `WKWebView` across tab or document switches.
+@MainActor
+final class MonacoWorkbenchSurfaceBinding {
+    weak var containerView: MonacoWorkbenchSurface.ContainerView?
+}
+
+/// AppKit visibility-aware host for `MonacoWorkbenchController`'s single `MonacoEditorWebView`.
+/// `EditorContentDeckController` hides inactive `NSHostingView`s (`isHidden = true`) instead of
+/// tearing them down, and SwiftUI coalesces updates on hidden hosts. Tracking AppKit's
+/// `viewDidHide` / `viewDidUnhide` / `viewDidMoveToWindow` deterministically reparents and
+/// re-syncs the shared `WKWebView` across Editor tabs and Git Diff tabs without race conditions.
 struct MonacoWorkbenchSurface: NSViewRepresentable {
     @ObservedObject var controller: MonacoWorkbenchController
+    var binding: MonacoWorkbenchSurfaceBinding?
+    var ownsWorkbench = true
+    var isActive = true
+    var allowsEnsureWebView = true
+    var rehydrationRevision = 0
+    var onActivate: (() -> Void)?
+    var onDeactivate: (() -> Void)?
 
     final class ContainerView: NSView {
+        var controller: MonacoWorkbenchController?
+        var ownsWorkbench = true
+        var isActive = true
+        var allowsEnsureWebView = true
+        var needsSyncOnUnhide = false
+        private var wasOwningWebView = false
+        var onActivate: (() -> Void)?
+        var onDeactivate: (() -> Void)?
+
         override var isOpaque: Bool { false }
+
+        var canOwnWebView: Bool {
+            guard allowsEnsureWebView else { return false }
+            return ownsWorkbench || (isActive && !isHiddenOrHasHiddenAncestor)
+        }
+
+        func markNotOwning() {
+            wasOwningWebView = false
+        }
+
+        func reconcile(forceSync: Bool) {
+            guard canOwnWebView, let controller else {
+                wasOwningWebView = false
+                return
+            }
+            let becameOwner = !wasOwningWebView
+            wasOwningWebView = true
+            needsSyncOnUnhide = false
+            let hadNoWebView = controller.webView == nil
+            let webView = controller.ensureWebView()
+            let didAcquireWebView = webView.superview !== self
+            mount(webView)
+            if (!ownsWorkbench && (becameOwner || didAcquireWebView || forceSync)) || hadNoWebView {
+                onActivate?()
+            }
+        }
 
         func mount(_ webView: MonacoEditorWebView) {
             guard webView.superview !== self else {
@@ -1276,6 +1328,32 @@ struct MonacoWorkbenchSurface: NSViewRepresentable {
             ])
             webView.clearBackgrounds()
         }
+
+        override func viewDidHide() {
+            super.viewDidHide()
+            wasOwningWebView = false
+            if !ownsWorkbench {
+                needsSyncOnUnhide = true
+                onDeactivate?()
+            }
+        }
+
+        override func viewDidUnhide() {
+            super.viewDidUnhide()
+            reconcile(forceSync: true)
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window == nil {
+                wasOwningWebView = false
+                if !ownsWorkbench {
+                    onDeactivate?()
+                }
+            } else {
+                reconcile(forceSync: false)
+            }
+        }
     }
 
     func makeNSView(context: Context) -> ContainerView {
@@ -1283,7 +1361,8 @@ struct MonacoWorkbenchSurface: NSViewRepresentable {
         container.wantsLayer = true
         container.layer?.backgroundColor = nil
         container.layer?.isOpaque = false
-        container.mount(controller.ensureWebView())
+        binding?.containerView = container
+        configure(container, isInitial: true)
         return container
     }
 
@@ -1296,6 +1375,36 @@ struct MonacoWorkbenchSurface: NSViewRepresentable {
                 layer.isOpaque = false
             }
         }
-        container.mount(controller.ensureWebView())
+        binding?.containerView = container
+        configure(container, isInitial: false)
+    }
+
+    static func dismantleNSView(_ container: ContainerView, coordinator: ()) {
+        container.markNotOwning()
+        if !container.ownsWorkbench {
+            container.onDeactivate?()
+        }
+        container.onActivate = nil
+        container.onDeactivate = nil
+        container.controller = nil
+    }
+
+    private func configure(_ container: ContainerView, isInitial: Bool) {
+        _ = rehydrationRevision
+        container.controller = controller
+        container.ownsWorkbench = ownsWorkbench
+        container.isActive = isActive
+        container.allowsEnsureWebView = allowsEnsureWebView
+        container.onActivate = onActivate
+        container.onDeactivate = onDeactivate
+        if container.canOwnWebView {
+            let forceSync = !isInitial && container.needsSyncOnUnhide
+            container.reconcile(forceSync: forceSync)
+        } else {
+            container.markNotOwning()
+            if !ownsWorkbench {
+                container.onDeactivate?()
+            }
+        }
     }
 }

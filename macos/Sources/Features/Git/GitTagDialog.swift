@@ -246,7 +246,7 @@ final class GitTagDialogController: NSViewController, NSWindowDelegate, NSTextFi
 
     private func tagsMergedAtCommit() async throws -> [String] {
         let result = try await repository.executor.execute(
-            arguments: ["tag", "--merged", commit.id.rawValue, "--sort=-version:refname"],
+            arguments: ["--no-optional-locks", "tag", "--merged", commit.id.rawValue, "--sort=-version:refname"],
             workingDirectory: repository.worktreePath, maxOutputBytes: 64_000)
         guard result.isSuccess else {
             throw GitExecutionError.processFailed(exitCode: result.exitCode, stderr: result.stderrString)

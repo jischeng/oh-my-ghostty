@@ -617,7 +617,7 @@ final class BuiltInGitInspectorProvider {
         }
         guard let branch = state.browsedBranch else { return snapshot }
         if branch.hasPrefix("refs/tags/") {
-            let result = try await (repositoryService.executor ?? repository.executor).execute(arguments: ["rev-parse", "--verify", branch + "^{commit}"], workingDirectory: repository.worktreePath)
+            let result = try await (repositoryService.executor ?? repository.executor).execute(arguments: ["--no-optional-locks", "rev-parse", "--verify", branch + "^{commit}"], workingDirectory: repository.worktreePath)
             guard result.isSuccess else { throw GitDiffServiceError.gitFailed(result.stderrString) }
             return GitHistorySnapshot(scope: snapshot.scope, branchName: snapshot.branchName,
                 headCommitID: snapshot.headCommitID, tipCommitIDs: [.init(result.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines))],

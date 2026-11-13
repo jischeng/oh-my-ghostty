@@ -244,8 +244,9 @@ struct GitRepositoryServiceTests {
 private struct RemoteRepositoryProbe: GitExecutor {
     func execute(arguments: [String], workingDirectory: String, stdin: Data?, maxOutputBytes: Int?) async throws -> GitExecutionResult {
         #expect(workingDirectory == "/remote/repo")
+        #expect(arguments.first == "--no-optional-locks")
         let output: String
-        if arguments.contains("--show-toplevel") { output = "true\n/remote/repo\n/remote/repo/.git\n/remote/repo/.git\n\n" } else if arguments.first == "symbolic-ref" { output = "main\n" } else { output = String(repeating: "a", count: 40) + "\n" }
+        if arguments.contains("--show-toplevel") { output = "true\n/remote/repo\n/remote/repo/.git\n/remote/repo/.git\n\n" } else if arguments.contains("symbolic-ref") { output = "main\n" } else { output = String(repeating: "a", count: 40) + "\n" }
         return GitExecutionResult(exitCode: 0, stdout: Data(output.utf8), stderr: Data())
     }
 }

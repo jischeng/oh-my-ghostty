@@ -32,6 +32,7 @@ struct GitHistoryService: Sendable {
     ) async throws -> GitHistorySnapshot {
         async let refsResult = (executor ?? repository.executor).execute(
             arguments: [
+                "--no-optional-locks",
                 "for-each-ref",
                 "--format=%(refname)%00%(objectname)%00%(*objectname)%1e",
                 "refs/heads",
@@ -43,13 +44,13 @@ struct GitHistoryService: Sendable {
             maxOutputBytes: 2 * 1024 * 1024
         )
         async let branchResult = (executor ?? repository.executor).execute(
-            arguments: ["symbolic-ref", "--quiet", "--short", "HEAD"],
+            arguments: ["--no-optional-locks", "symbolic-ref", "--quiet", "--short", "HEAD"],
             workingDirectory: repository.worktreePath,
             stdin: nil,
             maxOutputBytes: 16 * 1024
         )
         async let headResult = (executor ?? repository.executor).execute(
-            arguments: ["rev-parse", "--quiet", "--verify", "HEAD"],
+            arguments: ["--no-optional-locks", "rev-parse", "--quiet", "--verify", "HEAD"],
             workingDirectory: repository.worktreePath,
             stdin: nil,
             maxOutputBytes: 16 * 1024
@@ -57,6 +58,7 @@ struct GitHistoryService: Sendable {
         // Fetched but not pulled: reachable from remote-tracking refs only.
         async let remoteOnlyResult = (executor ?? repository.executor).execute(
             arguments: [
+                "--no-optional-locks",
                 "rev-list",
                 "--max-count=\(Self.remoteOnlyLimit)",
                 "--remotes",
@@ -221,6 +223,7 @@ struct GitHistoryService: Sendable {
         let requestedCount = pageSize + 1
         let result = try await (executor ?? repository.executor).execute(
             arguments: [
+                "--no-optional-locks",
                 "log",
                 "--encoding=UTF-8",
                 "--topo-order",
@@ -277,7 +280,7 @@ struct GitHistoryService: Sendable {
     ) async throws -> Set<GitCommitID>? {
         guard !paths.isEmpty else { return nil }
         let result = try await (executor ?? repository.executor).execute(
-            arguments: ["log", "--no-color", "--format=%H", "--stdin", "--"]
+            arguments: ["--no-optional-locks", "log", "--no-color", "--format=%H", "--stdin", "--"]
                 + paths.flatMap(GitHistorySearchQuery.pathspecs(for:)),
             workingDirectory: repository.worktreePath,
             stdin: Data((snapshot.tipCommitIDs.map(\.rawValue).joined(separator: "\n") + "\n").utf8),

@@ -141,19 +141,33 @@ struct EditorAppearanceTests {
     @Test func monacoEditorRemainsTransparentOverSharedBackdrop() async throws {
         let backdropColor = NSColor(red: 0.12, green: 0.24, blue: 0.36, alpha: 1)
         let source = "from pathlib import Path\n\ndef greet(name: str) -> str:\n    return f'Hello {name}'\n"
-        let root = CodeEditorView(
-            text: .constant(source),
-            fileURL: URL(fileURLWithPath: "/tmp/hello.py"),
-            terminalTheme: .oneDark
+        let controller = MonacoWorkbenchController()
+        let uri = "omg-model://local/tmp/hello.py"
+        var resolvedTheme = EditorTheme.oneDark
+        resolvedTheme.background = EditorTheme.transparentBackground
+        controller.setTheme(resolvedTheme, isDark: true)
+        controller.openOrUpdateModel(uri: uri, path: "/tmp/hello.py", text: source, readOnly: false)
+        controller.activateModel(
+            uri: uri,
+            readOnly: false,
+            wordWrap: true,
+            tabSize: 4,
+            insertSpaces: true,
+            keymapProfile: .idea
         )
-        .background(EditorBackdrop(color: backdropColor, opacity: 1, blur: .disabled))
-        .frame(width: 760, height: 460)
+        let root = MonacoWorkbenchSurface(controller: controller)
+            .background(EditorBackdrop(color: backdropColor, opacity: 1, blur: .disabled))
+            .frame(width: 760, height: 460)
 
         let mounted = EditorTestSupport.host(root, size: NSSize(width: 760, height: 460))
         mounted.1.makeKeyAndOrderFront(nil)
-        defer { EditorTestSupport.unmount(mounted) }
+        defer {
+            controller.tearDown()
+            EditorTestSupport.unmount(mounted)
+        }
 
         let webView = try await EditorTestSupport.waitForMonacoReady(in: mounted.0.view)
+        #expect(webView.configuration.processPool === OMGWebViewProcessPool.shared)
         #expect(!webView.isOpaque)
         #expect((webView.value(forKey: "drawsBackground") as? Bool) == false)
         #expect((webView.underPageBackgroundColor?.alphaComponent ?? 0) == 0)

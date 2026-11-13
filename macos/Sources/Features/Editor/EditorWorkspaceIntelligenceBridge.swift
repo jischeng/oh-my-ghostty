@@ -138,6 +138,22 @@ final class EditorWorkspaceIntelligenceBridge {
         }
     }
 
+    /// Restores git gutter bars and language-server diagnostics after an idle-reaped workbench
+    /// recreates its `WKWebView` while open documents remained preserved in `EditorWorkspace`.
+    func rehydrateWorkbenchDecorations() {
+        guard let workspace else { return }
+        for document in workspace.documents {
+            refreshGitGutter(for: document)
+            let ctx = documentContext(for: document)
+            let currentText = document.text
+            let docID = document.id
+            lifecycleTasks[docID]?.cancel()
+            lifecycleTasks[docID] = Task { @MainActor [weak self] in
+                await self?.coordinator.documentDidChange(ctx, text: currentText)
+            }
+        }
+    }
+
     func refreshGitGutter(for document: EditorDocument, remoteExecutor: (any GitExecutor)? = nil) {
         let docID = document.id
         let uri = docID.monacoURI

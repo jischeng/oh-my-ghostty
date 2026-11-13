@@ -160,7 +160,9 @@ struct GitEditorDiffModelTests {
         await model.select(next)?.value
         #expect(model.content?.presentation?.isConsistent == true)
         #expect(await executor.commands.count == 8)
-        #expect(await executor.commands.filter { $0.first == "rev-list" }.count == 1)
+        let recorded = await executor.commands
+        #expect(recorded.allSatisfy { $0.first == "--no-optional-locks" })
+        #expect(recorded.filter { $0.contains("rev-list") }.count == 1)
     }
 
     @Test func largeSourcesAndPatchesLoadAcrossGitTargets() async throws {
@@ -386,7 +388,7 @@ private actor ConcurrentBarrierDiffExecutor: GitExecutor {
         if arguments.contains("--name-status") {
             return ok("M\0fast.swift\0")
         }
-        if arguments.first == "show" {
+        if arguments.contains("show") {
             let spec = arguments.last ?? ""
             if spec.hasPrefix("HEAD:") {
                 return ok("let value = 1\n")
@@ -422,7 +424,7 @@ private actor BinaryCancellingSourceExecutor: GitExecutor {
         if arguments.contains("--name-status") {
             return GitExecutionResult(exitCode: 0, stdout: Data("M\0asset.bin\0".utf8), stderr: Data())
         }
-        if arguments.first == "show" {
+        if arguments.contains("show") {
             let id = UUID()
             sourceStarted = true
             diffWaiter?.resume()

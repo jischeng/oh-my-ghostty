@@ -72,14 +72,14 @@ struct GitWorkingTreeContent: Equatable, Sendable {
 
 extension GitRepositoryService {
     func headCommit(for repository: GitRepositoryIdentity) async throws -> GitCommitID {
-        let result = try await (executor ?? repository.executor).execute(arguments: ["rev-parse", "--verify", "HEAD"],
+        let result = try await (executor ?? repository.executor).execute(arguments: ["--no-optional-locks", "rev-parse", "--verify", "HEAD"],
             workingDirectory: repository.worktreePath, stdin: nil, maxOutputBytes: 4096)
         guard result.isSuccess else { throw GitDiffServiceError.gitFailed(result.stderrString) }
         return GitCommitID(result.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     func remoteAddress(for repository: GitRepositoryIdentity) async throws -> String? {
-        let result = try await (executor ?? repository.executor).execute(arguments: ["config", "--get", "remote.origin.url"],
+        let result = try await (executor ?? repository.executor).execute(arguments: ["--no-optional-locks", "config", "--get", "remote.origin.url"],
             workingDirectory: repository.worktreePath, stdin: nil, maxOutputBytes: 16 * 1024)
         if result.exitCode == 1 { return nil }
         guard result.isSuccess else { throw GitDiffServiceError.gitFailed(result.stderrString) }
@@ -97,7 +97,8 @@ extension GitRepositoryService {
 
     func branches(for repository: GitRepositoryIdentity) async throws -> [GitBranchInfo] {
         let result = try await (executor ?? repository.executor).execute(
-            arguments: ["for-each-ref",
+            arguments: ["--no-optional-locks",
+                        "for-each-ref",
                         "--format=%(refname)%00%(objectname)%00%(HEAD)%00%(upstream:short)%00%(upstream:track)%00%(symref)",
                         "refs/heads", "refs/remotes"],
             workingDirectory: repository.worktreePath, stdin: nil, maxOutputBytes: 512 * 1024

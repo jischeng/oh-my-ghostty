@@ -1,5 +1,126 @@
 import AppKit
+import Combine
 import SwiftUI
+
+enum GitDiffViewMode: String, Equatable, Sendable {
+    case inline
+    case split
+
+    init(storedValue: String?) {
+        switch storedValue?.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case Self.split.rawValue, "Side by Side", "并排":
+            self = .split
+        default:
+            self = .inline
+        }
+    }
+
+    var isInline: Bool {
+        self == .inline
+    }
+
+    static func isLegacyStoredValue(_ value: String) -> Bool {
+        value != Self.inline.rawValue && value != Self.split.rawValue
+    }
+}
+
+@MainActor
+final class GitDiffPreferences: ObservableObject {
+    static let viewModeKey = "git.diff.viewMode"
+    static let reviewKey = "git.diff.review"
+    static let wordWrapKey = "git.diff.wordWrap"
+    static let shared = GitDiffPreferences()
+
+    @Published private(set) var viewMode: GitDiffViewMode
+    @Published private(set) var review: Bool
+    @Published private(set) var wordWrap: Bool
+
+    private let defaults: UserDefaults
+    private var isWritingDefaults = false
+    private nonisolated(unsafe) var defaultsObserver: NSObjectProtocol?
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        let rawMode = defaults.string(forKey: Self.viewModeKey)
+        let resolvedMode = GitDiffViewMode(storedValue: rawMode)
+        self.viewMode = resolvedMode
+        self.review = (defaults.object(forKey: Self.reviewKey) as? Bool) ?? true
+        self.wordWrap = (defaults.object(forKey: Self.wordWrapKey) as? Bool) ?? true
+        if let rawMode, GitDiffViewMode.isLegacyStoredValue(rawMode) {
+            defaults.set(resolvedMode.rawValue, forKey: Self.viewModeKey)
+        }
+        self.defaultsObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: defaults,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.refreshFromDefaults()
+            }
+        }
+    }
+
+    deinit {
+        if let defaultsObserver {
+            NotificationCenter.default.removeObserver(defaultsObserver)
+        }
+    }
+
+    func setViewMode(_ next: GitDiffViewMode) {
+        if viewMode != next {
+            viewMode = next
+        }
+        if defaults.string(forKey: Self.viewModeKey) != next.rawValue {
+            isWritingDefaults = true
+            defaults.set(next.rawValue, forKey: Self.viewModeKey)
+            isWritingDefaults = false
+        }
+    }
+
+    func setReview(_ next: Bool) {
+        if review != next {
+            review = next
+        }
+        if (defaults.object(forKey: Self.reviewKey) as? Bool) != next {
+            isWritingDefaults = true
+            defaults.set(next, forKey: Self.reviewKey)
+            isWritingDefaults = false
+        }
+    }
+
+    func setWordWrap(_ next: Bool) {
+        if wordWrap != next {
+            wordWrap = next
+        }
+        if (defaults.object(forKey: Self.wordWrapKey) as? Bool) != next {
+            isWritingDefaults = true
+            defaults.set(next, forKey: Self.wordWrapKey)
+            isWritingDefaults = false
+        }
+    }
+
+    func refreshFromDefaults() {
+        guard !isWritingDefaults else { return }
+        let rawMode = defaults.string(forKey: Self.viewModeKey)
+        let nextMode = GitDiffViewMode(storedValue: rawMode)
+        if let rawMode, GitDiffViewMode.isLegacyStoredValue(rawMode) {
+            isWritingDefaults = true
+            defaults.set(nextMode.rawValue, forKey: Self.viewModeKey)
+            isWritingDefaults = false
+        }
+        if viewMode != nextMode {
+            viewMode = nextMode
+        }
+        let nextReview = (defaults.object(forKey: Self.reviewKey) as? Bool) ?? true
+        if review != nextReview {
+            review = nextReview
+        }
+        let nextWrap = (defaults.object(forKey: Self.wordWrapKey) as? Bool) ?? true
+        if wordWrap != nextWrap {
+            wordWrap = nextWrap
+        }
+    }
+}
 
 struct GitEditorDiffRequest: Identifiable {
     let id = UUID()
@@ -33,15 +154,14 @@ struct GitEditorDiffView: View {
     var isActive = true
     var actions = GitDiffEditorActions()
     var externalController: MonacoWorkbenchController?
+    var rehydrationRevision = 0
     let close: () -> Void
     @StateObject private var model: GitEditorDiffModel
     @StateObject private var ownedWorkbench = MonacoWorkbenchController()
-    @AppStorage("git.diff.viewMode") private var mode = GitL10n.text("Inline")
-    @AppStorage("git.diff.review") private var review = true
-    @AppStorage("git.diff.wordWrap") private var wordWrap = true
+    @ObservedObject private var preferences = GitDiffPreferences.shared
     @State private var hasMountedDiffSurface = false
     @State private var forceNextDiffSync = false
-    @State private var surfaceBinding = GitDiffSurfaceBinding()
+    @State private var surfaceBinding = MonacoWorkbenchSurfaceBinding()
     @State private var navigator = GitDiffReviewNavigator()
     @State private var pendingLanding: GitDiffReviewNavigator.Landing?
     @State private var navigationHint: String?
@@ -54,6 +174,7 @@ struct GitEditorDiffView: View {
         actions: GitDiffEditorActions = GitDiffEditorActions(),
         service: GitDiffService = GitDiffService(),
         externalController: MonacoWorkbenchController? = nil,
+        rehydrationRevision: Int = 0,
         close: @escaping () -> Void
     ) {
         self.request = request
@@ -61,6 +182,7 @@ struct GitEditorDiffView: View {
         self.isActive = isActive
         self.actions = actions
         self.externalController = externalController
+        self.rehydrationRevision = rehydrationRevision
         self.close = close
         _model = StateObject(wrappedValue: GitEditorDiffModel(request: request, service: service))
     }
@@ -106,19 +228,6 @@ struct GitEditorDiffView: View {
         }
         let textSRGB = theme.text.color.usingColorSpace(.sRGB) ?? theme.text.color
         return textSRGB.brightnessComponent >= 0.5
-    }
-
-    private var effectiveInlineMode: Bool {
-        let stored = UserDefaults.standard.string(forKey: "git.diff.viewMode") ?? mode
-        return stored != GitL10n.text("Side by Side")
-    }
-
-    private var effectiveReview: Bool {
-        (UserDefaults.standard.object(forKey: "git.diff.review") as? Bool) ?? review
-    }
-
-    private var effectiveWordWrap: Bool {
-        (UserDefaults.standard.object(forKey: "git.diff.wordWrap") as? Bool) ?? wordWrap
     }
 
     private var diffContent: GitEditorDiffModel.Content? {
@@ -208,23 +317,23 @@ struct GitEditorDiffView: View {
                         // Reserve both toolbar clusters so mode changes never displace the file summary.
                         .frame(maxWidth: max(160, toolbarGeometry.size.width - 560), alignment: .leading)
                         Spacer(minLength: 8)
-                        GitDiffReviewSwitcher(review: review) { next in
+                        GitDiffReviewSwitcher(review: preferences.review) { next in
                             clearHint()
-                            review = next
+                            preferences.setReview(next)
                         }
                         .frame(width: 132, height: 26)
                         toolbarButton(
                             "arrow.turn.down.left",
                             help: GitL10n.text("Wrap diff lines"),
-                            selected: wordWrap
+                            selected: preferences.wordWrap
                         ) {
                             clearHint()
-                            wordWrap.toggle()
+                            preferences.setWordWrap(!preferences.wordWrap)
                         }
                         fileMenu
-                        GitDiffModeSwitcher(mode: mode) { next in
+                        GitDiffModeSwitcher(mode: preferences.viewMode) { next in
                             clearHint()
-                            mode = next
+                            preferences.setViewMode(next)
                         }
                         .frame(width: 54, height: 26)
                         toolbarButton(
@@ -275,11 +384,13 @@ struct GitEditorDiffView: View {
                         .background(Color.primary.opacity(0.04))
                         .overlay(alignment: .bottom) { Divider() }
                     }
-                    GitDiffWorkbenchSurface(
+                    MonacoWorkbenchSurface(
                         controller: workbench,
                         binding: surfaceBinding,
                         ownsWorkbench: ownsWorkbench,
                         isActive: isActive,
+                        allowsEnsureWebView: diffContent != nil,
+                        rehydrationRevision: rehydrationRevision,
                         onActivate: {
                             syncWorkbenchEnvironment()
                             syncWorkbenchAppearance()
@@ -363,9 +474,9 @@ struct GitEditorDiffView: View {
                 navigator.reset()
             }
         }
-        .onChange(of: review) { _ in syncDiffToWorkbench() }
-        .onChange(of: mode) { _ in syncDiffToWorkbench() }
-        .onChange(of: wordWrap) { _ in syncDiffToWorkbench() }
+        .onChange(of: preferences.review) { _ in syncDiffToWorkbench() }
+        .onChange(of: preferences.viewMode) { _ in syncDiffToWorkbench() }
+        .onChange(of: preferences.wordWrap) { _ in syncDiffToWorkbench() }
         .onChange(of: isActive) { active in
             if active {
                 syncWorkbenchEnvironment()
@@ -465,6 +576,7 @@ struct GitEditorDiffView: View {
         workbench.isActive = isActive
         syncWorkbenchAppearance()
 
+        preferences.refreshFromDefaults()
         let document = content.document
         let isPatchOnly = content.sourceError != nil || content.presentation == nil
         let force = forceNextDiffSync
@@ -477,9 +589,9 @@ struct GitEditorDiffView: View {
             modifiedText: isPatchOnly ? "" : content.after,
             patch: document.text,
             patchOnly: isPatchOnly,
-            review: effectiveReview,
-            inline: effectiveInlineMode,
-            wordWrap: effectiveWordWrap,
+            review: preferences.review,
+            inline: preferences.viewMode.isInline,
+            wordWrap: preferences.wordWrap,
             readOnly: true,
             force: force
         )
@@ -738,8 +850,8 @@ struct GitEditorDiffView: View {
 }
 
 struct GitDiffModeSwitcher: NSViewRepresentable {
-    let mode: String
-    let select: (String) -> Void
+    let mode: GitDiffViewMode
+    let select: (GitDiffViewMode) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(select: select) }
 
@@ -751,19 +863,9 @@ struct GitDiffModeSwitcher: NSViewRepresentable {
             target: context.coordinator,
             action: #selector(Coordinator.activate(_:))
         )
-        for index in labels.indices {
-            control.setLabel("", forSegment: index)
-            control.setImage(NSImage(
-                systemSymbolName: index == 0 ? "rectangle.split.2x1" : "text.alignleft",
-                accessibilityDescription: labels[index]
-            )?.withSymbolConfiguration(.init(pointSize: 12, weight: .medium)), forSegment: index)
-            control.setToolTip(GitL10n.format("{0} Diff", labels[index]), forSegment: index)
-            control.setWidth(26, forSegment: index)
-        }
         control.segmentStyle = .texturedRounded
         control.controlSize = .small
         control.font = .systemFont(ofSize: 11, weight: .medium)
-        control.setAccessibilityLabel(GitL10n.text("Git diff view mode"))
         update(control, context: context)
         return control
     }
@@ -778,16 +880,27 @@ struct GitDiffModeSwitcher: NSViewRepresentable {
 
     private func update(_ control: NSSegmentedControl, context: Context) {
         context.coordinator.select = select
-        control.selectedSegment = mode == GitL10n.text("Side by Side") ? 0 : 1
+        let labels = [GitL10n.text("Side by Side"), GitL10n.text("Inline")]
+        for index in labels.indices {
+            control.setLabel("", forSegment: index)
+            control.setImage(NSImage(
+                systemSymbolName: index == 0 ? "rectangle.split.2x1" : "text.alignleft",
+                accessibilityDescription: labels[index]
+            )?.withSymbolConfiguration(.init(pointSize: 12, weight: .medium)), forSegment: index)
+            control.setToolTip(GitL10n.format("{0} Diff", labels[index]), forSegment: index)
+            control.setWidth(26, forSegment: index)
+        }
+        control.setAccessibilityLabel(GitL10n.text("Git diff view mode"))
+        control.selectedSegment = mode == .split ? 0 : 1
     }
 
     @MainActor
     final class Coordinator: NSObject {
-        var select: (String) -> Void
-        init(select: @escaping (String) -> Void) { self.select = select }
+        var select: (GitDiffViewMode) -> Void
+        init(select: @escaping (GitDiffViewMode) -> Void) { self.select = select }
 
         @objc func activate(_ sender: NSSegmentedControl) {
-            let modes = [GitL10n.text("Side by Side"), GitL10n.text("Inline")]
+            let modes: [GitDiffViewMode] = [.split, .inline]
             guard modes.indices.contains(sender.selectedSegment) else { return }
             select(modes[sender.selectedSegment])
         }
@@ -811,8 +924,6 @@ struct GitDiffReviewSwitcher: NSViewRepresentable {
         control.segmentStyle = .rounded
         control.controlSize = .small
         control.font = .systemFont(ofSize: 11, weight: .medium)
-        labels.enumerated().forEach { index, label in control.setToolTip(label, forSegment: index) }
-        control.setAccessibilityLabel(GitL10n.text("Git diff presentation"))
         update(control, context: context)
         return control
     }
@@ -827,6 +938,12 @@ struct GitDiffReviewSwitcher: NSViewRepresentable {
 
     private func update(_ control: NSSegmentedControl, context: Context) {
         context.coordinator.select = select
+        let labels = [GitL10n.text("Review"), GitL10n.text("Full Source")]
+        for (index, label) in labels.enumerated() {
+            control.setLabel(label, forSegment: index)
+            control.setToolTip(label, forSegment: index)
+        }
+        control.setAccessibilityLabel(GitL10n.text("Git diff presentation"))
         control.selectedSegment = review ? 0 : 1
     }
 
@@ -838,139 +955,6 @@ struct GitDiffReviewSwitcher: NSViewRepresentable {
         @objc func activate(_ sender: NSSegmentedControl) {
             guard (0..<2).contains(sender.selectedSegment) else { return }
             select(sender.selectedSegment == 0)
-        }
-    }
-}
-
-@MainActor
-private final class GitDiffSurfaceBinding {
-    weak var containerView: GitDiffWorkbenchSurface.ContainerView?
-}
-
-/// AppKit visibility-aware host for `GitEditorDiffView`'s diff `WKWebView`.
-/// `EditorContentDeckController` hides inactive `NSHostingView`s (`isHidden = true`) in the
-/// same turn it sets `isActive = false`; SwiftUI skips evaluating hidden hosts, coalescing
-/// `true -> (hidden false) -> true` on re-selection. Overriding `viewDidUnhide` / `viewDidHide`
-/// deterministically re-attaches the pooled `WKWebView` and re-syncs the active diff.
-private struct GitDiffWorkbenchSurface: NSViewRepresentable {
-    let controller: MonacoWorkbenchController
-    let binding: GitDiffSurfaceBinding
-    let ownsWorkbench: Bool
-    let isActive: Bool
-    let onActivate: () -> Void
-    let onDeactivate: () -> Void
-
-    final class ContainerView: NSView {
-        var controller: MonacoWorkbenchController?
-        var ownsWorkbench = false
-        var isActive = false
-        var needsSyncOnUnhide = false
-        var onActivate: (() -> Void)?
-        var onDeactivate: (() -> Void)?
-
-        override var isOpaque: Bool { false }
-
-        var canOwnWebView: Bool {
-            ownsWorkbench || (isActive && !isHiddenOrHasHiddenAncestor)
-        }
-
-        func reconcile(forceSync: Bool) {
-            guard canOwnWebView, let controller else { return }
-            let webView = controller.ensureWebView()
-            let didAcquireWebView = webView.superview !== self
-            mount(webView)
-            if !ownsWorkbench && (didAcquireWebView || forceSync) {
-                onActivate?()
-            }
-        }
-
-        private func mount(_ webView: MonacoEditorWebView) {
-            guard webView.superview !== self else {
-                webView.clearBackgrounds()
-                return
-            }
-            webView.removeFromSuperview()
-            subviews.forEach { $0.removeFromSuperview() }
-            webView.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(webView)
-            NSLayoutConstraint.activate([
-                webView.leadingAnchor.constraint(equalTo: leadingAnchor),
-                webView.trailingAnchor.constraint(equalTo: trailingAnchor),
-                webView.topAnchor.constraint(equalTo: topAnchor),
-                webView.bottomAnchor.constraint(equalTo: bottomAnchor)
-            ])
-            webView.clearBackgrounds()
-        }
-
-        override func viewDidHide() {
-            super.viewDidHide()
-            if !ownsWorkbench {
-                needsSyncOnUnhide = true
-                onDeactivate?()
-            }
-        }
-
-        override func viewDidUnhide() {
-            super.viewDidUnhide()
-            reconcile(forceSync: true)
-        }
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            if window == nil {
-                if !ownsWorkbench {
-                    onDeactivate?()
-                }
-            } else {
-                reconcile(forceSync: false)
-            }
-        }
-    }
-
-    func makeNSView(context: Context) -> ContainerView {
-        let container = ContainerView(frame: .zero)
-        container.wantsLayer = true
-        container.layer?.backgroundColor = nil
-        container.layer?.isOpaque = false
-        binding.containerView = container
-        configure(container, isInitial: true)
-        return container
-    }
-
-    func updateNSView(_ container: ContainerView, context: Context) {
-        if let layer = container.layer {
-            if layer.backgroundColor != nil {
-                layer.backgroundColor = nil
-            }
-            if layer.isOpaque {
-                layer.isOpaque = false
-            }
-        }
-        binding.containerView = container
-        configure(container, isInitial: false)
-    }
-
-    static func dismantleNSView(_ container: ContainerView, coordinator: ()) {
-        if !container.ownsWorkbench {
-            container.onDeactivate?()
-        }
-        container.onActivate = nil
-        container.onDeactivate = nil
-        container.controller = nil
-    }
-
-    private func configure(_ container: ContainerView, isInitial: Bool) {
-        container.controller = controller
-        container.ownsWorkbench = ownsWorkbench
-        container.isActive = isActive
-        container.onActivate = onActivate
-        container.onDeactivate = onDeactivate
-        if container.canOwnWebView {
-            let forceSync = !isInitial && container.needsSyncOnUnhide
-            container.needsSyncOnUnhide = false
-            container.reconcile(forceSync: forceSync)
-        } else if !ownsWorkbench {
-            container.onDeactivate?()
         }
     }
 }

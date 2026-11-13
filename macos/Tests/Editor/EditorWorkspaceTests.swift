@@ -475,6 +475,149 @@ struct EditorWorkspaceTests {
         }
         Issue.record("Timed out waiting for editor workspace state")
     }
+
+    @Test @MainActor func collapsingWorkspaceReapsIdleWebViewPreservingTabsAndRehydratesOnUncollapse() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("editor-collapse-reap-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let alphaURL = dir.appendingPathComponent("Alpha.swift")
+        let betaURL = dir.appendingPathComponent("Beta.swift")
+        try Data("let alpha = 1\n".utf8).write(to: alphaURL)
+        try Data("let beta = 2\n".utf8).write(to: betaURL)
+
+        let filesystem = LocalWorkspaceFilesystem(workingDirectory: dir.path)
+        let workspace = EditorWorkspace(idleReapDelay: .milliseconds(80))
+        defer { workspace.cancelAndClear() }
+
+        workspace.open(path: alphaURL.path, filesystem: filesystem)
+        await waitUntil { !workspace.isLoading && workspace.documents.count == 1 }
+        workspace.open(path: betaURL.path, filesystem: filesystem)
+        await waitUntil { !workspace.isLoading && workspace.documents.count == 2 }
+
+        let alpha = try #require(workspace.documents.first { $0.path == alphaURL.path })
+        let beta = try #require(workspace.documents.first { $0.path == betaURL.path })
+        #expect(workspace.selectedID == beta.id)
+
+        // Simulate active warm workbench with both models open and Beta active.
+        let initialWebView = workspace.workbenchController.ensureWebView()
+        for doc in workspace.documents {
+            workspace.workbenchController.openOrUpdateModel(
+                uri: doc.id.monacoURI,
+                path: doc.path,
+                text: doc.text,
+                readOnly: false
+            )
+        }
+        workspace.workbenchController.isActive = true
+        workspace.workbenchController.activateModel(
+            uri: beta.id.monacoURI,
+            readOnly: false,
+            wordWrap: true,
+            tabSize: 4,
+            insertSpaces: true,
+            keymapProfile: .idea
+        )
+        // Edit Alpha in-memory so rehydration must preserve unsaved text too.
+        alpha.text = "let alpha = 99\n"
+
+        // 1. Collapsing briefly and uncollapsing BEFORE idleReapDelay cancels reaping and keeps warm WebView.
+        workspace.isVisible = false
+        #expect(!workspace.workbenchController.isActive)
+        try await Task.sleep(for: .milliseconds(25))
+        workspace.isVisible = true
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(workspace.workbenchController.webView === initialWebView)
+        #expect(workspace.workbenchController.isActive)
+
+        // 2. Collapsing past idleReapDelay tears down WebView while preserving documents & selectedID.
+        workspace.isVisible = false
+        await waitUntil { workspace.workbenchController.webView == nil }
+        #expect(workspace.workbenchController.webView == nil)
+        #expect(workspace.workbenchController.openModels.isEmpty)
+        #expect(workspace.documents.map(\.id) == [alpha.id, beta.id])
+        #expect(workspace.selectedID == beta.id)
+        #expect(alpha.text == "let alpha = 99\n")
+
+        // 3. Uncollapsing seamlessly re-ensures WKWebView, re-syncs all open models, and activates Beta.
+        workspace.isVisible = true
+        let rehydratedWebView = try #require(workspace.workbenchController.webView)
+        #expect(rehydratedWebView !== initialWebView)
+        #expect(workspace.workbenchController.isActive)
+        #expect(workspace.workbenchController.activeURI == beta.id.monacoURI)
+        #expect(workspace.workbenchController.openModels[alpha.id.monacoURI]?.text == "let alpha = 99\n")
+        #expect(workspace.workbenchController.openModels[beta.id.monacoURI]?.text == "let beta = 2\n")
+    }
+
+    @Test @MainActor func collapsingWorkspaceWithActiveGitDiffReapsAndRehydratesBothModelsAndDiff() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("editor-collapse-diff-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let codeURL = dir.appendingPathComponent("Code.swift")
+        try Data("struct App {}\n".utf8).write(to: codeURL)
+
+        let filesystem = LocalWorkspaceFilesystem(workingDirectory: dir.path)
+        let workspace = EditorWorkspace(idleReapDelay: .milliseconds(80))
+        defer { workspace.cancelAndClear() }
+
+        workspace.open(path: codeURL.path, filesystem: filesystem)
+        await waitUntil { !workspace.isLoading && workspace.documents.count == 1 }
+        let codeDoc = try #require(workspace.documents.first)
+
+        let repository = GitRepositoryIdentity(
+            worktreePath: dir.path,
+            gitDirPath: dir.path + "/.git",
+            commonGitDirPath: dir.path + "/.git"
+        )
+        let diffRequest = GitEditorDiffRequest(
+            repository: repository,
+            target: .unstaged,
+            file: .init(path: "Code.swift", status: "M")
+        )
+        workspace.openGitDiff(diffRequest)
+        // Opening a Git diff request before knowing binary/truncated status does NOT eagerly create a WebView.
+        #expect(workspace.workbenchController.webView == nil)
+
+        // Simulate GitEditorDiffView activating the non-binary diff on the shared workbench.
+        workspace.workbenchController.openOrUpdateModel(
+            uri: codeDoc.id.monacoURI,
+            path: codeDoc.path,
+            text: codeDoc.text,
+            readOnly: false
+        )
+        workspace.workbenchController.isActive = true
+        workspace.workbenchController.activateDiff(
+            id: "\(diffRequest.id.uuidString):M:Code.swift",
+            path: "Code.swift",
+            originalText: "struct App {}\n",
+            modifiedText: "struct App { let v = 1 }\n",
+            patch: "@@ -1 +1 @@\n-struct App {}\n+struct App { let v = 1 }\n",
+            review: true,
+            inline: false,
+            wordWrap: true
+        )
+        let initialWebView = try #require(workspace.workbenchController.webView)
+
+        // Collapse editor -> idle reaper tears down WebView while preserving documents, gitDiffs, and gitDiff.
+        workspace.isVisible = false
+        await waitUntil { workspace.workbenchController.webView == nil }
+        #expect(workspace.workbenchController.webView == nil)
+        #expect(workspace.documents.map(\.id) == [codeDoc.id])
+        #expect(workspace.gitDiffs.map(\.id) == [diffRequest.id])
+        #expect(workspace.gitDiff?.id == diffRequest.id)
+
+        // Uncollapse editor -> rehydrates both background document models and active diff snapshot.
+        workspace.isVisible = true
+        let rehydratedWebView = try #require(workspace.workbenchController.webView)
+        #expect(rehydratedWebView !== initialWebView)
+        #expect(workspace.workbenchController.isActive)
+        #expect(workspace.workbenchController.openModels[codeDoc.id.monacoURI]?.text == "struct App {}\n")
+        #expect(workspace.workbenchController.activeDiff?.path == "Code.swift")
+        #expect(workspace.workbenchController.activeDiff?.inline == false)
+    }
 }
 
 private actor ControlledEditorWorkspaceFilesystem: WorkspaceFilesystem {

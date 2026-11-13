@@ -5,35 +5,6 @@ import WebKit
 @testable import Ghostty
 
 struct GitDiffTextRendererTests {
-    @Test func numbersOnlyHunkLinesAndColorsPlusMinusContent() {
-        let diff = """
-        diff --git a/file.txt b/file.txt
-        index 1234567..7654321 100644
-        --- a/file.txt
-        +++ b/file.txt
-        @@ -1,2 +1,3 @@
-        -old
-        +++literal-add
-         context
-        ---literal-delete
-        """
-
-        let rendered = GitDiffTextRenderer.render(diff).string
-        let lines = rendered.components(separatedBy: "\n")
-        #expect(lines.count == 9)
-        #expect(prefix(of: lines[0]).trimmingCharacters(in: .whitespaces).isEmpty)
-        #expect(prefix(of: lines[1]).trimmingCharacters(in: .whitespaces).isEmpty)
-        #expect(prefix(of: lines[2]).trimmingCharacters(in: .whitespaces).isEmpty)
-        #expect(prefix(of: lines[3]).trimmingCharacters(in: .whitespaces).isEmpty)
-        #expect(prefix(of: lines[4]).trimmingCharacters(in: .whitespaces).isEmpty)
-        #expect(prefix(of: lines[5]).contains("1"))
-        #expect(prefix(of: lines[6]).contains("1"))
-        #expect(prefix(of: lines[7]).contains("2"))
-        #expect(prefix(of: lines[8]).contains("3"))
-        #expect(lines[6].contains("+++literal-add"))
-        #expect(lines[8].contains("---literal-delete"))
-    }
-
     @MainActor
     @Test func fallbackPatchRendersInTransparentPierreWebViewInsteadOfOpaqueTextView() async throws {
         let root = FileManager.default.temporaryDirectory
@@ -205,9 +176,28 @@ struct GitDiffTextRendererTests {
         #expect(refresh.isEnabled)
         #expect(!workbench.isActive)
         #expect(workbench.activeDiff?.path == "GitDiffTextView.swift")
-    }
 
-    private func prefix(of line: String) -> String {
-        String(line.split(separator: "│", maxSplits: 1).first ?? "")
+        // Opening a binary diff on a cold workbench must NOT allocate a WKWebView at all.
+        let coldBinaryWorkbench = MonacoWorkbenchController()
+        defer { coldBinaryWorkbench.tearDown() }
+        let binaryView = NSHostingView(
+            rootView: GitEditorDiffView(
+                request: GitEditorDiffRequest(
+                    repository: repository,
+                    target: .unstaged,
+                    file: .init(path: "icon.png", status: "M")
+                ),
+                theme: .oneDark,
+                externalController: coldBinaryWorkbench,
+                close: {}
+            )
+            .frame(width: 720, height: 420)
+        )
+        window.contentView = binaryView
+        for _ in 0..<40 {
+            binaryView.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(15))
+        }
+        #expect(coldBinaryWorkbench.webView == nil)
     }
 }

@@ -688,10 +688,9 @@ struct MonacoWorkbenchTests {
         // Zero eager WebView allocation when workspace is idle and Git Inspector is open.
         try await Task.sleep(for: .milliseconds(100))
         #expect(workspace.workbenchController.webView == nil)
-        #expect(workspace.diffWorkbenchController.webView == nil)
         #expect(EditorTestSupport.findAll(MonacoEditorWebView.self, in: inspectorMount.0.view).isEmpty)
 
-        // First Git Diff open lazily allocates diffWorkbenchController.webView; code workbench stays nil.
+        // Opening a Git Diff request stays lazy until a non-binary diff surface actually renders.
         let requestA = GitEditorDiffRequest(
             repository: repository,
             target: .unstaged,
@@ -703,23 +702,34 @@ struct MonacoWorkbenchTests {
             file: .init(path: "Beta.swift", status: "M")
         )
         workspace.openGitDiff(requestA)
-        let firstDiffWebView = try #require(workspace.diffWorkbenchController.webView)
         #expect(workspace.workbenchController.webView == nil)
+
+        // Rendering the non-binary diff lazily allocates the single shared workbench WebView.
+        workspace.workbenchController.isActive = true
+        workspace.workbenchController.activateDiff(
+            id: "\(requestA.id.uuidString):M:Alpha.swift",
+            path: "Alpha.swift",
+            originalText: "let alpha = 1\n",
+            modifiedText: "let alpha = 2\n",
+            patch: "@@ -1 +1 @@\n-let alpha = 1\n+let alpha = 2\n"
+        )
+        let firstSharedWebView = try #require(workspace.workbenchController.webView)
+        #expect(firstSharedWebView.configuration.processPool === OMGWebViewProcessPool.shared)
 
         // Second Git Diff open reuses the exact same warm WKWebView.
         workspace.openGitDiff(requestB)
-        #expect(workspace.diffWorkbenchController.webView === firstDiffWebView)
+        #expect(workspace.workbenchController.webView === firstSharedWebView)
 
-        // Closing one diff while another remains open must NOT reap the pooled WebView.
+        // Closing one diff while another remains open must NOT reap the shared WebView.
         workspace.closeGitDiff(requestB)
         try await Task.sleep(for: .milliseconds(120))
-        #expect(workspace.diffWorkbenchController.webView === firstDiffWebView)
+        #expect(workspace.workbenchController.webView === firstSharedWebView)
 
         // Closing the last diff keeps the WebView warm briefly; reopening before idleReapDelay cancels reaping.
         workspace.closeGitDiff(requestA)
         #expect(workspace.gitDiffs.isEmpty)
-        #expect(workspace.diffWorkbenchController.webView === firstDiffWebView)
-        #expect(!workspace.diffWorkbenchController.isActive)
+        #expect(workspace.workbenchController.webView === firstSharedWebView)
+        #expect(!workspace.workbenchController.isActive)
 
         try await Task.sleep(for: .milliseconds(25))
         let requestC = GitEditorDiffRequest(
@@ -728,29 +738,18 @@ struct MonacoWorkbenchTests {
             file: .init(path: "Gamma.swift", status: "A")
         )
         workspace.openGitDiff(requestC)
-        #expect(workspace.diffWorkbenchController.webView === firstDiffWebView)
+        #expect(workspace.workbenchController.webView === firstSharedWebView)
 
-        // Closing all diffs and waiting past idleReapDelay tears down diffWorkbenchController.webView.
+        // Closing all diffs and waiting past idleReapDelay tears down workbenchController.webView.
         workspace.closeGitDiff(requestC)
-        #expect(workspace.diffWorkbenchController.webView === firstDiffWebView)
+        #expect(workspace.workbenchController.webView === firstSharedWebView)
         for _ in 0..<40 {
-            if workspace.diffWorkbenchController.webView == nil { break }
+            if workspace.workbenchController.webView == nil { break }
             try await Task.sleep(for: .milliseconds(20))
         }
-        #expect(workspace.diffWorkbenchController.webView == nil)
+        #expect(workspace.workbenchController.webView == nil)
 
-        // Opening another diff after idle reaping cleanly boots a fresh WKWebView.
-        let requestD = GitEditorDiffRequest(
-            repository: repository,
-            target: .unstaged,
-            file: .init(path: "Delta.swift", status: "M")
-        )
-        workspace.openGitDiff(requestD)
-        let rebootedDiffWebView = try #require(workspace.diffWorkbenchController.webView)
-        #expect(rebootedDiffWebView !== firstDiffWebView)
-        workspace.closeGitDiff(requestD)
-
-        // Code workbench follows the same empty-reaper contract once its last document closes.
+        // Opening a code document after idle reaping boots a fresh shared WKWebView and reaps when closed.
         let fs = LocalWorkspaceFilesystem(workingDirectory: root.path)
         workspace.open(path: codeFile.path, filesystem: fs)
         for _ in 0..<60 {
@@ -759,6 +758,7 @@ struct MonacoWorkbenchTests {
         }
         let doc = try #require(workspace.selectedDocument)
         let codeWebView = workspace.workbenchController.ensureWebView()
+        #expect(codeWebView !== firstSharedWebView)
         await workspace.close(doc, window: nil)
         #expect(workspace.documents.isEmpty)
         #expect(workspace.workbenchController.webView === codeWebView)
@@ -919,5 +919,187 @@ struct MonacoWorkbenchTests {
         #expect(sharedWorkbench.isActive)
         #expect(webView.isDescendant(of: hostA))
         #expect(!webView.isDescendant(of: hostB))
+    }
+
+    @Test func editorAndGitDiffTabsInContentDeckShareSingleWorkbenchWithoutRaceConditions() async throws {
+        let defaults = UserDefaults.standard
+        let savedReview = defaults.object(forKey: "git.diff.review")
+        let savedMode = defaults.object(forKey: "git.diff.viewMode")
+        let savedWrap = defaults.object(forKey: "git.diff.wordWrap")
+        defaults.set(true, forKey: "git.diff.review")
+        defaults.set("split", forKey: "git.diff.viewMode")
+        defaults.set(true, forKey: "git.diff.wordWrap")
+        GitDiffPreferences.shared.refreshFromDefaults()
+        defer {
+            defaults.set(savedReview, forKey: "git.diff.review")
+            defaults.set(savedMode, forKey: "git.diff.viewMode")
+            defaults.set(savedWrap, forKey: "git.diff.wordWrap")
+            GitDiffPreferences.shared.refreshFromDefaults()
+        }
+
+        let repoRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-unified-workbench-deck-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: repoRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: repoRoot) }
+
+        let alphaFile = repoRoot.appendingPathComponent("Alpha.swift")
+        let betaFile = repoRoot.appendingPathComponent("Beta.swift")
+        try Data("let alpha = 1\n".utf8).write(to: alphaFile)
+        try Data("let beta = 1\n".utf8).write(to: betaFile)
+        for args in [["init", "--quiet"], ["add", "."]] {
+            let res = try await LocalGitExecutor().execute(arguments: args, workingDirectory: repoRoot.path)
+            try #require(res.isSuccess)
+        }
+        try Data("let alpha = 2\n".utf8).write(to: alphaFile)
+        try Data("let beta = 2\n".utf8).write(to: betaFile)
+
+        let workspace = EditorWorkspace()
+        defer { workspace.cancelAndClear() }
+        let filesystem = LocalWorkspaceFilesystem(workingDirectory: repoRoot.path)
+        workspace.open(path: alphaFile.path, filesystem: filesystem)
+        for _ in 0..<60 {
+            if !workspace.isLoading, workspace.documents.count == 1 { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let alphaDoc = try #require(workspace.documents.first)
+
+        let repository = GitRepositoryIdentity(
+            worktreePath: repoRoot.path,
+            gitDirPath: repoRoot.path + "/.git",
+            commonGitDirPath: repoRoot.path + "/.git"
+        )
+        let diffA = GitEditorDiffRequest(
+            repository: repository,
+            target: .unstaged,
+            file: .init(path: "Alpha.swift", status: "M")
+        )
+        let diffB = GitEditorDiffRequest(
+            repository: repository,
+            target: .unstaged,
+            file: .init(path: "Beta.swift", status: "M")
+        )
+
+        let deck = EditorContentDeckController()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 860, height: 480),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentViewController = deck
+        window.setContentSize(NSSize(width: 860, height: 480))
+        window.makeKeyAndOrderFront(nil)
+        defer {
+            window.contentViewController = nil
+            window.orderOut(nil)
+            window.close()
+        }
+
+        func syncDeck() {
+            var items: [EditorContentItem] = []
+            if !workspace.documents.isEmpty {
+                items.append(EditorContentItem(
+                    id: .workbench,
+                    content: AnyView(
+                        EditorSharedWorkbenchPane(
+                            workspace: workspace,
+                            terminalBackground: .black,
+                            terminalTheme: .oneDark
+                        )
+                    )
+                ))
+            }
+            items += workspace.gitDiffs.map { req in
+                let selected = workspace.gitDiff?.id == req.id
+                return EditorContentItem(
+                    id: .diff(req.id),
+                    content: AnyView(
+                        GitEditorDiffView(
+                            request: req,
+                            theme: .oneDark,
+                            isActive: selected && workspace.isVisible,
+                            externalController: workspace.workbenchController,
+                            close: { workspace.closeGitDiff(req) }
+                        )
+                    )
+                )
+            }
+            let selectedKey: EditorContentKey = if let diff = workspace.gitDiff {
+                .diff(diff.id)
+            } else if workspace.selectedDocument != nil {
+                .workbench
+            } else {
+                .empty
+            }
+            deck.update(items: items, selectedID: selectedKey)
+            deck.view.layoutSubtreeIfNeeded()
+        }
+
+        // 1. Mount Editor Tab (Alpha.swift): allocates the single shared WKWebView in .workbench.
+        syncDeck()
+        let sharedWebView = try await EditorTestSupport.waitForMonacoReady(in: deck.view)
+        let workbenchHost = try #require(deck.hosts[.workbench])
+        #expect(workspace.workbenchController.webView === sharedWebView)
+        #expect(workspace.workbenchController.activeURI == alphaDoc.id.monacoURI)
+        #expect(workspace.workbenchController.activeDiff == nil)
+        #expect(workspace.workbenchController.isActive)
+        #expect(sharedWebView.isDescendant(of: workbenchHost))
+
+        // 2. Open Diff Tab A -> switches shared WKWebView from .workbench to .diff(diffA.id).
+        workspace.openGitDiff(diffA)
+        syncDeck()
+        for _ in 0..<120 {
+            if workspace.workbenchController.activeDiff?.path == "Alpha.swift" { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let diffHostA = try #require(deck.hosts[.diff(diffA.id)])
+        #expect(workspace.workbenchController.webView === sharedWebView)
+        #expect(workspace.workbenchController.activeURI == nil)
+        #expect(workspace.workbenchController.activeDiff?.path == "Alpha.swift")
+        #expect(workspace.workbenchController.isActive)
+        #expect(EditorTestSupport.findAll(MonacoEditorWebView.self, in: deck.view).count == 1)
+        #expect(sharedWebView.isDescendant(of: diffHostA))
+        #expect(!sharedWebView.isDescendant(of: workbenchHost))
+
+        // 3. Open Diff Tab B -> reparents the exact same WKWebView to .diff(diffB.id).
+        workspace.openGitDiff(diffB)
+        syncDeck()
+        for _ in 0..<120 {
+            if workspace.workbenchController.activeDiff?.path == "Beta.swift" { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let diffHostB = try #require(deck.hosts[.diff(diffB.id)])
+        #expect(workspace.workbenchController.webView === sharedWebView)
+        #expect(workspace.workbenchController.activeDiff?.path == "Beta.swift")
+        #expect(workspace.workbenchController.isActive)
+        #expect(EditorTestSupport.findAll(MonacoEditorWebView.self, in: deck.view).count == 1)
+        #expect(sharedWebView.isDescendant(of: diffHostB))
+
+        // 4. Switch back to Editor Tab -> reparents shared WKWebView back into .workbench and restores Monaco model.
+        workspace.selectedID = alphaDoc.id
+        syncDeck()
+        #expect(workspace.workbenchController.webView === sharedWebView)
+        #expect(workspace.workbenchController.activeURI == alphaDoc.id.monacoURI)
+        #expect(workspace.workbenchController.activeDiff == nil)
+        #expect(workspace.workbenchController.isActive)
+        #expect(sharedWebView.isDescendant(of: workbenchHost))
+        #expect(!sharedWebView.isDescendant(of: diffHostB))
+
+        // 5. Switch Editor -> Diff A -> Editor again with all NSHostingViews warm & cached in the deck.
+        workspace.selectGitDiff(diffA)
+        syncDeck()
+        #expect(workspace.workbenchController.webView === sharedWebView)
+        #expect(workspace.workbenchController.activeDiff?.path == "Alpha.swift")
+        #expect(workspace.workbenchController.isActive)
+        #expect(sharedWebView.isDescendant(of: diffHostA))
+
+        workspace.selectedID = alphaDoc.id
+        syncDeck()
+        #expect(workspace.workbenchController.webView === sharedWebView)
+        #expect(workspace.workbenchController.activeURI == alphaDoc.id.monacoURI)
+        #expect(workspace.workbenchController.activeDiff == nil)
+        #expect(workspace.workbenchController.isActive)
+        #expect(sharedWebView.isDescendant(of: workbenchHost))
     }
 }

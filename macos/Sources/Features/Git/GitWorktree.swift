@@ -46,7 +46,7 @@ struct GitWorktreeInfo: Equatable, Sendable, Identifiable {
 
 extension GitRepositoryService {
     func worktrees(for repository: GitRepositoryIdentity, includeStatus: Bool = false) async throws -> [GitWorktreeInfo] {
-        let result = try await (executor ?? repository.executor).execute(arguments: ["worktree", "list", "--porcelain", "-z"],
+        let result = try await (executor ?? repository.executor).execute(arguments: ["--no-optional-locks", "worktree", "list", "--porcelain", "-z"],
             workingDirectory: repository.worktreePath, stdin: nil, maxOutputBytes: 512 * 1024)
         guard result.isSuccess else { throw GitDiffServiceError.gitFailed(result.stderrString) }
         let currentPath: String

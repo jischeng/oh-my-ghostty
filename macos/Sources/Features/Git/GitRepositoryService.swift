@@ -36,6 +36,7 @@ struct GitRepositoryService: Sendable {
         do {
             let result = try await command.execute(
                 arguments: [
+                    "--no-optional-locks",
                     "rev-parse",
                     "--is-inside-work-tree",
                     "--show-toplevel",
@@ -105,13 +106,13 @@ struct GitRepositoryService: Sendable {
     ) async -> GitRepositoryStatusKind {
         do {
             async let branchResult = (executor ?? identity.executor).execute(
-                arguments: ["symbolic-ref", "--quiet", "--short", "HEAD"],
+                arguments: ["--no-optional-locks", "symbolic-ref", "--quiet", "--short", "HEAD"],
                 workingDirectory: identity.worktreePath,
                 stdin: nil,
                 maxOutputBytes: 16 * 1024
             )
             async let headResult = (executor ?? identity.executor).execute(
-                arguments: ["rev-parse", "--quiet", "--verify", "HEAD"],
+                arguments: ["--no-optional-locks", "rev-parse", "--quiet", "--verify", "HEAD"],
                 workingDirectory: identity.worktreePath,
                 stdin: nil,
                 maxOutputBytes: 16 * 1024

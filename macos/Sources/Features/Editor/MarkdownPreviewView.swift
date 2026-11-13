@@ -22,6 +22,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> MarkdownPreviewWebView {
         let configuration = WKWebViewConfiguration()
+        configuration.processPool = OMGWebViewProcessPool.shared
         configuration.websiteDataStore = .nonPersistent()
         configuration.setURLSchemeHandler(context.coordinator.resources, forURLScheme: "omg-markdown")
         configuration.setURLSchemeHandler(context.coordinator.resources, forURLScheme: "omg-markdown-image")

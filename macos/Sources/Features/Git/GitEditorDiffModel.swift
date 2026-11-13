@@ -34,17 +34,46 @@ final class GitEditorDiffModel: ObservableObject {
 
     @discardableResult
     func reload() -> Task<Void, Never> {
-        let path = selected?.path ?? request.file?.path
+        let optimisticFile = selected ?? request.file
+        let path = optimisticFile?.path
+        let knownCommitBase = commitBase
+        let shouldPreloadOptimistic: Bool = {
+            guard optimisticFile != nil else { return false }
+            if case .commit(let commit) = request.target {
+                return knownCommitBase?.commit == commit
+            }
+            return true
+        }()
         files = []
         return startLoading(.files) {
+            let optimisticTask: Task<Content, Error>? = if shouldPreloadOptimistic, let optimisticFile {
+                Task { @MainActor in
+                    try await self.loadContent(for: optimisticFile, knownBase: knownCommitBase)
+                }
+            } else {
+                nil
+            }
+            defer { optimisticTask?.cancel() }
+
             let list = try await self.service.listFiles(for: self.request.repository, target: self.request.target)
             try Task.checkCancellation()
             self.files = list.files
             self.commitBase = list.commitBase
             self.selected = path.flatMap { path in list.files.first { $0.path == path } } ?? list.files.first
-            if let selected = self.selected {
-                self.phase = .diff
-                try await self.load(selected)
+            guard let selected = self.selected else {
+                optimisticTask?.cancel()
+                return
+            }
+            self.phase = .diff
+            if let optimisticTask, let optimisticFile, selected == optimisticFile {
+                let loaded = try await optimisticTask.value
+                try Task.checkCancellation()
+                self.content = loaded
+            } else {
+                optimisticTask?.cancel()
+                let loaded = try await self.loadContent(for: selected, knownBase: self.commitBase)
+                try Task.checkCancellation()
+                self.content = loaded
             }
         }
     }
@@ -53,7 +82,12 @@ final class GitEditorDiffModel: ObservableObject {
     func select(_ file: GitDiffFile) -> Task<Void, Never>? {
         guard files.contains(file) else { return nil }
         selected = file
-        return startLoading(.diff) { try await self.load(file) }
+        let knownCommitBase = commitBase
+        return startLoading(.diff) {
+            let loaded = try await self.loadContent(for: file, knownBase: knownCommitBase)
+            try Task.checkCancellation()
+            self.content = loaded
+        }
     }
 
     @discardableResult
@@ -94,19 +128,42 @@ final class GitEditorDiffModel: ObservableObject {
         return task
     }
 
-    private func load(_ file: GitDiffFile) async throws {
-        let document = try await service.loadDiff(for: file, repository: request.repository, target: request.target,
-                                                  knownBase: commitBase)
+    private func loadContent(
+        for file: GitDiffFile,
+        knownBase: GitDiffCommitBase?
+    ) async throws -> Content {
+        let repository = request.repository
+        let target = request.target
+        let service = self.service
+        let versionsTask = Task {
+            try await service.sourceVersions(
+                for: file,
+                repository: repository,
+                target: target,
+                knownBase: knownBase
+            )
+        }
+        defer { versionsTask.cancel() }
+
+        let document = try await service.loadDiff(
+            for: file,
+            repository: repository,
+            target: target,
+            knownBase: knownBase
+        )
         try Task.checkCancellation()
         var content = Content(document: document)
         if !document.isBinary && !document.isTruncated {
             do {
-                let versions = try await service.sourceVersions(for: file, repository: request.repository,
-                                                                target: request.target, knownBase: commitBase)
+                let versions = try await versionsTask.value
                 try Task.checkCancellation()
                 content.before = versions.before
                 content.after = versions.after
-                let presentation = GitDiffPresentation(before: versions.before, after: versions.after, patch: document.text)
+                let presentation = GitDiffPresentation(
+                    before: versions.before,
+                    after: versions.after,
+                    patch: document.text
+                )
                 content.presentation = presentation
                 if !presentation.isConsistent {
                     content.sourceError = GitL10n.text("Source snapshots do not match this patch. Refresh to retry; the patch is shown below.")
@@ -116,6 +173,6 @@ final class GitEditorDiffModel: ObservableObject {
                 content.sourceError = error.localizedDescription
             }
         }
-        self.content = content
+        return content
     }
 }

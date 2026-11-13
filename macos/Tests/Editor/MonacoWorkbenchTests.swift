@@ -653,4 +653,271 @@ struct MonacoWorkbenchTests {
         #expect((dom["text"] as? String)?.contains("4096") == true)
         #expect(dom["diffBg"] as? String == "transparent")
     }
+
+    @Test func editorWorkspaceAndGitInspectorStayZeroWebViewUntilFirstOpenAndReapAfterIdle() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-lazy-reap-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let codeFile = root.appendingPathComponent("Main.swift")
+        try Data("let ready = true\n".utf8).write(to: codeFile)
+
+        let repository = GitRepositoryIdentity(
+            worktreePath: root.path,
+            gitDirPath: root.path + "/.git",
+            commonGitDirPath: root.path + "/.git"
+        )
+        let inspectorContent = InspectorGitContent(
+            repository: repository,
+            branch: "main",
+            status: .ready(repository: repository, branch: "main", headCommitID: .init("abc1234")),
+            activeTab: .changes
+        )
+        let inspectorMount = EditorTestSupport.host(
+            InspectorGitView(content: inspectorContent, perform: { _ in })
+                .frame(width: 300, height: 480),
+            size: NSSize(width: 300, height: 480)
+        )
+        inspectorMount.1.orderFront(nil)
+        defer { EditorTestSupport.unmount(inspectorMount) }
+
+        let workspace = EditorWorkspace(idleReapDelay: .milliseconds(80))
+        defer { workspace.cancelAndClear() }
+
+        // Zero eager WebView allocation when workspace is idle and Git Inspector is open.
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(workspace.workbenchController.webView == nil)
+        #expect(workspace.diffWorkbenchController.webView == nil)
+        #expect(EditorTestSupport.findAll(MonacoEditorWebView.self, in: inspectorMount.0.view).isEmpty)
+
+        // First Git Diff open lazily allocates diffWorkbenchController.webView; code workbench stays nil.
+        let requestA = GitEditorDiffRequest(
+            repository: repository,
+            target: .unstaged,
+            file: .init(path: "Alpha.swift", status: "M")
+        )
+        let requestB = GitEditorDiffRequest(
+            repository: repository,
+            target: .unstaged,
+            file: .init(path: "Beta.swift", status: "M")
+        )
+        workspace.openGitDiff(requestA)
+        let firstDiffWebView = try #require(workspace.diffWorkbenchController.webView)
+        #expect(workspace.workbenchController.webView == nil)
+
+        // Second Git Diff open reuses the exact same warm WKWebView.
+        workspace.openGitDiff(requestB)
+        #expect(workspace.diffWorkbenchController.webView === firstDiffWebView)
+
+        // Closing one diff while another remains open must NOT reap the pooled WebView.
+        workspace.closeGitDiff(requestB)
+        try await Task.sleep(for: .milliseconds(120))
+        #expect(workspace.diffWorkbenchController.webView === firstDiffWebView)
+
+        // Closing the last diff keeps the WebView warm briefly; reopening before idleReapDelay cancels reaping.
+        workspace.closeGitDiff(requestA)
+        #expect(workspace.gitDiffs.isEmpty)
+        #expect(workspace.diffWorkbenchController.webView === firstDiffWebView)
+        #expect(!workspace.diffWorkbenchController.isActive)
+
+        try await Task.sleep(for: .milliseconds(25))
+        let requestC = GitEditorDiffRequest(
+            repository: repository,
+            target: .staged,
+            file: .init(path: "Gamma.swift", status: "A")
+        )
+        workspace.openGitDiff(requestC)
+        #expect(workspace.diffWorkbenchController.webView === firstDiffWebView)
+
+        // Closing all diffs and waiting past idleReapDelay tears down diffWorkbenchController.webView.
+        workspace.closeGitDiff(requestC)
+        #expect(workspace.diffWorkbenchController.webView === firstDiffWebView)
+        for _ in 0..<40 {
+            if workspace.diffWorkbenchController.webView == nil { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(workspace.diffWorkbenchController.webView == nil)
+
+        // Opening another diff after idle reaping cleanly boots a fresh WKWebView.
+        let requestD = GitEditorDiffRequest(
+            repository: repository,
+            target: .unstaged,
+            file: .init(path: "Delta.swift", status: "M")
+        )
+        workspace.openGitDiff(requestD)
+        let rebootedDiffWebView = try #require(workspace.diffWorkbenchController.webView)
+        #expect(rebootedDiffWebView !== firstDiffWebView)
+        workspace.closeGitDiff(requestD)
+
+        // Code workbench follows the same empty-reaper contract once its last document closes.
+        let fs = LocalWorkspaceFilesystem(workingDirectory: root.path)
+        workspace.open(path: codeFile.path, filesystem: fs)
+        for _ in 0..<60 {
+            if !workspace.isLoading, workspace.selectedDocument != nil { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let doc = try #require(workspace.selectedDocument)
+        let codeWebView = workspace.workbenchController.ensureWebView()
+        await workspace.close(doc, window: nil)
+        #expect(workspace.documents.isEmpty)
+        #expect(workspace.workbenchController.webView === codeWebView)
+        for _ in 0..<40 {
+            if workspace.workbenchController.webView == nil { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(workspace.workbenchController.webView == nil)
+    }
+
+    @Test func pooledDiffTabsInContentDeckShareSingleWebViewWithoutInactiveTabTheft() async throws {
+        let defaults = UserDefaults.standard
+        let savedReview = defaults.object(forKey: "git.diff.review")
+        let savedMode = defaults.object(forKey: "git.diff.viewMode")
+        let savedWrap = defaults.object(forKey: "git.diff.wordWrap")
+        defaults.set(true, forKey: "git.diff.review")
+        defaults.set(GitL10n.text("Side by Side"), forKey: "git.diff.viewMode")
+        defaults.set(true, forKey: "git.diff.wordWrap")
+        defer {
+            defaults.set(savedReview, forKey: "git.diff.review")
+            defaults.set(savedMode, forKey: "git.diff.viewMode")
+            defaults.set(savedWrap, forKey: "git.diff.wordWrap")
+        }
+
+        let repoRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-pooled-diff-deck-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: repoRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: repoRoot) }
+
+        try Data("let alpha = 1\n".utf8).write(to: repoRoot.appendingPathComponent("Alpha.swift"))
+        try Data("let beta = 1\n".utf8).write(to: repoRoot.appendingPathComponent("Beta.swift"))
+        for args in [["init", "--quiet"], ["add", "."]] {
+            let res = try await LocalGitExecutor().execute(arguments: args, workingDirectory: repoRoot.path)
+            try #require(res.isSuccess)
+        }
+        try Data("let alpha = 2\n".utf8).write(to: repoRoot.appendingPathComponent("Alpha.swift"))
+        try Data("let beta = 2\n".utf8).write(to: repoRoot.appendingPathComponent("Beta.swift"))
+
+        let repository = GitRepositoryIdentity(
+            worktreePath: repoRoot.path,
+            gitDirPath: repoRoot.path + "/.git",
+            commonGitDirPath: repoRoot.path + "/.git"
+        )
+        let requestA = GitEditorDiffRequest(
+            repository: repository,
+            target: .unstaged,
+            file: .init(path: "Alpha.swift", status: "M")
+        )
+        let requestB = GitEditorDiffRequest(
+            repository: repository,
+            target: .unstaged,
+            file: .init(path: "Beta.swift", status: "M")
+        )
+
+        let sharedWorkbench = MonacoWorkbenchController()
+        let deck = EditorContentDeckController()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 820, height: 460),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentViewController = deck
+        window.setContentSize(NSSize(width: 820, height: 460))
+        window.makeKeyAndOrderFront(nil)
+        defer {
+            sharedWorkbench.tearDown()
+            window.contentViewController = nil
+            window.orderOut(nil)
+            window.close()
+        }
+
+        func makeItems(selectedID: UUID) -> [EditorContentItem] {
+            [requestA, requestB].map { req in
+                EditorContentItem(
+                    id: .diff(req.id),
+                    content: AnyView(
+                        GitEditorDiffView(
+                            request: req,
+                            theme: .oneDark,
+                            isActive: req.id == selectedID,
+                            externalController: sharedWorkbench,
+                            close: {}
+                        )
+                    )
+                )
+            }
+        }
+
+        // 1. Mount and activate Tab A.
+        deck.update(items: makeItems(selectedID: requestA.id), selectedID: .diff(requestA.id))
+        deck.view.layoutSubtreeIfNeeded()
+        let webView = try await EditorTestSupport.waitForMonacoReady(in: deck.view)
+        for _ in 0..<120 {
+            if sharedWorkbench.activeDiff?.path == "Alpha.swift", sharedWorkbench.isReady { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let hostA = try #require(deck.hosts[.diff(requestA.id)])
+        #expect(sharedWorkbench.activeDiff?.path == "Alpha.swift")
+        #expect(sharedWorkbench.isActive)
+        #expect(EditorTestSupport.findAll(MonacoEditorWebView.self, in: deck.view).count == 1)
+        #expect(webView.isDescendant(of: hostA))
+
+        // 2. Switch to Tab B: must reuse the exact same WKWebView and move it into hostB.
+        deck.update(items: makeItems(selectedID: requestB.id), selectedID: .diff(requestB.id))
+        deck.view.layoutSubtreeIfNeeded()
+        for _ in 0..<120 {
+            if sharedWorkbench.activeDiff?.path == "Beta.swift" { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let hostB = try #require(deck.hosts[.diff(requestB.id)])
+        #expect(sharedWorkbench.webView === webView)
+        #expect(sharedWorkbench.activeDiff?.path == "Beta.swift")
+        #expect(sharedWorkbench.isActive)
+        #expect(EditorTestSupport.findAll(MonacoEditorWebView.self, in: deck.view).count == 1)
+        #expect(webView.isDescendant(of: hostB))
+        #expect(!webView.isDescendant(of: hostA))
+
+        // 3. Mutate @AppStorage while Tab A is hidden & inactive: Tab A must NOT steal webView or activeDiff.
+        defaults.set(GitL10n.text("Inline"), forKey: "git.diff.viewMode")
+        for _ in 0..<60 {
+            if sharedWorkbench.activeDiff?.inline == true { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try await Task.sleep(for: .milliseconds(40))
+        #expect(sharedWorkbench.activeDiff?.path == "Beta.swift")
+        #expect(sharedWorkbench.activeDiff?.inline == true)
+        #expect(webView.isDescendant(of: hostB))
+        #expect(!webView.isDescendant(of: hostA))
+
+        // 4. Switch back to Tab A: immediately swaps cached Alpha.swift back into the pooled WebView.
+        deck.update(items: makeItems(selectedID: requestA.id), selectedID: .diff(requestA.id))
+        deck.view.layoutSubtreeIfNeeded()
+        for _ in 0..<60 {
+            if sharedWorkbench.activeDiff?.path == "Alpha.swift", webView.isDescendant(of: hostA) { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(sharedWorkbench.webView === webView)
+        #expect(sharedWorkbench.activeDiff?.path == "Alpha.swift")
+        #expect(sharedWorkbench.activeDiff?.inline == true)
+        #expect(sharedWorkbench.isActive)
+        #expect(EditorTestSupport.findAll(MonacoEditorWebView.self, in: deck.view).count == 1)
+        #expect(webView.isDescendant(of: hostA))
+        #expect(!webView.isDescendant(of: hostB))
+
+        // 5. Repeat B -> A round-trips when both NSHostingViews are already cached in the deck.
+        deck.update(items: makeItems(selectedID: requestB.id), selectedID: .diff(requestB.id))
+        deck.view.layoutSubtreeIfNeeded()
+        #expect(sharedWorkbench.activeDiff?.path == "Beta.swift")
+        #expect(sharedWorkbench.isActive)
+        #expect(webView.isDescendant(of: hostB))
+        #expect(!webView.isDescendant(of: hostA))
+
+        deck.update(items: makeItems(selectedID: requestA.id), selectedID: .diff(requestA.id))
+        deck.view.layoutSubtreeIfNeeded()
+        #expect(sharedWorkbench.activeDiff?.path == "Alpha.swift")
+        #expect(sharedWorkbench.isActive)
+        #expect(webView.isDescendant(of: hostA))
+        #expect(!webView.isDescendant(of: hostB))
+    }
 }

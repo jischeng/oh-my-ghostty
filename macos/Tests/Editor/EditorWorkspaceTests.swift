@@ -253,6 +253,7 @@ struct EditorWorkspaceTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let filesystem = LocalWorkspaceFilesystem(workingDirectory: root.path)
         let workspace = EditorWorkspace()
+        defer { workspace.cancelAndClear() }
         for name in ["first.txt", "second.txt"] {
             let file = root.appendingPathComponent(name)
             try Data("original".utf8).write(to: file)
@@ -286,6 +287,7 @@ struct EditorWorkspaceTests {
     @Test @MainActor func staleConcurrentOpenCannotReplaceNewerSelection() async throws {
         let filesystem = ControlledEditorWorkspaceFilesystem()
         let workspace = EditorWorkspace()
+        defer { workspace.cancelAndClear() }
 
         workspace.open(path: "/first", filesystem: filesystem)
         await filesystem.waitUntilReadStarts(at: "/first")
@@ -305,6 +307,7 @@ struct EditorWorkspaceTests {
     @Test @MainActor func repeatedOpenKeepsExistingDirtyDocument() async throws {
         let filesystem = ControlledEditorWorkspaceFilesystem()
         let workspace = EditorWorkspace()
+        defer { workspace.cancelAndClear() }
 
         workspace.open(path: "/project/file", filesystem: filesystem)
         await filesystem.waitUntilReadStarts(at: "/project/file")
@@ -327,6 +330,7 @@ struct EditorWorkspaceTests {
         let reason = "Remote disk is read-only."
         let filesystem = ControlledEditorWorkspaceFilesystem(writeFailure: reason)
         let workspace = EditorWorkspace()
+        defer { workspace.cancelAndClear() }
         workspace.open(path: "/file", filesystem: filesystem)
         await filesystem.waitUntilReadStarts(at: "/file")
         await filesystem.finishRead(at: "/file", with: Data("original".utf8))
@@ -345,6 +349,7 @@ struct EditorWorkspaceTests {
     @Test @MainActor func slowSaveDoesNotDropSubsequentSaveOrSaveAll() async throws {
         let filesystem = ControlledEditorWorkspaceFilesystem(deferWrites: true)
         let workspace = EditorWorkspace()
+        defer { workspace.cancelAndClear() }
         workspace.open(path: "/doc1", filesystem: filesystem)
         await filesystem.waitUntilReadStarts(at: "/doc1")
         await filesystem.finishRead(at: "/doc1", with: Data("doc1".utf8))
@@ -441,6 +446,7 @@ struct EditorWorkspaceTests {
         let filesystem = LocalWorkspaceFilesystem(workingDirectory: root.path)
 
         let workspace = EditorWorkspace()
+        defer { workspace.cancelAndClear() }
         workspace.open(path: file.path, filesystem: filesystem)
         await waitUntil { !workspace.isLoading }
         guard let doc = workspace.documents.first else {
@@ -459,9 +465,13 @@ struct EditorWorkspaceTests {
     private func waitUntil(
         _ condition: @escaping @MainActor () -> Bool
     ) async {
-        for _ in 0..<1_000 {
+        for _ in 0..<250 {
             if condition() { return }
             await Task.yield()
+        }
+        for _ in 0..<400 {
+            if condition() { return }
+            try? await Task.sleep(for: .milliseconds(5))
         }
         Issue.record("Timed out waiting for editor workspace state")
     }

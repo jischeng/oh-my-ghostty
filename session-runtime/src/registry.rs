@@ -11,6 +11,7 @@ use std::{
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::{Child, Stdio},
+    sync::{Arc, Mutex},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -20,6 +21,19 @@ const MAX_OPEN_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 const LOCAL_HOLDER_STARTUP_GRACE_SECONDS: u64 = 10;
 const LOCAL_MAINTENANCE_PROBE_TIMEOUT: Duration = Duration::from_millis(30);
 const MAX_LOCAL_MAINTENANCE_PROBES: usize = MAX_RUNNING;
+const TOMBSTONE_RETENTION_SECONDS: u64 = 7 * 24 * 3600;
+
+fn file_modified_unix(path: &Path) -> Option<u64> {
+    let meta = fs::symlink_metadata(path).ok()?;
+    if !meta.file_type().is_file() {
+        return None;
+    }
+    meta.modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeMode {
     Remote,
@@ -163,6 +177,8 @@ pub struct Registry {
     pub command: Vec<String>,
     pub policy: Policy,
     workers: HashMap<String, JoinHandle<()>>,
+    finished_workers: Arc<Mutex<Vec<String>>>,
+    wakeup: Option<crate::WakePipe>,
     local_holders: HashMap<String, LocalHolder>,
     mode: RuntimeMode,
     containment_root: Option<PathBuf>,
@@ -175,6 +191,8 @@ impl Registry {
             command,
             policy,
             workers: HashMap::new(),
+            finished_workers: Arc::new(Mutex::new(Vec::new())),
+            wakeup: None,
             local_holders: HashMap::new(),
             mode: RuntimeMode::Remote,
             containment_root: None,
@@ -186,6 +204,10 @@ impl Registry {
         let mut registry = Self::new(root, command, policy);
         registry.mode = RuntimeMode::Local;
         registry
+    }
+
+    pub(crate) fn set_wakeup(&mut self, wakeup: crate::WakePipe) {
+        self.wakeup = Some(wakeup);
     }
 
     pub fn supports_local_launch(&self) -> bool {
@@ -399,6 +421,12 @@ impl Registry {
         Ok(true)
     }
     pub fn maintenance(&mut self) {
+        let notified: Vec<_> = std::mem::take(&mut *self.finished_workers.lock().unwrap());
+        for id in notified {
+            if let Some(h) = self.workers.remove(&id) {
+                let _ = h.join();
+            }
+        }
         let finished: Vec<_> = self
             .workers
             .iter()
@@ -432,10 +460,16 @@ impl Registry {
         self.last_maintenance = Instant::now();
         let now = unix_time();
         let mut local_probes = 0;
+        let mut closed_paths = Vec::new();
         if let Ok(entries) = fs::read_dir(&self.root) {
             for entry in entries.flatten() {
-                if entry.path().extension().is_some_and(|s| s == "json") {
-                    if let Ok(mut record) = Record::load(&entry.path()) {
+                let entry_path = entry.path();
+                if entry_path.extension().is_some_and(|s| s == "closed") {
+                    closed_paths.push(entry_path);
+                    continue;
+                }
+                if entry_path.extension().is_some_and(|s| s == "json") {
+                    if let Ok(mut record) = Record::load(&entry_path) {
                         if !valid_id(&record.id) || self.workers.contains_key(&record.id) {
                             continue;
                         }
@@ -455,8 +489,7 @@ impl Registry {
                                         if crate::holder::listener_is_gone(&error)
                                             && self.local_holder_startup_grace_elapsed(&record) =>
                                     {
-                                        if self.mark_local_lost(&mut record, &entry.path()).is_err()
-                                        {
+                                        if self.mark_local_lost(&mut record, &entry_path).is_err() {
                                             continue;
                                         }
                                     }
@@ -467,7 +500,7 @@ impl Registry {
                                 && now.saturating_sub(record.updated_at)
                                     > record.policy.record_retention_seconds
                             {
-                                let _ = fs::remove_file(entry.path());
+                                let _ = fs::remove_file(&entry_path);
                             }
                             continue;
                         }
@@ -484,7 +517,7 @@ impl Registry {
                             }
                             record.pid = None;
                             record.ended = Some(EndReason::Lost);
-                            if record.save(&entry.path()).is_err() {
+                            if record.save(&entry_path).is_err() {
                                 continue;
                             }
                         }
@@ -501,9 +534,26 @@ impl Registry {
                             && now.saturating_sub(record.updated_at)
                                 > record.policy.record_retention_seconds
                         {
-                            let _ = fs::remove_file(entry.path());
+                            let _ = fs::remove_file(&entry_path);
                         }
                     }
+                }
+            }
+        }
+        for closed_path in closed_paths {
+            let Some(id) = closed_path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !valid_id(id)
+                || self.workers.contains_key(id)
+                || self.local_holders.contains_key(id)
+                || self.root.join(format!("{id}.json")).exists()
+            {
+                continue;
+            }
+            if let Some(modified) = file_modified_unix(&closed_path) {
+                if now.saturating_sub(modified) > TOMBSTONE_RETENTION_SECONDS {
+                    let _ = fs::remove_file(&closed_path);
                 }
             }
         }
@@ -710,7 +760,14 @@ impl Registry {
             .join(format!("{}.sock", &key[..16]));
         let path = self.root.join(format!("{id}.json"));
         if self.workers.contains_key(id) {
-            return UnixStream::connect(socket);
+            match UnixStream::connect(&socket) {
+                Ok(stream) => return Ok(stream),
+                Err(_) => {
+                    if let Some(worker) = self.workers.remove(id) {
+                        let _ = worker.join();
+                    }
+                }
+            }
         }
         if self.mode == RuntimeMode::Local {
             return self.connect_local(
@@ -807,9 +864,31 @@ impl Registry {
         let p = socket.clone();
         let record_path = path.clone();
         let containment_root = self.containment_root.clone();
+        struct WorkerExitGuard {
+            id: String,
+            finished: Arc<Mutex<Vec<String>>>,
+            wakeup: Option<crate::WakePipe>,
+        }
+        impl Drop for WorkerExitGuard {
+            fn drop(&mut self) {
+                self.finished
+                    .lock()
+                    .unwrap()
+                    .push(std::mem::take(&mut self.id));
+                if let Some(wakeup) = &self.wakeup {
+                    wakeup.notify();
+                }
+            }
+        }
+        let exit_guard = WorkerExitGuard {
+            id: id.into(),
+            finished: self.finished_workers.clone(),
+            wakeup: self.wakeup.clone(),
+        };
         let worker = thread::Builder::new()
             .name(format!("session-{id}"))
             .spawn(move || {
+                let _exit_guard = exit_guard;
                 if let Err(error) = server::serve_managed(
                     &p,
                     argv,
@@ -1213,5 +1292,47 @@ mod tests {
             Some(older_sessions)
         );
         fs::remove_dir_all(run_root).unwrap();
+    }
+
+    #[test]
+    fn maintenance_purges_expired_closed_tombstones_while_preserving_fresh_or_live_records() {
+        let root = local_test_root();
+        let sessions = root.join("sessions");
+        let mut registry =
+            Registry::new_local(sessions.clone(), vec!["/bin/sh".into()], Policy::default());
+
+        let expired_id = "44444444-4444-4444-4444-444444444444";
+        let fresh_id = "55555555-5555-5555-5555-555555555555";
+        let retained_record_id = "66666666-6666-6666-6666-666666666666";
+
+        let expired_marker = sessions.join(format!("{expired_id}.closed"));
+        let fresh_marker = sessions.join(format!("{fresh_id}.closed"));
+        let retained_marker = sessions.join(format!("{retained_record_id}.closed"));
+
+        let eight_days_ago =
+            std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(unix_time() - 8 * 24 * 3600);
+        for marker in [&expired_marker, &retained_marker] {
+            let file = fs::File::create(marker).unwrap();
+            file.set_modified(eight_days_ago).unwrap();
+        }
+        fs::File::create(&fresh_marker).unwrap();
+
+        let retained_policy = Policy {
+            record_retention_seconds: 30 * 24 * 3600,
+            ..Policy::default()
+        };
+        let mut record = Record::new(retained_record_id, retained_policy).unwrap();
+        record.ended = Some(EndReason::ExplicitClose);
+        record
+            .save(&sessions.join(format!("{retained_record_id}.json")))
+            .unwrap();
+
+        registry.last_maintenance = Instant::now() - Duration::from_secs(31);
+        registry.maintenance();
+
+        assert!(!expired_marker.exists());
+        assert!(fresh_marker.exists());
+        assert!(retained_marker.exists());
+        fs::remove_dir_all(root).unwrap();
     }
 }

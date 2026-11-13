@@ -259,6 +259,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         pending_screen_size: std.atomic.Value(u64) = .init(0),
         target_screen_size: std.atomic.Value(u64) = .init(0),
         completed_screen_size: std.atomic.Value(u64) = .init(0),
+        resize_mutex: std.Io.Mutex = .init,
+        resize_cond: std.Io.Condition = .init,
 
         const HighlightTag = enum(u8) {
             search_match,
@@ -1077,6 +1079,17 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
         }
 
+        /// Release the retained front frame once a surface has remained occluded
+        /// past the short tab-switching grace window.
+        pub fn trimHibernated(self: *Self) void {
+            if (comptime GraphicsAPI.swap_chain_count > 1) {
+                if (self.visible.load(.acquire)) return;
+                @import("omg_memory.zig").trimAll(self, global.io()) catch |err| {
+                    log.warn("unable to hibernate occluded GPU resources err={}", .{err});
+                };
+            }
+        }
+
         /// Create or update the display link and match it to the current
         /// surface state.
         fn syncDisplayLink(
@@ -1194,7 +1207,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // when rebuilding the frame fails due to memory pressure.
             defer self.font_shaper.endFrame();
             const target_screen = self.target_screen_size.load(.acquire);
-            defer if (target_screen != 0) self.completed_screen_size.store(target_screen, .release);
+            defer if (target_screen != 0) {
+                self.resize_mutex.lockUncancelable(global.io());
+                self.completed_screen_size.store(target_screen, .release);
+                self.resize_cond.broadcast(global.io());
+                self.resize_mutex.unlock(global.io());
+            };
 
             // We fully deinit and reset the terminal state every so often
             // so that a particularly large terminal state doesn't cause
@@ -1696,12 +1714,21 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             if (sync) {
                 const pending = self.pending_screen_size.load(.acquire);
                 if (pending != 0 and self.completed_screen_size.load(.acquire) != pending) {
-                    const start = std.Io.Timestamp.now(global.io(), .awake);
-                    const budget_ns: i96 = 15 * std.time.ns_per_ms;
+                    const deadline = (std.Io.Timeout{
+                        .duration = .{
+                            .raw = .fromMilliseconds(15),
+                            .clock = .awake,
+                        },
+                    }).toDeadline(global.io());
+                    self.resize_mutex.lockUncancelable(global.io());
+                    defer self.resize_mutex.unlock(global.io());
                     while (self.completed_screen_size.load(.acquire) != pending) {
-                        const now = std.Io.Timestamp.now(global.io(), .awake);
-                        if (start.durationTo(now).toNanoseconds() >= budget_ns) break;
-                        std.Io.sleep(global.io(), .fromNanoseconds(200 * std.time.ns_per_us), .awake) catch break;
+                        @import("../lib/compat/thread.zig").waitTimeout(
+                            &self.resize_cond,
+                            global.io(),
+                            &self.resize_mutex,
+                            deadline,
+                        ) catch break;
                     }
                 }
             }

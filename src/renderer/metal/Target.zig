@@ -40,6 +40,8 @@ texture: objc.Object,
 width: usize,
 /// Current height of this target.
 height: usize,
+/// Set when CALayer cleanup owns purging the IOSurface on the main thread.
+evicted: bool = false,
 
 pub fn init(opts: Options) !Self {
     // We set our surface's color space to Display P3.
@@ -103,6 +105,10 @@ pub fn init(opts: Options) !Self {
 }
 
 pub fn deinit(self: *Self) void {
-    self.surface.deinit();
+    if (self.evicted) {
+        self.surface.release();
+    } else {
+        self.surface.deinit();
+    }
     self.texture.release();
 }

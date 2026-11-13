@@ -77,6 +77,9 @@ cursor_c_cancel: xev.Completion = .{},
 /// Incremental scrollback compression scheduling.
 compression: Compression = undefined,
 
+/// Delayed front-frame eviction for sustained surface occlusion.
+hibernation: Hibernation = undefined,
+
 /// The surface we're rendering to.
 surface: *apprt.Surface,
 
@@ -195,6 +198,8 @@ pub fn init(
     if (comptime terminalpkg.compression_enabled) {
         result.compression = try .init();
     }
+    errdefer if (comptime terminalpkg.compression_enabled) result.compression.deinit();
+    result.hibernation = try .init();
 
     return result;
 }
@@ -210,6 +215,7 @@ pub fn deinit(self: *Thread) void {
     self.cursor_h.deinit();
     if (comptime terminalpkg.compression_enabled)
         self.compression.deinit();
+    self.hibernation.deinit();
     self.loop.deinit();
 
     // Nothing can possibly access the mailbox anymore, destroy it.
@@ -393,6 +399,7 @@ fn drainMailbox(self: *Thread) !void {
                 // renderer's own visibility as well as the thread flag, so
                 // drawing first silently drops the initial foreground frame.
                 self.renderer.setVisible(v);
+                self.hibernation.setVisible(self, v);
 
                 // Rebuild cells skipped while hidden, then draw immediately.
                 // Do not wait for a restarted display link: its next callback
@@ -677,9 +684,10 @@ fn renderCallback(
         return .disarm;
     };
 
-    // If we're not visible there's no point spending CPU rebuilding cells —
-    // we'll catch up when the .visible mailbox message flips us back on.
-    if (!t.flags.visible) return .disarm;
+    // If we're not visible there's no point spending CPU rebuilding cells on
+    // background output, except when a pending resize needs updated grid data
+    // so tab-switch presentation does not wait on a stale screen size.
+    if (!t.flags.visible and !t.flags.resize_redraw) return .disarm;
 
     // Update our frame data
     t.renderer.updateFrame(
@@ -898,5 +906,57 @@ const Compression = struct {
             .complete,
             => null,
         };
+    }
+};
+
+/// Releases the retained front GPU frame after sustained occlusion so background
+/// tabs and minimized windows do not hold full-resolution IOSurfaces indefinitely.
+const Hibernation = struct {
+    const idle_interval = 5_000;
+
+    timer: xev.Timer,
+    completion: xev.Completion = .{},
+    reset_completion: xev.Completion = .{},
+
+    fn init() !Hibernation {
+        return .{ .timer = try xev.Timer.init() };
+    }
+
+    fn deinit(self: *Hibernation) void {
+        self.timer.deinit();
+    }
+
+    fn setVisible(self: *Hibernation, thread: *Thread, visible: bool) void {
+        if (visible) return;
+        self.timer.reset(
+            &thread.loop,
+            &self.completion,
+            &self.reset_completion,
+            idle_interval,
+            Thread,
+            thread,
+            timerCallback,
+        );
+    }
+
+    fn timerCallback(
+        thread_: ?*Thread,
+        _: *xev.Loop,
+        _: *xev.Completion,
+        result: xev.Timer.RunError!void,
+    ) xev.CallbackAction {
+        _ = result catch |err| switch (err) {
+            error.Canceled => return .disarm,
+            else => {
+                log.warn("error in hibernation timer err={}", .{err});
+                return .disarm;
+            },
+        };
+
+        const thread = thread_ orelse return .disarm;
+        if (!thread.flags.visible and @hasDecl(rendererpkg.Renderer, "trimHibernated")) {
+            thread.renderer.trimHibernated();
+        }
+        return .disarm;
     }
 };

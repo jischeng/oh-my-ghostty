@@ -99,11 +99,13 @@ fn serve_mode(directory: &Path, command: Vec<String>, local: bool) -> io::Result
         fs::Permissions::from_mode(0o600),
     )?;
     listener.set_nonblocking(true)?;
+    let wake = WakePipe::new()?;
     let mut initial = if local {
         Registry::new_local(root, command, policy.clone())
     } else {
         Registry::new(root, command, policy.clone())
     };
+    initial.set_wakeup(wake.clone());
     if !local {
         initial.set_containment_root(crate::containment::host_root()?);
     }
@@ -112,20 +114,36 @@ fn serve_mode(directory: &Path, command: Vec<String>, local: bool) -> io::Result
     let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut idle_since = Instant::now();
     loop {
-        {
+        wake.drain();
+        let timeout_ms = {
             let mut state = registry.lock().unwrap();
             state.maintenance();
             if !state.is_empty() || active.load(std::sync::atomic::Ordering::SeqCst) > 0 {
                 idle_since = Instant::now();
+                30_000
             } else if idle_since.elapsed() > Duration::from_secs(policy.host_idle_seconds) {
                 let _ = fs::remove_file(directory.join("host.sock"));
                 return Ok(());
+            } else {
+                let deadline = idle_since
+                    + Duration::from_secs(policy.host_idle_seconds)
+                    + Duration::from_nanos(1);
+                deadline_poll_ms(Instant::now(), deadline).min(30_000)
             }
-        }
+        };
         let socket = match listener.accept() {
             Ok((s, _)) => s,
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(20));
+                use std::os::fd::AsRawFd;
+                let mut descriptors = [
+                    libc::pollfd {
+                        fd: listener.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                    wake.poll_fd(),
+                ];
+                poll_fds(&mut descriptors, timeout_ms)?;
                 continue;
             }
             Err(e) => return Err(e),
@@ -136,9 +154,21 @@ fn serve_mode(directory: &Path, command: Vec<String>, local: bool) -> io::Result
         }
         let registry = registry.clone();
         let active = active.clone();
+        let wake = wake.clone();
         std::thread::spawn(move || {
+            struct ActiveGuard {
+                active: Arc<std::sync::atomic::AtomicUsize>,
+                wake: WakePipe,
+            }
+            impl Drop for ActiveGuard {
+                fn drop(&mut self) {
+                    self.active
+                        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    self.wake.notify();
+                }
+            }
+            let _guard = ActiveGuard { active, wake };
             let _ = host_connection(socket, registry);
-            active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         });
     }
 }
@@ -294,6 +324,52 @@ fn host_connection(socket: UnixStream, registry: Arc<Mutex<Registry>>) -> io::Re
         if transport.dead {
             return Err(io::Error::other("transport backlog exceeded"));
         }
-        std::thread::sleep(Duration::from_millis(2));
+        let mut descriptors = Vec::with_capacity(streams.len() + 1);
+        descriptors.push(transport.poll_fd());
+        for p in streams.values() {
+            descriptors.push(p.poll_fd());
+        }
+        let timeout_ms = deadline_poll_ms(
+            Instant::now(),
+            last_heartbeat + Duration::from_secs(45) + Duration::from_nanos(1),
+        );
+        poll_fds(&mut descriptors, timeout_ms)?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_connection_wakes_on_socket_activity_without_busy_polling() {
+        let nonce = crate::record::nonce().unwrap();
+        let root = std::env::temp_dir().join(format!("omg-host-poll-{}", &nonce[..8]));
+        let sessions = root.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&sessions, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let registry = Arc::new(Mutex::new(Registry::new_local(
+            sessions,
+            vec!["/bin/sh".into()],
+            Policy::default(),
+        )));
+        let (server_sock, mut client_sock) = UnixStream::pair().unwrap();
+        client_sock
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let handle = std::thread::spawn(move || host_connection(server_sock, registry));
+
+        std::thread::sleep(Duration::from_millis(20));
+        let started = Instant::now();
+        Frame::new(b'P', 0, &[]).send(&mut client_sock).unwrap();
+        let reply = Frame::read(&mut client_sock).unwrap();
+        assert_eq!(reply.kind, b'P');
+        assert!(started.elapsed() < Duration::from_millis(250));
+
+        drop(client_sock);
+        let _ = handle.join().unwrap();
+        let _ = fs::remove_dir_all(root);
     }
 }

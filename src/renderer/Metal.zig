@@ -263,6 +263,17 @@ pub inline fn presentLastTarget(self: *Metal) !void {
     _ = self;
 }
 
+/// Detach an occluded front target from our CALayer onto a 1x1 placeholder
+/// before marking the underlying IOSurface purgeable.
+pub fn evictPresentedTarget(
+    self: *Metal,
+    old_target: *Target,
+    new_target: *const Target,
+) void {
+    old_target.evicted = true;
+    self.layer.replaceSurfaceIfCurrent(old_target.surface, new_target.surface);
+}
+
 /// Returns the options to use when constructing buffers.
 pub inline fn bufferOptions(self: Metal) bufferpkg.Options {
     return .{

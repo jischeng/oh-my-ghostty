@@ -88,6 +88,54 @@ pub inline fn setSurfaceSync(self: *IOSurfaceLayer, surface: *IOSurface) void {
     self.layer.setProperty("contents", surface);
 }
 
+const ReplaceSurfaceBlock = objc.Block(struct {
+    layer: objc.c.id,
+    old_surface: *IOSurface,
+    new_surface: *IOSurface,
+}, .{}, void);
+
+/// Atomically swaps `old_surface` for `new_surface` on the main thread if the
+/// layer is still presenting `old_surface`, then purges and releases `old_surface`.
+pub fn replaceSurfaceIfCurrent(
+    self: *IOSurfaceLayer,
+    old_surface: *IOSurface,
+    new_surface: *IOSurface,
+) void {
+    old_surface.retain();
+    new_surface.retain();
+
+    var block = ReplaceSurfaceBlock.init(.{
+        .layer = self.layer.value,
+        .old_surface = old_surface,
+        .new_surface = new_surface,
+    }, &replaceSurfaceCallback);
+
+    const NSThread = objc.getClass("NSThread").?;
+    if (NSThread.msgSend(bool, "isMainThread", .{})) {
+        replaceSurfaceCallback(&block);
+    } else {
+        macos.dispatch.dispatch_async(
+            @ptrCast(macos.dispatch.queue.getMain()),
+            @ptrCast(&block),
+        );
+    }
+}
+
+fn replaceSurfaceCallback(
+    block: *const ReplaceSurfaceBlock.Context,
+) callconv(.c) void {
+    const layer = objc.Object.fromId(block.layer);
+    const old_surface: *IOSurface = block.old_surface;
+    const new_surface: *IOSurface = block.new_surface;
+    defer new_surface.release();
+    defer old_surface.deinit();
+
+    const current = layer.getProperty(?*anyopaque, "contents");
+    if (current != null and @intFromPtr(current.?) == @intFromPtr(old_surface)) {
+        layer.setProperty("contents", new_surface);
+    }
+}
+
 const SetSurfaceBlock = objc.Block(struct {
     layer: objc.c.id,
     surface: *IOSurface,

@@ -266,12 +266,33 @@ pub fn run_from_stdin() -> io::Result<()> {
         local_launch: Some(request.launch),
         presentation: Some(presentation.clone()),
     };
+    let wake = crate::WakePipe::new()?;
+    let actor_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let actor_done_thread = actor_done.clone();
+    let actor_wake = wake.clone();
     let actor = std::thread::Builder::new()
         .name(format!("holder-session-{id}"))
-        .spawn(move || server::serve_managed(&session_socket, argv, Some(managed)))?;
+        .spawn(move || {
+            struct ActorExitGuard {
+                done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+                wake: crate::WakePipe,
+            }
+            impl Drop for ActorExitGuard {
+                fn drop(&mut self) {
+                    self.done.store(true, std::sync::atomic::Ordering::SeqCst);
+                    self.wake.notify();
+                }
+            }
+            let _guard = ActorExitGuard {
+                done: actor_done_thread,
+                wake: actor_wake,
+            };
+            server::serve_managed(&session_socket, argv, Some(managed))
+        })?;
 
     loop {
-        if actor.is_finished() {
+        wake.drain();
+        if actor_done.load(std::sync::atomic::Ordering::SeqCst) || actor.is_finished() {
             let result = actor
                 .join()
                 .map_err(|_| io::Error::other("local session holder actor panicked"))?;
@@ -343,18 +364,15 @@ pub fn run_from_stdin() -> io::Result<()> {
                 }
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                let mut descriptor = libc::pollfd {
-                    fd: listener.as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                };
-                let result = unsafe { libc::poll(&mut descriptor, 1, 200) };
-                if result < 0 {
-                    let error = io::Error::last_os_error();
-                    if error.kind() != io::ErrorKind::Interrupted {
-                        return Err(error);
-                    }
-                }
+                let mut descriptors = [
+                    libc::pollfd {
+                        fd: listener.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                    wake.poll_fd(),
+                ];
+                crate::poll_fds(&mut descriptors, -1)?;
             }
             Err(error) => return Err(error),
         }

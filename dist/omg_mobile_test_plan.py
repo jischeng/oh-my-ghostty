@@ -12,13 +12,20 @@ from omg_test_plan import ROOT, changed_paths, git
 IOS_VERSION_SPEC = "ios/project.yml"
 
 
-# Changes to the iOS app or its mobile companion/gateway endpoints select full
-# mobile checks (native core + Simulator build + guest VM/Simulator UI).
+# Changes to the iOS app, its mobile companion/gateway endpoints, or shared
+# desktop/runtime schemas consumed by mobile select full mobile checks
+# (native core + Simulator build + guest VM/Simulator UI).
 MOBILE_UI_PATHS = (
     "session-runtime/src/mobile.rs",
     "session-runtime/src/mobile/**",
+    "session-runtime/src/lib.rs",
+    "session-runtime/src/registry.rs",
+    "session-runtime/src/record.rs",
     "session-runtime/mobile-support/**",
     "dist/macos/build-mobile-support.py",
+    "macos/Sources/Features/Terminal/Workspaces/**",
+    "macos/Sources/Features/Plugins/SSHHostRegistry.swift",
+    "macos/Sources/Features/Plugins/WorkspaceProvider.swift",
 )
 
 # Changes to libghostty-vt or snapshot wire compatibility linked into iOS select

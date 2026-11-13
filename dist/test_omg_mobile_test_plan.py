@@ -21,7 +21,6 @@ class MobileTestPlanTests(unittest.TestCase):
             "session-runtime/src/launchd.rs",
             "session-runtime/src/server.rs",
             "session-runtime/src/host.rs",
-            "session-runtime/src/registry.rs",
             "session-runtime/src/activity.rs",
             "dist/macos/build-session-runtime.py",
             "build.zig",
@@ -43,8 +42,14 @@ class MobileTestPlanTests(unittest.TestCase):
             "ios/scripts/vm-fixture.py",
             "session-runtime/src/mobile.rs",
             "session-runtime/src/mobile/control.rs",
+            "session-runtime/src/lib.rs",
+            "session-runtime/src/registry.rs",
+            "session-runtime/src/record.rs",
             "dist/macos/build-mobile-support.py",
             "session-runtime/mobile-support/Support.swift",
+            "macos/Sources/Features/Terminal/Workspaces/TerminalWorkspaceSessionStore.swift",
+            "macos/Sources/Features/Plugins/SSHHostRegistry.swift",
+            "macos/Sources/Features/Plugins/WorkspaceProvider.swift",
         ]:
             with self.subTest(path=path):
                 result = make_plan([path])

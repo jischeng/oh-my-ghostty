@@ -193,7 +193,7 @@ mobile checks instead.
 
 | Changed area | Mobile checks |
 | --- | --- |
-| `ios/` implementation, assets, build or UI-test scripts, or `session-runtime` mobile companion/gateway (`mobile.rs`, `mobile/**`, `mobile-support/**`) | Native core, Simulator build, VM + Simulator acceptance |
+| `ios/` implementation, assets, build or UI-test scripts, `session-runtime` mobile companion/gateway (`mobile.rs`, `mobile/**`, `mobile-support/**`), or shared desktop/runtime schemas (`Workspaces/**`, `SSHHostRegistry.swift`, `WorkspaceProvider.swift`, `session-runtime/src/{lib,registry,record}.rs`) | Native core, Simulator build, VM + Simulator acceptance |
 | Shared `libghostty-vt` (`include/ghostty/vt*`, `src/lib_vt.zig`, `src/terminal/**`, `src/simd/**`, `src/unicode/**`, VT input encoders) or snapshot wire compatibility | Native core (`ios/scripts/test.sh`) only; no Simulator or VM mobile UI |
 | Desktop `SessionBackend`, non-mobile `session-runtime`, macOS UI features, release metadata, documentation | No mobile build, Simulator launch or mobile acceptance |
 

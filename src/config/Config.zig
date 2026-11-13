@@ -3997,6 +3997,8 @@ pub fn load(alloc_gpa: Allocator) !Config {
     return result;
 }
 
+pub const default_link_count: usize = if (builtin.target.os.tag == .macos) 4 else 1;
+
 pub fn default(alloc_gpa: Allocator) Allocator.Error!Config {
     // Build up our basic config
     var result: Config = .{
@@ -4040,6 +4042,7 @@ pub fn default(alloc_gpa: Allocator) Allocator.Error!Config {
             .highlight = .{ .hover_mods = inputpkg.ctrlOrSuper(.{}) },
         });
     }
+    assert(result.link.links.items.len == default_link_count);
 
     return result;
 }
@@ -4881,10 +4884,10 @@ pub fn finalize(self: *Config) !void {
     if (self.@"window-width" > 0) self.@"window-width" = @max(10, self.@"window-width");
     if (self.@"window-height" > 0) self.@"window-height" = @max(4, self.@"window-height");
 
-    // Disable both URL detection and OMG's macOS bare path fallback together.
+    // Disable both URL detection and OMG's macOS path matchers together.
     if (!self.@"link-url") {
-        const default_count: usize = if (builtin.target.os.tag == .macos) 3 else 1;
-        self.link.links.items = self.link.links.items[default_count..];
+        const count = @min(default_link_count, self.link.links.items.len);
+        self.link.links.items = self.link.links.items[count..];
     }
 
     // We warn when the quit-after-last-window-closed-delay is set to a very
@@ -11253,4 +11256,23 @@ test "compatibility: window new-window" {
             cfg.@"macos-dock-drop-behavior",
         );
     }
+}
+
+test "link-url false removes all default links" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var default_cfg = try Config.default(alloc);
+    defer default_cfg.deinit();
+    try default_cfg.finalize();
+    try testing.expectEqual(Config.default_link_count, default_cfg.link.links.items.len);
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    var it: TestIterator = .{ .data = &.{
+        "--link-url=false",
+    } };
+    try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
+    try testing.expectEqual(@as(usize, 0), cfg.link.links.items.len);
 }

@@ -20,6 +20,15 @@ int omg_group_pids(int pgid, int *pids, size_t capacity) {
     if (bytes < 0) return -1;
     return bytes / (int)sizeof(int);
 }
+int omg_tty_foreground_pgid(int pid) {
+    if (pid <= 1) return -1;
+    struct proc_bsdinfo info;
+    int result = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info));
+    if (result != sizeof(info)) return -1;
+    if (info.e_tdev == 0 || info.e_tdev == (uint32_t)-1) return -1;
+    int pgid = (int)info.e_tpgid;
+    return pgid > 1 ? pgid : -1;
+}
 int omg_session_pids(int leader, int *pids, size_t capacity) {
     if (leader <= 1 || !pids || capacity == 0) return -1;
     int total_bytes = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);

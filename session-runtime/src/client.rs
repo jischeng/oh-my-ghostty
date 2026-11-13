@@ -354,8 +354,10 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
     let mut attempt_rx = None;
     let mut attempt_tx_id = 0u64;
     let mut idle_since = Instant::now();
+    let wake = crate::WakePipe::new()?;
 
     loop {
+        wake.drain();
         if peers.values().any(|p| {
             !p.ended
                 && (!p.control
@@ -399,7 +401,15 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
             let interactive = interactive_next;
             interactive_next = false;
             let (tx, rx) = mpsc::channel();
+            let wake_attempt = wake.clone();
             thread::spawn(move || {
+                struct NotifyOnDrop(crate::WakePipe);
+                impl Drop for NotifyOnDrop {
+                    fn drop(&mut self) {
+                        self.0.notify();
+                    }
+                }
+                let _notify = NotifyOnDrop(wake_attempt);
                 let _ = tx.send((attempt_id, connect(interactive)));
             });
             attempt_rx = Some(rx);
@@ -1030,6 +1040,29 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
                         }
                         peer.peer.push(inner);
                     }
+                    if let Some(remote) = remote.as_mut() {
+                        if capabilities_received && strict_open {
+                            if let Err(error) = begin_open(
+                                remote,
+                                &mut peers,
+                                &mut remote_streams,
+                                &mut next_stream,
+                            ) {
+                                eprintln!("session runtime open failed: {error}");
+                            }
+                        }
+                        if capabilities_received && durable_close {
+                            begin_controls(
+                                remote,
+                                &mut peers,
+                                &mut remote_streams,
+                                &mut next_stream,
+                            );
+                        }
+                        if capabilities_received {
+                            begin_list(remote, &peers, &mut list_in_flight);
+                        }
+                    }
                 }
                 Err(_) => {
                     remote = None;
@@ -1095,10 +1128,60 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
             state = State::Reconnecting;
             let delay = retry_delay(attempt.max(1));
             set_status(&mut peers, state, attempt, Some(delay), None);
+            for peer in peers.values_mut() {
+                if peer.peer.flush().is_err() {
+                    peer.peer.dead = true;
+                }
+            }
+            peers.retain(|_, p| !p.peer.dead);
             retry_at = Instant::now() + delay;
         }
 
-        thread::sleep(Duration::from_millis(2));
+        use std::os::fd::AsRawFd;
+        let mut descriptors = Vec::with_capacity(peers.len() + 3);
+        descriptors.push(libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        });
+        descriptors.push(wake.poll_fd());
+        if let Some(remote) = &remote {
+            descriptors.push(remote.poll_fd());
+        }
+        for peer in peers.values() {
+            descriptors.push(peer.peer.poll_fd());
+        }
+        let now = Instant::now();
+        let has_active_peers = peers.values().any(|p| {
+            !p.ended
+                && (!p.control
+                    || p.close_id.is_some() && !p.control_done
+                    || p.list_requested && !p.control_done)
+        });
+        let mut timeout_ms: libc::c_int = 60_000;
+        if !has_active_peers {
+            timeout_ms = timeout_ms.min(crate::deadline_poll_ms(
+                now,
+                idle_since + PEER_IDLE_TIMEOUT + Duration::from_nanos(1),
+            ));
+        }
+        if remote.is_some() {
+            timeout_ms = timeout_ms
+                .min(crate::deadline_poll_ms(
+                    now,
+                    last_pong + HEARTBEAT_TIMEOUT + Duration::from_nanos(1),
+                ))
+                .min(crate::deadline_poll_ms(
+                    now,
+                    last_heartbeat + HEARTBEAT_INTERVAL,
+                ));
+            if let Some(since) = stable_since {
+                timeout_ms = timeout_ms.min(crate::deadline_poll_ms(now, since + STABLE_RESET));
+            }
+        } else if !attempt_pending {
+            timeout_ms = timeout_ms.min(crate::deadline_poll_ms(now, retry_at));
+        }
+        crate::poll_fds(&mut descriptors, timeout_ms)?;
     }
 }
 

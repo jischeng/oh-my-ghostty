@@ -694,20 +694,20 @@ fn helper_executable() -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
+fn support_bundle_domain(support: Option<&Path>) -> &'static str {
+    match support.and_then(|p| p.file_name()).and_then(|n| n.to_str()) {
+        Some("OMG") => "com.jischeng.omg",
+        Some("OMG Dev PTY") => "com.jischeng.omg.debug.pty",
+        Some("OMG Dev Workspace") => "com.jischeng.omg.debug.workspace",
+        _ => "com.jischeng.omg.debug",
+    }
+}
+
 fn helper(config: &Config, mut request: Value) -> io::Result<Value> {
     let executable = helper_executable().ok_or_else(|| {
         io::Error::other("Desktop SSH helper is not available on this host; use local directories or pair directly with the SSH server")
     })?;
-    let domain = match config
-        .support
-        .as_ref()
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str())
-    {
-        Some("OMG") => "com.jischeng.omg",
-        Some("OMG Dev Workspace") => "com.jischeng.omg.debug.workspace",
-        _ => "com.jischeng.omg.debug",
-    };
+    let domain = support_bundle_domain(config.support.as_deref());
     request["domain"] = domain.into();
     let mut child = Command::new(executable)
         .process_group(0)
@@ -1006,5 +1006,34 @@ mod tests {
         assert_eq!(resolved.1, vec!["-p".to_owned(), "2222".to_owned()]);
 
         let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn support_bundle_domain_maps_release_and_all_dev_channels() {
+        assert_eq!(
+            support_bundle_domain(Some(Path::new(
+                "/Users/test/Library/Application Support/OMG"
+            ))),
+            "com.jischeng.omg"
+        );
+        assert_eq!(
+            support_bundle_domain(Some(Path::new(
+                "/Users/test/Library/Application Support/OMG Dev"
+            ))),
+            "com.jischeng.omg.debug"
+        );
+        assert_eq!(
+            support_bundle_domain(Some(Path::new(
+                "/Users/test/Library/Application Support/OMG Dev PTY"
+            ))),
+            "com.jischeng.omg.debug.pty"
+        );
+        assert_eq!(
+            support_bundle_domain(Some(Path::new(
+                "/Users/test/Library/Application Support/OMG Dev Workspace"
+            ))),
+            "com.jischeng.omg.debug.workspace"
+        );
+        assert_eq!(support_bundle_domain(None), "com.jischeng.omg.debug");
     }
 }

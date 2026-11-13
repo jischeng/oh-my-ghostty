@@ -156,13 +156,7 @@ fn resize_dimensions(data: &[u8]) -> Option<(u16, u16, u16, u16)> {
 }
 
 fn peer_wants_write(peer: &Peer) -> bool {
-    peer.queued > 0
-        && !(peer.ack.is_some()
-            && peer
-                .queue
-                .front()
-                .and_then(|frame| frame.first().copied())
-                .is_some_and(|kind| matches!(kind, OUTPUT | RESIZE | EXIT | b'M')))
+    peer.wants_write()
 }
 
 fn pty_poll_interests(eof: bool, input_pending: bool) -> libc::c_short {
@@ -348,6 +342,7 @@ pub fn serve_managed(
     let _guard = SocketGuard(path.to_owned());
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;
+    let mut listener = Some(listener);
     // openpty cannot atomically set CLOEXEC. Serialize every session spawn
     // across that small window so another shell cannot inherit these FDs.
     let spawn_guard = PTY_SPAWN
@@ -724,7 +719,10 @@ pub fn serve_managed(
         }
         // A bounded accept batch cannot starve PTY processing.
         for _ in 0..8 {
-            match listener.accept() {
+            let Some(active_listener) = &listener else {
+                break;
+            };
+            match active_listener.accept() {
                 Ok((socket, _)) => {
                     if peers.len() >= 16 {
                         continue;
@@ -1103,6 +1101,20 @@ pub fn serve_managed(
         }
         if let (Some(code), true) = (exited, eof) {
             if draining.is_none() {
+                // Close and unlink the session socket and persist terminal end
+                // state before notifying peers so a fast reattach attempt after
+                // EXIT never connects to a dying listener.
+                listener = None;
+                let _ = fs::remove_file(path);
+                let _ = child.wait();
+                if let Some(group) = &group {
+                    group.finish()?;
+                }
+                if let Some(m) = &mut managed {
+                    m.record.pid = None;
+                    m.record.ended = Some(end_reason);
+                    m.record.save(&m.path)?;
+                }
                 let metadata = serde_json::to_vec(&serde_json::json!({
                     "cwd": last_cwd,
                     "foreground_pid": None::<u64>,
@@ -1118,15 +1130,6 @@ pub fn serve_managed(
             }
             let start = draining.as_ref().unwrap();
             if peers.iter().all(|p| p.queued == 0) || start.elapsed() > Duration::from_secs(2) {
-                let _ = child.wait();
-                if let Some(group) = &group {
-                    group.finish()?;
-                }
-                if let Some(m) = &mut managed {
-                    m.record.pid = None;
-                    m.record.ended = Some(end_reason);
-                    m.record.save(&m.path)?;
-                }
                 return Ok(());
             }
         }
@@ -1138,11 +1141,13 @@ pub fn serve_managed(
                 revents: 0,
             });
         }
-        descriptors.push(libc::pollfd {
-            fd: listener.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        });
+        if let Some(listener) = &listener {
+            descriptors.push(libc::pollfd {
+                fd: listener.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
         descriptors.push(libc::pollfd {
             fd: events.as_raw_fd(),
             events: libc::POLLIN,

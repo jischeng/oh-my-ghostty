@@ -447,6 +447,29 @@ impl Peer {
         self.queued = front.len().saturating_sub(self.offset);
         self.queue.push_back(front);
     }
+    pub fn wants_write(&self) -> bool {
+        self.queued > 0
+            && !(self.ack.is_some()
+                && self
+                    .queue
+                    .front()
+                    .and_then(|frame| frame.first().copied())
+                    .is_some_and(|kind| matches!(kind, OUTPUT | RESIZE | EXIT | b'M')))
+    }
+
+    pub fn poll_fd(&self) -> libc::pollfd {
+        use std::os::fd::AsRawFd;
+        let mut events = libc::POLLIN;
+        if self.wants_write() {
+            events |= libc::POLLOUT;
+        }
+        libc::pollfd {
+            fd: self.socket.as_raw_fd(),
+            events,
+            revents: 0,
+        }
+    }
+
     pub fn flush(&mut self) -> io::Result<()> {
         // Bound work per peer, preserving fairness for PTY draining.
         let mut budget = 256 * 1024;
@@ -533,6 +556,82 @@ impl Drop for Peer {
         self.buffer_budget.release(allocation);
     }
 }
+
+#[derive(Clone)]
+pub(crate) struct WakePipe {
+    reader: Arc<UnixStream>,
+    writer: Arc<UnixStream>,
+}
+
+impl WakePipe {
+    pub fn new() -> io::Result<Self> {
+        let (reader, writer) = UnixStream::pair()?;
+        reader.set_nonblocking(true)?;
+        writer.set_nonblocking(true)?;
+        Ok(Self {
+            reader: Arc::new(reader),
+            writer: Arc::new(writer),
+        })
+    }
+
+    pub fn poll_fd(&self) -> libc::pollfd {
+        use std::os::fd::AsRawFd;
+        libc::pollfd {
+            fd: self.reader.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }
+    }
+
+    pub fn notify(&self) {
+        let _ = (&*self.writer).write(&[1]);
+    }
+
+    pub fn drain(&self) {
+        let mut buf = [0u8; 64];
+        while let Ok(n) = (&*self.reader).read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+        }
+    }
+}
+
+pub(crate) fn deadline_poll_ms(
+    now: std::time::Instant,
+    deadline: std::time::Instant,
+) -> libc::c_int {
+    if now >= deadline {
+        0
+    } else {
+        deadline
+            .duration_since(now)
+            .as_millis()
+            .saturating_add(1)
+            .min(libc::c_int::MAX as u128) as libc::c_int
+    }
+}
+
+pub(crate) fn poll_fds(
+    descriptors: &mut [libc::pollfd],
+    timeout_ms: libc::c_int,
+) -> io::Result<()> {
+    let result = unsafe {
+        libc::poll(
+            descriptors.as_mut_ptr(),
+            descriptors.len() as libc::nfds_t,
+            timeout_ms,
+        )
+    };
+    if result < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 pub mod deploy;
 pub mod handoff;
 pub mod host;
@@ -735,5 +834,36 @@ mod tests {
         remote.write_all(&header).unwrap();
 
         assert!(peer.read().is_err());
+    }
+
+    #[test]
+    fn wake_pipe_and_deadline_poll_wake_immediately_without_busy_spin() {
+        let wake = WakePipe::new().unwrap();
+        let now = std::time::Instant::now();
+        assert_eq!(deadline_poll_ms(now, now), 0);
+        assert_eq!(
+            deadline_poll_ms(now, now + std::time::Duration::from_nanos(1)),
+            1
+        );
+        assert_eq!(
+            deadline_poll_ms(now, now + std::time::Duration::from_millis(25)),
+            26
+        );
+
+        let notifier = wake.clone();
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            notifier.notify();
+        });
+        let started = std::time::Instant::now();
+        let mut fds = [wake.poll_fd()];
+        poll_fds(&mut fds, 5_000).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+        assert_ne!(fds[0].revents & libc::POLLIN, 0);
+        wake.drain();
+        let mut fds = [wake.poll_fd()];
+        poll_fds(&mut fds, 0).unwrap();
+        assert_eq!(fds[0].revents & libc::POLLIN, 0);
+        handle.join().unwrap();
     }
 }

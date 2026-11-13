@@ -25,7 +25,12 @@ struct MobileSupport {
 
     static func registry(_ request: [String: Any]) -> [[String: Any]] {
         let domain = request["domain"] as? String ?? "com.jischeng.omg.debug"
-        guard ["com.jischeng.omg.debug", "com.jischeng.omg", "com.jischeng.omg.debug.workspace"].contains(domain),
+        guard [
+            "com.jischeng.omg.debug",
+            "com.jischeng.omg.debug.pty",
+            "com.jischeng.omg",
+            "com.jischeng.omg.debug.workspace",
+        ].contains(domain),
               let data = UserDefaults(suiteName: domain)?.data(forKey: "OMG.SSH.Registry.v1"),
               let store = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return [] }

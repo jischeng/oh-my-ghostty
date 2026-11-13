@@ -24,8 +24,18 @@
     md.use(window.markdownItAnchor);
     md.use(window.texmath, {
         engine: window.katex,
-        delimiters: ['dollars', 'brackets'],
+        delimiters: ['dollars', 'brackets', 'beg_end'],
         katexOptions: { throwOnError: false, trust: false, strict: 'ignore', maxExpand: 1000 }
+    });
+
+    // Unwrap standalone Codex <proposed_plan> wrapper lines without shifting source offsets.
+    md.block.ruler.before('html_block', 'agent_plan_wrapper', function (state, start, _end, silent) {
+        if (state.sCount[start] - state.blkIndent >= 4) return false;
+        const line = state.src.slice(state.bMarks[start] + state.tShift[start], state.eMarks[start]);
+        if (!/^<\/?proposed_plan>\s*$/i.test(line)) return false;
+        if (silent) return true;
+        state.line = start + 1;
+        return true;
     });
 
     // MkDocs !!! note (indented body) and ::: note containers share GitHub alert rendering.
@@ -118,7 +128,7 @@
         FORBID_TAGS: ['style', 'script', 'iframe', 'object', 'embed', 'form', 'base', 'link', 'meta'],
         FORBID_ATTR: ['srcset'],
         ALLOW_DATA_ATTR: false,
-        ALLOWED_URI_REGEXP: /^(?:(?:(?:f|ht)tps?|mailto|tel|file|omg-markdown-image):|data:image\/(?:png|gif|jpeg|jpg|webp|bmp);|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i
+        ALLOWED_URI_REGEXP: /^(?:(?:(?:f|ht)tps?|mailto|tel|file|omg-markdown-image):|data:image\/(?:png|gif|jpeg|jpg|webp|bmp);|[a-z0-9_.\-]+\.[a-z0-9_]+:\d|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i
     };
 
     function notify(message) {
@@ -322,22 +332,45 @@
         return { codeBlocks, taskOffsets };
     }
 
+    function parseFileLineBadge(rawHref) {
+        const hashMatch = rawHref.match(/#(L?\d+(?:C\d+)?(?:-L?\d+(?:C\d+)?)?)$/i);
+        if (hashMatch) {
+            const raw = hashMatch[1];
+            return { raw, badge: ':' + (/^l/i.test(raw) ? raw.toUpperCase() : 'L' + raw) };
+        }
+        const withoutScheme = rawHref.replace(/^file:\/\//i, '');
+        const colonMatch = withoutScheme.match(/:(\d+)(?::\d+)?(?:-L?(\d+)(?::\d+)?)?$/);
+        if (colonMatch) {
+            const raw = colonMatch[2] ? colonMatch[1] + '-' + colonMatch[2] : colonMatch[1];
+            const badge = colonMatch[2] ? ':L' + colonMatch[1] + '-L' + colonMatch[2] : ':L' + colonMatch[1];
+            return { raw, badge };
+        }
+        return null;
+    }
+
+    function isLocalCodeReference(rawHref) {
+        if (/^file:\/\//i.test(rawHref)) return true;
+        if (/^(?:[a-z][a-z0-9+.-]*:(?!\d)|(?:javascript|vbscript|data|blob|about):)/i.test(rawHref)) return false;
+        if (/^(?:\/(?!\/)|~\/)/.test(rawHref)) return true;
+        return /(?:[./\\]).*(?:#L?\d+|:\d+(?::\d+)?(?:-L?\d+(?::\d+)?)?)$/i.test(rawHref);
+    }
+
     function formatFileCapsule(link, rawHref) {
         link.classList.add('omg-file-link');
-        link.title = rawHref;
-        const lineMatch = rawHref.match(/#(L?\d+(?:C\d+)?(?:-L?\d+(?:C\d+)?)?)$/i);
+        let decodedHref = rawHref;
+        try { decodedHref = decodeURIComponent(rawHref); } catch (_) {}
+        link.title = decodedHref;
+        const lineInfo = parseFileLineBadge(decodedHref);
         let labelText = link.textContent.trim();
-        if (labelText === rawHref) {
-            try {
-                const u = new URL(rawHref);
-                const segments = decodeURIComponent(u.pathname).split('/').filter(Boolean);
-                if (segments.length > 0) labelText = segments[segments.length - 1];
-            } catch (_) {}
+        if (labelText === rawHref || labelText === decodedHref) {
+            const stripped = decodedHref
+                .replace(/^file:\/\//i, '')
+                .replace(/#L?\d+(?:C\d+)?(?:-L?\d+(?:C\d+)?)?$/i, '')
+                .replace(/:\d+(?::\d+)?(?:-L?\d+(?::\d+)?)?$/, '');
+            const segments = stripped.split('/').filter(Boolean);
+            if (segments.length > 0) labelText = segments[segments.length - 1];
         }
-        const badgeText = lineMatch
-            ? ':' + (/^l/i.test(lineMatch[1]) ? lineMatch[1].toUpperCase() : 'L' + lineMatch[1])
-            : '';
-        const showBadge = badgeText && !labelText.includes(lineMatch[1]);
+        const showBadge = lineInfo && !labelText.includes(lineInfo.raw);
         link.textContent = '';
         const labelSpan = document.createElement('span');
         labelSpan.className = 'omg-file-label';
@@ -346,7 +379,7 @@
         if (showBadge) {
             const lineSpan = document.createElement('span');
             lineSpan.className = 'omg-file-line';
-            lineSpan.textContent = badgeText;
+            lineSpan.textContent = lineInfo.badge;
             link.appendChild(lineSpan);
         }
     }
@@ -398,8 +431,8 @@
                 });
                 return;
             }
-            if (/^file:\/\//i.test(rawHref)) {
-                link.href = rawHref;
+            if (isLocalCodeReference(rawHref)) {
+                link.href = /^file:\/\//i.test(rawHref) ? rawHref : '#';
                 link.rel = 'noreferrer noopener';
                 formatFileCapsule(link, rawHref);
                 link.addEventListener('click', event => {
@@ -408,12 +441,13 @@
                 });
                 return;
             }
+            const hasScheme = /^(?:[a-z][a-z0-9+.-]*:(?!\d)|(?:javascript|vbscript|data|blob|about):)/i.test(rawHref);
             try {
                 const resolved = new URL(rawHref, options.baseURL || assetURL);
                 if (/^(https?:|mailto:)$/i.test(resolved.protocol)) {
                     link.href = resolved.href;
                     link.rel = 'noreferrer noopener';
-                } else if (resolved.protocol === 'omg-markdown-image:' && !/^[a-z][a-z0-9+.-]*:/i.test(rawHref)) {
+                } else if (!hasScheme && resolved.protocol === 'omg-markdown-image:') {
                     link.href = resolved.href;
                     link.rel = 'noreferrer noopener';
                     link.addEventListener('click', event => {

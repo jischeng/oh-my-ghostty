@@ -92,12 +92,13 @@ pub fn resolve(self: *Cache, cwd: []const u8, value: []const u8, exists: bool) b
 /// Standalone root separators in prose/code aren't useful implicit links.
 /// Explicit OSC8 links retain their author-provided target.
 pub fn isBareRoot(value: []const u8) bool {
-    return std.mem.eql(u8, std.mem.trim(u8, value, " \t\r\n'\""), "/");
+    return std.mem.eql(u8, std.mem.trim(u8, value, " \t\r\n'\"`"), "/");
 }
 
 test "OMG bare root is not an implicit link" {
     try std.testing.expect(isBareRoot("/"));
     try std.testing.expect(isBareRoot("'/'"));
+    try std.testing.expect(isBareRoot("`/`"));
     try std.testing.expect(!isBareRoot("/home/user"));
 }
 
@@ -105,7 +106,7 @@ test "OMG bare root is not an implicit link" {
 /// by their handler and never checked against a filesystem.
 pub fn needsCheck(value: []const u8) bool {
     var path = value;
-    if (path.len >= 2 and (path[0] == '\'' or path[0] == '"') and path[path.len - 1] == path[0]) {
+    if (path.len >= 2 and (path[0] == '\'' or path[0] == '"' or path[0] == '`') and path[path.len - 1] == path[0]) {
         path = path[1 .. path.len - 1];
     }
     if (std.ascii.startsWithIgnoreCase(path, "file:")) return true;

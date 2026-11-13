@@ -4011,10 +4011,15 @@ pub fn default(alloc_gpa: Allocator) Allocator.Error!Config {
     // Add our default command palette entries
     try result.@"command-palette-entry".init(alloc);
 
-    // Quoted paths must win over a partial URL/path match inside their quotes.
+    // Quoted and spaced paths must win over a partial no-space match inside them.
     if (comptime builtin.target.os.tag == .macos) {
         try result.link.links.append(alloc, .{
             .regex = @import("omg_path.zig").quoted_regex,
+            .action = .{ .open = {} },
+            .highlight = .{ .hover_mods = inputpkg.ctrlOrSuper(.{}) },
+        });
+        try result.link.links.append(alloc, .{
+            .regex = @import("omg_path.zig").spaced_path_regex,
             .action = .{ .open = {} },
             .highlight = .{ .hover_mods = inputpkg.ctrlOrSuper(.{}) },
         });

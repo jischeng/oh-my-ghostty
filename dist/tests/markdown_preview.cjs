@@ -118,6 +118,36 @@ const fixture = sample + '\n' + [
     assert.equal(messages.at(-1).baseText, rawTasks);
     assert.equal(messages.at(-1).text, '# Heading  with  two spaces\n\n- [x] first task\n  - [x] second task\n');
 
+    // Codex <proposed_plan>, Codex path:line capsules, and OMP bare \begin{align}...\end{align}
+    const agentExtensions = [
+        '<proposed_plan>',
+        '# Codex Plan Heading',
+        '',
+        '- [ ] Plan step referencing [app.py](/home/user/repo/app.py:12), [My Report.md](</home/user/My Project/My Report.md:3>), and [rel.py](rel.py:9)',
+        '',
+        '\\begin{align}',
+        'y &= x^2 + 1',
+        '\\end{align}',
+        '</proposed_plan>',
+        ''
+    ].join('\n');
+    await w.renderMarkdown(agentExtensions, {editable: true, baseURL: 'omg-markdown-image://document/home/user/repo/', theme: 'dark'});
+    assert.equal(root.querySelector('h1')?.textContent, 'Codex Plan Heading');
+    const codexLinks = root.querySelectorAll('a.omg-file-link');
+    assert.equal(codexLinks.length, 3);
+    assert.equal(codexLinks[0].querySelector('.omg-file-line')?.textContent, ':L12');
+    assert.equal(codexLinks[1].querySelector('.omg-file-line')?.textContent, ':L3');
+    assert.equal(codexLinks[2].querySelector('.omg-file-line')?.textContent, ':L9');
+    codexLinks[2].click();
+    assert.equal(messages.at(-1).type, 'openLink');
+    assert.equal(messages.at(-1).href, 'rel.py:9');
+    assert.ok(root.querySelector('.katex-display'), 'bare \\begin{align} renders via KaTeX');
+    const planCheckbox = root.querySelector('input.task-list-item-checkbox');
+    planCheckbox.checked = true;
+    planCheckbox.dispatchEvent(new w.Event('change', {bubbles: true}));
+    assert.equal(messages.at(-1).type, 'edit');
+    assert.ok(messages.at(-1).text.includes('<proposed_plan>\n# Codex Plan Heading\n\n- [x] Plan step'));
+
     await Promise.all([w.renderMarkdown('stale'), w.renderMarkdown('newest')]);
     assert.equal(root.textContent.trim(), 'newest');
     console.log('PASS: GFM, smart tables, file:// capsules, code copy, carousel, task toggle, alerts/admonitions, highlight, math, image URLs, sanitization, diagram errors, latest-render ordering');

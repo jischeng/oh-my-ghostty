@@ -70,7 +70,8 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                             }
                             workspace.isVisible = true
                         }
-                        .padding(.top, 8)
+                        .fixedSize()
+                        .padding(.top, 6)
                         .padding(.trailing, 8)
                     }
                     SessionRuntimeRecoveryBanner(controller: controller, surface: surfaceView)
@@ -97,41 +98,76 @@ struct EditorWorkspaceHost<Terminal: View>: View {
         }
     }
 
+    private var duplicateBasenames: Set<String> {
+        var counts: [String: Int] = [:]
+        for doc in workspace.documents {
+            counts[(doc.path as NSString).lastPathComponent, default: 0] += 1
+        }
+        return Set(counts.compactMap { $0.value > 1 ? $0.key : nil })
+    }
+
+    private func closeOthers(keeping kept: EditorDocument) {
+        let others = workspace.documents.filter { $0.id != kept.id }
+        Task {
+            for doc in others {
+                await workspace.close(doc, window: controller.window)
+            }
+        }
+    }
+
     private var editor: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 6) {
+        let duplicates = duplicateBasenames
+        let docList = workspace.documents
+        let diffList = workspace.gitDiffs
+        return VStack(spacing: 0) {
+            HStack(spacing: 8) {
                 ScrollViewReader { proxy in
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 2) {
-                            ForEach(workspace.documents, id: \.id) { document in
+                            ForEach(Array(docList.enumerated()), id: \.element.id) { index, document in
+                                let isSelected = workspace.gitDiff == nil && workspace.selectedID == document.id
+                                let nextSelected: Bool = {
+                                    if index + 1 < docList.count {
+                                        return workspace.gitDiff == nil && workspace.selectedID == docList[index + 1].id
+                                    }
+                                    if let firstDiff = diffList.first {
+                                        return workspace.gitDiff?.id == firstDiff.id
+                                    }
+                                    return true
+                                }()
                                 EditorDocumentTab(
                                     document: document,
-                                    isSelected: workspace.gitDiff == nil && workspace.selectedID == document.id,
-                                    select: {
-                                        workspace.gitDiff = nil
-                                        workspace.selectedID = document.id
-                                    },
-                                    close: { close(document) }
+                                    isSelected: isSelected,
+                                    showsParentHint: duplicates.contains((document.path as NSString).lastPathComponent),
+                                    showsTrailingSeparator: !isSelected && !nextSelected,
+                                    isChinese: isChinese,
+                                    actions: .init(
+                                        select: {
+                                            workspace.gitDiff = nil
+                                            workspace.selectedID = document.id
+                                        },
+                                        close: { close(document) },
+                                        closeOthers: docList.count > 1 ? { closeOthers(keeping: document) } : nil
+                                    )
                                 )
                                 .id(document.id)
                             }
-                            ForEach(workspace.gitDiffs) { request in
-                                HStack(spacing: 6) {
-                                    Button { workspace.selectGitDiff(request) } label: {
-                                        Label(request.tabTitle, systemImage: "arrow.left.arrow.right")
-                                            .lineLimit(1)
-                                    }
-                                    Button { workspace.closeGitDiff(request) } label: {
-                                        Image(systemName: "xmark").font(.caption2)
-                                    }.help(GitL10n.text("Close Diff"))
-                                }
-                                .padding(.horizontal, 8).padding(.vertical, 6)
-                                .background(workspace.gitDiff?.id == request.id ? Color.accentColor.opacity(0.16) : Color.clear,
-                                            in: RoundedRectangle(cornerRadius: 5))
-                                .help(request.repository.worktreePath + " — " + request.tabTitle)
+                            ForEach(Array(diffList.enumerated()), id: \.element.id) { index, request in
+                                let isSelected = workspace.gitDiff?.id == request.id
+                                let nextSelected = index + 1 < diffList.count
+                                    ? workspace.gitDiff?.id == diffList[index + 1].id
+                                    : true
+                                EditorGitDiffTab(
+                                    request: request,
+                                    isSelected: isSelected,
+                                    showsTrailingSeparator: !isSelected && !nextSelected,
+                                    select: { workspace.selectGitDiff(request) },
+                                    close: { workspace.closeGitDiff(request) }
+                                )
                                 .id(request.id)
                             }
                         }
+                        .padding(.vertical, 1)
                     }
                     .onChange(of: workspace.gitDiff?.id) { selected in
                         if let selected { proxy.scrollTo(selected) }
@@ -146,13 +182,15 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                             .padding(.trailing, 2)
                     }
                     EditorToolbarIconButton(
-                        tooltip: isChinese ? "打开文件… (⌘O)" : "Open File… (⌘O)",
+                        tooltip: isChinese ? "打开文件…" : "Open File…",
+                        shortcut: "⌘O",
                         accessibilityLabel: "Open File",
                         icon: EditorOpenFileIcon(),
                         action: openFile
                     )
                     EditorToolbarIconButton(
-                        tooltip: isChinese ? "收起编辑器 (⇧⎋)" : "Collapse Editor (⇧⎋)",
+                        tooltip: isChinese ? "收起编辑器" : "Collapse Editor",
+                        shortcut: "⇧⎋",
                         accessibilityLabel: "Hide Editor",
                         icon: EditorCodexCollapseIcon(),
                         action: { workspace.isVisible = false }
@@ -162,7 +200,10 @@ struct EditorWorkspaceHost<Terminal: View>: View {
             .buttonStyle(.borderless)
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
-            Divider()
+            .background(Color.primary.opacity(0.02))
+            Rectangle()
+                .fill(Color.primary.opacity(0.09))
+                .frame(height: 1)
             if let error = workspace.errorMessage {
                 HStack(alignment: .top) {
                     Text(error).font(.callout).textSelection(.enabled)
@@ -332,64 +373,308 @@ struct EditorWorkspaceHost<Terminal: View>: View {
             return
         }
         let docDir = (document.path as NSString).deletingLastPathComponent
+        let localHref = lower.hasPrefix("file:") ? trimmed : (trimmed.removingPercentEncoding ?? trimmed)
         let candidate: String
-        if !lower.hasPrefix("file:"), !trimmed.hasPrefix("/"), !trimmed.hasPrefix("~"), docDir.hasPrefix("/") {
-            candidate = docDir == "/" ? "/" + trimmed : docDir + "/" + trimmed
+        if !lower.hasPrefix("file:"), !localHref.hasPrefix("/"), !localHref.hasPrefix("~"), docDir.hasPrefix("/") {
+            candidate = docDir == "/" ? "/" + localHref : docDir + "/" + localHref
         } else {
-            candidate = trimmed
+            candidate = localHref
         }
         _ = TerminalPathOpener.open(candidate, from: surfaceView, baseDirectory: docDir)
     }
 }
 
 private struct EditorDocumentTab: View {
+    struct Actions {
+        let select: () -> Void
+        let close: () -> Void
+        let closeOthers: (() -> Void)?
+    }
+
     @ObservedObject var document: EditorDocument
     let isSelected: Bool
-    let select: () -> Void
-    let close: () -> Void
+    let showsParentHint: Bool
+    let showsTrailingSeparator: Bool
+    let isChinese: Bool
+    let actions: Actions
+    @Environment(\.colorScheme) private var colorScheme
     @State private var isHovered = false
     @State private var isCloseHovered = false
+    @State private var anchorBox = EditorAnchorBox()
+
+    private var filename: String {
+        (document.path as NSString).lastPathComponent
+    }
+
+    private var parentFolder: String {
+        ((document.path as NSString).deletingLastPathComponent as NSString).lastPathComponent
+    }
+
+    private var tooltipText: String {
+        let hostTitle = document.filesystem.descriptor.presentationTitle
+        if hostTitle == "Local" || hostTitle.isEmpty {
+            return document.path
+        }
+        return "\(hostTitle) — \(document.path)"
+    }
 
     var body: some View {
-        HStack(spacing: 6) {
-            Button(action: select) {
-                HStack(spacing: 5) {
-                    if document.isDirty {
+        HStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Button(action: {
+                    EditorHoverTooltipPresenter.shared.hide()
+                    actions.select()
+                }, label: {
+                    HStack(spacing: 5.5) {
+                        EditorFileIconView(filename: filename)
+                            .opacity(isSelected || isHovered ? 1.0 : 0.82)
+                        Text(filename)
+                            .font(.system(size: 12, weight: isSelected ? .medium : .regular))
+                            .foregroundStyle(
+                                isSelected
+                                    ? Color.primary
+                                    : (isHovered ? Color.primary.opacity(0.92) : Color.secondary)
+                            )
+                            .lineLimit(1)
+                        if showsParentHint, !parentFolder.isEmpty, parentFolder != "/" {
+                            Text(parentFolder)
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                })
+                .buttonStyle(.plain)
+
+                ZStack {
+                    if document.isDirty && !isHovered && !isCloseHovered {
                         Circle()
                             .fill(Color.orange)
-                            .frame(width: 6, height: 6)
+                            .frame(width: 6.5, height: 6.5)
+                    } else {
+                        Button(action: {
+                            EditorHoverTooltipPresenter.shared.hide()
+                            actions.close()
+                        }, label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 8.5, weight: .bold))
+                                .foregroundStyle(isCloseHovered ? Color.primary : Color.secondary)
+                                .frame(width: 16, height: 16)
+                                .background(
+                                    isCloseHovered ? Color.primary.opacity(0.12) : Color.clear,
+                                    in: RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                )
+                                .contentShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                        })
+                        .buttonStyle(.plain)
+                        .opacity(isCloseHovered ? 1.0 : (isHovered ? 0.82 : (isSelected ? 0.45 : 0.0)))
+                        .allowsHitTesting(isSelected || isHovered || isCloseHovered)
                     }
-                    Text((document.path as NSString).lastPathComponent)
-                        .lineLimit(1)
+                }
+                .frame(width: 16, height: 16)
+                .onHover { isCloseHovered = $0 }
+            }
+            .padding(.leading, 8.5)
+            .padding(.trailing, 5.5)
+            .padding(.vertical, 4.5)
+            .background {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(
+                        isSelected
+                            ? Color.primary.opacity(colorScheme == .dark ? 0.11 : 0.075)
+                            : (isHovered ? Color.primary.opacity(0.05) : Color.clear)
+                    )
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(
+                        isSelected ? Color.primary.opacity(colorScheme == .dark ? 0.15 : 0.11) : Color.clear,
+                        lineWidth: 1
+                    )
+            }
+            .overlay(alignment: .bottom) {
+                if isSelected {
+                    Capsule()
+                        .fill(Color.accentColor)
+                        .frame(height: 2)
+                        .padding(.horizontal, 8)
                 }
             }
-            Button(action: close) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 9.5, weight: .semibold))
-                    .foregroundStyle(isCloseHovered ? .primary : .secondary)
-                    .frame(width: 16, height: 16)
-                    .background(isCloseHovered ? Color.primary.opacity(0.1) : Color.clear, in: RoundedRectangle(cornerRadius: 4))
+            .background(EditorAnchorReader(box: anchorBox))
+            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .onHover { hovering in
+                isHovered = hovering
+                if hovering {
+                    EditorHoverTooltipPresenter.shared.schedule(
+                        text: tooltipText,
+                        shortcut: nil,
+                        anchor: anchorBox,
+                        delayMs: 420
+                    )
+                } else {
+                    EditorHoverTooltipPresenter.shared.cancel(anchor: anchorBox)
+                }
             }
-            .onHover { isCloseHovered = $0 }
-            .help("Close File")
+            .onDisappear {
+                EditorHoverTooltipPresenter.shared.cancel(anchor: anchorBox)
+            }
+            .contextMenu {
+                Button(isChinese ? "关闭标签页" : "Close Tab") { actions.close() }
+                if let closeOthers = actions.closeOthers {
+                    Button(isChinese ? "关闭其他标签页" : "Close Other Tabs") { closeOthers() }
+                }
+                Divider()
+                Button(isChinese ? "复制文件路径" : "Copy File Path") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(document.path, forType: .string)
+                }
+            }
+
+            Rectangle()
+                .fill(showsTrailingSeparator && !isHovered ? Color.primary.opacity(0.08) : Color.clear)
+                .frame(width: 1, height: 13)
+                .padding(.leading, 2)
         }
-        .padding(.leading, 9)
-        .padding(.trailing, 6)
-        .padding(.vertical, 5)
-        .background(
-            isSelected
-                ? Color.accentColor.opacity(0.18)
-                : (isHovered ? Color.primary.opacity(0.06) : Color.clear),
-            in: RoundedRectangle(cornerRadius: 6)
-        )
-        .onHover { isHovered = $0 }
-        .help(document.filesystem.descriptor.presentationTitle + " — " + document.path)
+        .accessibilityLabel(filename)
+    }
+}
+
+private struct EditorGitDiffTab: View {
+    let request: GitEditorDiffRequest
+    let isSelected: Bool
+    let showsTrailingSeparator: Bool
+    let select: () -> Void
+    let close: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var isHovered = false
+    @State private var isCloseHovered = false
+    @State private var anchorBox = EditorAnchorBox()
+
+    var body: some View {
+        HStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Button(action: {
+                    EditorHoverTooltipPresenter.shared.hide()
+                    select()
+                }, label: {
+                    HStack(spacing: 5.5) {
+                        Image(systemName: "arrow.left.arrow.right")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                        Text(request.tabTitle)
+                            .font(.system(size: 12, weight: isSelected ? .medium : .regular))
+                            .foregroundStyle(
+                                isSelected
+                                    ? Color.primary
+                                    : (isHovered ? Color.primary.opacity(0.92) : Color.secondary)
+                            )
+                            .lineLimit(1)
+                    }
+                    .contentShape(Rectangle())
+                })
+                .buttonStyle(.plain)
+
+                Button(action: {
+                    EditorHoverTooltipPresenter.shared.hide()
+                    close()
+                }, label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .foregroundStyle(isCloseHovered ? Color.primary : Color.secondary)
+                        .frame(width: 16, height: 16)
+                        .background(
+                            isCloseHovered ? Color.primary.opacity(0.12) : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        )
+                        .contentShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                })
+                .buttonStyle(.plain)
+                .opacity(isCloseHovered ? 1.0 : (isHovered ? 0.82 : (isSelected ? 0.45 : 0.0)))
+                .allowsHitTesting(isSelected || isHovered || isCloseHovered)
+                .onHover { isCloseHovered = $0 }
+            }
+            .padding(.leading, 8.5)
+            .padding(.trailing, 5.5)
+            .padding(.vertical, 4.5)
+            .background {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(
+                        isSelected
+                            ? Color.primary.opacity(colorScheme == .dark ? 0.11 : 0.075)
+                            : (isHovered ? Color.primary.opacity(0.05) : Color.clear)
+                    )
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(
+                        isSelected ? Color.primary.opacity(colorScheme == .dark ? 0.15 : 0.11) : Color.clear,
+                        lineWidth: 1
+                    )
+            }
+            .overlay(alignment: .bottom) {
+                if isSelected {
+                    Capsule()
+                        .fill(Color.accentColor)
+                        .frame(height: 2)
+                        .padding(.horizontal, 8)
+                }
+            }
+            .background(EditorAnchorReader(box: anchorBox))
+            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .onHover { hovering in
+                isHovered = hovering
+                if hovering {
+                    EditorHoverTooltipPresenter.shared.schedule(
+                        text: request.repository.worktreePath + " — " + request.tabTitle,
+                        shortcut: nil,
+                        anchor: anchorBox,
+                        delayMs: 420
+                    )
+                } else {
+                    EditorHoverTooltipPresenter.shared.cancel(anchor: anchorBox)
+                }
+            }
+            .onDisappear {
+                EditorHoverTooltipPresenter.shared.cancel(anchor: anchorBox)
+            }
+
+            Rectangle()
+                .fill(showsTrailingSeparator && !isHovered ? Color.primary.opacity(0.08) : Color.clear)
+                .frame(width: 1, height: 13)
+                .padding(.leading, 2)
+        }
+    }
+}
+
+private struct EditorFileIconView: View {
+    let filename: String
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        if let asset = MaterialFileIcons.assetName(
+            for: filename,
+            isDirectory: false,
+            isLight: colorScheme == .light
+        ), NSImage(named: asset) != nil {
+            Image(asset)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
+                .frame(width: 14, height: 14)
+        } else {
+            Image(systemName: "doc.text")
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 14, height: 14)
+        }
     }
 }
 
 private struct EditorMarkdownModeSwitch: View {
     @ObservedObject var document: EditorDocument
     let isChinese: Bool
+    @State private var anchorBox = EditorAnchorBox()
 
     var body: some View {
         Picker("", selection: $document.isPreviewMode) {
@@ -399,37 +684,73 @@ private struct EditorMarkdownModeSwitch: View {
         .pickerStyle(.segmented)
         .labelsHidden()
         .controlSize(.small)
-        .frame(width: 120)
-        .help(isChinese ? "切换源码编辑 / Markdown 预览" : "Switch between Source Edit and Markdown Preview")
+        .frame(width: 116)
+        .background(EditorAnchorReader(box: anchorBox))
+        .onHover { hovering in
+            if hovering {
+                EditorHoverTooltipPresenter.shared.schedule(
+                    text: isChinese ? "切换源码编辑 / 预览" : "Switch Edit / Preview",
+                    shortcut: nil,
+                    anchor: anchorBox,
+                    delayMs: 320
+                )
+            } else {
+                EditorHoverTooltipPresenter.shared.cancel(anchor: anchorBox)
+            }
+        }
+        .onDisappear {
+            EditorHoverTooltipPresenter.shared.cancel(anchor: anchorBox)
+        }
     }
 }
 
 private struct EditorToolbarIconButton<Icon: View>: View {
     let tooltip: String
+    var shortcut: String?
     let accessibilityLabel: String
     let icon: Icon
     let action: () -> Void
     @State private var isHovered = false
+    @State private var anchorBox = EditorAnchorBox()
 
     var body: some View {
-        Button(action: action) {
+        Button(action: {
+            EditorHoverTooltipPresenter.shared.hide()
+            action()
+        }, label: {
             icon
                 .frame(width: 16, height: 16)
                 .foregroundStyle(isHovered ? Color.primary : Color.secondary)
                 .frame(width: 28, height: 28)
                 .background(
                     isHovered ? Color.primary.opacity(0.10) : Color.clear,
-                    in: RoundedRectangle(cornerRadius: 6)
+                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .strokeBorder(isHovered ? Color.primary.opacity(0.12) : Color.clear, lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(isHovered ? Color.primary.opacity(0.13) : Color.clear, lineWidth: 1)
                 )
-                .contentShape(RoundedRectangle(cornerRadius: 6))
-        }
+                .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        })
         .buttonStyle(.plain)
-        .onHover { isHovered = $0 }
-        .help(tooltip)
+        .background(EditorAnchorReader(box: anchorBox))
+        .onHover { hovering in
+            isHovered = hovering
+            if hovering {
+                EditorHoverTooltipPresenter.shared.schedule(
+                    text: tooltip,
+                    shortcut: shortcut,
+                    anchor: anchorBox,
+                    delayMs: 120
+                )
+            } else {
+                EditorHoverTooltipPresenter.shared.cancel(anchor: anchorBox)
+            }
+        }
+        .onDisappear {
+            EditorHoverTooltipPresenter.shared.cancel(anchor: anchorBox)
+        }
+        .help(shortcut.map { "\(tooltip) (\($0))" } ?? tooltip)
         .accessibilityLabel(accessibilityLabel)
     }
 }
@@ -483,11 +804,9 @@ private struct EditorCodexCollapseIcon: View {
                 CGPoint(x: x * scaleX, y: y * scaleY)
             }
             var path = Path()
-            // Bottom-left inward corner (┐)
             path.move(to: pt(3.5, 9.5))
             path.addLine(to: pt(6.5, 9.5))
             path.addLine(to: pt(6.5, 12.5))
-            // Top-right inward corner (└)
             path.move(to: pt(9.5, 3.5))
             path.addLine(to: pt(9.5, 6.5))
             path.addLine(to: pt(12.5, 6.5))
@@ -510,11 +829,9 @@ private struct EditorCodexExpandIcon: View {
                 CGPoint(x: x * scaleX, y: y * scaleY)
             }
             var path = Path()
-            // Bottom-left outward corner (└)
             path.move(to: pt(4.0, 8.5))
             path.addLine(to: pt(4.0, 12.0))
             path.addLine(to: pt(7.5, 12.0))
-            // Top-right outward corner (┐)
             path.move(to: pt(12.0, 7.5))
             path.addLine(to: pt(12.0, 4.0))
             path.addLine(to: pt(8.5, 4.0))
@@ -532,6 +849,7 @@ private struct EditorCollapsedPill: View {
     let isChinese: Bool
     let expand: () -> Void
     @State private var isHovered = false
+    @State private var anchorBox = EditorAnchorBox()
 
     private var activeDocument: EditorDocument? {
         guard workspace.gitDiff == nil else { return nil }
@@ -559,67 +877,254 @@ private struct EditorCollapsedPill: View {
         workspace.documents.count + workspace.gitDiffs.count
     }
 
+    private var hasDirtyDocument: Bool {
+        workspace.documents.contains(where: \.isDirty)
+    }
+
+    private var hoverTooltipText: String {
+        let prefix = isChinese ? "展开编辑器" : "Expand Editor"
+        if totalItemCount > 1 {
+            return isChinese
+                ? "\(prefix) · \(activeTitle) (共 \(totalItemCount) 个)"
+                : "\(prefix) · \(activeTitle) (\(totalItemCount) open)"
+        }
+        return "\(prefix) · \(activeTitle)"
+    }
+
     var body: some View {
-        Button(action: expand) {
-            HStack(spacing: 7) {
-                if let doc = activeDocument {
-                    EditorCollapsedStatusDot(document: doc)
-                } else {
-                    Circle()
-                        .fill(Color.accentColor)
-                        .frame(width: 6, height: 6)
-                }
-                Text(activeTitle)
-                    .font(.system(size: 12, weight: .medium))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: 180)
-                    .foregroundStyle(isHovered ? Color.primary : Color.primary.opacity(0.88))
-
-                if totalItemCount > 1 {
-                    Text("\(totalItemCount)")
-                        .font(.system(size: 10.5, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(Color.primary.opacity(0.10), in: Capsule())
-                }
-
+        Button(action: {
+            EditorHoverTooltipPresenter.shared.hide()
+            expand()
+        }, label: {
+            ZStack(alignment: .topTrailing) {
                 EditorCodexExpandIcon()
-                    .frame(width: 14, height: 14)
+                    .frame(width: 15, height: 15)
                     .foregroundStyle(isHovered ? Color.primary : Color.secondary)
+                    .frame(width: 28, height: 28)
+
+                if hasDirtyDocument {
+                    Circle()
+                        .fill(Color.orange)
+                        .frame(width: 5.5, height: 5.5)
+                        .padding(.top, 4.5)
+                        .padding(.trailing, 4.5)
+                } else if let doc = activeDocument {
+                    EditorDirtySubscriptionView(document: doc)
+                }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5.5)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+            .frame(width: 28, height: 28)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
             .background(
-                (isHovered ? Color.accentColor.opacity(0.10) : Color.black.opacity(0.14)),
-                in: RoundedRectangle(cornerRadius: 8)
+                isHovered ? Color.primary.opacity(0.09) : Color.black.opacity(0.12),
+                in: RoundedRectangle(cornerRadius: 7, style: .continuous)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 8)
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
                     .strokeBorder(
-                        isHovered ? Color.accentColor.opacity(0.55) : Color.primary.opacity(0.16),
+                        isHovered ? Color.primary.opacity(0.26) : Color.primary.opacity(0.13),
                         lineWidth: 1
                     )
             )
-            .shadow(color: .black.opacity(0.18), radius: 6, x: 0, y: 2)
-            .contentShape(RoundedRectangle(cornerRadius: 8))
-        }
+            .shadow(color: .black.opacity(0.14), radius: 4, x: 0, y: 1.5)
+            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        })
         .buttonStyle(.plain)
-        .onHover { isHovered = $0 }
-        .help(isChinese ? "展开编辑器" : "Expand Editor")
+        .fixedSize()
+        .background(EditorAnchorReader(box: anchorBox))
+        .onHover { hovering in
+            isHovered = hovering
+            if hovering {
+                EditorHoverTooltipPresenter.shared.schedule(
+                    text: hoverTooltipText,
+                    shortcut: "⇧⎋",
+                    anchor: anchorBox,
+                    delayMs: 120
+                )
+            } else {
+                EditorHoverTooltipPresenter.shared.cancel(anchor: anchorBox)
+            }
+        }
+        .onDisappear {
+            EditorHoverTooltipPresenter.shared.cancel(anchor: anchorBox)
+        }
+        .help(hoverTooltipText)
         .accessibilityLabel("Editor")
     }
 }
 
-private struct EditorCollapsedStatusDot: View {
+/// Subscribes to active document's dirty state so the compact expand button updates immediately.
+private struct EditorDirtySubscriptionView: View {
     @ObservedObject var document: EditorDocument
 
     var body: some View {
-        Circle()
-            .fill(document.isDirty ? Color.orange : Color.accentColor)
-            .frame(width: 6, height: 6)
+        if document.isDirty {
+            Circle()
+                .fill(Color.orange)
+                .frame(width: 5.5, height: 5.5)
+                .padding(.top, 4.5)
+                .padding(.trailing, 4.5)
+        }
+    }
+}
+
+private final class EditorAnchorBox {
+    weak var view: NSView?
+}
+
+private struct EditorAnchorReader: NSViewRepresentable {
+    let box: EditorAnchorBox
+
+    final class PassThroughView: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+
+    func makeNSView(context: Context) -> PassThroughView {
+        let view = PassThroughView()
+        box.view = view
+        return view
+    }
+
+    func updateNSView(_ nsView: PassThroughView, context: Context) {
+        box.view = nsView
+    }
+}
+
+@MainActor
+private final class EditorHoverTooltipPresenter {
+    static let shared = EditorHoverTooltipPresenter()
+
+    private weak var activeBox: EditorAnchorBox?
+    private var hoverTask: Task<Void, Never>?
+    private var panel: NSPanel?
+    private var hostingView: NSHostingView<EditorFloatingTooltipBubble>?
+
+    private init() {
+        for name in [
+            NSApplication.didResignActiveNotification,
+            NSWindow.didResignKeyNotification,
+            NSWindow.willCloseNotification
+        ] {
+            NotificationCenter.default.addObserver(
+                forName: name,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.hide() }
+            }
+        }
+    }
+
+    func schedule(text: String, shortcut: String?, anchor: EditorAnchorBox, delayMs: UInt64) {
+        hoverTask?.cancel()
+        activeBox = anchor
+        hoverTask = Task { @MainActor [weak self, weak anchor] in
+            try? await Task.sleep(nanoseconds: delayMs * 1_000_000)
+            guard !Task.isCancelled, let self, let anchor, self.activeBox === anchor else { return }
+            self.present(text: text, shortcut: shortcut, from: anchor)
+        }
+    }
+
+    func cancel(anchor: EditorAnchorBox) {
+        guard activeBox === anchor else { return }
+        hide()
+    }
+
+    func hide() {
+        hoverTask?.cancel()
+        hoverTask = nil
+        activeBox = nil
+        panel?.orderOut(nil)
+    }
+
+    private func present(text: String, shortcut: String?, from box: EditorAnchorBox) {
+        guard let anchorView = box.view,
+              let window = anchorView.window,
+              window.isVisible else { return }
+        let rectInWindow = anchorView.convert(anchorView.bounds, to: nil)
+        let screenRect = window.convertToScreen(rectInWindow)
+        guard screenRect.width > 0, screenRect.height > 0 else { return }
+
+        let bubble = EditorFloatingTooltipBubble(text: text, shortcut: shortcut)
+        let host: NSHostingView<EditorFloatingTooltipBubble>
+        if let existing = hostingView {
+            existing.rootView = bubble
+            host = existing
+        } else {
+            let created = NSHostingView(rootView: bubble)
+            hostingView = created
+            host = created
+        }
+        host.layoutSubtreeIfNeeded()
+        let fitting = host.fittingSize
+        let size = NSSize(width: ceil(fitting.width), height: ceil(fitting.height))
+
+        let tooltipPanel: NSPanel
+        if let existingPanel = panel {
+            tooltipPanel = existingPanel
+        } else {
+            let created = NSPanel(
+                contentRect: NSRect(origin: .zero, size: size),
+                styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered,
+                defer: false
+            )
+            created.isOpaque = false
+            created.backgroundColor = .clear
+            created.hasShadow = true
+            created.ignoresMouseEvents = true
+            created.level = .popUpMenu
+            created.isReleasedWhenClosed = false
+            created.hidesOnDeactivate = true
+            created.contentView = host
+            panel = created
+            tooltipPanel = created
+        }
+
+        tooltipPanel.appearance = window.effectiveAppearance
+        let visibleFrame = (window.screen ?? NSScreen.main)?.visibleFrame
+            ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
+        var originX = screenRect.maxX - size.width
+        originX = min(max(originX, visibleFrame.minX + 6), visibleFrame.maxX - size.width - 6)
+        var originY = screenRect.minY - size.height - 5
+        if originY < visibleFrame.minY + 6 {
+            originY = screenRect.maxY + 5
+        }
+        tooltipPanel.setFrame(NSRect(origin: NSPoint(x: originX, y: originY), size: size), display: true)
+        tooltipPanel.orderFront(nil)
+    }
+}
+
+private struct EditorFloatingTooltipBubble: View {
+    let text: String
+    let shortcut: String?
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(text)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(Color.primary)
+                .lineLimit(1)
+            if let shortcut, !shortcut.isEmpty {
+                Text(shortcut)
+                    .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                    .foregroundStyle(Color.secondary)
+                    .padding(.horizontal, 4.5)
+                    .padding(.vertical, 1)
+                    .background(
+                        Color.primary.opacity(colorScheme == .dark ? 0.12 : 0.08),
+                        in: RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    )
+            }
+        }
+        .padding(.horizontal, 8.5)
+        .padding(.vertical, 5)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .strokeBorder(Color.primary.opacity(colorScheme == .dark ? 0.18 : 0.12), lineWidth: 1)
+        )
+        .fixedSize()
     }
 }
 

@@ -296,3 +296,46 @@ test "OMG agent Python and cd quoted paths survive terminal soft wrapping" {
     defer cells.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 2 * (path.len + 2)), cells.count());
 }
+
+test "OMG unquoted spaced paths underline full span and fall back when missing" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 120, .rows = 4 });
+    defer t.deinit(alloc);
+    try t.setPwd("/repo");
+    var stream = t.vtStream();
+    defer stream.deinit();
+    const spaced = "~/Library/Application Support/OMG Dev/workspaces/state.json";
+    const plain = "~/.omg/run/";
+    stream.nextSlice("查了 " ++ spaced ++ " 和 " ++ plain ++ " 里的文件\r\ncp /repo/a b/c\r\n");
+
+    const mods = input.ctrlOrSuper(.{});
+    var config = try @import("link.zig").Set.fromConfig(alloc, &.{
+        .{ .regex = @import("../config/omg_path.zig").quoted_regex, .action = .{ .open = {} }, .highlight = .{ .hover_mods = mods } },
+        .{ .regex = @import("../config/omg_path.zig").spaced_path_regex, .action = .{ .open = {} }, .highlight = .{ .hover_mods = mods } },
+        .{ .regex = @import("../config/url.zig").no_space_regex, .action = .{ .open = {} }, .highlight = .{ .hover_mods = mods } },
+        .{ .regex = @import("../config/omg_path.zig").regex, .action = .{ .open = {} }, .highlight = .{ .hover_mods = mods } },
+    });
+    defer config.deinit(alloc);
+
+    var cache: Cache = .{};
+    defer cache.deinit(alloc);
+    _ = try cache.putPending(alloc, "/repo", spaced);
+    _ = cache.resolve("/repo", spaced, true);
+    _ = try cache.putPending(alloc, "/repo", plain);
+    _ = cache.resolve("/repo", plain, true);
+    // In `cp /repo/a b/c`, `/repo/a b/c` is missing while `/repo/a` and `b/c` exist.
+    _ = try cache.putPending(alloc, "/repo", "/repo/a b/c");
+    _ = cache.resolve("/repo", "/repo/a b/c", false);
+    _ = try cache.putPending(alloc, "/repo", "/repo/a");
+    _ = cache.resolve("/repo", "/repo/a", true);
+    _ = try cache.putPending(alloc, "/repo", "b/c");
+    _ = cache.resolve("/repo", "b/c", true);
+
+    var frame: terminal.RenderState = .empty;
+    defer frame.deinit(alloc);
+    try frame.update(alloc, &t);
+    var cells = try collect(alloc, alloc, t.screens.active, &frame, config.links, &cache, mods);
+    defer cells.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, spaced.len + plain.len + "/repo/a".len + "b/c".len), cells.count());
+}

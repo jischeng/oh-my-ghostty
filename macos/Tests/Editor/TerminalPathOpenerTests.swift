@@ -10,6 +10,22 @@ struct TerminalPathOpenerTests {
         #expect(TerminalPathTarget.path("README.md", directory: "/remote/two", isRemote: true) == "/remote/two/README.md")
         #expect(TerminalPathTarget.path("'App icon.icon'", directory: "/project", isRemote: false) == "/project/App icon.icon")
         #expect(TerminalPathTarget.path("\"App icon.icon\"", directory: "/project", isRemote: false) == "/project/App icon.icon")
+        #expect(TerminalPathTarget.path("`App icon.icon`", directory: "/project", isRemote: false) == "/project/App icon.icon")
+        #expect(TerminalPathTarget.path(
+            "~/Library/Application Support/OMG Dev/workspaces/state.json",
+            directory: "/project",
+            isRemote: false
+        ) == ("~/Library/Application Support/OMG Dev/workspaces/state.json" as NSString).expandingTildeInPath)
+        #expect(TerminalPathTarget.path(
+            "macos/Sources/Ghostty/Surface View/SurfaceLinkHint.swift:48",
+            directory: "/project",
+            isRemote: false
+        ) == "/project/macos/Sources/Ghostty/Surface View/SurfaceLinkHint.swift")
+        #expect(TerminalPathTarget.path(
+            "file:///tmp/OMG Dev/state.json#L12",
+            directory: "/",
+            isRemote: false
+        ) == "/tmp/OMG Dev/state.json")
         #expect(TerminalPathTarget.path("README.md", directory: "", isRemote: false) == nil)
         #expect(TerminalPathTarget.path("/project/README.md", directory: "", isRemote: false) == "/project/README.md")
         #expect(TerminalPathTarget.path("src/file.swift:12:3", directory: "/project", isRemote: false) == "/project/src/file.swift")

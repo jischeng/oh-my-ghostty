@@ -5,8 +5,61 @@ const std = @import("std");
 const oni = @import("oniguruma");
 
 pub const quoted_regex =
-    \\'(?![A-Za-z][A-Za-z0-9+.-]*:(?![0-9]))[^'"\r\n]+'|"(?![A-Za-z][A-Za-z0-9+.-]*:(?![0-9]))[^"'\r\n]+"
+    \\'(?![A-Za-z][A-Za-z0-9+.-]*:(?![0-9]))[^'"\r\n]+'|"(?![A-Za-z][A-Za-z0-9+.-]*:(?![0-9]))[^"'\r\n]+"|`(?![A-Za-z][A-Za-z0-9+.-]*:(?![0-9]))[^`\r\n]+`
 ;
+
+const spaced_prefix =
+    \\(?<![\w./~:@$+-])(?!(?:\.{3,}|[\w.\-/]*\.{3,}))(?:~/|/(?!/)|\.{1,2}/|[\w.\-]+/)
+;
+
+const spaced_token_char =
+    \\[^\s/:*?"'<>|`\[\]{};&,\x{2018}-\x{201F}\x{3000}-\x{303F}\x{FF00}-\x{FF65}()]
+;
+
+const spaced_seg_token =
+    "(?>(?:" ++ spaced_token_char ++ "|\\((?>" ++ spaced_token_char ++ "+)\\))+)";
+
+const spaced_word_no_ext =
+    "(?!" ++ spaced_token_char ++ "*\\.[a-z]{2,6}(?=\\s))" ++ spaced_seg_token;
+
+const spaced_next_guard =
+    \\(?!https?://|mailto:|file:|ssh://|git://|~/|\.{1,2}/)
+;
+
+const unspaced_dir = "(?>" ++ spaced_seg_token ++ "/)";
+
+const spaced_dir =
+    "(?>" ++ spaced_seg_token ++ "(?: " ++ spaced_next_guard ++ spaced_seg_token ++ "){1,5}/)";
+
+const spaced_ext_tail =
+    spaced_word_no_ext ++ "(?: " ++ spaced_next_guard ++ spaced_word_no_ext ++ "){0,6} " ++
+    spaced_next_guard ++ "(?:" ++ spaced_token_char ++ "|\\((?>" ++ spaced_token_char ++ "+)\\))*\\.(?:7z|[A-Za-z][A-Za-z0-9_]{0,11})";
+
+const spaced_title_dir_tail =
+    \\[\w\-]+(?: [A-Z][\w\-]*){1,3}
+;
+
+const spaced_location_suffix =
+    \\(?::[0-9]+(?::[0-9]+)?(?:-L?[0-9]+(?::[0-9]+)?)?|#L?[0-9]+(?:C[0-9]+)?(?:-L?[0-9]+(?:C[0-9]+)?)?)?
+;
+
+const spaced_trailing_guard =
+    \\(?<![,.])(?![/\w~@$+-]|\.(?=[\w/-]))
+;
+
+/// Unquoted rooted/relative paths containing spaces inside directory segments
+/// (e.g. `~/Library/Application Support/OMG Dev/workspaces/state.json`) or
+/// spaced bundle/file names (e.g. `/Applications/OMG Dev.app`). Every match is
+/// still verified against the pane's filesystem before underlining or opening.
+pub const spaced_path_regex =
+    spaced_prefix ++
+    "(?:" ++
+    "(?:" ++ unspaced_dir ++ ")*" ++ spaced_dir ++ "(?:" ++ unspaced_dir ++ "|" ++ spaced_dir ++ ")*(?:" ++ spaced_ext_tail ++ "|" ++ spaced_title_dir_tail ++ "|" ++ spaced_seg_token ++ ")?" ++
+    "|" ++
+    "(?:" ++ unspaced_dir ++ ")*(?:" ++ spaced_ext_tail ++ "|" ++ spaced_title_dir_tail ++ ")" ++
+    ")" ++
+    spaced_location_suffix ++
+    spaced_trailing_guard;
 
 // Plain ls -l (including localized month names), without Nerd Font icons.
 // Consume the metadata as context, but \K makes only the filename clickable.
@@ -42,6 +95,8 @@ test "OMG bare path candidates" {
         .{ .input = "'App icon.icon'", .expected = "'App icon.icon'" },
         .{ .input = "\"App icon.icon\"", .expected = "\"App icon.icon\"" },
         .{ .input = "'/tmp/App icon.icon'", .expected = "'/tmp/App icon.icon'" },
+        .{ .input = "`~/Library/Application Support/OMG Dev/workspaces/state.json`", .expected = "`~/Library/Application Support/OMG Dev/workspaces/state.json`" },
+        .{ .input = "`/Applications/OMG Dev.app`", .expected = "`/Applications/OMG Dev.app`" },
         .{ .input = "(README.md)", .expected = "README.md" },
         .{ .input = "README.md:12:3", .expected = "README.md:12:3" },
         .{ .input = "README.md:12-40", .expected = "README.md:12-40" },
@@ -99,6 +154,72 @@ test "OMG bare path candidates" {
         " / ",
         // A method call is not a dotfile.
         ".zIndex(1)",
+    }) |input| {
+        if (re.search(input, .{})) |result| {
+            var match = result;
+            match.deinit();
+            return error.TestUnexpectedResult;
+        } else |_| {}
+    }
+}
+
+test "OMG spaced path candidates" {
+    try oni.testing.ensureInit();
+    var re = try oni.Regex.init(spaced_path_regex, .{}, oni.Encoding.utf8, oni.Syntax.default, null);
+    defer re.deinit();
+
+    const cases = [_]struct { input: []const u8, expected: []const u8 }{
+        .{
+            .input = "我刚直接查了你本机 ~/Library/Application Support/OMG Dev/workspaces/state.json 和 ~/.omg/run/ 里的会话文件",
+            .expected = "~/Library/Application Support/OMG Dev/workspaces/state.json",
+        },
+        .{
+            .input = "现在可以直接在已安装的 /Applications/OMG Dev.app 中一并验收这几项",
+            .expected = "/Applications/OMG Dev.app",
+        },
+        .{
+            .input = "Checked ~/Library/Application Support/OMG Dev/workspaces/state.json and README.md",
+            .expected = "~/Library/Application Support/OMG Dev/workspaces/state.json",
+        },
+        .{
+            .input = "See ~/Library/Application Support for details",
+            .expected = "~/Library/Application Support",
+        },
+        .{
+            .input = "查了 ~/Library/Application Support 里的会话",
+            .expected = "~/Library/Application Support",
+        },
+        .{
+            .input = "Edit macos/Sources/Ghostty/Surface View/SurfaceLinkHint.swift:48 now",
+            .expected = "macos/Sources/Ghostty/Surface View/SurfaceLinkHint.swift:48",
+        },
+        .{
+            .input = "Xcode at /Volumes/My Shared Files/Xcode.app/Contents/Developer/usr/bin/xcodebuild",
+            .expected = "/Volumes/My Shared Files/Xcode.app/Contents/Developer/usr/bin/xcodebuild",
+        },
+        .{
+            .input = "Saved ~/Desktop/Screen Shot 2026-11-13 at 14.30.00.png.",
+            .expected = "~/Desktop/Screen Shot 2026-11-13 at 14.30.00.png",
+        },
+        .{
+            .input = "Report (~/Downloads/report (1).pdf) ready",
+            .expected = "~/Downloads/report (1).pdf",
+        },
+    };
+    for (cases) |case| {
+        var match = try re.search(case.input, .{});
+        defer match.deinit();
+        try std.testing.expectEqualStrings(
+            case.expected,
+            case.input[@intCast(match.starts()[0])..@intCast(match.ends()[0])],
+        );
+    }
+
+    for ([_][]const u8{
+        "cd /repo && make",
+        "https://example.com/a b",
+        "~/.omg/run/",
+        "Please click Yes/No to continue",
     }) |input| {
         if (re.search(input, .{})) |result| {
             var match = result;

@@ -13,14 +13,21 @@ enum TerminalPathTarget {
         options: [.caseInsensitive]
     )
 
+    private static func stripMatchingQuotes(_ value: String) -> String {
+        guard value.count >= 2, let first = value.first,
+              first == "'" || first == "\"" || first == "`", value.last == first else {
+            return value
+        }
+        return String(value.dropFirst().dropLast())
+    }
+
     static func isCandidate(_ value: String) -> Bool {
         if value.lowercased().hasPrefix("file:") { return true }
-        var unquoted = value
-        if unquoted.count >= 2, let first = unquoted.first,
-           first == "'" || first == "\"", unquoted.last == first {
-            unquoted = String(unquoted.dropFirst().dropLast())
-        }
+        let unquoted = stripMatchingQuotes(value)
         let path = unquoted.replacingOccurrences(of: locationSuffixPattern, with: "", options: .regularExpression)
+        if path.contains(" ") {
+            return !path.contains("://")
+        }
         return URLComponents(string: path)?.scheme == nil
     }
 
@@ -34,15 +41,12 @@ enum TerminalPathTarget {
         isRemote: Bool
     ) -> (path: String, location: EditorTextLocation?)? {
         guard !value.isEmpty, value.utf8.count <= 16_384 else { return nil }
-        var value = value
-        if value.count >= 2, let first = value.first,
-           first == "'" || first == "\"", value.last == first {
-            value = String(value.dropFirst().dropLast())
-        }
+        let value = stripMatchingQuotes(value)
         let path: String
         let location: EditorTextLocation?
         if value.lowercased().hasPrefix("file:") {
-            guard let url = URL(string: value), url.isFileURL else { return nil }
+            let resolvedURL = URL(string: value) ?? URL(string: value.replacingOccurrences(of: " ", with: "%20"))
+            guard let url = resolvedURL, url.isFileURL else { return nil }
             // A file link never creates a connection to another machine.
             if !isRemote, let host = url.host, !host.isEmpty, host != "localhost" {
                 let local = ProcessInfo.processInfo.hostName.lowercased()
@@ -54,7 +58,11 @@ enum TerminalPathTarget {
         } else {
             let extracted = splitLocationSuffix(from: value)
             let withoutLocation = extracted.path
-            guard URLComponents(string: withoutLocation)?.scheme == nil else { return nil }
+            if withoutLocation.contains(" ") {
+                guard !withoutLocation.contains("://") else { return nil }
+            } else {
+                guard URLComponents(string: withoutLocation)?.scheme == nil else { return nil }
+            }
             // A prose full stop must not become a link to the pane's cwd.
             // Explicit paths such as ./ and ./README.md remain valid.
             guard withoutLocation != "." else { return nil }

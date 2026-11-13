@@ -64,8 +64,21 @@ struct GitEditorDiffView: View {
         _model = StateObject(wrappedValue: GitEditorDiffModel(request: request, service: service))
     }
 
+    private var ownsWorkbench: Bool {
+        externalController == nil
+    }
+
+    private var shouldMountWorkbenchSurface: Bool {
+        ownsWorkbench || isActive
+    }
+
     private var workbench: MonacoWorkbenchController {
         externalController ?? ownedWorkbench
+    }
+
+    private var workbenchDisplaysThisRequest: Bool {
+        guard let activeID = workbench.activeDiff?.id else { return false }
+        return activeID.hasPrefix(request.id.uuidString + ":")
     }
 
     private var editorSettings: EditorSettings {
@@ -115,7 +128,8 @@ struct GitEditorDiffView: View {
     }
 
     private var showsDiffSurface: Bool {
-        hasMountedDiffSurface && !showsNonDiffPlaceholder
+        guard shouldMountWorkbenchSurface, !showsNonDiffPlaceholder else { return false }
+        return diffContent != nil || (hasMountedDiffSurface && workbenchDisplaysThisRequest)
     }
 
     var body: some View {
@@ -228,7 +242,7 @@ struct GitEditorDiffView: View {
             Divider()
 
             ZStack(alignment: .topLeading) {
-                if hasMountedDiffSurface || diffContent != nil {
+                if shouldMountWorkbenchSurface {
                     VStack(spacing: 0) {
                         if let sourceError = diffContent?.sourceError {
                             HStack(spacing: 6) {
@@ -248,13 +262,13 @@ struct GitEditorDiffView: View {
                         MonacoWorkbenchSurface(controller: workbench)
                             .background(Color.clear)
                     }
-                    .opacity(showsNonDiffPlaceholder ? 0 : 1)
-                    .allowsHitTesting(!showsNonDiffPlaceholder)
+                    .opacity(showsDiffSurface ? 1 : 0)
+                    .allowsHitTesting(showsDiffSurface)
                 }
 
                 if showsNonDiffPlaceholder {
                     nonDiffPlaceholder
-                } else if model.isLoading && !hasMountedDiffSurface {
+                } else if model.isLoading && !showsDiffSurface {
                     ProgressView()
                         .padding()
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -284,8 +298,11 @@ struct GitEditorDiffView: View {
             close: close
         ))
         .onAppear {
-            syncWorkbenchEnvironment()
-            syncDiffToWorkbench()
+            if ownsWorkbench || isActive {
+                syncWorkbenchEnvironment()
+                syncWorkbenchAppearance()
+                syncDiffToWorkbench()
+            }
             model.reload()
         }
         .onDisappear {
@@ -293,19 +310,22 @@ struct GitEditorDiffView: View {
             clearHint()
             navigator.reset()
             hasMountedDiffSurface = false
-            if externalController == nil {
+            if ownsWorkbench {
                 ownedWorkbench.tearDown()
-            } else {
+            } else if isActive || workbenchDisplaysThisRequest {
                 workbench.isActive = false
             }
         }
         .onChange(of: model.selected) { actions.selectFile($0) }
         .onChange(of: model.content) { newContent in
-            syncDiffToWorkbench()
+            if ownsWorkbench || isActive {
+                syncDiffToWorkbench()
+            }
             guard newContent != nil, diffContent != nil else { return }
             if let landing = pendingLanding {
                 pendingLanding = nil
-                if let index = navigator.land(landing, changeCount: changeCount) {
+                if ownsWorkbench || isActive,
+                   let index = navigator.land(landing, changeCount: changeCount) {
                     let direction = landing == .first ? "next" : "previous"
                     workbench.navigateDiff(direction: direction, index: index)
                 }
@@ -316,7 +336,15 @@ struct GitEditorDiffView: View {
         .onChange(of: review) { _ in syncDiffToWorkbench() }
         .onChange(of: mode) { _ in syncDiffToWorkbench() }
         .onChange(of: wordWrap) { _ in syncDiffToWorkbench() }
-        .onChange(of: isActive) { _ in syncWorkbenchEnvironment() }
+        .onChange(of: isActive) { active in
+            if active {
+                syncWorkbenchEnvironment()
+                syncWorkbenchAppearance()
+                syncDiffToWorkbench()
+            } else if ownsWorkbench || workbenchDisplaysThisRequest {
+                workbench.isActive = false
+            }
+        }
         .onChange(of: theme) { _ in syncWorkbenchAppearance() }
         .onChange(of: colors) { _ in syncWorkbenchAppearance() }
         .onChange(of: settings.editorSettings) { _ in
@@ -366,6 +394,7 @@ struct GitEditorDiffView: View {
     }
 
     private func syncWorkbenchEnvironment() {
+        guard ownsWorkbench || isActive else { return }
         configureCallbacks()
         workbench.isPreview = false
         workbench.keymap = editorSettings.keymap
@@ -374,7 +403,8 @@ struct GitEditorDiffView: View {
     }
 
     private func syncWorkbenchAppearance() {
-        guard hasMountedDiffSurface || diffContent != nil else { return }
+        guard ownsWorkbench || isActive else { return }
+        guard !showsNonDiffPlaceholder || hasMountedDiffSurface || diffContent != nil else { return }
         workbench.setTheme(
             resolvedTheme,
             isDark: isDarkTheme,
@@ -388,8 +418,11 @@ struct GitEditorDiffView: View {
     }
 
     private func syncDiffToWorkbench() {
+        guard ownsWorkbench || isActive else { return }
         guard let content = diffContent else {
-            workbench.isActive = false
+            if ownsWorkbench || workbenchDisplaysThisRequest {
+                workbench.isActive = false
+            }
             return
         }
         if !hasMountedDiffSurface {
@@ -509,6 +542,7 @@ struct GitEditorDiffView: View {
     }
 
     private func selectChange(_ direction: GitDiffReviewNavigator.Direction) {
+        guard ownsWorkbench || isActive else { return }
         guard let outcome = navigator.move(
             direction,
             changeCount: changeCount,

@@ -88,9 +88,6 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                 Ghostty.moveFocus(to: surfaceView)
             }
         }
-        .onAppear {
-            workspace.scheduleIdlePreload()
-        }
         .onChange(of: workspace.isVisible) { visible in
             if visible {
                 if controller.focusedSurface !== surfaceView {
@@ -276,7 +273,8 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                         focus: { controller.focusedSurface = surfaceView },
                         isSurfaceFocused: { (controller.focusedSurface ?? controller.surfaceTree.first) === surfaceView },
                         askAgent: { askRequest in sendAskAgentToQuickInput(askRequest) }
-                    )) {
+                    ),
+                    externalController: workspace.diffWorkbenchController) {
                     workspace.closeGitDiff(request)
                 }
             ))

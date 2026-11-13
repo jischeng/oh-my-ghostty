@@ -231,6 +231,73 @@ struct GitEditorDiffModelTests {
         #expect(model.content?.presentation?.isConsistent == true)
     }
 
+    @Test func reloadWithKnownFileRunsListDiffAndSourceSnapshotsConcurrently() async throws {
+        let executor = ConcurrentBarrierDiffExecutor(expectedParties: 4)
+        let repository = GitRepositoryIdentity(
+            worktreePath: "/repo",
+            gitDirPath: "/repo/.git",
+            commonGitDirPath: "/repo/.git"
+        )
+        let model = GitEditorDiffModel(
+            request: .init(
+                repository: repository,
+                target: .staged,
+                file: .init(path: "fast.swift", status: "M")
+            ),
+            service: GitDiffService(executor: executor)
+        )
+        defer { model.cancel() }
+
+        let reloadTask = model.reload()
+        for _ in 0..<100 {
+            if await executor.barrierSatisfied { break }
+            try await Task.sleep(for: .milliseconds(15))
+        }
+        if await !executor.barrierSatisfied {
+            await executor.forceRelease()
+        }
+        await reloadTask.value
+
+        #expect(await executor.barrierSatisfied, "listFiles, loadDiff, and both sourceVersions blobs must overlap concurrently")
+        #expect(model.error == nil)
+        #expect(model.selected?.path == "fast.swift")
+        #expect(model.content?.before == "let value = 1\n")
+        #expect(model.content?.after == "let value = 2\n")
+        #expect(model.content?.presentation?.isConsistent == true)
+        #expect(model.content?.sourceError == nil)
+    }
+
+    @Test func binaryDiffCancelsConcurrentSourceSnapshotImmediately() async throws {
+        let executor = BinaryCancellingSourceExecutor()
+        let repository = GitRepositoryIdentity(
+            worktreePath: "/repo",
+            gitDirPath: "/repo/.git",
+            commonGitDirPath: "/repo/.git"
+        )
+        let model = GitEditorDiffModel(
+            request: .init(
+                repository: repository,
+                target: .staged,
+                file: .init(path: "asset.bin", status: "M")
+            ),
+            service: GitDiffService(executor: executor)
+        )
+        defer {
+            model.cancel()
+            Task { await executor.finishIfNeeded() }
+        }
+
+        await model.reload().value
+        for _ in 0..<50 {
+            if await executor.sourceWasCancelled { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(model.error == nil)
+        #expect(model.content?.document.isBinary == true)
+        #expect(model.content?.sourceError == nil)
+        #expect(await executor.sourceWasCancelled)
+    }
+
     private func makeModel(root: URL, file: GitDiffFile? = nil) -> GitEditorDiffModel {
         let repository = GitRepositoryIdentity(worktreePath: root.path, gitDirPath: root.path + "/.git",
                                                commonGitDirPath: root.path + "/.git")
@@ -285,5 +352,113 @@ private actor CountingDiffExecutor: GitExecutor {
         commands.append(arguments)
         return try await LocalGitExecutor().execute(arguments: arguments, workingDirectory: workingDirectory,
                                                      stdin: stdin, maxOutputBytes: maxOutputBytes)
+    }
+}
+
+private actor ConcurrentBarrierDiffExecutor: GitExecutor {
+    private let expectedParties: Int
+    private var arrived = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var barrierSatisfied = false
+
+    init(expectedParties: Int) {
+        self.expectedParties = expectedParties
+    }
+
+    func execute(
+        arguments: [String],
+        workingDirectory: String,
+        stdin: Data?,
+        maxOutputBytes: Int?
+    ) async throws -> GitExecutionResult {
+        arrived += 1
+        if arrived >= expectedParties {
+            barrierSatisfied = true
+            let pending = waiters
+            waiters.removeAll()
+            pending.forEach { $0.resume() }
+        } else if !barrierSatisfied {
+            await withCheckedContinuation { continuation in
+                waiters.append(continuation)
+            }
+        }
+
+        if arguments.contains("--name-status") {
+            return ok("M\0fast.swift\0")
+        }
+        if arguments.first == "show" {
+            let spec = arguments.last ?? ""
+            if spec.hasPrefix("HEAD:") {
+                return ok("let value = 1\n")
+            }
+            return ok("let value = 2\n")
+        }
+        return ok("diff --git a/fast.swift b/fast.swift\n@@ -1 +1 @@\n-let value = 1\n+let value = 2\n")
+    }
+
+    func forceRelease() {
+        let pending = waiters
+        waiters.removeAll()
+        pending.forEach { $0.resume() }
+    }
+
+    private func ok(_ stdout: String) -> GitExecutionResult {
+        GitExecutionResult(exitCode: 0, stdout: Data(stdout.utf8), stderr: Data())
+    }
+}
+
+private actor BinaryCancellingSourceExecutor: GitExecutor {
+    private var sourceContinuations: [UUID: CheckedContinuation<GitExecutionResult, Error>] = [:]
+    private var diffWaiter: CheckedContinuation<Void, Never>?
+    private var sourceStarted = false
+    private(set) var sourceWasCancelled = false
+
+    func execute(
+        arguments: [String],
+        workingDirectory: String,
+        stdin: Data?,
+        maxOutputBytes: Int?
+    ) async throws -> GitExecutionResult {
+        if arguments.contains("--name-status") {
+            return GitExecutionResult(exitCode: 0, stdout: Data("M\0asset.bin\0".utf8), stderr: Data())
+        }
+        if arguments.first == "show" {
+            let id = UUID()
+            sourceStarted = true
+            diffWaiter?.resume()
+            diffWaiter = nil
+            return try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    if Task.isCancelled {
+                        sourceWasCancelled = true
+                        continuation.resume(throwing: CancellationError())
+                    } else {
+                        sourceContinuations[id] = continuation
+                    }
+                }
+            } onCancel: {
+                Task { await self.cancelSource(id: id) }
+            }
+        }
+        if !sourceStarted {
+            await withCheckedContinuation { continuation in
+                diffWaiter = continuation
+            }
+        }
+        let binaryPatch = "diff --git a/asset.bin b/asset.bin\nBinary files a/asset.bin and b/asset.bin differ\n"
+        return GitExecutionResult(exitCode: 0, stdout: Data(binaryPatch.utf8), stderr: Data())
+    }
+
+    private func cancelSource(id: UUID) {
+        sourceWasCancelled = true
+        sourceContinuations.removeValue(forKey: id)?.resume(throwing: CancellationError())
+    }
+
+    func finishIfNeeded() {
+        diffWaiter?.resume()
+        diffWaiter = nil
+        let pending = Array(sourceContinuations.values)
+        sourceContinuations.removeAll()
+        pending.forEach { $0.resume(throwing: CancellationError()) }
     }
 }

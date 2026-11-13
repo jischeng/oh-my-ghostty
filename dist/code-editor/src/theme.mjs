@@ -142,16 +142,114 @@ export function buildOmgThemeData(spec = {}) {
     'diffEditor.diagonalFill': isDark ? '#ffffff12' : '#00000010',
   };
 
+  const addedFg = normalizeHexColor(
+    spec.added ?? spec.addition,
+    isDark ? '#3fb950' : '#1a7f37'
+  );
+  const deletedFg = normalizeHexColor(
+    spec.deleted ?? spec.deletion,
+    isDark ? '#f85149' : '#cf222e'
+  );
+  const modifiedFg = normalizeHexColor(
+    spec.modified,
+    isDark ? '#58a6ff' : '#0969da'
+  );
+  const addedLineBg = normalizeHexColor(
+    spec.addedBackground ?? spec.insertedLineBackground,
+    isDark ? '#2ea04324' : '#2da44e1c'
+  );
+  const addedWordBg = normalizeHexColor(
+    spec.addedEmphasisBackground ?? spec.insertedTextBackground,
+    isDark ? '#2ea04347' : '#2da44e38'
+  );
+  const deletedLineBg = normalizeHexColor(
+    spec.deletedBackground ?? spec.removedLineBackground,
+    isDark ? '#f8514924' : '#cf222e1c'
+  );
+  const deletedWordBg = normalizeHexColor(
+    spec.deletedEmphasisBackground ?? spec.removedTextBackground,
+    isDark ? '#f8514947' : '#cf222e38'
+  );
+
+  const pierre = {
+    themeType: isDark ? 'dark' : 'light',
+    foreground: `#${fgRule}`,
+    keywords: `#${keywordRule}`,
+    functions: `#${functionRule}`,
+    types: `#${typeRule}`,
+    strings: `#${stringRule}`,
+    numbers: `#${numberRule}`,
+    comments: `#${commentRule}`,
+    variables: `#${variableRule}`,
+    attributes: `#${attributeRule}`,
+    selection: selectionHex,
+    lineHighlight: lineHighlightHex,
+    lineNumber: isDark ? '#7d8590b8' : '#6e7781cc',
+    addedFg,
+    deletedFg,
+    modifiedFg,
+    addedLineBg,
+    addedWordBg,
+    deletedLineBg,
+    deletedWordBg,
+    separatorBg: isDark ? 'rgba(255, 255, 255, 0.045)' : 'rgba(15, 23, 42, 0.045)',
+    bufferBg: isDark ? 'rgba(255, 255, 255, 0.022)' : 'rgba(15, 23, 42, 0.022)',
+  };
+
   return {
     base,
     inherit: true,
     rules,
     colors,
     isDark,
+    pierre,
   };
 }
 
-export function applyOmgTheme(monaco, spec = {}) {
+export function applyPierreCssVariables(targetEl, pierrePalette) {
+  if (!targetEl || !targetEl.style || !pierrePalette) return;
+  const s = targetEl.style;
+  // Strictly transparent glass backdrop (#00000000) so OMG EditorBackdrop vibrancy shines through
+  s.setProperty('--diffs-bg', 'transparent');
+  s.setProperty('--diffs-dark-bg', 'transparent');
+  s.setProperty('--diffs-light-bg', 'transparent');
+  s.setProperty('--diffs-bg-context-override', 'transparent');
+  s.setProperty('--diffs-bg-context-gutter-override', 'transparent');
+  s.setProperty('--diffs-bg-buffer-override', pierrePalette.bufferBg);
+  s.setProperty('--diffs-bg-separator-override', pierrePalette.separatorBg);
+
+  s.setProperty('--omg-diff-fg', pierrePalette.foreground);
+  s.setProperty('--diffs-fg', pierrePalette.foreground);
+  s.setProperty('--diffs-dark', pierrePalette.foreground);
+  s.setProperty('--diffs-light', pierrePalette.foreground);
+  s.setProperty('--diffs-fg-number-override', pierrePalette.lineNumber);
+
+  // Syntax highlighting token variables consumed by our registered Zed theme (`omg-pierre`)
+  s.setProperty('--omg-syntax-foreground', pierrePalette.foreground);
+  s.setProperty('--omg-syntax-keyword', pierrePalette.keywords);
+  s.setProperty('--omg-syntax-function', pierrePalette.functions);
+  s.setProperty('--omg-syntax-type', pierrePalette.types);
+  s.setProperty('--omg-syntax-string', pierrePalette.strings);
+  s.setProperty('--omg-syntax-number', pierrePalette.numbers);
+  s.setProperty('--omg-syntax-comment', pierrePalette.comments);
+  s.setProperty('--omg-syntax-variable', pierrePalette.variables);
+  s.setProperty('--omg-syntax-attribute', pierrePalette.attributes);
+
+  // Diff semantic tints
+  s.setProperty('--diffs-addition-color-override', pierrePalette.addedFg);
+  s.setProperty('--diffs-deletion-color-override', pierrePalette.deletedFg);
+  s.setProperty('--diffs-modified-color-override', pierrePalette.modifiedFg);
+  s.setProperty('--diffs-bg-addition-override', pierrePalette.addedLineBg);
+  s.setProperty('--diffs-bg-addition-number-override', pierrePalette.addedLineBg);
+  s.setProperty('--diffs-bg-addition-emphasis-override', pierrePalette.addedWordBg);
+  s.setProperty('--diffs-bg-deletion-override', pierrePalette.deletedLineBg);
+  s.setProperty('--diffs-bg-deletion-number-override', pierrePalette.deletedLineBg);
+  s.setProperty('--diffs-bg-deletion-emphasis-override', pierrePalette.deletedWordBg);
+  s.setProperty('--diffs-bg-hover-override', pierrePalette.lineHighlight);
+  s.setProperty('--diffs-bg-selection-override', pierrePalette.selection);
+}
+
+export function applyOmgTheme(monaco, spec = {}, doc = globalThis.document) {
   const themeData = buildOmgThemeData(spec);
   monaco.editor.defineTheme(THEME_NAME, {
     base: themeData.base,
@@ -160,8 +258,9 @@ export function applyOmgTheme(monaco, spec = {}) {
     colors: themeData.colors,
   });
   monaco.editor.setTheme(THEME_NAME);
-  if (typeof document !== 'undefined' && document.documentElement) {
-    document.documentElement.dataset.omgTheme = themeData.isDark ? 'dark' : 'light';
+  if (doc && doc.documentElement) {
+    doc.documentElement.dataset.omgTheme = themeData.isDark ? 'dark' : 'light';
+    applyPierreCssVariables(doc.documentElement, themeData.pierre);
   }
   return { themeName: THEME_NAME, themeData };
 }

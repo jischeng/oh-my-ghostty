@@ -1,8 +1,10 @@
 export class KeymapController {
-  constructor({ monaco, postMessage, isAskAgentOpen }) {
+  constructor({ monaco, postMessage, isAskAgentOpen, getMode, onAskAgentShortcut }) {
     this.monaco = monaco;
     this.postMessage = postMessage;
     this.isAskAgentOpen = isAskAgentOpen;
+    this.getMode = getMode;
+    this.onAskAgentShortcut = onAskAgentShortcut;
     this.profile = 'vscode';
     this.contextKeys = [];
     this.staticDisposables = [];
@@ -180,7 +182,13 @@ export class KeymapController {
     if (!win || typeof win.addEventListener !== 'function') return;
     const onKeyDown = (event) => {
       if (event.defaultPrevented) return;
-      if (event.key === 'Escape' && event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      if (
+        event.key === 'Escape' &&
+        event.shiftKey &&
+        !event.metaKey &&
+        !event.ctrlKey &&
+        !event.altKey
+      ) {
         if (this.isAskAgentOpen?.()) return;
         event.preventDefault();
         this.emitHostCommand('hide');
@@ -188,6 +196,22 @@ export class KeymapController {
       }
       const cmd = event.metaKey && !event.ctrlKey;
       const key = (event.key || '').toLowerCase();
+      const code = event.code || '';
+
+      // Ask Agent shortcut (Cmd+Shift+L / Cmd+Shift+I) when in Pierre diff mode or outside Monaco input
+      if (
+        cmd &&
+        event.shiftKey &&
+        !event.altKey &&
+        (key === 'l' || key === 'i' || code === 'KeyL' || code === 'KeyI')
+      ) {
+        if (this.getMode?.() === 'diff' && this.onAskAgentShortcut) {
+          event.preventDefault();
+          this.onAskAgentShortcut();
+          return;
+        }
+      }
+
       if (cmd && !event.altKey && key === 's') {
         event.preventDefault();
         if (event.shiftKey || this.profile === 'idea') {
@@ -204,6 +228,38 @@ export class KeymapController {
       } else if (event.ctrlKey && !event.metaKey && !event.altKey && event.key === 'Tab') {
         event.preventDefault();
         this.emitHostCommand(event.shiftKey ? 'previousDocument' : 'nextDocument');
+      } else if (
+        this.getMode?.() === 'diff' &&
+        cmd &&
+        this.profile === 'idea' &&
+        event.shiftKey &&
+        !event.altKey &&
+        (event.key === ']' || event.key === '}' || code === 'BracketRight')
+      ) {
+        event.preventDefault();
+        this.emitHostCommand('nextDocument');
+      } else if (
+        this.getMode?.() === 'diff' &&
+        cmd &&
+        this.profile === 'idea' &&
+        event.shiftKey &&
+        !event.altKey &&
+        (event.key === '[' || event.key === '{' || code === 'BracketLeft')
+      ) {
+        event.preventDefault();
+        this.emitHostCommand('previousDocument');
+      } else if (
+        this.getMode?.() === 'diff' &&
+        cmd &&
+        this.profile === 'vscode' &&
+        event.altKey &&
+        !event.shiftKey &&
+        (event.key === 'ArrowRight' || event.key === 'ArrowLeft')
+      ) {
+        event.preventDefault();
+        this.emitHostCommand(
+          event.key === 'ArrowRight' ? 'nextDocument' : 'previousDocument'
+        );
       }
     };
     win.addEventListener('keydown', onKeyDown, false);

@@ -6,7 +6,6 @@ import '../node_modules/monaco-editor/esm/vs/base/browser/ui/codicons/codicon/co
 
 import 'monaco-editor/editor/browser/coreCommands.js';
 import 'monaco-editor/editor/browser/widget/codeEditor/codeEditorWidget.js';
-import 'monaco-editor/editor/browser/widget/diffEditor/diffEditor.contribution.js';
 import 'monaco-editor/editor/common/standaloneStrings.js';
 
 import 'monaco-editor/editor/contrib/bracketMatching/browser/bracketMatching.js';

@@ -1,3 +1,4 @@
+import './dom-shims.mjs';
 import './styles.css';
 import { monaco } from './monaco-imports.mjs';
 import { createOmgEditorWorkbench } from './workbench.mjs';

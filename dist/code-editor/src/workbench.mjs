@@ -7,6 +7,7 @@ import {
 import { KeymapController } from './keymaps.mjs';
 import { resolveMonacoLanguageId } from './languages.mjs';
 import { extractNormalizedRange, LspBridgeController } from './lsp-bridge.mjs';
+import { PierreDiffController } from './pierre-diff.mjs';
 import { applyOmgTheme } from './theme.mjs';
 
 function normalizeWordWrap(wordWrap, fallback = 'off') {
@@ -97,30 +98,6 @@ export function computeMinimalTextEdit(model, oldText, newText, monaco) {
   };
 }
 
-function computeFallbackDiffHunks(originalText, modifiedText) {
-  const origLines = originalText.split('\n');
-  const modLines = modifiedText.split('\n');
-  const maxLen = Math.max(origLines.length, modLines.length);
-  const hunks = [];
-  let inHunk = false;
-  let hunkStart = 1;
-
-  for (let i = 0; i < maxLen; i++) {
-    const different = origLines[i] !== modLines[i];
-    if (different && !inHunk) {
-      inHunk = true;
-      hunkStart = Math.min(i + 1, Math.max(1, modLines.length));
-    } else if (!different && inHunk) {
-      hunks.push(hunkStart);
-      inHunk = false;
-    }
-  }
-  if (inHunk) {
-    hunks.push(hunkStart);
-  }
-  return hunks;
-}
-
 export function createOmgEditorWorkbench({
   monaco,
   win = globalThis.window,
@@ -159,7 +136,7 @@ export function createOmgEditorWorkbench({
     appContainer.appendChild(diffContainer);
   }
 
-  applyOmgTheme(monaco, { base: 'vs-dark' });
+  const { themeData: initialThemeData } = applyOmgTheme(monaco, { base: 'vs-dark' }, doc);
   const highlighting = new PierreHighlightingManager(monaco);
 
   const modelsByUri = new Map();
@@ -170,9 +147,7 @@ export function createOmgEditorWorkbench({
 
   let activeUri = null;
   let mode = 'editor'; // 'editor' | 'diff'
-  let diffEditor = null;
-  let diffModels = { original: null, modified: null };
-  let diffFallbackHunks = [];
+  let pierreDiff = null;
 
   let currentFont = {
     fontFamily: "ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace",
@@ -239,8 +214,8 @@ export function createOmgEditorWorkbench({
   }
 
   function getActiveCodeEditor() {
-    if (mode === 'diff' && diffEditor) {
-      return diffEditor.getModifiedEditor();
+    if (mode === 'diff') {
+      return null;
     }
     return editor;
   }
@@ -249,15 +224,28 @@ export function createOmgEditorWorkbench({
     monaco,
     container: appContainer,
     getTargetEditor: getActiveCodeEditor,
+    getDiffContext: () => (mode === 'diff' ? pierreDiff?.captureAskAgentContext() : null),
     getModelMeta: (uri) => modelMetaByUri.get(uri) ?? null,
     postMessage,
   });
   askAgent.attachToEditor(editor);
 
+  pierreDiff = new PierreDiffController({
+    container: diffContainer,
+    win,
+    doc,
+    askAgent,
+    postMessage,
+    initialThemeData,
+    initialFont: currentFont,
+  });
+
   const keymaps = new KeymapController({
     monaco,
     postMessage,
     isAskAgentOpen: () => askAgent.isVisible(),
+    getMode: () => mode,
+    onAskAgentShortcut: () => pierreDiff.openAskAgentPrompt(),
   });
   keymaps.attachEditor(editor);
   keymaps.installGlobalShortcuts(win);
@@ -278,9 +266,7 @@ export function createOmgEditorWorkbench({
 
   if (typeof ResizeObserver !== 'undefined') {
     const ro = new ResizeObserver(() => {
-      if (mode === 'diff' && diffEditor) {
-        diffEditor.layout();
-      } else {
+      if (mode === 'editor') {
         editor.layout();
       }
     });
@@ -288,9 +274,7 @@ export function createOmgEditorWorkbench({
     workbenchDisposables.push({ dispose: () => ro.disconnect() });
   } else if (win && typeof win.addEventListener === 'function') {
     const onResize = () => {
-      if (mode === 'diff' && diffEditor) {
-        diffEditor.layout();
-      } else {
+      if (mode === 'editor') {
         editor.layout();
       }
     };
@@ -488,7 +472,7 @@ export function createOmgEditorWorkbench({
     askAgent.hidePrompt(false);
 
     if (mode === 'diff') {
-      diffContainer.style.display = 'none';
+      pierreDiff.hide();
       editorContainer.style.display = 'block';
       mode = 'editor';
     }
@@ -614,59 +598,7 @@ export function createOmgEditorWorkbench({
     return true;
   }
 
-  function disposeDiffModels() {
-    if (diffEditor) {
-      diffEditor.setModel(null);
-    }
-    if (diffModels.original && !diffModels.original.isDisposed()) {
-      diffModels.original.dispose();
-    }
-    if (diffModels.modified && !diffModels.modified.isDisposed()) {
-      diffModels.modified.dispose();
-    }
-    diffModels = { original: null, modified: null };
-    diffFallbackHunks = [];
-  }
-
-  function ensureDiffEditor() {
-    if (diffEditor) return diffEditor;
-    diffEditor = monaco.editor.createDiffEditor(diffContainer, {
-      ...baseEditorOptions,
-      renderSideBySide: true,
-      useInlineViewWhenSpaceIsLimited: false,
-      ignoreTrimWhitespace: false,
-      renderIndicators: true,
-      originalEditable: false,
-      readOnly: true,
-      hideUnchangedRegions: {
-        enabled: true,
-        revealLineCount: 3,
-        minimumLineCount: 3,
-        contextLineCount: 3,
-      },
-    });
-    const modEd = diffEditor.getModifiedEditor();
-    const origEd = diffEditor.getOriginalEditor();
-    askAgent.attachToEditor(modEd);
-    keymaps.attachEditor(modEd);
-    keymaps.attachEditor(origEd);
-    workbenchDisposables.push(
-      modEd.onDidFocusEditorText(() => postMessage({ type: 'focus' })),
-      origEd.onDidFocusEditorText(() => postMessage({ type: 'focus' }))
-    );
-    return diffEditor;
-  }
-
-  function activateDiff({
-    id = 'default',
-    path = '',
-    originalText = '',
-    modifiedText = '',
-    inline = false,
-    wordWrap = false,
-    readOnly = true,
-    languageHint,
-  } = {}) {
+  function activateDiff(payload = {}) {
     askAgent.hidePrompt(false);
 
     if (mode === 'editor') {
@@ -678,97 +610,22 @@ export function createOmgEditorWorkbench({
         }
       }
       editorContainer.style.display = 'none';
-      diffContainer.style.display = 'block';
+      pierreDiff.show();
       mode = 'diff';
     }
 
-    const de = ensureDiffEditor();
-    disposeDiffModels();
-
-    const languageId = resolveMonacoLanguageId({ languageHint, path });
-    highlighting.ensureLanguageAndProvider(languageId);
-
-    const safeId = encodeURIComponent(String(id));
-    const safePath = path.startsWith('/') ? path : `/${path}`;
-    const origUri = monaco.Uri.parse(`omg-diff://original/${safeId}${safePath}`);
-    const modUri = monaco.Uri.parse(`omg-diff://modified/${safeId}${safePath}`);
-
-    modelMetaByUri.set(modUri.toString(), {
-      uri: modUri.toString(),
-      path,
-      readOnly: Boolean(readOnly),
-      suppressDidChange: true,
-      disposables: [],
-    });
-
-    const originalModel = monaco.editor.createModel(String(originalText ?? ''), languageId, origUri);
-    const modifiedModel = monaco.editor.createModel(String(modifiedText ?? ''), languageId, modUri);
-    diffModels = { original: originalModel, modified: modifiedModel };
-    diffFallbackHunks = computeFallbackDiffHunks(
-      String(originalText ?? ''),
-      String(modifiedText ?? '')
-    );
-
-    const wrapMode = normalizeWordWrap(wordWrap, 'off');
-    de.updateOptions({
-      renderSideBySide: !inline,
-      diffWordWrap: wrapMode,
-      wordWrap: wrapMode,
-      readOnly: Boolean(readOnly),
-      hideUnchangedRegions: {
-        enabled: true,
-        revealLineCount: 3,
-        minimumLineCount: 3,
-        contextLineCount: 3,
-      },
-      ...currentFont,
-    });
-
-    de.setModel({
-      original: originalModel,
-      modified: modifiedModel,
-    });
-    de.layout();
-    return true;
+    return pierreDiff.activateDiff(payload);
   }
 
-  function navigateDiff({ direction = 'next' } = {}) {
-    if (mode !== 'diff' || !diffEditor) return false;
-    const isPrev = direction === 'prev' || direction === 'previous';
-    const modEditor = diffEditor.getModifiedEditor();
-    const model = modEditor.getModel();
-    if (!model || model.isDisposed()) return false;
-
-    const lineChanges = diffEditor.getLineChanges();
-    if (Array.isArray(lineChanges) && lineChanges.length > 0) {
-      diffEditor.goToDiff(isPrev ? 'previous' : 'next');
-      return true;
-    }
-
-    // Immediate deterministic fallback before background diff worker completes
-    if (diffFallbackHunks.length === 0) return false;
-    const curLine = modEditor.getPosition()?.lineNumber ?? 1;
-    let targetLine;
-    if (isPrev) {
-      const earlier = diffFallbackHunks.filter((l) => l < curLine);
-      targetLine =
-        earlier.length > 0
-          ? earlier[earlier.length - 1]
-          : diffFallbackHunks[diffFallbackHunks.length - 1];
-    } else {
-      const later = diffFallbackHunks.filter((l) => l > curLine);
-      targetLine = later.length > 0 ? later[0] : diffFallbackHunks[0];
-    }
-
-    const clampedLine = Math.max(1, Math.min(model.getLineCount(), targetLine));
-    const range = new monaco.Range(clampedLine, 1, clampedLine, 1);
-    modEditor.setSelection(range);
-    modEditor.revealRangeInCenter(range, monaco.editor.ScrollType.Immediate);
-    return true;
+  function navigateDiff(payload = {}) {
+    if (mode !== 'diff') return false;
+    return pierreDiff.navigateDiff(payload);
   }
 
   function setTheme(themeSpec = {}) {
-    return applyOmgTheme(monaco, themeSpec);
+    const result = applyOmgTheme(monaco, themeSpec, doc);
+    pierreDiff.setTheme(result.themeData);
+    return result;
   }
 
   function setFont({ family, size, ligatures } = {}) {
@@ -782,9 +639,7 @@ export function createOmgEditorWorkbench({
       currentFont.fontLigatures = ligatures;
     }
     editor.updateOptions({ ...currentFont });
-    if (diffEditor) {
-      diffEditor.updateOptions({ ...currentFont });
-    }
+    pierreDiff.setFont(currentFont);
     monaco.editor.remeasureFonts();
     return { ...currentFont };
   }
@@ -839,6 +694,9 @@ export function createOmgEditorWorkbench({
   function performAction({ action } = {}) {
     if (!action) return false;
     if (action === 'askAgent') {
+      if (mode === 'diff') {
+        return pierreDiff.openAskAgentPrompt();
+      }
       return askAgent.openPromptForEditor();
     }
     const monacoActionId = ACTION_MAP[action];
@@ -865,10 +723,9 @@ export function createOmgEditorWorkbench({
     askAgent.dispose();
     keymaps.dispose();
     lspBridge.dispose();
-    disposeDiffModels();
-    if (diffEditor) {
-      diffEditor.dispose();
-      diffEditor = null;
+    if (pierreDiff) {
+      pierreDiff.dispose();
+      pierreDiff = null;
     }
     for (const uriStr of Array.from(modelsByUri.keys())) {
       closeModel({ uri: uriStr });
@@ -888,6 +745,8 @@ export function createOmgEditorWorkbench({
     revealRange,
     activateDiff,
     navigateDiff,
+    selectDiffLines: (opts) => (mode === 'diff' ? pierreDiff.selectLines(opts) : false),
+    getDiffState: () => pierreDiff.getState(),
     setTheme,
     setFont,
     setGitDiffLines,
@@ -908,11 +767,13 @@ export function createOmgEditorWorkbench({
       keymapProfile: keymaps.getProfile(),
       isAskAgentOpen: askAgent.isVisible(),
       gitGutterCount: gitGutterDecorations.length,
+      diff: mode === 'diff' ? pierreDiff.getState() : null,
     }),
     _internal: {
       monaco,
       editor,
-      getDiffEditor: () => diffEditor,
+      pierreDiff,
+      getDiffEditor: () => pierreDiff?.getLegacyDiffEditorShim?.() ?? null,
       highlighting,
       askAgent,
       keymaps,

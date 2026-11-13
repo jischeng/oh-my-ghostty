@@ -83,6 +83,17 @@ export async function createWorkbenchDom() {
     window.Element.prototype.scrollIntoView = function scrollIntoView() {};
   }
 
+  if (!window.PointerEvent) {
+    window.PointerEvent = class PointerEvent extends window.MouseEvent {
+      constructor(type, init = {}) {
+        super(type, init);
+        this.pointerId = init.pointerId ?? 1;
+        this.pointerType = init.pointerType ?? 'mouse';
+        this.isPrimary = init.isPrimary ?? true;
+      }
+    };
+  }
+
   window.HTMLCanvasElement.prototype.getContext = () => ({
     font: '',
     fillStyle: '',
@@ -155,6 +166,8 @@ export async function createWorkbenchDom() {
   window.structuredClone = structuredClone;
 
   window.eval(editorJs);
+  // Drain microtasks so @pierre/highlights WASM + Zed theme preload completes
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
   return {
     dom,

@@ -17,6 +17,10 @@ test('macos/Resources/CodeEditor contains all offline production assets and lice
     'licenses/monaco-editor-ThirdPartyNotices.txt',
     'licenses/pierre-highlights-LICENSE.md',
     'licenses/pierre-highlights-NOTICE.md',
+    'licenses/pierre-diffs-LICENSE.md',
+    'licenses/pierre-theming-LICENSE.md',
+    'licenses/diff-LICENSE',
+    'licenses/hast-ecosystem-MIT-LICENSES.txt',
   ];
 
   for (const rel of expectedFiles) {

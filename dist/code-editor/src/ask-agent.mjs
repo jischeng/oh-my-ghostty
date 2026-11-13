@@ -1,8 +1,16 @@
 export class AskAgentController {
-  constructor({ monaco, container, getTargetEditor, getModelMeta, postMessage }) {
+  constructor({
+    monaco,
+    container,
+    getTargetEditor,
+    getDiffContext,
+    getModelMeta,
+    postMessage,
+  }) {
     this.monaco = monaco;
     this.container = container;
     this.getTargetEditor = getTargetEditor;
+    this.getDiffContext = getDiffContext;
     this.getModelMeta = getModelMeta;
     this.postMessage = postMessage;
     this.activeContext = null;
@@ -129,10 +137,7 @@ export class AskAgentController {
     };
   }
 
-  openPromptForEditor(editorInstance, initialComment = '') {
-    const ctx = this.captureSelectionContext(editorInstance);
-    if (!ctx) return false;
-
+  presentBarForContext(ctx, anchorCoords, initialComment = '') {
     this.activeContext = ctx;
     const basename = ctx.path ? ctx.path.split('/').pop() : 'selection';
     const lineRef =
@@ -142,24 +147,27 @@ export class AskAgentController {
     this.badgeEl.textContent = `${basename}#${lineRef}`;
     this.inputEl.value = initialComment;
 
-    let topPx = 12;
+    let topPx = 14;
     let leftPx = 48;
-    try {
-      const coords = ctx.position
-        ? ctx.editor.getScrolledVisiblePosition(ctx.position)
-        : null;
-      if (coords && Number.isFinite(coords.top) && Number.isFinite(coords.left)) {
-        const containerHeight = this.container.clientHeight || 600;
-        const containerWidth = this.container.clientWidth || 800;
-        const preferredAbove = coords.top - 42;
-        topPx =
-          preferredAbove >= 8
-            ? preferredAbove
-            : Math.min(Math.max(8, coords.top + (coords.height || 20) + 6), Math.max(8, containerHeight - 48));
-        leftPx = Math.min(Math.max(16, coords.left), Math.max(16, containerWidth - 440));
-      }
-    } catch {
-      // Default top-right-ish anchor when DOM layout metrics aren't computed (e.g. jsdom)
+    if (
+      anchorCoords &&
+      Number.isFinite(anchorCoords.top) &&
+      Number.isFinite(anchorCoords.left)
+    ) {
+      const containerHeight = this.container.clientHeight || 600;
+      const containerWidth = this.container.clientWidth || 800;
+      const preferredAbove = anchorCoords.top - 42;
+      topPx =
+        preferredAbove >= 8
+          ? preferredAbove
+          : Math.min(
+              Math.max(8, anchorCoords.top + (anchorCoords.height || 20) + 6),
+              Math.max(8, containerHeight - 48)
+            );
+      leftPx = Math.min(
+        Math.max(16, anchorCoords.left),
+        Math.max(16, containerWidth - 440)
+      );
     }
 
     this.barEl.style.top = `${Math.round(topPx)}px`;
@@ -170,14 +178,52 @@ export class AskAgentController {
     return true;
   }
 
-  submitPrompt(overrideComment) {
-    const ctx = this.activeContext ?? this.captureSelectionContext();
+  openPromptForEditor(editorInstance, initialComment = '') {
+    const ctx = this.captureSelectionContext(editorInstance);
     if (!ctx) return false;
-    const comment =
-      typeof overrideComment === 'string'
-        ? overrideComment.trim()
-        : this.inputEl.value.trim();
 
+    let coords = null;
+    try {
+      coords = ctx.position
+        ? ctx.editor.getScrolledVisiblePosition(ctx.position)
+        : null;
+    } catch {
+      coords = null;
+    }
+    return this.presentBarForContext(ctx, coords, initialComment);
+  }
+
+  openPromptForDiffContext(diffCtx, initialComment = '') {
+    if (!diffCtx) return false;
+    const ctx = {
+      source: 'diff',
+      path: String(diffCtx.path ?? ''),
+      side: diffCtx.side ?? 'additions',
+      startLine: Math.max(1, Math.trunc(Number(diffCtx.startLine) || 1)),
+      endLine: Math.max(1, Math.trunc(Number(diffCtx.endLine) || 1)),
+      selectedText: String(diffCtx.selectedText ?? ''),
+      restoreFocusTarget: diffCtx.restoreFocusTarget ?? null,
+    };
+    if (ctx.endLine < ctx.startLine) {
+      ctx.endLine = ctx.startLine;
+    }
+    return this.presentBarForContext(ctx, diffCtx.anchorCoords ?? null, initialComment);
+  }
+
+  emitOutboundMessage(ctx, promptText) {
+    if (ctx.source === 'diff') {
+      this.postMessage({
+        type: 'askAgent',
+        path: ctx.path,
+        side: ctx.side ?? 'additions',
+        startLine: ctx.startLine,
+        endLine: ctx.endLine,
+        selectedText: ctx.selectedText,
+        prompt: promptText,
+        comment: promptText,
+      });
+      return;
+    }
     this.postMessage({
       type: 'askAgent',
       uri: ctx.uri,
@@ -185,38 +231,78 @@ export class AskAgentController {
       startLine: ctx.startLine,
       endLine: ctx.endLine,
       selectedText: ctx.selectedText,
-      comment,
+      comment: promptText,
     });
+  }
 
+  submitPrompt(overrideComment) {
+    let ctx = this.activeContext;
+    if (!ctx) {
+      const diffCtx = this.getDiffContext?.();
+      ctx = diffCtx
+        ? {
+            source: 'diff',
+            path: String(diffCtx.path ?? ''),
+            side: diffCtx.side ?? 'additions',
+            startLine: Math.max(1, Math.trunc(Number(diffCtx.startLine) || 1)),
+            endLine: Math.max(1, Math.trunc(Number(diffCtx.endLine) || 1)),
+            selectedText: String(diffCtx.selectedText ?? ''),
+          }
+        : this.captureSelectionContext();
+    }
+    if (!ctx) return false;
+    const comment =
+      typeof overrideComment === 'string'
+        ? overrideComment.trim()
+        : this.inputEl.value.trim();
+
+    this.emitOutboundMessage(ctx, comment);
     this.hidePrompt(true);
     return true;
   }
 
-  triggerAskAgent({ comment = '', immediate = false } = {}) {
+  triggerAskAgent({ comment, prompt, immediate = false } = {}) {
+    const initialText = String(prompt ?? comment ?? '');
+    const diffCtx = this.getDiffContext?.();
+    if (diffCtx) {
+      if (immediate) {
+        this.emitOutboundMessage(
+          {
+            source: 'diff',
+            path: String(diffCtx.path ?? ''),
+            side: diffCtx.side ?? 'additions',
+            startLine: Math.max(1, Math.trunc(Number(diffCtx.startLine) || 1)),
+            endLine: Math.max(1, Math.trunc(Number(diffCtx.endLine) || 1)),
+            selectedText: String(diffCtx.selectedText ?? ''),
+          },
+          initialText.trim()
+        );
+        return true;
+      }
+      return this.openPromptForDiffContext(diffCtx, initialText);
+    }
+
     if (immediate) {
       const ctx = this.captureSelectionContext();
       if (!ctx) return false;
-      this.postMessage({
-        type: 'askAgent',
-        uri: ctx.uri,
-        path: ctx.path,
-        startLine: ctx.startLine,
-        endLine: ctx.endLine,
-        selectedText: ctx.selectedText,
-        comment: String(comment).trim(),
-      });
+      this.emitOutboundMessage(ctx, initialText.trim());
       return true;
     }
-    return this.openPromptForEditor(undefined, comment);
+    return this.openPromptForEditor(undefined, initialText);
   }
 
   hidePrompt(restoreFocus = false) {
     const prevEditor = this.activeContext?.editor;
+    const restoreTarget = this.activeContext?.restoreFocusTarget;
     this.activeContext = null;
     this.barEl.hidden = true;
     this.inputEl.value = '';
-    if (restoreFocus && prevEditor) {
-      prevEditor.focus?.();
+    if (restoreFocus) {
+      if (prevEditor) {
+        prevEditor.focus?.();
+      } else if (restoreTarget) {
+        restoreTarget.focus?.();
+      }
     }
   }
 

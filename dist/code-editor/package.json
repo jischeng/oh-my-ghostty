@@ -8,6 +8,7 @@
     "test": "node build.mjs && node --test tests/*.test.mjs"
   },
   "dependencies": {
+    "@pierre/diffs": "1.6.4",
     "@pierre/highlights": "0.5.1",
     "monaco-editor": "0.57.0"
   },

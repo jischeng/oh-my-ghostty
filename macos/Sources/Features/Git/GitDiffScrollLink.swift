@@ -129,9 +129,13 @@ struct GitDiffLinkedEditor: View {
             onPreviousDocument: actions.previousDocument,
             onSaveAll: actions.saveAll,
             onHide: actions.hide,
-            externalController: controller
+            externalController: controller,
+            modelURIOverride: modelURI
         )
         .onAppear {
+            link.register(controller: controller, uri: modelURI, side: side)
+        }
+        .onChange(of: path) { _ in
             link.register(controller: controller, uri: modelURI, side: side)
         }
         .onDisappear {

@@ -439,27 +439,59 @@ final class MonacoEditorWebView: WKWebView {
 
     override func updateLayer() {
         super.updateLayer()
-        clearBackgrounds()
+        if let layer {
+            if layer.backgroundColor != nil {
+                layer.backgroundColor = nil
+            }
+            if layer.isOpaque {
+                layer.isOpaque = false
+            }
+        }
     }
 
     /// WebKit recreates internal `NSScrollView` and `NSClipView` children across page loads
-    /// and appearance transitions; keep every layer clear over `EditorBackdrop`.
+    /// and appearance transitions; keep every layer clear over `EditorBackdrop` without
+    /// redundantly mutating unchanged properties during AppKit layout/display cycles.
     func clearBackgrounds() {
-        setValue(false, forKey: "drawsBackground")
-        underPageBackgroundColor = .clear
-        layer?.backgroundColor = NSColor.clear.cgColor
+        if (value(forKey: "drawsBackground") as? Bool) != false {
+            setValue(false, forKey: "drawsBackground")
+        }
+        if underPageBackgroundColor != .clear {
+            underPageBackgroundColor = .clear
+        }
+        if let layer {
+            if layer.backgroundColor != nil {
+                layer.backgroundColor = nil
+            }
+            if layer.isOpaque {
+                layer.isOpaque = false
+            }
+        }
         Self.clearSubviewBackgrounds(in: self)
     }
 
     private static func clearSubviewBackgrounds(in root: NSView) {
         for child in root.subviews {
             if let scrollView = child as? NSScrollView {
-                scrollView.drawsBackground = false
-                scrollView.backgroundColor = .clear
-            }
-            if let clipView = child as? NSClipView {
-                clipView.drawsBackground = false
-                clipView.backgroundColor = .clear
+                if scrollView.drawsBackground {
+                    scrollView.drawsBackground = false
+                }
+                if scrollView.backgroundColor != .clear {
+                    scrollView.backgroundColor = .clear
+                }
+                if scrollView.layer?.backgroundColor != nil {
+                    scrollView.layer?.backgroundColor = nil
+                }
+            } else if let clipView = child as? NSClipView {
+                if clipView.drawsBackground {
+                    clipView.drawsBackground = false
+                }
+                if clipView.backgroundColor != .clear {
+                    clipView.backgroundColor = .clear
+                }
+                if clipView.layer?.backgroundColor != nil {
+                    clipView.layer?.backgroundColor = nil
+                }
             }
             clearSubviewBackgrounds(in: child)
         }
@@ -1143,13 +1175,21 @@ struct MonacoWorkbenchSurface: NSViewRepresentable {
     func makeNSView(context: Context) -> ContainerView {
         let container = ContainerView(frame: .zero)
         container.wantsLayer = true
-        container.layer?.backgroundColor = NSColor.clear.cgColor
+        container.layer?.backgroundColor = nil
+        container.layer?.isOpaque = false
         container.mount(controller.ensureWebView())
         return container
     }
 
     func updateNSView(_ container: ContainerView, context: Context) {
-        container.layer?.backgroundColor = NSColor.clear.cgColor
+        if let layer = container.layer {
+            if layer.backgroundColor != nil {
+                layer.backgroundColor = nil
+            }
+            if layer.isOpaque {
+                layer.isOpaque = false
+            }
+        }
         container.mount(controller.ensureWebView())
     }
 }

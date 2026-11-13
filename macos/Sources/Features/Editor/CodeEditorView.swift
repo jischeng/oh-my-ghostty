@@ -34,6 +34,7 @@ struct CodeEditorView: View {
     var navigationRequest: EditorNavigationRequest?
     var onConsumeNavigation: (UUID) -> Void = { _ in }
     var externalController: MonacoWorkbenchController?
+    var modelURIOverride: String?
 
     @StateObject private var ownedController = MonacoWorkbenchController()
     @State private var standaloneID = UUID().uuidString
@@ -43,6 +44,9 @@ struct CodeEditorView: View {
     }
 
     private var modelURI: String {
+        if let modelURIOverride {
+            return modelURIOverride
+        }
         if let fileURL {
             let encoded = fileURL.path
                 .split(separator: "/", omittingEmptySubsequences: true)

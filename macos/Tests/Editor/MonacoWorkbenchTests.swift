@@ -344,4 +344,45 @@ struct MonacoWorkbenchTests {
         let comps = try #require(compRaw as? [[String: Any]])
         #expect(comps.contains { ($0["label"] as? String) == "WorkbenchConfigPayload" })
     }
+
+    @Test func gitDiffLinkedEditorSharesModelURIWithScrollLinkAndRevealsLine() async throws {
+        let link = GitDiffScrollLink()
+        let lines = (1...60).map { "line \($0)" }.joined(separator: "\n")
+        let view = GitDiffLinkedEditor(
+            text: lines,
+            path: "/repo/Sources/Demo.swift",
+            highlights: [24: true],
+            isActive: true,
+            theme: .oneDark,
+            link: link,
+            side: 1,
+            close: {}
+        )
+        .frame(width: 640, height: 420)
+
+        let mounted = EditorTestSupport.host(view, size: NSSize(width: 640, height: 420))
+        mounted.1.makeKeyAndOrderFront(nil)
+        defer { EditorTestSupport.unmount(mounted) }
+
+        let webView = try await EditorTestSupport.waitForMonacoReady(in: mounted.0.view)
+        for _ in 0..<80 {
+            let active = (try? await webView.evaluateJavaScript("window.omgEditor?.getState?.()?.activeUri")) as? String
+            if active != nil { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        // Jump to 0-based index 24 -> 1-based line 25 via GitDiffScrollLink.
+        link.jump(to: [1: 24])
+        #expect(link.lastRevealedLines[1] == 24)
+
+        var currentLine = 0
+        for _ in 0..<60 {
+            currentLine = (try? await webView.evaluateJavaScript(
+                "window.omgEditor?._internal?.editor?.getPosition?.()?.lineNumber ?? 0"
+            )) as? Int ?? 0
+            if currentLine == 25 { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(currentLine == 25, "GitDiffLinkedEditor and CodeEditorView must share the exact Monaco model URI")
+    }
 }

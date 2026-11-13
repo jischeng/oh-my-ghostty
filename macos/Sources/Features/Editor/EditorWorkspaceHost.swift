@@ -305,11 +305,24 @@ struct EditorWorkspaceHost<Terminal: View>: View {
     }
 
     private func navigateToDefinition(path: String, location: EditorTextLocation) {
-        let filesystem = workspace.selectedDocument?.filesystem ?? LocalWorkspaceFilesystem(
-            workingDirectory: controller.paneSessionContext(for: surfaceView)?.workingDirectory
-                ?? surfaceView.pwd
-                ?? NSHomeDirectory()
-        )
+        let filesystem: any WorkspaceFilesystem
+        if let selectedFilesystem = workspace.selectedDocument?.filesystem {
+            filesystem = selectedFilesystem
+        } else {
+            let session = controller.paneSessionContext(for: surfaceView) ?? .init(
+                workingDirectory: surfaceView.pwd,
+                terminalTitle: surfaceView.title
+            )
+            let context = InspectorPaneContext(
+                tabID: controller.tabSessionID,
+                surfaceID: surfaceView.id,
+                title: session.presentationTitle,
+                workingDirectory: session.workingDirectory,
+                workspace: session.workspace,
+                session: session
+            )
+            filesystem = WorkspaceFilesystemFactory.make(for: context)
+        }
         workspace.open(path: path, filesystem: filesystem, location: location, externalFallback: false)
     }
 

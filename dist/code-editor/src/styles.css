@@ -1,0 +1,194 @@
+:root {
+  color-scheme: dark light;
+}
+
+html,
+body,
+#app,
+#editor-root,
+#diff-root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: transparent !important;
+  background-color: transparent !important;
+}
+
+#app {
+  position: relative;
+}
+
+#editor-root,
+#diff-root {
+  position: absolute;
+  inset: 0;
+}
+
+#diff-root {
+  display: none;
+}
+
+/* Keep Monaco surfaces transparent over OMG's native EditorBackdrop glass */
+.monaco-editor,
+.monaco-editor-background,
+.monaco-editor .inputarea.ime-input,
+.monaco-editor .margin,
+.monaco-diff-editor,
+.monaco-diff-editor .diffOverview {
+  background: transparent !important;
+  background-color: transparent !important;
+}
+
+/* Git gutter bar decorations */
+.omg-git-gutter-added {
+  border-left: 3px solid #3fb950;
+  margin-left: 4px;
+  box-sizing: border-box;
+}
+
+.omg-git-gutter-modified {
+  border-left: 3px solid #58a6ff;
+  margin-left: 4px;
+  box-sizing: border-box;
+}
+
+.omg-git-gutter-deleted {
+  border-left: 3px solid transparent;
+  margin-left: 4px;
+  position: relative;
+}
+
+.omg-git-gutter-deleted::after {
+  content: '';
+  position: absolute;
+  left: -3px;
+  bottom: -3px;
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 6px solid #f85149;
+}
+
+html[data-omg-theme='light'] .omg-git-gutter-added {
+  border-left-color: #1a7f37;
+}
+
+html[data-omg-theme='light'] .omg-git-gutter-modified {
+  border-left-color: #0969da;
+}
+
+html[data-omg-theme='light'] .omg-git-gutter-deleted::after {
+  border-left-color: #cf222e;
+}
+
+/* Floating Ask Agent / Send to Quick Input bar */
+.omg-ask-agent-bar {
+  position: absolute;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 340px;
+  max-width: min(560px, calc(100vw - 32px));
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(24, 27, 36, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.36);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+  font-size: 12px;
+  color: #e6edf3;
+}
+
+.omg-ask-agent-bar[hidden] {
+  display: none !important;
+}
+
+html[data-omg-theme='light'] .omg-ask-agent-bar {
+  background: rgba(248, 250, 253, 0.95);
+  border-color: rgba(0, 0, 0, 0.12);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+  color: #1f2328;
+}
+
+.omg-ask-agent-badge {
+  flex: 0 0 auto;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  background: rgba(88, 166, 255, 0.16);
+  color: #79c0ff;
+}
+
+html[data-omg-theme='light'] .omg-ask-agent-badge {
+  background: rgba(9, 105, 218, 0.1);
+  color: #0969da;
+}
+
+.omg-ask-agent-input {
+  flex: 1 1 auto;
+  min-width: 140px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.omg-ask-agent-input::placeholder {
+  color: rgba(160, 170, 185, 0.72);
+}
+
+html[data-omg-theme='light'] .omg-ask-agent-input::placeholder {
+  color: rgba(87, 96, 106, 0.72);
+}
+
+.omg-ask-agent-btn {
+  flex: 0 0 auto;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 5px;
+  padding: 2px 8px;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+}
+
+.omg-ask-agent-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.omg-ask-agent-send {
+  background: rgba(56, 139, 253, 0.25);
+  border-color: rgba(88, 166, 255, 0.4);
+  color: #a5d6ff;
+}
+
+.omg-ask-agent-send:hover {
+  background: rgba(56, 139, 253, 0.38);
+}
+
+html[data-omg-theme='light'] .omg-ask-agent-btn {
+  border-color: rgba(0, 0, 0, 0.12);
+  background: rgba(0, 0, 0, 0.04);
+}
+
+html[data-omg-theme='light'] .omg-ask-agent-send {
+  background: rgba(9, 105, 218, 0.12);
+  border-color: rgba(9, 105, 218, 0.3);
+  color: #0969da;
+}

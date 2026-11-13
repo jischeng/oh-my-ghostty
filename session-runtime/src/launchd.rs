@@ -252,15 +252,6 @@ pub fn resolve_host_app(
     None
 }
 
-fn stable_label_hash(path: &Path) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in path.to_string_lossy().as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}
-
 fn launchctl(args: &[&str]) -> io::Result<bool> {
     Ok(std::process::Command::new("/bin/launchctl")
         .args(args)
@@ -291,7 +282,7 @@ pub fn spawn(helper: &Path, command: &[String], log: &Path) -> io::Result<Option
     let env_bundle_id = std::env::var("OMG_HOST_APP_BUNDLE_ID").ok();
     let host_app = resolve_host_app(helper, env_bundle.as_deref(), env_bundle_id.as_deref());
     let label = match &host_app {
-        Some(app) => format!("{}.host.{:016x}", app.bundle_id, stable_label_hash(log)),
+        Some(app) => format!("{}.host.{nonce}", app.bundle_id),
         None => format!("com.jischeng.omg.host.{nonce}"),
     };
     let dir = PathBuf::from(format!("/tmp/omg-launchd-{uid}-{nonce}"));
@@ -345,10 +336,6 @@ pub fn spawn(helper: &Path, command: &[String], log: &Path) -> io::Result<Option
     };
     std::fs::write(&job_plist, text)?;
     let target = format!("{domain}/{label}");
-    if host_app.is_some() {
-        // Clear any finished job record for this state directory before bootstrapping.
-        let _ = launchctl(&["bootout", &target]);
-    }
     if !launchctl(&["bootstrap", &domain, &job_plist.to_string_lossy()]).unwrap_or(false) {
         cleanup(&dir);
         return Ok(None);

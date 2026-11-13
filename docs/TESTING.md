@@ -193,9 +193,9 @@ mobile checks instead.
 
 | Changed area | Mobile checks |
 | --- | --- |
-| `ios/` implementation, assets, build or UI-test scripts | Native core, Simulator build, VM + Simulator acceptance |
-| Mobile/host/session wire protocol, session backend, VT C API, terminal/input core or runtime packaging | Same mobile checks, alongside the affected macOS/runtime checks |
-| Unrelated macOS feature, release metadata, documentation | No mobile build, Simulator launch or mobile acceptance |
+| `ios/` implementation, assets, build or UI-test scripts, or `session-runtime` mobile companion/gateway (`mobile.rs`, `mobile/**`, `mobile-support/**`) | Native core, Simulator build, VM + Simulator acceptance |
+| Shared `libghostty-vt` (`include/ghostty/vt*`, `src/lib_vt.zig`, `src/terminal/**`, `src/simd/**`, `src/unicode/**`, VT input encoders) or snapshot wire compatibility | Native core (`ios/scripts/test.sh`) only; no Simulator or VM mobile UI |
+| Desktop `SessionBackend`, non-mobile `session-runtime`, macOS UI features, release metadata, documentation | No mobile build, Simulator launch or mobile acceptance |
 
 Native mobile checks run locally without GUI. The integration runner uses the
 actual OMG Dev GUI inside Tart and the iOS app in Simulator: mobile takeover,

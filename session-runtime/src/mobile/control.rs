@@ -2225,8 +2225,7 @@ fn ensure_local_broker(binary: &Path, support: &Path, revision: &str) -> io::Res
             "--".into(),
             "/bin/sh".into(),
         ];
-        let launch_helper = std::env::current_exe().unwrap_or_else(|_| binary.to_path_buf());
-        if omg_session_runtime::launchd::spawn(&launch_helper, &command, &log_path)?.is_none() {
+        if omg_session_runtime::launchd::spawn(binary, &command, &log_path)?.is_none() {
             use std::os::unix::process::CommandExt;
             let log = fs::OpenOptions::new()
                 .create(true)

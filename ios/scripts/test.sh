@@ -6,7 +6,7 @@ if [[ "${1:-}" == --changed-since ]]; then
   plan=$(bash "$root/dist/macos/dev-tool.sh" python3 "$root/dist/omg_mobile_test_plan.py" --changed-since "$2")
   echo "$plan"
   selected=$(printf '%s' "$plan" | bash "$root/dist/macos/dev-tool.sh" python3 -c \
-    'import json,sys; print(int(json.load(sys.stdin)["run_mobile"]))')
+    'import json,sys; print(int("native-core" in json.load(sys.stdin)["checks"]))')
   [[ "$selected" == 1 ]] || exit 0
 elif [[ $# -ne 0 ]]; then
   echo "usage: $0 [--changed-since REF]" >&2

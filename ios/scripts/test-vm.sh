@@ -18,7 +18,7 @@ if [[ -n "$reference" ]]; then
   plan=$(bash "$devtool" python3 "$root/dist/omg_mobile_test_plan.py" --changed-since "$reference")
   echo "$plan"
   selected=$(printf '%s' "$plan" | bash "$devtool" python3 -c \
-    'import json,sys; print(int(json.load(sys.stdin)["run_mobile"]))')
+    'import json,sys; print(int("vm-simulator-ui" in json.load(sys.stdin)["checks"]))')
   [[ "$selected" == 1 ]] || exit 0
 fi
 

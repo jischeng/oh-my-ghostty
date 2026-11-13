@@ -646,10 +646,13 @@ def run_serial_test_gates(
     mobile_plan = omg_mobile_test_plan.make_plan(changed, ios_version_only=ios_ver_only)
     if mobile_plan["run_mobile"]:
         t0 = time.monotonic()
-        subprocess.run(["bash", "ios/scripts/test.sh", "--changed-since", prev_tag], cwd=root, check=True)
-        subprocess.run(["bash", "ios/scripts/test-vm.sh", "--changed-since", prev_tag], cwd=root, check=True)
+        if "native-core" in mobile_plan["checks"]:
+            subprocess.run(["bash", "ios/scripts/test.sh", "--changed-since", prev_tag], cwd=root, check=True)
+        if "vm-simulator-ui" in mobile_plan["checks"]:
+            subprocess.run(["bash", "ios/scripts/test-vm.sh", "--changed-since", prev_tag], cwd=root, check=True)
         report["mobile"] = {
             "status": "passed",
+            "checks": mobile_plan["checks"],
             "relevant_paths": mobile_plan["relevant_paths"],
             "seconds": round(time.monotonic() - t0, 2),
         }

@@ -52,6 +52,21 @@ function toRuleHex(input, fallbackSixChar) {
   return hex.slice(0, 6);
 }
 
+function toSolidHex(hexColor, fallbackHex) {
+  const norm = normalizeHexColor(hexColor, fallbackHex);
+  return norm.slice(0, 7);
+}
+
+function ensureMinimumAlphaHex(hexColor, minAlphaFloat) {
+  const norm = normalizeHexColor(hexColor, '#000000');
+  const currentAlpha = norm.length === 9 ? parseInt(norm.slice(7, 9), 16) / 255 : 1;
+  if (currentAlpha >= minAlphaFloat) {
+    return norm;
+  }
+  const alphaByte = byteToHex(minAlphaFloat * 255);
+  return alphaByte === 'ff' ? norm.slice(0, 7) : `${norm.slice(0, 7)}${alphaByte}`;
+}
+
 function normalizeBaseTheme(base) {
   if (base === 'vs' || base === 'light') return 'vs';
   if (base === 'hc-black' || base === 'hc-light') return base;
@@ -154,22 +169,47 @@ export function buildOmgThemeData(spec = {}) {
     spec.modified,
     isDark ? '#58a6ff' : '#0969da'
   );
-  const addedLineBg = normalizeHexColor(
-    spec.addedBackground ?? spec.insertedLineBackground,
-    isDark ? '#2ea04324' : '#2da44e1c'
+  // @pierre/diffs mixes --diffs-bg-addition-override / --diffs-bg-deletion-override
+  // against --diffs-bg (transparent) via color-mix(in lab, transparent 80..86%, target),
+  // so pass high-alpha / solid base colors here to achieve ~14-15% rendered line tint
+  // and ~20% gutter number tint instead of double-diluted 2.8% alpha.
+  // Meanwhile --diffs-bg-*-emphasis-override is applied directly on [data-diff-span]
+  // without color-mix, so keep word-emphasis alpha at ~34-36%.
+  const addedLineBg = ensureMinimumAlphaHex(
+    normalizeHexColor(
+      spec.addedBackground ?? spec.insertedLineBackground,
+      isDark ? '#2ea043bf' : '#2da44e'
+    ),
+    isDark ? 0.72 : 0.92
+  );
+  const addedNumberBg = normalizeHexColor(
+    spec.addedNumberBackground,
+    toSolidHex(addedLineBg, isDark ? '#2ea043' : '#2da44e')
   );
   const addedWordBg = normalizeHexColor(
     spec.addedEmphasisBackground ?? spec.insertedTextBackground,
-    isDark ? '#2ea04347' : '#2da44e38'
+    isDark ? '#2ea0435c' : '#2da44e57'
   );
-  const deletedLineBg = normalizeHexColor(
-    spec.deletedBackground ?? spec.removedLineBackground,
-    isDark ? '#f8514924' : '#cf222e1c'
+  const deletedLineBg = ensureMinimumAlphaHex(
+    normalizeHexColor(
+      spec.deletedBackground ?? spec.removedLineBackground,
+      isDark ? '#f85149bf' : '#cf222e'
+    ),
+    isDark ? 0.72 : 0.92
+  );
+  const deletedNumberBg = normalizeHexColor(
+    spec.deletedNumberBackground,
+    toSolidHex(deletedLineBg, isDark ? '#f85149' : '#cf222e')
   );
   const deletedWordBg = normalizeHexColor(
     spec.deletedEmphasisBackground ?? spec.removedTextBackground,
-    isDark ? '#f8514947' : '#cf222e38'
+    isDark ? '#f851495c' : '#cf222e57'
   );
+  const hoverBg = ensureMinimumAlphaHex(
+    normalizeHexColor(spec.pierreHoverBackground, isDark ? '#8b949e8c' : '#57606ab3'),
+    0.5
+  );
+  const selectionBg = ensureMinimumAlphaHex(selectionHex, 0.75);
 
   const pierre = {
     themeType: isDark ? 'dark' : 'light',
@@ -183,14 +223,18 @@ export function buildOmgThemeData(spec = {}) {
     variables: `#${variableRule}`,
     attributes: `#${attributeRule}`,
     selection: selectionHex,
+    selectionBg,
     lineHighlight: lineHighlightHex,
+    hoverBg,
     lineNumber: isDark ? '#7d8590b8' : '#6e7781cc',
     addedFg,
     deletedFg,
     modifiedFg,
     addedLineBg,
+    addedNumberBg,
     addedWordBg,
     deletedLineBg,
+    deletedNumberBg,
     deletedWordBg,
     separatorBg: isDark ? 'rgba(255, 255, 255, 0.045)' : 'rgba(15, 23, 42, 0.045)',
     bufferBg: isDark ? 'rgba(255, 255, 255, 0.022)' : 'rgba(15, 23, 42, 0.022)',
@@ -240,13 +284,22 @@ export function applyPierreCssVariables(targetEl, pierrePalette) {
   s.setProperty('--diffs-deletion-color-override', pierrePalette.deletedFg);
   s.setProperty('--diffs-modified-color-override', pierrePalette.modifiedFg);
   s.setProperty('--diffs-bg-addition-override', pierrePalette.addedLineBg);
-  s.setProperty('--diffs-bg-addition-number-override', pierrePalette.addedLineBg);
+  s.setProperty(
+    '--diffs-bg-addition-number-override',
+    pierrePalette.addedNumberBg ?? pierrePalette.addedLineBg
+  );
   s.setProperty('--diffs-bg-addition-emphasis-override', pierrePalette.addedWordBg);
   s.setProperty('--diffs-bg-deletion-override', pierrePalette.deletedLineBg);
-  s.setProperty('--diffs-bg-deletion-number-override', pierrePalette.deletedLineBg);
+  s.setProperty(
+    '--diffs-bg-deletion-number-override',
+    pierrePalette.deletedNumberBg ?? pierrePalette.deletedLineBg
+  );
   s.setProperty('--diffs-bg-deletion-emphasis-override', pierrePalette.deletedWordBg);
-  s.setProperty('--diffs-bg-hover-override', pierrePalette.lineHighlight);
-  s.setProperty('--diffs-bg-selection-override', pierrePalette.selection);
+  s.setProperty('--diffs-bg-hover-override', pierrePalette.hoverBg ?? pierrePalette.lineHighlight);
+  s.setProperty(
+    '--diffs-bg-selection-override',
+    pierrePalette.selectionBg ?? pierrePalette.selection
+  );
 }
 
 export function applyOmgTheme(monaco, spec = {}, doc = globalThis.document) {

@@ -2,7 +2,17 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
+import { OMG_PIERRE_UNSAFE_CSS } from '../src/pierre-diff.mjs';
+import { buildOmgThemeData } from '../src/theme.mjs';
 import { CODE_EDITOR_OUT_DIR, createWorkbenchDom } from './jsdom-harness.mjs';
+
+function hexAlpha(hex) {
+  assert.match(hex, /^#[0-9a-f]{6}([0-9a-f]{2})?$/i, `Expected normalized hex color, got ${hex}`);
+  if (hex.length === 9) {
+    return Number.parseInt(hex.slice(7, 9), 16) / 255;
+  }
+  return 1;
+}
 
 function buildSampleFile({ modHeader = false, modMiddle = false, modFooter = false } = {}) {
   const lines = [];
@@ -557,6 +567,278 @@ test('Inline Ask Agent in Pierre diff, keyboard shortcuts, and clean restore on 
     assert.equal(h.document.getElementById('editor-root').style.display, 'block');
     assert.equal(h.omgEditor._internal.editor.getSelection().startLineNumber, 3);
     assert.equal(h.omgEditor._internal.editor.getSelection().startColumn, 8);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('horizontal scroll clips [data-content] at sticky [data-gutter] edge and resets on scrollLeft=0, wordWrap, or file switch', async () => {
+  const h = await createWorkbenchDom();
+  try {
+    const longOriginal = [
+      'import Foundation',
+      'let baselineConfiguration = WorkspaceConfiguration(enableGlassVibrancy: true, maxColumns: 120, tabWidth: 4)',
+      'let status = "before"',
+      '',
+    ].join('\n');
+    const longModified = [
+      'import Foundation',
+      'let updatedConfiguration = WorkspaceConfiguration(enableGlassVibrancy: true, maxColumns: 160, tabWidth: 2, preserveBackdrop: true)',
+      'let status = "after"',
+      '',
+    ].join('\n');
+
+    h.omgEditor.activateDiff({
+      id: 'hscroll-clip-1',
+      path: '/workspace/Sources/ScrollClip.swift',
+      originalText: longOriginal,
+      modifiedText: longModified,
+      review: true,
+      inline: false,
+      wordWrap: false,
+    });
+
+    const { shadowRoot } = getDiffShadowRoot(h);
+    const addCode = shadowRoot.querySelector('code[data-additions][data-code]');
+    const delCode = shadowRoot.querySelector('code[data-deletions][data-code]');
+    assert.ok(addCode && delCode, 'Expected split additions and deletions [data-code] containers');
+
+    const getPaneParts = (codeEl) => {
+      let gutter = null;
+      let content = null;
+      for (const child of codeEl.children) {
+        if (child.hasAttribute('data-gutter')) gutter = child;
+        if (child.hasAttribute('data-content')) content = child;
+      }
+      assert.ok(gutter && content, 'Expected direct [data-gutter] and [data-content] children');
+      return { gutter, content };
+    };
+
+    const addParts = getPaneParts(addCode);
+    const delParts = getPaneParts(delCode);
+
+    // Initially at scrollLeft = 0: no clip-path and no data-omg-scrolled
+    assert.equal(addParts.content.style.clipPath, '');
+    assert.equal(addParts.gutter.hasAttribute('data-omg-scrolled'), false);
+    assert.equal(delParts.content.style.clipPath, '');
+    assert.equal(delParts.gutter.hasAttribute('data-omg-scrolled'), false);
+
+    // Scroll additions pane horizontally to scrollLeft = 42 (@pierre/diffs ScrollSyncManager syncs deletions pane too)
+    addCode.scrollLeft = 42;
+    addCode.dispatchEvent(new h.window.Event('scroll'));
+
+    assert.equal(addParts.content.style.clipPath, 'inset(0 0 0 42px)');
+    assert.equal(addParts.gutter.hasAttribute('data-omg-scrolled'), true);
+    assert.equal(delCode.scrollLeft, 42);
+    assert.equal(delParts.content.style.clipPath, 'inset(0 0 0 42px)');
+    assert.equal(delParts.gutter.hasAttribute('data-omg-scrolled'), true);
+
+    // Re-rendering same file (e.g. toggling review: false or navigateDiff) preserves active horizontal clip
+    h.omgEditor.activateDiff({
+      id: 'hscroll-clip-1',
+      path: '/workspace/Sources/ScrollClip.swift',
+      originalText: longOriginal,
+      modifiedText: longModified,
+      review: false,
+      inline: false,
+      wordWrap: false,
+    });
+    assert.equal(getPaneParts(addCode).content.style.clipPath, 'inset(0 0 0 42px)');
+    assert.equal(getPaneParts(addCode).gutter.hasAttribute('data-omg-scrolled'), true);
+
+    assert.equal(h.omgEditor.navigateDiff({ direction: 'next' }), true);
+    assert.equal(getPaneParts(addCode).content.style.clipPath, 'inset(0 0 0 42px)');
+
+    // Wait >300ms (or reset both) if ScrollSyncManager guard is still active, or scroll additions back to 0 after guard clears
+    delCode.scrollLeft = 0;
+    addCode.scrollLeft = 0;
+    addCode.dispatchEvent(new h.window.Event('scroll'));
+    assert.equal(getPaneParts(addCode).content.style.clipPath, '');
+    assert.equal(getPaneParts(addCode).gutter.hasAttribute('data-omg-scrolled'), false);
+    assert.equal(getPaneParts(delCode).content.style.clipPath, '');
+    assert.equal(getPaneParts(delCode).gutter.hasAttribute('data-omg-scrolled'), false);
+
+    // Scroll again, then switch to wordWrap: true -> resets scrollLeft, clipPath, and data-omg-scrolled
+    delCode.scrollLeft = 64;
+    delCode.dispatchEvent(new h.window.Event('scroll'));
+    assert.equal(getPaneParts(delCode).content.style.clipPath, 'inset(0 0 0 64px)');
+    assert.equal(getPaneParts(delCode).gutter.hasAttribute('data-omg-scrolled'), true);
+
+    h.omgEditor.activateDiff({
+      id: 'hscroll-clip-1',
+      path: '/workspace/Sources/ScrollClip.swift',
+      originalText: longOriginal,
+      modifiedText: longModified,
+      review: true,
+      inline: false,
+      wordWrap: true,
+    });
+    const wrapDelCode = shadowRoot.querySelector('code[data-deletions][data-code]');
+    assert.equal(wrapDelCode.scrollLeft, 0);
+    assert.equal(getPaneParts(wrapDelCode).content.style.clipPath, '');
+    assert.equal(getPaneParts(wrapDelCode).gutter.hasAttribute('data-omg-scrolled'), false);
+
+    // Unified (inline) mode horizontal scroll + reset when switching to a new file
+    h.omgEditor.activateDiff({
+      id: 'hscroll-clip-1',
+      path: '/workspace/Sources/ScrollClip.swift',
+      originalText: longOriginal,
+      modifiedText: longModified,
+      review: true,
+      inline: true,
+      wordWrap: false,
+    });
+    const unifiedCode = shadowRoot.querySelector('code[data-unified][data-code]');
+    assert.ok(unifiedCode, 'Expected unified [data-code] container');
+    unifiedCode.scrollLeft = 42;
+    unifiedCode.dispatchEvent(new h.window.Event('scroll'));
+    assert.equal(getPaneParts(unifiedCode).content.style.clipPath, 'inset(0 0 0 42px)');
+    assert.equal(getPaneParts(unifiedCode).gutter.hasAttribute('data-omg-scrolled'), true);
+
+    // Activate a different file -> resets scrollLeft and clears clipping
+    h.omgEditor.activateDiff({
+      id: 'hscroll-clip-2',
+      path: '/workspace/Sources/OtherFile.swift',
+      originalText: 'let a = 1\n',
+      modifiedText: 'let a = 2\n',
+      review: true,
+      inline: true,
+      wordWrap: false,
+    });
+    const nextUnifiedCode = shadowRoot.querySelector('code[data-unified][data-code]');
+    assert.equal(nextUnifiedCode.scrollLeft, 0);
+    assert.equal(getPaneParts(nextUnifiedCode).content.style.clipPath, '');
+    assert.equal(getPaneParts(nextUnifiedCode).gutter.hasAttribute('data-omg-scrolled'), false);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('OMG_PIERRE_UNSAFE_CSS styles [data-utility-button] contrast, scrolled gutter edge, split divider, and non-!important gutter transparency', async () => {
+  // Static unsafe CSS contract checks
+  assert.match(
+    OMG_PIERRE_UNSAFE_CSS,
+    /\[data-utility-button\]\s*\{[^}]*color:\s*#ffffff\s*!important;[^}]*fill:\s*currentColor\s*!important;/s,
+    '[data-utility-button] must force crisp #ffffff icon contrast over transparent --diffs-bg'
+  );
+  assert.match(
+    OMG_PIERRE_UNSAFE_CSS,
+    /\[data-utility-button\]\s*svg[^{]*\{[^}]*color:\s*#ffffff\s*!important;[^}]*fill:\s*currentColor\s*!important;/s
+  );
+  assert.match(
+    OMG_PIERRE_UNSAFE_CSS,
+    /\[data-diff-type='split'\]\[data-overflow='scroll'\]:not\(\[data-dehydrated\]\)\s*>\s*\[data-additions\][\s\S]*border-left:\s*1px solid color-mix\(in srgb,\s*var\(--diffs-fg\)\s*11%,\s*transparent\)/,
+    'Split scroll view must render a 1px vertical center divider on [data-additions]'
+  );
+  assert.match(
+    OMG_PIERRE_UNSAFE_CSS,
+    /\[data-diff-type='split'\]\[data-overflow='wrap'\]\s+\[data-additions\]\s*>\s*\[data-gutter\][\s\S]*border-left:\s*1px solid color-mix\(in srgb,\s*var\(--diffs-fg\)\s*11%,\s*transparent\)/,
+    'Split wrap view must render a 1px vertical center divider on [data-additions] > [data-gutter]'
+  );
+  assert.match(
+    OMG_PIERRE_UNSAFE_CSS,
+    /\[data-gutter\]\[data-omg-scrolled\]\s*\{[^}]*border-right:\s*1px solid color-mix\(in srgb,\s*var\(--diffs-fg\)\s*14%,\s*transparent\);[^}]*box-shadow:\s*6px 0 12px -6px rgba\(0,\s*0,\s*0,\s*0\.35\);/s
+  );
+  // [data-gutter] must NOT be in the background-color: transparent !important block
+  const importantTransparentRule = OMG_PIERRE_UNSAFE_CSS.match(
+    /([^{]+)\{\s*background-color:\s*transparent\s*!important;\s*\}/
+  );
+  assert.ok(importantTransparentRule, 'Expected glass transparent !important rule');
+  assert.doesNotMatch(
+    importantTransparentRule[1],
+    /\[data-gutter\]/,
+    '[data-gutter] must not be in the !important rule so per-line gutter tints remain clean'
+  );
+
+  // Verify live bundled <style data-unsafe-css> inside shadowRoot carries the exact rules
+  const h = await createWorkbenchDom();
+  try {
+    h.omgEditor.activateDiff({
+      id: 'unsafe-css-live',
+      path: '/workspace/Sources/ThemeCheck.swift',
+      originalText: 'let oldVal = 1\n',
+      modifiedText: 'let newVal = 2\n',
+      review: true,
+      inline: false,
+      wordWrap: false,
+    });
+    const { shadowRoot } = getDiffShadowRoot(h);
+    const unsafeCssText = shadowRoot.querySelector('style[data-unsafe-css]')?.textContent ?? '';
+    assert.match(unsafeCssText, /\[data-utility-button\][\s\S]*#ffffff\s*!important/);
+    assert.match(unsafeCssText, /\[data-gutter\]\[data-omg-scrolled\]/);
+    assert.match(unsafeCssText, /\[data-diff-type='split'\]/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('theme.mjs calibrates high-visibility addition/deletion mix targets without double dilution while keeping --diffs-bg transparent', async () => {
+  const darkTheme = buildOmgThemeData({ base: 'vs-dark' });
+  const lightTheme = buildOmgThemeData({ base: 'light' });
+
+  // Line mix targets must be high-alpha (>= 0.72 dark, >= 0.92 light), never double-diluted 14% (#...24)
+  assert.ok(
+    hexAlpha(darkTheme.pierre.addedLineBg) >= 0.72,
+    `Dark addedLineBg alpha too low: ${darkTheme.pierre.addedLineBg}`
+  );
+  assert.ok(
+    hexAlpha(darkTheme.pierre.deletedLineBg) >= 0.72,
+    `Dark deletedLineBg alpha too low: ${darkTheme.pierre.deletedLineBg}`
+  );
+  assert.equal(hexAlpha(darkTheme.pierre.addedNumberBg), 1);
+  assert.equal(hexAlpha(darkTheme.pierre.deletedNumberBg), 1);
+
+  assert.ok(
+    hexAlpha(lightTheme.pierre.addedLineBg) >= 0.92,
+    `Light addedLineBg alpha too low: ${lightTheme.pierre.addedLineBg}`
+  );
+  assert.ok(
+    hexAlpha(lightTheme.pierre.deletedLineBg) >= 0.92,
+    `Light deletedLineBg alpha too low: ${lightTheme.pierre.deletedLineBg}`
+  );
+  assert.equal(hexAlpha(lightTheme.pierre.addedNumberBg), 1);
+  assert.equal(hexAlpha(lightTheme.pierre.deletedNumberBg), 1);
+
+  // Word-level emphasis overrides are used directly without color-mix (~32%-38% alpha)
+  for (const wordHex of [
+    darkTheme.pierre.addedWordBg,
+    darkTheme.pierre.deletedWordBg,
+    lightTheme.pierre.addedWordBg,
+    lightTheme.pierre.deletedWordBg,
+  ]) {
+    const alpha = hexAlpha(wordHex);
+    assert.ok(
+      alpha >= 0.32 && alpha <= 0.38,
+      `Expected word emphasis alpha in 0.32..0.38, got ${alpha} (${wordHex})`
+    );
+  }
+
+  // Verify live CSS custom properties applied to #diff-root in dark and light modes
+  const h = await createWorkbenchDom();
+  try {
+    h.omgEditor.activateDiff({
+      id: 'tint-check',
+      path: '/workspace/Sources/Tints.swift',
+      originalText: 'let count = 1\n',
+      modifiedText: 'let count = 2\n',
+    });
+    const diffRoot = h.document.getElementById('diff-root');
+
+    h.omgEditor.setTheme({ base: 'vs-dark', added: '#3fb950', deleted: '#f85149' });
+    assert.equal(diffRoot.style.getPropertyValue('--diffs-bg'), 'transparent');
+    assert.equal(diffRoot.style.getPropertyValue('--diffs-bg-context-override'), 'transparent');
+    assert.equal(diffRoot.style.getPropertyValue('--diffs-bg-context-gutter-override'), 'transparent');
+    assert.ok(hexAlpha(diffRoot.style.getPropertyValue('--diffs-bg-addition-override')) >= 0.72);
+    assert.equal(hexAlpha(diffRoot.style.getPropertyValue('--diffs-bg-addition-number-override')), 1);
+    assert.ok(hexAlpha(diffRoot.style.getPropertyValue('--diffs-bg-deletion-override')) >= 0.72);
+    assert.equal(hexAlpha(diffRoot.style.getPropertyValue('--diffs-bg-deletion-number-override')), 1);
+
+    h.omgEditor.setTheme({ base: 'light', added: '#1a7f37', deleted: '#cf222e' });
+    assert.equal(diffRoot.style.getPropertyValue('--diffs-bg'), 'transparent');
+    assert.ok(hexAlpha(diffRoot.style.getPropertyValue('--diffs-bg-addition-override')) >= 0.92);
+    assert.equal(hexAlpha(diffRoot.style.getPropertyValue('--diffs-bg-addition-number-override')), 1);
+    assert.ok(hexAlpha(diffRoot.style.getPropertyValue('--diffs-bg-deletion-override')) >= 0.92);
+    assert.equal(hexAlpha(diffRoot.style.getPropertyValue('--diffs-bg-deletion-number-override')), 1);
   } finally {
     h.cleanup();
   }

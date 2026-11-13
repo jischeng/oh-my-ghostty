@@ -97,15 +97,61 @@ function createOmgZedTheme(appearance) {
 }
 
 // ThinkRail-inspired Shadow DOM styling over OMG's transparent glass vibrancy backdrop
-const OMG_PIERRE_UNSAFE_CSS = `
+export const OMG_PIERRE_UNSAFE_CSS = `
 :host,
 [data-diffs],
 [data-diff],
 pre,
 code,
-[data-gutter],
 [data-content] {
   background-color: transparent !important;
+}
+
+[data-gutter] {
+  background-color: transparent;
+  border-right: 1px solid transparent;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+[data-gutter][data-omg-scrolled] {
+  border-right: 1px solid color-mix(in srgb, var(--diffs-fg) 14%, transparent);
+  box-shadow: 6px 0 12px -6px rgba(0, 0, 0, 0.35);
+}
+
+[data-overflow='scroll']:not([data-dehydrated]) > [data-code]:not([data-diffs-scrollbar-measure]) > [data-content] {
+  min-width: max-content;
+}
+
+[data-diff-type='split'][data-overflow='scroll']:not([data-dehydrated]) > [data-additions],
+[data-diff-type='split'][data-overflow='wrap'] [data-additions] > [data-gutter],
+[data-dehydrated][data-diff-type='split'][data-overflow='scroll'] [data-additions] > [data-gutter] {
+  border-left: 1px solid color-mix(in srgb, var(--diffs-fg) 11%, transparent);
+}
+
+[data-background] :is([data-line], [data-no-newline]) {
+  --mix-dark: 80%;
+  --mix-light: 86%;
+}
+
+[data-background] :is([data-gutter-buffer], [data-column-number]) {
+  --mix-dark: 80%;
+  --mix-light: 80%;
+}
+
+[data-indicators='bars'] [data-line-type='change-deletion'][data-column-number]::before {
+  background-image: linear-gradient(
+    0deg,
+    transparent 50%,
+    var(--diffs-deletion-base) 50%
+  );
+}
+
+:not([data-disable-line-numbers]) > [data-code] :is([data-column-number], [data-gutter-buffer]) {
+  padding-right: 1.4ch;
+}
+
+:not([data-indicators='classic']) > [data-code] :is([data-line], [data-no-newline]) {
+  padding-left: 1.25ch;
 }
 
 pre[data-diff] {
@@ -133,14 +179,35 @@ pre[data-diff] {
   background-color: color-mix(in srgb, var(--diffs-fg) 12%, transparent);
 }
 
-[data-gutter-utility-slot] button {
-  cursor: pointer;
-  border-radius: 5px;
-  transition: transform 100ms ease, background-color 120ms ease;
+[data-gutter-utility-slot] {
+  align-items: center;
 }
 
-[data-gutter-utility-slot] button:hover {
+[data-utility-button] {
+  color: #ffffff !important;
+  fill: currentColor !important;
+  width: 18px;
+  height: 18px;
+  margin-right: -9px;
+  cursor: pointer;
+  border-radius: 5px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.28);
+  transition: transform 100ms ease, filter 120ms ease, background-color 120ms ease;
+}
+
+[data-utility-button]:hover {
   transform: scale(1.06);
+  filter: brightness(1.08);
+}
+
+[data-utility-button] svg,
+[data-utility-button] [data-icon] {
+  display: block;
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  color: #ffffff !important;
+  fill: currentColor !important;
 }
 
 [data-line][data-editor-active-line] {
@@ -430,6 +497,16 @@ export class PierreDiffController {
     this.currentLineNumber = 1;
     this.currentSide = 'additions';
     this.lastSelectedRange = null;
+    this.observedShadowRoot = null;
+
+    this.onShadowScroll = () => {
+      this.syncHorizontalScrollClipping();
+    };
+    this.onShadowClick = () => {
+      queueMicrotask(() => {
+        this.syncHorizontalScrollClipping();
+      });
+    };
 
     this.onFocusIn = () => {
       this.postMessage?.({ type: 'focus' });
@@ -513,6 +590,74 @@ export class PierreDiffController {
       this.fileDiffInstance.setOptions(options);
     }
     return this.fileDiffInstance;
+  }
+
+  ensureShadowScrollListener() {
+    const shadowRoot = this.fileContainer?.shadowRoot ?? null;
+    if (shadowRoot === this.observedShadowRoot) {
+      return;
+    }
+    if (this.observedShadowRoot) {
+      this.observedShadowRoot.removeEventListener('scroll', this.onShadowScroll, true);
+      this.observedShadowRoot.removeEventListener('click', this.onShadowClick, true);
+      this.observedShadowRoot = null;
+    }
+    if (shadowRoot) {
+      shadowRoot.addEventListener('scroll', this.onShadowScroll, {
+        capture: true,
+        passive: true,
+      });
+      shadowRoot.addEventListener('click', this.onShadowClick, {
+        capture: true,
+        passive: true,
+      });
+      this.observedShadowRoot = shadowRoot;
+    }
+  }
+
+  applyCodeScrollClipping(codeEl) {
+    if (!codeEl || !codeEl.children) return;
+    const preEl =
+      codeEl.closest?.('[data-diff]') ??
+      this.fileContainer?.shadowRoot?.querySelector?.('[data-diff]');
+    const isWrap =
+      Boolean(this.activeState?.wordWrap) ||
+      preEl?.getAttribute?.('data-overflow') === 'wrap';
+    if (isWrap && Number(codeEl.scrollLeft) > 0) {
+      codeEl.scrollLeft = 0;
+    }
+    const rawScrollLeft = isWrap ? 0 : Number(codeEl.scrollLeft) || 0;
+    const scrollLeft = Math.max(0, Math.round(rawScrollLeft));
+
+    let gutterEl = null;
+    let contentEl = null;
+    for (const child of codeEl.children) {
+      if (!gutterEl && child.hasAttribute?.('data-gutter')) {
+        gutterEl = child;
+      } else if (!contentEl && child.hasAttribute?.('data-content')) {
+        contentEl = child;
+      }
+    }
+
+    if (contentEl?.style) {
+      contentEl.style.clipPath = scrollLeft > 0 ? `inset(0 0 0 ${scrollLeft}px)` : '';
+    }
+    if (gutterEl) {
+      gutterEl.toggleAttribute('data-omg-scrolled', scrollLeft > 0);
+    }
+  }
+
+  syncHorizontalScrollClipping({ resetScrollLeft = false } = {}) {
+    const shadowRoot = this.fileContainer?.shadowRoot;
+    if (!shadowRoot) return;
+    const codeElements = shadowRoot.querySelectorAll('[data-code]');
+    for (const codeEl of codeElements) {
+      if (codeEl.hasAttribute('data-diffs-scrollbar-measure')) continue;
+      if (resetScrollLeft && Number(codeEl.scrollLeft) !== 0) {
+        codeEl.scrollLeft = 0;
+      }
+      this.applyCodeScrollClipping(codeEl);
+    }
   }
 
   parseOrGetCachedDiff({
@@ -701,6 +846,7 @@ export class PierreDiffController {
         : 'No textual changes';
       this.emptyStateEl.hidden = false;
       if (this.fileContainer) {
+        this.syncHorizontalScrollClipping({ resetScrollLeft: true });
         this.fileContainer.style.display = 'none';
       }
       return true;
@@ -714,6 +860,11 @@ export class PierreDiffController {
       fileContainer: this.fileContainer,
       containerWrapper: this.scrollerEl,
       forceRender: true,
+    });
+
+    this.ensureShadowScrollListener();
+    this.syncHorizontalScrollClipping({
+      resetScrollLeft: !isSameDiffTarget || resolvedWordWrap,
     });
 
     return true;
@@ -807,6 +958,8 @@ export class PierreDiffController {
 
     const lineEl = this.findRenderedLineElement(block.lineNumber, block.side);
     this.scrollToLineElement(lineEl);
+    this.ensureShadowScrollListener();
+    this.syncHorizontalScrollClipping();
     return true;
   }
 
@@ -1074,6 +1227,11 @@ export class PierreDiffController {
   }
 
   dispose() {
+    if (this.observedShadowRoot) {
+      this.observedShadowRoot.removeEventListener('scroll', this.onShadowScroll, true);
+      this.observedShadowRoot.removeEventListener('click', this.onShadowClick, true);
+      this.observedShadowRoot = null;
+    }
     this.scrollerEl.removeEventListener('focusin', this.onFocusIn);
     this.scrollerEl.removeEventListener('pointerdown', this.onPointerDown);
     if (this.fileDiffInstance) {

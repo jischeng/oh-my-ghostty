@@ -82,6 +82,18 @@ export async function createWorkbenchDom() {
   if (!window.Element.prototype.scrollIntoView) {
     window.Element.prototype.scrollIntoView = function scrollIntoView() {};
   }
+  if (!window.Element.prototype.scrollTo) {
+    window.Element.prototype.scrollTo = function scrollTo(xOrOptions, y) {
+      if (xOrOptions && typeof xOrOptions === 'object') {
+        if (typeof xOrOptions.left === 'number') this.scrollLeft = xOrOptions.left;
+        if (typeof xOrOptions.top === 'number') this.scrollTop = xOrOptions.top;
+      } else {
+        if (typeof xOrOptions === 'number') this.scrollLeft = xOrOptions;
+        if (typeof y === 'number') this.scrollTop = y;
+      }
+      this.dispatchEvent(new window.Event('scroll'));
+    };
+  }
 
   if (!window.PointerEvent) {
     window.PointerEvent = class PointerEvent extends window.MouseEvent {

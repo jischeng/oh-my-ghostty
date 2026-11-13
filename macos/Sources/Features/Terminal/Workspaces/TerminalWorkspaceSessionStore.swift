@@ -290,8 +290,13 @@ final class TerminalWorkspaceSessionStore {
               let owner = workspaces.snapshot.owner(of: tab.id),
               let descriptor = descriptors[tab.id],
               let state = try? descriptor.instantiate(restoreSessions: restoreSessions) else { return nil }
+        let windowRecord = workspaces.snapshot.windows?[owner.window]
+        let restoredTabLayout = (parent?.windowController as? TerminalController)?.tabLayout
+            ?? windowRecord?.tabLayout.flatMap(Ghostty.Config.MacOSTabLayout.init(rawValue:))
+        let restoredFrame = parent == nil ? (tab.frame ?? windowRecord?.frame) : nil
         let controller = TerminalController(app, withSurfaceTree: state.surfaceTree, parent: parent,
-            tabLayout: (parent?.windowController as? TerminalController)?.tabLayout,
+            initialFrame: restoredFrame,
+            tabLayout: restoredTabLayout,
             tabSessionID: tab.id, tabCreatedAt: state.tabCreatedAt, workspaceID: owner.workspace,
             windowSessionID: owner.window, workspaceGroupID: owner.group, workspaceCoordinator: runtime)
         controller.titleOverride = state.titleOverride

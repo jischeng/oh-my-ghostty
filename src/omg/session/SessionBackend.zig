@@ -52,6 +52,7 @@ force_attach: std.atomic.Value(bool) = .init(false),
 attachment_changed: std.Io.Condition = .init,
 requested_size: std.atomic.Value(u32) = .init((80 << 16) | 24),
 requested_pixels: std.atomic.Value(u32) = .init((640 << 16) | 384),
+has_explicit_size: std.atomic.Value(bool) = .init(false),
 
 pub const Options = struct {
     is_local: bool = false,
@@ -240,6 +241,7 @@ pub fn focusGained(self: *Self, _: *HostIO.ThreadData, focused: bool) !void {
 pub fn resize(self: *Self, grid: renderer.GridSize, screen: renderer.ScreenSize) !void {
     self.requested_size.store((@as(u32, grid.columns) << 16) | grid.rows, .release);
     self.requested_pixels.store(packedPixels(screen), .release);
+    self.has_explicit_size.store(true, .release);
     if (!self.ready.load(.acquire)) return;
     try self.sendDimensions();
 }
@@ -828,7 +830,9 @@ fn readLoop(self: *Self, io: *HostIO, epoch: u64, attached: *bool, connected_onc
                 if (sequence == null) return error.MissingSnapshot;
                 if (!try self.activateWriter(seq, epoch)) continue;
                 connected_once.* = true;
-                try self.sendDimensions();
+                if (self.has_explicit_size.load(.acquire)) {
+                    try self.sendDimensions();
+                }
                 try self.publishState(io, "{\"state\":\"ready\",\"attempt\":0}");
             },
             'R' => {
@@ -865,12 +869,14 @@ fn readLoop(self: *Self, io: *HostIO, epoch: u64, attached: *bool, connected_onc
                     .tty_name = metadata.value.tty_name,
                 }, epoch)) return error.SessionPaused;
                 {
-                    // Seed native inheritance for commands without OSC 7.
-                    // Process sampling must not overwrite shell-reported cwd.
+                    // Seed native inheritance and relative path links for commands without
+                    // OSC 7. Process sampling must not overwrite shell-reported cwd.
                     io.renderer_state.mutex.lockUncancelable(global.io());
                     defer io.renderer_state.mutex.unlock(global.io());
                     if (io.terminal.getPwd() == null and path.len > 0) {
-                        try io.terminal.setPwd(path);
+                        seedRestoredPwd(&io.terminal, path);
+                        io.renderer_state.omg_link_checks.revision +%= 1;
+                        try io.renderer_wakeup.notify();
                     }
                 }
                 const Message = @import("../../apprt.zig").surface.Message;
@@ -1311,6 +1317,7 @@ fn restore(self: *Self, io: *HostIO, bytes: []const u8) !void {
     io.terminal.deinit(self.alloc);
     io.terminal = decoded.toOwned();
     normalizeRestoredPwd(self.alloc, &io.terminal);
+    io.renderer_state.omg_link_checks.revision +%= 1;
     io.renderer_state.terminal_generation +%= 1;
     io.renderer_state.scroll = .{};
     io.renderer_state.visual_offset_y.store(0, .monotonic);
@@ -1322,13 +1329,42 @@ fn restore(self: *Self, io: *HostIO, bytes: []const u8) !void {
     try io.renderer_wakeup.notify();
 }
 
+/// Seeds a restored session's directory at the start of its retained scrollback
+/// so relative path links printed before reattachment (e.g. `ll`) remain clickable,
+/// while subsequent OSC 7 transitions still record at their own prompt cursor.
+fn seedRestoredPwd(term: *terminal.Terminal, path: []const u8) void {
+    term.setPwd(path) catch {
+        term.setPwd("") catch {};
+        return;
+    };
+    if (comptime @import("builtin").target.os.tag == .macos) {
+        if (path.len == 0) return;
+        inline for (.{ .primary, .alternate }) |key| {
+            if (term.screens.get(key)) |screen| {
+                screen.omg_cwd_history.record(
+                    screen.alloc,
+                    &screen.pages,
+                    screen.pages.getTopLeft(.screen),
+                    path,
+                ) catch {};
+            }
+        }
+    }
+}
+
 /// The runtime's VT stores OSC 7 payloads raw (`file://host/path`), while the
 /// GUI terminal stores decoded paths. A restored raw URL would otherwise be
 /// inherited by new tabs/splits as a bogus directory and block the runtime's
 /// sampled cwd from seeding it. Keep only an absolute decoded path.
 fn normalizeRestoredPwd(alloc: std.mem.Allocator, term: *terminal.Terminal) void {
     const raw = term.getPwd() orelse return;
-    if (raw.len > 0 and raw[0] == '/') return;
+    if (raw.len > 0 and raw[0] == '/') {
+        var copy_arena: std.heap.ArenaAllocator = .init(alloc);
+        defer copy_arena.deinit();
+        const copy = copy_arena.allocator().dupe(u8, raw) catch return;
+        seedRestoredPwd(term, copy);
+        return;
+    }
     var arena: std.heap.ArenaAllocator = .init(alloc);
     defer arena.deinit();
     const path: []const u8 = path: {
@@ -1341,22 +1377,73 @@ fn normalizeRestoredPwd(alloc: std.mem.Allocator, term: *terminal.Terminal) void
         if (decoded.len == 0 or decoded[0] != '/') break :path "";
         break :path arena.allocator().dupe(u8, decoded) catch "";
     };
-    term.setPwd(path) catch term.setPwd("") catch {};
+    seedRestoredPwd(term, path);
 }
 
-test "restored OSC 7 pwd becomes a decoded path" {
+test "restored OSC 7 pwd becomes a decoded path and seeds scrollback cwd history" {
     const alloc = std.testing.allocator;
-    var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 5, .rows = 1 });
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(alloc);
+    try t.printString("AGENTS.md");
+    try t.linefeed();
+    t.carriageReturn();
+    try t.printString("README.md");
+    try t.linefeed();
+    t.carriageReturn();
+    try t.printString("prompt > ");
     try t.setPwd("file://host.local/Users/me/my%20code");
     normalizeRestoredPwd(alloc, &t);
     try std.testing.expectEqualStrings("/Users/me/my code", t.getPwd().?);
-    try t.setPwd("/already/path");
-    normalizeRestoredPwd(alloc, &t);
-    try std.testing.expectEqualStrings("/already/path", t.getPwd().?);
-    try t.setPwd("file://host.local");
-    normalizeRestoredPwd(alloc, &t);
-    try std.testing.expect(t.getPwd() == null);
+    if (comptime @import("builtin").target.os.tag == .macos) {
+        const screen = t.screens.active;
+        const first_row = screen.pages.getTopLeft(.screen);
+        try std.testing.expectEqualStrings("/Users/me/my code", screen.omg_cwd_history.cwdAt(first_row).?);
+        try t.setPwd("/Users/me/my code/sub");
+        try t.printString("subfile.zig");
+        try std.testing.expectEqualStrings("/Users/me/my code", screen.omg_cwd_history.cwdAt(first_row).?);
+        try std.testing.expectEqualStrings("/Users/me/my code/sub", screen.omg_cwd_history.cwdAt(screen.cursor.page_pin.*).?);
+    }
+
+    var t2 = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 20, .rows = 2 });
+    defer t2.deinit(alloc);
+    try t2.printString("AGENTS.md");
+    try t2.linefeed();
+    t2.carriageReturn();
+    seedRestoredPwd(&t2, "/already/path");
+    try std.testing.expectEqualStrings("/already/path", t2.getPwd().?);
+    if (comptime @import("builtin").target.os.tag == .macos) {
+        try std.testing.expectEqualStrings("/already/path", t2.screens.active.omg_cwd_history.cwdAt(t2.screens.active.pages.getTopLeft(.screen)).?);
+    }
+
+    try t2.setPwd("file://host.local");
+    normalizeRestoredPwd(alloc, &t2);
+    try std.testing.expect(t2.getPwd() == null);
+}
+
+test "resize marks explicit geometry and emits dimensions only when ready" {
+    var backend = try Self.init(std.testing.allocator, "/unused", null, .{});
+    defer backend.deinit();
+    var sockets: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF_UNIX, c.SOCK_STREAM, 0, &sockets));
+    defer _ = c.close(sockets[0]);
+    defer _ = c.close(sockets[1]);
+    backend.fd = sockets[0];
+    backend.generation.store(9, .release);
+    backend.protocol_version.store(2, .release);
+
+    try std.testing.expect(!backend.has_explicit_size.load(.acquire));
+    try backend.resize(.{ .columns = 160, .rows = 52 }, .{ .width = 1440, .height = 936 });
+    try std.testing.expect(backend.has_explicit_size.load(.acquire));
+    var probe: [1]u8 = undefined;
+    try std.testing.expect(c.recv(sockets[1], &probe, 1, c.MSG_DONTWAIT) < 0);
+
+    backend.ready.store(true, .release);
+    try backend.resize(.{ .columns = 160, .rows = 52 }, .{ .width = 1440, .height = 936 });
+    var frame: [21]u8 = undefined;
+    try readTestBytes(sockets[1], &frame);
+    try std.testing.expectEqual(@as(u8, 'R'), frame[0]);
+    try std.testing.expectEqual(@as(u16, 160), std.mem.readInt(u16, frame[13..15], .big));
+    try std.testing.expectEqual(@as(u16, 52), std.mem.readInt(u16, frame[15..17], .big));
 }
 
 test "acknowledgeActivity sends C only when negotiated and snapshot is ready" {

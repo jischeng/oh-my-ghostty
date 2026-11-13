@@ -85,11 +85,15 @@ is retained, the checkpoint targets the original remote UUID and descriptor.
 The saved tab and split layout stay intact. These settings add no plugin
 permission, executable loading, or new daemon protocol capability.
 
-On macOS the local relay starts `omgd host-local` through a transient
-`gui/<uid>` launchd job (`AbandonProcessGroup`, no `KeepAlive`). The job runs
-`omgd detach`, which forks the host into its own session, reports its pid and
-exits; the relay then removes the job. The host is therefore outside the app
-coalition, so Cmd-Q fully quits the app instead of leaving it "running in the
+On macOS the local relay starts `omgd host-local` through a `gui/<uid>` launchd
+job (`AbandonProcessGroup`, no `KeepAlive`, `AssociatedBundleIdentifiers` set to
+the enclosing OMG bundle). When running inside an OMG `.app` bundle, the job
+runs `<App>.app/Contents/MacOS/omg +internal-runtime-host`, which spawns the
+host in its own session, reports its pid, and waits as its live parent without
+initializing AppKit or joining the GUI coalition (unbundled CLI test helpers
+fall back to `omgd detach`). macOS TCC therefore attributes `omgd` and all
+terminal shells to OMG (`com.jischeng.omg` / `com.jischeng.omg.debug`), while
+Cmd-Q still fully quits the GUI app instead of leaving it "running in the
 background", and reopening reattaches to the same host. If the GUI launchd
 domain is unavailable, the relay falls back to direct `setsid` startup.
 On quit the app signals each relay's whole process group, so a relay's SSH

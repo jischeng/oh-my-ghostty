@@ -1,8 +1,14 @@
 //! macOS-only detachment of persistent local hosts from the app coalition.
 //! A child of the GUI stays in its coalition after `setsid`, so LaunchServices
-//! reports the quit app as still running in the background. A transient
-//! launchd job starts `omgd detach`, which forks the host into its own session,
-//! reports its pid and exits; the job is then removed and the host remains.
+//! reports the quit app as still running in the background.
+//!
+//! When running inside an OMG `.app` bundle, a `gui/<uid>` launchd job starts
+//! `<App>.app/Contents/MacOS/omg +internal-runtime-host`, which spawns
+//! `omgd host-local` in its own session, reports its pid, and waits as its live
+//! parent without initializing AppKit or joining the GUI coalition. macOS TCC
+//! therefore attributes `omgd` and all terminal shells to OMG (`com.jischeng.omg`
+//! / `com.jischeng.omg.debug`), while Cmd-Q still cleanly terminates the GUI app.
+//! Unbundled helpers (such as standalone CLI tests) fall back to `omgd detach`.
 use std::{
     io,
     path::{Path, PathBuf},
@@ -10,6 +16,12 @@ use std::{
 };
 
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostApp {
+    pub bundle_id: String,
+    pub executable: PathBuf,
+}
 
 pub fn escape(value: &str) -> io::Result<String> {
     if value
@@ -29,6 +41,7 @@ pub fn escape(value: &str) -> io::Result<String> {
 
 pub struct Job<'a> {
     pub label: &'a str,
+    pub associated_bundle_id: Option<&'a str>,
     pub arguments: &'a [String],
     pub environment: &'a [(String, String)],
     pub working_directory: &'a Path,
@@ -50,6 +63,11 @@ pub fn plist(job: &Job<'_>) -> io::Result<String> {
         ))
     };
     out += &string("Label", job.label)?;
+    if let Some(bundle_id) = job.associated_bundle_id {
+        out += "<key>AssociatedBundleIdentifiers</key><array>\n";
+        out += &format!("<string>{}</string>\n", escape(bundle_id)?);
+        out += "</array>\n";
+    }
     out += "<key>ProgramArguments</key><array>\n";
     for argument in job.arguments {
         out += &format!("<string>{}</string>\n", escape(argument)?);
@@ -84,7 +102,13 @@ pub fn plist(job: &Job<'_>) -> io::Result<String> {
 /// XPC_SERVICE_NAME would attribute the process to the app's launchd job.
 pub fn environment(vars: impl Iterator<Item = (String, String)>) -> Vec<(String, String)> {
     let mut vars: Vec<_> = vars
-        .filter(|(key, _)| key != "XPC_SERVICE_NAME" && !key.starts_with("__CF"))
+        .filter(|(key, _)| {
+            key != "XPC_SERVICE_NAME"
+                && !key.starts_with("__CF")
+                && key != "OMG_HOST_APP_BUNDLE"
+                && key != "OMG_HOST_APP_BUNDLE_ID"
+                && key != "OMG_RUNTIME_HOST_LABEL"
+        })
         .filter(|(key, value)| escape(key).is_ok() && escape(value).is_ok())
         .map(|(key, value)| {
             if key == "TERM" && (value.trim().is_empty() || value == "dumb") {
@@ -99,6 +123,142 @@ pub fn environment(vars: impl Iterator<Item = (String, String)>) -> Vec<(String,
     }
     vars.sort();
     vars
+}
+
+fn extract_xml_plist_string(xml: &str, key: &str) -> Option<String> {
+    let needle = format!("<key>{key}</key>");
+    let after_key = xml.split_once(&needle)?.1;
+    let trimmed = after_key.trim_start();
+    let after_open = trimmed.strip_prefix("<string>")?;
+    let raw = after_open.split_once("</string>")?.0.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    Some(
+        raw.replace("&quot;", "\"")
+            .replace("&gt;", ">")
+            .replace("&lt;", "<")
+            .replace("&amp;", "&"),
+    )
+}
+
+fn extract_plutil_string(plist_path: &Path, key: &str) -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let out = std::process::Command::new("/usr/bin/plutil")
+        .args(["-extract", key, "raw", "-o", "-"])
+        .arg(plist_path)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(out.stdout).ok()?;
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+fn is_valid_omg_bundle_id(bundle_id: &str) -> bool {
+    bundle_id.starts_with("com.jischeng.omg")
+        && bundle_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .map(|m| m.is_file() && (m.permissions().mode() & 0o111 != 0))
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
+pub fn host_app_from_bundle(bundle: &Path, bundle_id_hint: Option<&str>) -> Option<HostApp> {
+    if bundle.extension().and_then(|s| s.to_str()) != Some("app") {
+        return None;
+    }
+    let contents = bundle.join("Contents");
+    let info_plist = contents.join("Info.plist");
+    if !info_plist.is_file() {
+        return None;
+    }
+    let xml = std::fs::read_to_string(&info_plist).ok();
+    let bundle_id = bundle_id_hint
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            xml.as_deref()
+                .and_then(|t| extract_xml_plist_string(t, "CFBundleIdentifier"))
+        })
+        .or_else(|| extract_plutil_string(&info_plist, "CFBundleIdentifier"))?;
+    if !is_valid_omg_bundle_id(&bundle_id) {
+        return None;
+    }
+    let executable_name = xml
+        .as_deref()
+        .and_then(|t| extract_xml_plist_string(t, "CFBundleExecutable"))
+        .or_else(|| extract_plutil_string(&info_plist, "CFBundleExecutable"))
+        .unwrap_or_else(|| "omg".into());
+    if executable_name.contains('/') || executable_name.contains('\0') {
+        return None;
+    }
+    let executable = contents.join("MacOS").join(executable_name);
+    if !is_executable_file(&executable) {
+        return None;
+    }
+    Some(HostApp {
+        bundle_id,
+        executable,
+    })
+}
+
+fn enclosing_app_bundle(path: &Path) -> Option<&Path> {
+    path.ancestors()
+        .find(|ancestor| ancestor.extension().and_then(|s| s.to_str()) == Some("app"))
+}
+
+pub fn resolve_host_app(
+    helper: &Path,
+    env_bundle: Option<&Path>,
+    env_bundle_id: Option<&str>,
+) -> Option<HostApp> {
+    if let Some(bundle) = env_bundle {
+        if let Some(app) = host_app_from_bundle(bundle, env_bundle_id) {
+            return Some(app);
+        }
+    }
+    if let Some(bundle) = enclosing_app_bundle(helper) {
+        if let Some(app) = host_app_from_bundle(bundle, None) {
+            return Some(app);
+        }
+    }
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(bundle) = enclosing_app_bundle(&current_exe) {
+            if let Some(app) = host_app_from_bundle(bundle, None) {
+                return Some(app);
+            }
+        }
+    }
+    None
+}
+
+fn stable_label_hash(path: &Path) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in path.to_string_lossy().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 fn launchctl(args: &[&str]) -> io::Result<bool> {
@@ -127,19 +287,33 @@ pub fn spawn(helper: &Path, command: &[String], log: &Path) -> io::Result<Option
             .map(|d| d.as_nanos())
             .unwrap_or_default()
     );
-    let label = format!("com.jischeng.omg.host.{nonce}");
+    let env_bundle = std::env::var_os("OMG_HOST_APP_BUNDLE").map(PathBuf::from);
+    let env_bundle_id = std::env::var("OMG_HOST_APP_BUNDLE_ID").ok();
+    let host_app = resolve_host_app(helper, env_bundle.as_deref(), env_bundle_id.as_deref());
+    let label = match &host_app {
+        Some(app) => format!("{}.host.{:016x}", app.bundle_id, stable_label_hash(log)),
+        None => format!("com.jischeng.omg.host.{nonce}"),
+    };
     let dir = PathBuf::from(format!("/tmp/omg-launchd-{uid}-{nonce}"));
     std::fs::create_dir(&dir)?;
     let cleanup = |dir: &Path| {
         let _ = std::fs::remove_dir_all(dir);
     };
     let ready = dir.join("ready");
-    let mut arguments = vec![
-        helper.to_string_lossy().into_owned(),
-        "detach".into(),
-        ready.to_string_lossy().into_owned(),
-        "--".into(),
-    ];
+    let mut arguments = match &host_app {
+        Some(app) => vec![
+            app.executable.to_string_lossy().into_owned(),
+            "+internal-runtime-host".into(),
+            ready.to_string_lossy().into_owned(),
+            "--".into(),
+        ],
+        None => vec![
+            helper.to_string_lossy().into_owned(),
+            "detach".into(),
+            ready.to_string_lossy().into_owned(),
+            "--".into(),
+        ],
+    };
     arguments.extend(command.iter().cloned());
     let umask = unsafe {
         let current = libc::umask(0o077);
@@ -148,9 +322,14 @@ pub fn spawn(helper: &Path, command: &[String], log: &Path) -> io::Result<Option
     };
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let job_plist = dir.join("job.plist");
-    let env = environment(std::env::vars());
+    let mut env = environment(std::env::vars());
+    if host_app.is_some() {
+        env.push(("OMG_RUNTIME_HOST_LABEL".into(), label.clone()));
+        env.sort();
+    }
     let text = plist(&Job {
         label: &label,
+        associated_bundle_id: host_app.as_ref().map(|app| app.bundle_id.as_str()),
         arguments: &arguments,
         environment: &env,
         working_directory: &cwd,
@@ -166,6 +345,10 @@ pub fn spawn(helper: &Path, command: &[String], log: &Path) -> io::Result<Option
     };
     std::fs::write(&job_plist, text)?;
     let target = format!("{domain}/{label}");
+    if host_app.is_some() {
+        // Clear any finished job record for this state directory before bootstrapping.
+        let _ = launchctl(&["bootout", &target]);
+    }
     if !launchctl(&["bootstrap", &domain, &job_plist.to_string_lossy()]).unwrap_or(false) {
         cleanup(&dir);
         return Ok(None);
@@ -183,15 +366,17 @@ pub fn spawn(helper: &Path, command: &[String], log: &Path) -> io::Result<Option
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    // The job's own process has exited (or never detached); the forked host
-    // lives in its own session and is not signalled by bootout.
-    let _ = launchctl(&["bootout", &target]);
+    if host_app.is_none() || pid.is_none() {
+        // Unbundled fallback exits immediately via `omgd detach`; bundled wrappers
+        // stay alive as the OMG-attributed parent until `host-local` exits.
+        let _ = launchctl(&["bootout", &target]);
+    }
     cleanup(&dir);
     pid.map(Some)
         .ok_or_else(|| io::Error::other("launchd host did not complete the detach handshake"))
 }
 
-/// `omgd detach READY -- COMMAND...`: runs as the transient launchd job.
+/// `omgd detach READY -- COMMAND...`: runs as the transient launchd job for unbundled helpers.
 pub fn detach(ready: &Path, command: &[String]) -> io::Result<()> {
     use std::os::unix::process::CommandExt;
     let (program, args) = command
@@ -225,6 +410,7 @@ mod tests {
         let env = vec![("K".to_string(), "v&w".to_string())];
         let text = plist(&Job {
             label: "l",
+            associated_bundle_id: Some("com.jischeng.omg.debug"),
             arguments: &args,
             environment: &env,
             working_directory: Path::new("/"),
@@ -236,6 +422,9 @@ mod tests {
         assert!(text.contains("<key>K</key><string>v&amp;w</string>"));
         assert!(text.contains("<key>AbandonProcessGroup</key><true/>"));
         assert!(text.contains("<key>KeepAlive</key><false/>"));
+        assert!(text.contains(
+            "<key>AssociatedBundleIdentifiers</key><array>\n<string>com.jischeng.omg.debug</string>\n</array>"
+        ));
         assert!(text.contains("<integer>18</integer>"));
     }
 
@@ -245,11 +434,14 @@ mod tests {
     }
 
     #[test]
-    fn environment_drops_app_job_attribution() {
+    fn environment_drops_app_job_and_internal_bundle_attribution() {
         let env = environment(
             [
                 ("XPC_SERVICE_NAME", "application.com.x"),
                 ("__CFBundleIdentifier", "com.x"),
+                ("OMG_HOST_APP_BUNDLE", "/Applications/OMG.app"),
+                ("OMG_HOST_APP_BUNDLE_ID", "com.jischeng.omg"),
+                ("OMG_RUNTIME_HOST_LABEL", "com.jischeng.omg.host.1"),
                 ("PATH", "/bin"),
                 ("TERM", "dumb"),
                 ("BAD", "a\u{1}"),
@@ -264,5 +456,48 @@ mod tests {
                 ("TERM".to_string(), "xterm-256color".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn resolves_enclosing_omg_app_bundle_and_rejects_foreign_bundles() {
+        let root = std::env::temp_dir().join(format!("omg-bundle-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let app = root.join("OMG Dev.app");
+        let macos = app.join("Contents/MacOS");
+        let runtime = app.join("Contents/Resources/session-runtime");
+        std::fs::create_dir_all(&macos).unwrap();
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::write(
+            app.join("Contents/Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.jischeng.omg.debug</string>
+    <key>CFBundleExecutable</key>
+    <string>omg</string>
+</dict></plist>"#,
+        )
+        .unwrap();
+        let exe = macos.join("omg");
+        std::fs::write(&exe, b"#!/bin/sh\n").unwrap();
+        let helper = runtime.join("omgd");
+        std::fs::write(&helper, b"#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let resolved = resolve_host_app(&helper, None, None).unwrap();
+        assert_eq!(resolved.bundle_id, "com.jischeng.omg.debug");
+        assert_eq!(resolved.executable, exe);
+
+        std::fs::write(
+            app.join("Contents/Info.plist"),
+            r#"<plist><dict><key>CFBundleIdentifier</key><string>com.other.app</string></dict></plist>"#,
+        )
+        .unwrap();
+        assert!(host_app_from_bundle(&app, None).is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -813,7 +813,7 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
         try diagnostics.seekToEnd()
         defer { try? diagnostics.close() }
         process.standardError = diagnostics
-        var environment = ProcessInfo.processInfo.environment
+        var environment = SessionRuntimeHostLauncher.applyingHostBundleEnvironment(ProcessInfo.processInfo.environment)
         environment["SSH_ASKPASS"] = artifacts.appendingPathComponent("askpass").path
         environment["SSH_ASKPASS_REQUIRE"] = interactive ? "force" : "never"
         environment["DISPLAY"] = environment["DISPLAY"] ?? "omg:0"

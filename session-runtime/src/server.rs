@@ -879,13 +879,20 @@ pub fn serve_managed(
                             peer.dead = true;
                             continue;
                         }
-                        size.ws_col = cols;
-                        size.ws_row = rows;
-                        size.ws_xpixel = pixel_width;
-                        size.ws_ypixel = pixel_height;
-                        vt.resize_pixels(cols, rows, pixel_width, pixel_height)?;
-                        if unsafe { libc::ioctl(pty.as_raw_fd(), libc::TIOCSWINSZ, &size) } < 0 {
-                            return Err(io::Error::last_os_error());
+                        let changed = size.ws_col != cols
+                            || size.ws_row != rows
+                            || size.ws_xpixel != pixel_width
+                            || size.ws_ypixel != pixel_height;
+                        if changed {
+                            size.ws_col = cols;
+                            size.ws_row = rows;
+                            size.ws_xpixel = pixel_width;
+                            size.ws_ypixel = pixel_height;
+                            vt.resize_pixels(cols, rows, pixel_width, pixel_height)?;
+                            if unsafe { libc::ioctl(pty.as_raw_fd(), libc::TIOCSWINSZ, &size) } < 0
+                            {
+                                return Err(io::Error::last_os_error());
+                            }
                         }
                         resizes.push(f.data);
                     }

@@ -249,6 +249,7 @@ final class MobileAccessController: ObservableObject {
                 "--app-support", support.path,
                 "--token-file", tokenFile.path,
             ]
+            process.environment = SessionRuntimeHostLauncher.applyingHostBundleEnvironment(ProcessInfo.processInfo.environment)
             process.standardOutput = handle
             process.standardError = handle
             process.terminationHandler = { [weak self, weak process] finished in

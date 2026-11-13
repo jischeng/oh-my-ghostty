@@ -556,6 +556,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     private var verticalTabWindowsObservation: NSKeyValueObservation?
     private var verticalTabSelectionObservation: NSKeyValueObservation?
     private weak var initialTabParent: NSWindow?
+    private let initialRestoredFrame: NSRect?
     var workspaceTabAttachmentIsPending: Bool { initialTabParent != nil }
     func finishWorkspaceTabAttachment() { initialTabParent = nil }
 
@@ -563,6 +564,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
          withBaseConfig base: Ghostty.SurfaceConfiguration? = nil,
          withSurfaceTree tree: SplitTree<Ghostty.SurfaceView>? = nil,
          parent: NSWindow? = nil,
+         initialFrame: NSRect? = nil,
          tabLayout: Ghostty.Config.MacOSTabLayout? = nil,
          tabSessionID: UUID? = nil,
          tabCreatedAt: Date? = nil,
@@ -637,6 +639,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             ? Self.injectingSessionID(self.tabSessionID, into: resolvedBase)
             : resolvedBase
         initialTabParent = parent
+        initialRestoredFrame = initialFrame
         let parentLayout = parentController?.workspaceID == resolvedWorkspaceID ? parentController?.tabLayoutState : nil
         let initialLayoutState = parentLayout ?? VerticalTabWindowLayoutState(
             isSidebarVisible: effectiveTabLayout == .vertical &&
@@ -4569,6 +4572,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         self.init(
             ghostty,
             withSurfaceTree: undoState.surfaceTree,
+            initialFrame: undoState.frame,
             tabSessionID: undoState.tabSessionID,
             tabCreatedAt: undoState.tabCreatedAt,
             workspaceID: undoState.workspaceID,
@@ -4686,10 +4690,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             focusedSurface = view
         }
 
-        // Give a new tab its final frame before installing the SwiftUI root;
-        // resizing an attached root forces an unnecessary initial layout.
+        // Give a new or restored tab its final frame before installing the SwiftUI root;
+        // resizing an attached root forces an unnecessary initial 80x24 layout.
         if let initialTabParent {
             window.setFrame(initialTabParent.frame, display: false)
+        } else if let initialRestoredFrame {
+            window.setFrame(initialRestoredFrame, display: false)
+            window.constrainToScreen()
         }
 
         // Initialize our content view to the SwiftUI root
@@ -4707,7 +4714,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // A tab must join at the group's current frame. Applying a fresh
         // window's default size makes AppKit resize every inactive tab on attach.
-        if initialTabParent == nil, let defaultSize {
+        if initialTabParent == nil, initialRestoredFrame == nil, let defaultSize {
             defaultSize.apply(to: window)
 
             if case .contentIntrinsicSize = defaultSize {

@@ -345,44 +345,312 @@ struct MonacoWorkbenchTests {
         #expect(comps.contains { ($0["label"] as? String) == "WorkbenchConfigPayload" })
     }
 
-    @Test func gitDiffLinkedEditorSharesModelURIWithScrollLinkAndRevealsLine() async throws {
-        let link = GitDiffScrollLink()
-        let lines = (1...60).map { "line \($0)" }.joined(separator: "\n")
-        let view = GitDiffLinkedEditor(
-            text: lines,
-            path: "/repo/Sources/Demo.swift",
-            highlights: [24: true],
-            isActive: true,
+    @Test func gitEditorDiffViewSyncsPierreModesAskAgentAndTearsDownCleanly() async throws {
+        let defaults = UserDefaults.standard
+        let savedReview = defaults.object(forKey: "git.diff.review")
+        let savedMode = defaults.object(forKey: "git.diff.viewMode")
+        let savedWrap = defaults.object(forKey: "git.diff.wordWrap")
+        defaults.set(true, forKey: "git.diff.review")
+        defaults.set(GitL10n.text("Side by Side"), forKey: "git.diff.viewMode")
+        defaults.set(true, forKey: "git.diff.wordWrap")
+        defer {
+            defaults.set(savedReview, forKey: "git.diff.review")
+            defaults.set(savedMode, forKey: "git.diff.viewMode")
+            defaults.set(savedWrap, forKey: "git.diff.wordWrap")
+        }
+
+        let repoRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-pierre-diff-\(UUID().uuidString)")
+        let srcDir = repoRoot.appendingPathComponent("Sources")
+        try FileManager.default.createDirectory(at: srcDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: repoRoot) }
+
+        let beforeLines = (1...30).map { "let item\($0) = \($0)" }
+        var afterLines = beforeLines
+        afterLines[4] = "let item5 = 500 // first hunk"
+        afterLines[22] = "let item23 = 2300 // second hunk"
+        let before = beforeLines.joined(separator: "\n") + "\n"
+        let after = afterLines.joined(separator: "\n") + "\n"
+        let demoFile = srcDir.appendingPathComponent("Demo.swift")
+        try Data(before.utf8).write(to: demoFile)
+        for args in [["init", "--quiet"], ["add", "."]] {
+            let res = try await LocalGitExecutor().execute(arguments: args, workingDirectory: repoRoot.path)
+            try #require(res.isSuccess)
+        }
+        try Data(after.utf8).write(to: demoFile)
+
+        let repository = GitRepositoryIdentity(
+            worktreePath: repoRoot.path,
+            gitDirPath: repoRoot.path + "/.git",
+            commonGitDirPath: repoRoot.path + "/.git"
+        )
+        let request = GitEditorDiffRequest(
+            repository: repository,
+            target: .unstaged,
+            file: .init(path: "Sources/Demo.swift", status: "M")
+        )
+
+        var capturedAskAgent: EditorAskAgentRequest?
+        let controller = MonacoWorkbenchController()
+        let view = GitEditorDiffView(
+            request: request,
             theme: .oneDark,
-            link: link,
-            side: 1,
+            actions: GitDiffEditorActions(
+                askAgent: { capturedAskAgent = $0 }
+            ),
+            externalController: controller,
             close: {}
         )
-        .frame(width: 640, height: 420)
+        .frame(width: 820, height: 480)
 
-        let mounted = EditorTestSupport.host(view, size: NSSize(width: 640, height: 420))
+        let mounted = EditorTestSupport.host(view, size: NSSize(width: 820, height: 480))
         mounted.1.makeKeyAndOrderFront(nil)
-        defer { EditorTestSupport.unmount(mounted) }
+        defer {
+            controller.tearDown()
+            EditorTestSupport.unmount(mounted)
+        }
 
         let webView = try await EditorTestSupport.waitForMonacoReady(in: mounted.0.view)
-        for _ in 0..<80 {
-            let active = (try? await webView.evaluateJavaScript("window.omgEditor?.getState?.()?.activeUri")) as? String
-            if active != nil { break }
-            try await Task.sleep(for: .milliseconds(20))
+        for _ in 0..<120 {
+            if controller.activeDiff != nil, controller.isReady { break }
+            try await Task.sleep(for: .milliseconds(25))
         }
 
-        // Jump to 0-based index 24 -> 1-based line 25 via GitDiffScrollLink.
-        link.jump(to: [1: 24])
-        #expect(link.lastRevealedLines[1] == 24)
+        #expect(!webView.isOpaque)
+        #expect((webView.underPageBackgroundColor?.alphaComponent ?? 1) == 0)
+        #expect(EditorTestSupport.findAll(MonacoEditorWebView.self, in: mounted.0.view).count == 1)
 
-        var currentLine = 0
+        // 1. Initial Review + Side by Side + Word Wrap state & live Pierre Shadow DOM
+        let initial = try #require(controller.activeDiff)
+        #expect(initial.path == "Sources/Demo.swift")
+        #expect(initial.review == true)
+        #expect(initial.inline == false)
+        #expect(initial.wordWrap == true)
+        #expect(initial.patchOnly == false)
+        #expect(initial.originalText == before)
+        #expect(initial.modifiedText == after)
+        #expect(initial.patch.contains("+let item5 = 500"))
+
+        let initialDOMRaw = try await controller.evaluateJavaScriptForTesting("""
+        (() => {
+          const el = document.querySelector('#diff-root diffs-container');
+          const sr = el?.shadowRoot;
+          return {
+            mode: window.omgEditor?.getState?.()?.mode ?? '',
+            separators: sr ? sr.querySelectorAll('[data-separator="line-info"]').length : -1,
+            addLines: sr ? sr.querySelectorAll('code[data-additions] [data-line]').length : -1,
+            hasDeletionsCol: Boolean(sr?.querySelector('code[data-deletions]')),
+            hasUnifiedCol: Boolean(sr?.querySelector('code[data-unified]')),
+            overflow: sr?.querySelector('pre[data-diff]')?.getAttribute('data-overflow') ?? '',
+            syntaxSpans: sr ? sr.querySelectorAll('span[style*="--omg-syntax-"]').length : 0,
+            diffBg: document.getElementById('diff-root')?.style.getPropertyValue('--diffs-bg') ?? ''
+          };
+        })()
+        """)
+        let initialDOM = try #require(initialDOMRaw as? [String: Any])
+        #expect(initialDOM["mode"] as? String == "diff")
+        #expect((initialDOM["separators"] as? Int ?? 0) >= 2, "Review mode must collapse unchanged context into hunk separators")
+        let collapsedAddLines = try #require(initialDOM["addLines"] as? Int)
+        #expect(collapsedAddLines > 0 && collapsedAddLines < 30)
+        #expect(initialDOM["hasDeletionsCol"] as? Bool == true)
+        #expect(initialDOM["hasUnifiedCol"] as? Bool == false)
+        #expect(initialDOM["overflow"] as? String == "wrap")
+        #expect((initialDOM["syntaxSpans"] as? Int ?? 0) > 0, "Offline @pierre/highlights must emit syntax token spans")
+        #expect(initialDOM["diffBg"] as? String == "transparent")
+
+        // Clicking an expand button inside a hunk separator expands unmodified context lines
+        let expandedCountRaw = try await controller.evaluateJavaScriptForTesting("""
+        (() => {
+          const sr = document.querySelector('#diff-root diffs-container')?.shadowRoot;
+          const btn = sr?.querySelector('[data-expand-button]');
+          btn?.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+          return sr ? sr.querySelectorAll('code[data-additions] [data-line]').length : -1;
+        })()
+        """)
+        #expect((expandedCountRaw as? Int ?? 0) > collapsedAddLines)
+
+        // 2. Toggle Review -> Full Source, Side by Side -> Inline, Word Wrap -> false on the same WebView
+        defaults.set(false, forKey: "git.diff.review")
+        defaults.set(GitL10n.text("Inline"), forKey: "git.diff.viewMode")
+        defaults.set(false, forKey: "git.diff.wordWrap")
         for _ in 0..<60 {
-            currentLine = (try? await webView.evaluateJavaScript(
-                "window.omgEditor?._internal?.editor?.getPosition?.()?.lineNumber ?? 0"
-            )) as? Int ?? 0
-            if currentLine == 25 { break }
+            if controller.activeDiff?.review == false,
+               controller.activeDiff?.inline == true,
+               controller.activeDiff?.wordWrap == false {
+                break
+            }
             try await Task.sleep(for: .milliseconds(20))
         }
-        #expect(currentLine == 25, "GitDiffLinkedEditor and CodeEditorView must share the exact Monaco model URI")
+        #expect(controller.activeDiff?.review == false)
+        #expect(controller.activeDiff?.inline == true)
+        #expect(controller.activeDiff?.wordWrap == false)
+        #expect(EditorTestSupport.find(MonacoEditorWebView.self, in: mounted.0.view) === webView)
+
+        let toggledDOMRaw = try await controller.evaluateJavaScriptForTesting("""
+        (() => {
+          const sr = document.querySelector('#diff-root diffs-container')?.shadowRoot;
+          return {
+            separators: sr ? sr.querySelectorAll('[data-separator="line-info"]').length : -1,
+            unifiedLines: sr ? sr.querySelectorAll('code[data-unified] [data-line]').length : -1,
+            hasDeletionsCol: Boolean(sr?.querySelector('code[data-deletions]')),
+            overflow: sr?.querySelector('pre[data-diff]')?.getAttribute('data-overflow') ?? ''
+          };
+        })()
+        """)
+        let toggledDOM = try #require(toggledDOMRaw as? [String: Any])
+        #expect(toggledDOM["separators"] as? Int == 0, "Full Source mode must render zero collapsed separators")
+        #expect((toggledDOM["unifiedLines"] as? Int ?? 0) >= 30, "Full Source Inline mode must render all lines")
+        #expect(toggledDOM["hasDeletionsCol"] as? Bool == false)
+        #expect(toggledDOM["overflow"] as? String == "scroll")
+
+        // 3. Change navigation via toolbar buttons updates Pierre active change line
+        let nextBtn = try #require(
+            EditorTestSupport.findAll(NativeActionControl.self, in: mounted.0.view)
+                .first { $0.toolTip == GitL10n.text("Next change") }
+        )
+        let prevBtn = try #require(
+            EditorTestSupport.findAll(NativeActionControl.self, in: mounted.0.view)
+                .first { $0.toolTip == GitL10n.text("Previous change") }
+        )
+        #expect(nextBtn.isEnabled && prevBtn.isEnabled)
+        nextBtn.performClick(nil)
+        nextBtn.performClick(nil)
+        for _ in 0..<40 {
+            let activeLine = try? await controller.evaluateJavaScriptForTesting(
+                "document.querySelector('#diff-root diffs-container')?.shadowRoot?.querySelector('[data-line][data-editor-active-line]')?.getAttribute('data-line') ?? ''"
+            ) as? String
+            if activeLine == "23" { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let navDOMRaw = try await controller.evaluateJavaScriptForTesting("""
+        (() => {
+          const sr = document.querySelector('#diff-root diffs-container')?.shadowRoot;
+          const st = window.omgEditor?.getDiffState?.() ?? {};
+          return {
+            currentChangeIndex: st.currentChangeIndex ?? -1,
+            currentLineNumber: st.currentLineNumber ?? -1,
+            activeLine: sr?.querySelector('[data-line][data-editor-active-line]')?.getAttribute('data-line') ?? ''
+          };
+        })()
+        """)
+        let navDOM = try #require(navDOMRaw as? [String: Any])
+        #expect(navDOM["currentChangeIndex"] as? Int == 1)
+        #expect(navDOM["currentLineNumber"] as? Int == 23)
+        #expect(navDOM["activeLine"] as? String == "23")
+        prevBtn.performClick(nil)
+
+        // 4. End-to-end Ask Agent from live Pierre WKWebView selection + prompt input
+        _ = try await controller.evaluateJavaScriptForTesting("""
+        (() => {
+          window.omgEditor.selectDiffLines({ startLine: 5, endLine: 5, side: 'additions', openAskAgent: true });
+          const input = document.querySelector('#omg-ask-agent-bar .omg-ask-agent-input');
+          input.value = 'Verify hunk semantics';
+          input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+          return true;
+        })()
+        """)
+        for _ in 0..<40 {
+            if capturedAskAgent != nil { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let ask = try #require(capturedAskAgent)
+        #expect(ask.path == demoFile.path)
+        #expect(ask.startLine == 5 && ask.endLine == 5)
+        #expect(ask.comment == "Verify hunk semantics")
+        let formatted = ask.formattedPrompt(workingDirectory: repoRoot.path)
+        #expect(formatted.contains("@Sources/Demo.swift#L5 Verify hunk semantics"))
+        #expect(formatted.contains("```swift\nlet item5 = 500 // first hunk\n```"))
+
+        // 5. Owned GitEditorDiffView tears down its WKWebView on unmount
+        let standaloneMount = EditorTestSupport.host(
+            GitEditorDiffView(request: request, theme: .oneDark, close: {}).frame(width: 600, height: 360),
+            size: NSSize(width: 600, height: 360)
+        )
+        standaloneMount.1.orderFront(nil)
+        let standaloneWeb = try await EditorTestSupport.waitForMonacoReady(in: standaloneMount.0.view)
+        weak var weakWebView = standaloneWeb
+        EditorTestSupport.unmount(standaloneMount)
+        for _ in 0..<40 {
+            if weakWebView?.superview == nil { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        #expect(weakWebView?.superview == nil)
+    }
+
+    @Test func gitEditorDiffViewRendersPatchOnlyFallbackInPierreOverGlass() async throws {
+        let repoRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-pierre-patch-only-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: repoRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: repoRoot) }
+
+        let before = (1...12).map { "let line\($0) = \($0)" }.joined(separator: "\n") + "\n"
+        var afterLines = (1...12).map { "let line\($0) = \($0)" }
+        afterLines[3] = "let line4 = 4096 // patch-only render"
+        let after = afterLines.joined(separator: "\n") + "\n"
+        let targetFile = repoRoot.appendingPathComponent("Oversized.swift")
+        try Data(before.utf8).write(to: targetFile)
+        for args in [["init", "--quiet"], ["add", "."]] {
+            let res = try await LocalGitExecutor().execute(arguments: args, workingDirectory: repoRoot.path)
+            try #require(res.isSuccess)
+        }
+        try Data(after.utf8).write(to: targetFile)
+
+        let repository = GitRepositoryIdentity(
+            worktreePath: repoRoot.path,
+            gitDirPath: repoRoot.path + "/.git",
+            commonGitDirPath: repoRoot.path + "/.git"
+        )
+        let request = GitEditorDiffRequest(
+            repository: repository,
+            target: .unstaged,
+            file: .init(path: "Oversized.swift", status: "M")
+        )
+        let controller = MonacoWorkbenchController()
+        let mounted = EditorTestSupport.host(
+            GitEditorDiffView(
+                request: request,
+                theme: .oneDark,
+                service: GitDiffService(sourceByteLimit: 32),
+                externalController: controller,
+                close: {}
+            )
+            .frame(width: 760, height: 420),
+            size: NSSize(width: 760, height: 420)
+        )
+        mounted.1.orderFront(nil)
+        defer {
+            controller.tearDown()
+            EditorTestSupport.unmount(mounted)
+        }
+
+        let webView = try await EditorTestSupport.waitForMonacoReady(in: mounted.0.view)
+        for _ in 0..<120 {
+            if controller.activeDiff?.patchOnly == true, controller.isReady { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        #expect(!webView.isOpaque)
+        #expect((webView.underPageBackgroundColor?.alphaComponent ?? 1) == 0)
+
+        let domRaw = try await controller.evaluateJavaScriptForTesting("""
+        (() => {
+          const sr = document.querySelector('#diff-root diffs-container')?.shadowRoot;
+          const st = window.omgEditor?.getDiffState?.() ?? {};
+          return {
+            patchOnly: Boolean(st.patchOnly),
+            isPartial: Boolean(st.isPartial),
+            changeCount: st.changeCount ?? 0,
+            syntaxSpans: sr ? sr.querySelectorAll('span[style*="--omg-syntax-"]').length : 0,
+            text: sr?.textContent ?? '',
+            diffBg: document.getElementById('diff-root')?.style.getPropertyValue('--diffs-bg') ?? ''
+          };
+        })()
+        """)
+        let dom = try #require(domRaw as? [String: Any])
+        #expect(dom["patchOnly"] as? Bool == true)
+        #expect(dom["isPartial"] as? Bool == true)
+        #expect((dom["changeCount"] as? Int ?? 0) >= 1)
+        #expect((dom["syntaxSpans"] as? Int ?? 0) > 0)
+        #expect((dom["text"] as? String)?.contains("4096") == true)
+        #expect(dom["diffBg"] as? String == "transparent")
     }
 }

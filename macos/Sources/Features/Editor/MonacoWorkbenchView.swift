@@ -519,9 +519,13 @@ final class MonacoWorkbenchController: NSObject, ObservableObject, WKNavigationD
         var path: String
         var originalText: String
         var modifiedText: String
+        var patch: String
+        var patchOnly: Bool
+        var review: Bool
         var inline: Bool
         var wordWrap: Bool
         var readOnly: Bool
+        var languageHint: String
     }
 
     @Published private(set) var isReady = false
@@ -643,7 +647,11 @@ final class MonacoWorkbenchController: NSObject, ObservableObject, WKNavigationD
     func focus() {
         guard let webView, let window = webView.window else { return }
         _ = window.makeFirstResponder(webView)
-        enqueueOrEvaluate("window.omgEditor?._internal?.editor?.focus?.();")
+        if activeDiff != nil {
+            enqueueOrEvaluate("document.querySelector('.omg-pierre-diff-scroller')?.focus?.({ preventScroll: true });")
+        } else {
+            enqueueOrEvaluate("window.omgEditor?._internal?.editor?.focus?.();")
+        }
     }
 
     // MARK: - Inbound JS Bridge (`window.omgEditor`)
@@ -753,21 +761,38 @@ final class MonacoWorkbenchController: NSObject, ObservableObject, WKNavigationD
     func activateDiff(
         id: String,
         path: String,
-        originalText: String,
-        modifiedText: String,
-        inline: Bool,
-        wordWrap: Bool,
-        readOnly: Bool = true
+        originalText: String = "",
+        modifiedText: String = "",
+        patch: String = "",
+        patchOnly: Bool = false,
+        review: Bool = true,
+        inline: Bool = false,
+        wordWrap: Bool = true,
+        readOnly: Bool = true,
+        languageHint: String? = nil,
+        force: Bool = false
     ) {
+        let sampleText = !modifiedText.isEmpty ? modifiedText : originalText
+        let resolvedLanguage = languageHint ?? EditorLanguageMapping.languageHint(
+            forPath: path,
+            textPrefix: String(sampleText.prefix(512))
+        )
         let snapshot = ActiveDiffSnapshot(
             id: id,
             path: path,
             originalText: originalText,
             modifiedText: modifiedText,
+            patch: patch,
+            patchOnly: patchOnly,
+            review: review,
             inline: inline,
             wordWrap: wordWrap,
-            readOnly: readOnly
+            readOnly: readOnly,
+            languageHint: resolvedLanguage
         )
+        if !force, activeDiff == snapshot, isReady {
+            return
+        }
         activeURI = nil
         activeDiff = snapshot
         sendCall("activateDiff", payload: [
@@ -775,18 +800,38 @@ final class MonacoWorkbenchController: NSObject, ObservableObject, WKNavigationD
             "path": path,
             "originalText": originalText,
             "modifiedText": modifiedText,
+            "patch": patch,
+            "patchOnly": patchOnly,
+            "review": review,
             "inline": inline,
             "wordWrap": wordWrap,
-            "readOnly": readOnly
+            "readOnly": readOnly,
+            "languageHint": resolvedLanguage
         ])
     }
 
-    func navigateDiff(direction: String) {
-        sendCall("navigateDiff", payload: ["direction": direction])
+    func navigateDiff(direction: String, index: Int? = nil) {
+        var payload: [String: Any] = ["direction": direction]
+        if let index {
+            payload["index"] = index
+        }
+        sendCall("navigateDiff", payload: payload)
     }
 
-    func setTheme(_ theme: EditorTheme, isDark: Bool) {
-        let payload = theme.monacoThemePayload(isDark: isDark)
+    func setTheme(
+        _ theme: EditorTheme,
+        isDark: Bool,
+        added: NSColor? = nil,
+        deleted: NSColor? = nil
+    ) {
+        var payload = theme.monacoThemePayload(isDark: isDark)
+        payload["isDark"] = isDark
+        if let added {
+            payload["added"] = EditorTheme.cssHex(added, includeAlpha: false)
+        }
+        if let deleted {
+            payload["deleted"] = EditorTheme.cssHex(deleted, includeAlpha: false)
+        }
         guard let json = Self.encodeJSON(payload), json != lastThemePayloadJSON else { return }
         lastThemePayloadJSON = json
         enqueueOrEvaluate("window.omgEditor?.setTheme?.(\(json));")
@@ -942,11 +987,16 @@ final class MonacoWorkbenchController: NSObject, ObservableObject, WKNavigationD
         case "askAgent":
             let rawURI = (body["uri"] as? String) ?? ""
             let uri = canonicalModelURI(uri: rawURI, path: body["path"] as? String)
-            let path = (body["path"] as? String) ?? openModels[uri]?.path ?? ""
+            let rawPath = (body["path"] as? String) ?? ""
+            let path = !rawPath.isEmpty
+                ? rawPath
+                : (openModels[uri]?.path ?? activeDiff?.path ?? "")
             let startLine = body["startLine"] as? Int
             let endLine = body["endLine"] as? Int
             let selectedText = (body["selectedText"] as? String) ?? ""
-            let comment = (body["comment"] as? String) ?? ""
+            let rawComment = (body["comment"] as? String) ?? ""
+            let rawPrompt = (body["prompt"] as? String) ?? ""
+            let comment = !rawComment.isEmpty ? rawComment : rawPrompt
             onAskAgent?(EditorAskAgentRequest(
                 path: path,
                 startLine: startLine,
@@ -1019,12 +1069,39 @@ final class MonacoWorkbenchController: NSObject, ObservableObject, WKNavigationD
         let responder = webView.window?.firstResponder
         let isFocusedInWebView = responder === webView
             || (responder as? NSView)?.isDescendant(of: webView) == true
-        guard isFocusedInWebView else { return false }
-
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             .subtracting([.capsLock, .numericPad, .function])
+        let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        let isAskAgentShortcut = modifiers == [.command, .shift] && (key == "l" || key == "i")
+
+        if !isFocusedInWebView {
+            guard activeDiff != nil, isSurfaceFocused() else { return false }
+            let externalTextInputFocused = (responder as? NSText) != nil
+                && (responder as? NSView)?.isDescendant(of: webView) != true
+            guard !externalTextInputFocused else { return false }
+            if event.keyCode == 53, modifiers == .shift {
+                return onCommand?(.hide) ?? false
+            }
+            if isAskAgentShortcut {
+                _ = webView.window?.makeFirstResponder(webView)
+                performEditorAction("askAgent")
+                return true
+            }
+            guard let action = keymap.action(for: event) else { return false }
+            switch action {
+            case .save, .saveAll, .close, .open, .nextDocument, .previousDocument, .hide:
+                return onCommand?(action) ?? false
+            default:
+                return false
+            }
+        }
+
         if event.keyCode == 53, modifiers == .shift {
             return onCommand?(.hide) ?? false
+        }
+        if isAskAgentShortcut {
+            performEditorAction("askAgent")
+            return true
         }
 
         guard let action = keymap.action(for: event) else { return false }
@@ -1088,6 +1165,11 @@ final class MonacoWorkbenchController: NSObject, ObservableObject, WKNavigationD
 
     private func shouldKeepKeystrokeInMonaco(_ event: NSEvent) -> Bool {
         // Prevent terminal menu items (e.g. Cmd+D Split Right) from stealing editor keystrokes.
+        let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        if modifiers == [.command, .shift], key == "l" || key == "i" {
+            return true
+        }
         guard keymap.action(for: event) != nil else { return false }
         return true
     }

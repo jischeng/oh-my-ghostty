@@ -289,17 +289,51 @@ struct GitHistoryInteractionTests {
     }
 
     @Test func diffEditorForwardsHideOpenAndDocumentNavigationShortcuts() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("git-diff-shortcuts-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data("let value = 1\n".utf8).write(to: directory.appendingPathComponent("file.swift"))
+        let initResult = try await LocalGitExecutor().execute(
+            arguments: ["init", "--quiet"],
+            workingDirectory: directory.path
+        )
+        try #require(initResult.isSuccess)
+
         var hidden = false
         var opened = false
         var next = false
-        let link = GitDiffScrollLink()
-        let view = GitDiffLinkedEditor(text: "let value = 1", path: "/file.swift", highlights: [0: true],
-            isActive: true, theme: .oneDark, link: link, side: 0,
-            actions: GitDiffEditorActions(hide: { hidden = true }, open: { opened = true }, nextDocument: { next = true }),
-            close: {})
-        let window = hostWindow(view)
+        var closed = false
+        let repository = GitRepositoryIdentity(
+            worktreePath: directory.path,
+            gitDirPath: directory.path + "/.git",
+            commonGitDirPath: directory.path + "/.git"
+        )
+        let workbench = MonacoWorkbenchController()
+        defer { workbench.tearDown() }
+        let view = GitEditorDiffView(
+            request: .init(
+                repository: repository,
+                target: .unstaged,
+                file: .init(path: "file.swift", status: "A", isUntracked: true)
+            ),
+            theme: .oneDark,
+            actions: GitDiffEditorActions(
+                hide: { hidden = true },
+                open: { opened = true },
+                nextDocument: { next = true }
+            ),
+            externalController: workbench,
+            close: { closed = true }
+        )
+        let window = hostWindow(view, width: 640, height: 420)
         defer { window.contentView = nil; window.close() }
-        try await Task.sleep(for: .milliseconds(200))
+        for _ in 0..<120 {
+            if workbench.activeDiff != nil, find(MonacoEditorWebView.self, in: window.contentView) != nil {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(25))
+        }
         let editor = try #require(find(MonacoEditorWebView.self, in: window.contentView))
         window.makeFirstResponder(editor)
         func key(_ characters: String, code: UInt16, modifiers: NSEvent.ModifierFlags) throws {
@@ -314,5 +348,7 @@ struct GitHistoryInteractionTests {
         #expect(opened)
         try key("\t", code: 48, modifiers: .control)
         #expect(next)
+        try key("w", code: 13, modifiers: .command)
+        #expect(closed)
     }
 }

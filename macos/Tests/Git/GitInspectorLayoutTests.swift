@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import Testing
+import WebKit
 @testable import Ghostty
 
 @MainActor
@@ -232,61 +233,106 @@ struct GitInspectorLayoutTests {
         #expect(actions == [.browseBranch(branch.id)])
     }
 
-    @Test func linkedDiffScrollsBothDirectionsBySourceLinesAndCanBeDisabled() async throws {
-        let beforeLines = (0..<200).map { "line \($0)" }
-        var afterLines = beforeLines
-        afterLines.insert(contentsOf: ["inserted one", "inserted two"], at: 21)
-        let before = beforeLines.joined(separator: "\n") + "\n"
-        let after = afterLines.joined(separator: "\n") + "\n"
-        let link = GitDiffScrollLink()
-        link.presentation = GitDiffPresentation(before: before, after: after,
-                                                        patch: "@@ -21,0 +22,2 @@\n+inserted one\n+inserted two\n")
-        func root(_ identity: String) -> some View {
-            HStack(spacing: 0) {
-                GitDiffLinkedEditor(text: before, path: "/before.txt", highlights: [:], isActive: true,
-                                    theme: .oneDark, link: link, side: 0, close: {}).id(identity + "-left")
-                GitDiffLinkedEditor(text: after, path: "/after.txt", highlights: [:], isActive: true,
-                                    theme: .oneDark, link: link, side: 1, close: {}).id(identity + "-right")
-            }.frame(width: 900, height: 300)
+    @Test func unifiedDiffNavigatesChangesAndCrossesFilesInsideSingleWebView() async throws {
+        let defaults = UserDefaults.standard
+        let savedReview = defaults.object(forKey: "git.diff.review")
+        let savedMode = defaults.object(forKey: "git.diff.viewMode")
+        defaults.set(true, forKey: "git.diff.review")
+        defaults.set(GitL10n.text("Side by Side"), forKey: "git.diff.viewMode")
+        defer {
+            defaults.set(savedReview, forKey: "git.diff.review")
+            defaults.set(savedMode, forKey: "git.diff.viewMode")
         }
-        let view = NSHostingView(rootView: root("first"))
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("git-unified-nav-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let alphaBefore = (1...20).map { "alpha \($0)" }.joined(separator: "\n") + "\n"
+        var alphaAfterLines = (1...20).map { "alpha \($0)" }
+        alphaAfterLines[2] = "alpha 3 modified"
+        alphaAfterLines[14] = "alpha 15 modified"
+        let alphaAfter = alphaAfterLines.joined(separator: "\n") + "\n"
+
+        try Data(alphaBefore.utf8).write(to: root.appendingPathComponent("alpha.swift"))
+        try Data("let beta = 1\n".utf8).write(to: root.appendingPathComponent("beta.swift"))
+        for arguments in [["init", "--quiet"], ["add", "."]] {
+            let res = try await LocalGitExecutor().execute(arguments: arguments, workingDirectory: root.path)
+            try #require(res.isSuccess)
+        }
+        try Data(alphaAfter.utf8).write(to: root.appendingPathComponent("alpha.swift"))
+        try Data("let beta = 2\n".utf8).write(to: root.appendingPathComponent("beta.swift"))
+
+        let repository = GitRepositoryIdentity(
+            worktreePath: root.path,
+            gitDirPath: root.path + "/.git",
+            commonGitDirPath: root.path + "/.git"
+        )
+        let request = GitEditorDiffRequest(
+            repository: repository,
+            target: .unstaged,
+            file: .init(path: "alpha.swift", status: "M")
+        )
+        let workbench = MonacoWorkbenchController()
+        defer { workbench.tearDown() }
+
+        let view = NSHostingView(
+            rootView: GitEditorDiffView(
+                request: request,
+                theme: .oneDark,
+                externalController: workbench,
+                close: {}
+            )
+            .frame(width: 900, height: 320)
+        )
         view.sizingOptions = []
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 300),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 320),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.contentView = view
         window.orderFront(nil)
         defer { window.contentView = nil; window.close() }
-        try await Task.sleep(for: .milliseconds(150))
-        func editors(_ view: NSView) -> [MonacoEditorWebView] {
-            if let text = view as? MonacoEditorWebView { return [text] }
-            return view.subviews.flatMap(editors)
+
+        func editors(in node: NSView) -> [MonacoEditorWebView] {
+            if let web = node as? MonacoEditorWebView { return [web] }
+            return node.subviews.flatMap { editors(in: $0) }
         }
-        let values = editors(view)
-        #expect(values.count == 2)
-        let left = try #require(values.first)
-        let right = try #require(values.last)
-        link.jump(to: [0: 80])
-        #expect(link.lastRevealedLines[0] == 80)
-        #expect(link.lastRevealedLines[1] == 82)
-        link.jump(to: [1: 120])
-        #expect(link.lastRevealedLines[1] == 120)
-        #expect(link.lastRevealedLines[0] == 118)
-        link.enabled = false
-        link.jump(to: [0: 30])
-        #expect(link.lastRevealedLines[0] == 30)
-        #expect(link.lastRevealedLines[1] == 120)
-        link.enabled = true
-        view.rootView = root("replacement")
-        try await Task.sleep(for: .milliseconds(150))
-        let replacements = editors(view)
-        let nextLeft = try #require(replacements.first)
-        let nextRight = try #require(replacements.last)
-        #expect(nextLeft !== left && nextRight !== right)
-        link.jump(to: [0: 60])
-        #expect(link.lastRevealedLines[1] == 62)
-        link.jump(to: [1: 100])
-        #expect(link.lastRevealedLines[0] == 98)
+        func buttons(in node: NSView) -> [NativeActionControl] {
+            (node as? NativeActionControl).map { [$0] } ?? node.subviews.flatMap { buttons(in: $0) }
+        }
+
+        for _ in 0..<120 {
+            if workbench.activeDiff?.path == "alpha.swift", workbench.isReady { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        view.layoutSubtreeIfNeeded()
+
+        let initialEditors = editors(in: view)
+        #expect(initialEditors.count == 1)
+        let retainedWebView = try #require(initialEditors.first)
+
+        // Legacy separate linked-scrolling button is no longer needed in unified Pierre split view.
+        #expect(!buttons(in: view).contains {
+            $0.toolTip == GitL10n.text("Disable linked scrolling") || $0.toolTip == GitL10n.text("Enable linked scrolling")
+        })
+
+        let nextChange = try #require(buttons(in: view).first { $0.toolTip == GitL10n.text("Next change") })
+        #expect(nextChange.isEnabled)
+        // alpha.swift has 2 change hunks: click 1 -> hunk 0, click 2 -> hunk 1, click 3 -> hint, click 4 -> beta.swift
+        nextChange.performClick(nil)
+        nextChange.performClick(nil)
+        nextChange.performClick(nil)
+        #expect(workbench.activeDiff?.path == "alpha.swift")
+        nextChange.performClick(nil)
+
+        for _ in 0..<120 {
+            if workbench.activeDiff?.path == "beta.swift" { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        #expect(workbench.activeDiff?.path == "beta.swift")
+        #expect(editors(in: view).count == 1)
+        #expect(editors(in: view).first === retainedWebView)
     }
 
     @Test func deletedCRLFFileOpensNativeBeforeAndAfterEditors() async throws {
@@ -316,8 +362,14 @@ struct GitInspectorLayoutTests {
                                                commonGitDirPath: root.path + "/.git")
         let request = GitEditorDiffRequest(repository: repository, target: .unstaged,
                                            file: .init(path: "removed.swift", status: "D"))
-        let view = NSHostingView(rootView: GitEditorDiffView(request: request, theme: .oneDark, close: {})
-            .background(Color(NSColor.windowBackgroundColor)))
+        let workbench = MonacoWorkbenchController()
+        defer { workbench.tearDown() }
+        let view = NSHostingView(rootView: GitEditorDiffView(
+            request: request,
+            theme: .oneDark,
+            externalController: workbench,
+            close: {}
+        ).background(Color(NSColor.windowBackgroundColor)))
         view.sizingOptions = []
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 400),
                               styleMask: [.borderless], backing: .buffered, defer: false)
@@ -330,14 +382,18 @@ struct GitInspectorLayoutTests {
             if let text = view as? MonacoEditorWebView { return [text] }
             return view.subviews.flatMap { editors(in: $0) }
         }
-        for _ in 0..<100 {
-            if editors(in: view).count == 2 { break }
-            try await Task.sleep(for: .milliseconds(30))
+        for _ in 0..<120 {
+            if editors(in: view).count == 1, workbench.activeDiff != nil { break }
+            try await Task.sleep(for: .milliseconds(25))
         }
         view.layoutSubtreeIfNeeded()
         let sources = editors(in: view)
-        #expect(sources.count == 2)
-        #expect(sources.allSatisfy { !$0.isOpaque })
+        #expect(sources.count == 1)
+        let singleEditor = try #require(sources.first)
+        #expect(!singleEditor.isOpaque)
+        #expect((singleEditor.underPageBackgroundColor?.alphaComponent ?? 1) == 0)
+        #expect(workbench.activeDiff?.originalText == source)
+        #expect(workbench.activeDiff?.modifiedText == "")
         func buttons(in root: NSView) -> [NativeActionControl] {
             (root as? NativeActionControl).map { [$0] } ?? root.subviews.flatMap { buttons(in: $0) }
         }
@@ -345,23 +401,24 @@ struct GitInspectorLayoutTests {
         let refresh = try #require(buttons(in: view).first { $0.toolTip == GitL10n.text("Refresh diff") })
         let refreshX = refresh.convert(refresh.bounds, to: view).minX
         wrap.performClick(nil)
-        try await Task.sleep(for: .milliseconds(100))
+        try await Task.sleep(for: .milliseconds(80))
+        #expect(workbench.activeDiff?.wordWrap == false)
         for review in [true, false] {
             defaults.set(review, forKey: "git.diff.review")
             for mode in [GitL10n.text("Inline"), GitL10n.text("Side by Side")] {
                 defaults.set(mode, forKey: "git.diff.viewMode")
-                try await Task.sleep(for: .milliseconds(100))
+                try await Task.sleep(for: .milliseconds(80))
                 view.layoutSubtreeIfNeeded()
                 let visibleWrap = try #require(buttons(in: view).first { $0.toolTip == GitL10n.text("Wrap diff lines") })
                 #expect(!visibleWrap.isHiddenOrHasHiddenAncestor)
                 let currentRefresh = try #require(buttons(in: view).first { $0.toolTip == GitL10n.text("Refresh diff") })
                 #expect(abs(currentRefresh.convert(currentRefresh.bounds, to: view).minX - refreshX) < 1)
-                if !review && mode == GitL10n.text("Side by Side") {
-                    let visibleEditors = editors(in: view).filter { !$0.isHiddenOrHasHiddenAncestor }
-                    #expect(visibleEditors.count == 2)
-                    #expect(sources.allSatisfy { source in visibleEditors.contains { $0 === source } },
-                            "Switching modes must reveal the retained native editors, not rebuild them.")
-                }
+                let visibleEditors = editors(in: view).filter { !$0.isHiddenOrHasHiddenAncestor }
+                #expect(visibleEditors.count == 1)
+                #expect(visibleEditors.first === singleEditor,
+                        "Switching modes must update the single pooled Pierre diff WebView in place, not rebuild it.")
+                #expect(workbench.activeDiff?.review == review)
+                #expect(workbench.activeDiff?.inline == (mode != GitL10n.text("Side by Side")))
             }
         }
         if FileManager.default.fileExists(atPath: "/tmp/omg-git-render") {

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// Builds an inline source view and bidirectional source-line anchors from Git's
@@ -185,5 +186,121 @@ struct GitDiffReviewNavigator: Equatable {
             armedDirection = .previous
             return .hint(.previousFile)
         }
+    }
+}
+
+/// Stable source ranges keep folding independent from displayed line numbers.
+struct GitDiffReviewLayout {
+    enum Item: Equatable {
+        case row(Int)
+        case folded(Range<Int>)
+    }
+
+    let items: [Item]
+
+    init(rows: [GitDiffPresentation.Row], expanded: Set<Int>, context: Int = 3) {
+        var visible = Set<Int>()
+        for index in rows.indices where rows[index].added != nil {
+            visible.formUnion(max(0, index - context)...min(rows.count - 1, index + context))
+        }
+        var result: [Item] = []
+        var index = 0
+        while index < rows.count {
+            if visible.contains(index) {
+                result.append(.row(index))
+                index += 1
+            } else {
+                let start = index
+                while index < rows.count && !visible.contains(index) {
+                    index += 1
+                }
+                if expanded.contains(start) {
+                    result += (start..<index).map(Item.row)
+                } else {
+                    result.append(.folded(start..<index))
+                }
+            }
+        }
+        items = result
+    }
+}
+
+/// Pure unified-patch line-number formatter for clipboard / diagnostic summaries.
+enum GitDiffTextRenderer {
+    static func render(_ text: String) -> NSAttributedString {
+        let result = NSMutableAttributedString(string: "")
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var oldLine = 0
+        var newLine = 0
+        var inHunk = false
+
+        for (index, line) in lines.enumerated() {
+            if line.hasPrefix("diff ") { inHunk = false }
+            let isHunk = line.hasPrefix("@@")
+            if isHunk {
+                updateLineNumbers(from: line, old: &oldLine, new: &newLine)
+                inHunk = true
+            }
+            let isMetadata = !inHunk && (
+                line.hasPrefix("diff ") ||
+                line.hasPrefix("index ") ||
+                line.hasPrefix("---") ||
+                line.hasPrefix("+++") ||
+                line.hasPrefix("Binary files ")
+            )
+            let isAdded = inHunk && line.hasPrefix("+")
+            let isDeleted = inHunk && line.hasPrefix("-")
+            let hasLineNumber = inHunk && !isHunk && !isMetadata && !line.hasPrefix("\\")
+
+            let oldNumber = hasLineNumber && !isAdded && !isHunk ? oldLine : nil
+            let newNumber = hasLineNumber && !isDeleted && !isHunk ? newLine : nil
+            if isAdded {
+                newLine += 1
+            } else if isDeleted {
+                oldLine += 1
+            } else if !isHunk && !isMetadata && !line.hasPrefix("\\") {
+                oldLine += 1
+                newLine += 1
+            }
+
+            let prefix = "\(number(oldNumber)) \(number(newNumber)) │ "
+            let output = prefix + line + (index + 1 < lines.count ? "\n" : "")
+            let foreground: NSColor = if isAdded {
+                .systemGreen
+            } else if isDeleted {
+                .systemRed
+            } else if isHunk {
+                .systemBlue
+            } else {
+                .labelColor
+            }
+            let background: NSColor = if isAdded {
+                NSColor.systemGreen.withAlphaComponent(0.08)
+            } else if isDeleted {
+                NSColor.systemRed.withAlphaComponent(0.08)
+            } else {
+                .clear
+            }
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
+                .foregroundColor: foreground,
+                .backgroundColor: background
+            ]
+            result.append(NSAttributedString(string: output, attributes: attributes))
+        }
+        return result
+    }
+
+    private static func updateLineNumbers(from line: String, old: inout Int, new: inout Int) {
+        let parts = line.split(separator: " ")
+        guard parts.count >= 3 else { return }
+        old = Int(parts[1].dropFirst().split(separator: ",", maxSplits: 1).first ?? "") ?? 0
+        new = Int(parts[2].dropFirst().split(separator: ",", maxSplits: 1).first ?? "") ?? 0
+    }
+
+    private static func number(_ value: Int?) -> String {
+        guard let value else { return "    " }
+        let string = String(value)
+        return String(repeating: " ", count: max(0, 4 - string.count)) + string
     }
 }

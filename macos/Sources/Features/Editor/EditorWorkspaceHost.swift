@@ -274,7 +274,8 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                         previousDocument: { workspace.selectAdjacentDocument(offset: -1) },
                         saveAll: { Task { await workspace.saveAll() } },
                         focus: { controller.focusedSurface = surfaceView },
-                        isSurfaceFocused: { (controller.focusedSurface ?? controller.surfaceTree.first) === surfaceView }
+                        isSurfaceFocused: { (controller.focusedSurface ?? controller.surfaceTree.first) === surfaceView },
+                        askAgent: { askRequest in sendAskAgentToQuickInput(askRequest) }
                     )) {
                     workspace.closeGitDiff(request)
                 }

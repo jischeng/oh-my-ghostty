@@ -22,163 +22,255 @@ struct GitDiffEditorActions {
     var saveAll: () -> Void = {}
     var focus: () -> Void = {}
     var isSurfaceFocused: () -> Bool = { true }
+    var askAgent: (EditorAskAgentRequest) -> Void = { _ in }
 }
 
 struct GitEditorDiffView: View {
     @Environment(\.gitCollectionColors) private var colors
+    @ObservedObject private var settings = OhMyGhosttySettings.shared
     let request: GitEditorDiffRequest
     let theme: EditorTheme
     var isActive = true
     var actions = GitDiffEditorActions()
+    var externalController: MonacoWorkbenchController?
     let close: () -> Void
     @StateObject private var model: GitEditorDiffModel
+    @StateObject private var ownedWorkbench = MonacoWorkbenchController()
     @AppStorage("git.diff.viewMode") private var mode = GitL10n.text("Inline")
     @AppStorage("git.diff.review") private var review = true
     @AppStorage("git.diff.wordWrap") private var wordWrap = true
-    @State private var reviewRow: Int?
-    @State private var scroll = GitDiffScrollLink()
-    @State private var linkedScrolling = true
+    @State private var hasMountedDiffSurface = false
+    @State private var forceNextDiffSync = false
     @State private var navigator = GitDiffReviewNavigator()
     @State private var pendingLanding: GitDiffReviewNavigator.Landing?
     @State private var navigationHint: String?
     @State private var hintTask: Task<Void, Never>?
 
-    init(request: GitEditorDiffRequest, theme: EditorTheme, isActive: Bool = true,
-         actions: GitDiffEditorActions = GitDiffEditorActions(), close: @escaping () -> Void) {
+    init(
+        request: GitEditorDiffRequest,
+        theme: EditorTheme,
+        isActive: Bool = true,
+        actions: GitDiffEditorActions = GitDiffEditorActions(),
+        service: GitDiffService = GitDiffService(),
+        externalController: MonacoWorkbenchController? = nil,
+        close: @escaping () -> Void
+    ) {
         self.request = request
         self.theme = theme
         self.isActive = isActive
         self.actions = actions
+        self.externalController = externalController
         self.close = close
-        _model = StateObject(wrappedValue: GitEditorDiffModel(request: request))
+        _model = StateObject(wrappedValue: GitEditorDiffModel(request: request, service: service))
+    }
+
+    private var workbench: MonacoWorkbenchController {
+        externalController ?? ownedWorkbench
+    }
+
+    private var editorSettings: EditorSettings {
+        settings.editorSettings
+    }
+
+    private var resolvedTheme: EditorTheme {
+        var resolved = theme
+        resolved.background = EditorTheme.transparentBackground
+        return resolved
+    }
+
+    private var isDarkTheme: Bool {
+        if theme.background.alphaComponent > 0 {
+            let srgb = theme.background.usingColorSpace(.sRGB) ?? theme.background
+            return srgb.brightnessComponent < 0.55
+        }
+        let textSRGB = theme.text.color.usingColorSpace(.sRGB) ?? theme.text.color
+        return textSRGB.brightnessComponent >= 0.5
+    }
+
+    private var isInlineMode: Bool {
+        mode != GitL10n.text("Side by Side")
+    }
+
+    private var diffContent: GitEditorDiffModel.Content? {
+        guard let content = model.content,
+              !content.document.isBinary,
+              !content.document.isTruncated else {
+            return nil
+        }
+        return content
+    }
+
+    private var showsNonDiffPlaceholder: Bool {
+        if model.error != nil {
+            return true
+        }
+        if let content = model.content,
+           content.document.isBinary || content.document.isTruncated {
+            return true
+        }
+        if !model.isLoading && model.content == nil {
+            return true
+        }
+        return false
+    }
+
+    private var showsDiffSurface: Bool {
+        hasMountedDiffSurface && !showsNonDiffPlaceholder
     }
 
     var body: some View {
         VStack(spacing: 0) {
             GeometryReader { toolbarGeometry in
-            ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 4) {
-                toolbarButton("chevron.left", help: GitL10n.text("Previous file"),
-                              disabled: selectedFileIndex < 0 || model.files.count < 2) {
-                    selectAdjacentFile(offset: -1)
-                }
-                toolbarButton("chevron.right", help: GitL10n.text("Next file"),
-                              disabled: selectedFileIndex < 0 || model.files.count < 2) {
-                    selectAdjacentFile(offset: 1)
-                }
-                Text(fileCounter)
-                    .font(.system(size: 11).monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .fixedSize()
-                toolbarDivider
-                toolbarButton("arrow.up", help: GitL10n.text("Previous change"), disabled: changeAnchors.isEmpty) {
-                    selectChange(.previous)
-                }
-                toolbarButton("arrow.down", help: GitL10n.text("Next change"), disabled: changeAnchors.isEmpty) {
-                    selectChange(.next)
-                }
-                HStack(spacing: 4) {
-                Text(model.selected?.displayPath ?? GitL10n.text("Select file"))
-                    .font(.system(size: 11))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(model.selected?.displayPath ?? request.repository.worktreePath)
-                    .layoutPriority(1)
-                if let presentation = model.content?.presentation {
-                    Text("−\(presentation.rows.filter { $0.added == false }.count)")
-                        .foregroundStyle(Color(colors.deleted)).font(.system(size: 11).monospacedDigit()).fixedSize()
-                    Text("+\(presentation.rows.filter { $0.added == true }.count)")
-                        .foregroundStyle(Color(colors.added)).font(.system(size: 11).monospacedDigit()).fixedSize()
-                }
-                }
-                // Reserve both toolbar clusters, so mode changes never displace the file summary.
-                .frame(width: max(160, toolbarGeometry.size.width - 620))
-                Group {
-                    toolbarButton("link",
-                                  help: linkedScrolling ? GitL10n.text("Disable linked scrolling") : GitL10n.text("Enable linked scrolling"),
-                                  selected: linkedScrolling,
-                                  accessibilityValue: GitL10n.text(linkedScrolling ? "On" : "Off")) {
-                        clearHint()
-                        linkedScrolling.toggle()
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 4) {
+                        toolbarButton(
+                            "chevron.left",
+                            help: GitL10n.text("Previous file"),
+                            disabled: selectedFileIndex < 0 || model.files.count < 2
+                        ) {
+                            selectAdjacentFile(offset: -1)
+                        }
+                        toolbarButton(
+                            "chevron.right",
+                            help: GitL10n.text("Next file"),
+                            disabled: selectedFileIndex < 0 || model.files.count < 2
+                        ) {
+                            selectAdjacentFile(offset: 1)
+                        }
+                        Text(fileCounter)
+                            .font(.system(size: 11).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .fixedSize()
+                        toolbarDivider
+                        toolbarButton(
+                            "arrow.up",
+                            help: GitL10n.text("Previous change"),
+                            disabled: changeCount == 0
+                        ) {
+                            selectChange(.previous)
+                        }
+                        toolbarButton(
+                            "arrow.down",
+                            help: GitL10n.text("Next change"),
+                            disabled: changeCount == 0
+                        ) {
+                            selectChange(.next)
+                        }
+                        HStack(spacing: 4) {
+                            Text(model.selected?.displayPath ?? GitL10n.text("Select file"))
+                                .font(.system(size: 11))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .help(model.selected?.displayPath ?? request.repository.worktreePath)
+                                .layoutPriority(1)
+                            if let stats = lineCounts {
+                                Text("−\(stats.deleted)")
+                                    .foregroundStyle(Color(colors.deleted))
+                                    .font(.system(size: 11).monospacedDigit())
+                                    .fixedSize()
+                                Text("+\(stats.added)")
+                                    .foregroundStyle(Color(colors.added))
+                                    .font(.system(size: 11).monospacedDigit())
+                                    .fixedSize()
+                            }
+                        }
+                        // Reserve both toolbar clusters so mode changes never displace the file summary.
+                        .frame(maxWidth: max(160, toolbarGeometry.size.width - 560), alignment: .leading)
+                        Spacer(minLength: 8)
+                        GitDiffReviewSwitcher(review: review) { next in
+                            clearHint()
+                            review = next
+                        }
+                        .frame(width: 132, height: 26)
+                        toolbarButton(
+                            "arrow.turn.down.left",
+                            help: GitL10n.text("Wrap diff lines"),
+                            selected: wordWrap
+                        ) {
+                            clearHint()
+                            wordWrap.toggle()
+                        }
+                        fileMenu
+                        GitDiffModeSwitcher(mode: mode) { next in
+                            clearHint()
+                            mode = next
+                        }
+                        .frame(width: 54, height: 26)
+                        toolbarButton(
+                            "pencil",
+                            help: GitL10n.text("Open in Editor"),
+                            disabled: model.selected == nil || model.selected?.kind == .deleted
+                        ) {
+                            clearHint()
+                            if let file = model.selected {
+                                actions.openFile(file, false)
+                            }
+                        }
+                        toolbarButton(
+                            "arrow.clockwise",
+                            help: GitL10n.text("Refresh diff"),
+                            disabled: model.isLoading
+                        ) {
+                            clearHint()
+                            forceNextDiffSync = true
+                            model.reload()
+                        }
                     }
-                    .opacity(mode == GitL10n.text("Side by Side") ? 1 : 0)
-                    .allowsHitTesting(mode == GitL10n.text("Side by Side"))
-                    .accessibilityHidden(mode != GitL10n.text("Side by Side"))
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .padding(.horizontal, 8)
+                    .frame(minWidth: toolbarGeometry.size.width, minHeight: 32)
                 }
-                GitDiffReviewSwitcher(review: review) { next in
-                    clearHint()
-                    review = next
-                }
-                .frame(width: 132, height: 26)
-                Group {
-                    toolbarButton("arrow.turn.down.left", help: GitL10n.text("Wrap diff lines"), selected: wordWrap) {
-                        wordWrap.toggle()
-                    }
-                }
-                fileMenu
-                GitDiffModeSwitcher(mode: mode) { next in
-                    clearHint()
-                    mode = next
-                }
-                .frame(width: 54, height: 26)
-                toolbarButton("pencil", help: GitL10n.text("Open in Editor"),
-                              disabled: model.selected == nil || model.selected?.kind == .deleted) {
-                    clearHint()
-                    if let file = model.selected { actions.openFile(file, false) }
-                }
-                toolbarButton("arrow.clockwise", help: GitL10n.text("Refresh diff"), disabled: model.isLoading) {
-                    clearHint()
-                    model.reload()
-                }
-            }
-            .buttonStyle(.borderless)
-            .controlSize(.small)
-            .padding(.horizontal, 8)
-            .frame(minWidth: toolbarGeometry.size.width, minHeight: 32)
-            }
             }
             .frame(height: 32)
             .clipped()
             .background(toolbarSurface)
             Divider()
-            if model.isLoading { ProgressView().padding() }
-            if let error = model.error { Text(error).foregroundStyle(.red).padding() }
-            if let content = model.content {
-                let document = content.document
-                if document.isBinary || document.isTruncated {
-                    Text(document.summary ?? document.text).padding()
-                } else if let sourceError = content.sourceError {
-                    Text(sourceError).foregroundStyle(.secondary).padding()
-                    GitDiffTextView(text: document.text)
-                } else if let presentation = content.presentation {
-                    NativeEditorContentDeck(items: [
-                        EditorContentItem(id: .diffMode("review"), content: AnyView(
-                            GitDiffReviewView(presentation: presentation, before: content.before, after: content.after,
-                                              path: document.file.path, theme: theme,
-                                              split: mode == GitL10n.text("Side by Side"), selectedRow: reviewRow)
-                        )),
-                        EditorContentItem(id: .diffMode("split"), content: AnyView(
-                            HSplitView {
-                                sourcePane(GitL10n.text("Before"), text: content.before, path: document.file.oldPath ?? document.file.path,
-                                           highlights: presentation.beforeHighlights, side: 0)
-                                sourcePane(GitL10n.text("After"), text: content.after, path: document.file.path,
-                                           highlights: presentation.afterHighlights, side: 1)
-                            }
-                        )),
-                        EditorContentItem(id: .diffMode("inline"), content: AnyView(
-                            GitDiffLinkedEditor(text: presentation.text, path: document.file.path,
-                                                highlights: presentation.highlights,
-                                                isActive: isActive && !review && mode == GitL10n.text("Inline"),
-                                                theme: theme, wordWrap: wordWrap, link: scroll, side: 2, actions: actions, close: close)
-                        )),
-                    ], selectedID: .diffMode(review ? "review" : mode == GitL10n.text("Side by Side") ? "split" : "inline"))
-                    .id(model.selected?.id)
-                    .transaction { $0.animation = nil }
 
+            ZStack(alignment: .topLeading) {
+                if hasMountedDiffSurface || diffContent != nil {
+                    VStack(spacing: 0) {
+                        if let sourceError = diffContent?.sourceError {
+                            HStack(spacing: 6) {
+                                Image(systemName: "info.circle")
+                                    .font(.caption)
+                                Text(sourceError)
+                                    .font(.caption)
+                                    .lineLimit(2)
+                                Spacer(minLength: 0)
+                            }
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Color.primary.opacity(0.04))
+                            .overlay(alignment: .bottom) { Divider() }
+                        }
+                        MonacoWorkbenchSurface(controller: workbench)
+                            .background(Color.clear)
+                    }
+                    .opacity(showsNonDiffPlaceholder ? 0 : 1)
+                    .allowsHitTesting(!showsNonDiffPlaceholder)
                 }
-            } else if !model.isLoading && model.error == nil {
-                Text(GitL10n.text("No changed files")).foregroundStyle(.secondary).padding()
+
+                if showsNonDiffPlaceholder {
+                    VStack(alignment: .leading, spacing: 0) {
+                        if let error = model.error {
+                            Text(error).foregroundStyle(.red).padding()
+                        } else if let content = model.content,
+                                  content.document.isBinary || content.document.isTruncated {
+                            Text(content.document.summary ?? content.document.text).padding()
+                        } else if !model.isLoading {
+                            Text(GitL10n.text("No changed files")).foregroundStyle(.secondary).padding()
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                } else if model.isLoading && !hasMountedDiffSurface {
+                    ProgressView()
+                        .padding()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .clipped()
@@ -197,26 +289,159 @@ struct GitEditorDiffView: View {
             }
         }
         .background(GitDiffFallbackCommands(
-            isActive: isActive && (review || model.content?.presentation == nil || model.content?.sourceError != nil),
-            actions: actions, close: close
+            isActive: isActive && !showsDiffSurface,
+            actions: actions,
+            close: close
         ))
-        .onAppear { model.reload() }
-        .onDisappear { model.cancel(); clearHint(); navigator.reset() }
+        .onAppear {
+            syncWorkbenchEnvironment()
+            syncDiffToWorkbench()
+            model.reload()
+        }
+        .onDisappear {
+            model.cancel()
+            clearHint()
+            navigator.reset()
+            hasMountedDiffSurface = false
+            if externalController == nil {
+                ownedWorkbench.tearDown()
+            } else {
+                workbench.isActive = false
+            }
+        }
         .onChange(of: model.selected) { actions.selectFile($0) }
-        .onChange(of: linkedScrolling) { scroll.enabled = $0 }
-        .onChange(of: model.content?.presentation) {
-            scroll.presentation = $0 ?? GitDiffPresentation(before: "", after: "", patch: "")
-            guard let presentation = $0 else { return }
+        .onChange(of: model.content) { newContent in
+            syncDiffToWorkbench()
+            guard newContent != nil, diffContent != nil else { return }
             if let landing = pendingLanding {
                 pendingLanding = nil
-                if let index = navigator.land(landing, changeCount: presentation.changeAnchors.count) {
-                    jump(to: presentation.changeAnchors[index], afterEditorReplacement: true)
+                if let index = navigator.land(landing, changeCount: changeCount) {
+                    let direction = landing == .first ? "next" : "previous"
+                    workbench.navigateDiff(direction: direction, index: index)
                 }
             } else {
                 navigator.reset()
             }
         }
+        .onChange(of: review) { _ in syncDiffToWorkbench() }
+        .onChange(of: mode) { _ in syncDiffToWorkbench() }
+        .onChange(of: wordWrap) { _ in syncDiffToWorkbench() }
+        .onChange(of: isActive) { _ in syncWorkbenchEnvironment() }
+        .onChange(of: theme) { _ in syncWorkbenchAppearance() }
+        .onChange(of: colors) { _ in syncWorkbenchAppearance() }
+        .onChange(of: settings.editorSettings) { _ in
+            syncWorkbenchEnvironment()
+            syncWorkbenchAppearance()
+        }
     }
+
+    // MARK: - Workbench Synchronization
+
+    private func syncWorkbenchEnvironment() {
+        configureCallbacks()
+        workbench.isPreview = false
+        workbench.keymap = editorSettings.keymap
+        workbench.isSurfaceFocused = actions.isSurfaceFocused
+        workbench.isActive = isActive && showsDiffSurface
+    }
+
+    private func syncWorkbenchAppearance() {
+        guard hasMountedDiffSurface || diffContent != nil else { return }
+        workbench.setTheme(
+            resolvedTheme,
+            isDark: isDarkTheme,
+            added: colors.added,
+            deleted: colors.deleted
+        )
+        workbench.setFont(
+            family: editorSettings.fontFamily,
+            size: editorSettings.fontSize
+        )
+    }
+
+    private func syncDiffToWorkbench() {
+        guard let content = diffContent else {
+            workbench.isActive = false
+            return
+        }
+        if !hasMountedDiffSurface {
+            hasMountedDiffSurface = true
+        }
+        configureCallbacks()
+        workbench.isPreview = false
+        workbench.keymap = editorSettings.keymap
+        workbench.isSurfaceFocused = actions.isSurfaceFocused
+        workbench.isActive = isActive
+        syncWorkbenchAppearance()
+
+        let document = content.document
+        let isPatchOnly = content.sourceError != nil || content.presentation == nil
+        let force = forceNextDiffSync
+        forceNextDiffSync = false
+
+        workbench.activateDiff(
+            id: "\(request.id.uuidString):\(document.file.id)",
+            path: document.file.path,
+            originalText: isPatchOnly ? "" : content.before,
+            modifiedText: isPatchOnly ? "" : content.after,
+            patch: document.text,
+            patchOnly: isPatchOnly,
+            review: review,
+            inline: isInlineMode,
+            wordWrap: wordWrap,
+            readOnly: true,
+            force: force
+        )
+    }
+
+    private func configureCallbacks() {
+        workbench.onFocus = actions.focus
+        workbench.onAskAgent = { askRequest in
+            actions.askAgent(resolvedAskAgentRequest(askRequest))
+        }
+        workbench.onCommand = { action in
+            switch action {
+            case .hide:
+                actions.hide()
+            case .close:
+                close()
+            case .open:
+                actions.open()
+            case .nextDocument:
+                actions.nextDocument()
+            case .previousDocument:
+                actions.previousDocument()
+            case .saveAll:
+                actions.saveAll()
+            case .save:
+                break
+            default:
+                return false
+            }
+            return true
+        }
+    }
+
+    private func resolvedAskAgentRequest(_ askRequest: EditorAskAgentRequest) -> EditorAskAgentRequest {
+        let isRelativePath = askRequest.path.isEmpty || !askRequest.path.hasPrefix("/")
+        let resolvedPath: String
+        if isRelativePath,
+           let file = model.selected,
+           let absolute = try? GitFileActions.absolutePath(file, repository: request.repository) {
+            resolvedPath = absolute
+        } else {
+            resolvedPath = askRequest.path
+        }
+        return EditorAskAgentRequest(
+            path: resolvedPath,
+            startLine: askRequest.startLine,
+            endLine: askRequest.endLine,
+            selectedText: askRequest.selectedText,
+            comment: askRequest.comment
+        )
+    }
+
+    // MARK: - File & Change Navigation
 
     private var selectedFileIndex: Int {
         guard let selected = model.selected else { return -1 }
@@ -228,8 +453,22 @@ struct GitEditorDiffView: View {
         return GitL10n.format("{0} / {1} files", String(selectedFileIndex + 1), String(model.files.count))
     }
 
-    private var changeAnchors: [(before: Int?, after: Int?, inline: Int)] {
-        model.content?.presentation?.changeAnchors ?? []
+    private var changeCount: Int {
+        if let presentation = model.content?.presentation {
+            return presentation.changeAnchors.count
+        }
+        guard let content = diffContent else { return 0 }
+        return Self.countPatchChanges(content.document.text)
+    }
+
+    private var lineCounts: (deleted: Int, added: Int)? {
+        if let presentation = model.content?.presentation {
+            let deleted = presentation.rows.reduce(into: 0) { if $1.added == false { $0 += 1 } }
+            let added = presentation.rows.reduce(into: 0) { if $1.added == true { $0 += 1 } }
+            return (deleted, added)
+        }
+        guard let content = diffContent else { return nil }
+        return Self.countPatchLines(content.document.text)
     }
 
     private var toolbarSurface: Color { Color.primary.opacity(0.025) }
@@ -242,37 +481,30 @@ struct GitEditorDiffView: View {
     }
 
     private func selectChange(_ direction: GitDiffReviewNavigator.Direction) {
-        guard let outcome = navigator.move(direction, changeCount: changeAnchors.count,
-                                            fileCount: model.files.count) else { return }
+        guard let outcome = navigator.move(
+            direction,
+            changeCount: changeCount,
+            fileCount: model.files.count
+        ) else { return }
+        let jsDirection = direction == .previous ? "previous" : "next"
         switch outcome {
         case .jump(let index):
             clearHint()
-            jump(to: changeAnchors[index])
+            workbench.navigateDiff(direction: jsDirection, index: index)
         case .hint(let hint):
             showHint(hint)
         case .openFile(let offset, let landing):
             clearHint()
             if model.files.count == 1 {
-                if let index = navigator.land(landing, changeCount: changeAnchors.count) {
-                    jump(to: changeAnchors[index])
+                if let index = navigator.land(landing, changeCount: changeCount) {
+                    let landDirection = landing == .first ? "next" : "previous"
+                    workbench.navigateDiff(direction: landDirection, index: index)
                 }
             } else {
                 pendingLanding = landing
                 model.selectAdjacentFile(offset: offset)
             }
         }
-    }
-
-    private func jump(to anchor: (before: Int?, after: Int?, inline: Int), afterEditorReplacement: Bool = false) {
-        reviewRow = anchor.inline
-        var lines: [Int: Int] = [:]
-        if mode == GitL10n.text("Side by Side") {
-            if let before = anchor.before { lines[0] = before }
-            if let after = anchor.after { lines[1] = after }
-        } else {
-            lines[2] = anchor.inline
-        }
-        if afterEditorReplacement { scroll.queueJump(to: lines) } else { scroll.jump(to: lines) }
     }
 
     private func showHint(_ hint: GitDiffReviewNavigator.Hint) {
@@ -297,10 +529,67 @@ struct GitEditorDiffView: View {
         navigator.disarm()
     }
 
-    private func toolbarButton(_ image: String, help: String, disabled: Bool = false, selected: Bool = false,
-                               accessibilityValue: String = "",
-                               width: CGFloat = 28,
-                               action: @escaping () -> Void) -> some View {
+    static func countPatchChanges(_ patch: String) -> Int {
+        var count = 0
+        var inHunk = false
+        var inChange = false
+        for raw in patch.components(separatedBy: "\n") {
+            let line = raw.hasSuffix("\r") ? raw.dropLast() : raw[...]
+            if line.hasPrefix("diff ") {
+                inHunk = false
+                inChange = false
+            } else if line.hasPrefix("@@") {
+                inHunk = true
+                inChange = false
+            } else if inHunk {
+                if line.hasPrefix("\\") {
+                    continue
+                }
+                if line.hasPrefix("+") || line.hasPrefix("-") {
+                    if !inChange {
+                        count += 1
+                        inChange = true
+                    }
+                } else {
+                    inChange = false
+                }
+            }
+        }
+        return count
+    }
+
+    static func countPatchLines(_ patch: String) -> (deleted: Int, added: Int) {
+        var deleted = 0
+        var added = 0
+        var inHunk = false
+        for raw in patch.components(separatedBy: "\n") {
+            let line = raw.hasSuffix("\r") ? raw.dropLast() : raw[...]
+            if line.hasPrefix("diff ") {
+                inHunk = false
+            } else if line.hasPrefix("@@") {
+                inHunk = true
+            } else if inHunk {
+                if line.hasPrefix("+") {
+                    added += 1
+                } else if line.hasPrefix("-") {
+                    deleted += 1
+                }
+            }
+        }
+        return (deleted, added)
+    }
+
+    // MARK: - Toolbar Controls
+
+    private func toolbarButton(
+        _ image: String,
+        help: String,
+        disabled: Bool = false,
+        selected: Bool = false,
+        accessibilityValue: String = "",
+        width: CGFloat = 28,
+        action: @escaping () -> Void
+    ) -> some View {
         NativeActionButton(
             symbol: image,
             help: help,
@@ -354,21 +643,6 @@ struct GitEditorDiffView: View {
         )
         .frame(width: 28, height: 24)
     }
-
-    private func sourcePane(_ title: String, text: String, path: String, highlights: [Int: Bool], side: Int) -> some View {
-        VStack(spacing: 0) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity)
-                .frame(height: 24)
-                .background(toolbarSurface)
-                .overlay(alignment: .bottom) { Divider() }
-            GitDiffLinkedEditor(text: text, path: path, highlights: highlights,
-                                isActive: isActive && !review && mode == GitL10n.text("Side by Side"), theme: theme, wordWrap: wordWrap, link: scroll, side: side, actions: actions, close: close)
-                .id("\(model.selected?.id ?? "")-\(side)")
-        }.frame(minWidth: 120)
-    }
 }
 
 struct GitDiffModeSwitcher: NSViewRepresentable {
@@ -379,8 +653,12 @@ struct GitDiffModeSwitcher: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSSegmentedControl {
         let labels = [GitL10n.text("Side by Side"), GitL10n.text("Inline")]
-        let control = NSSegmentedControl(labels: labels, trackingMode: .selectOne,
-                                         target: context.coordinator, action: #selector(Coordinator.activate(_:)))
+        let control = NSSegmentedControl(
+            labels: labels,
+            trackingMode: .selectOne,
+            target: context.coordinator,
+            action: #selector(Coordinator.activate(_:))
+        )
         for index in labels.indices {
             control.setLabel("", forSegment: index)
             control.setImage(NSImage(
@@ -432,8 +710,12 @@ struct GitDiffReviewSwitcher: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSSegmentedControl {
         let labels = [GitL10n.text("Review"), GitL10n.text("Full Source")]
-        let control = NSSegmentedControl(labels: labels, trackingMode: .selectOne,
-                                         target: context.coordinator, action: #selector(Coordinator.activate(_:)))
+        let control = NSSegmentedControl(
+            labels: labels,
+            trackingMode: .selectOne,
+            target: context.coordinator,
+            action: #selector(Coordinator.activate(_:))
+        )
         control.segmentStyle = .rounded
         control.controlSize = .small
         control.font = .systemFont(ofSize: 11, weight: .medium)
@@ -468,7 +750,7 @@ struct GitDiffReviewSwitcher: NSViewRepresentable {
     }
 }
 
-/// Loading, binary and error views have no CodeEditorView to own shortcuts.
+/// Loading, binary, empty, and error views have no active diff WebView to own shortcuts.
 private struct GitDiffFallbackCommands: NSViewRepresentable {
     let isActive: Bool
     let actions: GitDiffEditorActions
@@ -482,7 +764,9 @@ private struct GitDiffFallbackCommands: NSViewRepresentable {
 
         func handle(_ event: NSEvent) -> Bool {
             guard active, window != nil, event.window === window, actions.isSurfaceFocused(),
-                  let action = OhMyGhosttySettings.shared.editorSettings.keymap.action(for: event) else { return false }
+                  let action = OhMyGhosttySettings.shared.editorSettings.keymap.action(for: event) else {
+                return false
+            }
             switch action {
             case .hide: actions.hide()
             case .close: close()
@@ -502,11 +786,13 @@ private struct GitDiffFallbackCommands: NSViewRepresentable {
         EditorCommandRouter.shared.register(owner: view) { [weak view] event in view?.handle(event) ?? false }
         return view
     }
+
     func updateNSView(_ view: Scope, context: Context) {
         view.active = isActive
         view.actions = actions
         view.close = close
     }
+
     static func dismantleNSView(_ view: Scope, coordinator: ()) {
         EditorCommandRouter.shared.unregister(owner: view)
     }

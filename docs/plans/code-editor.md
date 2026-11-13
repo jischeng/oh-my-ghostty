@@ -11,8 +11,12 @@
   - 终端工作区空闲后支持 1.5s 轻量预热（测试环境自动跳过后台预热）；通过自定义 `WKURLSchemeHandler`（`omg-editor://bundle/index.html`）+ `.nonPersistent()` 数据存储提供完全离线资源加载（CSP `connect-src 'none'`，路径穿越严格校验在 bundle 根目录内）。
   - `MonacoEditorWebView` 保持全链路透明（`isOpaque = false`、`drawsBackground = false`、`underPageBackgroundColor = .clear`、内部 `NSScrollView`/`NSClipView` 背景清零，Monaco 主题 `#00000000`），无缝透出底层 `EditorBackdrop` 毛玻璃与终端背景。
 
-- **离线语法高亮与前端包（`dist/code-editor/` → `macos/Resources/CodeEditor/`）**：
-  - 基于裁剪版 `monaco-editor`（内置多光标、括号配对着色、Sticky Scroll、折叠、原生 Find/Replace/Go-to-Line、内联与并排 `DiffEditor`）结合 `@pierre/highlights` Tree-sitter WASM `LiveTokenizer`（`packed24` 同步状态机适配 Monaco `TokensProvider`，内置超长行 `20,000` 与超大文件 `300,000` 行安全降级阈值）。
+- **离线语法高亮与 Pierre Git Diff 前端包（`dist/code-editor/` → `macos/Resources/CodeEditor/`）**：
+  - 基于裁剪版 `monaco-editor`（内置多光标、括号配对着色、Sticky Scroll、折叠、原生 Find/Replace/Go-to-Line）结合 `@pierre/highlights` Tree-sitter WASM `LiveTokenizer`（`packed24` 同步状态机适配 Monaco `TokensProvider`，内置超长行 `20,000` 与超大文件 `300,000` 行安全降级阈值）。
+  - **单 WebView Pierre Git Diff（`@pierre/diffs` + `@pierre/highlights`，`GitEditorDiffView.swift`）**：
+    - 移除旧版 SwiftUI `GitDiffReviewView` 表格、双 WebView `GitDiffLinkedEditor` 分栏以及不透明 `GitDiffTextView` 兜底；统一由单个 `MonacoWorkbenchController` 承载 ThinkRail 风格 Pierre Diff 视图。
+    - 原生紧凑顶部工具栏保持完整（文件切换 `<`/`>`、变更导航 `↑`/`↓` 及跨文件二次确认提示、`Review | Full Source` 折叠上下文与全量源码切换、自动换行、`Side by Side | Inline` 双栏同步与行内视图、在编辑器中打开、刷新），在单一池化透明 `WKWebView` 内无闪烁原地切换所有模式；当完整源码快照受限时以 `patchOnly: true` 方式在毛玻璃背景上直接渲染统一补丁。
+    - Git Diff 内选中变更行并触发 Ask Agent（`⌘⇧L` / `⌘⇧I` 或内联提问栏）直接解析工作树文件路径与行号区间，经 `EditorWorkspaceHost.sendAskAgentToQuickInput` 注入所属终端的 `QuickInput` 草稿框；关闭 Diff 标签时调用 `tearDown()` 彻底回收 `WKWebView` 与快捷键注册。
   - 支持 `idea` 与 `vscode` 双快捷键配置档案，并拦截编辑器内按键以防终端菜单项（如 `⌘D` 分屏）误抢焦点。
 
 - **纯 Swift 代码智能、Git 行级变更槽与文件监听（`macos/Sources/Features/Editor/Intelligence/` + `EditorWorkspaceIntelligenceBridge.swift`）**：

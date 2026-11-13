@@ -5,7 +5,7 @@ import Foundation
 /// Refresh always resolves the selection against a new list before reading it.
 @MainActor
 final class GitEditorDiffModel: ObservableObject {
-    struct Content {
+    struct Content: Equatable {
         let document: GitDiffDocument
         var before = ""
         var after = ""

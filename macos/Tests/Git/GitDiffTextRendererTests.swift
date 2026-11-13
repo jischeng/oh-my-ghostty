@@ -1,5 +1,7 @@
 import AppKit
+import SwiftUI
 import Testing
+import WebKit
 @testable import Ghostty
 
 struct GitDiffTextRendererTests {
@@ -33,22 +35,72 @@ struct GitDiffTextRendererTests {
     }
 
     @MainActor
-    @Test func fallbackPatchHasScrollableTextKitGeometry() throws {
-        let patch = "@@ -2823,1 +2823,2000 @@\n-old\n" + String(repeating: "+new\n", count: 2_000)
-        let scroll = GitDiffTextView.makeScrollView(text: patch)
-        let textView = try #require(scroll.documentView as? NSTextView)
-        let container = try #require(textView.textContainer)
-        let layout = try #require(textView.layoutManager)
-        #expect(!container.widthTracksTextView && !container.heightTracksTextView)
-        #expect(textView.frame.width > 0 && textView.frame.height > 0)
-        layout.ensureLayout(for: container)
-        #expect(layout.usedRect(for: container).height > scroll.contentView.bounds.height)
-        #expect(textView.frame.height > scroll.contentView.bounds.height)
-        scroll.contentView.scroll(to: NSPoint(x: 0, y: textView.frame.height - scroll.contentView.bounds.height))
-        #expect(scroll.contentView.bounds.minY > 0)
-        #expect(textView.string.contains("2823"))
-        #expect(textView.string.contains("4822"))
-        #expect(layout.numberOfGlyphs == textView.string.utf16.count)
+    @Test func fallbackPatchRendersInTransparentPierreWebViewInsteadOfOpaqueTextView() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("git-patch-only-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try Data("base\n".utf8).write(to: root.appendingPathComponent("large.swift"))
+        for args in [["init", "--quiet"], ["add", "large.swift"]] {
+            let res = try await LocalGitExecutor().execute(arguments: args, workingDirectory: root.path)
+            try #require(res.isSuccess)
+        }
+        try Data(String(repeating: "let largeLine = 1\n", count: 80).utf8)
+            .write(to: root.appendingPathComponent("large.swift"))
+
+        let repository = GitRepositoryIdentity(
+            worktreePath: root.path,
+            gitDirPath: root.path + "/.git",
+            commonGitDirPath: root.path + "/.git"
+        )
+        let request = GitEditorDiffRequest(
+            repository: repository,
+            target: .unstaged,
+            file: .init(path: "large.swift", status: "M")
+        )
+        let workbench = MonacoWorkbenchController()
+        defer { workbench.tearDown() }
+
+        let view = NSHostingView(
+            rootView: GitEditorDiffView(
+                request: request,
+                theme: .oneDark,
+                service: GitDiffService(sourceByteLimit: 64),
+                externalController: workbench,
+                close: {}
+            )
+            .frame(width: 720, height: 420)
+        )
+        view.sizingOptions = []
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 420),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = view
+        window.orderFront(nil)
+        defer { window.contentView = nil; window.close() }
+
+        for _ in 0..<120 {
+            if workbench.activeDiff != nil, workbench.isReady { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        view.layoutSubtreeIfNeeded()
+
+        let snapshot = try #require(workbench.activeDiff)
+        #expect(snapshot.patchOnly)
+        #expect(snapshot.originalText.isEmpty)
+        #expect(snapshot.modifiedText.isEmpty)
+        #expect(snapshot.patch.contains("+let largeLine = 1"))
+
+        let webView = try #require(workbench.webView)
+        #expect(!webView.isOpaque)
+        #expect((webView.underPageBackgroundColor?.alphaComponent ?? 1) == 0)
+
+        func textViews(in node: NSView) -> [NSTextView] {
+            if let tv = node as? NSTextView { return [tv] }
+            return node.subviews.flatMap(textViews)
+        }
+        #expect(textViews(in: view).isEmpty, "Patch fallback must render in Pierre WebView, not an opaque NSTextView")
     }
 
     private func prefix(of line: String) -> String {

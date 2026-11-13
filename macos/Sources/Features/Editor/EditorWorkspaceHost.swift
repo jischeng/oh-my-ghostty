@@ -1,6 +1,5 @@
 import AppKit
 import SwiftUI
-import CodeEditSourceEditor
 
 private struct EditorTerminalControllerKey: EnvironmentKey {
     static let defaultValue: TerminalController? = nil
@@ -88,6 +87,9 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                surfaceView.window?.isKeyWindow == true {
                 Ghostty.moveFocus(to: surfaceView)
             }
+        }
+        .onAppear {
+            workspace.scheduleIdlePreload()
         }
         .onChange(of: workspace.isVisible) { visible in
             if visible {
@@ -230,38 +232,36 @@ struct EditorWorkspaceHost<Terminal: View>: View {
 
     private var selectedContentID: EditorContentKey {
         if let request = workspace.gitDiff { return .diff(request.id) }
-        if let id = workspace.selectedID { return .document(id) }
+        if workspace.selectedDocument != nil { return .workbench }
         return .empty
     }
 
     private var documentItems: [EditorContentItem] {
-        var items = workspace.documents.map { document in
-            let selected = workspace.gitDiff == nil && workspace.selectedID == document.id
-            return EditorContentItem(id: .document(document.id), content: AnyView(
-                EditorDocumentView(
-                    document: document,
-                    isActive: selected && workspace.isVisible,
+        var items: [EditorContentItem] = []
+        if !workspace.documents.isEmpty {
+            let isWorkbenchActive = workspace.gitDiff == nil && workspace.selectedDocument != nil && workspace.isVisible
+            items.append(EditorContentItem(id: .workbench, content: AnyView(
+                EditorSharedWorkbenchPane(
+                    workspace: workspace,
+                    isActive: isWorkbenchActive,
                     isSurfaceFocused: {
                         (controller.focusedSurface ?? controller.surfaceTree.first) === surfaceView
                     },
                     terminalBackground: appearanceTheme.background,
-                    terminalBackgroundOpacity: appearanceOpacity,
                     terminalTheme: appearanceTheme,
                     onFocus: {
                         if controller.focusedSurface !== surfaceView {
                             controller.focusedSurface = surfaceView
                         }
                     },
-                    save: { Task { await workspace.save(document) } },
-                    close: { close(document) },
                     open: openFile,
-                    nextDocument: { workspace.selectAdjacentDocument(offset: 1) },
-                    previousDocument: { workspace.selectAdjacentDocument(offset: -1) },
-                    saveAll: { Task { await workspace.saveAll() } },
+                    close: { doc in close(doc) },
                     onHide: { workspace.isVisible = false },
-                    openLink: { href in openMarkdownLink(href, document: document) }
+                    onAskAgent: { request in sendAskAgentToQuickInput(request) },
+                    onNavigateDefinition: { path, location in navigateToDefinition(path: path, location: location) },
+                    openMarkdownLink: { href, document in openMarkdownLink(href, document: document) }
                 )
-            ))
+            )))
         }
         items += workspace.gitDiffs.map { request in
             let selected = workspace.gitDiff?.id == request.id
@@ -292,6 +292,25 @@ struct EditorWorkspaceHost<Terminal: View>: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity))))
         }
         return items
+    }
+
+    private func sendAskAgentToQuickInput(_ request: EditorAskAgentRequest) {
+        let workingDirectory = controller.paneSessionContext(for: surfaceView)?.workingDirectory ?? surfaceView.pwd
+        EditorQuickInputBridge.send(
+            request,
+            workingDirectory: workingDirectory,
+            to: controller,
+            surface: surfaceView
+        )
+    }
+
+    private func navigateToDefinition(path: String, location: EditorTextLocation) {
+        let filesystem = workspace.selectedDocument?.filesystem ?? LocalWorkspaceFilesystem(
+            workingDirectory: controller.paneSessionContext(for: surfaceView)?.workingDirectory
+                ?? surfaceView.pwd
+                ?? NSHomeDirectory()
+        )
+        workspace.open(path: path, filesystem: filesystem, location: location, externalFallback: false)
     }
 
     private func openGitFile(_ file: GitDiffFile, repository: GitRepositoryIdentity, directory: Bool) {
@@ -1128,26 +1147,130 @@ private struct EditorFloatingTooltipBubble: View {
     }
 }
 
-private struct EditorDocumentView: View {
-    @ObservedObject var document: EditorDocument
+/// Routes "Ask Agent / Send to Quick Input" selections into the owning pane's QuickInput composer.
+@MainActor
+enum EditorQuickInputBridge {
+    static func send(
+        _ request: EditorAskAgentRequest,
+        workingDirectory: String?,
+        to controller: TerminalController,
+        surface: Ghostty.SurfaceView
+    ) {
+        let prompt = request.formattedPrompt(workingDirectory: workingDirectory)
+        guard !prompt.isEmpty else { return }
+        if controller.focusedSurface !== surface {
+            controller.focusedSurface = surface
+        }
+        if controller.quickInputModel.isEditingQueuedItem {
+            controller.quickInputModel.cancelQueuedItemEdit()
+        }
+        controller.presentQuickInput(for: surface, requestFocus: true)
+        controller.quickInputModel.useHistoryText(prompt, mode: .append)
+    }
+}
+
+/// Shared single-WebView workbench pane backing all open code documents in an `EditorWorkspace`.
+private struct EditorSharedWorkbenchPane: View {
+    @ObservedObject var workspace: EditorWorkspace
+    @ObservedObject private var settings = OhMyGhosttySettings.shared
+    @Environment(\.colorScheme) private var colorScheme
+
     let isActive: Bool
     var isSurfaceFocused: () -> Bool = { true }
     let terminalBackground: NSColor
-    let terminalBackgroundOpacity: Double
     let terminalTheme: EditorTheme
     let onFocus: () -> Void
-    let save: () -> Void
-    let close: () -> Void
     let open: () -> Void
-    let nextDocument: () -> Void
-    let previousDocument: () -> Void
-    let saveAll: () -> Void
+    let close: (EditorDocument) -> Void
     let onHide: () -> Void
-    var openLink: (String) -> Void = { _ in }
+    let onAskAgent: (EditorAskAgentRequest) -> Void
+    let onNavigateDefinition: (String, EditorTextLocation) -> Void
+    let openMarkdownLink: (String, EditorDocument) -> Void
 
-    private var showsMarkdownPreview: Bool {
-        document.isMarkdown && document.isPreviewMode
+    private var resolvedTheme: EditorTheme {
+        var theme = terminalTheme
+        theme.background = EditorTheme.transparentBackground
+        return theme
     }
+
+    private var isDarkTheme: Bool {
+        let srgb = terminalBackground.usingColorSpace(.sRGB) ?? terminalBackground
+        if settings.editorSettings.followsOMG {
+            return srgb.brightnessComponent < 0.55
+        }
+        if settings.editorSyntaxTheme == .oneLight {
+            return false
+        }
+        return colorScheme == .dark || settings.editorSyntaxTheme != .oneLight
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let document = workspace.selectedDocument {
+                EditorDocumentTopBanners(
+                    document: document,
+                    save: { Task { await workspace.save(document) } },
+                    reloadFromDisk: { Task { try? await document.reload() } },
+                    keepMyEdits: { document.keepLocalEditsAfterConflict() }
+                )
+            }
+            ZStack(alignment: .topLeading) {
+                MonacoWorkbenchSurface(controller: workspace.workbenchController)
+                    .opacity(showsSelectedMarkdownPreview ? 0 : 1)
+                    .allowsHitTesting(!showsSelectedMarkdownPreview)
+
+                if let document = workspace.selectedDocument {
+                    EditorActiveDocumentObserver(
+                        workspace: workspace,
+                        document: document,
+                        isActive: isActive,
+                        isSurfaceFocused: isSurfaceFocused,
+                        terminalBackground: terminalBackground,
+                        resolvedTheme: resolvedTheme,
+                        isDarkTheme: isDarkTheme,
+                        onFocus: onFocus,
+                        open: open,
+                        close: { close(document) },
+                        onHide: onHide,
+                        onAskAgent: onAskAgent,
+                        onNavigateDefinition: onNavigateDefinition,
+                        openMarkdownLink: { href in openMarkdownLink(href, document) }
+                    )
+                }
+            }
+            if let document = workspace.selectedDocument {
+                Divider()
+                EditorDocumentStatusBar(document: document)
+            }
+        }
+        .onChange(of: workspace.selectedID) { [oldID = workspace.selectedID] newID in
+            if let oldID, oldID != newID,
+               let previous = workspace.documents.first(where: { $0.id == oldID }) {
+                previous.flushAutoSave()
+            }
+        }
+        .onChange(of: isActive) { active in
+            workspace.workbenchController.isActive = active
+            if !active {
+                workspace.selectedDocument?.flushAutoSave()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
+            workspace.selectedDocument?.flushAutoSave()
+        }
+    }
+
+    private var showsSelectedMarkdownPreview: Bool {
+        guard let document = workspace.selectedDocument else { return false }
+        return document.isMarkdown && document.isPreviewMode
+    }
+}
+
+private struct EditorDocumentTopBanners: View {
+    @ObservedObject var document: EditorDocument
+    let save: () -> Void
+    let reloadFromDisk: () -> Void
+    let keepMyEdits: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1163,97 +1286,245 @@ private struct EditorDocumentView: View {
                 .padding(10)
                 .background(Color.red.opacity(0.1))
             }
-            ZStack(alignment: .topLeading) {
-                CodeEditorView(
+            if document.hasExternalDiskConflict {
+                HStack(spacing: 10) {
+                    Label("File changed on disk", systemImage: "arrow.triangle.2.circlepath.circle")
+                        .font(.callout.weight(.medium))
+                    Spacer(minLength: 8)
+                    Button("Reload from Disk", action: reloadFromDisk)
+                        .controlSize(.small)
+                        .disabled(document.isSaving || document.isReloading)
+                    Button("Keep My Edits", action: keepMyEdits)
+                        .controlSize(.small)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(Color.orange.opacity(0.14))
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel("File changed on disk")
+            }
+        }
+    }
+}
+
+private struct EditorDocumentStatusBar: View {
+    @ObservedObject var document: EditorDocument
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(document.path).lineLimit(1).truncationMode(.middle)
+                .help(document.path)
+            if document.filesystem.descriptor.kind == .ssh {
+                Label(document.filesystem.descriptor.displayName, systemImage: "network")
+            }
+            Spacer(minLength: 8)
+
+            if document.isSaving {
+                ProgressView().controlSize(.small)
+                Text("Saving…")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else if document.isDirty {
+                Text("Edited")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+    }
+}
+
+private struct EditorActiveDocumentObserver: View {
+    @ObservedObject var workspace: EditorWorkspace
+    @ObservedObject var document: EditorDocument
+    @ObservedObject private var settings = OhMyGhosttySettings.shared
+
+    let isActive: Bool
+    let isSurfaceFocused: () -> Bool
+    let terminalBackground: NSColor
+    let resolvedTheme: EditorTheme
+    let isDarkTheme: Bool
+    let onFocus: () -> Void
+    let open: () -> Void
+    let close: () -> Void
+    let onHide: () -> Void
+    let onAskAgent: (EditorAskAgentRequest) -> Void
+    let onNavigateDefinition: (String, EditorTextLocation) -> Void
+    let openMarkdownLink: (String) -> Void
+
+    private var showsMarkdownPreview: Bool {
+        document.isMarkdown && document.isPreviewMode
+    }
+
+    var body: some View {
+        Group {
+            if document.isMarkdown {
+                MarkdownPreviewView(
                     text: $document.text,
                     fileURL: URL(fileURLWithPath: document.path),
-                    isEditable: !document.isRestoringFromGit,
-                    isActive: isActive,
-                    isPreview: showsMarkdownPreview,
-                    isSurfaceFocused: isSurfaceFocused,
+                    isRemote: document.filesystem.descriptor.kind == .ssh,
+                    filesystem: document.filesystem,
                     terminalBackground: terminalBackground,
-                    terminalBackgroundOpacity: terminalBackgroundOpacity,
-                    terminalForeground: terminalTheme.text.color,
-                    terminalTheme: terminalTheme,
-                    wordWrapOverride: document.isMarkdown ? true : nil,
+                    foregroundColor: resolvedTheme.text.color,
+                    isActive: isActive && showsMarkdownPreview,
                     onFocus: onFocus,
-                    onSave: save,
-                    onClose: close,
-                    onOpen: open,
-                    onNextDocument: nextDocument,
-                    onPreviousDocument: previousDocument,
-                    onSaveAll: saveAll,
+                    onSave: { Task { await workspace.save(document) } },
+                    onSaveAll: { Task { await workspace.saveAll() } },
                     onHide: onHide,
-                    navigationRequest: document.pendingNavigation,
-                    onConsumeNavigation: { document.consumeNavigation($0) }
+                    onOpenLink: openMarkdownLink
                 )
-                .id(document.contentGeneration)
-                .opacity(showsMarkdownPreview ? 0 : 1)
-                .allowsHitTesting(!showsMarkdownPreview)
-
-                if document.isMarkdown {
-                    MarkdownPreviewView(
-                        text: $document.text,
-                        fileURL: URL(fileURLWithPath: document.path),
-                        isRemote: document.filesystem.descriptor.kind == .ssh,
-                        filesystem: document.filesystem,
-                        terminalBackground: terminalBackground,
-                        foregroundColor: terminalTheme.text.color,
-                        isActive: isActive && showsMarkdownPreview,
-                        onFocus: onFocus,
-                        onSave: save,
-                        onSaveAll: saveAll,
-                        onHide: onHide,
-                        onOpenLink: openLink
-                    )
-                    .id(document.contentGeneration)
-                    .opacity(showsMarkdownPreview ? 1 : 0)
-                    .allowsHitTesting(showsMarkdownPreview)
-                }
+                .id("\(document.id.monacoURI)-\(document.contentGeneration)")
+                .opacity(showsMarkdownPreview ? 1 : 0)
+                .allowsHitTesting(showsMarkdownPreview)
+            } else {
+                Color.clear
+                    .allowsHitTesting(false)
             }
-            Divider()
-            HStack(spacing: 8) {
-                Text(document.path).lineLimit(1).truncationMode(.middle)
-                    .help(document.path)
-                if document.filesystem.descriptor.kind == .ssh {
-                    Label(document.filesystem.descriptor.displayName, systemImage: "network")
-                }
-                Spacer(minLength: 8)
-
-                if document.isSaving {
-                    ProgressView().controlSize(.small)
-                    Text("Saving…")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                } else if document.isDirty {
-                    Text("Edited")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
         }
         .onAppear {
             if document.pendingNavigation != nil && document.isPreviewMode {
                 document.isPreviewMode = false
+            }
+            syncDocumentToWorkbench(preserveView: true)
+            applyPendingNavigation()
+        }
+        .onChange(of: document.id) { _ in
+            if document.pendingNavigation != nil && document.isPreviewMode {
+                document.isPreviewMode = false
+            }
+            syncDocumentToWorkbench(preserveView: true)
+            applyPendingNavigation()
+        }
+        .onChange(of: document.text) { _ in
+            pushModel(preserveView: true)
+        }
+        .onChange(of: document.contentGeneration) { _ in
+            pushModel(preserveView: false)
+        }
+        .onChange(of: document.externalSyncRevision) { _ in
+            pushModel(preserveView: true)
+        }
+        .onChange(of: document.isRestoringFromGit) { _ in
+            syncDocumentToWorkbench(preserveView: true)
+        }
+        .onChange(of: document.isPreviewMode) { _ in
+            syncActivation()
+            if !document.isPreviewMode {
+                applyPendingNavigation()
             }
         }
         .onChange(of: document.pendingNavigation) { navigation in
             if navigation != nil && document.isPreviewMode {
                 document.isPreviewMode = false
             }
+            applyPendingNavigation()
         }
-        .onChange(of: isActive) { active in
-            if !active {
-                document.flushAutoSave()
+        .onChange(of: isActive) { _ in
+            syncActivation()
+        }
+        .onChange(of: settings.editorSettings) { _ in
+            syncDocumentToWorkbench(preserveView: true)
+        }
+        .onChange(of: resolvedTheme) { _ in
+            workspace.workbenchController.setTheme(resolvedTheme, isDark: isDarkTheme)
+        }
+    }
+
+    private func syncDocumentToWorkbench(preserveView: Bool) {
+        let workbench = workspace.workbenchController
+        configureCallbacks(on: workbench)
+        workbench.setTheme(resolvedTheme, isDark: isDarkTheme)
+        workbench.setFont(
+            family: settings.editorSettings.fontFamily,
+            size: settings.editorSettings.fontSize
+        )
+        // Ensure all open tabs in the workspace have backing Monaco models ready.
+        for openDoc in workspace.documents {
+            let readOnly = openDoc.isRestoringFromGit
+            workbench.openOrUpdateModel(
+                uri: openDoc.id.monacoURI,
+                path: openDoc.path,
+                text: openDoc.text,
+                readOnly: readOnly,
+                preserveView: openDoc.id == document.id ? preserveView : true
+            )
+        }
+        syncActivation()
+    }
+
+    private func pushModel(preserveView: Bool) {
+        workspace.workbenchController.openOrUpdateModel(
+            uri: document.id.monacoURI,
+            path: document.path,
+            text: document.text,
+            readOnly: document.isRestoringFromGit,
+            preserveView: preserveView
+        )
+    }
+
+    private func syncActivation() {
+        let workbench = workspace.workbenchController
+        configureCallbacks(on: workbench)
+        let editorSettings = settings.editorSettings
+        let readOnly = document.isRestoringFromGit || !isActive || showsMarkdownPreview
+        let wordWrap = document.isMarkdown ? true : editorSettings.wordWrap
+        let insertSpaces = !EditorLanguageMapping.usesHardTabs(forPath: document.path)
+        workbench.isPreview = showsMarkdownPreview
+        workbench.keymap = editorSettings.keymap
+        workbench.isSurfaceFocused = isSurfaceFocused
+        workbench.isActive = isActive
+        workbench.activateModel(
+            uri: document.id.monacoURI,
+            readOnly: readOnly,
+            wordWrap: wordWrap,
+            tabSize: max(1, editorSettings.tabWidth),
+            insertSpaces: insertSpaces,
+            keymapProfile: editorSettings.keymapProfile
+        )
+    }
+
+    private func configureCallbacks(on workbench: MonacoWorkbenchController) {
+        workbench.onFocus = onFocus
+        workbench.onAskAgent = onAskAgent
+        workbench.onNavigateDefinition = onNavigateDefinition
+        workbench.onTextChange = { [weak workspace] uri, updated in
+            guard let doc = workspace?.documents.first(where: { $0.id.monacoURI == uri }),
+                  doc.text != updated else { return }
+            doc.text = updated
+        }
+        workbench.onCommand = { [weak workspace] action in
+            guard let workspace else { return false }
+            switch action {
+            case .save:
+                if let active = workspace.selectedDocument {
+                    Task { await workspace.save(active) }
+                }
+            case .saveAll:
+                Task { await workspace.saveAll() }
+            case .close:
+                close()
+            case .open:
+                open()
+            case .nextDocument:
+                workspace.selectAdjacentDocument(offset: 1)
+            case .previousDocument:
+                workspace.selectAdjacentDocument(offset: -1)
+            case .hide:
+                onHide()
+            default:
+                return false
             }
+            return true
         }
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
-            document.flushAutoSave()
-        }
+    }
+
+    private func applyPendingNavigation() {
+        guard !showsMarkdownPreview, let request = document.pendingNavigation else { return }
+        workspace.workbenchController.revealLocation(request.location, in: document.id.monacoURI)
+        document.consumeNavigation(request.id)
     }
 }
 

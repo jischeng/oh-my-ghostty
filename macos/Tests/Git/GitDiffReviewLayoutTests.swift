@@ -1,6 +1,5 @@
 import AppKit
 import SwiftUI
-import CodeEditSourceEditor
 import Testing
 @testable import Ghostty
 

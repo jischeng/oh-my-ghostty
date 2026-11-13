@@ -1,99 +1,49 @@
 # Code Editor Plan
 
-本文记录本轮 OMG 内置代码编辑器工作的分工、方向和接续检查项。
-它是实现交接记录，不是完成声明；未经过构建、真实应用或 SSH 环境验证的内容不得按已完成能力对外描述。
+本文记录 OMG 内置代码编辑器（Monaco + `@pierre/highlights` + 纯 Swift 智能引擎与主机工作台）的架构设计与验收检查项。
+它是实现交接记录，不是完成声明；未经过真实应用、VM GUI 或真实 SSH 环境交互验证的细节仍需按测试清单持续核对。
 
-## 当前方向
+## 当前架构（Monaco + Pierre + LSP/Symbol + FileWatcher + Ask-Agent）
 
-- 编辑器组件采用 `CodeEditSourceEditor`，先做轻量代码查看和基础编辑，不从零实现文本编辑器。
-- 文件读写走统一 `WorkspaceFilesystem` 边界，保持 local 和 SSH 文件路径共用同一套打开、读取、保存入口。
-- Files Inspector 仍保持 data-only action 模型；Files UI 只发 typed action，不直接持有编辑器控制器。
-- 文件打开入口从 Files 行的双击和上下文菜单进入 `.openFile(path:)`，由 `BuiltInFilesInspectorProvider` 校验当前树内非目录节点后调用 host 注入的 `OpenFileHandler`。
-- 编辑器嵌入目标是终端旁的 Editor 区域，支持文件标签、切换、保存、关闭和 dirty 状态展示。
-- Files provider、终端布局及 Editor host 已接线；菜单的 `Open File in Editor…`（⌘O）也进入同一打开流程。
+- **单实例共享 `WKWebView` 工作台（`MonacoWorkbenchView.swift`）**：
+  - 彻底移除第三方 `CodeEditSourceEditor` / `CodeEditTextView` / `SwiftTreeSitter` SPM 依赖；由 OMG 原生轻量 `EditorTheme` 承载语法配色，对外保持属性名与 `EditorCatalogThemes` / Ghostty 终端主题适配 100% 源码兼容。
+  - 每个 `EditorWorkspace` 仅持有 **一个** `MonacoWorkbenchController`（单个池化 `MonacoEditorWebView`），同一工作区内打开的所有文件标签共享单个 `WKWebView`，通过 `openOrUpdateModel` + `activateModel` + `closeModel` 毫秒级切换 `ITextModel` 并自动保存/恢复各标签的光标、选区、折叠、滚动位置与独立 Undo/Redo 栈。
+  - 终端工作区空闲后支持 1.5s 轻量预热（测试环境自动跳过后台预热）；通过自定义 `WKURLSchemeHandler`（`omg-editor://bundle/index.html`）+ `.nonPersistent()` 数据存储提供完全离线资源加载（CSP `connect-src 'none'`，路径穿越严格校验在 bundle 根目录内）。
+  - `MonacoEditorWebView` 保持全链路透明（`isOpaque = false`、`drawsBackground = false`、`underPageBackgroundColor = .clear`、内部 `NSScrollView`/`NSClipView` 背景清零，Monaco 主题 `#00000000`），无缝透出底层 `EditorBackdrop` 毛玻璃与终端背景。
 
-## 本轮分工
+- **离线语法高亮与前端包（`dist/code-editor/` → `macos/Resources/CodeEditor/`）**：
+  - 基于裁剪版 `monaco-editor`（内置多光标、括号配对着色、Sticky Scroll、折叠、原生 Find/Replace/Go-to-Line、内联与并排 `DiffEditor`）结合 `@pierre/highlights` Tree-sitter WASM `LiveTokenizer`（`packed24` 同步状态机适配 Monaco `TokensProvider`，内置超长行 `20,000` 与超大文件 `300,000` 行安全降级阈值）。
+  - 支持 `idea` 与 `vscode` 双快捷键配置档案，并拦截编辑器内按键以防终端菜单项（如 `⌘D` 分屏）误抢焦点。
 
-- 组件方向：使用 `CodeEditSourceEditor` 承载文本编辑体验。
-- 文件模型：保留 `EditorDocument` 作为文档状态和编码/换行处理边界。
-- 文件系统：复用 `WorkspaceFilesystem`，后续 local/SSH 都应通过同一读取和保存抽象进入编辑器。
-- Files 入口：新增 Files action，避免单击打开文件；双击和 `Open in Editor` 才请求打开。
-- host 集成：由 root 负责把 provider 的 `OpenFileHandler` 接到实际 Editor controller，并把 Editor 放入终端布局。
+- **纯 Swift 代码智能、Git 行级变更槽与文件监听（`macos/Sources/Features/Editor/Intelligence/` + `EditorWorkspaceIntelligenceBridge.swift`）**：
+  - `EditorIntelligenceCoordinator` 统一调度本地按需启动的 stdio JSON-RPC 2.0 语言服务器（`EditorLSPManager`：支持 `sourcekit-lsp`、`zls`、`rust-analyzer`、`gopls`、`typescript-language-server`/`vtsls`、`basedpyright`/`pyright`/`pylsp`、`clangd`，空闲自动回收并带优雅退出与 SIGTERM/SIGKILL 兜底）以及零进程纯 Swift 工作区符号索引（`EditorSymbolIndex`）和 `EditorCompletionEngine`。
+  - 打通 Monaco `HoverProvider`、`DefinitionProvider`（`⌘+Click` / `F12` 跨文件跳转直接通过 `EditorWorkspace.open(path:filesystem:location:)` 在标签页打开目标文件并定位）、`ReferenceProvider`、`DocumentSymbolProvider`（`⇧⌘O` 文件符号大纲与 Sticky Scroll）、`CompletionItemProvider` 以及 `publishDiagnostics` 波浪线标注。
+  - **严格的本地 / SSH 隔离边界**：`EditorDocumentID.Endpoint == .ssh` 的远程文档绝不触发本地宿主机目录遍历、绝不启动本地 LSP 子进程、绝不调用本地 `git` 命令。
+  - `EditorGitGutterService` 异步解析零上下文统一 diff（`git diff -U0 HEAD`），向 Monaco 注入行级 `added` / `modified` / `deleted` 侧边栏色条。
+  - `EditorFileWatcher` 同时监听父目录与目标文件描述符（`O_EVTONLY`），安全捕获 Claude Code / Codex / `vim` / `git` 的原子 `rename()` 替换并哈希去重，自保存前预登记摘要防误报：
+    - 当未修改文档（`!isDirty`）在磁盘被外部更新时，`EditorDocument.applyExternalDiskUpdate` 原地无损同步（`preserveView: true` 最小差分编辑，不销毁视图、不重置光标与滚动条）。
+    - 当已修改文档（`isDirty`）发生外部磁盘变更时，置位 `hasExternalDiskConflict = true` 并在编辑器顶部展示冲突横幅（`File changed on disk`：`Reload from Disk` / `Keep My Edits`）。SSH 文档在窗口重新获得焦点时通过 `WorkspaceFilesystem` 异步校验远端摘要。
 
-## 已写入的入口约束
+- **ThinkRail 风格 “Ask Agent” 与工作区全局模糊快开（`⌘P` / `⌘O`）**：
+  - 选中代码通过右键菜单、`⌘⇧L` / `⌘⇧I` 或内联提问浮层发送 `{ type: "askAgent", path, startLine, endLine, selectedText, comment }`，`EditorQuickInputBridge` 生成 `@<relative-path>#L<start>-L<end>` + 注释 + 代码围栏并自动展开聚焦所属终端分屏的 `QuickInput` 草稿框。
+  - `EditorFilePicker` 支持 `⌘P`（`Quick Open in Editor…`）与 `⌘O`：空查询保持目录浏览；输入关键字时异步递归扫描工作区文件（自动跳过 `.git`、`node_modules`、`zig-*`、`build*`、`DerivedData`、`target` 等产物目录）并按文件名/路径边界模糊打分排序，支持上下方向键与回车直达打开。
 
-- `InspectorPaneActionKind.openFile(path:)` 表示打开文件请求。
-- `BuiltInFilesInspectorProvider.OpenFileHandler` 签名为 `@MainActor (String, InspectorPaneContext) -> Void`。
-- `BuiltInFilesInspectorProvider` initializer 需要显式注入 `openFile`，避免未接线时静默 no-op。
-- Provider 只接受当前 published file tree 内的文件节点；目录和不存在的 path 会被忽略。
-- `RightInspectorHost` 的 SwiftUI Files row 已有双击和上下文菜单入口；当前未发现独立的原生 `NSOutlineView` Files 树入口。
+- **Markdown 实时预览与编辑双模保留**：
+  - `.md` / `.markdown` 默认以离线安全的 `MarkdownPreviewView` 打开，保留顶部 `Edit | Preview` 切换、待办复选框单字符写回、宽表自适应与行号导航自动切回 Monaco 编辑模式。
 
-## 后续共用打开路径
+## 构建、选择器与验证命令
 
-- Files 面板、未来文件搜索、Git Diff 详情里的文件打开都应调用同一 Editor 打开服务。
-- Git detail 当前不扩展为编辑器功能；后续只在需要“打开这个文件”时复用统一路径。
-- 后续普通文件与 Diff 本身共用 Editor 文档打开流程和展示区域；Git 提供差异数据，Editor 承载只读 Diff。不只复用从 Diff 跳到文件的动作。
+- 前端包重编与单测：`npm run build --prefix dist/code-editor && npm test --prefix dist/code-editor`
+- 测试计划选择器验证：`dist/macos/dev-tool.sh python3 -m unittest discover -s dist -p 'test_omg_test_plan.py'`（`dist/code-editor/**` 与 `macos/Resources/CodeEditor/**` 均映射至 `editor` 模块）
+- Swift 静态规范与文档契约：
+  - `dist/macos/dev-tool.sh swiftlint lint --strict --config macos/.swiftlint.yml macos`
+  - `dist/macos/dev-tool.sh python3 dist/check_omg_docs.py`
+- macOS 构建与测试（遵循串行执行与 VM 隔离原则）：
+  - `macos/build.nu --action test --test-modules editor,git,inspector`
 
-## 当前不扩展范围
+## 持续验收清单
 
-- 不扩展 Git detail 的交互范围。
-- 不实现 Vim 模态编辑。
-- 不接 LSP、诊断、补全服务。
-- 不设计完整 IDE 工作区。
-- 不新增插件 API 或第三方编辑器协议。
-
-## 使用与验收
-
-- 在 Files 双击文件，或选择 `File → Open File in Editor…`。SSH Pane 的打开对话框接受远端绝对路径。
-- 编辑区域按终端 Tab 保存文件标签；⌘S 保存、⌘F 查找、⌘W 关闭当前文件，隐藏区域保留文档。
-- 首版支持 UTF-8（含 BOM）及原换行风格；读取上限 10 MiB。SSH 使用已有 SFTP 连接能力，不提供新的交互认证界面。
-- 工作目录：`../oh-my-ghostty-editor`，分支：`codex/code-editor`，基于 `codex/git-readonly`。
-- 构建：`macos/build.nu`；测试：`macos/build.nu --action test`。独立 worktree 复用原 checkout 的 GhosttyKit 与 zig-out/share 构建产物。
-
-## 第二轮功能完善
-
-- 查找支持匹配计数与大小写选项；替换当前项或全部匹配走编辑器原生修改接口，保留撤销。
-- 支持按 `行:列` 跳转。快捷键：⌘F 查找、⌥⌘F 替换、⌘L 跳转、⌘G / ⇧⌘G 查找下一项或上一项。
-- Control-Tab / Control-Shift-Tab 切换文件，⇧⌘S 保存全部文件；标签菜单列出完整路径，支持重新加载与关闭全部文件。
-- 重新加载使用原文件系统，因此本地和 SSH 共用逻辑；未保存文件先确认，读取失败或读取期间继续编辑都保留现有内容。
-- 外部重新加载后重建对应编辑器视图，更新文本及编码基线；普通文件切换继续保留每个编辑器的撤销记录。
-- 本轮按用户要求只推进功能、编译和自动化测试，人工界面验收暂缓。
-
-## Worker 接续检查清单
-
-- 构建：确认 `BuiltInFilesInspectorProvider` 所有初始化点都已注入真实或测试 handler。
-- Files 入口：在真实 app 中验证文件双击打开，目录双击仍只展开/收起。
-- 中文 IME：在 Editor 中输入中文、候选词选择、组合态取消、光标移动和撤销。
-- 大文件：实际打开较大源码/日志文件，观察首屏时间、滚动、编辑延迟和内存增长。
-- 快捷键：验证保存、关闭、切换标签、复制粘贴、撤销重做和终端焦点切换。
-- Dirty 状态：修改后显示 dirty，保存后清除 dirty，关闭 dirty 文件时有明确处理。
-- 文件切换：多个标签切换不丢编辑内容，重复打开同一文件复用已有标签。
-- SSH roundtrip：如环境可用，验证远端文件打开、编辑、保存、重新读取后内容一致。
-- 错误路径：验证二进制文件、不可读文件、保存失败和 SSH 断线时的用户可见状态。
-- 文档同步：若入口、provider 行为或读写 contract 继续变化，同步更新 `docs/PLUGIN_DEVELOPMENT.md`。
-
-## 2026-09-07 保存可靠性与行操作修复
-
-- 自动保存失败显示文档内错误提示并提供 Retry Save；保留未保存内容，成功保存或重新加载后清除错误。
-- 慢速本地/SSH 写入期间继续编辑，当前写入成功后重新安排自动保存，避免剩余修改停留在 dirty 状态。
-- 关闭和重新加载确认期间暂停自动保存；取消后恢复，已移除的文档停止自动保存。
-- 修复文件末尾空行被误判为上一行，避免在空行执行删除或复制时修改上一行。
-- 回归覆盖保存冲突、慢写入、自动保存暂停/恢复、末尾空行操作及撤销。真实 SSH 网络、中文 IME 和界面交互仍需验收。
-
-## 2026-09-07 输入热路径代码优化
-
-- 查找栏缓存匹配范围，只在文本、查询条件或查找模式变化时更新；移动光标和遍历匹配不再重复扫描全文。修改查询从首项定位，关闭后仍可使用 Find Next。
-- 补全统一取消入口：输入空白、移动光标、多选区、IME 组合态、Escape、停用编辑器及提交补全都会使旧请求失效。返回及提交时校验当前光标/前缀；按键优先核对实际焦点及修饰键。
-- 关键词使用明确语言标识和别名，未知语言不再回退到 Swift；buffer 词表只聚合匹配词，按最近出现距离评分；同分候选按 label 稳定排序，过滤后无匹配立即清空。
-- 每个编辑器保留自己的高亮 provider 实例；Markdown 辅助高亮复用正则和 NSString 切片；等长修改仅使受影响行失效，长度变化时使后续范围失效，以兼容组件未平移有效范围缓存的行为。跨行语法仍由 Tree-sitter 管理。
-- 自动化覆盖原生编辑器补全请求失效、焦点、修饰键、IME 标记文本、提交及撤销；这些不是人工输入法和视觉验收的替代。
-
-### 本轮检查后仍待推进
-
-- Markdown 文件（`.md` / `.markdown`，不区分大小写）默认打开为 Preview 模式，每个文档在顶部右侧工具栏保留独立的 `Edit | Preview` 切换；收到行号定位导航请求时自动切换到 Edit 模式并默认开启软换行。Preview 使用打包的离线 `markdown-it` + `Highlight.js` + `KaTeX` + `Mermaid` + `DOMPurify` 管线渲染，支持自适应宽屏/窄屏重排、CJK 宽表格智能列宽与局部横向滚动、`file://#L...` 本地/SSH 跳转胶囊、代码块一键复制、GitHub Alerts 以及 `carousel` 多页轮播卡片。
-- Preview 中的待办复选框点击通过 `{type: "edit", text, baseText}` 版本校验桥只切换源码对应的单个字符，不经过富文本整篇序列化；仅打开或渲染不会规范化全文或标记修改。
-- `MarkdownPreviewView` 使用透明 WKWebView 继承终端背景，首次就绪立即渲染、后续编辑更新合并防抖；本地和 SSH 图片通过同一个 `WorkspaceFilesystem` 异步读取，资源桥只返回图片类型。重载文档重建预览并重新请求图片。脚本、字体和样式随应用打包，远程 URL 图片仍需要网络；HTML 经 DOMPurify 过滤，Mermaid 使用 strict 模式，外部链接仅在用户点击后交给系统浏览器。
-- 预览拥有自身选区与复制快捷键；隐藏终端不抢占 WebView 快捷键。编辑消息携带基准文本，拒绝覆盖已经变化的文档；保存前同步最新内容。前端离线测试依赖说明见 `dist/markdown-editor/README.md`。
-- buffer 补全仍只扫描文件开头 100,000 个 UTF-16 单元，大文件尾部的局部标识符可能缺失；后续应采用光标周边窗口或增量索引。
-- `EditorWorkspace.save/canClose` 在已有保存进行时直接返回 false，慢速 SSH 下缺少等待完成后继续用户操作的机制。
-- 每个打开的文档都保留原生编辑器以保存撤销历史；大量标签的内存及恢复策略需要实际测量，不能直接通过销毁隐藏编辑器优化。
+- **单 WebView 池化与内存**：在同一工作区连续打开/切换/关闭 10+ 个文件标签及 Git Diff，确认仅存在 1 个 `MonacoEditorWebView` 实例，关闭工作区后 `WKWebView` 与 LSP 子进程完全释放。
+- **外部 Agent 协同改码**：使用外部进程原子改写已打开文件，验证干净状态下光标不跳动、未保存状态下冲突横幅按钮（`Reload from Disk` 与 `Keep My Edits` 后继续保存）行为准确。
+- **中文 IME 与快捷键**：在 Monaco 编辑区验证中文拼音组合态候选词、撤销重做、`⌘F` / `⌥⌘F` / `⌘L` / `⇧⌘O` / `⌘P` / `⇧Escape` 以及终端分屏焦点切换。
+- **SSH 隔离与远端往返**：在 SSH 会话中验证打开、编辑、保存、重新加载以及窗口切回时的远端变更检测，确认无任何本地文件系统或本地 LSP/Git 泄露。

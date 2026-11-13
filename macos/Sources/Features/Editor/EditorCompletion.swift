@@ -35,6 +35,18 @@ public enum CompletionItemKind: String, Codable, Sendable, CaseIterable {
         case .text: .secondary
         }
     }
+
+    public var monacoCompletionKind: Int {
+        switch self {
+        case .keyword: 17
+        case .function: 1
+        case .variable: 4
+        case .type: 5
+        case .property: 9
+        case .snippet: 27
+        case .text: 18
+        }
+    }
 }
 
 /// A candidate suggestion presented in the completion popup.
@@ -63,6 +75,20 @@ public struct CompletionItem: Identifiable, Sendable, Equatable {
 
     public static func == (lhs: CompletionItem, rhs: CompletionItem) -> Bool {
         lhs.label == rhs.label && lhs.insertText == rhs.insertText && lhs.kind == rhs.kind
+    }
+
+    public var bridgeDictionary: [String: Any] {
+        var dict: [String: Any] = [
+            "label": label,
+            "insertText": insertText,
+            "kind": kind.rawValue,
+            "monacoKind": kind.monacoCompletionKind,
+            "isSnippet": kind == .snippet && insertText.contains("$")
+        ]
+        if let detail {
+            dict["detail"] = detail
+        }
+        return dict
     }
 }
 

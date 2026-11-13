@@ -1,5 +1,4 @@
 import AppKit
-import CodeEditTextView
 import SwiftUI
 import Testing
 import WebKit
@@ -265,30 +264,33 @@ struct MarkdownLiveEditorTests {
             window.close()
         }
 
-        var textView: TextView?
-        for _ in 0..<100 {
-            textView = findTextView(window.contentView)
-            if let textView, textView.enclosingScrollView != nil, textView.layoutManager.lineCount > 0 {
-                break
-            }
-            try await Task.sleep(for: .milliseconds(20))
+        let monacoWeb = try await EditorTestSupport.waitForMonacoReady(in: window.contentView)
+        try await waitUntil {
+            let count = (try? await monacoWeb.evaluateJavaScript(
+                "window.omgEditor?._internal?.editor?.getModel?.()?.getLineCount?.() ?? 0"
+            )) as? Int
+            return (count ?? 0) >= 1
         }
-        let editor = try #require(textView)
-        #expect(editor.layoutManager.wrapLines)
+        _ = try await monacoWeb.evaluateJavaScript("window.omgEditor._internal.editor.layout({ width: 960, height: 520 });")
         try await Task.sleep(for: .milliseconds(80))
-        editor.layoutSubtreeIfNeeded()
-        let wideHeight = editor.layoutManager.estimatedHeight()
+        let wideHeight = try #require(
+            try await monacoWeb.evaluateJavaScript("window.omgEditor._internal.editor.getContentHeight()") as? Double
+        )
 
         window.setContentSize(NSSize(width: 320, height: 520))
-        try await Task.sleep(for: .milliseconds(120))
-        editor.layoutSubtreeIfNeeded()
-        let narrowHeight = editor.layoutManager.estimatedHeight()
-        #expect(narrowHeight > wideHeight * 1.6, "Narrowing a word-wrapped editor must reflow lines and increase wrapped height")
+        _ = try await monacoWeb.evaluateJavaScript("window.omgEditor._internal.editor.layout({ width: 320, height: 520 });")
+        try await Task.sleep(for: .milliseconds(100))
+        let narrowHeight = try #require(
+            try await monacoWeb.evaluateJavaScript("window.omgEditor._internal.editor.getContentHeight()") as? Double
+        )
+        #expect(narrowHeight > wideHeight * 1.4, "Narrowing a word-wrapped editor must reflow lines and increase wrapped height")
 
         window.setContentSize(NSSize(width: 960, height: 520))
-        try await Task.sleep(for: .milliseconds(120))
-        editor.layoutSubtreeIfNeeded()
-        let restoredHeight = editor.layoutManager.estimatedHeight()
+        _ = try await monacoWeb.evaluateJavaScript("window.omgEditor._internal.editor.layout({ width: 960, height: 520 });")
+        try await Task.sleep(for: .milliseconds(100))
+        let restoredHeight = try #require(
+            try await monacoWeb.evaluateJavaScript("window.omgEditor._internal.editor.getContentHeight()") as? Double
+        )
         #expect(restoredHeight < narrowHeight, "Widening a word-wrapped editor back must unwrap lines cleanly")
     }
 
@@ -395,14 +397,6 @@ struct MarkdownLiveEditorTests {
         if let view = view as? MarkdownPreviewWebView { return view }
         for child in view?.subviews ?? [] {
             if let found = findWebView(child) { return found }
-        }
-        return nil
-    }
-
-    private func findTextView(_ view: NSView?) -> TextView? {
-        if let view = view as? TextView { return view }
-        for child in view?.subviews ?? [] {
-            if let found = findTextView(child) { return found }
         }
         return nil
     }

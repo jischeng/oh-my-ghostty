@@ -4,6 +4,7 @@ import SwiftUI
 enum EditorContentKey: Hashable {
     case terminal
     case workspace
+    case workbench
     case document(EditorDocumentID)
     case diff(UUID)
     case diffMode(String)

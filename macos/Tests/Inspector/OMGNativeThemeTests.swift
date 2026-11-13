@@ -1,5 +1,4 @@
 import AppKit
-import CodeEditSourceEditor
 import Testing
 @testable import Ghostty
 

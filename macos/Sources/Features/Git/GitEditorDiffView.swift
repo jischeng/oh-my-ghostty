@@ -1,6 +1,5 @@
 import AppKit
 import SwiftUI
-import CodeEditSourceEditor
 
 struct GitEditorDiffRequest: Identifiable {
     let id = UUID()

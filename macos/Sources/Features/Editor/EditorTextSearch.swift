@@ -1,72 +1,4 @@
 import Foundation
-import CodeEditTextView
-
-private final class ProgrammaticReplaceDelegate: NSObject, TextViewDelegate {
-    weak var upstream: TextViewDelegate?
-    var groupMutations = false
-    var ownsUndoGroup = false
-
-    init(upstream: TextViewDelegate?) {
-        self.upstream = upstream
-    }
-
-    func textView(_ textView: TextView, shouldReplaceContentsIn range: NSRange, with string: String) -> Bool {
-        true
-    }
-
-    func textView(_ textView: TextView, willReplaceContentsIn range: NSRange, with string: String) {
-        // Open the group before the first mutation is registered. The undo
-        // manager breaks a group that starts after a mutation has landed, so a
-        // late `beginUndoGrouping()` would leave the rest of the edits outside
-        // the group and turn one replace-all into several undo steps.
-        if groupMutations, !ownsUndoGroup, textView._undoManager?.isGrouping == false {
-            textView._undoManager?.beginUndoGrouping()
-            ownsUndoGroup = true
-        }
-        upstream?.textView(textView, willReplaceContentsIn: range, with: string)
-    }
-
-    func textView(_ textView: TextView, didReplaceContentsIn range: NSRange, with string: String) {
-        upstream?.textView(textView, didReplaceContentsIn: range, with: string)
-    }
-}
-
-@MainActor
-enum EditorTextEditing {
-    /// Literal replacements share one undo group without replacing untouched
-    /// lines between carets (which can invalidate the native line layout cache).
-    @discardableResult
-    static func replace(on textView: TextView, ranges: [NSRange], with replacement: String) -> Bool {
-        apply(on: textView, edits: ranges.map { ($0, replacement) })
-    }
-
-    @discardableResult
-    static func apply(on textView: TextView, edits: [(range: NSRange, text: String)]) -> Bool {
-        guard textView.isEditable, !edits.isEmpty else { return false }
-        let edits = edits.sorted { $0.range.location < $1.range.location }
-        guard edits.allSatisfy({ $0.range.location != NSNotFound && $0.range.location >= 0
-            && NSMaxRange($0.range) <= textView.textStorage.length }) else { return false }
-        for (first, second) in zip(edits, edits.dropFirst()) where NSMaxRange(first.range) > second.range.location {
-            return false
-        }
-        let originalDelegate = textView.delegate
-        let bypass = ProgrammaticReplaceDelegate(upstream: originalDelegate)
-        bypass.groupMutations = edits.count > 1
-        textView.delegate = bypass
-        defer {
-            if bypass.ownsUndoGroup { textView._undoManager?.endUndoGrouping() }
-            textView.delegate = originalDelegate
-        }
-        for edit in edits.reversed() {
-            // Callers restore their final selections. Do not let intermediate
-            // replacements remap stale multi-caret positions outside the buffer.
-            textView.selectionManager.setSelectedRange(edit.range)
-            textView.replaceCharacters(in: edit.range, with: edit.text)
-        }
-        return true
-    }
-
-}
 
 /// 1-based line and optional column / inclusive end-line target for opening files.
 struct EditorTextLocation: Equatable, Sendable {
@@ -81,7 +13,7 @@ struct EditorTextLocation: Equatable, Sendable {
     }
 }
 
-/// UTF-16 based search and navigation helpers for the native editor.
+/// UTF-16 based search and navigation helpers for the editor.
 enum EditorTextSearch {
     static func selectionRange(for location: EditorTextLocation, in text: String) -> NSRange? {
         if let endLine = location.endLine {

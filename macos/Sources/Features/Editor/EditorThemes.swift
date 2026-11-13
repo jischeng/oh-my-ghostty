@@ -1,6 +1,106 @@
 import AppKit
-import CodeEditSourceEditor
 import GhosttyKit
+
+/// Native syntax and surface theme model for OMG's code editor and diff views.
+public struct EditorTheme: Equatable {
+    public struct Attribute: Equatable {
+        public var color: NSColor
+        public var bold: Bool
+        public var italic: Bool
+
+        public init(color: NSColor, bold: Bool = false, italic: Bool = false) {
+            self.color = color
+            self.bold = bold
+            self.italic = italic
+        }
+    }
+
+    public var text: Attribute
+    public var insertionPoint: NSColor
+    public var invisibles: Attribute
+    public var background: NSColor
+    public var lineHighlight: NSColor
+    public var selection: NSColor
+    public var keywords: Attribute
+    public var commands: Attribute
+    public var types: Attribute
+    public var attributes: Attribute
+    public var variables: Attribute
+    public var values: Attribute
+    public var numbers: Attribute
+    public var strings: Attribute
+    public var characters: Attribute
+    public var comments: Attribute
+
+    public init(
+        text: Attribute,
+        insertionPoint: NSColor,
+        invisibles: Attribute,
+        background: NSColor,
+        lineHighlight: NSColor,
+        selection: NSColor,
+        keywords: Attribute,
+        commands: Attribute,
+        types: Attribute,
+        attributes: Attribute,
+        variables: Attribute,
+        values: Attribute,
+        numbers: Attribute,
+        strings: Attribute,
+        characters: Attribute,
+        comments: Attribute
+    ) {
+        self.text = text
+        self.insertionPoint = insertionPoint
+        self.invisibles = invisibles
+        self.background = background
+        self.lineHighlight = lineHighlight
+        self.selection = selection
+        self.keywords = keywords
+        self.commands = commands
+        self.types = types
+        self.attributes = attributes
+        self.variables = variables
+        self.values = values
+        self.numbers = numbers
+        self.strings = strings
+        self.characters = characters
+        self.comments = comments
+    }
+}
+
+extension EditorTheme {
+    func monacoThemePayload(isDark: Bool) -> [String: Any] {
+        [
+            "base": isDark ? "vs-dark" : "vs",
+            "foreground": Self.cssHex(text.color, includeAlpha: false),
+            "cursor": Self.cssHex(insertionPoint, includeAlpha: false),
+            "selection": Self.cssHex(selection, includeAlpha: true),
+            "lineHighlight": Self.cssHex(lineHighlight, includeAlpha: true),
+            "keywords": Self.cssHex(keywords.color, includeAlpha: false),
+            "functions": Self.cssHex(commands.color, includeAlpha: false),
+            "types": Self.cssHex(types.color, includeAlpha: false),
+            "strings": Self.cssHex(strings.color, includeAlpha: false),
+            "numbers": Self.cssHex(numbers.color, includeAlpha: false),
+            "comments": Self.cssHex(comments.color, includeAlpha: false),
+            "variables": Self.cssHex(variables.color, includeAlpha: false)
+        ]
+    }
+
+    static func cssHex(_ color: NSColor, includeAlpha: Bool) -> String {
+        let srgb = color.usingColorSpace(.sRGB) ?? color
+        let r = Int(round(min(max(srgb.redComponent, 0), 1) * 255))
+        let g = Int(round(min(max(srgb.greenComponent, 0), 1) * 255))
+        let b = Int(round(min(max(srgb.blueComponent, 0), 1) * 255))
+        if includeAlpha {
+            let a = Int(round(min(max(srgb.alphaComponent, 0), 1) * 255))
+            if a < 255 {
+                return String(format: "#%02x%02x%02x%02x", r, g, b, a)
+            }
+        }
+        return String(format: "#%02x%02x%02x", r, g, b)
+    }
+}
 
 extension EditorTheme {
     /// The workspace paints one backdrop for toolbar, gutter and text, so the

@@ -11,9 +11,45 @@ final class EditorWorkspace: ObservableObject {
     @Published var isVisible = false
     @Published var isLoading = false
     @Published var errorMessage: String?
+    let workbenchController = MonacoWorkbenchController()
+    private(set) var intelligenceBridge: EditorWorkspaceIntelligenceBridge!
     private var openTask: Task<Void, Never>?
+    private var idlePreloadTask: Task<Void, Never>?
+    var onDocumentRemoved: ((EditorDocument) -> Void)?
+    var onWorkspaceCleared: (() -> Void)?
+
+    init(
+        intelligenceCoordinator: EditorIntelligenceCoordinator? = nil,
+        fileWatcherDebounce: TimeInterval = 0.12
+    ) {
+        self.intelligenceBridge = EditorWorkspaceIntelligenceBridge(
+            workspace: self,
+            coordinator: intelligenceCoordinator,
+            fileWatcherDebounce: fileWatcherDebounce
+        )
+    }
+
+    func scheduleIdlePreload(delay: Duration = .milliseconds(1_500)) {
+        guard workbenchController.webView == nil, idlePreloadTask == nil else { return }
+        // Avoid spinning up idle background WebKit processes inside unit-test runners.
+        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
+        guard ProcessInfo.processInfo.thermalState != .critical else { return }
+        idlePreloadTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: delay)
+            } catch {
+                return
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.idlePreloadTask = nil
+            guard ProcessInfo.processInfo.thermalState != .critical else { return }
+            self.workbenchController.preloadIfNeeded()
+        }
+    }
 
     func cancelAndClear() {
+        idlePreloadTask?.cancel()
+        idlePreloadTask = nil
         openTask?.cancel()
         openTask = nil
         isLoading = false
@@ -21,7 +57,14 @@ final class EditorWorkspace: ObservableObject {
         for document in documents {
             document.suspendAutoSave()
             document.cancelAutoSave()
+            document.onWillWriteData = nil
+            document.onDidPersistSnapshot = nil
+            document.onDidEditText = nil
+            workbenchController.closeModel(uri: document.id.monacoURI)
         }
+        onWorkspaceCleared?()
+        intelligenceBridge.tearDown()
+        workbenchController.tearDown()
         gitDiff = nil
         gitDiffs.removeAll()
         documents.removeAll()
@@ -113,6 +156,7 @@ final class EditorWorkspace: ObservableObject {
                     document.requestNavigation(location)
                 }
                 documents.append(document)
+                intelligenceBridge.registerDocument(document)
                 selectedID = document.id
                 isLoading = false
             } catch {
@@ -297,6 +341,10 @@ final class EditorWorkspace: ObservableObject {
 
     func remove(_ document: EditorDocument) {
         document.suspendAutoSave()
+        document.cancelAutoSave()
+        intelligenceBridge.unregisterDocument(document)
+        onDocumentRemoved?(document)
+        workbenchController.closeModel(uri: document.id.monacoURI)
         documents.removeAll { $0.id == document.id }
         if selectedID == document.id { selectedID = documents.last?.id }
         if selectedID == nil, gitDiff == nil, let last = gitDiffs.last { selectGitDiff(last) }

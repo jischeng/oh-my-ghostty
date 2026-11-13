@@ -1,7 +1,6 @@
 import AppKit
 import SwiftUI
 import Testing
-import CodeEditTextView
 @testable import Ghostty
 
 @MainActor
@@ -301,7 +300,7 @@ struct GitHistoryInteractionTests {
         let window = hostWindow(view)
         defer { window.contentView = nil; window.close() }
         try await Task.sleep(for: .milliseconds(200))
-        let editor = try #require(find(TextView.self, in: window.contentView))
+        let editor = try #require(find(MonacoEditorWebView.self, in: window.contentView))
         window.makeFirstResponder(editor)
         func key(_ characters: String, code: UInt16, modifiers: NSEvent.ModifierFlags) throws {
             let event = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers,

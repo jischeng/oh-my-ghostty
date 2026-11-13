@@ -45,7 +45,13 @@ MODULES = {
         ("editor", "inspector"),
     ),
     "editor": Module(
-        ("macos/Sources/Features/Editor/**", "dist/markdown-editor/**"),
+        (
+            "macos/Sources/Features/Editor/**",
+            "dist/markdown-editor/**",
+            "dist/code-editor/**",
+            "macos/Resources/MarkdownPreview/**",
+            "macos/Resources/CodeEditor/**",
+        ),
         ("macos/Tests/Editor/*.swift",),
         ("git", "terminal"),
     ),

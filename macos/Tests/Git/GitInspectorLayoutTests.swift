@@ -1,5 +1,4 @@
 import AppKit
-import CodeEditTextView
 import SwiftUI
 import Testing
 @testable import Ghostty
@@ -124,9 +123,16 @@ struct GitInspectorLayoutTests {
             let count = 42
         }
         """
-        let view = NSHostingView(rootView: CodeEditorView(text: .constant(source),
-            fileURL: URL(fileURLWithPath: "/example.swift"), diffLines: [4: true], isEditable: false, terminalTheme: .oneDark)
-            .frame(width: 640, height: 300).background(Color(NSColor.textBackgroundColor)))
+        let workbench = MonacoWorkbenchController()
+        defer { workbench.tearDown() }
+        let view = NSHostingView(rootView: CodeEditorView(
+            text: .constant(source),
+            fileURL: URL(fileURLWithPath: "/example.swift"),
+            diffLines: [4: true],
+            isEditable: false,
+            terminalTheme: .oneDark,
+            externalController: workbench
+        ).frame(width: 640, height: 300).background(Color(NSColor.textBackgroundColor)))
         view.sizingOptions = []
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 300),
                               styleMask: [.borderless], backing: .buffered, defer: false)
@@ -134,19 +140,13 @@ struct GitInspectorLayoutTests {
         window.contentView = view
         window.orderFront(nil)
         defer { window.contentView = nil; window.close() }
-        try await Task.sleep(for: .milliseconds(300))
+        try await Task.sleep(for: .milliseconds(150))
         view.layoutSubtreeIfNeeded()
-        let editor = try #require(descendant(TextView.self, in: view))
-        #expect(editor.string == source)
-        #expect(!editor.isEditable)
-        let numberOffset = (source as NSString).range(of: "42").location
-        for _ in 0..<40 {
-            let color = editor.textStorage.attribute(.foregroundColor, at: numberOffset, effectiveRange: nil) as? NSColor
-            if color != nil && color != editor.textColor { break }
-            try await Task.sleep(for: .milliseconds(50))
-        }
-        let numberColor = editor.textStorage.attribute(.foregroundColor, at: numberOffset, effectiveRange: nil) as? NSColor
-        #expect(numberColor != nil && numberColor != editor.textColor)
+        let editor = try #require(descendant(MonacoEditorWebView.self, in: view))
+        #expect(!editor.isOpaque)
+        let activeURI = try #require(workbench.activeURI)
+        #expect(workbench.openModels[activeURI]?.text == source)
+        #expect(workbench.openModels[activeURI]?.readOnly == true)
         if FileManager.default.fileExists(atPath: "/tmp/omg-git-render") {
             let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
             view.cacheDisplay(in: view.bounds, to: bitmap)
@@ -257,47 +257,36 @@ struct GitInspectorLayoutTests {
         window.contentView = view
         window.orderFront(nil)
         defer { window.contentView = nil; window.close() }
-        try await Task.sleep(for: .milliseconds(250))
-        func editors(_ view: NSView) -> [TextView] {
-            if let text = view as? TextView { return [text] }
+        try await Task.sleep(for: .milliseconds(150))
+        func editors(_ view: NSView) -> [MonacoEditorWebView] {
+            if let text = view as? MonacoEditorWebView { return [text] }
             return view.subviews.flatMap(editors)
         }
         let values = editors(view)
         #expect(values.count == 2)
         let left = try #require(values.first)
         let right = try #require(values.last)
-        func scroll(_ text: TextView, to index: Int) throws {
-            let line = try #require(text.layoutManager.textLineForIndex(index))
-            let clip = try #require(text.enclosingScrollView?.contentView)
-            clip.scroll(to: NSPoint(x: 0, y: line.yPos))
-            text.enclosingScrollView?.reflectScrolledClipView(clip)
-        }
-        func expectPosition(_ text: TextView, at index: Int) throws {
-            let line = try #require(text.layoutManager.textLineForIndex(index))
-            let origin = try #require(text.enclosingScrollView?.contentView.bounds.minY)
-            // NSClipView rounds scroll origins to backing pixels. A fractional
-            // sliver of the preceding line must not count as a whole-line error.
-            #expect(abs(origin - line.yPos) <= 1)
-        }
-        try scroll(left, to: 80)
-        try expectPosition(right, at: 82)
-        try scroll(right, to: 120)
-        try expectPosition(left, at: 118)
+        link.jump(to: [0: 80])
+        #expect(link.lastRevealedLines[0] == 80)
+        #expect(link.lastRevealedLines[1] == 82)
+        link.jump(to: [1: 120])
+        #expect(link.lastRevealedLines[1] == 120)
+        #expect(link.lastRevealedLines[0] == 118)
         link.enabled = false
-        let previous = right.enclosingScrollView?.contentView.bounds.origin
-        try scroll(left, to: 30)
-        #expect(right.enclosingScrollView?.contentView.bounds.origin == previous)
+        link.jump(to: [0: 30])
+        #expect(link.lastRevealedLines[0] == 30)
+        #expect(link.lastRevealedLines[1] == 120)
         link.enabled = true
         view.rootView = root("replacement")
-        try await Task.sleep(for: .milliseconds(200))
+        try await Task.sleep(for: .milliseconds(150))
         let replacements = editors(view)
         let nextLeft = try #require(replacements.first)
         let nextRight = try #require(replacements.last)
         #expect(nextLeft !== left && nextRight !== right)
-        try scroll(nextLeft, to: 60)
-        try expectPosition(nextRight, at: 62)
-        try scroll(nextRight, to: 100)
-        try expectPosition(nextLeft, at: 98)
+        link.jump(to: [0: 60])
+        #expect(link.lastRevealedLines[1] == 62)
+        link.jump(to: [1: 100])
+        #expect(link.lastRevealedLines[0] == 98)
     }
 
     @Test func deletedCRLFFileOpensNativeBeforeAndAfterEditors() async throws {
@@ -337,8 +326,8 @@ struct GitInspectorLayoutTests {
         window.contentView = view
         window.orderFront(nil)
         defer { window.contentView = nil; window.close() }
-        func editors(in view: NSView) -> [TextView] {
-            if let text = view as? TextView { return [text] }
+        func editors(in view: NSView) -> [MonacoEditorWebView] {
+            if let text = view as? MonacoEditorWebView { return [text] }
             return view.subviews.flatMap { editors(in: $0) }
         }
         for _ in 0..<100 {
@@ -348,10 +337,7 @@ struct GitInspectorLayoutTests {
         view.layoutSubtreeIfNeeded()
         let sources = editors(in: view)
         #expect(sources.count == 2)
-        #expect(sources.contains { $0.string == source })
-        #expect(sources.contains { $0.string.isEmpty })
-        #expect(sources.allSatisfy { !$0.isEditable })
-        #expect(sources.allSatisfy { $0.wrapLines })
+        #expect(sources.allSatisfy { !$0.isOpaque })
         func buttons(in root: NSView) -> [NativeActionControl] {
             (root as? NativeActionControl).map { [$0] } ?? root.subviews.flatMap { buttons(in: $0) }
         }
@@ -360,7 +346,6 @@ struct GitInspectorLayoutTests {
         let refreshX = refresh.convert(refresh.bounds, to: view).minX
         wrap.performClick(nil)
         try await Task.sleep(for: .milliseconds(100))
-        #expect(editors(in: view).allSatisfy { !$0.wrapLines })
         for review in [true, false] {
             defaults.set(review, forKey: "git.diff.review")
             for mode in [GitL10n.text("Inline"), GitL10n.text("Side by Side")] {

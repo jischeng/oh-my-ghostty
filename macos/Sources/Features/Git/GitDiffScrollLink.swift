@@ -1,7 +1,5 @@
 import AppKit
 import SwiftUI
-import CodeEditSourceEditor
-import CodeEditTextView
 
 @MainActor
 final class GitDiffScrollLink {
@@ -9,64 +7,34 @@ final class GitDiffScrollLink {
     var presentation = GitDiffPresentation(before: "", after: "", patch: "")
     private var endpoints: [Int: Endpoint] = [:]
     private var pendingLines: [Int: Int] = [:]
-    private var syncing = false
+    private(set) var lastRevealedLines: [Int: Int] = [:]
 
     final class Endpoint {
-        weak var view: TextView?
-        var observer: NSObjectProtocol?
-        var lastOrigin: NSPoint?
-        init(_ view: TextView) { self.view = view }
-        deinit { if let observer { NotificationCenter.default.removeObserver(observer) } }
+        weak var controller: MonacoWorkbenchController?
+        let uri: String
+
+        init(controller: MonacoWorkbenchController, uri: String) {
+            self.controller = controller
+            self.uri = uri
+        }
     }
 
-    func register(_ view: TextView, side: Int) {
-        let endpoint = Endpoint(view)
-        endpoints[side] = endpoint
-        guard let clip = view.enclosingScrollView?.contentView else { return }
-        endpoint.lastOrigin = clip.bounds.origin
-        clip.postsBoundsChangedNotifications = true
-        endpoint.observer = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification,
-                                                                  object: clip, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.scrolled(side: side) }
-        }
+    func register(controller: MonacoWorkbenchController, uri: String, side: Int) {
+        endpoints[side] = Endpoint(controller: controller, uri: uri)
         applyPendingJump(side: side)
     }
 
-    func unregister(_ view: TextView?, side: Int) {
-        if endpoints[side]?.view === view { endpoints.removeValue(forKey: side) }
-    }
-
-    func scrolled(side: Int) {
-        guard let source = endpoints[side], let view = source.view,
-              let clip = view.enclosingScrollView?.contentView else { return }
-        let origin = clip.bounds.origin
-        guard origin != source.lastOrigin else { return }
-        source.lastOrigin = origin
-        guard enabled, !syncing, let destination = endpoints[1 - side], let target = destination.view,
-              let targetScroll = target.enclosingScrollView,
-              let line = view.layoutManager.textLineForPosition(max(0, origin.y)) else { return }
-        let mapping = side == 0 ? presentation.beforeToAfter : presentation.afterToBefore
-        guard let index = mapping[line.index],
-              let targetLine = target.layoutManager.textLineForIndex(index) else { return }
-        syncing = true
-        defer { syncing = false }
-        // CodeEditTextView removed `ensureLayoutUntil` because it destroyed
-        // layout information; `rectForOffset` lays out the line it resolves.
-        _ = target.layoutManager.rectForOffset(targetLine.range.location)
-        let laidOut = target.layoutManager.textLineForIndex(index) ?? targetLine
-        let fraction = max(0, min(1, (origin.y - line.yPos) / max(1, line.height)))
-        let y = laidOut.yPos + fraction * laidOut.height
-        let targetClip = targetScroll.contentView
-        let point = NSPoint(x: max(0, min(origin.x, target.bounds.width - targetClip.bounds.width)),
-                            y: max(0, min(y, target.bounds.height - targetClip.bounds.height)))
-        destination.lastOrigin = point
-        targetClip.scroll(to: point)
-        targetScroll.reflectScrolledClipView(targetClip)
+    func unregister(controller: MonacoWorkbenchController?, side: Int) {
+        if endpoints[side]?.controller === controller {
+            endpoints.removeValue(forKey: side)
+        }
     }
 
     func jump(to lines: [Int: Int]) {
         pendingLines.merge(lines) { _, new in new }
-        for side in lines.keys { applyPendingJump(side: side) }
+        for side in lines.keys {
+            applyPendingJump(side: side)
+        }
     }
 
     func queueJump(to lines: [Int: Int]) {
@@ -74,43 +42,29 @@ final class GitDiffScrollLink {
     }
 
     private func applyPendingJump(side: Int) {
-        guard let index = pendingLines[side], let endpoint = endpoints[side], let view = endpoint.view,
-              let scrollView = view.enclosingScrollView,
-              let line = view.layoutManager.textLineForIndex(index) else { return }
-        _ = view.layoutManager.rectForOffset(line.range.location)
-        let resolved = view.layoutManager.textLineForIndex(index) ?? line
-        let clip = scrollView.contentView
-        let point = NSPoint(x: clip.bounds.origin.x,
-                            y: max(0, min(resolved.yPos - 8, view.bounds.height - clip.bounds.height)))
-        endpoint.lastOrigin = point
-        clip.scroll(to: point)
-        scrollView.reflectScrolledClipView(clip)
+        guard let zeroBasedIndex = pendingLines[side],
+              let endpoint = endpoints[side],
+              let controller = endpoint.controller else { return }
+        let oneBasedLine = max(1, zeroBasedIndex + 1)
+        controller.revealRange(uri: endpoint.uri, startLine: oneBasedLine, startColumn: 1)
+        lastRevealedLines[side] = zeroBasedIndex
         pendingLines.removeValue(forKey: side)
-    }
-}
 
-@MainActor
-final class GitDiffScrollEndpoint: @preconcurrency TextViewCoordinator {
-    let link: GitDiffScrollLink
-    let side: Int
-    private weak var view: TextView?
-    init(link: GitDiffScrollLink, side: Int) { self.link = link; self.side = side }
-    func prepareCoordinator(controller: TextViewController) {
-        view = controller.textView
-        // The source editor calls prepare before loadView creates its scroll view.
-        DispatchQueue.main.async { [weak self, weak controller] in
-            guard let self, let text = controller?.textView, self.view === text else { return }
-            self.link.register(text, side: self.side)
+        guard enabled else { return }
+        let partnerSide = 1 - side
+        guard partnerSide == 0 || partnerSide == 1,
+              pendingLines[partnerSide] == nil,
+              let partner = endpoints[partnerSide],
+              let partnerController = partner.controller else { return }
+        let mapping = side == 0 ? presentation.beforeToAfter : presentation.afterToBefore
+        if let mappedIndex = mapping[zeroBasedIndex] {
+            partnerController.revealRange(uri: partner.uri, startLine: max(1, mappedIndex + 1), startColumn: 1)
+            lastRevealedLines[partnerSide] = mappedIndex
         }
     }
-    func destroy() {
-        link.unregister(view, side: side)
-        view = nil
-    }
 }
 
-/// Each native editor gets its own endpoint. A departing editor must never
-/// unregister the replacement created while changing files or display modes.
+/// Read-only Monaco-backed diff pane connected to `GitDiffScrollLink`.
 struct GitDiffLinkedEditor: View {
     let text: String
     let path: String
@@ -118,26 +72,71 @@ struct GitDiffLinkedEditor: View {
     let isActive: Bool
     let theme: EditorTheme
     let wordWrap: Bool
+    let link: GitDiffScrollLink
+    let side: Int
     let close: () -> Void
     let actions: GitDiffEditorActions
-    @State private var endpoint: GitDiffScrollEndpoint
 
-    init(text: String, path: String, highlights: [Int: Bool], isActive: Bool,
-         theme: EditorTheme, wordWrap: Bool = true, link: GitDiffScrollLink, side: Int,
-         actions: GitDiffEditorActions = GitDiffEditorActions(), close: @escaping () -> Void) {
-        self.text = text; self.path = path; self.highlights = highlights
-        self.isActive = isActive; self.theme = theme; self.close = close
+    @StateObject private var controller = MonacoWorkbenchController()
+    @State private var instanceID = UUID().uuidString
+
+    init(
+        text: String,
+        path: String,
+        highlights: [Int: Bool],
+        isActive: Bool,
+        theme: EditorTheme,
+        wordWrap: Bool = true,
+        link: GitDiffScrollLink,
+        side: Int,
+        actions: GitDiffEditorActions = GitDiffEditorActions(),
+        close: @escaping () -> Void
+    ) {
+        self.text = text
+        self.path = path
+        self.highlights = highlights
+        self.isActive = isActive
+        self.theme = theme
         self.wordWrap = wordWrap
+        self.link = link
+        self.side = side
         self.actions = actions
-        _endpoint = State(initialValue: GitDiffScrollEndpoint(link: link, side: side))
+        self.close = close
+    }
+
+    private var modelURI: String {
+        let encoded = path
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map { String($0).addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
+            .joined(separator: "/")
+        return "omg-model://standalone-\(instanceID)/\(encoded.isEmpty ? "diff" : encoded)"
     }
 
     var body: some View {
-        CodeEditorView(text: .constant(text), fileURL: URL(fileURLWithPath: path, isDirectory: false),
-                       diffLines: highlights, additionalCoordinators: [endpoint],
-                       isEditable: false, isActive: isActive, isSurfaceFocused: actions.isSurfaceFocused,
-                       terminalTheme: theme, wordWrapOverride: wordWrap, onFocus: actions.focus, onClose: close, onOpen: actions.open,
-                       onNextDocument: actions.nextDocument, onPreviousDocument: actions.previousDocument,
-                       onSaveAll: actions.saveAll, onHide: actions.hide)
+        CodeEditorView(
+            text: .constant(text),
+            fileURL: URL(fileURLWithPath: path, isDirectory: false),
+            diffLines: highlights,
+            isEditable: false,
+            isActive: isActive,
+            isSurfaceFocused: actions.isSurfaceFocused,
+            terminalTheme: theme,
+            wordWrapOverride: wordWrap,
+            onFocus: actions.focus,
+            onClose: close,
+            onOpen: actions.open,
+            onNextDocument: actions.nextDocument,
+            onPreviousDocument: actions.previousDocument,
+            onSaveAll: actions.saveAll,
+            onHide: actions.hide,
+            externalController: controller
+        )
+        .onAppear {
+            link.register(controller: controller, uri: modelURI, side: side)
+        }
+        .onDisappear {
+            link.unregister(controller: controller, side: side)
+            controller.tearDown()
+        }
     }
 }

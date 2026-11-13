@@ -73,6 +73,22 @@ struct EditorDocumentID: Hashable, Sendable {
         }
         self.path = "/" + components.joined(separator: "/")
     }
+
+    var monacoURI: String {
+        let encodedSegments = path
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map { segment in
+                String(segment).addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String(segment)
+            }
+            .joined(separator: "/")
+        switch endpoint {
+        case .local:
+            return "omg-model://local/\(encodedSegments)"
+        case .ssh(let workspaceID):
+            let host = workspaceID.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed) ?? "ssh"
+            return "omg-model://ssh-\(host)/\(encodedSegments)"
+        }
+    }
 }
 
 struct EditorDocumentEncoding: Equatable, Sendable {
@@ -102,6 +118,7 @@ final class EditorDocument: ObservableObject {
             revision &+= 1
             isDirty = text != persistedText
             if isDirty { scheduleAutoSave() }
+            onDidEditText?(text)
         }
     }
     @Published private(set) var isDirty: Bool
@@ -110,16 +127,24 @@ final class EditorDocument: ObservableObject {
     @Published var isRestoringFromGit = false
     @Published private(set) var saveErrorMessage: String?
     @Published private(set) var contentGeneration: UInt64 = 0
+    @Published private(set) var externalSyncRevision: UInt64 = 0
+    @Published private(set) var hasExternalDiskConflict = false
     @Published private(set) var pendingNavigation: EditorNavigationRequest?
     @Published var isPreviewMode = true
 
     private var encoding: EditorDocumentEncoding
     private var persistedText: String
     private var persistedData: Data
+    private var pendingExternalDiskSnapshot: (data: Data, text: String, encoding: EditorDocumentEncoding)?
     private var revision: UInt64 = 0
     private var autoSaveTask: Task<Void, Never>?
 
+    var onWillWriteData: ((Data) -> Void)?
+    var onDidPersistSnapshot: ((Data, String) -> Void)?
+    var onDidEditText: ((String) -> Void)?
+
     var path: String { id.path }
+    var persistedSnapshotData: Data { persistedData }
 
     var isMarkdown: Bool {
         ["md", "markdown"].contains((path as NSString).pathExtension.lowercased())
@@ -227,6 +252,7 @@ final class EditorDocument: ObservableObject {
         let data = await Task.detached(priority: .utility) {
             Self.encode(savedText, encoding: encoding)
         }.value
+        onWillWriteData?(data)
         do {
             try await filesystem.writeFile(data, at: path, replacing: expectedData)
         } catch {
@@ -236,6 +262,11 @@ final class EditorDocument: ObservableObject {
         saveErrorMessage = nil
         persistedText = savedText
         persistedData = data
+        pendingExternalDiskSnapshot = nil
+        if hasExternalDiskConflict {
+            hasExternalDiskConflict = false
+        }
+        onDidPersistSnapshot?(data, savedText)
         if revision == savedRevision {
             isDirty = false
         } else {
@@ -268,10 +299,64 @@ final class EditorDocument: ObservableObject {
         encoding = decoded.encoding
         persistedText = decoded.text
         persistedData = data
+        pendingExternalDiskSnapshot = nil
+        hasExternalDiskConflict = false
         text = decoded.text
         isDirty = false
         saveErrorMessage = nil
         contentGeneration &+= 1
+        onDidPersistSnapshot?(data, decoded.text)
+    }
+
+    func applyExternalDiskUpdate(
+        data: Data,
+        decoded: (text: String, encoding: EditorDocumentEncoding)
+    ) {
+        if data == persistedData {
+            pendingExternalDiskSnapshot = nil
+            if hasExternalDiskConflict {
+                hasExternalDiskConflict = false
+            }
+            return
+        }
+        guard !isSaving, !isReloading, !isRestoringFromGit else { return }
+        if !isDirty {
+            cancelAutoSave()
+            encoding = decoded.encoding
+            persistedText = decoded.text
+            persistedData = data
+            pendingExternalDiskSnapshot = nil
+            if hasExternalDiskConflict {
+                hasExternalDiskConflict = false
+            }
+            if text != decoded.text {
+                text = decoded.text
+            }
+            isDirty = false
+            saveErrorMessage = nil
+            externalSyncRevision &+= 1
+        } else {
+            pendingExternalDiskSnapshot = (data: data, text: decoded.text, encoding: decoded.encoding)
+            if !hasExternalDiskConflict {
+                hasExternalDiskConflict = true
+            }
+        }
+    }
+
+    func keepLocalEditsAfterConflict() {
+        if let pending = pendingExternalDiskSnapshot {
+            encoding = pending.encoding
+            persistedData = pending.data
+            persistedText = pending.text
+            pendingExternalDiskSnapshot = nil
+            onWillWriteData?(pending.data)
+        }
+        hasExternalDiskConflict = false
+        saveErrorMessage = nil
+        isDirty = text != persistedText
+        if isDirty {
+            scheduleAutoSave()
+        }
     }
 
     func discardChanges() {
@@ -279,6 +364,12 @@ final class EditorDocument: ObservableObject {
         text = persistedText
         isDirty = false
         saveErrorMessage = nil
+    }
+
+    nonisolated static func decodeData(
+        _ data: Data
+    ) throws -> (text: String, encoding: EditorDocumentEncoding) {
+        try decode(data)
     }
 
     nonisolated private static func decode(

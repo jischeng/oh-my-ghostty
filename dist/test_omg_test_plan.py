@@ -162,6 +162,19 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(result["scope"], "changed")
         self.assertEqual(result["root_modules"], ["git"])
 
+    def test_code_editor_bundle_and_sources_select_editor_module(self):
+        for path in [
+            "dist/code-editor/src/workbench.mjs",
+            "dist/code-editor/build.mjs",
+            "macos/Resources/CodeEditor/editor.js",
+        ]:
+            with self.subTest(path=path):
+                result = self.plan(paths=[path])
+                self.assertEqual(result["scope"], "changed")
+                self.assertEqual(result["root_modules"], ["editor"])
+                self.assertEqual(result["modules"], ["editor", "git", "terminal"])
+                self.assertEqual(result["unknown_paths"], [])
+
     def test_tabs_namespace_is_more_specific_than_terminal_parent(self):
         result = self.plan(paths=["macos/Sources/Features/Terminal/Tabs/VerticalTabBarView.swift"])
         self.assertEqual(result["root_modules"], ["tabs"])

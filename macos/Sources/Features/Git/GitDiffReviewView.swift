@@ -1,7 +1,5 @@
 import AppKit
 import SwiftUI
-import CodeEditSourceEditor
-import CodeEditTextView
 
 /// Stable source ranges keep folding independent from displayed line numbers.
 struct GitDiffReviewLayout {
@@ -171,37 +169,82 @@ struct GitDiffReviewView: View {
     }
 
     @MainActor private func highlighted(_ source: String) async -> [AttributedString] {
-        let view = TextView(string: source)
-        let provider = EditorSyntaxHighlightProvider()
-        let language = EditorCoordinator().language(fileURL: URL(fileURLWithPath: path), text: source)
-        provider.setUp(textView: view, codeLanguage: language)
-        let captures: [HighlightRange] = (try? await withCheckedThrowingContinuation { continuation in
-            provider.queryHighlightsFor(textView: view, range: NSRange(location: 0, length: source.utf16.count)) {
-                continuation.resume(with: $0)
+        GitDiffLexicalHighlighter.highlightLines(source: source, path: path, theme: theme)
+    }
+}
+
+private enum GitDiffLexicalHighlighter {
+    private static let keywords: Set<String> = [
+        "import", "func", "let", "var", "struct", "class", "enum", "protocol", "extension",
+        "actor", "return", "if", "else", "guard", "switch", "case", "default", "for", "while",
+        "in", "where", "do", "try", "catch", "throw", "throws", "async", "await", "private",
+        "public", "internal", "fileprivate", "open", "static", "final", "override", "mutating",
+        "nonisolated", "some", "any", "init", "deinit", "defer", "self", "Self", "nil", "true",
+        "false", "const", "pub", "fn", "comptime", "errdefer", "orelse", "unreachable", "type",
+        "interface", "export", "from", "function", "new", "typeof", "void", "null", "undefined",
+        "def", "lambda", "None", "True", "False", "impl", "trait", "mod", "use", "crate", "mut",
+        "match", "package", "go", "select", "chan"
+    ]
+
+    private static let tokenRegex = try? NSRegularExpression(
+        pattern: #"(//[^\n]*|#(?!!\[)[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\b0x[0-9a-fA-F_]+\b|\b\d+(?:\.\d+)?\b|\b[A-Za-z_][A-Za-z0-9_]*\b)"#
+    )
+
+    static func highlightLines(source: String, path: String, theme: EditorTheme) -> [AttributedString] {
+        guard !source.isEmpty else { return [AttributedString("")] }
+        let nsSource = source as NSString
+        let attributed = NSMutableAttributedString(
+            string: source,
+            attributes: [.foregroundColor: theme.text.color]
+        )
+        let ext = (path as NSString).pathExtension.lowercased()
+        let usesHashComments = ["py", "sh", "bash", "zsh", "nu", "yml", "yaml", "toml", "rb", "mk", "conf"]
+            .contains(ext) || (path as NSString).lastPathComponent.lowercased() == "makefile"
+
+        if let regex = tokenRegex {
+            let fullRange = NSRange(location: 0, length: nsSource.length)
+            regex.enumerateMatches(in: source, range: fullRange) { match, _, _ in
+                guard let range = match?.range, range.length > 0 else { return }
+                let token = nsSource.substring(with: range)
+                guard let first = token.first else { return }
+                let color: NSColor?
+                if token.hasPrefix("//") || token.hasPrefix("/*") {
+                    color = theme.comments.color
+                } else if first == "#" {
+                    color = usesHashComments ? theme.comments.color : theme.keywords.color
+                } else if first == "\"" || first == "'" || first == "`" {
+                    color = theme.strings.color
+                } else if first.isNumber {
+                    color = theme.numbers.color
+                } else if keywords.contains(token) {
+                    color = theme.keywords.color
+                } else if first.isUppercase {
+                    color = theme.types.color
+                } else {
+                    let afterIndex = NSMaxRange(range)
+                    if afterIndex < nsSource.length,
+                       nsSource.character(at: afterIndex) == UInt16(UInt8(ascii: "(")) {
+                        color = theme.commands.color
+                    } else {
+                        color = nil
+                    }
+                }
+                if let color {
+                    attributed.addAttribute(.foregroundColor, value: color, range: range)
+                }
             }
-        }) ?? []
-        let text = NSMutableAttributedString(string: source, attributes: [.foregroundColor: theme.text.color])
-        for capture in captures where NSMaxRange(capture.range) <= text.length {
-            text.addAttribute(.foregroundColor, value: color(capture.capture), range: capture.range)
         }
+
         var offset = 0
         return source.components(separatedBy: "\n").map { line in
             let length = line.utf16.count
             defer { offset += length + 1 }
-            return AttributedString(text.attributedSubstring(from: NSRange(location: offset, length: length)))
-        }
-    }
-
-    private func color(_ capture: CaptureName?) -> NSColor {
-        switch capture {
-        case .keyword, .include, .constructor, .boolean, .variableBuiltin,
-             .keywordReturn, .keywordFunction, .repeat, .conditional, .tag: theme.keywords.color
-        case .comment: theme.comments.color
-        case .string: theme.strings.color
-        case .number, .float: theme.numbers.color
-        case .type: theme.types.color
-        case .typeAlternate: theme.commands.color
-        default: theme.text.color
+            guard offset + length <= attributed.length else {
+                return AttributedString(line)
+            }
+            return AttributedString(
+                attributed.attributedSubstring(from: NSRange(location: offset, length: length))
+            )
         }
     }
 }

@@ -41,6 +41,7 @@ struct GitEditorDiffView: View {
     @AppStorage("git.diff.wordWrap") private var wordWrap = true
     @State private var hasMountedDiffSurface = false
     @State private var forceNextDiffSync = false
+    @State private var surfaceBinding = GitDiffSurfaceBinding()
     @State private var navigator = GitDiffReviewNavigator()
     @State private var pendingLanding: GitDiffReviewNavigator.Landing?
     @State private var navigationHint: String?
@@ -68,8 +69,15 @@ struct GitEditorDiffView: View {
         externalController == nil
     }
 
-    private var shouldMountWorkbenchSurface: Bool {
-        ownsWorkbench || isActive
+    private var canControlWorkbench: Bool {
+        if ownsWorkbench {
+            return true
+        }
+        guard isActive else { return false }
+        if let container = surfaceBinding.containerView {
+            return !container.isHiddenOrHasHiddenAncestor
+        }
+        return true
     }
 
     private var workbench: MonacoWorkbenchController {
@@ -100,8 +108,17 @@ struct GitEditorDiffView: View {
         return textSRGB.brightnessComponent >= 0.5
     }
 
-    private var isInlineMode: Bool {
-        mode != GitL10n.text("Side by Side")
+    private var effectiveInlineMode: Bool {
+        let stored = UserDefaults.standard.string(forKey: "git.diff.viewMode") ?? mode
+        return stored != GitL10n.text("Side by Side")
+    }
+
+    private var effectiveReview: Bool {
+        (UserDefaults.standard.object(forKey: "git.diff.review") as? Bool) ?? review
+    }
+
+    private var effectiveWordWrap: Bool {
+        (UserDefaults.standard.object(forKey: "git.diff.wordWrap") as? Bool) ?? wordWrap
     }
 
     private var diffContent: GitEditorDiffModel.Content? {
@@ -128,7 +145,7 @@ struct GitEditorDiffView: View {
     }
 
     private var showsDiffSurface: Bool {
-        guard shouldMountWorkbenchSurface, !showsNonDiffPlaceholder else { return false }
+        guard canControlWorkbench, !showsNonDiffPlaceholder else { return false }
         return diffContent != nil || (hasMountedDiffSurface && workbenchDisplaysThisRequest)
     }
 
@@ -242,29 +259,42 @@ struct GitEditorDiffView: View {
             Divider()
 
             ZStack(alignment: .topLeading) {
-                if shouldMountWorkbenchSurface {
-                    VStack(spacing: 0) {
-                        if let sourceError = diffContent?.sourceError {
-                            HStack(spacing: 6) {
-                                Image(systemName: "info.circle")
-                                    .font(.caption)
-                                Text(sourceError)
-                                    .font(.caption)
-                                    .lineLimit(2)
-                                Spacer(minLength: 0)
-                            }
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(Color.primary.opacity(0.04))
-                            .overlay(alignment: .bottom) { Divider() }
+                VStack(spacing: 0) {
+                    if let sourceError = diffContent?.sourceError {
+                        HStack(spacing: 6) {
+                            Image(systemName: "info.circle")
+                                .font(.caption)
+                            Text(sourceError)
+                                .font(.caption)
+                                .lineLimit(2)
+                            Spacer(minLength: 0)
                         }
-                        MonacoWorkbenchSurface(controller: workbench)
-                            .background(Color.clear)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Color.primary.opacity(0.04))
+                        .overlay(alignment: .bottom) { Divider() }
                     }
-                    .opacity(showsDiffSurface ? 1 : 0)
-                    .allowsHitTesting(showsDiffSurface)
+                    GitDiffWorkbenchSurface(
+                        controller: workbench,
+                        binding: surfaceBinding,
+                        ownsWorkbench: ownsWorkbench,
+                        isActive: isActive,
+                        onActivate: {
+                            syncWorkbenchEnvironment()
+                            syncWorkbenchAppearance()
+                            syncDiffToWorkbench()
+                        },
+                        onDeactivate: {
+                            if ownsWorkbench || workbenchDisplaysThisRequest {
+                                workbench.isActive = false
+                            }
+                        }
+                    )
+                    .background(Color.clear)
                 }
+                .opacity(showsDiffSurface ? 1 : 0)
+                .allowsHitTesting(showsDiffSurface)
 
                 if showsNonDiffPlaceholder {
                     nonDiffPlaceholder
@@ -298,7 +328,7 @@ struct GitEditorDiffView: View {
             close: close
         ))
         .onAppear {
-            if ownsWorkbench || isActive {
+            if canControlWorkbench {
                 syncWorkbenchEnvironment()
                 syncWorkbenchAppearance()
                 syncDiffToWorkbench()
@@ -312,19 +342,19 @@ struct GitEditorDiffView: View {
             hasMountedDiffSurface = false
             if ownsWorkbench {
                 ownedWorkbench.tearDown()
-            } else if isActive || workbenchDisplaysThisRequest {
+            } else if workbenchDisplaysThisRequest {
                 workbench.isActive = false
             }
         }
         .onChange(of: model.selected) { actions.selectFile($0) }
         .onChange(of: model.content) { newContent in
-            if ownsWorkbench || isActive {
+            if canControlWorkbench {
                 syncDiffToWorkbench()
             }
             guard newContent != nil, diffContent != nil else { return }
             if let landing = pendingLanding {
                 pendingLanding = nil
-                if ownsWorkbench || isActive,
+                if canControlWorkbench,
                    let index = navigator.land(landing, changeCount: changeCount) {
                     let direction = landing == .first ? "next" : "previous"
                     workbench.navigateDiff(direction: direction, index: index)
@@ -394,7 +424,7 @@ struct GitEditorDiffView: View {
     }
 
     private func syncWorkbenchEnvironment() {
-        guard ownsWorkbench || isActive else { return }
+        guard canControlWorkbench else { return }
         configureCallbacks()
         workbench.isPreview = false
         workbench.keymap = editorSettings.keymap
@@ -403,7 +433,7 @@ struct GitEditorDiffView: View {
     }
 
     private func syncWorkbenchAppearance() {
-        guard ownsWorkbench || isActive else { return }
+        guard canControlWorkbench else { return }
         guard !showsNonDiffPlaceholder || hasMountedDiffSurface || diffContent != nil else { return }
         workbench.setTheme(
             resolvedTheme,
@@ -418,7 +448,7 @@ struct GitEditorDiffView: View {
     }
 
     private func syncDiffToWorkbench() {
-        guard ownsWorkbench || isActive else { return }
+        guard canControlWorkbench else { return }
         guard let content = diffContent else {
             if ownsWorkbench || workbenchDisplaysThisRequest {
                 workbench.isActive = false
@@ -447,9 +477,9 @@ struct GitEditorDiffView: View {
             modifiedText: isPatchOnly ? "" : content.after,
             patch: document.text,
             patchOnly: isPatchOnly,
-            review: review,
-            inline: isInlineMode,
-            wordWrap: wordWrap,
+            review: effectiveReview,
+            inline: effectiveInlineMode,
+            wordWrap: effectiveWordWrap,
             readOnly: true,
             force: force
         )
@@ -542,7 +572,7 @@ struct GitEditorDiffView: View {
     }
 
     private func selectChange(_ direction: GitDiffReviewNavigator.Direction) {
-        guard ownsWorkbench || isActive else { return }
+        guard canControlWorkbench else { return }
         guard let outcome = navigator.move(
             direction,
             changeCount: changeCount,
@@ -812,6 +842,139 @@ struct GitDiffReviewSwitcher: NSViewRepresentable {
     }
 }
 
+@MainActor
+private final class GitDiffSurfaceBinding {
+    weak var containerView: GitDiffWorkbenchSurface.ContainerView?
+}
+
+/// AppKit visibility-aware host for `GitEditorDiffView`'s diff `WKWebView`.
+/// `EditorContentDeckController` hides inactive `NSHostingView`s (`isHidden = true`) in the
+/// same turn it sets `isActive = false`; SwiftUI skips evaluating hidden hosts, coalescing
+/// `true -> (hidden false) -> true` on re-selection. Overriding `viewDidUnhide` / `viewDidHide`
+/// deterministically re-attaches the pooled `WKWebView` and re-syncs the active diff.
+private struct GitDiffWorkbenchSurface: NSViewRepresentable {
+    let controller: MonacoWorkbenchController
+    let binding: GitDiffSurfaceBinding
+    let ownsWorkbench: Bool
+    let isActive: Bool
+    let onActivate: () -> Void
+    let onDeactivate: () -> Void
+
+    final class ContainerView: NSView {
+        var controller: MonacoWorkbenchController?
+        var ownsWorkbench = false
+        var isActive = false
+        var needsSyncOnUnhide = false
+        var onActivate: (() -> Void)?
+        var onDeactivate: (() -> Void)?
+
+        override var isOpaque: Bool { false }
+
+        var canOwnWebView: Bool {
+            ownsWorkbench || (isActive && !isHiddenOrHasHiddenAncestor)
+        }
+
+        func reconcile(forceSync: Bool) {
+            guard canOwnWebView, let controller else { return }
+            let webView = controller.ensureWebView()
+            let didAcquireWebView = webView.superview !== self
+            mount(webView)
+            if !ownsWorkbench && (didAcquireWebView || forceSync) {
+                onActivate?()
+            }
+        }
+
+        private func mount(_ webView: MonacoEditorWebView) {
+            guard webView.superview !== self else {
+                webView.clearBackgrounds()
+                return
+            }
+            webView.removeFromSuperview()
+            subviews.forEach { $0.removeFromSuperview() }
+            webView.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(webView)
+            NSLayoutConstraint.activate([
+                webView.leadingAnchor.constraint(equalTo: leadingAnchor),
+                webView.trailingAnchor.constraint(equalTo: trailingAnchor),
+                webView.topAnchor.constraint(equalTo: topAnchor),
+                webView.bottomAnchor.constraint(equalTo: bottomAnchor)
+            ])
+            webView.clearBackgrounds()
+        }
+
+        override func viewDidHide() {
+            super.viewDidHide()
+            if !ownsWorkbench {
+                needsSyncOnUnhide = true
+                onDeactivate?()
+            }
+        }
+
+        override func viewDidUnhide() {
+            super.viewDidUnhide()
+            reconcile(forceSync: true)
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window == nil {
+                if !ownsWorkbench {
+                    onDeactivate?()
+                }
+            } else {
+                reconcile(forceSync: false)
+            }
+        }
+    }
+
+    func makeNSView(context: Context) -> ContainerView {
+        let container = ContainerView(frame: .zero)
+        container.wantsLayer = true
+        container.layer?.backgroundColor = nil
+        container.layer?.isOpaque = false
+        binding.containerView = container
+        configure(container, isInitial: true)
+        return container
+    }
+
+    func updateNSView(_ container: ContainerView, context: Context) {
+        if let layer = container.layer {
+            if layer.backgroundColor != nil {
+                layer.backgroundColor = nil
+            }
+            if layer.isOpaque {
+                layer.isOpaque = false
+            }
+        }
+        binding.containerView = container
+        configure(container, isInitial: false)
+    }
+
+    static func dismantleNSView(_ container: ContainerView, coordinator: ()) {
+        if !container.ownsWorkbench {
+            container.onDeactivate?()
+        }
+        container.onActivate = nil
+        container.onDeactivate = nil
+        container.controller = nil
+    }
+
+    private func configure(_ container: ContainerView, isInitial: Bool) {
+        container.controller = controller
+        container.ownsWorkbench = ownsWorkbench
+        container.isActive = isActive
+        container.onActivate = onActivate
+        container.onDeactivate = onDeactivate
+        if container.canOwnWebView {
+            let forceSync = !isInitial && container.needsSyncOnUnhide
+            container.needsSyncOnUnhide = false
+            container.reconcile(forceSync: forceSync)
+        } else if !ownsWorkbench {
+            container.onDeactivate?()
+        }
+    }
+}
+
 /// Loading, binary, empty, and error views have no active diff WebView to own shortcuts.
 private struct GitDiffFallbackCommands: NSViewRepresentable {
     let isActive: Bool
@@ -825,7 +988,11 @@ private struct GitDiffFallbackCommands: NSViewRepresentable {
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
         func handle(_ event: NSEvent) -> Bool {
-            guard active, window != nil, event.window === window, actions.isSurfaceFocused(),
+            guard active,
+                  !isHiddenOrHasHiddenAncestor,
+                  window != nil,
+                  event.window === window,
+                  actions.isSurfaceFocused(),
                   let action = OhMyGhosttySettings.shared.editorSettings.keymap.action(for: event) else {
                 return false
             }

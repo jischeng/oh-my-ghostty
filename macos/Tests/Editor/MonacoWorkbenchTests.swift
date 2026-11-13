@@ -904,5 +904,20 @@ struct MonacoWorkbenchTests {
         #expect(EditorTestSupport.findAll(MonacoEditorWebView.self, in: deck.view).count == 1)
         #expect(webView.isDescendant(of: hostA))
         #expect(!webView.isDescendant(of: hostB))
+
+        // 5. Repeat B -> A round-trips when both NSHostingViews are already cached in the deck.
+        deck.update(items: makeItems(selectedID: requestB.id), selectedID: .diff(requestB.id))
+        deck.view.layoutSubtreeIfNeeded()
+        #expect(sharedWorkbench.activeDiff?.path == "Beta.swift")
+        #expect(sharedWorkbench.isActive)
+        #expect(webView.isDescendant(of: hostB))
+        #expect(!webView.isDescendant(of: hostA))
+
+        deck.update(items: makeItems(selectedID: requestA.id), selectedID: .diff(requestA.id))
+        deck.view.layoutSubtreeIfNeeded()
+        #expect(sharedWorkbench.activeDiff?.path == "Alpha.swift")
+        #expect(sharedWorkbench.isActive)
+        #expect(webView.isDescendant(of: hostA))
+        #expect(!webView.isDescendant(of: hostB))
     }
 }

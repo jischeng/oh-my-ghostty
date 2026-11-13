@@ -96,6 +96,12 @@ struct EditorWorkspaceLifetimeTests {
             if !workspace.isLoading, workspace.selectedDocument?.path == secondFile.path { break }
             try await Task.sleep(for: .milliseconds(20))
         }
+        let secondDocument = try #require(workspace.selectedDocument)
+        for _ in 0..<100 {
+            let activeURI = (try? await webView.evaluateJavaScript("window.omgEditor?.getState?.()?.activeUri")) as? String
+            if activeURI == secondDocument.id.monacoURI { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
         let allWebViews = EditorTestSupport.findAll(MonacoEditorWebView.self, in: host)
         #expect(allWebViews.count == 1, "All tabs in a workspace must share a single pooled MonacoEditorWebView")
         #expect(allWebViews.first === webView)
@@ -116,8 +122,17 @@ struct EditorWorkspaceLifetimeTests {
 
         workspace.selectedID = document.id
         for _ in 0..<100 {
-            let activeURI = (try? await webView.evaluateJavaScript("window.omgEditor?.getState?.()?.activeUri")) as? String
-            if activeURI == document.id.monacoURI { break }
+            let readyForUndo = (try? await webView.evaluateJavaScript("""
+            (() => {
+                const state = window.omgEditor?.getState?.();
+                const ed = window.omgEditor?._internal?.editor;
+                const monaco = window.omgEditor?._internal?.monaco;
+                if (!state || !ed || !monaco) return false;
+                return state.activeUri === \(String(reflecting: document.id.monacoURI))
+                    && !ed.getOption(monaco.editor.EditorOption.readOnly);
+            })()
+            """)) as? Bool
+            if readyForUndo == true { break }
             try await Task.sleep(for: .milliseconds(25))
         }
         #expect(EditorTestSupport.find(MonacoEditorWebView.self, in: host) === webView)

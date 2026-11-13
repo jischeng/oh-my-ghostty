@@ -36,7 +36,7 @@ struct GitDiffHighlightTests {
         try await Task.sleep(for: .milliseconds(100))
         let editor = try #require(find(host))
         #expect(!editor.isOpaque)
-        #expect(editor.underPageBackgroundColor == .clear)
+        #expect((editor.underPageBackgroundColor?.alphaComponent ?? 1) == 0)
         for _ in 0..<3 {
             for width: CGFloat in [315.5, 780, 360, 780] {
                 window.setContentSize(.init(width: width, height: 650))

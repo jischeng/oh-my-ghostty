@@ -456,7 +456,7 @@ final class MonacoEditorWebView: WKWebView {
         if (value(forKey: "drawsBackground") as? Bool) != false {
             setValue(false, forKey: "drawsBackground")
         }
-        if underPageBackgroundColor != .clear {
+        if (underPageBackgroundColor?.alphaComponent ?? 1) != 0 {
             underPageBackgroundColor = .clear
         }
         if let layer {
@@ -476,7 +476,7 @@ final class MonacoEditorWebView: WKWebView {
                 if scrollView.drawsBackground {
                     scrollView.drawsBackground = false
                 }
-                if scrollView.backgroundColor != .clear {
+                if scrollView.backgroundColor.alphaComponent != 0 {
                     scrollView.backgroundColor = .clear
                 }
                 if scrollView.layer?.backgroundColor != nil {
@@ -486,7 +486,7 @@ final class MonacoEditorWebView: WKWebView {
                 if clipView.drawsBackground {
                     clipView.drawsBackground = false
                 }
-                if clipView.backgroundColor != .clear {
+                if clipView.backgroundColor.alphaComponent != 0 {
                     clipView.backgroundColor = .clear
                 }
                 if clipView.layer?.backgroundColor != nil {

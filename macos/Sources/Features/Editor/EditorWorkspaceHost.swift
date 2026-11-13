@@ -239,11 +239,9 @@ struct EditorWorkspaceHost<Terminal: View>: View {
     private var documentItems: [EditorContentItem] {
         var items: [EditorContentItem] = []
         if !workspace.documents.isEmpty {
-            let isWorkbenchActive = workspace.gitDiff == nil && workspace.selectedDocument != nil && workspace.isVisible
             items.append(EditorContentItem(id: .workbench, content: AnyView(
                 EditorSharedWorkbenchPane(
                     workspace: workspace,
-                    isActive: isWorkbenchActive,
                     isSurfaceFocused: {
                         (controller.focusedSurface ?? controller.surfaceTree.first) === surfaceView
                     },
@@ -1188,7 +1186,6 @@ private struct EditorSharedWorkbenchPane: View {
     @ObservedObject private var settings = OhMyGhosttySettings.shared
     @Environment(\.colorScheme) private var colorScheme
 
-    let isActive: Bool
     var isSurfaceFocused: () -> Bool = { true }
     let terminalBackground: NSColor
     let terminalTheme: EditorTheme
@@ -1199,6 +1196,10 @@ private struct EditorSharedWorkbenchPane: View {
     let onAskAgent: (EditorAskAgentRequest) -> Void
     let onNavigateDefinition: (String, EditorTextLocation) -> Void
     let openMarkdownLink: (String, EditorDocument) -> Void
+
+    private var effectiveIsActive: Bool {
+        workspace.gitDiff == nil && workspace.selectedDocument != nil && workspace.isVisible
+    }
 
     private var resolvedTheme: EditorTheme {
         var theme = terminalTheme
@@ -1236,7 +1237,7 @@ private struct EditorSharedWorkbenchPane: View {
                     EditorActiveDocumentObserver(
                         workspace: workspace,
                         document: document,
-                        isActive: isActive,
+                        isActive: effectiveIsActive,
                         isSurfaceFocused: isSurfaceFocused,
                         terminalBackground: terminalBackground,
                         resolvedTheme: resolvedTheme,
@@ -1256,13 +1257,16 @@ private struct EditorSharedWorkbenchPane: View {
                 EditorDocumentStatusBar(document: document)
             }
         }
+        .onAppear {
+            workspace.workbenchController.isActive = effectiveIsActive
+        }
         .onChange(of: workspace.selectedID) { [oldID = workspace.selectedID] newID in
             if let oldID, oldID != newID,
                let previous = workspace.documents.first(where: { $0.id == oldID }) {
                 previous.flushAutoSave()
             }
         }
-        .onChange(of: isActive) { active in
+        .onChange(of: effectiveIsActive) { active in
             workspace.workbenchController.isActive = active
             if !active {
                 workspace.selectedDocument?.flushAutoSave()
@@ -1482,7 +1486,7 @@ private struct EditorActiveDocumentObserver: View {
         let workbench = workspace.workbenchController
         configureCallbacks(on: workbench)
         let editorSettings = settings.editorSettings
-        let readOnly = document.isRestoringFromGit || !isActive || showsMarkdownPreview
+        let readOnly = document.isRestoringFromGit || showsMarkdownPreview
         let wordWrap = document.isMarkdown ? true : editorSettings.wordWrap
         let insertSpaces = !EditorLanguageMapping.usesHardTabs(forPath: document.path)
         workbench.isPreview = showsMarkdownPreview

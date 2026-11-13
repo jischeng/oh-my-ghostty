@@ -180,16 +180,21 @@ final class EditorDocument: ObservableObject {
         autoSaveTask = nil
     }
 
+    var defaultAutoSaveDelay: Duration {
+        filesystem.descriptor.kind == .ssh ? .milliseconds(2500) : .seconds(1)
+    }
+
     func flushAutoSave() {
         scheduleAutoSave(delay: .zero)
     }
 
-    private func scheduleAutoSave(delay: Duration = .seconds(1)) {
+    private func scheduleAutoSave(delay: Duration? = nil) {
+        let effectiveDelay = delay ?? defaultAutoSaveDelay
         cancelAutoSave()
         guard autoSaveSuspensionCount == 0, isDirty, !isSaving, !isReloading else { return }
         autoSaveTask = Task { @MainActor [weak self] in
             do {
-                try await Task.sleep(for: delay)
+                try await Task.sleep(for: effectiveDelay)
             } catch {
                 return
             }

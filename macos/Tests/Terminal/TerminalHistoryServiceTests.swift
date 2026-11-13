@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 @testable import Ghostty
@@ -271,5 +272,206 @@ struct TerminalHistoryServiceTests {
         #expect(item.preview.count <= 2_001)
         #expect(item.text == text)
         #expect(!item.location.isAvailable)
+    }
+
+    @Test func sessionRuntimeHistoryStorePersistsPrivateSidecarAndReconcilesReattachedCommands() throws {
+        let baseURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-runtime-history-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: baseURL) }
+
+        let descriptor = SessionRuntimeDescriptor(
+            connection: nil,
+            revision: "test-rev",
+            policy: .init()
+        )
+        let paneID = UUID()
+        let epoch = UUID()
+        let t1 = Date(timeIntervalSince1970: 1_750_000_100)
+        let t2 = Date(timeIntervalSince1970: 1_750_000_200)
+        let t3 = Date(timeIntervalSince1970: 1_750_000_300)
+
+        let preDetachNewestFirst = [
+            InspectorHistoryItem(
+                id: "cmd-3",
+                kind: .command,
+                text: "git status",
+                timestamp: t3,
+                location: .command(surfaceID: paneID, executionID: 3, epoch: epoch),
+                sourceLabel: "Local"
+            ),
+            InspectorHistoryItem(
+                id: "cmd-2",
+                kind: .command,
+                text: "zig build test",
+                timestamp: t2,
+                location: .command(surfaceID: paneID, executionID: 2, epoch: epoch),
+                sourceLabel: "Local"
+            ),
+            InspectorHistoryItem(
+                id: "cmd-1",
+                kind: .command,
+                text: "cd /work/repo",
+                timestamp: t1,
+                location: .command(surfaceID: paneID, executionID: 1, epoch: epoch),
+                sourceLabel: "Local"
+            ),
+        ]
+
+        #expect(SessionRuntimeHistoryStore.save(
+            commands: preDetachNewestFirst,
+            workingDirectory: "/work/first",
+            for: descriptor,
+            paneID: paneID,
+            baseURL: baseURL,
+            now: t3
+        ))
+        // Record subsequent OSC 7 working directories and verify MRU deduplication.
+        #expect(SessionRuntimeHistoryStore.save(
+            commands: [],
+            workingDirectory: "/work/second",
+            for: descriptor,
+            paneID: paneID,
+            baseURL: baseURL,
+            now: t3.addingTimeInterval(5)
+        ))
+        #expect(SessionRuntimeHistoryStore.save(
+            commands: [],
+            workingDirectory: "/work/first",
+            for: descriptor,
+            paneID: paneID,
+            baseURL: baseURL,
+            now: t3.addingTimeInterval(10)
+        ))
+
+        let fileURL = SessionRuntimeHistoryStore.fileURL(for: descriptor, paneID: paneID, baseURL: baseURL)
+        let attrs = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        let permissions = (attrs[.posixPermissions] as? NSNumber)?.intValue ?? 0
+        #expect((permissions & 0o777) == 0o600)
+
+        let loaded = try #require(SessionRuntimeHistoryStore.load(
+            for: descriptor,
+            paneID: paneID,
+            baseURL: baseURL,
+            now: t3.addingTimeInterval(15)
+        ))
+        #expect(loaded.commands.map(\.text) == ["git status", "zig build test", "cd /work/repo"])
+        #expect(loaded.directories.map(\.path) == ["/work/second", "/work/first"])
+
+        // Simulate reattach where VT snapshot reconstructed the 2 visible commands + 1 new post-attach command,
+        // while `cd /work/repo` had already scrolled out of the ring buffer.
+        let newEpoch = UUID()
+        let t4 = Date(timeIntervalSince1970: 1_750_000_400)
+        let reconstructedLiveNewestFirst = [
+            InspectorHistoryItem(
+                id: "live-new",
+                kind: .command,
+                text: "pwd",
+                timestamp: t4,
+                location: .command(surfaceID: paneID, executionID: 3, epoch: newEpoch),
+                sourceLabel: "Local"
+            ),
+            InspectorHistoryItem(
+                id: "live-rebuilt-2",
+                kind: .command,
+                text: "git status",
+                timestamp: t4,
+                location: .command(surfaceID: paneID, executionID: 2, epoch: newEpoch)
+            ),
+            InspectorHistoryItem(
+                id: "live-rebuilt-1",
+                kind: .command,
+                text: "zig build test",
+                timestamp: t4,
+                location: .command(surfaceID: paneID, executionID: 1, epoch: newEpoch)
+            ),
+        ]
+
+        let reconciled = SessionRuntimeHistoryStore.reconcile(
+            liveNewestFirst: reconstructedLiveNewestFirst,
+            with: loaded.commands,
+            surfaceID: paneID
+        )
+        #expect(reconciled.map(\.text) == ["pwd", "git status", "zig build test", "cd /work/repo"])
+        #expect(reconciled[0].timestamp == t4)
+        #expect(reconciled[1].timestamp == t3)
+        #expect(reconciled[1].sourceLabel == "Local")
+        #expect(reconciled[1].location.isAvailable)
+        #expect(reconciled[2].timestamp == t2)
+        #expect(reconciled[2].location.isAvailable)
+        #expect(reconciled[3].timestamp == t1)
+        #expect(reconciled[3].location == .unavailable(.expired))
+
+        SessionRuntimeHistoryStore.remove(for: descriptor, paneID: paneID, baseURL: baseURL)
+        #expect(!FileManager.default.fileExists(atPath: fileURL.path))
+    }
+
+    @Test func commandOutputActionsExtractCopyAndOpenOSC133OutputInEditor() async throws {
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-cmd-out-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let settings = OhMyGhosttySettings.shared
+        let oldDestination = settings.editorFileOpenDestination
+        settings.editorFileOpenDestination = .currentPane
+        defer { settings.editorFileOpenDestination = oldDestination }
+
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        var config = Ghostty.SurfaceConfiguration()
+        config.workingDirectory = "/tmp"
+        config.command = "/bin/sh -c 'printf \"\\033]133;A\\007$ \\033]133;B\\007echo osc133-alpha\\r\\n\\033]133;C\\007osc133-alpha\\r\\nsecond-line\\r\\n\\033]133;D;0\\007\\033]133;A\\007$ \\033]133;B\\007\"; sleep 30'"
+        let controller = TerminalController(app, withBaseConfig: config)
+        let window = try #require(controller.window)
+        defer {
+            EditorWorkspaceStore.shared.remove(tabID: controller.tabSessionID)
+            window.delegate = nil
+            window.close()
+        }
+        window.makeKeyAndOrderFront(nil)
+        let surface = try #require(controller.surfaceTree.first)
+
+        for _ in 0..<100 {
+            if TerminalHistoryService.shared.commands(for: surface.id).contains(where: { $0.text == "echo osc133-alpha" }) {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let item = try #require(TerminalHistoryService.shared.commands(for: surface.id).first)
+        #expect(item.text == "echo osc133-alpha")
+        #expect(TerminalCommandOutputActions.hasLastCommandOutput(in: surface))
+        #expect(TerminalCommandOutputActions.canExtractOutput(for: item, in: surface))
+
+        let pasteboard = NSPasteboard(name: .init("omg.test.output.\(UUID().uuidString)"))
+        #expect(TerminalCommandOutputActions.copyLastCommandOutput(from: surface, pasteboard: pasteboard))
+        let copied = try #require(pasteboard.string(forType: .string))
+        #expect(copied.contains("osc133-alpha"))
+        #expect(copied.contains("second-line"))
+
+        let logURL = try #require(TerminalCommandOutputActions.openLastCommandOutputInEditor(
+            from: surface,
+            baseDirectory: tempRoot
+        ))
+        let attrs = try FileManager.default.attributesOfItem(atPath: logURL.path)
+        let mode = (attrs[.posixPermissions] as? NSNumber)?.intValue ?? 0
+        #expect((mode & 0o777) == 0o600)
+        #expect(logURL.lastPathComponent.hasPrefix("echo-"))
+
+        let workspace = EditorWorkspaceStore.shared.workspace(
+            for: controller.tabSessionID,
+            surfaceID: surface.id
+        )
+        for _ in 0..<100 {
+            if workspace.selectedDocument != nil, !workspace.isLoading { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(workspace.isVisible)
+        #expect(workspace.selectedDocument?.text.contains("osc133-alpha") == true)
+
+        // Verify Edit menu installation is idempotent.
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        TerminalCommandMenuController.shared.install(in: editMenu)
+        TerminalCommandMenuController.shared.install(in: editMenu)
+        #expect(editMenu.items.count == 4)
     }
 }

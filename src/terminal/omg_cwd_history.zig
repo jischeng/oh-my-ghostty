@@ -57,13 +57,30 @@ pub fn record(self: *Self, alloc: Allocator, pages: *PageList, cursor: PageList.
 }
 
 pub fn cwdAt(self: *const Self, pin: PageList.Pin) ?[]const u8 {
-    var i = self.entries.items.len;
-    while (i > 0) {
-        i -= 1;
-        const entry = self.entries.items[i];
-        if (entry.pin.eql(pin) or entry.pin.before(pin)) return entry.cwd;
+    const items = self.entries.items;
+    if (items.len == 0) return null;
+
+    // Fast path: output in the active viewport almost always belongs to the
+    // latest OSC 7 transition, avoiding page-list traversal across history.
+    const last = items[items.len - 1];
+    if (last.pin.eql(pin) or last.pin.before(pin)) return last.cwd;
+
+    const first = items[0];
+    if (pin.before(first.pin.*)) return null;
+
+    // Binary search `items[0 .. items.len - 1]` for the rightmost transition `<= pin`.
+    var lo: usize = 0;
+    var hi: usize = items.len - 1;
+    while (lo + 1 < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const candidate = items[mid];
+        if (candidate.pin.eql(pin) or candidate.pin.before(pin)) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
     }
-    return null;
+    return items[lo].cwd;
 }
 
 test "OMG cwd history follows output through scroll reflow and reset" {
@@ -121,4 +138,33 @@ test "OMG cwd history bounds retained transitions without guessing old cwd" {
     try std.testing.expectEqual(@as(usize, max_entries), screen.omg_cwd_history.entries.items.len);
     try std.testing.expect(screen.omg_cwd_history.cwdAt(oldest.*) == null);
     try std.testing.expectEqualStrings("/b", screen.omg_cwd_history.cwdAt(screen.cursor.page_pin.*).?);
+}
+
+test "OMG cwd history binary search resolves intermediate transitions accurately" {
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
+    const Terminal = @import("Terminal.zig");
+    const alloc = std.testing.allocator;
+    var t = try Terminal.init(std.testing.io, alloc, .{ .cols = 24, .rows = 6 });
+    defer t.deinit(alloc);
+    const screen = t.screens.active;
+
+    var pins: [8]*PageList.Pin = undefined;
+    var initialized: usize = 0;
+    defer for (pins[0..initialized]) |p| screen.pages.untrackPin(p);
+
+    var path_buf: [32]u8 = undefined;
+    for (0..pins.len) |idx| {
+        const cwd = try std.fmt.bufPrint(&path_buf, "/dir/{d}", .{idx});
+        try t.setPwd(cwd);
+        pins[idx] = try screen.pages.trackPin(screen.cursor.page_pin.*);
+        initialized += 1;
+        try t.printString("entry.txt");
+        try t.linefeed();
+        t.carriageReturn();
+    }
+
+    for (pins, 0..) |p, idx| {
+        const expected = try std.fmt.bufPrint(&path_buf, "/dir/{d}", .{idx});
+        try std.testing.expectEqualStrings(expected, screen.omg_cwd_history.cwdAt(p.*).?);
+    }
 }

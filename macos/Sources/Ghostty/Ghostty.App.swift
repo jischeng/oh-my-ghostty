@@ -693,7 +693,17 @@ extension Ghostty {
                 guard target.tag == GHOSTTY_TARGET_SURFACE,
                       let surface = target.target.surface,
                       let view = self.surfaceView(from: surface) else { return false }
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [weak view] in
+                    guard let view else { return }
+                    if !OMGApplicationEnvironment.isRunningTests,
+                       let runtime = view.runtimeDescriptor {
+                        _ = SessionRuntimeHistoryStore.save(
+                            commands: TerminalHistoryService.shared.commands(for: view.id),
+                            workingDirectory: view.pwd,
+                            for: runtime,
+                            paneID: view.id
+                        )
+                    }
                     NotificationCenter.default.post(name: .terminalHistoryDidChange, object: view.id)
                 }
 
@@ -711,6 +721,32 @@ extension Ghostty {
                 DispatchQueue.main.async { [weak view] in
                     guard let view else { return }
                     TerminalLinkChecker.check(url: url, baseDirectory: base, from: view)
+                }
+                return true
+
+            case GHOSTTY_ACTION_OMG_OPEN_PATH_CANDIDATES:
+                guard target.tag == GHOSTTY_TARGET_SURFACE,
+                      let surface = target.target.surface,
+                      let view = self.surfaceView(from: surface) else { return false }
+                let v = action.action.omg_open_path_candidates
+                guard let base = String(
+                    bytes: UnsafeRawBufferPointer(
+                        start: v.base_directory,
+                        count: Int(v.base_directory_len)
+                    ),
+                    encoding: .utf8
+                ) else { return false }
+                let rawCandidates = UnsafeRawBufferPointer(
+                    start: v.candidates,
+                    count: Int(v.candidates_len)
+                )
+                let candidates = rawCandidates
+                    .split(separator: 0, omittingEmptySubsequences: true)
+                    .compactMap { String(bytes: $0, encoding: .utf8) }
+                guard !candidates.isEmpty else { return false }
+                DispatchQueue.main.async { [weak view] in
+                    guard let view else { return }
+                    TerminalPathOpener.openFirstExisting(candidates, from: view, baseDirectory: base)
                 }
                 return true
 

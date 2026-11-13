@@ -119,13 +119,12 @@ final class ScriptTab: NSObject {
     func handleSelectTab(_ command: NSScriptCommand) -> Any? {
         guard NSApp.validateScript(command: command) else { return nil }
 
-        guard let tabContainerWindow = parentWindow else {
+        guard let tabController = parentController,
+              TerminalFocusRouter.focus(tab: tabController) else {
             command.scriptErrorNumber = errAEEventFailed
             command.scriptErrorString = "Tab is no longer available."
             return nil
         }
-
-        tabContainerWindow.makeKeyAndOrderFront(nil)
         return nil
     }
 

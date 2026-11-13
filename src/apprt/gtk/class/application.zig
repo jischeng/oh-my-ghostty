@@ -750,7 +750,11 @@ pub const Application = extern struct {
             .progress_report => return Action.progressReport(target, value),
 
             // OSC 3008 context is currently consumed by the macOS OMG shell.
-            .context_signal, .command_history_changed, .omg_link_check => {},
+            .context_signal,
+            .command_history_changed,
+            .omg_link_check,
+            .omg_open_path_candidates,
+            => {},
 
             .prompt_title => return Action.promptTitle(target, value),
 

@@ -100,6 +100,18 @@ struct TerminalCommandPaletteView: View {
                 action: onToggleInspector
             ))
         }
+        options.append(CommandOption(
+            title: TerminalCommandOutputActions.copyLastOutputTitle,
+            leadingIcon: "doc.on.doc"
+        ) {
+            _ = TerminalCommandOutputActions.copyLastCommandOutput(from: surfaceView)
+        })
+        options.append(CommandOption(
+            title: TerminalCommandOutputActions.openLastOutputTitle,
+            leadingIcon: "doc.text"
+        ) {
+            _ = TerminalCommandOutputActions.openLastCommandOutputInEditor(from: surfaceView)
+        })
         return options
     }
 
@@ -163,7 +175,7 @@ struct TerminalCommandPaletteView: View {
 
     /// Commands for jumping to other terminal surfaces.
     private var jumpOptions: [CommandOption] {
-        TerminalController.all.flatMap { controller -> [CommandOption] in
+        TerminalFocusRouter.allTerminalControllers().flatMap { controller -> [CommandOption] in
             guard let window = controller.window else { return [] }
 
             let color = (window as? TerminalWindow)?.tabColor
@@ -193,10 +205,7 @@ struct TerminalCommandPaletteView: View {
                     leadingColor: displayColor?.displayColor.map { Color($0) },
                     sortKey: ObjectIdentifier(surface)
                 ) {
-                    NotificationCenter.default.post(
-                        name: Ghostty.Notification.ghosttyPresentTerminal,
-                        object: surface
-                    )
+                    _ = TerminalFocusRouter.focus(surface: surface, highlight: true)
                 }
             }
         }

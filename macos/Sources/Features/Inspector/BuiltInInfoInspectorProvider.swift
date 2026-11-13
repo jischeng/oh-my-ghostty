@@ -461,7 +461,7 @@ final class BuiltInInfoInspectorProvider {
 
         case .jumpToHistoryItem(let item):
             guard let surfaceID = action.context.surfaceID else { return }
-            for controller in TerminalController.all {
+            for controller in TerminalFocusRouter.allTerminalControllers() {
                 if let surfaceView = controller.surfaceTree.first(where: { $0.id == surfaceID }) {
                     if historyService.jump(to: item, in: surfaceView) != .jumped {
                         NSSound.beep()

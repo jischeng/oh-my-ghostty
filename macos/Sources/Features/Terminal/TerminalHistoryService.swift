@@ -25,10 +25,15 @@ final class TerminalHistoryService {
     // be relabeled as belonging to a new host; one high-water mark is bounded.
     private var historicalExecutionFloor: [UUID: UInt64] = [:]
     private let commandSource: ((UUID) -> [InspectorHistoryItem])?
+    private let outputSource: ((UUID, UInt64) -> String?)?
 
     /// The injected source is also the test seam; there is no second history store.
-    init(commandSource: ((UUID) -> [InspectorHistoryItem])? = nil) {
+    init(
+        commandSource: ((UUID) -> [InspectorHistoryItem])? = nil,
+        outputSource: ((UUID, UInt64) -> String?)? = nil
+    ) {
         self.commandSource = commandSource
+        self.outputSource = outputSource
     }
 
     static func connectionID(_ context: PaneSessionContext) -> String? {
@@ -199,7 +204,7 @@ final class TerminalHistoryService {
 
     func commands(for surfaceID: UUID) -> [InspectorHistoryItem] {
         if let commandSource { return commandSource(surfaceID) }
-        for controller in TerminalController.all {
+        for controller in TerminalFocusRouter.allTerminalControllers() {
             guard let view = controller.surfaceTree.first(where: { $0.id == surfaceID }),
                   let surface = view.surface else { continue }
             if let context = controller.paneSessionContext(for: view) {
@@ -221,15 +226,58 @@ final class TerminalHistoryService {
                 return item
             }
             archivedBySurface[surfaceID] = archived
-            let saved = ShellScrollbackRestoreStore.savedCommands(for: surfaceID)
-            let combined = Self.presentingHistory(in: live + archived, from: saved,
-                surfaceID: surfaceID,
-                allowReconciliation: ShellScrollbackRestoreStore.allowsAnchorReconciliation(for: surfaceID))
+            let combined: [InspectorHistoryItem]
+            if let saved = ShellScrollbackRestoreStore.savedCommands(for: surfaceID) {
+                combined = Self.presentingHistory(
+                    in: live + archived,
+                    from: saved,
+                    surfaceID: surfaceID,
+                    allowReconciliation: ShellScrollbackRestoreStore.allowsAnchorReconciliation(for: surfaceID)
+                )
+            } else if let runtime = view.runtimeDescriptor,
+                      let runtimeRecord = SessionRuntimeHistoryStore.load(for: runtime, paneID: surfaceID) {
+                combined = SessionRuntimeHistoryStore.reconcile(
+                    liveNewestFirst: live + archived,
+                    with: runtimeRecord.commands,
+                    surfaceID: surfaceID
+                )
+            } else {
+                combined = live + archived
+            }
             return combined.sorted { lhs, rhs in
                 (lhs.timestamp ?? .distantPast) > (rhs.timestamp ?? .distantPast)
             }
         }
         return []
+    }
+
+    func commandOutput(executionID: UInt64, in view: Ghostty.SurfaceView) -> String? {
+        if let outputSource {
+            return outputSource(view.id, executionID)
+        }
+        guard let surface = view.surface else { return nil }
+        var raw = ghostty_text_s()
+        guard ghostty_surface_omg_command_output(surface, executionID, &raw) else {
+            return nil
+        }
+        defer { ghostty_surface_free_text(surface, &raw) }
+        guard let ptr = raw.text else { return "" }
+        return String(
+            bytes: UnsafeRawBufferPointer(start: ptr, count: Int(raw.text_len)),
+            encoding: .utf8
+        )
+    }
+
+    func lastCommandOutput(in view: Ghostty.SurfaceView) -> String? {
+        commandOutput(executionID: 0, in: view)
+    }
+
+    func commandOutput(for item: InspectorHistoryItem, in view: Ghostty.SurfaceView) -> String? {
+        guard validate(item.location, surfaceID: view.id) == nil,
+              case .command(_, let executionID, _) = item.location else {
+            return nil
+        }
+        return commandOutput(executionID: executionID, in: view)
     }
 
     /// Exact v3/v4 binding. All replayed input markers must match the

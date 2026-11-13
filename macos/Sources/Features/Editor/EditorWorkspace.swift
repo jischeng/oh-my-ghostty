@@ -657,6 +657,13 @@ final class EditorWorkspaceStore {
         workspaces[surfaceID]?.isVisible == true
     }
 
+    @discardableResult
+    func hideIfCovering(surfaceID: UUID) -> Bool {
+        guard let workspace = workspaces[surfaceID], workspace.isVisible else { return false }
+        workspace.isVisible = false
+        return true
+    }
+
     private func notifySurfaceCoverageDidChange(surfaceID: UUID, isVisible: Bool) {
         NotificationCenter.default.post(
             name: Self.surfaceCoverageDidChangeNotification,

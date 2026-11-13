@@ -178,6 +178,9 @@ pub const Message = union(enum) {
     /// OMG: dispatch queued viewport path checks on the app thread.
     omg_link_dispatch: void,
 
+    /// OMG: notify host that command history entries were restored or updated.
+    command_history_changed: void,
+
     pub const ReportTitleStyle = enum {
         csi_21_t,
 

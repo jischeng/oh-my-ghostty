@@ -69,6 +69,53 @@ struct TerminalPathOpenerTests {
         #expect(fileURLSingle?.location == EditorTextLocation(startLine: 42))
     }
 
+    @Test func markdownHeadingFragmentsStripAnchorWithoutBreakingLineRangesOrHashesInFilenames() {
+        let relativeAnchor = TerminalPathTarget.target("./arch.md#overview", directory: "/project", isRemote: false)
+        #expect(relativeAnchor?.path == "/project/arch.md")
+        #expect(relativeAnchor?.location == nil)
+        #expect(TerminalPathTarget.isCandidate("./arch.md#overview"))
+
+        let nestedAnchor = TerminalPathTarget.target(
+            "docs/README.md#install-on-macos",
+            directory: "/project",
+            isRemote: false
+        )
+        #expect(nestedAnchor?.path == "/project/docs/README.md")
+        #expect(nestedAnchor?.location == nil)
+        #expect(TerminalPathTarget.isCandidate("docs/README.md#install-on-macos"))
+
+        let remoteAnchor = TerminalPathTarget.target(
+            "docs/guide.md#sec-1",
+            directory: "/remote/repo",
+            isRemote: true
+        )
+        #expect(remoteAnchor?.path == "/remote/repo/docs/guide.md")
+        #expect(remoteAnchor?.location == nil)
+
+        let urlAnchor = TerminalPathTarget.target(
+            "file:///project/docs/guide.md#section-2",
+            directory: "/",
+            isRemote: false
+        )
+        #expect(urlAnchor?.path == "/project/docs/guide.md")
+        #expect(urlAnchor?.location == nil)
+
+        let lineFragment = TerminalPathTarget.target("docs/README.md#L12-L40", directory: "/project", isRemote: false)
+        #expect(lineFragment?.path == "/project/docs/README.md")
+        #expect(lineFragment?.location == EditorTextLocation(startLine: 12, endLine: 40))
+
+        let lockFile = TerminalPathTarget.target(".#lockfile", directory: "/project", isRemote: false)
+        #expect(lockFile?.path == "/project/.#lockfile")
+        #expect(lockFile?.location == nil)
+
+        let autosave = TerminalPathTarget.target("dir/#autosave#", directory: "/project", isRemote: false)
+        #expect(autosave?.path == "/project/dir/#autosave#")
+        #expect(autosave?.location == nil)
+
+        #expect(!TerminalPathTarget.isCandidate("#heading-only"))
+        #expect(TerminalPathTarget.target("#heading-only", directory: "/project", isRemote: false) == nil)
+    }
+
     @Test func standaloneFullStopIsNotAPathLink() {
         for remote in [false, true] {
             for value in [".", "'.'", "\".\"", ".:12"] {
@@ -337,5 +384,55 @@ struct TerminalPathOpenerTests {
         }
         #expect(controller.surfaceTree.map({ $0 }).count == 2)
         #expect(!FileManager.default.fileExists(atPath: captured.path))
+    }
+
+    @Test @MainActor func openFirstExistingCandidateOpensValidTargetFromDeferredClick() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let docs = root.appendingPathComponent("docs")
+        try FileManager.default.createDirectory(at: docs, withIntermediateDirectories: true)
+        let targetFile = docs.appendingPathComponent("arch.md")
+        try "# Architecture\n\n## Overview\n".write(to: targetFile, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let settings = OhMyGhosttySettings.shared
+        let oldDestination = settings.editorFileOpenDestination
+        settings.editorFileOpenDestination = .currentPane
+        defer { settings.editorFileOpenDestination = oldDestination }
+
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        var config = Ghostty.SurfaceConfiguration()
+        config.workingDirectory = root.path
+        config.command = "/bin/sleep 30"
+        let controller = TerminalController(app, withBaseConfig: config)
+        let window = try #require(controller.window)
+        defer {
+            EditorWorkspaceStore.shared.remove(tabID: controller.tabSessionID)
+            window.delegate = nil
+            window.close()
+        }
+        window.makeKeyAndOrderFront(nil)
+        let surface = try #require(controller.surfaceTree.first)
+        surface.pwd = root.path
+
+        TerminalPathOpener.openFirstExisting(
+            ["missing-prefix/docs/arch.md#overview", "./docs/arch.md#overview"],
+            from: surface,
+            baseDirectory: root.path
+        )
+
+        let workspace = EditorWorkspaceStore.shared.workspace(
+            for: controller.tabSessionID,
+            surfaceID: surface.id
+        )
+        for _ in 0..<100 {
+            if workspace.selectedDocument != nil, !workspace.isLoading { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let openedPath = try #require(workspace.selectedDocument?.path)
+        #expect(
+            URL(fileURLWithPath: openedPath).resolvingSymlinksInPath()
+                == targetFile.resolvingSymlinksInPath()
+        )
+        #expect(workspace.isVisible)
     }
 }

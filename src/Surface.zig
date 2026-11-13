@@ -1207,8 +1207,8 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
             self.renderer_state.omg_link_dispatch_pending = false;
             var it = self.renderer_state.omg_link_checks.map.iterator();
             while (it.next()) |entry| {
-                if (entry.value_ptr.* != .queued) continue;
-                entry.value_ptr.* = .pending;
+                if (entry.value_ptr.status != .queued) continue;
+                entry.value_ptr.status = .pending;
                 const key = entry.key_ptr.*;
                 const sep = std.mem.indexOfScalar(u8, key, 0).?;
                 _ = try self.rt_app.performAction(.{ .surface = self }, .omg_link_check, .{
@@ -1216,6 +1216,16 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
                     .base_directory = key[0..sep],
                 });
             }
+        },
+
+        .command_history_changed => {
+            _ = self.rt_app.performAction(
+                .{ .surface = self },
+                .command_history_changed,
+                {},
+            ) catch |err| {
+                log.warn("apprt failed command_history_changed notification err={}", .{err});
+            };
         },
 
         .present_surface => try self.presentSurface(),
@@ -1692,7 +1702,8 @@ fn modsChanged(self: *Surface, mods: input.Mods) void {
             self.renderer_state.mouse.mods = self.mouseModsWithCapture(self.mouse.mods);
             if (comptime builtin.target.os.tag == .macos) {
                 if (mods.binding().equal(input.ctrlOrSuper(.{}))) {
-                    self.renderer_state.omg_link_checks.clear(self.alloc);
+                    const now_ms = std.Io.Timestamp.now(global.io(), .awake).toMilliseconds();
+                    self.renderer_state.omg_link_checks.pruneExpired(self.alloc, now_ms);
                 }
             }
 
@@ -4045,7 +4056,8 @@ pub fn mouseButtonCallback(
             self.mouse.link_click_bypass = false;
             break :bypass v;
         }
-        const v = self.mouse.over_link and linkModsBypassCapture(mods);
+        const v = linkModsBypassCapture(mods) and
+            (self.mouse.over_link or self.hasCommandLinkCandidate());
         self.mouse.link_click_bypass = v;
         break :bypass v;
     } else false;
@@ -4136,7 +4148,7 @@ pub fn mouseButtonCallback(
         // Handle link clicking. We want to do this before we do mouse
         // reporting or any other mouse handling because a successfully
         // clicked link will swallow the event.
-        if (self.mouse.over_link and !self.mouse.selection_gesture.left_click_dragged) {
+        if ((self.mouse.over_link or link_click_bypass) and !self.mouse.selection_gesture.left_click_dragged) {
             // We are holding the renderer lock, but this should just be
             // a cached value.
             const pos = release_pos orelse try self.rt_surface.getCursorPos();
@@ -4144,6 +4156,15 @@ pub fn mouseButtonCallback(
                 if (processed) return true;
             } else |err| {
                 log.warn("error processing links err={}", .{err});
+            }
+            if (comptime builtin.target.os.tag == .macos) {
+                if (linkModsBypassCapture(mods)) {
+                    if (self.processUnverifiedOmgPathClick(pos)) |processed| {
+                        if (processed) return true;
+                    } else |err| {
+                        log.warn("error processing unverified path click err={}", .{err});
+                    }
+                }
             }
         }
 
@@ -4652,7 +4673,8 @@ fn omgLinkExists(self: *Surface, detected: @import("omg_wrapped_link.zig").Resul
     if (!OmgLinkCheck.needsCheck(value)) return true;
     const cwd = screen.omg_cwd_history.cwdAt(sel.start()) orelse "";
     if (self.renderer_state.omg_link_checks.get(cwd, value)) |status| return status == .exists;
-    if (!try self.renderer_state.omg_link_checks.putPending(self.alloc, cwd, value)) return false;
+    const now_ms = std.Io.Timestamp.now(global.io(), .awake).toMilliseconds();
+    if (!try self.renderer_state.omg_link_checks.putPendingAt(self.alloc, cwd, value, now_ms)) return false;
     _ = self.rt_app.performAction(
         .{ .surface = self },
         .omg_link_check,
@@ -4661,12 +4683,165 @@ fn omgLinkExists(self: *Surface, detected: @import("omg_wrapped_link.zig").Resul
     return false;
 }
 
+/// OMG: returns true if a Cmd-click at the current cursor position hits an
+/// OSC 8 hyperlink, scheme URL, or non-missing path candidate (even before
+/// async filesystem verification returns).
+fn hasCommandLinkCandidate(self: *Surface) bool {
+    if (comptime !builtin.target.os.tag.isDarwin()) return false;
+    const pos = self.rt_surface.getCursorPos() catch return false;
+    return self.hasCommandLinkCandidateAtPos(pos);
+}
+
+pub fn hasCommandLinkCandidateAtPos(self: *Surface, pos: apprt.CursorPos) bool {
+    if (comptime !builtin.target.os.tag.isDarwin()) return false;
+    if (pos.x < 0 or pos.y < 0) return false;
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
+    return self.hasCommandLinkCandidateLocked(pos) catch false;
+}
+
+/// Requires the renderer state mutex is held.
+fn hasCommandLinkCandidateLocked(self: *Surface, pos: apprt.CursorPos) !bool {
+    const screen: *terminal.Screen = self.renderer_state.terminal.screens.active;
+    const point = self.posToViewport(pos.x, pos.y);
+    const mouse_pin = screen.pages.pin(.{ .viewport = point }) orelse return false;
+    const rac = mouse_pin.rowAndCell();
+    if (rac.cell.semantic_content == .prompt) return false;
+    if (self.config.link_osc8 and rac.cell.hyperlink) return true;
+    if (self.config.links.len == 0) return false;
+
+    const line = screen.selectLine(.{
+        .pin = mouse_pin,
+        .whitespace = null,
+        .semantic_prompt_boundary = true,
+    }) orelse return false;
+
+    const strmap = try @import("omg_wrapped_link.zig").stringMap(self.alloc, screen, line);
+    defer strmap.deinit(self.alloc);
+    const cmd_mods = input.ctrlOrSuper(.{});
+
+    for (self.config.links) |link| {
+        switch (link.highlight) {
+            .always, .hover => {},
+            .always_mods, .hover_mods => |v| if (!v.equal(cmd_mods)) continue,
+        }
+        var it = strmap.searchIterator(link.regex);
+        while (try it.next()) |found| {
+            var match = found;
+            defer match.deinit();
+            const detected = try @import("omg_wrapped_link.zig").Result.fromMatch(self.alloc, match);
+            defer detected.deinit(self.alloc);
+            if (!detected.contains(screen, mouse_pin)) continue;
+            const value = detected.target;
+            if (OmgLinkCheck.isBareRoot(value)) continue;
+            if (link.action == .open and OmgLinkCheck.needsCheck(value)) {
+                const cwd = screen.omg_cwd_history.cwdAt(detected.selection.start()) orelse "";
+                if (self.renderer_state.omg_link_checks.get(cwd, value)) |status| {
+                    if (status == .missing) continue;
+                }
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+/// OMG: when a user Cmd+Clicks a path candidate before async `.omg_link_check`
+/// has finished, collect all non-missing candidates covering the clicked cell
+/// in priority order and let the host verify & open the first existing one.
+///
+/// Requires the renderer state mutex is held.
+fn processUnverifiedOmgPathClick(self: *Surface, pos: apprt.CursorPos) !bool {
+    if (pos.x < 0 or pos.y < 0) return false;
+    if (self.config.links.len == 0) return false;
+
+    const screen: *terminal.Screen = self.renderer_state.terminal.screens.active;
+    const point = self.posToViewport(pos.x, pos.y);
+    const mouse_pin = screen.pages.pin(.{ .viewport = point }) orelse return false;
+    if (mouse_pin.rowAndCell().cell.semantic_content == .prompt) return false;
+
+    const line = screen.selectLine(.{
+        .pin = mouse_pin,
+        .whitespace = null,
+        .semantic_prompt_boundary = true,
+    }) orelse return false;
+
+    const strmap = try @import("omg_wrapped_link.zig").stringMap(self.alloc, screen, line);
+    defer strmap.deinit(self.alloc);
+    const cmd_mods = input.ctrlOrSuper(.{});
+    const now_ms = std.Io.Timestamp.now(global.io(), .awake).toMilliseconds();
+
+    var joined: std.ArrayList(u8) = .empty;
+    defer joined.deinit(self.alloc);
+    var count: usize = 0;
+    var base_cwd: ?[]const u8 = null;
+
+    for (self.config.links) |link| {
+        if (link.action != .open) continue;
+        switch (link.highlight) {
+            .always, .hover => {},
+            .always_mods, .hover_mods => |v| if (!v.equal(cmd_mods)) continue,
+        }
+        var it = strmap.searchIterator(link.regex);
+        while (try it.next()) |found| {
+            var match = found;
+            defer match.deinit();
+            const detected = try @import("omg_wrapped_link.zig").Result.fromMatch(self.alloc, match);
+            defer detected.deinit(self.alloc);
+            if (!detected.contains(screen, mouse_pin)) continue;
+
+            const value = detected.target;
+            if (OmgLinkCheck.isBareRoot(value) or !OmgLinkCheck.needsCheck(value)) continue;
+            if (std.mem.indexOfScalar(u8, value, 0) != null) continue;
+
+            const cwd = screen.omg_cwd_history.cwdAt(detected.selection.start()) orelse "";
+            if (base_cwd == null) {
+                base_cwd = cwd;
+            } else if (!std.mem.eql(u8, base_cwd.?, cwd)) {
+                continue;
+            }
+
+            if (self.renderer_state.omg_link_checks.get(cwd, value)) |status| {
+                if (status == .missing) continue;
+            } else {
+                _ = self.renderer_state.omg_link_checks.putPendingAt(self.alloc, cwd, value, now_ms) catch {};
+            }
+
+            var dup = false;
+            var split_it = std.mem.splitScalar(u8, joined.items, 0);
+            while (split_it.next()) |existing| {
+                if (existing.len > 0 and std.mem.eql(u8, existing, value)) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (dup) continue;
+
+            if (count > 0) try joined.append(self.alloc, 0);
+            try joined.appendSlice(self.alloc, value);
+            count += 1;
+        }
+    }
+
+    if (count == 0) return false;
+    _ = try self.rt_app.performAction(
+        .{ .surface = self },
+        .omg_open_path_candidates,
+        .{
+            .candidates = joined.items,
+            .base_directory = base_cwd orelse "",
+        },
+    );
+    return true;
+}
+
 /// OMG: apply one answer without scheduling a frame. The host flushes once
 /// after applying the whole filesystem batch.
 pub fn omgLinkChecked(self: *Surface, url: []const u8, base_directory: []const u8, exists: bool) void {
     self.renderer_state.mutex.lockUncancelable(global.io());
     defer self.renderer_state.mutex.unlock(global.io());
-    if (self.renderer_state.omg_link_checks.resolve(base_directory, url, exists)) {
+    const now_ms = std.Io.Timestamp.now(global.io(), .awake).toMilliseconds();
+    if (self.renderer_state.omg_link_checks.resolveAt(base_directory, url, exists, now_ms)) {
         self.renderer_state.omg_link_results_dirty = true;
     }
 }

@@ -2,6 +2,8 @@
 const Self = @This();
 const std = @import("std");
 const PageList = @import("PageList.zig");
+const Selection = @import("Selection.zig");
+const page = @import("page.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Entry = struct {
@@ -179,6 +181,370 @@ pub fn finish(self: *Self, alloc: Allocator, pages: *PageList, cursor: PageList.
         pages.untrackPin(old.end_pin);
         alloc.free(old.text);
         if (old.replay_key) |key| alloc.free(key);
+    }
+}
+
+fn sameRow(a: PageList.Pin, b: PageList.Pin) bool {
+    return a.node == b.node and a.y == b.y;
+}
+
+/// Returns the untracked output selection for a recorded command execution.
+/// Pass `id == 0` to select the output of the most recent valid command.
+/// Returns `null` if the command does not exist, is invalid, or produced no
+/// non-whitespace/text output cells.
+pub fn outputSelection(self: *const Self, pages: *const PageList, id: u64) ?Selection {
+    const items = self.entries.items;
+    const entry_index: usize = blk: {
+        if (id == 0) {
+            var idx = items.len;
+            while (idx > 0) {
+                idx -= 1;
+                if (items[idx].isValid()) break :blk idx;
+            }
+            return null;
+        }
+        for (items, 0..) |entry, idx| {
+            if (entry.id == id and entry.isValid()) break :blk idx;
+        }
+        return null;
+    };
+
+    const entry = items[entry_index];
+    const bottom = pages.getBottomRight(.screen) orelse return null;
+    var limit = bottom;
+    for (items[entry_index + 1 ..]) |later| {
+        if (later.pin.garbage) continue;
+        if (entry.pin.before(later.pin.*)) {
+            limit = later.pin.*;
+            break;
+        }
+    }
+
+    var start: PageList.Pin = undefined;
+    var end: PageList.Pin = undefined;
+    var found = false;
+    var passed_input = !entry.end_inclusive;
+
+    var it = entry.end_pin.cellIterator(.right_down, limit);
+    while (it.next()) |pin| {
+        if (!limit.eql(bottom) and pin.eql(limit)) break;
+
+        if (!passed_input) {
+            passed_input = true;
+            continue;
+        }
+
+        const rac = pin.rowAndCell();
+        if (!sameRow(pin, entry.end_pin.*) and !sameRow(pin, entry.pin.*) and rac.row.semantic_prompt != .none) {
+            break;
+        }
+
+        switch (rac.cell.semantic_content) {
+            .prompt => break,
+            .input => {
+                if (pin.eql(entry.end_pin.*)) continue;
+                break;
+            },
+            .output => {
+                if (!rac.cell.hasText()) continue;
+                if (!found) {
+                    start = pin;
+                    end = pin;
+                    found = true;
+                } else {
+                    end = pin;
+                }
+            },
+        }
+    }
+
+    if (!found) return null;
+    return Selection.init(start, end, false);
+}
+
+/// Reconstructs bounded `OSC 133` command history entries (and any active
+/// unsubmitted input anchor) from a decoded VT snapshot's semantic cells.
+/// Preserves timestamps and replay keys from `previous` when matching tail
+/// occurrences exist during an in-process session restore.
+pub fn rebuildFromSemanticPages(
+    self: *Self,
+    alloc: Allocator,
+    pages: *PageList,
+    cursor_pin: PageList.Pin,
+    cursor_semantic_content: page.Cell.SemanticContent,
+    previous: ?*const Self,
+    fallback_timestamp: i64,
+) !void {
+    self.deinit(alloc, pages);
+    if (previous) |prev| {
+        if (prev.next_id > self.next_id) self.next_id = prev.next_id;
+    }
+
+    const Candidate = struct {
+        start: PageList.Pin,
+        end: PageList.Pin,
+        end_inclusive: bool,
+        text: [:0]u8,
+        followed_by_output_or_prompt: bool = false,
+    };
+
+    var candidates: std.ArrayList(Candidate) = .empty;
+    defer {
+        for (candidates.items) |item| alloc.free(item.text);
+        candidates.deinit(alloc);
+    }
+
+    if (pages.getBottomRight(.screen)) |bottom| {
+        const top = pages.getTopLeft(.screen);
+        var current_start: ?PageList.Pin = null;
+        var current_last_input: PageList.Pin = undefined;
+        var pending_end: ?PageList.Pin = null;
+        var text_buf: std.ArrayList(u8) = .empty;
+        defer text_buf.deinit(alloc);
+        var overflow = false;
+
+        const commitCurrent = struct {
+            fn call(
+                alloc_: Allocator,
+                list: *std.ArrayList(Candidate),
+                buf: *std.ArrayList(u8),
+                start_opt: *?PageList.Pin,
+                pending_end_opt: *?PageList.Pin,
+                overflow_flag: *bool,
+                end_pin: PageList.Pin,
+                end_inclusive: bool,
+                followed: bool,
+            ) !void {
+                const start_pin = start_opt.* orelse return;
+                defer {
+                    start_opt.* = null;
+                    pending_end_opt.* = null;
+                    buf.clearRetainingCapacity();
+                    overflow_flag.* = false;
+                }
+                if (overflow_flag.*) return;
+                const trimmed = std.mem.trim(u8, buf.items, " \t\r\n");
+                if (trimmed.len == 0) return;
+                const copy = try alloc_.dupeZ(u8, trimmed);
+                errdefer alloc_.free(copy);
+                try list.append(alloc_, .{
+                    .start = start_pin,
+                    .end = end_pin,
+                    .end_inclusive = end_inclusive,
+                    .text = copy,
+                    .followed_by_output_or_prompt = followed,
+                });
+            }
+        }.call;
+
+        var it = top.cellIterator(.right_down, bottom);
+        while (it.next()) |pin| {
+            const rac = pin.rowAndCell();
+
+            if (current_start != null and pin.x == 0 and !rac.row.wrap_continuation) {
+                if (rac.row.semantic_prompt == .prompt) {
+                    try commitCurrent(
+                        alloc,
+                        &candidates,
+                        &text_buf,
+                        &current_start,
+                        &pending_end,
+                        &overflow,
+                        pending_end orelse current_last_input,
+                        pending_end == null,
+                        true,
+                    );
+                } else if (pending_end != null and rac.row.semantic_prompt != .prompt_continuation) {
+                    try commitCurrent(
+                        alloc,
+                        &candidates,
+                        &text_buf,
+                        &current_start,
+                        &pending_end,
+                        &overflow,
+                        pending_end.?,
+                        false,
+                        rac.cell.semantic_content == .prompt or (rac.cell.semantic_content == .output and rac.cell.hasText()),
+                    );
+                }
+            }
+
+            switch (rac.cell.semantic_content) {
+                .input => {
+                    if (current_start == null) {
+                        current_start = pin;
+                        pending_end = null;
+                        text_buf.clearRetainingCapacity();
+                        overflow = false;
+                    } else if (pending_end != null) {
+                        pending_end = null;
+                    }
+
+                    if (!overflow) {
+                        if (pin.x == 0 and !pin.eql(current_start.?) and !rac.row.wrap_continuation) {
+                            try text_buf.append(alloc, '\n');
+                        }
+                        switch (rac.cell.wide) {
+                            .spacer_head, .spacer_tail => {},
+                            else => {
+                                var bytes: [4]u8 = undefined;
+                                const cp = rac.cell.codepoint();
+                                if (std.unicode.utf8Encode(if (cp == 0) ' ' else cp, &bytes)) |len| {
+                                    try text_buf.appendSlice(alloc, bytes[0..len]);
+                                    if (pin.grapheme(rac.cell)) |extra| for (extra) |value| {
+                                        if (std.unicode.utf8Encode(value, &bytes)) |n| {
+                                            try text_buf.appendSlice(alloc, bytes[0..n]);
+                                        } else |_| {}
+                                    };
+                                } else |_| {}
+                            },
+                        }
+                        if (text_buf.items.len > 16384) overflow = true;
+                    }
+                    current_last_input = pin;
+                },
+                .prompt => {
+                    if (current_start != null) {
+                        if (rac.row.semantic_prompt == .prompt_continuation) {
+                            pending_end = null;
+                        } else {
+                            try commitCurrent(
+                                alloc,
+                                &candidates,
+                                &text_buf,
+                                &current_start,
+                                &pending_end,
+                                &overflow,
+                                pending_end orelse pin,
+                                false,
+                                true,
+                            );
+                        }
+                    } else if (candidates.items.len > 0) {
+                        candidates.items[candidates.items.len - 1].followed_by_output_or_prompt = true;
+                    }
+                },
+                .output => {
+                    if (current_start != null) {
+                        if (rac.cell.hasText()) {
+                            try commitCurrent(
+                                alloc,
+                                &candidates,
+                                &text_buf,
+                                &current_start,
+                                &pending_end,
+                                &overflow,
+                                pending_end orelse pin,
+                                false,
+                                true,
+                            );
+                        } else if (pending_end == null) {
+                            pending_end = pin;
+                        }
+                    } else if (rac.cell.hasText() and candidates.items.len > 0) {
+                        candidates.items[candidates.items.len - 1].followed_by_output_or_prompt = true;
+                    }
+                },
+            }
+        }
+
+        if (current_start != null) {
+            try commitCurrent(
+                alloc,
+                &candidates,
+                &text_buf,
+                &current_start,
+                &pending_end,
+                &overflow,
+                pending_end orelse current_last_input,
+                pending_end == null,
+                false,
+            );
+        }
+    }
+
+    // If the cursor is currently in `.input` state, an unsubmitted command at the
+    // active prompt must remain `self.input` rather than appearing as executed.
+    var active_input_pin: ?PageList.Pin = if (cursor_semantic_content == .input) cursor_pin else null;
+    if (cursor_semantic_content == .input and candidates.items.len > 0) {
+        const last = candidates.items[candidates.items.len - 1];
+        if (!last.followed_by_output_or_prompt and (last.start.before(cursor_pin) or last.start.eql(cursor_pin))) {
+            active_input_pin = last.start;
+            const popped = candidates.pop().?;
+            alloc.free(popped.text);
+        }
+    }
+
+    const slice = if (candidates.items.len > 100)
+        candidates.items[candidates.items.len - 100 ..]
+    else
+        candidates.items;
+
+    // Match previous valid entries from the tail when commands align so IDs,
+    // timestamps, and replay keys survive in-process snapshot restores.
+    var prev_valid: std.ArrayList(Entry) = .empty;
+    defer prev_valid.deinit(alloc);
+    if (previous) |prev| {
+        for (prev.entries.items) |entry| {
+            if (!entry.superseded) try prev_valid.append(alloc, entry);
+        }
+    }
+
+    const matched_tail: usize = blk: {
+        var count: usize = 0;
+        while (count < slice.len and count < prev_valid.items.len) {
+            const cand = slice[slice.len - 1 - count];
+            const prev_entry = prev_valid.items[prev_valid.items.len - 1 - count];
+            if (!std.mem.eql(u8, cand.text, prev_entry.text)) break;
+            count += 1;
+        }
+        break :blk count;
+    };
+
+    const unmatched_len = slice.len - matched_tail;
+    for (slice, 0..) |cand, idx| {
+        const anchor = try pages.trackPin(cand.start);
+        errdefer pages.untrackPin(anchor);
+        const end_anchor = try pages.trackPin(cand.end);
+        errdefer pages.untrackPin(end_anchor);
+        const copy = try alloc.dupeZ(u8, cand.text);
+        errdefer alloc.free(copy);
+
+        if (idx >= unmatched_len) {
+            const prev_idx = prev_valid.items.len - matched_tail + (idx - unmatched_len);
+            const prev_entry = prev_valid.items[prev_idx];
+            const replay_copy: ?[:0]const u8 = if (prev_entry.replay_key) |k|
+                try alloc.dupeZ(u8, k)
+            else
+                null;
+            errdefer if (replay_copy) |k| alloc.free(k);
+            const id = prev_entry.id;
+            if (id >= self.next_id) self.next_id = id + 1;
+            try self.entries.append(alloc, .{
+                .id = id,
+                .pin = anchor,
+                .end_pin = end_anchor,
+                .end_inclusive = cand.end_inclusive,
+                .text = copy,
+                .replay_key = replay_copy,
+                .timestamp = prev_entry.timestamp,
+            });
+        } else {
+            const id = self.next_id;
+            self.next_id += 1;
+            try self.entries.append(alloc, .{
+                .id = id,
+                .pin = anchor,
+                .end_pin = end_anchor,
+                .end_inclusive = cand.end_inclusive,
+                .text = copy,
+                .timestamp = fallback_timestamp,
+            });
+        }
+    }
+
+    if (active_input_pin) |pin| {
+        self.input = try pages.trackPin(pin);
     }
 }
 
@@ -364,4 +730,106 @@ test "OMG command history includes the final cell before delayed wrap" {
     try std.testing.expect(t.screens.active.cursor.pending_wrap);
     try t.semanticPrompt(.init(.end_input_start_output));
     try std.testing.expectEqualStrings("abcd", t.screens.active.omg_command_history.entries.items[0].text);
+}
+
+test "OMG command history extracts command output across shells and blank middle lines" {
+    const Terminal = @import("Terminal.zig");
+    const Formatter = @import("formatter.zig").ScreenFormatter;
+    const alloc = std.testing.allocator;
+    var t = try Terminal.init(std.testing.io, alloc, .{ .cols = 80, .rows = 16 });
+    defer t.deinit(alloc);
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("\x1b]133;A\x07$ \x1b]133;B\x07printf 'first\\n\\nthird\\n'\x1b]133;C\x07\r\nfirst\r\n\r\nthird\r\n");
+    stream.nextSlice("\x1b]133;A\x07$ \x1b]133;B\x07true\x1b]133;C\x07\r\n");
+    stream.nextSlice("\x1b]133;A\x07$ \x1b]133;B\x07echo fish-line\r\n\x1b]133;C;cmdline_url=echo%20fish-line\x07fish-line\r\n\x1b]133;A\x07$ \x1b]133;B\x07");
+
+    const screen = t.screens.active;
+    const entries = screen.omg_command_history.entries.items;
+    try std.testing.expectEqual(@as(usize, 3), entries.len);
+
+    // Specific command ID with blank internal line.
+    const first_sel = screen.omg_command_history.outputSelection(&screen.pages, entries[0].id).?;
+    var first_out: std.Io.Writer.Allocating = .init(alloc);
+    defer first_out.deinit();
+    var fmt1: Formatter = .init(screen, .{ .emit = .plain, .trim = true });
+    fmt1.content = .{ .selection = first_sel };
+    try fmt1.format(&first_out.writer);
+    try std.testing.expectEqualStrings("first\n\nthird", first_out.written());
+
+    // Command with zero output returns null.
+    try std.testing.expect(screen.omg_command_history.outputSelection(&screen.pages, entries[1].id) == null);
+
+    // `id == 0` selects the latest valid command's output (including Fish col-0 C).
+    const latest_sel = screen.omg_command_history.outputSelection(&screen.pages, 0).?;
+    var latest_out: std.Io.Writer.Allocating = .init(alloc);
+    defer latest_out.deinit();
+    var fmt3: Formatter = .init(screen, .{ .emit = .plain, .trim = true });
+    fmt3.content = .{ .selection = latest_sel };
+    try fmt3.format(&latest_out.writer);
+    try std.testing.expectEqualStrings("fish-line", latest_out.written());
+}
+
+test "OMG command history rebuilds executed commands and active input from VT snapshot" {
+    const Terminal = @import("Terminal.zig");
+    const snapshot = @import("snapshot/main.zig");
+    const Formatter = @import("formatter.zig").ScreenFormatter;
+    const alloc = std.testing.allocator;
+
+    var origin = try Terminal.init(std.testing.io, alloc, .{ .cols = 60, .rows = 12 });
+    defer origin.deinit(alloc);
+    var stream = origin.vtStream();
+    defer stream.deinit();
+
+    stream.nextSlice("\x1b]133;A\x07$ \x1b]133;B\x07pwd\x1b]133;C\x07\r\n/Users/test/project\r\n");
+    stream.nextSlice("\x1b]133;A\x07$ \x1b]133;B\x07ls -1\x1b]133;C\x07\r\nREADME.md\r\nsrc\r\n");
+    // Leave an unsubmitted partial input at the active prompt before snapshotting!
+    stream.nextSlice("\x1b]133;A\x07$ \x1b]133;B\x07git st");
+    origin.screens.active.omg_command_history.entries.items[0].timestamp = 1700000100;
+    origin.screens.active.omg_command_history.entries.items[1].timestamp = 1700000200;
+
+    var encoded: std.Io.Writer.Allocating = .init(alloc);
+    defer encoded.deinit();
+    try snapshot.encode(alloc, &encoded.writer, &origin, .{ .continuation = .ground });
+
+    var reader: std.Io.Reader = .fixed(encoded.written());
+    var decoded_state = try snapshot.decodeExact(alloc, std.testing.io, &reader, .{ .max_continuation_bytes = 0 });
+    defer decoded_state.deinit(alloc);
+    var restored = decoded_state.toOwned();
+    defer restored.deinit(alloc);
+
+    const restored_screen = restored.screens.get(.primary).?;
+    try restored_screen.omg_command_history.rebuildFromSemanticPages(
+        restored_screen.alloc,
+        &restored_screen.pages,
+        restored_screen.cursor.page_pin.*,
+        restored_screen.cursor.semantic_content,
+        &origin.screens.active.omg_command_history,
+        1700000999,
+    );
+
+    const entries = restored_screen.omg_command_history.entries.items;
+    try std.testing.expectEqual(@as(usize, 2), entries.len);
+    try std.testing.expectEqualStrings("pwd", entries[0].text);
+    try std.testing.expectEqual(@as(i64, 1700000100), entries[0].timestamp);
+    try std.testing.expectEqualStrings("ls -1", entries[1].text);
+    try std.testing.expectEqual(@as(i64, 1700000200), entries[1].timestamp);
+    try std.testing.expect(entries[0].isValid());
+    try std.testing.expect(entries[1].isValid());
+
+    const sel = restored_screen.omg_command_history.outputSelection(&restored_screen.pages, 0).?;
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    var fmt: Formatter = .init(restored_screen, .{ .emit = .plain, .trim = true });
+    fmt.content = .{ .selection = sel };
+    try fmt.format(&out.writer);
+    try std.testing.expectEqualStrings("README.md\nsrc", out.written());
+
+    // Completing the partial command after reattach records `git status`!
+    var restored_stream = restored.vtStream();
+    defer restored_stream.deinit();
+    restored_stream.nextSlice("atus\x1b]133;C\x07\r\nOn branch main\r\n");
+    try std.testing.expectEqual(@as(usize, 3), restored_screen.omg_command_history.entries.items.len);
+    try std.testing.expectEqualStrings("git status", restored_screen.omg_command_history.entries.items[2].text);
 }

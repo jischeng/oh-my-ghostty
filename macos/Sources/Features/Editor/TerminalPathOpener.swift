@@ -1,10 +1,8 @@
 import AppKit
+import GhosttyKit
 
 /// A terminal path is resolved against the clicked pane, never the process cwd.
 enum TerminalPathTarget {
-    private static let locationSuffixPattern =
-        "(?::\\d+(?::\\d+)?(?:-L?\\d+(?::\\d+)?)?|#L?\\d+(?:C\\d+)?(?:-L?\\d+(?:C\\d+)?)?)$"
-
     private static let colonLocationRegex = try? NSRegularExpression(
         pattern: ":(\\d+)(?::(\\d+))?(?:-L?(\\d+)(?::(\\d+))?)?$"
     )
@@ -21,10 +19,15 @@ enum TerminalPathTarget {
         return String(value.dropFirst().dropLast())
     }
 
+    private static func isPureAnchorFragment(_ path: String) -> Bool {
+        path.hasPrefix("#") && !(path.count >= 3 && path.hasSuffix("#"))
+    }
+
     static func isCandidate(_ value: String) -> Bool {
         if value.lowercased().hasPrefix("file:") { return true }
         let unquoted = stripMatchingQuotes(value)
-        let path = unquoted.replacingOccurrences(of: locationSuffixPattern, with: "", options: .regularExpression)
+        let path = splitLocationSuffix(from: unquoted).path
+        guard !path.isEmpty, !isPureAnchorFragment(path) else { return false }
         if path.contains(" ") {
             return !path.contains("://")
         }
@@ -63,9 +66,9 @@ enum TerminalPathTarget {
             } else {
                 guard URLComponents(string: withoutLocation)?.scheme == nil else { return nil }
             }
-            // A prose full stop must not become a link to the pane's cwd.
-            // Explicit paths such as ./ and ./README.md remain valid.
-            guard withoutLocation != "." else { return nil }
+            // A prose full stop or bare `#heading` fragment must not become a file link.
+            // Explicit paths such as ./ and ./README.md and Emacs #autosave# remain valid.
+            guard withoutLocation != ".", !isPureAnchorFragment(withoutLocation) else { return nil }
             path = withoutLocation
             location = extracted.location
         }
@@ -79,14 +82,21 @@ enum TerminalPathTarget {
         if path.hasPrefix("/") { return (path, location) }
         // An empty base explicitly means the clicked output's cwd is no longer known.
         guard !directory.isEmpty else { return nil }
-        return ((directory as NSString).appendingPathComponent(path), location)
+        var cleanRelative = path
+        while cleanRelative.hasPrefix("./"), cleanRelative.count > 2 {
+            cleanRelative.removeFirst(2)
+        }
+        return ((directory as NSString).appendingPathComponent(cleanRelative), location)
     }
 
     private static func splitLocationSuffix(from value: String) -> (path: String, location: EditorTextLocation?) {
-        if let hashIndex = value.lastIndex(of: "#") {
+        if let hashIndex = value.lastIndex(of: "#"),
+           hashIndex > value.startIndex,
+           value[value.index(before: hashIndex)] != "/" {
+            let prefix = String(value[..<hashIndex])
             let fragment = String(value[value.index(after: hashIndex)...])
-            if let location = parseFragmentLocation(fragment) {
-                return (String(value[..<hashIndex]), location)
+            if !fragment.isEmpty, !fragment.contains("/"), prefix != ".", !prefix.hasSuffix("/.") {
+                return (prefix, parseFragmentLocation(fragment))
             }
         }
         let nsValue = value as NSString
@@ -174,40 +184,118 @@ enum TerminalPathOpener {
     static func open(_ value: String, from source: Ghostty.SurfaceView, baseDirectory: String? = nil) -> Bool {
         guard TerminalPathTarget.isCandidate(value) else { return false }
         guard let resolved = resolve(value, from: source, baseDirectory: baseDirectory) else { return true }
-        let controller = resolved.controller, session = resolved.session
-        let context = resolved.context, filesystem = resolved.filesystem
-        let path = resolved.path, location = resolved.location
+        let controller = resolved.controller
+        let filesystem = resolved.filesystem
+        let path = resolved.path
         Task { [weak controller, weak source] in
             do {
                 guard let kind = try await filesystem.itemType(at: path),
-                      let controller, let source, source.surface != nil,
-                      controller.surfaceTree.first(where: { $0.id == source.id }) != nil,
-                      controller.paneSessionContext(for: source)?.state == session.state else { return }
-                switch kind {
-                case .file:
-                    EditorWorkspaceStore.shared.open(path: path, context: context, location: location)
-                case .directory:
-                    let isIdleShell = await isIdleInteractiveShell(source, session: session)
-                    guard !Task.isCancelled,
-                          source.surface != nil,
-                          controller.surfaceTree.first(where: { $0.id == source.id }) != nil,
-                          controller.paneSessionContext(for: source)?.state == session.state else { return }
-                    try openDirectory(
-                        path,
-                        controller: controller,
-                        source: source,
-                        session: session,
-                        isIdleInteractiveShell: isIdleShell
-                    )
-                }
+                      let controller, let source else { return }
+                try await performOpen(kind: kind, resolved: resolved, controller: controller, source: source)
             } catch {
-                guard let controller, let source else { return }
-                let workspace = EditorWorkspaceStore.shared.workspace(for: controller.tabSessionID, surfaceID: source.id)
-                workspace.errorMessage = error.localizedDescription
-                workspace.isVisible = true
+                presentOpenError(error, controller: controller, source: source)
             }
         }
         return true
+    }
+
+    /// Deferred click handler for `omg_path` candidates whose async hover existence
+    /// check has not finished yet when the user presses `Cmd+Click`.
+    static func openFirstExisting(
+        _ candidates: [String],
+        from source: Ghostty.SurfaceView,
+        baseDirectory: String?
+    ) {
+        guard !candidates.isEmpty else { return }
+        let base = baseDirectory ?? ""
+        Task { [weak source] in
+            for candidate in candidates {
+                guard !Task.isCancelled, let source, source.surface != nil else { return }
+                guard TerminalPathTarget.isCandidate(candidate),
+                      let resolved = resolve(candidate, from: source, baseDirectory: baseDirectory) else {
+                    reportLinkChecked(candidate, baseDirectory: base, exists: false, to: source)
+                    continue
+                }
+                let controller = resolved.controller
+                let filesystem = resolved.filesystem
+                let path = resolved.path
+                do {
+                    let kind = try await filesystem.itemType(at: path)
+                    guard !Task.isCancelled else { return }
+                    reportLinkChecked(candidate, baseDirectory: base, exists: kind != nil, to: source)
+                    guard let kind else { continue }
+                    try await performOpen(kind: kind, resolved: resolved, controller: controller, source: source)
+                    return
+                } catch {
+                    presentOpenError(error, controller: controller, source: source)
+                    return
+                }
+            }
+        }
+    }
+
+    private static func reportLinkChecked(
+        _ url: String,
+        baseDirectory: String,
+        exists: Bool,
+        to source: Ghostty.SurfaceView
+    ) {
+        guard let surface = source.surface else { return }
+        url.withCString { urlPtr in
+            baseDirectory.withCString { basePtr in
+                ghostty_surface_omg_link_checked(
+                    surface,
+                    urlPtr, UInt(url.utf8.count),
+                    basePtr, UInt(baseDirectory.utf8.count),
+                    exists
+                )
+            }
+        }
+        ghostty_surface_omg_link_checks_flush(surface)
+    }
+
+    private static func performOpen(
+        kind: WorkspaceItemType,
+        resolved: Resolved,
+        controller: TerminalController,
+        source: Ghostty.SurfaceView
+    ) async throws {
+        let session = resolved.session
+        guard source.surface != nil,
+              controller.surfaceTree.first(where: { $0.id == source.id }) != nil,
+              controller.paneSessionContext(for: source)?.state == session.state else { return }
+        switch kind {
+        case .file:
+            EditorWorkspaceStore.shared.open(
+                path: resolved.path,
+                context: resolved.context,
+                location: resolved.location
+            )
+        case .directory:
+            let isIdleShell = await isIdleInteractiveShell(source, session: session)
+            guard !Task.isCancelled,
+                  source.surface != nil,
+                  controller.surfaceTree.first(where: { $0.id == source.id }) != nil,
+                  controller.paneSessionContext(for: source)?.state == session.state else { return }
+            try openDirectory(
+                resolved.path,
+                controller: controller,
+                source: source,
+                session: session,
+                isIdleInteractiveShell: isIdleShell
+            )
+        }
+    }
+
+    private static func presentOpenError(
+        _ error: Error,
+        controller: TerminalController?,
+        source: Ghostty.SurfaceView?
+    ) {
+        guard let controller, let source else { return }
+        let workspace = EditorWorkspaceStore.shared.workspace(for: controller.tabSessionID, surfaceID: source.id)
+        workspace.errorMessage = error.localizedDescription
+        workspace.isVisible = true
     }
 
     private static let interactiveShellNames: Set<String> = [

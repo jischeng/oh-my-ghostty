@@ -428,7 +428,7 @@ struct EditorWorkspaceHost<Terminal: View>: View {
 
     private func openMarkdownLink(_ href: String, document: EditorDocument) {
         let trimmed = href.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return }
         let lower = trimmed.lowercased()
         if lower.hasPrefix("https://") || lower.hasPrefix("http://") || lower.hasPrefix("mailto:"),
            let url = URL(string: trimmed) {

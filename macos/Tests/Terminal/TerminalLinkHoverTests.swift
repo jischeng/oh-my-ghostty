@@ -299,6 +299,193 @@ struct TerminalLinkHoverTests {
         #expect(window.firstResponder === surface)
     }
 
+    @Test func mouseMovedWithoutCommandSkipsRedundantLocationPublishingOutsideGrabHandle() throws {
+        let controller = try makeController(split: false)
+        defer { controller.window?.delegate = nil; controller.window?.close() }
+        let window = try #require(controller.window)
+        let surface = try #require(controller.focusedSurface)
+        window.contentView?.layoutSubtreeIfNeeded()
+        #expect(surface.bounds.height > 120)
+
+        let exitEvent = try #require(NSEvent.enterExitEvent(
+            with: .mouseExited,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 0,
+            trackingNumber: 0,
+            userData: nil
+        ))
+        surface.mouseExited(with: exitEvent)
+        #expect(surface.mouseLocationInSurface == nil)
+
+        var publishedUpdates = 0
+        let cancellable = surface.$mouseLocationInSurface.dropFirst().sink { _ in
+            publishedUpdates += 1
+        }
+        defer { cancellable.cancel() }
+
+        for delta in 0..<6 {
+            let localPoint = NSPoint(x: 40 + CGFloat(delta), y: 40 + CGFloat(delta))
+            let move = try #require(NSEvent.mouseEvent(
+                with: .mouseMoved,
+                location: surface.convert(localPoint, to: nil),
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 0,
+                clickCount: 0,
+                pressure: 0
+            ))
+            surface.mouseMoved(with: move)
+        }
+        #expect(surface.mouseOverSurface)
+        #expect(surface.mouseLocationInSurface == nil)
+        #expect(publishedUpdates == 0, "Plain mouse moves outside the grab-handle band must not republish @Published location")
+
+        // Entering the top grab-handle hover band publishes location so split drag handle reveals.
+        let topBandPoint = NSPoint(x: surface.bounds.midX, y: surface.bounds.height - 6)
+        let enterTopBand = try #require(NSEvent.mouseEvent(
+            with: .mouseMoved,
+            location: surface.convert(topBandPoint, to: nil),
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 0,
+            pressure: 0
+        ))
+        surface.mouseMoved(with: enterTopBand)
+        #expect(surface.mouseLocationInSurface != nil)
+
+        // Leaving the top band clears mouseLocationInSurface back to nil, and pressing Cmd restores live location.
+        let bodyPoint = NSPoint(x: 55, y: 50)
+        let leaveTopBand = try #require(NSEvent.mouseEvent(
+            with: .mouseMoved,
+            location: surface.convert(bodyPoint, to: nil),
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 0,
+            pressure: 0
+        ))
+        surface.mouseMoved(with: leaveTopBand)
+        #expect(surface.mouseLocationInSurface == nil)
+
+        surface.updateLinkHoverModifiers(.command)
+        #expect(surface.mouseLocationInSurface == bodyPoint)
+    }
+
+    @Test func immediateCommandClickOnUnverifiedPathOpensWithoutPriorHover() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let notes = root.appendingPathComponent("notes")
+        try FileManager.default.createDirectory(at: notes, withIntermediateDirectories: true)
+        let targetFile = notes.appendingPathComponent("fast-click.md")
+        try "# Fast Click\n".write(to: targetFile, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let settings = OhMyGhosttySettings.shared
+        let oldDestination = settings.editorFileOpenDestination
+        settings.editorFileOpenDestination = .currentPane
+        defer { settings.editorFileOpenDestination = oldDestination }
+
+        let app = try #require(NSApp.delegate as? AppDelegate)
+        var config = Ghostty.SurfaceConfiguration()
+        config.workingDirectory = root.path
+        config.command = "/bin/sh -c 'printf \"notes/fast-click.md#fast-click\\n\"; sleep 30'"
+        let controller = TerminalController(app.ghostty, withBaseConfig: config, tabLayout: .vertical)
+        let window = try #require(controller.window)
+        defer {
+            EditorWorkspaceStore.shared.remove(tabID: controller.tabSessionID)
+            window.delegate = nil
+            window.close()
+        }
+        controller.showWindow(nil)
+        window.makeKeyAndOrderFront(nil)
+        let surface = try #require(controller.focusedSurface)
+        surface.pwd = root.path
+
+        for _ in 0..<100 {
+            if surface.cachedScreenContents.get().contains("notes/fast-click.md#fast-click") { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try #require(surface.cachedScreenContents.get().contains("notes/fast-click.md#fast-click"))
+        window.contentView?.layoutSubtreeIfNeeded()
+
+        let rawSurface = try #require(surface.surface)
+        var clickLocalPoint: NSPoint?
+        for offset in stride(from: 6.0, through: 160.0, by: 4.0) {
+            let candidate = NSPoint(x: 40, y: surface.bounds.height - offset)
+            if ghostty_surface_omg_has_link_candidate(
+                rawSurface,
+                candidate.x,
+                surface.frame.height - candidate.y
+            ) {
+                clickLocalPoint = candidate
+                break
+            }
+        }
+        let targetLocalPoint = try #require(clickLocalPoint)
+        let windowLocation = surface.convert(targetLocalPoint, to: nil)
+
+        // Ensure first Cmd+Click is NOT swallowed even when another control owns firstResponder
+        // and no prior Cmd+hover verification has run.
+        let composer = NSTextView(frame: NSRect(x: 0, y: 0, width: 40, height: 20))
+        window.contentView?.addSubview(composer)
+        defer { composer.removeFromSuperview() }
+        window.makeFirstResponder(composer)
+        #expect(!surface.isHoveringLink)
+
+        let downEvent = try #require(NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: windowLocation,
+            modifierFlags: .command,
+            timestamp: 1,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 10,
+            clickCount: 1,
+            pressure: 1
+        ))
+        let upEvent = try #require(NSEvent.mouseEvent(
+            with: .leftMouseUp,
+            location: windowLocation,
+            modifierFlags: .command,
+            timestamp: 1.02,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 10,
+            clickCount: 1,
+            pressure: 0
+        ))
+
+        let routedDown = surface.localEventLeftMouseDown(downEvent, isAppActive: true, isKeyWindow: true)
+        #expect(routedDown === downEvent)
+        surface.mouseDown(with: downEvent)
+        surface.mouseUp(with: upEvent)
+
+        let workspace = EditorWorkspaceStore.shared.workspace(
+            for: controller.tabSessionID,
+            surfaceID: surface.id
+        )
+        for _ in 0..<100 {
+            if workspace.selectedDocument != nil, !workspace.isLoading { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let openedPath = try #require(workspace.selectedDocument?.path)
+        #expect(
+            URL(fileURLWithPath: openedPath).resolvingSymlinksInPath()
+                == targetFile.resolvingSymlinksInPath()
+        )
+        #expect(workspace.selectedDocument?.text == "# Fast Click\n")
+    }
+
     @Test(.tags(.interactiveDesktop))
     func commandHoverRemainsStable() async throws {
         for split in [false, true] {

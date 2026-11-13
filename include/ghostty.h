@@ -900,6 +900,15 @@ typedef struct {
   uintptr_t base_directory_len;
 } ghostty_action_omg_link_check_s;
 
+// apprt.action.OmgOpenPathCandidates.C
+// OMG: NUL-separated candidate paths borrowed for the callback.
+typedef struct {
+  const char* candidates;
+  uintptr_t candidates_len;
+  const char* base_directory;
+  uintptr_t base_directory_len;
+} ghostty_action_omg_open_path_candidates_s;
+
 // apprt.action.CommandFinished.C
 typedef struct {
   // -1 if no exit code was reported, otherwise 0-255
@@ -1004,6 +1013,7 @@ typedef enum {
   GHOSTTY_ACTION_CONTEXT_SIGNAL,
   GHOSTTY_ACTION_COMMAND_HISTORY_CHANGED,
   GHOSTTY_ACTION_OMG_LINK_CHECK,
+  GHOSTTY_ACTION_OMG_OPEN_PATH_CANDIDATES,
 } ghostty_action_tag_e;
 
 typedef union {
@@ -1043,6 +1053,7 @@ typedef union {
   ghostty_action_progress_report_s progress_report;
   ghostty_action_context_signal_s context_signal;
   ghostty_action_omg_link_check_s omg_link_check;
+  ghostty_action_omg_open_path_candidates_s omg_open_path_candidates;
   ghostty_action_command_finished_s command_finished;
   ghostty_action_start_search_s start_search;
   ghostty_action_search_total_s search_total;
@@ -1236,7 +1247,14 @@ GHOSTTY_API void ghostty_surface_free_text(ghostty_surface_t, ghostty_text_s*);
 GHOSTTY_API void ghostty_surface_omg_commands(ghostty_surface_t, void*, void (*)(void*, uint64_t, const char*, int64_t, const char*));
 // On success returns the exact anchored viewport row and top grid padding in points.
 GHOSTTY_API bool ghostty_surface_omg_jump_command(ghostty_surface_t, uint64_t, uint32_t*, double*);
+// Extracts the plain-text output of command `id` (`0` = latest valid command).
+// Free the returned text with ghostty_surface_free_text.
+GHOSTTY_API bool ghostty_surface_omg_command_output(ghostty_surface_t, uint64_t, ghostty_text_s*);
 GHOSTTY_API void ghostty_surface_omg_clear_commands(ghostty_surface_t);
+// True if a Cmd-link candidate (OSC8, URL, or non-missing path) covers (x, y).
+GHOSTTY_API bool ghostty_surface_omg_has_link_candidate(ghostty_surface_t, double, double);
+// Seeds terminal pwd + scrollback cwd history only when terminal pwd is unset.
+GHOSTTY_API bool ghostty_surface_omg_seed_cwd_if_empty(ghostty_surface_t, const char*, uintptr_t);
 // Answer a GHOSTTY_ACTION_OMG_LINK_CHECK. Must be called on the main thread.
 GHOSTTY_API void ghostty_surface_omg_link_checked(ghostty_surface_t, const char*, uintptr_t, const char*, uintptr_t, bool);
 // Complete a group of answers; refresh links/rendering once, on the main thread.

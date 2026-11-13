@@ -1017,12 +1017,14 @@ struct LocalWorkspaceFilesystem: WorkspaceFilesystem {
     }
 
     func itemType(at path: String) async throws -> WorkspaceItemType? {
-        let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else {
-            return nil
-        }
-        return isDir.boolValue ? .directory : .file
+        await Task.detached(priority: .userInitiated) {
+            let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else {
+                return nil
+            }
+            return isDir.boolValue ? .directory : .file
+        }.value
     }
 
     func readFile(at path: String) async throws -> Data {
@@ -1363,14 +1365,107 @@ enum SSHSFTPClient {
     }
 }
 
+protocol SSHRemoteTransport: Sendable {
+    func runSFTP(batch: String, host: String, connection: GitSSHConnection?) async throws -> String
+    func runCommand(_ command: String, host: String, connection: GitSSHConnection?) async throws -> String
+}
+
+struct DefaultSSHRemoteTransport: SSHRemoteTransport {
+    func runSFTP(batch: String, host: String, connection: GitSSHConnection?) async throws -> String {
+        try await SSHSFTPClient.run(batch: batch, host: host, connection: connection)
+    }
+
+    func runCommand(_ command: String, host: String, connection: GitSSHConnection?) async throws -> String {
+        try await SSHSFTPClient.runCommand(command, host: host, connection: connection)
+    }
+}
+
+final class SSHWorkspaceItemTypeCache: @unchecked Sendable {
+    static let shared = SSHWorkspaceItemTypeCache()
+
+    enum EntryState: Equatable {
+        case present(WorkspaceItemType)
+        case missing
+    }
+
+    private struct Entry {
+        var state: EntryState
+        var updatedAt: ContinuousClock.Instant
+    }
+
+    private let lock = NSLock()
+    private let ttl: Duration
+    private let maxEntriesPerWorkspace: Int
+    private var storage: [String: [String: Entry]] = [:]
+
+    init(ttl: Duration = .seconds(5), maxEntriesPerWorkspace: Int = 2048) {
+        self.ttl = ttl
+        self.maxEntriesPerWorkspace = maxEntriesPerWorkspace
+    }
+
+    func lookup(
+        path: String,
+        workspaceID: String,
+        now: ContinuousClock.Instant = ContinuousClock.now
+    ) -> EntryState? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard var entries = storage[workspaceID],
+              let entry = entries[path] else { return nil }
+        if entry.updatedAt.duration(to: now) > ttl {
+            entries.removeValue(forKey: path)
+            storage[workspaceID] = entries.isEmpty ? nil : entries
+            return nil
+        }
+        return entry.state
+    }
+
+    func store(
+        _ updates: [String: EntryState],
+        workspaceID: String,
+        now: ContinuousClock.Instant = ContinuousClock.now
+    ) {
+        guard !updates.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        var entries = storage[workspaceID] ?? [:]
+        entries = entries.filter { $0.value.updatedAt.duration(to: now) <= ttl }
+        for (path, state) in updates {
+            if entries.count >= maxEntriesPerWorkspace, entries[path] == nil {
+                if let oldestKey = entries.min(by: { $0.value.updatedAt < $1.value.updatedAt })?.key {
+                    entries.removeValue(forKey: oldestKey)
+                }
+            }
+            entries[path] = Entry(state: state, updatedAt: now)
+        }
+        storage[workspaceID] = entries
+    }
+
+    func invalidateAll(for workspaceID: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        storage.removeValue(forKey: workspaceID)
+    }
+}
+
 struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
     let host: SSHHostConfiguration
     let connection: GitSSHConnection?
     let descriptor: WorkspaceDescriptor
+    let transport: any SSHRemoteTransport
+    let itemTypeCache: SSHWorkspaceItemTypeCache
 
-    init(host: SSHHostConfiguration, workingDirectory: String, connection: GitSSHConnection? = nil) {
+    init(
+        host: SSHHostConfiguration,
+        workingDirectory: String,
+        connection: GitSSHConnection? = nil,
+        transport: any SSHRemoteTransport = DefaultSSHRemoteTransport(),
+        itemTypeCache: SSHWorkspaceItemTypeCache = .shared
+    ) {
         self.connection = connection
         self.host = host
+        self.transport = transport
+        self.itemTypeCache = itemTypeCache
         self.descriptor = .init(
             kind: .ssh,
             id: host.workspaceID,
@@ -1381,17 +1476,34 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
 
     func listDirectory(at path: String) async throws -> [WorkspaceFileEntry] {
         let output = try await runSFTP(batch: "ls -la \(Self.quote(path))")
-        return try Self.parseLongListing(output, directory: path)
+        let entries = try Self.parseLongListing(output, directory: path)
+        let dirStatuses = Self.parseDirectoryListingStatuses(output, directory: path)
+        var cacheUpdates: [String: SSHWorkspaceItemTypeCache.EntryState] = [:]
+        for (name, status) in dirStatuses.prefix(500) {
+            let childPath = Self.standardized(Self.join(path, name))
+            switch status {
+            case .file:
+                cacheUpdates[childPath] = .present(.file)
+            case .directory:
+                cacheUpdates[childPath] = .present(.directory)
+            case .symlink, .other:
+                break
+            }
+        }
+        itemTypeCache.store(cacheUpdates, workspaceID: descriptor.id)
+        return entries
     }
 
     func createFile(named name: String, in directory: String) async throws {
         guard Self.validChildName(name) else { throw WorkspaceFilesystemError.invalidPath }
         _ = try await runSFTP(batch: "put /dev/null \(Self.quote(Self.join(directory, name)))")
+        itemTypeCache.invalidateAll(for: descriptor.id)
     }
 
     func createDirectory(named name: String, in directory: String) async throws {
         guard Self.validChildName(name) else { throw WorkspaceFilesystemError.invalidPath }
         _ = try await runSFTP(batch: "mkdir \(Self.quote(Self.join(directory, name)))")
+        itemTypeCache.invalidateAll(for: descriptor.id)
     }
 
     func renameItem(at path: String, to name: String) async throws {
@@ -1399,7 +1511,8 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
         guard destination != path else { return }
         let command = "python3 -c " + Self.shellQuote(Self.exclusiveRenameScript) + " " +
             Self.shellQuote(path) + " " + Self.shellQuote(destination)
-        _ = try await SSHSFTPClient.runCommand(command, host: host.alias, connection: connection)
+        _ = try await runRemoteCommand(command)
+        itemTypeCache.invalidateAll(for: descriptor.id)
     }
 
     // No check-then-rename fallback: it could overwrite a concurrently created target.
@@ -1431,25 +1544,160 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
         // Test the exact path; this also works for empty directories and follows
         // symlinks consistently with local itemType. No directory enumeration.
         guard !path.isEmpty, !path.contains("\0") else { return nil }
-        let output = try await SSHSFTPClient.runCommand(
-            Self.itemTypeCommand(path), host: host.alias, connection: connection
-        )
-        switch output.trimmingCharacters(in: .whitespacesAndNewlines) {
-        case "directory": return .directory
-        case "file": return .file
-        default: return nil
+        if let cached = itemTypeCache.lookup(path: path, workspaceID: descriptor.id) {
+            switch cached {
+            case .present(let kind): return kind
+            case .missing: return nil
+            }
         }
+        let output = try await runRemoteCommand(Self.itemTypeCommand(path))
+        let resolved: WorkspaceItemType?
+        switch output.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "directory": resolved = .directory
+        case "file": resolved = .file
+        default: resolved = nil
+        }
+        itemTypeCache.store(
+            [path: resolved.map(SSHWorkspaceItemTypeCache.EntryState.present) ?? .missing],
+            workspaceID: descriptor.id
+        )
+        return resolved
+    }
+
+    enum DirectoryEntryKind: Equatable {
+        case file
+        case directory
+        case symlink
+        case other
+    }
+
+    static func canProbeViaParentListing(_ path: String) -> Bool {
+        guard path.hasPrefix("/"), path != "/", !path.hasSuffix("/"),
+              !path.contains("//"),
+              !path.contains("/./"), !path.hasSuffix("/."),
+              !path.contains("/../"), !path.hasSuffix("/..") else {
+            return false
+        }
+        let parent = (path as NSString).deletingLastPathComponent
+        return parent != "/" && parent != "/tmp" && parent != "/var/tmp"
+    }
+
+    static func parseDirectoryListingStatuses(
+        _ output: String,
+        directory: String
+    ) -> [String: DirectoryEntryKind] {
+        var entries: [String: DirectoryEntryKind] = [:]
+        for rawLine in output.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard line.count > 10, !line.hasPrefix("sftp>") else { continue }
+            let columns = line.split(maxSplits: 8, whereSeparator: { $0 == " " || $0 == "\t" })
+            guard columns.count >= 9 else { continue }
+            let listedPath = listingPath(String(columns[8]), directory: directory)
+            let name = (listedPath as NSString).lastPathComponent
+            guard name != ".", name != ".." else { continue }
+            let kind: DirectoryEntryKind
+            switch line.first {
+            case "-": kind = .file
+            case "d": kind = .directory
+            case "l": kind = .symlink
+            default: kind = .other
+            }
+            entries[name] = kind
+        }
+        return entries
     }
 
     func itemTypes(at paths: [String]) async throws -> [String: WorkspaceItemType] {
+        // Validate path bounds consistently up front.
+        let validatedBatches = try Self.itemTypeBatches(paths)
+        let uniquePaths = validatedBatches.flatMap { $0 }
+        guard !uniquePaths.isEmpty else { return [:] }
+
         var result: [String: WorkspaceItemType] = [:]
-        for batch in try Self.itemTypeBatches(paths) {
+        var uncached: [String] = []
+        for path in uniquePaths {
+            if let cached = itemTypeCache.lookup(path: path, workspaceID: descriptor.id) {
+                if case .present(let kind) = cached {
+                    result[path] = kind
+                }
+            } else {
+                uncached.append(path)
+            }
+        }
+        guard !uncached.isEmpty else { return result }
+
+        var shellFallbackPaths: [String] = []
+        var parentGroups: [String: [String]] = [:]
+        for path in uncached {
+            if Self.canProbeViaParentListing(path) {
+                let parent = (path as NSString).deletingLastPathComponent
+                parentGroups[parent, default: []].append(path)
+            } else {
+                shellFallbackPaths.append(path)
+            }
+        }
+
+        if !parentGroups.isEmpty && parentGroups.count <= 3 {
+            for parent in parentGroups.keys.sorted() {
+                try Task.checkCancellation()
+                let groupPaths = parentGroups[parent] ?? []
+                do {
+                    let listing = try await runSFTP(batch: "ls -laf \(Self.quote(parent))")
+                    let statuses = Self.parseDirectoryListingStatuses(listing, directory: parent)
+                    var cacheUpdates: [String: SSHWorkspaceItemTypeCache.EntryState] = [:]
+                    for (name, status) in statuses.prefix(500) {
+                        let siblingPath = Self.standardized(Self.join(parent, name))
+                        switch status {
+                        case .file:
+                            cacheUpdates[siblingPath] = .present(.file)
+                        case .directory:
+                            cacheUpdates[siblingPath] = .present(.directory)
+                        case .symlink, .other:
+                            break
+                        }
+                    }
+                    for path in groupPaths {
+                        let name = (path as NSString).lastPathComponent
+                        switch statuses[name] {
+                        case .some(.file):
+                            result[path] = .file
+                            cacheUpdates[path] = .present(.file)
+                        case .some(.directory):
+                            result[path] = .directory
+                            cacheUpdates[path] = .present(.directory)
+                        case .some(.symlink):
+                            shellFallbackPaths.append(path)
+                        case .some(.other), .none:
+                            cacheUpdates[path] = .missing
+                        }
+                    }
+                    itemTypeCache.store(cacheUpdates, workspaceID: descriptor.id)
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    shellFallbackPaths.append(contentsOf: groupPaths)
+                }
+            }
+        } else {
+            for parent in parentGroups.keys.sorted() {
+                shellFallbackPaths.append(contentsOf: parentGroups[parent] ?? [])
+            }
+        }
+
+        for batch in try Self.itemTypeBatches(shellFallbackPaths) {
             try Task.checkCancellation()
-            let output = try await SSHSFTPClient.runCommand(
-                Self.itemTypesCommand(batch), host: host.alias, connection: connection
-            )
+            let output = try await runRemoteCommand(Self.itemTypesCommand(batch))
             let types = try Self.parseItemTypes(output, paths: batch)
-            result.merge(types) { _, new in new }
+            var cacheUpdates: [String: SSHWorkspaceItemTypeCache.EntryState] = [:]
+            for path in batch {
+                if let kind = types[path] {
+                    result[path] = kind
+                    cacheUpdates[path] = .present(kind)
+                } else {
+                    cacheUpdates[path] = .missing
+                }
+            }
+            itemTypeCache.store(cacheUpdates, workspaceID: descriptor.id)
         }
         return result
     }
@@ -1505,7 +1753,12 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
     }
 
     func readFile(at path: String) async throws -> Data {
-        // Pre-check remote attributes before downloading (E11)
+        try await readFileWithPermissions(at: path).data
+    }
+
+    private func readFileWithPermissions(at path: String) async throws -> (data: Data, permissions: Int?) {
+        // Pre-check remote attributes before downloading (E11) and capture permissions in one SFTP call.
+        var remotePermissions: Int?
         if let output = try? await runSFTP(batch: "ls -la \(Self.quote(path))"),
            let attrs = Self.parseFileAttributes(from: output) {
             guard !attrs.isDirectory else {
@@ -1514,6 +1767,7 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
             guard attrs.size <= UInt64(editorMaximumFileSize) else {
                 throw WorkspaceFilesystemError.fileTooLarge(path, editorMaximumFileSize)
             }
+            remotePermissions = attrs.permissions
         }
 
         let localURL = Self.temporaryTransferURL()
@@ -1525,7 +1779,7 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
             guard size <= UInt64(editorMaximumFileSize) else {
                 throw WorkspaceFilesystemError.fileTooLarge(path, editorMaximumFileSize)
             }
-            return try Data(contentsOf: localURL)
+            return (try Data(contentsOf: localURL), remotePermissions)
         } catch let error as WorkspaceFilesystemError {
             throw error
         } catch {
@@ -1537,20 +1791,21 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
         "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
+    static func parseResolvedCanonicalPath(_ output: String) -> String? {
+        let result = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard result.hasPrefix("/"), !result.contains("\0") else { return nil }
+        return standardized(result)
+    }
+
     private func resolveSymlinkViaSSH(at path: String) async -> String? {
         let command = "readlink -f \(Self.shellQuote(path)) 2>/dev/null || realpath \(Self.shellQuote(path)) 2>/dev/null"
-        guard let output = try? await SSHSFTPClient.runCommand(command, host: host.alias, connection: connection) else { return nil }
-        let result = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        return result.hasPrefix("/") && result != path ? result : nil
+        guard let output = try? await runRemoteCommand(command) else { return nil }
+        return Self.parseResolvedCanonicalPath(output)
     }
 
     func resolveCanonicalPath(at path: String) async -> String? {
-        let command = "readlink -f \(Self.shellQuote(path)) 2>/dev/null || realpath \(Self.shellQuote(path)) 2>/dev/null"
-        if let output = try? await SSHSFTPClient.runCommand(command, host: host.alias, connection: connection) {
-            let resolved = output.trimmingCharacters(in: .whitespacesAndNewlines)
-            if resolved.hasPrefix("/"), !resolved.contains("\0") {
-                return Self.standardized(resolved)
-            }
+        if let resolved = await resolveSymlinkViaSSH(at: path) {
+            return resolved
         }
         let resolved = await resolveSymlinkTarget(at: path)
         if resolved == path {
@@ -1614,14 +1869,17 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
     }
 
     func writeFile(_ data: Data, at path: String, replacing expectedData: Data) async throws {
-        var targetPath = path
+        let targetPath: String
+        let verifiedCanonicalTarget: Bool
         if let resolved = await resolveSymlinkViaSSH(at: path) {
             targetPath = resolved
+            verifiedCanonicalTarget = true
         } else {
             targetPath = await resolveSymlinkTarget(at: path)
+            verifiedCanonicalTarget = false
         }
 
-        if targetPath == path {
+        if !verifiedCanonicalTarget && targetPath == path {
             let status = await checkRemoteSymlinkStatus(at: path)
             switch status {
             case .symlink:
@@ -1637,15 +1895,11 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
             }
         }
 
-        var remotePermissions: Int?
-        if let attrs = try? await statFile(at: targetPath) {
-            remotePermissions = attrs.permissions
-        }
-
-        let current = try await readFile(at: targetPath)
-        guard current == expectedData else {
+        let currentFile = try await readFileWithPermissions(at: targetPath)
+        guard currentFile.data == expectedData else {
             throw WorkspaceFilesystemError.fileChanged(path)
         }
+        let remotePermissions = currentFile.permissions
         let localURL = Self.temporaryTransferURL()
         defer { try? FileManager.default.removeItem(at: localURL) }
         do {
@@ -1671,6 +1925,7 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
 
         do {
             _ = try await runSFTP(batch: batch)
+            itemTypeCache.invalidateAll(for: descriptor.id)
         } catch {
             _ = try? await runSFTP(batch: "rm \(Self.quote(remoteTempPath))")
             throw error
@@ -1678,7 +1933,11 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
     }
 
     private func runSFTP(batch: String) async throws -> String {
-        try await SSHSFTPClient.run(batch: batch, host: host.alias, connection: connection)
+        try await transport.runSFTP(batch: batch, host: host.alias, connection: connection)
+    }
+
+    private func runRemoteCommand(_ command: String) async throws -> String {
+        try await transport.runCommand(command, host: host.alias, connection: connection)
     }
 
     static func parseFileAttributes(

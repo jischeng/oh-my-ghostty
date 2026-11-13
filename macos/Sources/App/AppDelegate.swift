@@ -154,6 +154,13 @@ class AppDelegate: NSObject,
         return false
     }
 
+    var quickControllerIfInitialized: QuickTerminalController? {
+        if case .initialized(let controller) = quickTerminalControllerState {
+            return controller
+        }
+        return nil
+    }
+
     /// Our quick terminal. This starts out uninitialized and only initializes if used.
     var quickController: QuickTerminalController {
         switch quickTerminalControllerState {
@@ -403,6 +410,12 @@ class AppDelegate: NSObject,
         )
         NotificationCenter.default.addObserver(
             self,
+            selector: #selector(dockAttentionDidChange(_:)),
+            name: .omgDockAttentionDidChange,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
             selector: #selector(ghosttyNewWindow(_:)),
             name: Ghostty.Notification.ghosttyNewWindow,
             object: nil)
@@ -451,6 +464,7 @@ class AppDelegate: NSObject,
         // Setup our menu
         setupMenuImages()
         EditorMenuController.shared.install(in: menuNewWindow?.menu)
+        TerminalCommandMenuController.shared.install(in: menuCopy?.menu)
 
         // Setup signal handlers
         setupSignals()
@@ -799,7 +813,20 @@ class AppDelegate: NSObject,
     }
 
     @objc private func windowDidBecomeKey(_ notification: Notification) {
-        syncFloatOnTopMenu(notification.object as? NSWindow)
+        let keyWindow = notification.object as? NSWindow
+        syncFloatOnTopMenu(keyWindow)
+        if let controller = keyWindow?.windowController as? TerminalController,
+           let surface = controller.focusedSurface,
+           controller.surfaceTree.contains(surface),
+           controller.isSurfaceEffectivelyVisible(surface) {
+            MainActor.assumeIsolated {
+                TerminalFocusRouter.acknowledgeDockAttention(
+                    for: surface,
+                    in: controller,
+                    tabActivities: tabActivities
+                )
+            }
+        }
     }
 
     @objc private func quickTerminalDidChangeVisibility(_ notification: Notification) {
@@ -841,6 +868,18 @@ class AppDelegate: NSObject,
     @objc private func terminalWindowHasBell(_ notification: Notification) {
         guard notification.object is BaseTerminalController else { return }
         syncDockBadge()
+    }
+
+    @objc private func dockAttentionDidChange(_ notification: Notification) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.dockAttentionDidChange(notification) }
+            return
+        }
+        setDockBadge()
+        if !OMGApplicationEnvironment.isRunningTests,
+           MainActor.assumeIsolated({ computeDockBadgeLabel() != nil }) {
+            syncDockBadge()
+        }
     }
 
     private func requestBadgeAuthorizationAndSet(_ center: UNUserNotificationCenter) {
@@ -918,12 +957,39 @@ class AppDelegate: NSObject,
         }
     }
 
-    private func setDockBadge() {
-        let bellCount = NSApp.windows
-            .compactMap { $0.windowController as? BaseTerminalController }
-            .reduce(0) { $0 + ($1.bell ? 1 : 0) }
-        let wantsBadge = ghostty.config.bellFeatures.contains(.attention) && bellCount > 0
-        let label = wantsBadge ? (bellCount > 99 ? "99+" : String(bellCount)) : nil
+    @MainActor
+    func computeDockBadgeLabel() -> String? {
+        let allControllers = TerminalFocusRouter.allTerminalControllers()
+        var countedIDs = Set<ObjectIdentifier>()
+        var bellCount = 0
+        for controller in allControllers {
+            countedIDs.insert(ObjectIdentifier(controller))
+            if controller.bell { bellCount += 1 }
+        }
+        for window in NSApp.windows {
+            if let controller = window.windowController as? BaseTerminalController,
+               countedIDs.insert(ObjectIdentifier(controller)).inserted,
+               controller.bell {
+                bellCount += 1
+            }
+        }
+        let attentionCount = TerminalFocusRouter.unacknowledgedAttentionCount(
+            controllers: allControllers,
+            tabActivities: tabActivities
+        )
+        return DockBadgePolicy.badgeLabel(
+            bellCount: bellCount,
+            bellAttentionEnabled: ghostty.config.bellFeatures.contains(.attention),
+            unacknowledgedAttentionCount: attentionCount
+        )
+    }
+
+    func setDockBadge() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.setDockBadge() }
+            return
+        }
+        let label = MainActor.assumeIsolated { computeDockBadgeLabel() }
         NSApp.dockTile.badgeLabel = label
         NSApp.dockTile.display()
     }
@@ -1113,13 +1179,9 @@ class AppDelegate: NSObject,
     // MARK: - GhosttyAppDelegate
 
     func findSurface(forUUID uuid: UUID) -> Ghostty.SurfaceView? {
-        for c in TerminalController.all {
-            for view in c.surfaceTree where view.id == uuid {
-                return view
-            }
+        MainActor.assumeIsolated {
+            TerminalFocusRouter.findSurface(forUUID: uuid)
         }
-
-        return nil
     }
 
     // MARK: - Global State

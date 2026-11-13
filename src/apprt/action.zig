@@ -368,6 +368,10 @@ pub const Action = union(Key) {
     /// ghostty_surface_omg_link_checked using the same url/base_directory.
     omg_link_check: OmgLinkCheck,
 
+    /// OMG: open the first existing path among NUL-separated candidates when
+    /// Cmd-click occurred before asynchronous link verification finished.
+    omg_open_path_candidates: OmgOpenPathCandidates,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -442,6 +446,7 @@ pub const Action = union(Key) {
         context_signal,
         command_history_changed,
         omg_link_check,
+        omg_open_path_candidates,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
@@ -856,6 +861,30 @@ pub const OmgLinkCheck = struct {
         return .{
             .url = self.url.ptr,
             .len = self.url.len,
+            .base_directory = self.base_directory.ptr,
+            .base_directory_len = self.base_directory.len,
+        };
+    }
+};
+
+/// OMG: NUL-separated path candidates to verify and open on immediate Cmd-click.
+/// Borrowed for the duration of the callback only.
+pub const OmgOpenPathCandidates = struct {
+    candidates: []const u8,
+    base_directory: []const u8,
+
+    // Sync with: ghostty_action_omg_open_path_candidates_s
+    pub const C = extern struct {
+        candidates: [*]const u8,
+        candidates_len: usize,
+        base_directory: [*]const u8,
+        base_directory_len: usize,
+    };
+
+    pub fn cval(self: OmgOpenPathCandidates) C {
+        return .{
+            .candidates = self.candidates.ptr,
+            .candidates_len = self.candidates.len,
             .base_directory = self.base_directory.ptr,
             .base_directory_len = self.base_directory.len,
         };

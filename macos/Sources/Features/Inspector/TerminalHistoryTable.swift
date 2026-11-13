@@ -5,7 +5,24 @@ import SwiftUI
 struct TerminalHistoryTable: NSViewRepresentable {
     let items: [InspectorHistoryItem]
     let jump: (InspectorHistoryItem) -> Void
+    var copyOutput: ((InspectorHistoryItem) -> Void)?
+    var openOutputInEditor: ((InspectorHistoryItem) -> Void)?
+    var canExtractOutput: ((InspectorHistoryItem) -> Bool)?
     @ObservedObject private var settings = OhMyGhosttySettings.shared
+
+    init(
+        items: [InspectorHistoryItem],
+        copyOutput: ((InspectorHistoryItem) -> Void)? = nil,
+        openOutputInEditor: ((InspectorHistoryItem) -> Void)? = nil,
+        canExtractOutput: ((InspectorHistoryItem) -> Bool)? = nil,
+        jump: @escaping (InspectorHistoryItem) -> Void
+    ) {
+        self.items = items
+        self.copyOutput = copyOutput
+        self.openOutputInEditor = openOutputInEditor
+        self.canExtractOutput = canExtractOutput
+        self.jump = jump
+    }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -35,6 +52,9 @@ struct TerminalHistoryTable: NSViewRepresentable {
                   coordinator.items.indices.contains(table.selectedRow) else { return nil }
             return coordinator.items[table.selectedRow].text
         }
+        table.contextMenuBuilder = { [weak coordinator = context.coordinator] row in
+            coordinator?.contextMenu(forRow: row)
+        }
         context.coordinator.table = table
         scroll.documentView = table
         scroll.widthChanged = { [weak coordinator = context.coordinator] width in
@@ -47,6 +67,9 @@ struct TerminalHistoryTable: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         let coordinator = context.coordinator
         coordinator.jump = jump
+        coordinator.copyOutput = copyOutput
+        coordinator.openOutputInEditor = openOutputInEditor
+        coordinator.canExtractOutput = canExtractOutput
         coordinator.updateWidth(scroll.contentSize.width)
         coordinator.update(items: items, strings: .init(language: settings.language))
     }
@@ -61,11 +84,25 @@ struct TerminalHistoryTable: NSViewRepresentable {
 
     final class HistoryTable: NSTableView {
         var copyText: (() -> String?)?
+        var contextMenuBuilder: ((Int) -> NSMenu?)?
+
         @objc func copy(_ sender: Any?) {
             guard let text = copyText?() else { return }
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
         }
+
+        override func menu(for event: NSEvent) -> NSMenu? {
+            let point = convert(event.locationInWindow, from: nil)
+            let clicked = row(at: point)
+            let targetRow = clicked >= 0 ? clicked : selectedRow
+            guard targetRow >= 0 else { return nil }
+            if clicked >= 0, !selectedRowIndexes.contains(clicked) {
+                selectRowIndexes(IndexSet(integer: clicked), byExtendingSelection: false)
+            }
+            return contextMenuBuilder?(targetRow)
+        }
+
         override func performKeyEquivalent(with event: NSEvent) -> Bool {
             if let responder = window?.firstResponder as? NSView,
                responder === self || responder.isDescendant(of: self),
@@ -99,9 +136,13 @@ struct TerminalHistoryTable: NSViewRepresentable {
         }
     }
 
+    @MainActor
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         var items: [InspectorHistoryItem] = []
         var jump: ((InspectorHistoryItem) -> Void)?
+        var copyOutput: ((InspectorHistoryItem) -> Void)?
+        var openOutputInEditor: ((InspectorHistoryItem) -> Void)?
+        var canExtractOutput: ((InspectorHistoryItem) -> Bool)?
         weak var table: NSTableView?
         private var width: CGFloat = 300
         private var heights: [String: CGFloat] = [:]
@@ -111,6 +152,114 @@ struct TerminalHistoryTable: NSViewRepresentable {
             value.dateFormat = "yyyy-MM-dd HH:mm:ss"
             return value
         }()
+
+        func contextMenu(forRow row: Int) -> NSMenu? {
+            guard items.indices.contains(row) else { return nil }
+            let item = items[row]
+            let menu = NSMenu()
+            menu.autoenablesItems = false
+
+            let copyTitle = item.kind == .command ? strings.copyCommand : strings.copyPrompt
+            let copyItem = NSMenuItem(
+                title: copyTitle,
+                action: #selector(copyCommandAtMenuRow(_:)),
+                keyEquivalent: ""
+            )
+            copyItem.target = self
+            copyItem.tag = row
+            copyItem.isEnabled = !item.text.isEmpty
+            menu.addItem(copyItem)
+
+            if item.kind == .command {
+                let outputAvailable = resolveCanExtractOutput(for: item)
+                let copyOut = NSMenuItem(
+                    title: strings.copyCommandOutput,
+                    action: #selector(copyCommandOutputAtMenuRow(_:)),
+                    keyEquivalent: ""
+                )
+                copyOut.target = self
+                copyOut.tag = row
+                copyOut.isEnabled = outputAvailable
+                menu.addItem(copyOut)
+
+                let openOut = NSMenuItem(
+                    title: strings.openCommandOutputInEditor,
+                    action: #selector(openCommandOutputAtMenuRow(_:)),
+                    keyEquivalent: ""
+                )
+                openOut.target = self
+                openOut.tag = row
+                openOut.isEnabled = outputAvailable
+                menu.addItem(openOut)
+
+                menu.addItem(.separator())
+                let jumpItem = NSMenuItem(
+                    title: strings.jumpToCommand,
+                    action: #selector(jumpAtMenuRow(_:)),
+                    keyEquivalent: ""
+                )
+                jumpItem.target = self
+                jumpItem.tag = row
+                jumpItem.isEnabled = Self.canJump(item)
+                menu.addItem(jumpItem)
+            }
+
+            return menu
+        }
+
+        private func resolveSurface(for item: InspectorHistoryItem) -> Ghostty.SurfaceView? {
+            guard case .command(let surfaceID, _, _) = item.location else { return nil }
+            return TerminalFocusRouter.findSurface(forUUID: surfaceID)
+        }
+
+        private func resolveCanExtractOutput(for item: InspectorHistoryItem) -> Bool {
+            if let canExtractOutput {
+                return canExtractOutput(item)
+            }
+            guard let surface = resolveSurface(for: item) else { return false }
+            return TerminalCommandOutputActions.canExtractOutput(for: item, in: surface)
+        }
+
+        @objc private func copyCommandAtMenuRow(_ sender: NSMenuItem) {
+            guard items.indices.contains(sender.tag) else { return }
+            let text = items[sender.tag].text
+            guard !text.isEmpty else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+        }
+
+        @objc private func copyCommandOutputAtMenuRow(_ sender: NSMenuItem) {
+            guard items.indices.contains(sender.tag) else { return }
+            let item = items[sender.tag]
+            if let copyOutput {
+                copyOutput(item)
+                return
+            }
+            guard let surface = resolveSurface(for: item) else {
+                NSSound.beep()
+                return
+            }
+            _ = TerminalCommandOutputActions.copyCommandOutput(for: item, from: surface)
+        }
+
+        @objc private func openCommandOutputAtMenuRow(_ sender: NSMenuItem) {
+            guard items.indices.contains(sender.tag) else { return }
+            let item = items[sender.tag]
+            if let openOutputInEditor {
+                openOutputInEditor(item)
+                return
+            }
+            guard let surface = resolveSurface(for: item) else {
+                NSSound.beep()
+                return
+            }
+            _ = TerminalCommandOutputActions.openCommandOutputInEditor(for: item, from: surface)
+        }
+
+        @objc private func jumpAtMenuRow(_ sender: NSMenuItem) {
+            guard items.indices.contains(sender.tag), Self.canJump(items[sender.tag]) else { return }
+            jump?(items[sender.tag])
+        }
 
         func update(items next: [InspectorHistoryItem], strings nextStrings: InfoStrings) {
             guard items != next || strings != nextStrings, let table else { return }

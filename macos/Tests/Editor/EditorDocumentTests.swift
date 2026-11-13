@@ -19,6 +19,35 @@ struct EditorDocumentTests {
         #expect(try Data(contentsOf: file) == original)
     }
 
+    @Test @MainActor func defaultAutoSaveDelayUsesCalmerWindowForSSHWhileExplicitFlushStaysImmediate() async throws {
+        let localDoc = try await EditorDocument.open(
+            path: "/local/notes.md",
+            filesystem: MutableEditorFilesystem(data: Data("local".utf8))
+        )
+        #expect(localDoc.defaultAutoSaveDelay == .seconds(1))
+
+        let remoteFS = MockSSHAutoSaveEditorFilesystem(data: Data("original".utf8))
+        let document = try await EditorDocument.open(path: "/remote/notes.md", filesystem: remoteFS)
+        #expect(document.defaultAutoSaveDelay == .milliseconds(2500))
+        document.text = "remote edit"
+        #expect(document.isDirty)
+
+        // After 1.2s, a local document would have auto-saved, whereas SSH (2.5s) remains debounced.
+        try await Task.sleep(for: .milliseconds(1200))
+        #expect(await remoteFS.writeCount() == 0)
+        #expect(document.isDirty)
+
+        // Explicit flushAutoSave / save writes immediately without waiting for the remaining window.
+        document.flushAutoSave()
+        for _ in 0..<50 {
+            if await remoteFS.writeCount() > 0, !document.isDirty { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(await remoteFS.writeCount() == 1)
+        #expect(await remoteFS.currentData() == Data("remote edit".utf8))
+        #expect(!document.isDirty)
+    }
+
     @Test @MainActor func localFileRoundTripPreservesBOMAndCRLF() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("omg-editor-test-\(UUID().uuidString)", isDirectory: true)
@@ -531,4 +560,35 @@ private actor SuspendedWriteEditorFilesystem: WorkspaceFilesystem {
     }
 
     func writtenData() -> Data? { output }
+}
+
+private actor MockSSHAutoSaveEditorFilesystem: WorkspaceFilesystem {
+    nonisolated let descriptor = WorkspaceDescriptor(
+        kind: .ssh,
+        id: "ssh:cloud",
+        displayName: "cloud",
+        workingDirectory: "/remote"
+    )
+    private var data: Data
+    private var writes = 0
+
+    init(data: Data) {
+        self.data = data
+    }
+
+    func listDirectory(at path: String) async throws -> [WorkspaceFileEntry] { [] }
+    func createFile(named name: String, in directory: String) async throws {}
+    func createDirectory(named name: String, in directory: String) async throws {}
+    func readFile(at path: String) async throws -> Data { data }
+
+    func writeFile(_ data: Data, at path: String, replacing expectedData: Data) async throws {
+        guard self.data == expectedData else {
+            throw WorkspaceFilesystemError.fileChanged(path)
+        }
+        self.data = data
+        self.writes += 1
+    }
+
+    func currentData() -> Data { data }
+    func writeCount() -> Int { writes }
 }

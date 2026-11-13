@@ -904,17 +904,7 @@ class BaseTerminalController: NSWindowController,
     @objc private func ghosttyDidPresentTerminal(_ notification: Notification) {
         guard let target = notification.object as? Ghostty.SurfaceView else { return }
         guard surfaceTree.contains(target) else { return }
-
-        // Bring the window to front and focus the surface.
-        window?.makeKeyAndOrderFront(nil)
-
-        // We use a small delay to ensure this runs after any UI cleanup
-        // (e.g., command palette restoring focus to its original surface).
-        Ghostty.moveFocus(to: target)
-        Ghostty.moveFocus(to: target, delay: 0.1)
-
-        // Show a brief highlight to help the user locate the presented terminal.
-        target.highlight()
+        _ = TerminalFocusRouter.focus(surface: target, highlight: true)
     }
 
     @objc private func ghosttySurfaceDragEndedNoTarget(_ notification: Notification) {

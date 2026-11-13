@@ -157,8 +157,33 @@ extension Ghostty {
         @Published private(set) var mouseOverSurface: Bool = false
 
         // The last known mouse location in the surface's local coordinate space,
-        // used by overlays such as the split drag handle reveal region.
+        // used by overlays such as the split drag handle reveal region and Cmd-link hint.
+        // Only published when an overlay actually depends on live pointer coordinates.
         @Published private(set) var mouseLocationInSurface: CGPoint?
+        private(set) var latestMouseLocationInSurface: CGPoint?
+
+        func updatePublishedMouseLocation(_ pos: CGPoint?) {
+            latestMouseLocationInSurface = pos
+            guard let pos else {
+                if mouseLocationInSurface != nil {
+                    mouseLocationInSurface = nil
+                }
+                return
+            }
+            if linkHintCommandPressed || isHoveringLink {
+                if mouseLocationInSurface != pos {
+                    mouseLocationInSurface = pos
+                }
+                return
+            }
+            if SurfaceGrabHandle.isInHoverRegion(pos, in: bounds) {
+                if mouseLocationInSurface.map({ SurfaceGrabHandle.isInHoverRegion($0, in: bounds) }) != true {
+                    mouseLocationInSurface = pos
+                }
+            } else if mouseLocationInSurface != nil {
+                mouseLocationInSurface = nil
+            }
+        }
 
         // Whether the cursor is currently visible (not hidden by typing, etc.)
         @Published private(set) var cursorVisible: Bool = true
@@ -695,7 +720,10 @@ extension Ghostty {
 
             case GHOSTTY_MOUSE_SHAPE_POINTER:
                 // OMG: keep the current cursor; SurfaceLinkHint marks the link.
-                if !isHoveringLink { isHoveringLink = true }
+                if !isHoveringLink {
+                    isHoveringLink = true
+                    updatePublishedMouseLocation(latestMouseLocationInSurface)
+                }
                 return
 
             case GHOSTTY_MOUSE_SHAPE_W_RESIZE:
@@ -733,7 +761,10 @@ extension Ghostty {
                 return
             }
 
-            if isHoveringLink { isHoveringLink = false }
+            if isHoveringLink {
+                isHoveringLink = false
+                updatePublishedMouseLocation(latestMouseLocationInSurface)
+            }
 
             // OMG: the core resends the same shape on every hovered cell.
             // Republishing it re-renders SwiftUI overlays and rebuilds cursor
@@ -868,7 +899,7 @@ extension Ghostty {
                 let hovered = mouseOverSurface || isHoveringLink || hoverUrl != nil
                 updateLinkHoverModifiers(event.modifierFlags)
                 if hovered, window?.firstResponder !== self {
-                    let pos = mouseLocationInSurface ?? NSPoint(x: -1, y: -1)
+                    let pos = latestMouseLocationInSurface ?? mouseLocationInSurface ?? NSPoint(x: -1, y: -1)
                     surfaceModel?.sendMousePos(.init(
                         x: pos.x, y: pos.y >= 0 ? frame.height - pos.y : -1,
                         mods: .init(nsFlags: event.modifierFlags)))
@@ -883,10 +914,20 @@ extension Ghostty {
 
         func updateLinkHoverModifiers(_ flags: NSEvent.ModifierFlags) {
             let pressed = flags.contains(.command)
-            if linkHintCommandPressed != pressed { linkHintCommandPressed = pressed }
+            var changed = false
+            if linkHintCommandPressed != pressed {
+                linkHintCommandPressed = pressed
+                changed = true
+            }
             if !pressed {
-                if isHoveringLink { isHoveringLink = false }
+                if isHoveringLink {
+                    isHoveringLink = false
+                    changed = true
+                }
                 if hoverUrl != nil { hoverUrl = nil }
+            }
+            if changed {
+                updatePublishedMouseLocation(latestMouseLocationInSurface)
             }
         }
 
@@ -908,7 +949,7 @@ extension Ghostty {
             let cmd = modifierFlags.contains(.command)
             if linkHintCommandPressed != cmd { linkHintCommandPressed = cmd }
             if !mouseOverSurface { mouseOverSurface = true }
-            mouseLocationInSurface = pos
+            updatePublishedMouseLocation(pos)
             if sendToCore {
                 surfaceModel?.sendMousePos(.init(
                     x: pos.x,
@@ -972,8 +1013,15 @@ extension Ghostty {
             let hasDisplacedPaneResponder =
                 (window.windowController as? BaseTerminalController)?.focusedSurface === self
                 && (window.firstResponder == nil || window.firstResponder === window)
+            let localPoint = convert(event.locationInWindow, from: nil)
             let isCommandLinkClick = event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command
-                && (isHoveringLink || hoverUrl != nil)
+                && (
+                    isHoveringLink
+                    || hoverUrl != nil
+                    || (bounds.contains(localPoint) && surface.map {
+                        ghostty_surface_omg_has_link_candidate($0, localPoint.x, frame.height - localPoint.y)
+                    } == true)
+                )
 
             // If our window/app is already focused, then this click is only
             // being used to transfer split focus, except for an explicit
@@ -1211,7 +1259,7 @@ extension Ghostty {
                 if bounds.contains(pos) {
                     if !mouseOverSurface { mouseOverSurface = true }
                     if !linkHintCommandPressed { linkHintCommandPressed = true }
-                    mouseLocationInSurface = pos
+                    updatePublishedMouseLocation(pos)
                     surfaceModel?.sendMousePos(.init(
                         x: pos.x,
                         y: frame.height - pos.y,
@@ -1304,7 +1352,7 @@ extension Ghostty {
             super.mouseEntered(with: event)
 
             let pos = self.convert(event.locationInWindow, from: nil)
-            mouseLocationInSurface = pos
+            updatePublishedMouseLocation(pos)
 
             guard let surfaceModel else { return }
 
@@ -1323,7 +1371,7 @@ extension Ghostty {
         override func mouseExited(with event: NSEvent) {
             clearLinkHover()
             mouseOverSurface = false
-            mouseLocationInSurface = nil
+            updatePublishedMouseLocation(nil)
             guard let surfaceModel else { return }
 
             // If the mouse is being dragged then we don't have to emit
@@ -1352,7 +1400,7 @@ extension Ghostty {
                 linkHintCommandPressed = event.modifierFlags.contains(.command)
             }
             let pos = self.convert(event.locationInWindow, from: nil)
-            mouseLocationInSurface = pos
+            updatePublishedMouseLocation(pos)
 
             guard let surfaceModel else { return }
 
@@ -1790,7 +1838,8 @@ extension Ghostty {
             // leaves the core's link hover active until another modifier event.
             defer {
                 if let surfaceModel {
-                    let pos = mouseLocationInSurface
+                    let pos = latestMouseLocationInSurface
+                        ?? mouseLocationInSurface
                         ?? syncLivePointerIfInside(modifierFlags: event.modifierFlags, sendToCore: false)
                         ?? NSPoint(x: -1, y: -1)
                     surfaceModel.sendMousePos(.init(
@@ -1972,6 +2021,7 @@ extension Ghostty {
                 menu.addItem(withTitle: "Copy", action: #selector(copy(_:)), keyEquivalent: "")
             }
             menu.addItem(withTitle: "Paste", action: #selector(paste(_:)), keyEquivalent: "")
+            TerminalCommandMenuController.shared.appendContextMenuItems(to: menu, for: self)
 
             menu.addItem(.separator())
             item = menu.addItem(withTitle: "Split Right", action: #selector(splitRight(_:)), keyEquivalent: "")
@@ -2190,8 +2240,7 @@ extension Ghostty {
             let id = notification.request.identifier
             guard self.notificationIdentifiers.remove(id) != nil else { return }
             if focus {
-                self.window?.makeKeyAndOrderFront(self)
-                Ghostty.moveFocus(to: self)
+                _ = TerminalFocusRouter.focus(surface: self)
             }
         }
 

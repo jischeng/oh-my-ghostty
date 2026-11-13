@@ -34,6 +34,8 @@ enum SettingsMenuLocalizer {
         ("Redo", "重做"),
         ("Cut", "剪切"),
         ("Copy", "复制"),
+        ("Copy Last Command Output", "复制上一条命令输出"),
+        ("Open Last Command Output in Editor", "在编辑器中打开上一条命令输出"),
         ("Paste", "粘贴"),
         ("Paste Selection", "粘贴选区"),
         ("Select All", "全选"),

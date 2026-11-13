@@ -145,4 +145,9 @@ struct InfoStrings: Equatable, Sendable {
     var historyLimited: String {
         t("Showing recent prompts. Older or oversized records may be omitted.", "仅显示近期提问，较早或超大记录可能未收录。")
     }
+    var copyCommand: String { t("Copy Command", "复制命令") }
+    var copyPrompt: String { t("Copy Prompt", "复制提问") }
+    var copyCommandOutput: String { t("Copy Command Output", "复制命令输出") }
+    var openCommandOutputInEditor: String { t("Open Command Output in Editor", "在编辑器中打开命令输出") }
+    var jumpToCommand: String { t("Jump to Command", "跳转到命令位置") }
 }

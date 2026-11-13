@@ -242,4 +242,62 @@ struct TerminalHistoryTableTests {
         #expect(shortCell.bounds.contains(shortCell.date.frame))
         #expect(shortCell.bounds.maxY - shortCell.date.frame.maxY == TerminalHistoryTable.Metrics.verticalInset)
     }
+
+    @Test func contextMenuOffersCommandOutputActionsForLiveRowsAndDisablesThemForArchivedRows() throws {
+        let coordinator = TerminalHistoryTable.Coordinator()
+        let table = TerminalHistoryTable.HistoryTable(frame: NSRect(x: 0, y: 0, width: 320, height: 180))
+        table.addTableColumn(NSTableColumn(identifier: .init("history")))
+        table.dataSource = coordinator
+        table.delegate = coordinator
+        coordinator.table = table
+        let surfaceID = UUID()
+        let liveItem = InspectorHistoryItem(
+            id: "live-cmd",
+            kind: .command,
+            text: "git diff --stat",
+            timestamp: Date(),
+            location: .command(surfaceID: surfaceID, executionID: 1, epoch: UUID())
+        )
+        let archivedItem = InspectorHistoryItem(
+            id: "archived-cmd",
+            kind: .command,
+            text: "ls -la",
+            timestamp: Date(),
+            location: .unavailable(.expired)
+        )
+
+        var copiedOutputIDs: [String] = []
+        var openedOutputIDs: [String] = []
+        var jumpedIDs: [String] = []
+
+        coordinator.canExtractOutput = { item in item.location.isAvailable }
+        coordinator.copyOutput = { item in copiedOutputIDs.append(item.id) }
+        coordinator.openOutputInEditor = { item in openedOutputIDs.append(item.id) }
+        coordinator.jump = { item in jumpedIDs.append(item.id) }
+        coordinator.update(items: [liveItem, archivedItem], strings: .init(language: .english))
+
+        let liveMenu = try #require(coordinator.contextMenu(forRow: 0))
+        let liveActions = liveMenu.items.filter { !$0.isSeparatorItem }
+        #expect(liveActions.map(\.title) == [
+            "Copy Command",
+            "Copy Command Output",
+            "Open Command Output in Editor",
+            "Jump to Command",
+        ])
+        #expect(liveActions.allSatisfy { $0.isEnabled })
+
+        _ = liveActions[1].target?.perform(liveActions[1].action, with: liveActions[1])
+        _ = liveActions[2].target?.perform(liveActions[2].action, with: liveActions[2])
+        _ = liveActions[3].target?.perform(liveActions[3].action, with: liveActions[3])
+        #expect(copiedOutputIDs == ["live-cmd"])
+        #expect(openedOutputIDs == ["live-cmd"])
+        #expect(jumpedIDs == ["live-cmd"])
+
+        let archivedMenu = try #require(coordinator.contextMenu(forRow: 1))
+        let archivedActions = archivedMenu.items.filter { !$0.isSeparatorItem }
+        #expect(archivedActions[0].isEnabled)
+        #expect(!archivedActions[1].isEnabled)
+        #expect(!archivedActions[2].isEnabled)
+        #expect(!archivedActions[3].isEnabled)
+    }
 }

@@ -1767,6 +1767,62 @@ pub const CAPI = struct {
         surface.core_surface.omgLinkChecksFlush();
     }
 
+    export fn ghostty_surface_omg_has_link_candidate(
+        surface: *Surface,
+        x: f64,
+        y: f64,
+    ) bool {
+        const scale = surface.content_scale;
+        return surface.core_surface.hasCommandLinkCandidateAtPos(.{
+            .x = @floatCast(x * scale.x),
+            .y = @floatCast(y * scale.y),
+        });
+    }
+
+    export fn ghostty_surface_omg_command_output(
+        surface: *Surface,
+        id: u64,
+        result: *Text,
+    ) bool {
+        const core = &surface.core_surface;
+        core.renderer_state.mutex.lockUncancelable(global.io());
+        defer core.renderer_state.mutex.unlock(global.io());
+        if (core.renderer_state.terminal.screens.active_key != .primary) return false;
+        const screen = core.renderer_state.terminal.screens.active;
+        const sel = screen.omg_command_history.outputSelection(&screen.pages, id) orelse return false;
+        return readTextLocked(surface, sel, result);
+    }
+
+    export fn ghostty_surface_omg_seed_cwd_if_empty(
+        surface: *Surface,
+        cwd_ptr: [*]const u8,
+        cwd_len: usize,
+    ) bool {
+        if (cwd_len == 0 or cwd_len > 4096) return false;
+        const cwd = cwd_ptr[0..cwd_len];
+        if (cwd[0] != '/' or std.mem.indexOfScalar(u8, cwd, 0) != null) return false;
+        const core = &surface.core_surface;
+        core.renderer_state.mutex.lockUncancelable(global.io());
+        defer core.renderer_state.mutex.unlock(global.io());
+        const existing = core.io.terminal.getPwd() orelse "";
+        if (existing.len > 0) return false;
+        core.io.terminal.setPwd(cwd) catch return false;
+        if (comptime builtin.target.os.tag == .macos) {
+            inline for (.{ .primary, .alternate }) |key| {
+                if (core.io.terminal.screens.get(key)) |screen| {
+                    screen.omg_cwd_history.record(
+                        screen.alloc,
+                        &screen.pages,
+                        screen.pages.getTopLeft(.screen),
+                        cwd,
+                    ) catch {};
+                }
+            }
+        }
+        core.renderer_state.omg_link_checks.revision +%= 1;
+        return true;
+    }
+
     export fn ghostty_surface_omg_jump_command(
         surface: *Surface,
         id: u64,

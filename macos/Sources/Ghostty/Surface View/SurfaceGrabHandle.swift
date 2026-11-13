@@ -91,7 +91,7 @@ extension Ghostty {
         }
 
         /// Returns true when the pointer is inside the top hover band.
-        private static func isInHoverRegion(_ point: CGPoint, in bounds: CGRect) -> Bool {
+        static func isInHoverRegion(_ point: CGPoint, in bounds: CGRect) -> Bool {
             hoverRect(in: bounds).contains(point)
         }
     }

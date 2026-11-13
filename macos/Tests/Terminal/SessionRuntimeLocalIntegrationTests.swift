@@ -43,6 +43,8 @@ struct SessionRuntimeLocalIntegrationTests {
                       remote=os.environ.get('OMG_RUNTIME_REMOTE'),
                       socket=os.environ.get('OMG_RUNTIME_SOCKET'))
         pathlib.Path(\(String(reflecting: result.path))).write_text(json.dumps(result))
+        sys.stdout.write(f'\\033]7;file://localhost{os.getcwd()}\\007')
+        sys.stdout.write('\\033]133;A\\007$ \\033]133;B\\007echo omgd-reattached\\r\\n\\033]133;C\\007omgd-reattached\\r\\n\\033]133;D;0\\007\\033]133;A\\007$ \\033]133;B\\007')
         print('PERSISTENT_LOCAL_FIXTURE', flush=True)
         deadline = time.monotonic() + 30
         while pathlib.Path(\(String(reflecting: root.path))).exists() and not pathlib.Path(\(String(reflecting: stopped.path))).exists() and time.monotonic() < deadline:
@@ -104,6 +106,7 @@ struct SessionRuntimeLocalIntegrationTests {
         let native = try #require(app.app)
         let identity = UUID()
         let descriptor = SessionRuntimeDescriptor(connection: nil, revision: "fixture", policy: policy)
+        defer { SessionRuntimeHistoryStore.remove(for: descriptor, paneID: identity) }
         var config = Ghostty.SurfaceConfiguration()
         let python = try #require(LocalPythonInterpreter.cached())
         config.command = Ghostty.Shell.quote(python.executablePath) + " " + Ghostty.Shell.quote(script.path)
@@ -191,6 +194,12 @@ struct SessionRuntimeLocalIntegrationTests {
         #expect(restored.surfaceModel?.foregroundPID == processGroup)
         #expect(restored.surfaceModel?.ttyName == launched["tty"] as? String)
         #expect(restored.id == identity)
+        for _ in 0..<100 where !TerminalHistoryService.shared.commands(for: identity).contains(where: { $0.text == "echo omgd-reattached" }) {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let reattachedCommands = TerminalHistoryService.shared.commands(for: identity)
+        #expect(reattachedCommands.contains { $0.text == "echo omgd-reattached" && $0.location.isAvailable })
+        #expect(TerminalHistoryService.shared.lastCommandOutput(in: restored)?.contains("omgd-reattached") == true)
 
         let secondUndoManager = second?.undoManager
         secondUndoManager?.disableUndoRegistration()

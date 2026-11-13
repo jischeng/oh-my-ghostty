@@ -49,11 +49,15 @@ final class SessionRuntimeCloseQueue: ObservableObject {
     func enqueue(_ additions: [SessionRuntimeCloseRequest]) throws {
         if let loadError { throw loadError }
         var next = requests
-        for request in additions where !next.contains(request) { next.append(request) }
+        for request in additions {
+            SessionRuntimeHistoryStore.remove(for: request.descriptor, paneID: request.pane)
+            if !next.contains(request) { next.append(request) }
+        }
         try save(next)
     }
 
     func acknowledge(_ request: SessionRuntimeCloseRequest) throws {
+        SessionRuntimeHistoryStore.remove(for: request.descriptor, paneID: request.pane)
         try save(requests.filter { $0 != request })
     }
 

@@ -142,13 +142,11 @@ final class ScriptTerminal: NSObject {
             return nil
         }
 
-        guard let controller = BaseTerminalController.controller(owning: surfaceView) else {
+        guard TerminalFocusRouter.focus(surface: surfaceView) else {
             command.scriptErrorNumber = errAEEventFailed
             command.scriptErrorString = "Terminal is not in a window."
             return nil
         }
-
-        controller.focusSurface(surfaceView)
         return nil
     }
 

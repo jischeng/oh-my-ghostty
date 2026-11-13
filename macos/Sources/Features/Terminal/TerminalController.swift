@@ -424,7 +424,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             objectWillChange.send()
         }
     }
-    @Published private(set) var agentActivities: [UUID: TabActivity] = [:]
+    @Published private(set) var agentActivities: [UUID: TabActivity] = [:] {
+        didSet {
+            TerminalFocusRouter.notifyActivityMapChanged(previous: oldValue, current: agentActivities)
+        }
+    }
     @Published private(set) var tabPaneFocusHistory = TabPaneFocusHistory()
     @Published private(set) var agentResumeDescriptors: [UUID: AgentResumeDescriptor] = [:]
     let quickInputModel = AgentQuickInputModel(historyStore: .shared)
@@ -956,6 +960,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
 
         for surface in surfaces where paneSessionObservers[surface.id] == nil {
+            if !OMGApplicationEnvironment.isRunningTests,
+               let runtime = surface.runtimeDescriptor {
+                _ = SessionRuntimeHistoryStore.seedRestoredWorkingDirectoryIfNeeded(
+                    on: surface,
+                    descriptor: runtime
+                )
+            }
             paneSessionContexts[surface.id] = .init(
                 workingDirectory: surface.pwd,
                 terminalTitle: surface.title
@@ -1001,6 +1012,14 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                             workingDirectory: pwd,
                             state: surface.runtimeConnectionState
                         )
+                        if !OMGApplicationEnvironment.isRunningTests, pwd != nil {
+                            _ = SessionRuntimeHistoryStore.save(
+                                commands: TerminalHistoryService.shared.commands(for: surface.id),
+                                workingDirectory: pwd,
+                                for: runtime,
+                                paneID: surface.id
+                            )
+                        }
                     } else {
                         context.updateLocalMetadata(workingDirectory: pwd, terminalTitle: title)
                     }
@@ -1084,6 +1103,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         if signal.id == "omg-runtime-state", let runtime = surface.runtimeDescriptor {
             guard let state = SessionRuntimeConnectionState.decode(signal.metadata) else { return }
             surface.runtimeConnectionState = state
+            if state == .ready, !OMGApplicationEnvironment.isRunningTests {
+                _ = SessionRuntimeHistoryStore.seedRestoredWorkingDirectoryIfNeeded(
+                    on: surface,
+                    descriptor: runtime
+                )
+            }
             var context = paneSessionContexts[surface.id] ?? .init(
                 workingDirectory: surface.pwd,
                 terminalTitle: surface.title
@@ -1936,6 +1961,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     ) {
         guard surfaceTree.contains(where: { $0 === surface }) else { return }
         acknowledgeTerminalAgentState(for: surface)
+        TerminalFocusRouter.acknowledgeDockAttention(for: surface, in: self)
     }
 
     func acknowledgeTerminalAgentState(

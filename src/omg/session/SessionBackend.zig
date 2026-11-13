@@ -1304,35 +1304,120 @@ fn restore(self: *Self, io: *HostIO, bytes: []const u8) !void {
     var input: std.Io.Reader = .fixed(bytes);
     var decoded = try terminal.snapshot.decodeExact(self.alloc, global.io(), &input, .{ .max_continuation_bytes = 1024 * 1024 });
     defer decoded.deinit(self.alloc);
-    io.renderer_state.mutex.lockUncancelable(global.io());
-    defer io.renderer_state.mutex.unlock(global.io());
-    var handler = io.terminal_stream.handler;
-    // Reset parser-owned allocations while retaining host routing pointers.
-    handler.apc = .{};
-    handler.dcs = .{};
-    if (comptime @TypeOf(handler).tmux_enabled) handler.tmux_viewer = null;
-    handler.termio_messaged = false;
-    SnapshotPresentation.prepare(&io.terminal, &decoded.terminal.?);
-    io.terminal_stream.deinit();
-    io.terminal.deinit(self.alloc);
-    io.terminal = decoded.toOwned();
-    normalizeRestoredPwd(self.alloc, &io.terminal);
-    io.renderer_state.omg_link_checks.revision +%= 1;
-    io.renderer_state.terminal_generation +%= 1;
-    io.renderer_state.scroll = .{};
-    io.renderer_state.visual_offset_y.store(0, .monotonic);
-    io.terminal_stream = .init(.{ .allocator = self.alloc, .handler = handler });
-    switch (decoded.continuation) {
-        .ground => {},
-        .bytes => |continuation| io.terminal_stream.nextSlice(continuation),
+    {
+        io.renderer_state.mutex.lockUncancelable(global.io());
+        defer io.renderer_state.mutex.unlock(global.io());
+        var handler = io.terminal_stream.handler;
+        // Reset parser-owned allocations while retaining host routing pointers.
+        handler.apc = .{};
+        handler.dcs = .{};
+        if (comptime @TypeOf(handler).tmux_enabled) handler.tmux_viewer = null;
+        handler.termio_messaged = false;
+        SnapshotPresentation.prepare(&io.terminal, &decoded.terminal.?);
+        restoreCommandAndCwdHistory(self.alloc, &io.terminal, &decoded.terminal.?);
+        io.terminal_stream.deinit();
+        io.terminal.deinit(self.alloc);
+        io.terminal = decoded.toOwned();
+        normalizeRestoredPwd(self.alloc, &io.terminal);
+        io.renderer_state.omg_link_checks.revision +%= 1;
+        io.renderer_state.terminal_generation +%= 1;
+        io.renderer_state.scroll = .{};
+        io.renderer_state.visual_offset_y.store(0, .monotonic);
+        io.terminal_stream = .init(.{ .allocator = self.alloc, .handler = handler });
+        switch (decoded.continuation) {
+            .ground => {},
+            .bytes => |continuation| io.terminal_stream.nextSlice(continuation),
+        }
+        try io.renderer_wakeup.notify();
     }
-    try io.renderer_wakeup.notify();
+    _ = self.publishSurface(io, .command_history_changed);
+}
+
+/// Rebuilds `OSC 133` command history on the decoded primary screen (reconciling
+/// timestamps/replay keys from `previous` when reconnecting in-process) and
+/// carries over prior `OSC 7` directory transitions relative to the bottom of
+/// scrollback before `normalizeRestoredPwd` seeds any missing top-of-screen pwd.
+fn restoreCommandAndCwdHistory(
+    alloc: std.mem.Allocator,
+    previous: *terminal.Terminal,
+    restored: *terminal.Terminal,
+) void {
+    const now_secs = std.Io.Clock.real.now(restored.io()).toSeconds();
+    if (restored.screens.get(.primary)) |dst| {
+        const src = previous.screens.get(.primary);
+        dst.omg_command_history.rebuildFromSemanticPages(
+            dst.alloc,
+            &dst.pages,
+            dst.cursor.page_pin.*,
+            dst.cursor.semantic_content,
+            if (src) |s| &s.omg_command_history else null,
+            now_secs,
+        ) catch {};
+
+        if (comptime @import("builtin").target.os.tag == .macos) {
+            if (src) |s| carryOverCwdHistory(alloc, s, dst);
+        }
+    }
+}
+
+fn carryOverCwdHistory(
+    alloc: std.mem.Allocator,
+    src: *terminal.Screen,
+    dst: *terminal.Screen,
+) void {
+    if (src.omg_cwd_history.entries.items.len == 0) return;
+    const src_bottom = src.pages.getBottomRight(.screen) orelse return;
+    const dst_bottom = dst.pages.getBottomRight(.screen) orelse return;
+    const src_bottom_pt = (src.pages.pointFromPin(.screen, src_bottom) orelse return).coord();
+    const dst_bottom_pt = (dst.pages.pointFromPin(.screen, dst_bottom) orelse return).coord();
+
+    const Saved = struct { rows_from_bottom: u32, x: u16, cwd: []const u8 };
+    var saved: std.ArrayList(Saved) = .empty;
+    defer saved.deinit(alloc);
+
+    for (src.omg_cwd_history.entries.items) |entry| {
+        if (entry.pin.garbage or entry.cwd.len == 0) continue;
+        const pt = (src.pages.pointFromPin(.screen, entry.pin.*) orelse continue).coord();
+        const delta: u32 = if (src_bottom_pt.y >= pt.y) src_bottom_pt.y - pt.y else 0;
+        saved.append(alloc, .{
+            .rows_from_bottom = delta,
+            .x = pt.x,
+            .cwd = entry.cwd,
+        }) catch return;
+    }
+
+    for (saved.items) |item| {
+        const dst_y: u32 = if (dst_bottom_pt.y >= item.rows_from_bottom)
+            dst_bottom_pt.y - item.rows_from_bottom
+        else
+            0;
+        const max_x: u16 = if (dst.pages.cols > 0) dst.pages.cols - 1 else 0;
+        const pin = dst.pages.pin(.{ .screen = .{
+            .x = @min(item.x, max_x),
+            .y = dst_y,
+        } }) orelse dst.pages.getTopLeft(.screen);
+        dst.omg_cwd_history.record(dst.alloc, &dst.pages, pin, item.cwd) catch {};
+    }
 }
 
 /// Seeds a restored session's directory at the start of its retained scrollback
 /// so relative path links printed before reattachment (e.g. `ll`) remain clickable,
 /// while subsequent OSC 7 transitions still record at their own prompt cursor.
 fn seedRestoredPwd(term: *terminal.Terminal, path: []const u8) void {
+    // `term.setPwd` on macOS records at the current cursor pin, which would pop
+    // any transitions at the same cursor coordinate if not careful, or leave
+    // earlier scrollback without a seed. Save/restore only when seeding cold.
+    if (comptime @import("builtin").target.os.tag == .macos) {
+        const primary_has_history = if (term.screens.get(.primary)) |s|
+            s.omg_cwd_history.entries.items.len > 0
+        else
+            false;
+        if (primary_has_history) {
+            if (term.pwd.items.len > 0) term.pwd.clearRetainingCapacity();
+            if (path.len > 0) term.pwd.appendSlice(term.screens.active.alloc, path) catch {};
+            return;
+        }
+    }
     term.setPwd(path) catch {
         term.setPwd("") catch {};
         return;
@@ -1418,6 +1503,47 @@ test "restored OSC 7 pwd becomes a decoded path and seeds scrollback cwd history
     try t2.setPwd("file://host.local");
     normalizeRestoredPwd(alloc, &t2);
     try std.testing.expect(t2.getPwd() == null);
+}
+
+test "OMG session restore rebuilds command history and preserves OSC 7 cwd transitions" {
+    const alloc = std.testing.allocator;
+    var origin = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 60, .rows = 10 });
+    defer origin.deinit(alloc);
+    var stream = origin.vtStream();
+    defer stream.deinit();
+
+    try origin.setPwd("/repo/root");
+    stream.nextSlice("\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07\r\nREADME.md\r\n");
+    try origin.setPwd("/repo/root/sub");
+    stream.nextSlice("\x1b]133;A\x07$ \x1b]133;B\x07cat note.txt\x1b]133;C\x07\r\nsub-note\r\n\x1b]133;A\x07$ \x1b]133;B\x07");
+
+    var encoded: std.Io.Writer.Allocating = .init(alloc);
+    defer encoded.deinit();
+    try terminal.snapshot.encode(alloc, &encoded.writer, &origin, .{ .continuation = .ground });
+
+    var snap_reader: std.Io.Reader = .fixed(encoded.written());
+    var decoded = try terminal.snapshot.decodeExact(alloc, std.testing.io, &snap_reader, .{ .max_continuation_bytes = 0 });
+    defer decoded.deinit(alloc);
+    var restored = decoded.toOwned();
+    defer restored.deinit(alloc);
+
+    restoreCommandAndCwdHistory(alloc, &origin, &restored);
+    normalizeRestoredPwd(alloc, &restored);
+
+    const screen = restored.screens.get(.primary).?;
+    try std.testing.expectEqual(@as(usize, 2), screen.omg_command_history.entries.items.len);
+    try std.testing.expectEqualStrings("ls", screen.omg_command_history.entries.items[0].text);
+    try std.testing.expectEqualStrings("cat note.txt", screen.omg_command_history.entries.items[1].text);
+    if (comptime @import("builtin").target.os.tag == .macos) {
+        try std.testing.expectEqualStrings(
+            "/repo/root",
+            screen.omg_cwd_history.cwdAt(screen.omg_command_history.entries.items[0].pin.*).?,
+        );
+        try std.testing.expectEqualStrings(
+            "/repo/root/sub",
+            screen.omg_cwd_history.cwdAt(screen.omg_command_history.entries.items[1].pin.*).?,
+        );
+    }
 }
 
 test "resize marks explicit geometry and emits dimensions only when ready" {

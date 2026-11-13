@@ -27,11 +27,7 @@ struct FocusTerminalIntent: AppIntent {
             throw GhosttyIntentError.surfaceNotFound
         }
 
-        guard let controller = BaseTerminalController.controller(owning: surfaceView) else {
-            return .result()
-        }
-
-        controller.focusSurface(surfaceView)
+        _ = TerminalFocusRouter.focus(surface: surfaceView)
         return .result()
     }
 }

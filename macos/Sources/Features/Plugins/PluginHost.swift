@@ -280,7 +280,14 @@ final class TabActivityStore: ObservableObject {
 
     static let maximumTTLMilliseconds: UInt64 = 86_400_000
 
-    @Published private(set) var entries: [UUID: Entry] = [:]
+    @Published private(set) var entries: [UUID: Entry] = [:] {
+        didSet {
+            TerminalFocusRouter.notifyActivityMapChanged(
+                previous: oldValue.mapValues(\.status.activity),
+                current: entries.mapValues(\.status.activity)
+            )
+        }
+    }
 
     private var lastRevisions: [RevisionKey: UInt64] = [:]
     private var expirationWorkItems: [UUID: DispatchWorkItem] = [:]

@@ -626,6 +626,73 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
         }
     }
 
+    /// Reveals `controller` by switching to its workspace when parked/inactive
+    /// and selecting its tab within that workspace's group.
+    @discardableResult
+    func revealTab(_ controller: TerminalController) -> Bool {
+        guard !quitting, controller.isAvailableForWorkspace else { return false }
+        let host = controller.windowSessionID
+        controller.workspaceSwitcherIsPresented = false
+        controller.workspacePopover.close()
+        cancelWorkspaceSwitch(in: host)
+
+        let snapshot = store.snapshot
+        let needsWorkspaceActivation = controller.workspacePresentationIsParked
+            || snapshot.isParked(controller.tabSessionID)
+            || (snapshot.owner(of: controller.tabSessionID) != nil
+                && snapshot.windows?[host]?.currentWorkspace != controller.workspaceID)
+
+        if needsWorkspaceActivation {
+            if native.transitioningWindows.contains(host) || applying {
+                store.transaction { state in
+                    state.windows?[host]?.groups[controller.workspaceID]?.selected = controller.tabSessionID
+                }
+                deferredSwitches[host] = controller.workspaceID
+                scheduleWorkspaceSwitch(in: host)
+                return false
+            }
+            return perform(
+                hosts: [host],
+                focus: controller,
+                desiredFocus: { controller },
+                change: { state in
+                    self.restoreMissing(
+                        workspace: controller.workspaceID,
+                        host: host,
+                        app: controller.ghostty,
+                        parent: controller.window
+                    )
+                    state = self.draft ?? state
+                    state.windows?[host]?.groups[controller.workspaceID]?.selected = controller.tabSessionID
+                    state.select(controller.workspaceID, in: host)
+                    return true
+                }
+            )
+        }
+
+        if hasNonNativeFullscreen(in: host),
+           store.group(window: host, workspace: controller.workspaceID)?.selected != controller.tabSessionID {
+            return selectNonNativeTab(controller)
+        }
+
+        if let window = controller.window {
+            if window.isMiniaturized {
+                window.deminiaturize(nil)
+            }
+            if let tabGroup = window.tabGroup, tabGroup.selectedWindow !== window {
+                tabGroup.selectedWindow = window
+            }
+        }
+        if snapshot.owner(of: controller.tabSessionID) != nil {
+            store.transaction { state in
+                state.windows?[host]?.groups[controller.workspaceID]?.selected = controller.tabSessionID
+                state.select(controller.workspaceID, in: host)
+            }
+            savePresentation()
+        }
+        return true
+    }
+
     func fullscreenDidChange(_ controller: TerminalController) {
         guard !applying, !restoring, !quitting, !TerminalWorkspacePresentation.isChanging else { return }
         if let fullscreen = liveControllers.first(where: {

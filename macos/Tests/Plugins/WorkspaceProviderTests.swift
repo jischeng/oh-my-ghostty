@@ -1133,4 +1133,212 @@ struct WorkspaceProviderTests {
             now: now
         ) == descriptor)
     }
+
+    @Test func parseResolvedCanonicalPathAcceptsNormalNonSymlinkFilesAndNormalizesPaths() {
+        // readlink -f returns the path itself for every normal regular file.
+        #expect(
+            SSHWorkspaceFilesystem.parseResolvedCanonicalPath("/remote/project/README.md\n")
+                == "/remote/project/README.md"
+        )
+        #expect(
+            SSHWorkspaceFilesystem.parseResolvedCanonicalPath("  /remote/real/dir/../target.txt \n")
+                == "/remote/real/target.txt"
+        )
+        #expect(SSHWorkspaceFilesystem.parseResolvedCanonicalPath("") == nil)
+        #expect(SSHWorkspaceFilesystem.parseResolvedCanonicalPath("   \n") == nil)
+        #expect(SSHWorkspaceFilesystem.parseResolvedCanonicalPath("relative/path.txt") == nil)
+        #expect(SSHWorkspaceFilesystem.parseResolvedCanonicalPath("/remote/bad\0path") == nil)
+    }
+
+    @Test func sshWriteFileUsesSingleReadlinkAndThreeSFTPTransfersWithoutFallbackStorm() async throws {
+        let host = SSHHostConfiguration(
+            alias: "cloud",
+            hostname: "cloud.example.com",
+            user: "dev",
+            port: nil,
+            proxyJump: nil
+        )
+        let transport = MockSSHRemoteTransport(
+            commandHandler: { command in
+                #expect(command.contains("readlink -f '/remote/dir/notes.md'"))
+                return "/remote/dir/notes.md\n"
+            },
+            sftpHandler: { batch in
+                if batch == "ls -la \"/remote/dir/notes.md\"" {
+                    return "-rw-r----- 1 dev staff 6 Jan 1 00:00 /remote/dir/notes.md\n"
+                }
+                let getPrefix = "get \"/remote/dir/notes.md\" "
+                if batch.hasPrefix(getPrefix) {
+                    let localQuoted = String(batch.dropFirst(getPrefix.count))
+                    let localPath = localQuoted.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                    try Data("before".utf8).write(to: URL(fileURLWithPath: localPath))
+                    return ""
+                }
+                if batch.hasPrefix("put ") {
+                    #expect(batch.contains("chmod 640 "))
+                    #expect(batch.contains("rename "))
+                    #expect(batch.contains("\"/remote/dir/notes.md\""))
+                    return ""
+                }
+                Issue.record("Unexpected SFTP batch during regular SSH save: \(batch)")
+                return ""
+            }
+        )
+        let cache = SSHWorkspaceItemTypeCache()
+        let filesystem = SSHWorkspaceFilesystem(
+            host: host,
+            workingDirectory: "/remote/dir",
+            transport: transport,
+            itemTypeCache: cache
+        )
+
+        try await filesystem.writeFile(
+            Data("after!".utf8),
+            at: "/remote/dir/notes.md",
+            replacing: Data("before".utf8)
+        )
+
+        let recordedCommands = await transport.recordedCommands()
+        let recordedBatches = await transport.recordedSFTPBatches()
+        #expect(recordedCommands.count == 1)
+        #expect(recordedBatches.count == 3)
+        #expect(!recordedBatches.contains("ls -la \"/remote/dir\""))
+    }
+
+    @Test func sshWriteFileFallbackAbortsUnverifiedSymlinkWhenReadlinkFails() async throws {
+        let host = SSHHostConfiguration(
+            alias: "legacy-box",
+            hostname: "legacy.example.com",
+            user: "dev",
+            port: nil,
+            proxyJump: nil
+        )
+        let transport = MockSSHRemoteTransport(
+            commandHandler: { _ in
+                throw WorkspaceFilesystemError.commandFailed(1, "readlink unsupported")
+            },
+            sftpHandler: { batch in
+                if batch == "ls -la \"/remote/dir/link.md\"" {
+                    // OpenSSH sftp-server readdir format without "-> target"
+                    return "lrwxr-xr-x ? dev staff 12 Jan 1 00:00 /remote/dir/link.md\n"
+                }
+                if batch == "ls -la \"/remote/dir\"" {
+                    return """
+                    drwxr-xr-x ? dev staff 96 Jan 1 00:00 /remote/dir/.
+                    lrwxr-xr-x ? dev staff 12 Jan 1 00:00 /remote/dir/link.md
+                    """
+                }
+                return ""
+            }
+        )
+        let filesystem = SSHWorkspaceFilesystem(
+            host: host,
+            workingDirectory: "/remote/dir",
+            transport: transport,
+            itemTypeCache: SSHWorkspaceItemTypeCache()
+        )
+
+        await #expect(throws: WorkspaceFilesystemError.self) {
+            try await filesystem.writeFile(
+                Data("updated".utf8),
+                at: "/remote/dir/link.md",
+                replacing: Data("before".utf8)
+            )
+        }
+    }
+
+    @Test func sshItemTypesUsesParentSFTPListingAndCacheBeforeShellFallback() async throws {
+        let host = SSHHostConfiguration(
+            alias: "cloud",
+            hostname: "cloud.example.com",
+            user: "dev",
+            port: nil,
+            proxyJump: nil
+        )
+        let transport = MockSSHRemoteTransport(
+            commandHandler: { command in
+                // Only symlink entries should fall back to shell `test -d/-f`.
+                #expect(command.contains("'/remote/repo/current'"))
+                return "D"
+            },
+            sftpHandler: { batch in
+                #expect(batch == "ls -laf \"/remote/repo\"")
+                return """
+                drwxr-xr-x 4 dev staff 128 Jan 1 00:00 /remote/repo/.
+                drwxr-xr-x 4 dev staff 128 Jan 1 00:00 /remote/repo/..
+                -rw-r--r-- 1 dev staff 420 Jan 1 00:00 /remote/repo/README.md
+                -rw-r--r-- 1 dev staff 128 Jan 1 00:00 /remote/repo/Makefile
+                drwxr-xr-x 3 dev staff  96 Jan 1 00:00 /remote/repo/src
+                lrwxrwxrwx 1 dev staff  10 Jan 1 00:00 /remote/repo/current
+                """
+            }
+        )
+        let cache = SSHWorkspaceItemTypeCache()
+        let filesystem = SSHWorkspaceFilesystem(
+            host: host,
+            workingDirectory: "/remote/repo",
+            transport: transport,
+            itemTypeCache: cache
+        )
+
+        // Regular files, directories, and missing paths resolve via SFTP parent listing with 0 shell spawns.
+        let first = try await filesystem.itemTypes(at: [
+            "/remote/repo/README.md",
+            "/remote/repo/src",
+            "/remote/repo/missing.txt",
+        ])
+        #expect(first == [
+            "/remote/repo/README.md": WorkspaceItemType.file,
+            "/remote/repo/src": WorkspaceItemType.directory,
+        ])
+        #expect(await transport.recordedSFTPBatches().count == 1)
+        #expect(await transport.recordedCommands().isEmpty)
+
+        // Subsequent queries for cached entries + sibling entries from the same listing issue 0 remote calls.
+        let cachedResult = try await filesystem.itemTypes(at: [
+            "/remote/repo/README.md",
+            "/remote/repo/Makefile",
+            "/remote/repo/missing.txt",
+        ])
+        #expect(cachedResult == [
+            "/remote/repo/README.md": WorkspaceItemType.file,
+            "/remote/repo/Makefile": WorkspaceItemType.file,
+        ])
+        #expect(await transport.recordedSFTPBatches().count == 1)
+        #expect(await transport.recordedCommands().isEmpty)
+
+        // Symlink entries fall back to shell `test -d/-f` to follow the link target accurately.
+        let symlinkResult = try await filesystem.itemTypes(at: ["/remote/repo/current"])
+        #expect(symlinkResult == ["/remote/repo/current": WorkspaceItemType.directory])
+        #expect(await transport.recordedSFTPBatches().count == 2)
+        #expect(await transport.recordedCommands().count == 1)
+    }
+}
+
+private actor MockSSHRemoteTransport: SSHRemoteTransport {
+    private let commandHandler: @Sendable (String) async throws -> String
+    private let sftpHandler: @Sendable (String) async throws -> String
+    private var commands: [String] = []
+    private var sftpBatches: [String] = []
+
+    init(
+        commandHandler: @escaping @Sendable (String) async throws -> String,
+        sftpHandler: @escaping @Sendable (String) async throws -> String
+    ) {
+        self.commandHandler = commandHandler
+        self.sftpHandler = sftpHandler
+    }
+
+    func runSFTP(batch: String, host: String, connection: GitSSHConnection?) async throws -> String {
+        sftpBatches.append(batch)
+        return try await sftpHandler(batch)
+    }
+
+    func runCommand(_ command: String, host: String, connection: GitSSHConnection?) async throws -> String {
+        commands.append(command)
+        return try await commandHandler(command)
+    }
+
+    func recordedCommands() -> [String] { commands }
+    func recordedSFTPBatches() -> [String] { sftpBatches }
 }

@@ -1049,6 +1049,30 @@ final class MonacoWorkbenchController: NSObject, ObservableObject, WKNavigationD
         case .documentSymbols:
             performEditorAction("documentSymbols")
             return true
+        case .undo:
+            webView.evaluateJavaScript("""
+            (() => {
+                const active = document.activeElement;
+                if (active && (active.tagName === 'INPUT' || (active.tagName === 'TEXTAREA' && !active.classList.contains('inputarea')))) {
+                    document.execCommand('undo');
+                } else {
+                    window.omgEditor?._internal?.editor?.getModel?.()?.undo?.();
+                }
+            })()
+            """, completionHandler: nil)
+            return true
+        case .redo:
+            webView.evaluateJavaScript("""
+            (() => {
+                const active = document.activeElement;
+                if (active && (active.tagName === 'INPUT' || (active.tagName === 'TEXTAREA' && !active.classList.contains('inputarea')))) {
+                    document.execCommand('redo');
+                } else {
+                    window.omgEditor?._internal?.editor?.getModel?.()?.redo?.();
+                }
+            })()
+            """, completionHandler: nil)
+            return true
         case .cut:
             return NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: webView)
         case .copy:

@@ -97,11 +97,13 @@ struct EditorWorkspaceLifetimeTests {
             try await Task.sleep(for: .milliseconds(20))
         }
         let secondDocument = try #require(workspace.selectedDocument)
+        var secondActiveURI: String?
         for _ in 0..<100 {
-            let activeURI = (try? await webView.evaluateJavaScript("window.omgEditor?.getState?.()?.activeUri")) as? String
-            if activeURI == secondDocument.id.monacoURI { break }
+            secondActiveURI = (try? await webView.evaluateJavaScript("window.omgEditor?.getState?.()?.activeUri")) as? String
+            if secondActiveURI == secondDocument.id.monacoURI { break }
             try await Task.sleep(for: .milliseconds(25))
         }
+        #expect(secondActiveURI == secondDocument.id.monacoURI)
         let allWebViews = EditorTestSupport.findAll(MonacoEditorWebView.self, in: host)
         #expect(allWebViews.count == 1, "All tabs in a workspace must share a single pooled MonacoEditorWebView")
         #expect(allWebViews.first === webView)
@@ -121,8 +123,9 @@ struct EditorWorkspaceLifetimeTests {
         #expect(document.isDirty)
 
         workspace.selectedID = document.id
+        var readyForUndo = false
         for _ in 0..<100 {
-            let readyForUndo = (try? await webView.evaluateJavaScript("""
+            readyForUndo = ((try? await webView.evaluateJavaScript("""
             (() => {
                 const state = window.omgEditor?.getState?.();
                 const ed = window.omgEditor?._internal?.editor;
@@ -131,16 +134,24 @@ struct EditorWorkspaceLifetimeTests {
                 return state.activeUri === \(String(reflecting: document.id.monacoURI))
                     && !ed.getOption(monaco.editor.EditorOption.readOnly);
             })()
-            """)) as? Bool
-            if readyForUndo == true { break }
+            """)) as? Bool) ?? false
+            if readyForUndo { break }
             try await Task.sleep(for: .milliseconds(25))
         }
+        #expect(readyForUndo)
         #expect(EditorTestSupport.find(MonacoEditorWebView.self, in: host) === webView)
 
+        _ = window.makeFirstResponder(webView)
+        _ = try? await webView.evaluateJavaScript("window.omgEditor?._internal?.editor?.focus?.();")
+        try await Task.sleep(for: .milliseconds(40))
         _ = try await webView.evaluateJavaScript("""
         (() => {
             const ed = window.omgEditor._internal.editor;
-            ed.trigger('test', 'undo', null);
+            if (ed.hasTextFocus()) {
+                ed.trigger('test', 'undo', null);
+            } else {
+                ed.getModel()?.undo?.();
+            }
             return ed.getValue();
         })()
         """)

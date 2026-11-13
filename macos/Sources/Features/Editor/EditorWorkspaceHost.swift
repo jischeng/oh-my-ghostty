@@ -1250,6 +1250,7 @@ private struct EditorSharedWorkbenchPane: View {
                         onNavigateDefinition: onNavigateDefinition,
                         openMarkdownLink: { href in openMarkdownLink(href, document) }
                     )
+                    .id(document.id)
                 }
             }
             if let document = workspace.selectedDocument {
@@ -1402,13 +1403,6 @@ private struct EditorActiveDocumentObserver: View {
             }
         }
         .onAppear {
-            if document.pendingNavigation != nil && document.isPreviewMode {
-                document.isPreviewMode = false
-            }
-            syncDocumentToWorkbench(preserveView: true)
-            applyPendingNavigation()
-        }
-        .onChange(of: document.id) { _ in
             if document.pendingNavigation != nil && document.isPreviewMode {
                 document.isPreviewMode = false
             }

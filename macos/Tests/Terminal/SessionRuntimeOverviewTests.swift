@@ -43,4 +43,23 @@ struct SessionRuntimeOverviewTests {
         try await Task.sleep(for: .milliseconds(80))
         #expect(!model.busy && model.report.sessions.isEmpty)
     }
+
+    @Test func backgroundStoreGatesTimerToActiveSubscribersAndResolvesTargetedPIDs() {
+        let store = SessionRuntimeBackgroundStore(enabledInTests: true)
+        #expect(!store.isPollingTimerRunning)
+
+        let firstObserver = store.beginUIObservation()
+        #expect(store.isPollingTimerRunning)
+        let secondObserver = store.beginUIObservation()
+        #expect(store.isPollingTimerRunning)
+
+        store.endUIObservation(firstObserver)
+        #expect(store.isPollingTimerRunning)
+        store.endUIObservation(secondObserver)
+        #expect(!store.isPollingTimerRunning)
+
+        let currentPID = Int(ProcessInfo.processInfo.processIdentifier)
+        let destinations = SessionRuntimeBackgroundStore.activeSSHDestinations(forLeaderPIDs: [currentPID])
+        #expect(destinations[currentPID] == nil)
+    }
 }

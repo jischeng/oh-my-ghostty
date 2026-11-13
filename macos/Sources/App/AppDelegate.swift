@@ -331,6 +331,13 @@ class AppDelegate: NSObject,
         // Store our start time
         applicationLaunchTime = ProcessInfo.processInfo.systemUptime
         SessionRuntimeCloseQueue.shared.start()
+        if !OMGApplicationEnvironment.isRunningTests {
+            let supportURL = OMGApplicationEnvironment.applicationSupportURL()
+            DispatchQueue.global(qos: .utility).async {
+                SSHReplayStore.pruneExpired(applicationSupportURL: supportURL)
+                NativeTabDragDiagnostics.pruneExpired(applicationSupportURL: supportURL)
+            }
+        }
 
         // Check if secure input was enabled when we last quit.
         if UserDefaults.ghostty.bool(forKey: "SecureInput") != SecureInput.shared.enabled {
@@ -476,6 +483,13 @@ class AppDelegate: NSObject,
     func applicationDidHide(_ notification: Notification) {
         // Keep track of our hidden state to restore properly
         self.hiddenState = .init()
+    }
+
+    func applicationWillResignActive(_ notification: Notification) {
+        guard !OMGApplicationEnvironment.isRunningTests else { return }
+        MainActor.assumeIsolated {
+            TerminalWorkspaceSessionStore.shared.flushPendingCaptureSynchronously()
+        }
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {

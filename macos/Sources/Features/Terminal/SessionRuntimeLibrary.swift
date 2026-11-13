@@ -896,10 +896,17 @@ final class SessionRuntimeBackgroundStore: ObservableObject {
 
     @Published private(set) var items: [SessionRuntimeBackgroundItem] = []
     var isEnabledInTests = false
+    private var monitoringConfigured = false
     private var timer: Timer?
+    private var activeUIObservers: Set<UUID> = []
+    private var directoryWatchers: [String: (fd: Int32, source: DispatchSourceFileSystemObject)] = [:]
+    private var directoryRefreshWork: DispatchWorkItem?
     private var refreshTask: Task<Void, Never>?
     private var suppressedSessionIDs: Set<String> = []
     private var observers: Set<AnyCancellable> = []
+
+    var activeSubscriberCount: Int { activeUIObservers.count }
+    var isPollingTimerRunning: Bool { timer != nil }
 
     private struct MobileSessionMeta: Decodable, Sendable {
         let generation: String
@@ -908,15 +915,85 @@ final class SessionRuntimeBackgroundStore: ObservableObject {
         let project: String?
     }
 
-    private init() {
-        guard !OMGApplicationEnvironment.isRunningTests else { return }
-        startMonitoring()
+    init(enabledInTests: Bool = false) {
+        self.isEnabledInTests = enabledInTests
+        guard !OMGApplicationEnvironment.isRunningTests || enabledInTests else { return }
+        startMonitoringIfNeeded()
     }
 
     func startMonitoringIfNeeded() {
         guard !OMGApplicationEnvironment.isRunningTests || isEnabledInTests else { return }
-        guard timer == nil else { return }
+        guard !monitoringConfigured else { return }
+        monitoringConfigured = true
         startMonitoring()
+    }
+
+    func beginUIObservation() -> UUID {
+        let token = UUID()
+        activeUIObservers.insert(token)
+        startMonitoringIfNeeded()
+        updatePollingTimerState()
+        refresh()
+        return token
+    }
+
+    func endUIObservation(_ token: UUID) {
+        guard activeUIObservers.remove(token) != nil else { return }
+        updatePollingTimerState()
+    }
+
+    private func updatePollingTimerState() {
+        guard !OMGApplicationEnvironment.isRunningTests || isEnabledInTests else {
+            timer?.invalidate()
+            timer = nil
+            return
+        }
+        if activeUIObservers.isEmpty {
+            timer?.invalidate()
+            timer = nil
+        } else if timer == nil {
+            timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.refresh()
+                }
+            }
+        }
+    }
+
+    private func scheduleDirectoryEventRefresh() {
+        guard directoryRefreshWork == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.directoryRefreshWork = nil
+            self.refresh()
+        }
+        directoryRefreshWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+    }
+
+    private func updateWatchedDirectories(_ paths: Set<String>) {
+        guard !OMGApplicationEnvironment.isRunningTests || isEnabledInTests else { return }
+        for (path, entry) in directoryWatchers where !paths.contains(path) {
+            directoryWatchers.removeValue(forKey: path)
+            entry.source.cancel()
+        }
+        for path in paths where directoryWatchers[path] == nil {
+            let fd = Darwin.open(path, O_EVTONLY)
+            guard fd >= 0 else { continue }
+            let source = DispatchSource.makeFileSystemObjectSource(
+                fileDescriptor: fd,
+                eventMask: [.write, .rename, .delete],
+                queue: .main
+            )
+            source.setEventHandler { [weak self] in
+                self?.scheduleDirectoryEventRefresh()
+            }
+            source.setCancelHandler {
+                Darwin.close(fd)
+            }
+            directoryWatchers[path] = (fd, source)
+            source.resume()
+        }
     }
 
     private func startMonitoring() {
@@ -934,11 +1011,6 @@ final class SessionRuntimeBackgroundStore: ObservableObject {
                 }
             }
             .store(in: &observers)
-        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.refresh()
-            }
-        }
         refresh()
     }
 
@@ -1037,31 +1109,54 @@ final class SessionRuntimeBackgroundStore: ObservableObject {
         return destination
     }
 
-    nonisolated private static func activeSSHDestinations(forLeaderPIDs leaders: Set<Int>) -> [Int: String] {
-        guard !leaders.isEmpty else { return [:] }
-        let totalBytes = proc_listpids(UInt32(PROC_ALL_PIDS), 0, nil, 0)
-        guard totalBytes > 0 else { return [:] }
-        let maxCount = min(16_384, Int(totalBytes) / MemoryLayout<Int32>.size + 64)
-        var allPIDs = [Int32](repeating: 0, count: maxCount)
+    nonisolated private static func listScopedPIDs(type: Int32, typeInfo: UInt32, limit: Int = 64) -> [Int32] {
+        var buffer = [Int32](repeating: 0, count: limit)
         let bytes = proc_listpids(
-            UInt32(PROC_ALL_PIDS),
-            0,
-            &allPIDs,
-            Int32(maxCount * MemoryLayout<Int32>.size)
+            UInt32(type),
+            typeInfo,
+            &buffer,
+            Int32(limit * MemoryLayout<Int32>.size)
         )
-        guard bytes > 0 else { return [:] }
-        let count = Int(bytes) / MemoryLayout<Int32>.size
-        var sessionPIDsByLeader: [Int: [Int32]] = [:]
-        for idx in 0..<count {
-            let pid = allPIDs[idx]
-            guard pid > 1 else { continue }
-            let sid = Int(getsid(pid))
-            guard leaders.contains(sid) else { continue }
-            sessionPIDsByLeader[sid, default: []].append(pid)
-        }
+        guard bytes > 0 else { return [] }
+        let count = min(limit, Int(bytes) / MemoryLayout<Int32>.size)
+        return buffer.prefix(count).filter { $0 > 1 }
+    }
+
+    nonisolated static func activeSSHDestinations(forLeaderPIDs leaders: Set<Int>) -> [Int: String] {
+        guard !leaders.isEmpty else { return [:] }
+        let bsdSize = Int32(MemoryLayout<proc_bsdinfo>.size)
         var result: [Int: String] = [:]
-        for (leader, pids) in sessionPIDsByLeader {
-            for pid in pids.sorted(by: >) {
+        for leader in leaders {
+            guard leader > 1, let leaderPID = Int32(exactly: leader) else { continue }
+            var candidates: [Int32] = []
+            var seen = Set<Int32>()
+            func appendCandidate(_ pid: Int32) {
+                if pid > 1, seen.insert(pid).inserted {
+                    candidates.append(pid)
+                }
+            }
+
+            var bsdInfo = proc_bsdinfo()
+            if proc_pidinfo(leaderPID, PROC_PIDTBSDINFO, 0, &bsdInfo, bsdSize) == bsdSize {
+                let fgPgid = Int32(bitPattern: bsdInfo.e_tpgid)
+                if fgPgid > 1 && fgPgid != leaderPID {
+                    appendCandidate(fgPgid)
+                    for pid in listScopedPIDs(type: PROC_PGRP_ONLY, typeInfo: UInt32(fgPgid)).sorted(by: >) {
+                        appendCandidate(pid)
+                    }
+                }
+            }
+
+            appendCandidate(leaderPID)
+            let directChildren = listScopedPIDs(type: PROC_PPID_ONLY, typeInfo: UInt32(leaderPID)).sorted(by: >)
+            for child in directChildren {
+                appendCandidate(child)
+                for grandChild in listScopedPIDs(type: PROC_PPID_ONLY, typeInfo: UInt32(child), limit: 16).sorted(by: >) {
+                    appendCandidate(grandChild)
+                }
+            }
+
+            for pid in candidates {
                 if let argv = processArgv(pid), let dest = parseSSHDestination(argv) {
                     result[leader] = dest
                     break
@@ -1089,10 +1184,27 @@ final class SessionRuntimeBackgroundStore: ObservableObject {
             descriptors.append(candidate)
         }
         guard !descriptors.isEmpty else {
+            let runRoot = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".omg/run", isDirectory: true)
+            updateWatchedDirectories(FileManager.default.fileExists(atPath: runRoot.path) ? [runRoot.path] : [])
             if !items.isEmpty { items = [] }
             return
         }
         let supportURL = OMGApplicationEnvironment.applicationSupportURL()
+        var watchPaths = Set<String>()
+        let runRoot = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".omg/run", isDirectory: true)
+        if FileManager.default.fileExists(atPath: runRoot.path) {
+            watchPaths.insert(runRoot.path)
+        }
+        for descriptor in descriptors {
+            let sessionsDir = SessionRuntimeConnections.localStateDirectory(
+                for: descriptor,
+                applicationSupportRoot: supportURL
+            ).appendingPathComponent("sessions", isDirectory: true)
+            if FileManager.default.fileExists(atPath: sessionsDir.path) {
+                watchPaths.insert(sessionsDir.path)
+            }
+        }
+        updateWatchedDirectories(watchPaths)
         let homePath = FileManager.default.homeDirectoryForCurrentUser.path
         let currentRevision = (try? String(
             contentsOf: SessionRuntimeConnections.resources.appendingPathComponent("revision"),
@@ -1330,12 +1442,36 @@ final class SessionRuntimeBackgroundPopover: NSViewController {
     private var subscriptions = Set<AnyCancellable>()
     private var selectedTargetID = "local"
     private var renderedTargetIDs: [String] = []
+    private var backgroundObservationToken: UUID?
     var onPreferredSizeChange: ((NSSize) -> Void)?
 
     init(controller: TerminalController, onDismiss: @escaping () -> Void) {
         self.controller = controller
         self.onDismiss = onDismiss
         super.init(nibName: nil, bundle: nil)
+    }
+
+    deinit {
+        if let token = backgroundObservationToken {
+            Task { @MainActor in
+                SessionRuntimeBackgroundStore.shared.endUIObservation(token)
+            }
+        }
+    }
+
+    override func viewWillAppear() {
+        super.viewWillAppear()
+        if backgroundObservationToken == nil {
+            backgroundObservationToken = SessionRuntimeBackgroundStore.shared.beginUIObservation()
+        }
+    }
+
+    override func viewDidDisappear() {
+        super.viewDidDisappear()
+        if let token = backgroundObservationToken {
+            backgroundObservationToken = nil
+            SessionRuntimeBackgroundStore.shared.endUIObservation(token)
+        }
     }
 
     @available(*, unavailable)

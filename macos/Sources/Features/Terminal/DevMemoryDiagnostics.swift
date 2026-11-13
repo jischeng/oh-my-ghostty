@@ -4,8 +4,18 @@ import AppKit
 /// contents, titles, paths, commands, process IDs or allocation stacks are read.
 @MainActor
 enum DevMemoryDiagnostics {
+    static func isSupportedDebugBundle(_ bundleIdentifier: String?) -> Bool {
+        bundleIdentifier?.hasPrefix("com.jischeng.omg.debug") == true
+    }
+
+    static func diagnosticsDirectory(
+        applicationSupportURL: URL = OMGApplicationEnvironment.applicationSupportURL()
+    ) -> URL {
+        applicationSupportURL.appendingPathComponent("MemoryDiagnostics", isDirectory: true)
+    }
+
 #if DEBUG
-    private static let enabled = Bundle.main.bundleIdentifier == "com.jischeng.omg.debug" &&
+    private static let enabled = isSupportedDebugBundle(Bundle.main.bundleIdentifier) &&
         ProcessInfo.processInfo.environment["OMG_DEV_MEMORY_DIAGNOSTICS"] == "1"
     private static var writer: DevMemoryLog?
     private static var timer: Timer?
@@ -13,10 +23,7 @@ enum DevMemoryDiagnostics {
 
     static func start() {
         guard enabled, timer == nil else { return }
-        let directory = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        )[0].appendingPathComponent("OMG/MemoryDiagnostics", isDirectory: true)
+        let directory = diagnosticsDirectory()
         writer = DevMemoryLog(directory: directory)
         record("start")
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in

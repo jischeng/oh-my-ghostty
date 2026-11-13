@@ -60,4 +60,47 @@ struct DevMemoryDiagnosticsTests {
             #expect(size <= DevMemoryLog.maxBytes)
         }
     }
+
+    @Test func debugBundleMatcherAcceptsAllDebugChannelsAndUsesChannelAppSupport() {
+        #expect(DevMemoryDiagnostics.isSupportedDebugBundle("com.jischeng.omg.debug"))
+        #expect(DevMemoryDiagnostics.isSupportedDebugBundle("com.jischeng.omg.debug.workspace"))
+        #expect(DevMemoryDiagnostics.isSupportedDebugBundle("com.jischeng.omg.debug.pty"))
+        #expect(!DevMemoryDiagnostics.isSupportedDebugBundle("com.jischeng.omg"))
+        #expect(!DevMemoryDiagnostics.isSupportedDebugBundle(nil))
+
+        let customSupport = URL(fileURLWithPath: "/tmp/Application Support/OMG Workspace Dev", isDirectory: true)
+        let diagnosticsDir = DevMemoryDiagnostics.diagnosticsDirectory(applicationSupportURL: customSupport)
+        #expect(diagnosticsDir.path == "/tmp/Application Support/OMG Workspace Dev/MemoryDiagnostics")
+        #expect(!diagnosticsDir.path.contains("/Application Support/OMG/MemoryDiagnostics"))
+    }
+
+    @Test func dragDiagnosticsPruneRemovesOnlyJsonlOlderThanSevenDays() throws {
+        let supportDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-drag-gc-\(UUID().uuidString)", isDirectory: true)
+        let diagDir = supportDir.appendingPathComponent("DragDiagnostics", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: diagDir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        defer { try? FileManager.default.removeItem(at: supportDir) }
+
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let expiredFile = diagDir.appendingPathComponent("drag-old.jsonl")
+        let recentFile = diagDir.appendingPathComponent("drag-recent.jsonl")
+        try Data("{\"phase\":\"down\"}\n".utf8).write(to: expiredFile)
+        try Data("{\"phase\":\"up\"}\n".utf8).write(to: recentFile)
+        try FileManager.default.setAttributes(
+            [.modificationDate: now.addingTimeInterval(-(8 * 24 * 60 * 60))],
+            ofItemAtPath: expiredFile.path
+        )
+        try FileManager.default.setAttributes(
+            [.modificationDate: now.addingTimeInterval(-(2 * 24 * 60 * 60))],
+            ofItemAtPath: recentFile.path
+        )
+
+        NativeTabDragDiagnostics.pruneExpired(applicationSupportURL: supportDir, now: now)
+        #expect(!FileManager.default.fileExists(atPath: expiredFile.path))
+        #expect(FileManager.default.fileExists(atPath: recentFile.path))
+    }
 }

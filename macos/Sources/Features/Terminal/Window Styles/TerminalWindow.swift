@@ -74,6 +74,7 @@ class TerminalWindow: NSWindow {
             guard tabColor != oldValue else { return }
             tabColorIndicator.rootView = TabColorIndicatorView(tabColor: tabColor)
             invalidateRestorableState()
+            (windowController as? BaseTerminalController)?.sessionCheckpointStateDidChange()
         }
     }
 

@@ -400,10 +400,17 @@ struct EditorIntelligenceTests {
             environment: ["OMG_MOCK_SHUTDOWN_FILE": shutdownMarkerURL.path]
         )
 
+        let trustStore = EditorWorkspaceTrustStore(
+            fileURL: tempDir.appendingPathComponent(".omg-trust.json")
+        )
+        trustStore.trust(workspaceRoot: tempDir.path)
+
         let lspManager = EditorLSPManager(
             serverCommands: ["python": customCmd],
             idleTimeout: 0.35,
-            reaperInterval: 0.10
+            emptyWorkspaceIdleTimeout: 0.35,
+            reaperInterval: 0.10,
+            trustStore: trustStore
         )
         let coordinator = EditorIntelligenceCoordinator(lspManager: lspManager)
 
@@ -516,6 +523,267 @@ struct EditorIntelligenceTests {
         #expect(wroteShutdownMarker)
 
         await coordinator.shutdown()
+    }
+
+    @Test
+    @MainActor
+    func untrustedWorkspaceStaysInRestrictedModeUntilTrustedAndPersistsPrivatePermissions() async throws {
+        guard let pythonPath = Self.resolveRealPython3Executable() else {
+            Issue.record("Python 3 executable not found on test machine")
+            return
+        }
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-lsp-trust-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let serverScriptURL = tempDir.appendingPathComponent("mock_py_lsp.py")
+        try Data(Self.mockPythonLSPServerScript.utf8).write(to: serverScriptURL)
+        let sourceURL = tempDir.appendingPathComponent("restricted.py")
+        let sourceText = "def guarded_entry():\n    return 42\n"
+        try Data(sourceText.utf8).write(to: sourceURL)
+
+        let trustFileURL = tempDir.appendingPathComponent("trust/editor-workspace-trust.json")
+        let trustStore = EditorWorkspaceTrustStore(fileURL: trustFileURL)
+        #expect(!trustStore.isTrusted(workspaceRoot: tempDir.path))
+
+        let customCmd = EditorLSPServerCommand(
+            executable: pythonPath,
+            arguments: ["-u", serverScriptURL.path]
+        )
+        let lspManager = EditorLSPManager(
+            serverCommands: ["python": customCmd],
+            idleTimeout: 2.0,
+            reaperInterval: 0.10,
+            trustStore: trustStore
+        )
+        let coordinator = EditorIntelligenceCoordinator(lspManager: lspManager)
+
+        let workspace = EditorWorkspace(intelligenceCoordinator: coordinator)
+        workspace.open(
+            path: sourceURL.path,
+            filesystem: LocalWorkspaceFilesystem(workingDirectory: tempDir.path)
+        )
+        defer {
+            workspace.cancelAndClear()
+            Task { await coordinator.shutdown() }
+        }
+
+        let opened = await waitForMainCondition(timeoutMs: 2_000) {
+            workspace.documents.count == 1
+        }
+        #expect(opened)
+
+        // Wait briefly for initial open-document wiring; untrusted workspace MUST stay in Restricted Mode.
+        try? await Task.sleep(for: .milliseconds(120))
+        #expect(workspace.untrustedLocalWorkspaceRoot != nil)
+        #expect(await lspManager.activeServerCount == 0)
+
+        // Local symbol extraction still works in Restricted Mode without spawning LSP.
+        let docContext = EditorIntelligenceDocumentContext(
+            path: sourceURL.path,
+            languageHint: "python",
+            workspaceRoot: tempDir.path,
+            isLocal: true
+        )
+        let fallbackSymbols = await coordinator.documentSymbols(for: docContext, text: sourceText)
+        #expect(fallbackSymbols.map(\.name) == ["guarded_entry"])
+        #expect(await lspManager.activeServerCount == 0)
+
+        // Granting trust persists 0600 trust record and immediately starts LSP for open documents!
+        workspace.trustWorkspace(root: tempDir.path)
+        #expect(workspace.untrustedLocalWorkspaceRoot == nil)
+        #expect(trustStore.isTrusted(workspaceRoot: tempDir.path))
+        #expect(trustStore.isTrusted(workspaceRoot: tempDir.appendingPathComponent("subdir/nested").path))
+
+        let trustPerms = try FileManager.default.attributesOfItem(atPath: trustFileURL.path)[.posixPermissions] as? NSNumber
+        #expect(trustPerms?.intValue == 0o600)
+
+        let reloadedTrustStore = EditorWorkspaceTrustStore(fileURL: trustFileURL)
+        #expect(reloadedTrustStore.isTrusted(workspaceRoot: tempDir.path))
+
+        let startedLSP = await waitForAsyncCondition(timeoutMs: 2_500) {
+            await lspManager.activeServerCount == 1
+        }
+        #expect(startedLSP)
+
+        await coordinator.shutdown()
+    }
+
+    @Test
+    func lspEnvironmentScrubberRemovesSecretsWhilePreservingToolchains() async throws {
+        let rawEnv: [String: String] = [
+            "PATH": "/opt/homebrew/bin:/usr/bin:/bin",
+            "HOME": "/Users/tester",
+            "USER": "tester",
+            "TMPDIR": "/tmp",
+            "SHELL": "/bin/zsh",
+            "LANG": "en_US.UTF-8",
+            "SDKROOT": "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+            "DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer",
+            "CARGO_HOME": "/Users/tester/.cargo",
+            "RUSTUP_HOME": "/Users/tester/.rustup",
+            "GOPATH": "/Users/tester/go",
+            "NVM_DIR": "/Users/tester/.nvm",
+            "OPENAI_API_KEY": "sk-secret",
+            "ANTHROPIC_API_KEY": "sk-ant-secret",
+            "GITHUB_TOKEN": "ghp_secret",
+            "AWS_SESSION_TOKEN": "aws-session-secret",
+            "AWS_SECRET_ACCESS_KEY": "aws-secret",
+            "CUSTOM_SERVICE_API_KEY": "custom-key",
+            "INTERNAL_SECRET_VALUE": "internal-secret",
+            "GITLAB_PRIVATE_TOKEN": "glpat-secret",
+            "DATABASE_PASSWORD": "db-password",
+        ]
+
+        let scrubbed = EditorLSPManager.scrubSensitiveEnvironment(rawEnv)
+        for preserved in [
+            "PATH", "HOME", "USER", "TMPDIR", "SHELL", "LANG",
+            "SDKROOT", "DEVELOPER_DIR", "CARGO_HOME", "RUSTUP_HOME", "GOPATH", "NVM_DIR",
+        ] {
+            #expect(scrubbed[preserved] == rawEnv[preserved])
+        }
+        for removed in [
+            "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GITHUB_TOKEN",
+            "AWS_SESSION_TOKEN", "AWS_SECRET_ACCESS_KEY", "CUSTOM_SERVICE_API_KEY",
+            "INTERNAL_SECRET_VALUE", "GITLAB_PRIVATE_TOKEN", "DATABASE_PASSWORD",
+        ] {
+            #expect(scrubbed[removed] == nil)
+        }
+
+        // Verify live LSP subprocess environment never receives scrubbed credentials.
+        guard let pythonPath = Self.resolveRealPython3Executable() else { return }
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-lsp-env-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let envDumpURL = tempDir.appendingPathComponent("child_env.json")
+        let envDumpScript = Self.mockPythonLSPServerScript.replacingOccurrences(
+            of: "root_uri = \"\"",
+            with: """
+            root_uri = ""
+            with open(\(String(reflecting: envDumpURL.path)), "w", encoding="utf-8") as _ef:
+                json.dump(dict(os.environ), _ef)
+            """
+        )
+        let scriptURL = tempDir.appendingPathComponent("env_lsp.py")
+        try Data(envDumpScript.utf8).write(to: scriptURL)
+        let sourceURL = tempDir.appendingPathComponent("check.py")
+        try Data("x = 1\n".utf8).write(to: sourceURL)
+
+        let trustStore = EditorWorkspaceTrustStore(fileURL: tempDir.appendingPathComponent("trust.json"))
+        trustStore.trust(workspaceRoot: tempDir.path)
+
+        var injectedBase = ProcessInfo.processInfo.environment
+        injectedBase["OPENAI_API_KEY"] = "sk-live-leak-test"
+        injectedBase["GITHUB_TOKEN"] = "ghp-live-leak-test"
+        injectedBase["AWS_SESSION_TOKEN"] = "aws-live-leak-test"
+        injectedBase["CARGO_HOME"] = "/tmp/preserved-cargo-home"
+
+        let lspManager = EditorLSPManager(
+            serverCommands: ["python": EditorLSPServerCommand(executable: pythonPath, arguments: ["-u", scriptURL.path])],
+            idleTimeout: 1.0,
+            reaperInterval: 0.1,
+            trustStore: trustStore,
+            baseEnvironmentOverride: injectedBase
+        )
+        defer { Task { await lspManager.shutdownAll() } }
+
+        await lspManager.didOpen(.init(
+            path: sourceURL.path,
+            languageID: "python",
+            text: "x = 1\n",
+            workspaceRoot: tempDir.path
+        ))
+        let dumped = await waitForMainCondition(timeoutMs: 2_500) {
+            FileManager.default.fileExists(atPath: envDumpURL.path)
+        }
+        #expect(dumped)
+        let childEnv = try JSONDecoder().decode([String: String].self, from: Data(contentsOf: envDumpURL))
+        #expect(childEnv["OPENAI_API_KEY"] == nil)
+        #expect(childEnv["GITHUB_TOKEN"] == nil)
+        #expect(childEnv["AWS_SESSION_TOKEN"] == nil)
+        #expect(childEnv["CARGO_HOME"] == "/tmp/preserved-cargo-home")
+        await lspManager.shutdownAll()
+    }
+
+    @Test
+    func globalLRUCapEvictsOldestIdleServerAndShortensZeroDocumentTeardown() async throws {
+        guard let pythonPath = Self.resolveRealPython3Executable() else {
+            Issue.record("Python 3 executable not found on test machine")
+            return
+        }
+
+        let baseDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-lsp-lru-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: baseDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: baseDir) }
+
+        let scriptURL = baseDir.appendingPathComponent("lru_lsp.py")
+        try Data(Self.mockPythonLSPServerScript.utf8).write(to: scriptURL)
+
+        let trustStore = EditorWorkspaceTrustStore(fileURL: baseDir.appendingPathComponent("trust.json"))
+        var roots: [URL] = []
+        for idx in 1...4 {
+            let ws = baseDir.appendingPathComponent("ws\(idx)", isDirectory: true)
+            try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: true)
+            try Data("x = \(idx)\n".utf8).write(to: ws.appendingPathComponent("mod.py"))
+            trustStore.trust(workspaceRoot: ws.path)
+            roots.append(ws)
+        }
+
+        let lspManager = EditorLSPManager(
+            serverCommands: ["python": EditorLSPServerCommand(executable: pythonPath, arguments: ["-u", scriptURL.path])],
+            idleTimeout: 30.0,
+            emptyWorkspaceIdleTimeout: 0.20,
+            reaperInterval: 0.05,
+            maxActiveServers: 3,
+            trustStore: trustStore
+        )
+
+        // Start 3 servers across ws1, ws2, ws3.
+        for idx in 0..<3 {
+            await lspManager.didOpen(.init(
+                path: roots[idx].appendingPathComponent("mod.py").path,
+                languageID: "python",
+                text: "x = \(idx)\n",
+                workspaceRoot: roots[idx].path
+            ))
+            try? await Task.sleep(for: .milliseconds(30))
+        }
+        #expect(await lspManager.activeServerCount == 3)
+
+        // Close ws2's open document so ws2 becomes idle (0 open documents), then open ws4 ->
+        // LRU cap (max 3) immediately evicts the idle ws2 session before spawning ws4!
+        await lspManager.didClose(
+            path: roots[1].appendingPathComponent("mod.py").path,
+            languageID: "python",
+            workspaceRoot: roots[1].path
+        )
+        await lspManager.didOpen(.init(
+            path: roots[3].appendingPathComponent("mod.py").path,
+            languageID: "python",
+            text: "x = 4\n",
+            workspaceRoot: roots[3].path
+        ))
+        #expect(await lspManager.activeServerCount == 3)
+
+        // Close remaining open documents -> shortened `emptyWorkspaceIdleTimeout` (0.20s, not 30s!)
+        // reaps all zero-document language servers promptly!
+        for idx in [0, 2, 3] {
+            await lspManager.didClose(
+                path: roots[idx].appendingPathComponent("mod.py").path,
+                languageID: "python",
+                workspaceRoot: roots[idx].path
+            )
+        }
+        let reapedPromptly = await waitForAsyncCondition(timeoutMs: 2_500) {
+            await lspManager.activeServerCount == 0
+        }
+        #expect(reapedPromptly)
+        await lspManager.shutdownAll()
     }
 
     // MARK: - Helpers

@@ -261,9 +261,12 @@ extension NativeSettingsController {
                     isRunning: false
                 )
             case .running:
+                let statusText = mobile.connectedDevices > 0
+                    ? self.text("\(mobile.connectedDevices) Connected", "\(mobile.connectedDevices) 台已连接")
+                    : self.text("Ready", "已就绪")
                 statusControl?.configure(
                     endpoint: activeEndpoint,
-                    statusText: self.text("Ready", "已就绪"),
+                    statusText: statusText,
                     color: .systemGreen
                 )
                 statusSubtitle?.stringValue = mobile.publicURL.isEmpty

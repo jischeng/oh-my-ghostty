@@ -1556,7 +1556,9 @@ final class OhMyGhosttySettings: ObservableObject {
             if let backgroundOpacityOverride {
                 lines.append("background-opacity = \(backgroundOpacityOverride)")
             }
-            lines.append("unfocused-split-opacity = \(unfocusedSplitOpacity)")
+            if chosen["appearance.unfocusedSplitOpacity"] != nil {
+                lines.append("unfocused-split-opacity = \(unfocusedSplitOpacity)")
+            }
             if let backgroundBlurOverride {
                 lines.append("background-blur = \(backgroundBlurOverride.ghosttyValue)")
             }

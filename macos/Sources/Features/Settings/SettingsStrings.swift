@@ -749,13 +749,13 @@ struct SettingsStrings: Equatable, Sendable {
     }
     var agentHostDetectorOnly: String { t("Detector is managed on this Mac", "检测器由本机管理") }
     var agentUpdateScopeCaption: String {
-        t("After an OMG upgrade, enabled automatic checks inspect installed status extensions immediately, regardless of the interval. Automatic extension updates are off by default. Only existing integrations are updated; CLI updates have separate settings.",
-          "OMG 升级后，已启用的自动检查会立即检查状态扩展，不受检查周期限制。扩展自动更新默认关闭，仅更新已有集成；CLI 更新独立设置。")
+        t("After an OMG upgrade, enabled automatic checks inspect installed status extensions immediately, regardless of the interval. Automatic status extension updates are on by default and only update already-installed integrations; CLI automatic updates have separate settings (off by default).",
+          "OMG 升级后，已启用的自动检查会立即检查状态扩展，不受检查周期限制。状态扩展自动更新默认开启，且仅更新已安装的集成；CLI 自动更新独立设置（默认关闭）。")
     }
     var agentLocalScopeCaption: String { t("These update settings apply to this Mac only.", "以上更新设置仅适用于本机。") }
     var agentSSHScopeCaption: String {
-        t("Automatic checks and updates run only while this host is connected in OMG. Scheduling stays on this Mac; no remote daemon is installed. Manual checks remain available. Requires non-interactive OpenSSH access and Python 3.",
-          "仅在 OMG 连接此主机时自动检查和更新。定时任务由本机管理，不在远端安装常驻服务。仍可手动检查。需要免交互 OpenSSH 登录和 Python 3。")
+        t("Automatic checks and updates run from this Mac only while this host is connected in OMG; Agent integration checks do not install a remote update scheduler (persistent SSH terminal sessions separately run ~/.omg/omgd when enabled). Manual checks remain available. Requires non-interactive OpenSSH access and Python 3.",
+          "仅在 OMG 连接此主机时由本机发起自动检查和更新；Agent 集成检查不会在远端安装独立定时更新服务（启用持久化 SSH 终端会话时会按需运行 ~/.omg/omgd）。仍可手动检查。需要免交互 OpenSSH 登录和 Python 3。")
     }
     var agentStatusHooksLabel: String {
         t("Enable Normalized Status Events (OMG-wide)", "启用规范化状态事件（OMG 全局）")

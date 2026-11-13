@@ -51,6 +51,7 @@ final class MobileAccessController: ObservableObject {
     private let executable: URL
     private let support: URL
     private let tokenFile: URL
+    private let gatewayRecordFile: URL
     private let enabledFile: URL
     private let networkModeFile: URL
     private let publicURLFile: URL
@@ -61,6 +62,13 @@ final class MobileAccessController: ObservableObject {
     private var log: FileHandle?
     private var intentionalStop = false
     private var terminationObserver: NSObjectProtocol?
+    private var gatewayStateSource: DispatchSourceFileSystemObject?
+    private var gatewayStateFD: Int32 = -1
+
+    private struct GatewayStatusRecord: Decodable {
+        let pid: Int32
+        let connected_devices: Int?
+    }
 
     var listenAddress: String? {
         if let address { return "\(address):\(port)" }
@@ -96,6 +104,7 @@ final class MobileAccessController: ObservableObject {
         self.addressProvider = addressProvider
         self.tailscaleAddressProvider = tailscaleAddressProvider
         tokenFile = support.appendingPathComponent("mobile-pair.token")
+        gatewayRecordFile = support.appendingPathComponent("mobile-gateway.json")
         enabledFile = support.appendingPathComponent("mobile-enabled.txt")
         networkModeFile = support.appendingPathComponent("mobile-network-mode.txt")
         publicURLFile = support.appendingPathComponent("mobile-public-url.txt")
@@ -125,6 +134,7 @@ final class MobileAccessController: ObservableObject {
         if let terminationObserver {
             NotificationCenter.default.removeObserver(terminationObserver)
         }
+        gatewayStateSource?.cancel()
         process?.terminate()
     }
 
@@ -258,6 +268,8 @@ final class MobileAccessController: ObservableObject {
                     self.process = nil
                     try? handle.close()
                     self.log = nil
+                    self.stopGatewayStateMonitor()
+                    self.connectedDevices = 0
                     if self.intentionalStop {
                         self.state = .stopped
                     } else {
@@ -275,14 +287,18 @@ final class MobileAccessController: ObservableObject {
             self.process = process
             log = handle
             state = .starting
+            startGatewayStateMonitor()
             try process.run()
             Task { [weak self, weak process] in
                 try? await Task.sleep(for: .milliseconds(450))
                 guard let self, let process, self.process === process, process.isRunning else { return }
                 self.state = .running
+                self.refreshConnectedDevices()
                 await self.refreshInvitation()
             }
         } catch {
+            stopGatewayStateMonitor()
+            connectedDevices = 0
             errorMessage = error.localizedDescription
             state = .failed(error.localizedDescription)
             try? log?.close()
@@ -295,6 +311,7 @@ final class MobileAccessController: ObservableObject {
             saveEnabledPreference(false)
         }
         intentionalStop = true
+        stopGatewayStateMonitor()
         process?.terminate()
         process = nil
         try? log?.close()
@@ -303,6 +320,52 @@ final class MobileAccessController: ObservableObject {
         errorMessage = nil
         connectedDevices = 0
         state = .stopped
+    }
+
+    func refreshConnectedDevices() {
+        let count: Int
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: gatewayRecordFile.path),
+           attrs[.type] as? FileAttributeType == .typeRegular,
+           let data = try? Data(contentsOf: gatewayRecordFile),
+           let record = try? JSONDecoder().decode(GatewayStatusRecord.self, from: data),
+           record.pid > 1,
+           Darwin.kill(record.pid, 0) == 0 {
+            count = max(0, record.connected_devices ?? 0)
+        } else {
+            count = 0
+        }
+        if connectedDevices != count {
+            connectedDevices = count
+        }
+    }
+
+    func startGatewayStateMonitor() {
+        guard gatewayStateSource == nil else { return }
+        let fd = Darwin.open(support.path, O_EVTONLY | O_NOFOLLOW)
+        guard fd >= 0 else { return }
+        gatewayStateFD = fd
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd,
+            eventMask: [.write, .rename, .delete, .attrib],
+            queue: .main
+        )
+        source.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                self?.refreshConnectedDevices()
+            }
+        }
+        source.setCancelHandler {
+            Darwin.close(fd)
+        }
+        gatewayStateSource = source
+        source.resume()
+        refreshConnectedDevices()
+    }
+
+    func stopGatewayStateMonitor() {
+        gatewayStateSource?.cancel()
+        gatewayStateSource = nil
+        gatewayStateFD = -1
     }
 
     func refreshInvitation() async {

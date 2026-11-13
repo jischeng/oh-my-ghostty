@@ -52,10 +52,15 @@ final class TerminalWorkspaceSessionStore {
     let workspaces: TerminalWorkspaceStore
     private let writer: TerminalWorkspaceSnapshotWriter
     private let selectionRestoration: TerminalTabSelectionRestoration?
+    static let defaultDebounceInterval: TimeInterval = 0.5
     private var saved = Snapshot()
     private var descriptors: [UUID: TerminalWorkspaceSessionState] = [:]
-    private var timer: AnyCancellable?
+    private var notifications: Set<AnyCancellable> = []
     private var checkpointWork: DispatchWorkItem?
+    private var debouncedCaptureWork: DispatchWorkItem?
+    var debounceInterval: TimeInterval
+    var hasPendingDebouncedCapture: Bool { debouncedCaptureWork != nil }
+    private(set) var isDirty = false
     private var started = false
     private var restoring = false
     private var quitting = false
@@ -71,11 +76,13 @@ final class TerminalWorkspaceSessionStore {
     var writeCount: Int { writer.writeCount }
 
     init(url: URL? = nil, testing: Bool = false, workspaces: TerminalWorkspaceStore? = nil,
-         selectionRestoration: TerminalTabSelectionRestoration? = nil) {
+         selectionRestoration: TerminalTabSelectionRestoration? = nil,
+         debounceInterval: TimeInterval = TerminalWorkspaceSessionStore.defaultDebounceInterval) {
         self.url = url ?? OMGApplicationEnvironment.applicationSupportURL().appendingPathComponent("workspaces/state.json")
         self.testing = testing
         self.workspaces = workspaces ?? .shared
         self.selectionRestoration = selectionRestoration ?? (testing ? nil : .shared)
+        self.debounceInterval = max(0.01, debounceInterval)
         writer = TerminalWorkspaceSnapshotWriter(url: self.url)
         writer.onCompletion = { [weak self] error in
             guard let self else { return }
@@ -266,8 +273,57 @@ final class TerminalWorkspaceSessionStore {
         if ownsRestoration, runtime.liveControllers.isEmpty {
             _ = TerminalController.newWindow(app)
         }
+        bindLifecycleNotifications()
         capture()
-        timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect().sink { [weak self] _ in self?.capture() }
+    }
+
+    private func bindLifecycleNotifications() {
+        notifications.removeAll()
+        let center = NotificationCenter.default
+        let dirtyNames: [NSNotification.Name] = [
+            NSWindow.didBecomeMainNotification,
+            NSWindow.didEnterFullScreenNotification,
+            NSWindow.didExitFullScreenNotification,
+        ]
+        for name in dirtyNames {
+            center.publisher(for: name)
+                .sink { [weak self] _ in self?.markDirty() }
+                .store(in: &notifications)
+        }
+        if !testing {
+            center.publisher(for: NSApplication.willResignActiveNotification)
+                .sink { [weak self] _ in
+                    self?.flushPendingCaptureSynchronously()
+                }
+                .store(in: &notifications)
+        }
+    }
+
+    func markDirty() {
+        guard started, !preparing, !restoring, !quitting else { return }
+        isDirty = true
+        scheduleDebouncedCaptureIfNeeded()
+    }
+
+    private func scheduleDebouncedCaptureIfNeeded() {
+        guard debouncedCaptureWork == nil, checkpointWork == nil, !preparing, !quitting else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.debouncedCaptureWork = nil
+            self.capture()
+        }
+        debouncedCaptureWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + debounceInterval, execute: work)
+    }
+
+    func flushPendingCaptureSynchronously() {
+        guard started, !quitting else { return }
+        checkpointWork?.cancel()
+        checkpointWork = nil
+        debouncedCaptureWork?.cancel()
+        debouncedCaptureWork = nil
+        capture()
+        flush()
     }
 
     func restoreWorkspace(_ id: UUID, window: UUID, group: UUID?, app: Ghostty.App, parent: NSWindow?) -> [TerminalController] {
@@ -370,13 +426,25 @@ final class TerminalWorkspaceSessionStore {
 
     private func scheduleCapture() {
         guard checkpointWork == nil, !preparing, !quitting else { return }
+        isDirty = true
+        debouncedCaptureWork?.cancel()
+        debouncedCaptureWork = nil
         let work = DispatchWorkItem { [weak self] in self?.checkpointWork = nil; self?.capture() }
         checkpointWork = work
         DispatchQueue.main.async(execute: work)
     }
 
     func capture(foreground: NSWindow? = NSApp.mainWindow) {
-        guard started, !restoring, !quitting, !runtime.isChanging, !TerminalWorkspacePresentation.isChanging else { return }
+        guard started, !restoring, !quitting else { return }
+        if runtime.isChanging || TerminalWorkspacePresentation.isChanging {
+            if isDirty {
+                scheduleDebouncedCaptureIfNeeded()
+            }
+            return
+        }
+        debouncedCaptureWork?.cancel()
+        debouncedCaptureWork = nil
+        isDirty = false
         closing = closing.filter { $0.value.value != nil }
         var records = Dictionary(uniqueKeysWithValues: saved.tabs.map { ($0.id, $0) })
         let catalog = workspaces.snapshot

@@ -66,4 +66,87 @@ struct EditorVisibilityHostTests {
         deck.view.layoutSubtreeIfNeeded()
         #expect(editor.frame == deck.view.bounds)
     }
+
+    @Test func surfaceOcclusionTracksEditorVisibilitySplitZoomAndTabSelection() throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        guard let coreApp = app.app else {
+            Issue.record("Ghostty core app unavailable in test harness")
+            return
+        }
+        let editorStore = EditorWorkspaceStore()
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let controller = TerminalController(app, withBaseConfig: config)
+        let window = try #require(controller.window)
+        let secondSurface = Ghostty.SurfaceView(coreApp, baseConfig: config)
+        defer {
+            window.delegate = nil
+            window.close()
+        }
+
+        controller.editorWorkspaceStore = editorStore
+        controller.windowOcclusionOverrideForTesting = true
+
+        let primarySurface = try #require(controller.surfaceTree.first)
+        controller.syncSurfaceTreeOcclusionState()
+        #expect(primarySurface.lastSentCoreOcclusionState == true)
+        #expect(primarySurface.lastReportedOcclusionState == true)
+
+        // 1. Showing a full-pane EditorWorkspace immediately occludes the covered terminal surface,
+        //    and hiding it immediately restores redraw visibility.
+        let editorWorkspace = editorStore.workspace(for: controller.tabSessionID, surfaceID: primarySurface.id)
+        editorWorkspace.isVisible = true
+        #expect(editorWorkspace.isVisible)
+        #expect(primarySurface.lastSentCoreOcclusionState == false)
+        #expect(primarySurface.lastReportedOcclusionState == false)
+
+        editorWorkspace.isVisible = false
+        #expect(!editorWorkspace.isVisible)
+        #expect(primarySurface.lastSentCoreOcclusionState == true)
+        #expect(primarySurface.lastReportedOcclusionState == true)
+
+        // 2. Split zoom occludes non-zoomed siblings and restores them immediately on unzoom.
+        let leftLeaf = SplitTree<Ghostty.SurfaceView>.Node.leaf(view: primarySurface)
+        let rightLeaf = SplitTree<Ghostty.SurfaceView>.Node.leaf(view: secondSurface)
+        let splitNode = SplitTree<Ghostty.SurfaceView>.Node.split(.init(
+            direction: .horizontal,
+            ratio: 0.5,
+            left: leftLeaf,
+            right: rightLeaf
+        ))
+        controller.surfaceTree = .init(root: splitNode, zoomed: nil)
+        #expect(primarySurface.lastSentCoreOcclusionState == true)
+        #expect(secondSurface.lastSentCoreOcclusionState == true)
+
+        controller.surfaceTree = .init(root: splitNode, zoomed: leftLeaf)
+        #expect(primarySurface.lastSentCoreOcclusionState == true)
+        #expect(secondSurface.lastSentCoreOcclusionState == false)
+
+        controller.surfaceTree = .init(root: splitNode, zoomed: nil)
+        #expect(primarySurface.lastSentCoreOcclusionState == true)
+        #expect(secondSurface.lastSentCoreOcclusionState == true)
+
+        // 3. Background tabs and parked workspace controllers mark their surfaces occluded
+        //    and wake immediately when reselected / unparked.
+        let siblingController = TerminalController(app, withBaseConfig: config)
+        defer {
+            siblingController.window?.delegate = nil
+            siblingController.window?.close()
+        }
+        controller.applyWorkspaceTabProjection([controller, siblingController], selected: siblingController)
+        #expect(primarySurface.lastSentCoreOcclusionState == false)
+        #expect(secondSurface.lastSentCoreOcclusionState == false)
+
+        controller.applyWorkspaceTabProjection([controller, siblingController], selected: controller)
+        #expect(primarySurface.lastSentCoreOcclusionState == true)
+        #expect(secondSurface.lastSentCoreOcclusionState == true)
+
+        controller.workspacePresentationIsParked = true
+        #expect(primarySurface.lastSentCoreOcclusionState == false)
+        #expect(secondSurface.lastSentCoreOcclusionState == false)
+
+        controller.workspacePresentationIsParked = false
+        #expect(primarySurface.lastSentCoreOcclusionState == true)
+        #expect(secondSurface.lastSentCoreOcclusionState == true)
+    }
 }

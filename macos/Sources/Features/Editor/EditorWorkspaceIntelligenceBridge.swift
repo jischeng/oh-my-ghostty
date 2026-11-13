@@ -17,6 +17,7 @@ final class EditorWorkspaceIntelligenceBridge {
     private var lifecycleTasks: [EditorDocumentID: Task<Void, Never>] = [:]
     private var focusCheckTask: Task<Void, Never>?
     private nonisolated(unsafe) var windowKeyObserver: NSObjectProtocol?
+    private nonisolated(unsafe) var trustChangeObserver: NSObjectProtocol?
 
     init(
         workspace: EditorWorkspace,
@@ -47,10 +48,14 @@ final class EditorWorkspaceIntelligenceBridge {
 
         configureCallbacks()
         installWindowFocusObserver()
+        installTrustChangeObserver()
     }
 
     deinit {
         if let observer = windowKeyObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = trustChangeObserver {
             NotificationCenter.default.removeObserver(observer)
         }
     }
@@ -132,9 +137,29 @@ final class EditorWorkspaceIntelligenceBridge {
         for (_, task) in lifecycleTasks { task.cancel() }
         lifecycleTasks.removeAll()
         fileWatcher.stopAll()
+        let openContexts = (workspace?.documents ?? []).map { documentContext(for: $0) }
         let coordinator = self.coordinator
         Task { @MainActor in
+            for ctx in openContexts {
+                await coordinator.documentDidClose(ctx)
+            }
             await coordinator.shutdown()
+        }
+    }
+
+    /// Immediately opens all trusted local documents in `EditorLSPManager` after workspace trust is granted.
+    func activateTrustedOpenDocuments() {
+        guard let workspace else { return }
+        let store = coordinator.lspManager.trustStore
+        for document in workspace.documents where document.id.endpoint == .local {
+            let ctx = documentContext(for: document)
+            guard let root = ctx.effectiveLocalRoot, store.isTrusted(workspaceRoot: root) else { continue }
+            let docID = document.id
+            let currentText = document.text
+            lifecycleTasks[docID]?.cancel()
+            lifecycleTasks[docID] = Task { @MainActor [weak self] in
+                await self?.coordinator.documentDidOpen(ctx, text: currentText)
+            }
         }
     }
 
@@ -245,6 +270,21 @@ final class EditorWorkspaceIntelligenceBridge {
                 self.focusCheckTask = Task { @MainActor [weak self] in
                     await self?.refreshRemoteDocumentsOnFocus()
                 }
+            }
+        }
+    }
+
+    private func installTrustChangeObserver() {
+        let store = coordinator.lspManager.trustStore
+        trustChangeObserver = NotificationCenter.default.addObserver(
+            forName: EditorWorkspaceTrustStore.didChangeNotification,
+            object: store,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.activateTrustedOpenDocuments()
+                self.workspace?.objectWillChange.send()
             }
         }
     }

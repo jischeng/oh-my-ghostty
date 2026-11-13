@@ -2327,6 +2327,7 @@ struct AgentContextSignalReducer: Sendable {
     mutating func reconcileLocalForegroundProcess(
         _ foregroundPID: Int?,
         livenessIsAlive: Bool? = nil,
+        confirmedProcessExit: Bool = false,
         now: Date = Date()
     ) -> AgentActivityUpdate? {
         var removedCurrent = false
@@ -2337,8 +2338,10 @@ struct AgentContextSignalReducer: Sendable {
                 break
             }
             guard livenessIsAlive != nil else { return nil }
-            guard now.timeIntervalSince(current.updatedAt) >=
-                    Self.startupValidationGrace else { return nil }
+            if !confirmedProcessExit {
+                guard now.timeIntervalSince(current.updatedAt) >=
+                        Self.startupValidationGrace else { return nil }
+            }
             if current.activity.state == .working ||
                 current.activity.state == .needsAttention {
                 return markUnexpectedInterruption(record: current, now: now)

@@ -1,3 +1,4 @@
+import AppKit
 import Testing
 import Foundation
 import Sparkle
@@ -121,5 +122,59 @@ struct UpdateStateTests {
     )
     func testShouldTerminateWithoutWarning(_ state: UpdateState, expected: Bool) {
         #expect(state.shouldTerminateWithoutWarning == expected)
+    }
+
+    @MainActor
+    @Test func unobtrusiveUpdateTargetRequiresVisibleAccessorySupportingWindow() {
+        final class StubVisibleTerminalWindow: TerminalWindow {
+            var stubVisible = true
+            override var isVisible: Bool { stubVisible }
+        }
+        final class StubHiddenTitlebarWindow: HiddenTitlebarTerminalWindow {
+            var stubVisible = true
+            override var isVisible: Bool { stubVisible }
+        }
+        final class StubQuickTerminalWindow: QuickTerminalWindow {
+            var stubVisible = true
+            override var isVisible: Bool { stubVisible }
+        }
+
+        let rect = NSRect(x: 0, y: 0, width: 320, height: 200)
+        let hiddenTitlebar = StubHiddenTitlebarWindow(
+            contentRect: rect,
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: true
+        )
+        hiddenTitlebar.isReleasedWhenClosed = false
+        let quickWindow = StubQuickTerminalWindow(
+            contentRect: rect,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: true
+        )
+        quickWindow.isReleasedWhenClosed = false
+        let standardWindow = StubVisibleTerminalWindow(
+            contentRect: rect,
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: true
+        )
+        standardWindow.isReleasedWhenClosed = false
+        defer {
+            hiddenTitlebar.close()
+            quickWindow.close()
+            standardWindow.close()
+        }
+
+        #expect(!hiddenTitlebar.supportsUpdateAccessory)
+        #expect(standardWindow.supportsUpdateAccessory)
+        #expect(!UpdateDriver.canPresentUnobtrusiveUpdate(in: [hiddenTitlebar, quickWindow]))
+
+        standardWindow.stubVisible = false
+        #expect(!UpdateDriver.canPresentUnobtrusiveUpdate(in: [hiddenTitlebar, quickWindow, standardWindow]))
+
+        standardWindow.stubVisible = true
+        #expect(UpdateDriver.canPresentUnobtrusiveUpdate(in: [hiddenTitlebar, quickWindow, standardWindow]))
     }
 }

@@ -26,6 +26,7 @@ final class EditorWorkspace: ObservableObject {
                 cancelWorkbenchReap()
                 rehydrateWorkbenchAfterUncollapseIfNeeded()
             }
+            onVisibilityChanged?(isVisible)
         }
     }
     @Published var isLoading = false
@@ -41,6 +42,7 @@ final class EditorWorkspace: ObservableObject {
     private var reapedActiveDiff: MonacoWorkbenchController.ActiveDiffSnapshot?
     var onDocumentRemoved: ((EditorDocument) -> Void)?
     var onWorkspaceCleared: (() -> Void)?
+    var onVisibilityChanged: ((Bool) -> Void)?
 
     init(
         intelligenceCoordinator: EditorIntelligenceCoordinator? = nil,
@@ -53,6 +55,40 @@ final class EditorWorkspace: ObservableObject {
             coordinator: intelligenceCoordinator,
             fileWatcherDebounce: fileWatcherDebounce
         )
+    }
+
+    var trustStore: EditorWorkspaceTrustStore {
+        intelligenceBridge.coordinator.lspManager.trustStore
+    }
+
+    /// Returns the local workspace root of the active (or first) local document when Restricted Mode applies.
+    var untrustedLocalWorkspaceRoot: String? {
+        let candidateDocs: [EditorDocument]
+        if gitDiff == nil, let selected = selectedDocument {
+            candidateDocs = [selected] + documents.filter { $0.id != selected.id }
+        } else {
+            candidateDocs = documents
+        }
+        let store = trustStore
+        for document in candidateDocs where document.id.endpoint == .local {
+            let ctx = EditorIntelligenceDocumentContext(document: document)
+            if let root = ctx.effectiveLocalRoot, !store.isTrusted(workspaceRoot: root) {
+                return root
+            }
+        }
+        return nil
+    }
+
+    /// Grants workspace trust for the active untrusted local root and immediately starts LSP sessions.
+    func trustCurrentWorkspace() {
+        guard let root = untrustedLocalWorkspaceRoot else { return }
+        trustWorkspace(root: root)
+    }
+
+    func trustWorkspace(root: String) {
+        _ = trustStore.trust(workspaceRoot: root)
+        intelligenceBridge.activateTrustedOpenDocuments()
+        objectWillChange.send()
     }
 
     func cancelAndClear() {
@@ -613,10 +649,32 @@ final class EditorWorkspaceStore {
         }
     }
 
+    static let surfaceCoverageDidChangeNotification = Notification.Name(
+        "OMGEditorSurfaceCoverageDidChange"
+    )
+
+    func isEditorCovering(surfaceID: UUID) -> Bool {
+        workspaces[surfaceID]?.isVisible == true
+    }
+
+    private func notifySurfaceCoverageDidChange(surfaceID: UUID, isVisible: Bool) {
+        NotificationCenter.default.post(
+            name: Self.surfaceCoverageDidChangeNotification,
+            object: self,
+            userInfo: [
+                "surfaceID": surfaceID,
+                "isVisible": isVisible,
+            ]
+        )
+    }
+
     func workspace(for tabID: UUID, surfaceID: UUID) -> EditorWorkspace {
         owners[surfaceID] = tabID
         if let existing = workspaces[surfaceID] { return existing }
         let workspace = EditorWorkspace()
+        workspace.onVisibilityChanged = { [weak self] isVisible in
+            self?.notifySurfaceCoverageDidChange(surfaceID: surfaceID, isVisible: isVisible)
+        }
         workspaces[surfaceID] = workspace
         return workspace
     }
@@ -715,7 +773,12 @@ final class EditorWorkspaceStore {
     func remove(surfaceIDs: [UUID]) {
         for surfaceID in surfaceIDs {
             if let ws = workspaces.removeValue(forKey: surfaceID) {
+                let wasVisible = ws.isVisible
+                ws.onVisibilityChanged = nil
                 ws.cancelAndClear()
+                if wasVisible {
+                    notifySurfaceCoverageDidChange(surfaceID: surfaceID, isVisible: false)
+                }
             }
             owners.removeValue(forKey: surfaceID)
         }

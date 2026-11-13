@@ -423,14 +423,17 @@ final class MonacoEditorWebView: WKWebView {
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let responder = window?.firstResponder
         let isFocused = responder === self || (responder as? NSView)?.isDescendant(of: self) == true
-        if isFocused, super.performKeyEquivalent(with: event) {
+        guard isFocused else {
+            return super.performKeyEquivalent(with: event)
+        }
+        if super.performKeyEquivalent(with: event) {
             return true
         }
-        if isFocused, interceptsKeystrokeForEditor?(event) == true {
+        if interceptsKeystrokeForEditor?(event) == true {
             keyDown(with: event)
             return true
         }
-        return super.performKeyEquivalent(with: event)
+        return false
     }
 
     override func viewDidMoveToWindow() {

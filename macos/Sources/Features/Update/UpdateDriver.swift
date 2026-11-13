@@ -200,8 +200,12 @@ class UpdateDriver: NSObject, SPUUserDriver {
 
     /// True if there is a target that can render our unobtrusive update checker.
     var hasUnobtrusiveTarget: Bool {
-        NSApp.windows.contains { window in
-            (window is TerminalWindow || window is QuickTerminalWindow) &&
+        Self.canPresentUnobtrusiveUpdate(in: NSApp.windows)
+    }
+
+    static func canPresentUnobtrusiveUpdate(in windows: [NSWindow]) -> Bool {
+        windows.contains { window in
+            (window as? TerminalWindow)?.supportsUpdateAccessory == true &&
             window.isVisible
         }
     }

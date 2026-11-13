@@ -51,15 +51,39 @@ extension Ghostty {
         }
 
         // Typed, allowlisted launch state used only for app restoration.
-        var agentResumeDescriptor: AgentResumeDescriptor?
+        var agentResumeDescriptor: AgentResumeDescriptor? {
+            didSet {
+                if oldValue != agentResumeDescriptor {
+                    notifyOwningControllerCheckpointDirty()
+                }
+            }
+        }
 
         // SSH session replay state used to restore plain SSH panes that do not
         // have an active agent resume descriptor.
-        var sshResumeDescriptor: SSHResumeDescriptor?
+        var sshResumeDescriptor: SSHResumeDescriptor? {
+            didSet {
+                if oldValue != sshResumeDescriptor {
+                    notifyOwningControllerCheckpointDirty()
+                }
+            }
+        }
 
         // Persisted user acknowledgement for terminal agent completion (`done` /
         // `error`) so preserved `omgd` snapshots do not resurrect cleared badges.
-        var acknowledgedAgentStatus: AcknowledgedAgentStatus?
+        var acknowledgedAgentStatus: AcknowledgedAgentStatus? {
+            didSet {
+                if oldValue != acknowledgedAgentStatus {
+                    notifyOwningControllerCheckpointDirty()
+                }
+            }
+        }
+
+        func notifyOwningControllerCheckpointDirty() {
+            if let surfaceView = self as? SurfaceView {
+                BaseTerminalController.controller(owning: surfaceView)?.sessionCheckpointStateDidChange()
+            }
+        }
 
         // One-shot host launch handoff; survives a CLI replay file being removed
         // before its queued start signal reaches AppKit after a fast failure.

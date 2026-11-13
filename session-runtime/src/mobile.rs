@@ -115,6 +115,55 @@ struct GatewayRecord {
     public_url: String,
     token_file: PathBuf,
     started_at: u64,
+    #[serde(default)]
+    connected_devices: usize,
+}
+
+struct GatewayStateTracker {
+    dir: PathBuf,
+    record: GatewayRecord,
+    active_peers: std::collections::BTreeMap<IpAddr, usize>,
+}
+
+struct ActiveDeviceGuard {
+    tracker: Arc<std::sync::Mutex<GatewayStateTracker>>,
+    peer_ip: IpAddr,
+}
+
+impl ActiveDeviceGuard {
+    fn acquire(
+        tracker: &Option<Arc<std::sync::Mutex<GatewayStateTracker>>>,
+        peer_ip: IpAddr,
+    ) -> Option<Self> {
+        let tracker = tracker.as_ref()?.clone();
+        if let Ok(mut state) = tracker.lock() {
+            *state.active_peers.entry(peer_ip).or_insert(0) += 1;
+            let count = state.active_peers.len();
+            if state.record.connected_devices != count {
+                state.record.connected_devices = count;
+                let _ = write_gateway_record(&state.dir, &state.record);
+            }
+        }
+        Some(Self { tracker, peer_ip })
+    }
+}
+
+impl Drop for ActiveDeviceGuard {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.tracker.lock() {
+            if let Some(connections) = state.active_peers.get_mut(&self.peer_ip) {
+                *connections = connections.saturating_sub(1);
+                if *connections == 0 {
+                    state.active_peers.remove(&self.peer_ip);
+                }
+            }
+            let count = state.active_peers.len();
+            if state.record.connected_devices != count {
+                state.record.connected_devices = count;
+                let _ = write_gateway_record(&state.dir, &state.record);
+            }
+        }
+    }
 }
 
 struct GatewayLock(fs::File);
@@ -717,6 +766,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
                     "listen": active.as_ref().map(|r| &r.listen),
                     "public_url": active.as_ref().map(|r| &r.public_url),
                     "invite_url": invite,
+                    "connected_devices": active.as_ref().map_or(0, |r| r.connected_devices),
                     "state_dir": state_dir,
                     "endpoints": discovered.iter().map(|e| serde_json::json!({
                         "id": e.id,
@@ -737,6 +787,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
             if let Some(dir) = state_dir {
                 println!("State dir:    {}", dir.display());
             }
+            println!("Connected:    {} mobile client(s)", rec.connected_devices);
             println!(
                 "Runtimes:     {} local session endpoint(s) on this machine",
                 discovered.len()
@@ -895,22 +946,28 @@ pub fn run(args: &[String]) -> io::Result<()> {
         let listener = tokio::net::TcpListener::bind(address).await?;
         let bound = listener.local_addr()?;
         let effective_public = public_url_arg.unwrap_or_else(|| format!("ws://{bound}"));
-        if let (Some(ref dir), Some(_)) = (&support, &_gateway_lock) {
+        let state_tracker = if let (Some(ref dir), Some(_)) = (&support, &_gateway_lock) {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let _ = write_gateway_record(
-                dir,
-                &GatewayRecord {
-                    pid: std::process::id(),
-                    listen: bound.to_string(),
-                    public_url: effective_public.clone(),
-                    token_file: key_path.clone(),
-                    started_at: now,
-                },
-            );
-        }
+            let record = GatewayRecord {
+                pid: std::process::id(),
+                listen: bound.to_string(),
+                public_url: effective_public.clone(),
+                token_file: key_path.clone(),
+                started_at: now,
+                connected_devices: 0,
+            };
+            let _ = write_gateway_record(dir, &record);
+            Some(Arc::new(std::sync::Mutex::new(GatewayStateTracker {
+                dir: dir.clone(),
+                record,
+                active_peers: std::collections::BTreeMap::new(),
+            })))
+        } else {
+            None
+        };
         eprintln!("OMG mobile listening on ws://{bound}/catalogue");
         let loopback_listener = if !bound.ip().is_loopback() && bound.port() != 0 {
             let lo = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), bound.port());
@@ -936,17 +993,20 @@ pub fn run(args: &[String]) -> io::Result<()> {
             } else {
                 listener.accept().await
             };
-            let (stream, _) = accepted?;
+            let (stream, peer_addr) = accepted?;
             let Ok(handshake_permit) = handshake_permits.clone().try_acquire_owned() else {
                 continue;
             };
             let config = config.clone();
             let session_permits = session_permits.clone();
             let auth_failure_permits = auth_failure_permits.clone();
+            let state_tracker = state_tracker.clone();
             tokio::spawn(async move {
                 if let Err(error) = serve(
                     stream,
+                    peer_addr.ip(),
                     config,
+                    state_tracker,
                     handshake_permit,
                     session_permits,
                     auth_failure_permits,
@@ -1050,7 +1110,9 @@ fn ensure_background_gateway(
 
 async fn serve(
     stream: tokio::net::TcpStream,
+    peer_ip: IpAddr,
     config: Arc<Config>,
+    state_tracker: Option<Arc<std::sync::Mutex<GatewayStateTracker>>>,
     handshake_permit: tokio::sync::OwnedSemaphorePermit,
     session_permits: Arc<tokio::sync::Semaphore>,
     auth_failure_permits: Arc<tokio::sync::Semaphore>,
@@ -1127,6 +1189,12 @@ async fn serve(
         .map_err(|_| io::Error::other("Too many active mobile connections"))?;
     let mut ws = ws;
     let destination = rx.await.map_err(io::Error::other)?;
+    let _active_device_guard = match destination {
+        Route::Control | Route::Session(_, _) => {
+            ActiveDeviceGuard::acquire(&state_tracker, peer_ip)
+        }
+        Route::Catalogue => None,
+    };
     let destination = match destination {
         Route::Control => return control::serve(ws, config).await,
         Route::Catalogue => {
@@ -1466,5 +1534,52 @@ mod tests {
         assert!(validate_public_url("ws://devbox.example.com:8791").is_err());
         assert!(validate_public_url("https://devbox.example.com").is_err());
         assert!(validate_public_url("wss://user:pass@devbox.example.com").is_err());
+    }
+
+    #[test]
+    fn active_device_guard_tracks_unique_peers_and_persists_gateway_record() {
+        let dir = std::env::temp_dir().join(format!(
+            "omg-mobile-devices-{}",
+            omg_session_runtime::record::nonce().unwrap()
+        ));
+        ensure_state_dir(&dir).unwrap();
+        let _lock = GatewayLock::acquire(&dir).unwrap();
+        let record = GatewayRecord {
+            pid: std::process::id(),
+            listen: "127.0.0.1:18791".into(),
+            public_url: "ws://127.0.0.1:18791".into(),
+            token_file: dir.join("mobile-pair.token"),
+            started_at: 1,
+            connected_devices: 0,
+        };
+        write_gateway_record(&dir, &record).unwrap();
+        let tracker = Some(Arc::new(std::sync::Mutex::new(GatewayStateTracker {
+            dir: dir.clone(),
+            record,
+            active_peers: std::collections::BTreeMap::new(),
+        })));
+
+        let phone_a: IpAddr = "192.168.1.50".parse().unwrap();
+        let phone_b: IpAddr = "192.168.1.51".parse().unwrap();
+
+        let guard_a_control = ActiveDeviceGuard::acquire(&tracker, phone_a).unwrap();
+        assert_eq!(read_gateway_record(&dir).unwrap().connected_devices, 1);
+
+        let guard_a_session = ActiveDeviceGuard::acquire(&tracker, phone_a).unwrap();
+        assert_eq!(read_gateway_record(&dir).unwrap().connected_devices, 1);
+
+        let guard_b_control = ActiveDeviceGuard::acquire(&tracker, phone_b).unwrap();
+        assert_eq!(read_gateway_record(&dir).unwrap().connected_devices, 2);
+
+        drop(guard_a_session);
+        assert_eq!(read_gateway_record(&dir).unwrap().connected_devices, 2);
+
+        drop(guard_a_control);
+        assert_eq!(read_gateway_record(&dir).unwrap().connected_devices, 1);
+
+        drop(guard_b_control);
+        assert_eq!(read_gateway_record(&dir).unwrap().connected_devices, 0);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -877,4 +877,84 @@ struct TerminalWorkspaceIntegrationTests {
         #expect(first.surfaceTree.first === firstSurface)
         #expect(second.surfaceTree.first === secondSurface)
     }
+
+    @Test func sessionStorePersistsViaDebouncedDirtyEventsAndFlushesSynchronously() async throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let url = directory.appendingPathComponent("sessions.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let controller = TerminalController(app, withBaseConfig: config)
+        _ = controller.window
+        defer { controller.window?.delegate = nil; controller.window?.close() }
+
+        let store = TerminalWorkspaceSessionStore(url: url, testing: true, debounceInterval: 0.08)
+        store.start(app)
+        try await waitForAppKit { FileManager.default.fileExists(atPath: url.path) }
+        try FileManager.default.removeItem(at: url)
+
+        // Idle without dirty events must not poll/write on a 1Hz timer.
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(!store.hasPendingDebouncedCapture)
+        #expect(!FileManager.default.fileExists(atPath: url.path))
+
+        // Event-driven dirty mark schedules a debounced write.
+        controller.titleOverride = "Dirty Event Title \(UUID().uuidString)"
+        store.markDirty()
+        #expect(store.hasPendingDebouncedCapture)
+        try await waitForAppKit { FileManager.default.fileExists(atPath: url.path) }
+        #expect(!store.hasPendingDebouncedCapture)
+
+        // Synchronous flush persists immediately without waiting for debounce expiration.
+        try FileManager.default.removeItem(at: url)
+        store.debounceInterval = 10
+        controller.titleOverride = "Sync Flush Title \(UUID().uuidString)"
+        store.markDirty()
+        #expect(store.hasPendingDebouncedCapture)
+        store.flushPendingCaptureSynchronously()
+        #expect(!store.hasPendingDebouncedCapture)
+        try await waitForAppKit { FileManager.default.fileExists(atPath: url.path) }
+        #expect(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    @Test func localAgentProcessExitSourceReapsExitedProcessWithoutPolling() async throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let controller = TerminalController(app, withBaseConfig: config)
+        _ = controller.window
+        let surface = try #require(controller.surfaceTree.first)
+
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        child.arguments = ["30"]
+        try child.run()
+        let childPID = Int(child.processIdentifier)
+        defer {
+            if child.isRunning { child.terminate() }
+            controller.window?.delegate = nil
+            controller.window?.close()
+        }
+
+        surface.contextSignal = .init(
+            action: .start,
+            id: "omg-agent-claude-\(childPID)",
+            metadata: "type=app;omg_agent=claude;omg_scope=local;omg_liveness=pid;omg_state=working"
+        )
+
+        #expect(controller.activeAgentProcessExitSourcePIDs[surface.id] == childPID)
+        #expect(controller.agentActivities[surface.id]?.state == .working)
+
+        child.terminate()
+        child.waitUntilExit()
+
+        try await waitForAppKit(timeout: .milliseconds(500)) {
+            controller.activeAgentProcessExitSourcePIDs[surface.id] == nil &&
+                controller.agentActivities[surface.id]?.state != .working
+        }
+        #expect(controller.activeAgentProcessExitSourcePIDs[surface.id] == nil)
+        #expect(controller.agentActivities[surface.id]?.state != .working)
+    }
 }

@@ -1,5 +1,140 @@
+import Combine
 import Darwin
 import Foundation
+
+/// Persists user-approved local workspace root prefixes (`0600` private JSON) so untrusted
+/// repositories stay in Restricted Mode (no external LSP child processes spawned) until trusted.
+final class EditorWorkspaceTrustStore: ObservableObject, @unchecked Sendable {
+    static let shared = EditorWorkspaceTrustStore()
+    static let didChangeNotification = Notification.Name("OMGEditorWorkspaceTrustDidChange")
+
+    private struct PersistedState: Codable {
+        var version: Int = 1
+        var trustedRoots: [String]
+    }
+
+    @MainActor @Published private(set) var revision: UInt64 = 0
+
+    let fileURL: URL?
+    private let lock = NSLock()
+    private var trustedPrefixes: Set<String>
+    private let trustAllByDefault: Bool
+
+    init(
+        fileURL: URL? = OMGApplicationEnvironment.applicationSupportURL()
+            .appendingPathComponent("editor-trusted-workspaces.json"),
+        initiallyTrustedRoots: [String] = [],
+        trustAllByDefault: Bool = false
+    ) {
+        self.fileURL = fileURL
+        self.trustAllByDefault = trustAllByDefault
+
+        var loaded = Set(initiallyTrustedRoots.compactMap(Self.canonicalDirectoryPath))
+        if let fileURL {
+            OMGPrivateFileWriter.tightenPermissionsIfPresent(at: fileURL)
+            if let data = try? Data(contentsOf: fileURL),
+               data.count <= 1_048_576,
+               let decoded = try? JSONDecoder().decode(PersistedState.self, from: data) {
+                for raw in decoded.trustedRoots {
+                    if let canonical = Self.canonicalDirectoryPath(raw) {
+                        loaded.insert(canonical)
+                    }
+                }
+            }
+        }
+        self.trustedPrefixes = loaded
+    }
+
+    static func canonicalDirectoryPath(_ rawPath: String) -> String? {
+        let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("/"), !trimmed.contains("\0") else { return nil }
+        let resolved = URL(fileURLWithPath: trimmed, isDirectory: true)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+            .path
+        var normalized = resolved
+        while normalized.count > 1 && normalized.hasSuffix("/") {
+            normalized.removeLast()
+        }
+        guard normalized != "/" else { return nil }
+        return normalized
+    }
+
+    var trustedRoots: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return trustedPrefixes.sorted()
+    }
+
+    func isTrusted(workspaceRoot: String) -> Bool {
+        if trustAllByDefault { return true }
+        guard let candidate = Self.canonicalDirectoryPath(workspaceRoot) else { return false }
+        lock.lock()
+        let snapshot = trustedPrefixes
+        lock.unlock()
+        for prefix in snapshot {
+            if candidate == prefix || candidate.hasPrefix(prefix + "/") {
+                return true
+            }
+        }
+        return false
+    }
+
+    @discardableResult
+    func trust(workspaceRoot: String) -> Bool {
+        guard let canonical = Self.canonicalDirectoryPath(workspaceRoot) else { return false }
+        let inserted: Bool = lock.withLock {
+            trustedPrefixes.insert(canonical).inserted
+        }
+        persist()
+        if inserted {
+            notifyChanged(trustedRoot: canonical)
+        }
+        return inserted
+    }
+
+    @discardableResult
+    func revoke(workspaceRoot: String) -> Bool {
+        guard let canonical = Self.canonicalDirectoryPath(workspaceRoot) else { return false }
+        let removed: Bool = lock.withLock {
+            trustedPrefixes.remove(canonical) != nil
+        }
+        persist()
+        if removed {
+            notifyChanged(trustedRoot: canonical)
+        }
+        return removed
+    }
+
+    private func persist() {
+        guard let fileURL else { return }
+        let sorted = trustedRoots
+        let state = PersistedState(trustedRoots: sorted)
+        guard let data = try? JSONEncoder().encode(state) else { return }
+        try? OMGPrivateFileWriter.writeAtomically(data, to: fileURL)
+    }
+
+    private func notifyChanged(trustedRoot: String) {
+        let publishChange: @MainActor @Sendable () -> Void = { [weak self] in
+            guard let self else { return }
+            self.revision &+= 1
+            NotificationCenter.default.post(
+                name: Self.didChangeNotification,
+                object: self,
+                userInfo: ["workspaceRoot": trustedRoot]
+            )
+        }
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                publishChange()
+            }
+        } else {
+            Task { @MainActor in
+                publishChange()
+            }
+        }
+    }
+}
 
 /// Executable specification for launching a local stdio Language Server.
 struct EditorLSPServerCommand: Equatable, Sendable {
@@ -115,8 +250,13 @@ enum EditorLSPError: Error, Equatable, Sendable {
     case responseError(code: Int, message: String)
 }
 
-/// On-demand, zero-bundled-binary local LSP client manager with 5-minute idle reaping.
+/// On-demand, zero-bundled-binary local LSP client manager with workspace trust gating,
+/// credential environment scrubbing, global LRU eviction, and idle reaping.
 actor EditorLSPManager {
+    static let shared = EditorLSPManager()
+    static let defaultMaxActiveServers = 3
+    static let defaultEmptyWorkspaceIdleTimeout: TimeInterval = 30
+
     struct ServerKey: Hashable, Sendable {
         let workspaceRoot: String
         let serverGroup: String
@@ -166,8 +306,13 @@ actor EditorLSPManager {
 
     private let injectedCommands: [String: EditorLSPServerCommand]
     private let idleTimeout: TimeInterval
+    private let emptyWorkspaceIdleTimeout: TimeInterval
     private let reaperInterval: TimeInterval
+    private let maxActiveServers: Int
+    nonisolated let trustStore: EditorWorkspaceTrustStore
+    private let baseEnvironmentOverride: [String: String]?
     private var diagnosticsHandler: (@Sendable (String, [EditorDiagnostic]) -> Void)?
+    private var diagnosticsSubscribers: [UUID: @Sendable (String, [EditorDiagnostic]) -> Void] = [:]
 
     private var resolvedLoginEnvironment: [String: String]?
     private var loginEnvironmentTask: Task<[String: String], Never>?
@@ -176,12 +321,17 @@ actor EditorLSPManager {
     private var activeSessions: [ServerKey: LSPServerSession] = [:]
     private var pendingStartTasks: [ServerKey: Task<LSPServerSession?, Never>] = [:]
     private var reaperTask: Task<Void, Never>?
+    private var zeroDocumentReapTasks: [ServerKey: Task<Void, Never>] = [:]
     private var isShuttingDownAll = false
 
     init(
         serverCommands: [String: EditorLSPServerCommand] = [:],
         idleTimeout: TimeInterval = 300,
+        emptyWorkspaceIdleTimeout: TimeInterval? = nil,
         reaperInterval: TimeInterval = 30,
+        maxActiveServers: Int = EditorLSPManager.defaultMaxActiveServers,
+        trustStore: EditorWorkspaceTrustStore = .shared,
+        baseEnvironmentOverride: [String: String]? = nil,
         diagnosticsHandler: (@Sendable (String, [EditorDiagnostic]) -> Void)? = nil
     ) {
         var normalized: [String: EditorLSPServerCommand] = [:]
@@ -192,9 +342,16 @@ actor EditorLSPManager {
                 normalized[group] = value
             }
         }
+        let clampedIdle = max(0.05, idleTimeout)
+        let resolvedEmptyIdle = emptyWorkspaceIdleTimeout.map { max(0.02, $0) }
+            ?? min(clampedIdle, Self.defaultEmptyWorkspaceIdleTimeout)
         self.injectedCommands = normalized
-        self.idleTimeout = max(0.05, idleTimeout)
+        self.idleTimeout = clampedIdle
+        self.emptyWorkspaceIdleTimeout = min(clampedIdle, resolvedEmptyIdle)
         self.reaperInterval = max(0.05, reaperInterval)
+        self.maxActiveServers = max(1, maxActiveServers)
+        self.trustStore = trustStore
+        self.baseEnvironmentOverride = baseEnvironmentOverride
         self.diagnosticsHandler = diagnosticsHandler
     }
 
@@ -202,8 +359,31 @@ actor EditorLSPManager {
         self.diagnosticsHandler = handler
     }
 
+    func addDiagnosticsObserver(
+        _ handler: @escaping @Sendable (String, [EditorDiagnostic]) -> Void
+    ) -> UUID {
+        let id = UUID()
+        diagnosticsSubscribers[id] = handler
+        return id
+    }
+
+    func removeDiagnosticsObserver(_ id: UUID) {
+        diagnosticsSubscribers.removeValue(forKey: id)
+    }
+
+    private func emitDiagnostics(path: String, diagnostics: [EditorDiagnostic]) {
+        diagnosticsHandler?(path, diagnostics)
+        for subscriber in diagnosticsSubscribers.values {
+            subscriber(path, diagnostics)
+        }
+    }
+
     var activeServerCount: Int {
         activeSessions.values.filter { $0.isAlive }.count
+    }
+
+    func activeServerKeys() -> [ServerKey] {
+        activeSessions.compactMap { key, session in session.isAlive ? key : nil }
     }
 
     func activeServerPIDs() -> [pid_t] {
@@ -246,7 +426,7 @@ actor EditorLSPManager {
     }
 
     func didClose(path: String, languageID: String, workspaceRoot: String) async {
-        guard let session = await session(
+        guard let (key, session) = await keyedSession(
             workspaceRoot: workspaceRoot,
             languageID: languageID,
             spawnIfNeeded: false
@@ -254,6 +434,9 @@ actor EditorLSPManager {
             return
         }
         await session.didClose(path: path)
+        if session.openDocumentCount == 0 {
+            scheduleZeroDocumentReap(for: key)
+        }
     }
 
     // MARK: - LSP Queries
@@ -330,18 +513,37 @@ actor EditorLSPManager {
         )
     }
 
-    // MARK: - Idle Reaper & Shutdown
+    // MARK: - Idle Reaper, LRU Eviction & Shutdown
+
+    private func scheduleZeroDocumentReap(for key: ServerKey) {
+        zeroDocumentReapTasks.removeValue(forKey: key)?.cancel()
+        let delay = emptyWorkspaceIdleTimeout
+        zeroDocumentReapTasks[key] = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(max(10, Int((delay * 1_000).rounded(.up)))))
+            } catch {
+                return
+            }
+            guard let self, !Task.isCancelled else { return }
+            await self.reapIdleServers(now: Date())
+        }
+    }
 
     func reapIdleServers(now: Date = Date()) async {
         var idleSessions: [LSPServerSession] = []
         for (key, session) in activeSessions {
             if !session.isAlive {
                 activeSessions.removeValue(forKey: key)
+                zeroDocumentReapTasks.removeValue(forKey: key)?.cancel()
                 continue
             }
+            let effectiveTimeout = session.openDocumentCount == 0
+                ? emptyWorkspaceIdleTimeout
+                : idleTimeout
             let elapsed = now.timeIntervalSince(session.lastActivityDate)
-            if elapsed >= idleTimeout {
+            if elapsed >= effectiveTimeout {
                 activeSessions.removeValue(forKey: key)
+                zeroDocumentReapTasks.removeValue(forKey: key)?.cancel()
                 idleSessions.append(session)
             }
         }
@@ -354,12 +556,46 @@ actor EditorLSPManager {
         }
     }
 
+    private func evictLRUServersForNewSession(preserving targetKey: ServerKey) async {
+        for (key, session) in activeSessions where !session.isAlive {
+            activeSessions.removeValue(forKey: key)
+            zeroDocumentReapTasks.removeValue(forKey: key)?.cancel()
+        }
+        let maxAllowedBeforeInsert = max(0, maxActiveServers - 1)
+        let excessCount = activeSessions.keys.filter { $0 != targetKey }.count - maxAllowedBeforeInsert
+        guard excessCount > 0 else { return }
+
+        let candidates = activeSessions
+            .filter { $0.key != targetKey }
+            .sorted { lhs, rhs in
+                let lhsHasOpenDocs = lhs.value.openDocumentCount > 0 ? 1 : 0
+                let rhsHasOpenDocs = rhs.value.openDocumentCount > 0 ? 1 : 0
+                if lhsHasOpenDocs != rhsHasOpenDocs {
+                    return lhsHasOpenDocs < rhsHasOpenDocs
+                }
+                return lhs.value.lastActivityDate < rhs.value.lastActivityDate
+            }
+            .prefix(excessCount)
+
+        var evicted: [LSPServerSession] = []
+        for (key, session) in candidates {
+            activeSessions.removeValue(forKey: key)
+            zeroDocumentReapTasks.removeValue(forKey: key)?.cancel()
+            evicted.append(session)
+        }
+        for session in evicted {
+            await session.shutdown()
+        }
+    }
+
     func shutdownAll() async {
         isShuttingDownAll = true
         defer { isShuttingDownAll = false }
 
         reaperTask?.cancel()
         reaperTask = nil
+        for (_, task) in zeroDocumentReapTasks { task.cancel() }
+        zeroDocumentReapTasks.removeAll()
 
         let inFlight = Array(pendingStartTasks.values)
         pendingStartTasks.removeAll()
@@ -385,28 +621,51 @@ actor EditorLSPManager {
         languageID: String,
         spawnIfNeeded: Bool
     ) async -> LSPServerSession? {
+        await keyedSession(
+            workspaceRoot: workspaceRoot,
+            languageID: languageID,
+            spawnIfNeeded: spawnIfNeeded
+        )?.1
+    }
+
+    private func keyedSession(
+        workspaceRoot: String,
+        languageID: String,
+        spawnIfNeeded: Bool
+    ) async -> (ServerKey, LSPServerSession)? {
         guard !isShuttingDownAll, workspaceRoot.hasPrefix("/") else { return nil }
         let normalizedLang = EditorLanguageID.normalizeHint(languageID)
         let serverGroup = EditorLanguageID.lspServerGroup(for: normalizedLang)
             ?? (injectedCommands[normalizedLang] != nil ? normalizedLang : nil)
         guard let serverGroup else { return nil }
 
-        let canonicalRoot = URL(fileURLWithPath: workspaceRoot).standardizedFileURL.path
+        let canonicalRoot = EditorWorkspaceTrustStore.canonicalDirectoryPath(workspaceRoot)
+            ?? URL(fileURLWithPath: workspaceRoot).standardizedFileURL.path
         let key = ServerKey(workspaceRoot: canonicalRoot, serverGroup: serverGroup)
 
         if let existing = activeSessions[key] {
             if existing.isAlive {
+                guard trustStore.isTrusted(workspaceRoot: canonicalRoot) else {
+                    activeSessions.removeValue(forKey: key)
+                    zeroDocumentReapTasks.removeValue(forKey: key)?.cancel()
+                    await existing.shutdown()
+                    return nil
+                }
                 existing.touchActivity()
-                return existing
+                return (key, existing)
             }
             activeSessions.removeValue(forKey: key)
+            zeroDocumentReapTasks.removeValue(forKey: key)?.cancel()
         }
 
-        guard spawnIfNeeded else { return nil }
+        guard spawnIfNeeded, trustStore.isTrusted(workspaceRoot: canonicalRoot) else { return nil }
 
         if let pending = pendingStartTasks[key] {
-            return await pending.value
+            guard let started = await pending.value else { return nil }
+            return (key, started)
         }
+
+        await evictLRUServersForNewSession(preserving: key)
 
         let startTask = Task<LSPServerSession?, Never> { [weak self] in
             guard let self else { return nil }
@@ -419,10 +678,12 @@ actor EditorLSPManager {
         let created = await startTask.value
         pendingStartTasks.removeValue(forKey: key)
 
-        if let created, created.isAlive, !isShuttingDownAll {
+        if let created, created.isAlive, !isShuttingDownAll,
+           trustStore.isTrusted(workspaceRoot: canonicalRoot) {
+            await evictLRUServersForNewSession(preserving: key)
             activeSessions[key] = created
             ensureReaperRunning()
-            return created
+            return (key, created)
         } else if let created {
             await created.shutdown()
         }
@@ -445,6 +706,62 @@ actor EditorLSPManager {
         }
     }
 
+    nonisolated private static let preservedToolchainEnvironmentKeys: Set<String> = [
+        "PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "SHELL", "LANG", "TERM",
+        "SDKROOT", "DEVELOPER_DIR", "CARGO_HOME", "RUSTUP_HOME", "GOPATH", "GOROOT",
+        "NVM_DIR", "VOLTA_HOME", "PYENV_ROOT", "PNPM_HOME", "BUN_INSTALL",
+        "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+        "CF_USER_TEXT_ENCODING", "__CF_USER_TEXT_ENCODING",
+    ]
+
+    nonisolated private static let exactSensitiveEnvironmentKeys: Set<String> = [
+        "AWS_SESSION_TOKEN", "AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID", "AWS_SECURITY_TOKEN",
+        "GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN", "NPM_TOKEN", "CARGO_REGISTRY_TOKEN",
+        "PYPI_API_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
+        "GOOGLE_API_KEY", "AZURE_OPENAI_API_KEY", "COHERE_API_KEY", "MISTRAL_API_KEY",
+        "DEEPSEEK_API_KEY", "XAI_API_KEY", "GROQ_API_KEY", "HF_TOKEN", "HUGGING_FACE_HUB_TOKEN",
+        "SLACK_TOKEN", "DISCORD_TOKEN", "STRIPE_SECRET_KEY", "DATABASE_URL", "REDIS_URL",
+        "PASSWORD", "PASSWD", "SECRET", "TOKEN", "PRIVATE_KEY",
+    ]
+
+    nonisolated static func isSensitiveEnvironmentVariableName(_ rawKey: String) -> Bool {
+        let upper = rawKey.uppercased()
+        if preservedToolchainEnvironmentKeys.contains(upper) || upper.hasPrefix("LC_") {
+            return false
+        }
+        if exactSensitiveEnvironmentKeys.contains(upper) {
+            return true
+        }
+        if upper.hasSuffix("_API_KEY") || upper.hasSuffix("_APIKEY") || upper.contains("_API_KEY_") {
+            return true
+        }
+        if upper.contains("_SECRET") || upper.hasPrefix("SECRET_") {
+            return true
+        }
+        if upper.hasSuffix("_TOKEN") || upper.hasPrefix("TOKEN_") || upper.contains("_TOKEN_") {
+            return true
+        }
+        if upper.hasSuffix("_PASSWORD") || upper.hasPrefix("PASSWORD_") || upper.hasSuffix("_PASSWD") {
+            return true
+        }
+        if upper.hasSuffix("_PRIVATE_KEY") || upper.contains("_PRIVATE_KEY_") {
+            return true
+        }
+        if upper.hasSuffix("_CREDENTIAL") || upper.hasSuffix("_CREDENTIALS") || upper.hasSuffix("_ACCESS_KEY") {
+            return true
+        }
+        return false
+    }
+
+    nonisolated static func scrubSensitiveEnvironment(_ environment: [String: String]) -> [String: String] {
+        var scrubbed: [String: String] = [:]
+        scrubbed.reserveCapacity(environment.count)
+        for (key, value) in environment where !isSensitiveEnvironmentVariableName(key) {
+            scrubbed[key] = value
+        }
+        return scrubbed
+    }
+
     private func spawnAndInitializeSession(
         key: ServerKey,
         languageID: String
@@ -457,20 +774,22 @@ actor EditorLSPManager {
         }
 
         let baseEnv = await loginEnvironment()
-        var mergedEnv = baseEnv
+        var mergedEnv = Self.scrubSensitiveEnvironment(baseEnv)
         if let customEnv = command.environment {
-            for (k, v) in customEnv {
+            for (k, v) in Self.scrubSensitiveEnvironment(customEnv) {
                 mergedEnv[k] = v
             }
         }
 
-        let diagCallback = diagnosticsHandler
         let session = LSPServerSession(
             workspaceRoot: key.workspaceRoot,
             command: command,
             environment: mergedEnv,
-            onDiagnostics: { path, diagnostics in
-                diagCallback?(path, diagnostics)
+            onDiagnostics: { [weak self] path, diagnostics in
+                guard let self else { return }
+                Task {
+                    await self.emitDiagnostics(path: path, diagnostics: diagnostics)
+                }
             }
         )
         do {
@@ -519,6 +838,9 @@ actor EditorLSPManager {
     }
 
     private func loginEnvironment() async -> [String: String] {
+        if let override = baseEnvironmentOverride {
+            return override
+        }
         if let cached = resolvedLoginEnvironment {
             return cached
         }
@@ -653,6 +975,7 @@ private final class LSPServerSession: @unchecked Sendable {
         let languageID: String
         var version: Int
         var text: String
+        var openCount: Int
     }
 
     let workspaceRoot: String
@@ -691,6 +1014,12 @@ private final class LSPServerSession: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return lastActivityStorage
+    }
+
+    var openDocumentCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return openDocuments.count
     }
 
     var isAlive: Bool {
@@ -784,10 +1113,17 @@ private final class LSPServerSession: @unchecked Sendable {
         touchActivity()
         let uri = Self.fileURI(forPath: path)
         let existingText: String? = lock.withLock {
-            if let existing = openDocuments[uri] {
+            if var existing = openDocuments[uri] {
+                existing.openCount += 1
+                openDocuments[uri] = existing
                 return existing.text
             }
-            openDocuments[uri] = SyncedDocument(languageID: languageID, version: 1, text: text)
+            openDocuments[uri] = SyncedDocument(
+                languageID: languageID,
+                version: 1,
+                text: text,
+                openCount: 1
+            )
             return nil
         }
         if let existingText {
@@ -854,8 +1190,17 @@ private final class LSPServerSession: @unchecked Sendable {
     func didClose(path: String) async {
         touchActivity()
         let uri = Self.fileURI(forPath: path)
-        let removed = lock.withLock { openDocuments.removeValue(forKey: uri) }
-        guard removed != nil else { return }
+        let shouldSendClose: Bool = lock.withLock {
+            guard var existing = openDocuments[uri] else { return false }
+            existing.openCount -= 1
+            if existing.openCount > 0 {
+                openDocuments[uri] = existing
+                return false
+            }
+            openDocuments.removeValue(forKey: uri)
+            return true
+        }
+        guard shouldSendClose else { return }
 
         sendNotification(
             method: "textDocument/didClose",
@@ -1502,7 +1847,7 @@ struct EditorIntelligenceDocumentContext: Equatable, Sendable {
         )
     }
 
-    fileprivate var effectiveLocalRoot: String? {
+    var effectiveLocalRoot: String? {
         guard isLocal else { return nil }
         if let workspaceRoot, workspaceRoot.hasPrefix("/") {
             return workspaceRoot
@@ -1521,23 +1866,41 @@ final class EditorIntelligenceCoordinator {
     let lspManager: EditorLSPManager
     let symbolIndex: EditorSymbolIndex
     let completionEngine: EditorCompletionEngine
+    private let ownsLSPManager: Bool
+    private var diagnosticsObserverID: UUID?
 
     init(
         lspManager: EditorLSPManager? = nil,
         symbolIndex: EditorSymbolIndex = EditorSymbolIndex(),
         completionEngine: EditorCompletionEngine? = nil
     ) {
-        let resolvedLSP = lspManager ?? EditorLSPManager()
+        let ownsManager = (lspManager != nil)
+        let resolvedLSP = lspManager ?? EditorLSPManager.shared
         self.lspManager = resolvedLSP
+        self.ownsLSPManager = ownsManager
         self.symbolIndex = symbolIndex
         self.completionEngine = completionEngine ?? EditorCompletionEngine()
 
         Task { [weak self] in
-            await resolvedLSP.setDiagnosticsHandler { [weak self] path, diagnostics in
+            let id = await resolvedLSP.addDiagnosticsObserver { [weak self] path, diagnostics in
                 Task { @MainActor [weak self] in
                     self?.onDiagnostics?(path, diagnostics)
                 }
             }
+            await MainActor.run { [weak self] in
+                if let self {
+                    self.diagnosticsObserverID = id
+                } else {
+                    Task { await resolvedLSP.removeDiagnosticsObserver(id) }
+                }
+            }
+        }
+    }
+
+    deinit {
+        if let id = diagnosticsObserverID {
+            let manager = lspManager
+            Task { await manager.removeDiagnosticsObserver(id) }
         }
     }
 
@@ -1606,8 +1969,14 @@ final class EditorIntelligenceCoordinator {
     }
 
     func shutdown() async {
+        if let id = diagnosticsObserverID {
+            diagnosticsObserverID = nil
+            await lspManager.removeDiagnosticsObserver(id)
+        }
         await symbolIndex.clearOpenDocuments()
-        await lspManager.shutdownAll()
+        if ownsLSPManager {
+            await lspManager.shutdownAll()
+        }
     }
 
     // MARK: - Unified Intelligence Queries

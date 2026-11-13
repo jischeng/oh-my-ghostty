@@ -298,4 +298,64 @@ struct SettingsControlsTests {
         #expect(button.accessibilityRole() == .popUpButton)
         #expect(button.isEnabled)
     }
+
+    @Test func mobileAccessControllerTracksLiveConnectedDevicesFromGatewayRecord() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let executable = directory.appendingPathComponent("fake-omgd")
+        try Data("#!/bin/sh\nsleep 10\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let controller = MobileAccessController(
+            executable: executable,
+            support: directory,
+            port: 18799,
+            addressProvider: { "192.168.1.9" },
+            tailscaleAddressProvider: { nil }
+        )
+        defer { controller.stop() }
+        #expect(controller.connectedDevices == 0)
+
+        controller.startGatewayStateMonitor()
+        let recordURL = directory.appendingPathComponent("mobile-gateway.json")
+        let recordJSON = """
+        {
+          "pid": \(ProcessInfo.processInfo.processIdentifier),
+          "listen": "192.168.1.9:18799",
+          "public_url": "ws://192.168.1.9:18799",
+          "token_file": "\(directory.appendingPathComponent("mobile-pair.token").path)",
+          "started_at": 1,
+          "connected_devices": 2
+        }
+        """
+        let tmpURL = directory.appendingPathComponent(".mobile-gateway.tmp")
+        try Data(recordJSON.utf8).write(to: tmpURL)
+        _ = try FileManager.default.replaceItemAt(recordURL, withItemAt: tmpURL)
+
+        try await waitForAppKit { controller.connectedDevices == 2 }
+        #expect(controller.connectedDevices == 2)
+
+        controller.stop()
+        #expect(controller.connectedDevices == 0)
+    }
+
+    @Test func agentScopeCaptionsAccuratelyDescribeDefaultHookUpdatesAndRemoteRuntime() {
+        let en = SettingsStrings(language: .english)
+        let zh = SettingsStrings(language: .simplifiedChinese)
+
+        #expect(en.agentUpdateScopeCaption.contains("Automatic status extension updates are on by default"))
+        #expect(!en.agentUpdateScopeCaption.contains("off by default."))
+        #expect(zh.agentUpdateScopeCaption.contains("状态扩展自动更新默认开启"))
+        #expect(!zh.agentUpdateScopeCaption.contains("扩展自动更新默认关闭"))
+
+        #expect(en.agentSSHScopeCaption.contains("~/.omg/omgd"))
+        #expect(!en.agentSSHScopeCaption.contains("no remote daemon is installed"))
+        #expect(zh.agentSSHScopeCaption.contains("~/.omg/omgd"))
+        #expect(!zh.agentSSHScopeCaption.contains("不在远端安装常驻服务"))
+    }
 }

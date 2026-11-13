@@ -372,6 +372,14 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             let ownID = ObjectIdentifier(self)
             if (selectedTabID == ownID) != (newValue == ownID) { objectWillChange.send() }
         }
+        didSet {
+            let ownID = ObjectIdentifier(self)
+            let wasSelected = oldValue == nil || oldValue == ownID
+            let isSelected = selectedTabID == nil || selectedTabID == ownID
+            if wasSelected != isSelected {
+                syncSurfaceTreeOcclusionState()
+            }
+        }
     }
 
     /// The tab currently under the pointer. This is independent from selection.
@@ -443,6 +451,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     private var agentTitleWatchers: [UUID: AgentTitleIdleWatcher] = [:]
     private var typedAgentHookContextIDs: [UUID: String] = [:]
     private var agentValidationWorkItems: [UUID: DispatchWorkItem] = [:]
+    private var agentProcessExitSources: [UUID: (pid: Int, source: DispatchSourceProcess)] = [:]
+    private var agentStaleWorkingWorkItems: [UUID: DispatchWorkItem] = [:]
+
+    var activeAgentProcessExitSourcePIDs: [UUID: Int] {
+        agentProcessExitSources.mapValues(\.pid)
+    }
 
     private var agentProcessPollCancellable: AnyCancellable?
     private var observedForegroundProcessIDs: [UUID: Int] = [:]
@@ -748,6 +762,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         verticalTabWindowsObservation?.invalidate()
         verticalTabSelectionObservation?.invalidate()
         agentProcessPollCancellable?.cancel()
+        for entry in agentProcessExitSources.values { entry.source.cancel() }
+        for item in agentValidationWorkItems.values { item.cancel() }
+        for item in agentStaleWorkingWorkItems.values { item.cancel() }
         pendingTabOrganizationWorkItem?.cancel()
         quickInputSecureInputCancellable?.cancel()
         quickInputDraftImportTask?.cancel()
@@ -843,7 +860,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         for surfaceID: UUID
     ) {
         guard surfaceTree.contains(where: { $0.id == surfaceID }) else { return }
-        agentValidationWorkItems.removeValue(forKey: surfaceID)?.cancel()
+        cancelAgentValidationMonitoring(for: surfaceID)
         paneSessionContexts[surfaceID] = snapshot.context
         if let activity = snapshot.activity {
             agentActivities[surfaceID] = activity
@@ -931,12 +948,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             activeIDs.contains($0.key)
         }
         pruneQuickInputState(retaining: activeIDs)
-        for (surfaceID, workItem) in agentValidationWorkItems
+        for surfaceID in Set(agentValidationWorkItems.keys)
+            .union(agentProcessExitSources.keys)
+            .union(agentStaleWorkingWorkItems.keys)
         where !activeIDs.contains(surfaceID) {
-            workItem.cancel()
-        }
-        agentValidationWorkItems = agentValidationWorkItems.filter {
-            activeIDs.contains($0.key)
+            cancelAgentValidationMonitoring(for: surfaceID)
         }
 
         for surface in surfaces where paneSessionObservers[surface.id] == nil {
@@ -990,6 +1006,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                     }
                     updatePaneSessionContext(context, for: surface.id)
                     updateAgentTitleActivity(title, for: surface.id)
+                    sessionCheckpointStateDidChange()
                 }
                 .store(in: &observers)
 
@@ -1622,6 +1639,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             status: status,
             now: Date()
         )
+        scheduleStaleWorkingCheckIfNeeded(for: surfaceID)
         guard let state = AgentTitleStatusReconciler.nextState(
             status: status,
             title: title,
@@ -1662,7 +1680,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             agentReducers.removeValue(forKey: surfaceID)
             agentTitleWatchers.removeValue(forKey: surfaceID)
             typedAgentHookContextIDs.removeValue(forKey: surfaceID)
-            agentValidationWorkItems.removeValue(forKey: surfaceID)?.cancel()
+            cancelAgentValidationMonitoring(for: surfaceID)
             setAcknowledgedAgentStatus(nil, for: surfaceID)
             clearAgentResumeDescriptor(for: surfaceID)
             if agentActivities.removeValue(forKey: surfaceID) != nil {
@@ -2165,40 +2183,151 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         ))
     }
 
-    private func scheduleAgentValidation(for surfaceID: UUID) {
+    private func cancelAgentValidationMonitoring(for surfaceID: UUID) {
         agentValidationWorkItems.removeValue(forKey: surfaceID)?.cancel()
-        guard agentReducers[surfaceID]?.requiresForegroundValidation == true else {
-            return
+        agentStaleWorkingWorkItems.removeValue(forKey: surfaceID)?.cancel()
+        if let entry = agentProcessExitSources.removeValue(forKey: surfaceID) {
+            entry.source.cancel()
         }
+    }
+
+    private func scheduleStaleWorkingCheckIfNeeded(for surfaceID: UUID) {
+        agentStaleWorkingWorkItems.removeValue(forKey: surfaceID)?.cancel()
+        guard let activity = agentActivities[surfaceID],
+              activity.state == .working,
+              let contextID = agentResumeContextIDs[surfaceID],
+              typedAgentHookContextIDs[surfaceID] == contextID,
+              agentTitleWatchers[surfaceID] != nil else { return }
+        let delay = AgentTitleStatusReconciler.idleConfirmationDelay + 0.05
         let workItem = DispatchWorkItem { [weak self] in
-            guard let self,
-                  let surface = surfaceTree.first(where: { $0.id == surfaceID }),
-                  var reducer = agentReducers[surfaceID] else { return }
-            let livenessIsAlive = reducer.validationIdentity.map {
+            guard let self else { return }
+            self.agentStaleWorkingWorkItems.removeValue(forKey: surfaceID)
+            if let stale = self.staleWorkingActivityUpdate(for: surfaceID) {
+                self.applyAgentActivityUpdate(stale, for: surfaceID)
+                return
+            }
+            if self.agentActivities[surfaceID]?.state == .working,
+               self.agentTitleWatchers[surfaceID] != nil {
+                let stallCheck = DispatchWorkItem { [weak self] in
+                    guard let self else { return }
+                    self.agentStaleWorkingWorkItems.removeValue(forKey: surfaceID)
+                    if let stale = self.staleWorkingActivityUpdate(for: surfaceID) {
+                        self.applyAgentActivityUpdate(stale, for: surfaceID)
+                    }
+                }
+                self.agentStaleWorkingWorkItems[surfaceID] = stallCheck
+                DispatchQueue.main.asyncAfter(
+                    deadline: .now() + AgentTitleStatusReconciler.idleStallDelay + 0.05,
+                    execute: stallCheck
+                )
+            }
+        }
+        agentStaleWorkingWorkItems[surfaceID] = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func reconcileAgentValidation(
+        for surfaceID: UUID,
+        confirmedProcessExit: Bool = false
+    ) {
+        guard let surface = surfaceTree.first(where: { $0.id == surfaceID }),
+              var reducer = agentReducers[surfaceID] else { return }
+        let livenessIsAlive: Bool?
+        if confirmedProcessExit {
+            livenessIsAlive = false
+        } else {
+            livenessIsAlive = reducer.validationIdentity.map {
                 switch $0 {
                 case .process(let processID): Self.processExists(processID)
                 case .processGroup(let processGroupID):
                     Self.processGroupExists(processGroupID)
                 }
             }
-            let update = reducer.reconcileLocalForegroundProcess(
-                surface.surfaceModel?.foregroundPID,
-                livenessIsAlive: livenessIsAlive
-            )
-            agentReducers[surfaceID] = reducer
-            if let stale = staleWorkingActivityUpdate(for: surfaceID) {
-                applyAgentActivityUpdate(stale, for: surfaceID)
+        }
+        let update = reducer.reconcileLocalForegroundProcess(
+            surface.surfaceModel?.foregroundPID,
+            livenessIsAlive: livenessIsAlive,
+            confirmedProcessExit: confirmedProcessExit
+        )
+        agentReducers[surfaceID] = reducer
+        if let stale = staleWorkingActivityUpdate(for: surfaceID) {
+            applyAgentActivityUpdate(stale, for: surfaceID)
+        }
+        if let update {
+            applyAgentActivityUpdate(update, for: surfaceID)
+            if update == .clear {
+                clearAgentResumeDescriptor(for: surfaceID)
+            } else if case .set(let activity) = update,
+                      activity.state == .error {
+                clearAgentResumeDescriptor(for: surfaceID)
             }
-            if let update {
-                applyAgentActivityUpdate(update, for: surfaceID)
-                if update == .clear {
-                    clearAgentResumeDescriptor(for: surfaceID)
-                } else if case .set(let activity) = update,
-                          activity.state == .error {
-                    clearAgentResumeDescriptor(for: surfaceID)
+        }
+        scheduleAgentValidation(for: surfaceID)
+    }
+
+    private func scheduleAgentValidation(for surfaceID: UUID) {
+        agentValidationWorkItems.removeValue(forKey: surfaceID)?.cancel()
+        guard let reducer = agentReducers[surfaceID],
+              reducer.requiresForegroundValidation,
+              let identity = reducer.validationIdentity else {
+            cancelAgentValidationMonitoring(for: surfaceID)
+            return
+        }
+
+        scheduleStaleWorkingCheckIfNeeded(for: surfaceID)
+
+        switch identity {
+        case .process(let processID):
+            if let existing = agentProcessExitSources[surfaceID] {
+                if existing.pid == processID {
+                    return
+                }
+                existing.source.cancel()
+                agentProcessExitSources.removeValue(forKey: surfaceID)
+            }
+            if processID > 0, let pid = pid_t(exactly: processID) {
+                if Darwin.kill(pid, 0) == 0 {
+                    let source = DispatchSource.makeProcessSource(
+                        identifier: pid,
+                        eventMask: .exit,
+                        queue: .main
+                    )
+                    source.setEventHandler { [weak self] in
+                        guard let self else { return }
+                        if let current = self.agentProcessExitSources[surfaceID], current.pid == processID {
+                            current.source.cancel()
+                            self.agentProcessExitSources.removeValue(forKey: surfaceID)
+                        }
+                        self.reconcileAgentValidation(for: surfaceID, confirmedProcessExit: true)
+                    }
+                    agentProcessExitSources[surfaceID] = (processID, source)
+                    source.resume()
+                    if !Self.processExists(processID) {
+                        if let current = agentProcessExitSources.removeValue(forKey: surfaceID) {
+                            current.source.cancel()
+                        }
+                        reconcileAgentValidation(for: surfaceID, confirmedProcessExit: true)
+                    }
+                    return
+                }
+                if errno == EPERM {
+                    scheduleFallbackAgentValidationTimer(for: surfaceID)
+                    return
                 }
             }
-            scheduleAgentValidation(for: surfaceID)
+            reconcileAgentValidation(for: surfaceID, confirmedProcessExit: true)
+
+        case .processGroup:
+            if let existing = agentProcessExitSources.removeValue(forKey: surfaceID) {
+                existing.source.cancel()
+            }
+            scheduleFallbackAgentValidationTimer(for: surfaceID)
+        }
+    }
+
+    private func scheduleFallbackAgentValidationTimer(for surfaceID: UUID) {
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.reconcileAgentValidation(for: surfaceID)
         }
         agentValidationWorkItems[surfaceID] = workItem
         DispatchQueue.main.asyncAfter(
@@ -3382,8 +3511,33 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         DispatchQueue.main.async(execute: work)
     }
 
-    private var tabPresentationIsClosing = false
-    var workspacePresentationIsParked = false
+    private var tabPresentationIsClosing = false {
+        didSet {
+            if oldValue != tabPresentationIsClosing {
+                syncSurfaceTreeOcclusionState()
+            }
+        }
+    }
+    var workspacePresentationIsParked = false {
+        didSet {
+            if oldValue != workspacePresentationIsParked {
+                syncSurfaceTreeOcclusionState()
+            }
+        }
+    }
+
+    override var isControllerPresentingSurfaces: Bool {
+        guard super.isControllerPresentingSurfaces else { return false }
+        guard !workspacePresentationIsParked, !tabPresentationIsClosing else { return false }
+        if let selectedTabID, selectedTabID != ObjectIdentifier(self) {
+            return false
+        }
+        return true
+    }
+
+    override func sessionCheckpointStateDidChange() {
+        workspaceCoordinator.sessions.markDirty()
+    }
 
     /// Closed windows can remain in NSApp.windows while undo retains their
     /// surface trees. Only an intact presentation can participate in a workspace.
@@ -4798,6 +4952,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // newTab installs observation after attachment. Reading tabGroup here
         // otherwise builds a temporary native stack and a second sidebar host.
         if initialTabParent == nil { setupTabObservation() }
+        syncSurfaceTreeOcclusionState()
     }
 
     /// Setup correct window frame before showing the window
@@ -5257,6 +5412,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 agentScreenStableTicks = [:]
                 agentValidationWorkItems.values.forEach { $0.cancel() }
                 agentValidationWorkItems = [:]
+                agentStaleWorkingWorkItems.values.forEach { $0.cancel() }
+                agentStaleWorkingWorkItems = [:]
+                agentProcessExitSources.values.forEach { $0.source.cancel() }
+                agentProcessExitSources = [:]
             }
         }
         if changedKey == nil || changedKey == "sessions.startupMode" {

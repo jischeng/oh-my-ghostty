@@ -720,6 +720,8 @@ struct SSHResumeDescriptor: Codable, Equatable, Sendable {
 }
 
 enum SSHReplayStore {
+    static let maxEntryAge: TimeInterval = 24 * 60 * 60
+
     static func url(
         for connectionID: String,
         applicationSupportURL: URL? = nil
@@ -746,17 +748,50 @@ enum SSHReplayStore {
         ),
         let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
         attributes[.type] as? FileAttributeType == .typeRegular,
-        let modified = attributes[.modificationDate] as? Date,
-        now.timeIntervalSince(modified) >= -5 * 60,
-        now.timeIntervalSince(modified) <= 24 * 60 * 60,
-        let permissions = (attributes[.posixPermissions] as? NSNumber)?.intValue,
-        permissions & 0o077 == 0,
-        let size = (attributes[.size] as? NSNumber)?.intValue,
-        size <= 64 * 1_024,
-        let data = try? Data(contentsOf: url, options: [.mappedIfSafe]) else {
+        let modified = attributes[.modificationDate] as? Date else {
+            return nil
+        }
+        let age = now.timeIntervalSince(modified)
+        if age > Self.maxEntryAge {
+            try? FileManager.default.removeItem(at: url)
+            return nil
+        }
+        guard age >= -5 * 60,
+              let permissions = (attributes[.posixPermissions] as? NSNumber)?.intValue,
+              permissions & 0o077 == 0,
+              let size = (attributes[.size] as? NSNumber)?.intValue,
+              size <= 64 * 1_024,
+              let data = try? Data(contentsOf: url, options: [.mappedIfSafe]) else {
             return nil
         }
         return try? JSONDecoder().decode(SSHReplayDescriptor.self, from: data)
+    }
+
+    static func pruneExpired(
+        applicationSupportURL: URL? = nil,
+        now: Date = Date(),
+        maxScan: Int = 512
+    ) {
+        guard maxScan > 0 else { return }
+        let support = applicationSupportURL ??
+            OMGApplicationEnvironment.applicationSupportURL()
+        let directory = support.appendingPathComponent("SSHReplay", isDirectory: true)
+        guard let dirAttrs = try? FileManager.default.attributesOfItem(atPath: directory.path),
+              dirAttrs[.type] as? FileAttributeType == .typeDirectory,
+              let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else {
+            return
+        }
+        for name in names.prefix(maxScan) {
+            guard name.hasPrefix("omg-ssh-"), name.hasSuffix(".json") else { continue }
+            let fileURL = directory.appendingPathComponent(name)
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
+                  attrs[.type] as? FileAttributeType == .typeRegular,
+                  let modified = attrs[.modificationDate] as? Date,
+                  now.timeIntervalSince(modified) > Self.maxEntryAge else {
+                continue
+            }
+            try? FileManager.default.removeItem(at: fileURL)
+        }
     }
 }
 

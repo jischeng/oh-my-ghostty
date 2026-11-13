@@ -202,16 +202,21 @@ struct OhMyGhosttySettingsTests {
         try "background-opacity = 0.8\nunfocused-split-opacity = 0.7\n"
             .write(to: configURL, atomically: true, encoding: .utf8)
         #expect(settings.unfocusedSplitOpacity == 0.9)
+        let initialOverlay = try String(contentsOf: overlayURL, encoding: .utf8)
+        #expect(!initialOverlay.contains("unfocused-split-opacity"))
         let initial = Ghostty.Config(at: configURL.path, overrideAt: overlayURL.path)
         #expect(initial.errors.isEmpty)
         #expect(initial.backgroundOpacity == 0.8)
-        // The Swift accessor returns the native overlay alpha, the inverse of the setting.
-        #expect(abs(initial.unfocusedSplitOpacity - 0.1) < 0.001)
+        // Native `baseline.ghostty` sets `unfocused-split-opacity = 0.7` (overlay alpha 0.3),
+        // which must be preserved until the user explicitly customizes `unfocusedSplitOpacity`.
+        #expect(abs(initial.unfocusedSplitOpacity - 0.3) < 0.001)
 
         settings.backgroundOpacityOverride = 0.6
         settings.unfocusedSplitOpacity = 0.75
         settings.focusedSplitBorderPosition = .left
         settings.focusedSplitBorderWidth = 3
+        let customOverlay = try String(contentsOf: overlayURL, encoding: .utf8)
+        #expect(customOverlay.contains("unfocused-split-opacity = 0.75"))
         let restored = OhMyGhosttySettings(fileURL: url)
         #expect(restored.unfocusedSplitOpacity == 0.75)
         let custom = Ghostty.Config(at: configURL.path, overrideAt: overlayURL.path)
@@ -227,6 +232,8 @@ struct OhMyGhosttySettingsTests {
         #expect(opaque.unfocusedSplitOpacity == 0)
 
         settings.resetAppearance()
+        let resetOverlay = try String(contentsOf: overlayURL, encoding: .utf8)
+        #expect(!resetOverlay.contains("unfocused-split-opacity"))
         let reset = OhMyGhosttySettings(fileURL: url)
         #expect(reset.backgroundOpacityOverride == nil)
         #expect(reset.unfocusedSplitOpacity == 0.9)
@@ -234,7 +241,7 @@ struct OhMyGhosttySettingsTests {
         #expect(reset.focusedSplitBorderPosition == .bottom)
         let resetConfig = Ghostty.Config(at: configURL.path, overrideAt: overlayURL.path)
         #expect(resetConfig.backgroundOpacity == 0.8)
-        #expect(abs(resetConfig.unfocusedSplitOpacity - 0.1) < 0.001)
+        #expect(abs(resetConfig.unfocusedSplitOpacity - 0.3) < 0.001)
     }
 
     @Test func typedSettingsRoundTripThroughHumanReadableFile() throws {

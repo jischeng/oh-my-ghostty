@@ -1102,4 +1102,56 @@ struct MonacoWorkbenchTests {
         #expect(workspace.workbenchController.isActive)
         #expect(sharedWebView.isDescendant(of: workbenchHost))
     }
+
+    @Test func focusedWorkbenchPerformsSuperKeyEquivalentAtMostOnce() throws {
+        final class CountingChildView: NSView {
+            var performCount = 0
+            override var acceptsFirstResponder: Bool { true }
+            override func performKeyEquivalent(with event: NSEvent) -> Bool {
+                performCount += 1
+                return false
+            }
+        }
+
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .nonPersistent()
+        let webView = MonacoEditorWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 200), configuration: config)
+        let child = CountingChildView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
+        webView.addSubview(child)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 200),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = webView
+        defer { window.close() }
+        #expect(window.makeFirstResponder(child))
+
+        var interceptChecks = 0
+        webView.interceptsKeystrokeForEditor = { _ in
+            interceptChecks += 1
+            return false
+        }
+
+        let event = try #require(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [.command, .shift],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: "K",
+            charactersIgnoringModifiers: "k",
+            isARepeat: false,
+            keyCode: 40
+        ))
+
+        let handled = webView.performKeyEquivalent(with: event)
+        #expect(!handled)
+        #expect(child.performCount == 1)
+        #expect(interceptChecks == 1)
+    }
 }

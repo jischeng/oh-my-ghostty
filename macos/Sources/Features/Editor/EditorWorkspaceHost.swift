@@ -29,6 +29,7 @@ struct EditorPaneContainer<Terminal: View>: View {
 /// The editor occupies one existing split leaf; its terminal remains alive underneath.
 struct EditorWorkspaceHost<Terminal: View>: View {
     @ObservedObject private var settings = OhMyGhosttySettings.shared
+    @ObservedObject private var trustStore = EditorWorkspaceTrustStore.shared
     @ObservedObject var controller: TerminalController
     @ObservedObject private var workspace: EditorWorkspace
     @ObservedObject var surfaceView: Ghostty.SurfaceView
@@ -203,6 +204,38 @@ struct EditorWorkspaceHost<Terminal: View>: View {
             Rectangle()
                 .fill(Color.primary.opacity(0.09))
                 .frame(height: 1)
+            if trustStore.revision >= 0,
+               let untrustedRoot = workspace.untrustedLocalWorkspaceRoot,
+               !workspace.trustStore.isTrusted(workspaceRoot: untrustedRoot) {
+                HStack(spacing: 8) {
+                    Image(systemName: "lock.shield")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Text(
+                        isChinese
+                            ? "信任此工作区以启用语言服务"
+                            : "Trust this workspace to enable Language Server features"
+                    )
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    Spacer(minLength: 8)
+                    Button(isChinese ? "信任" : "Trust") {
+                        workspace.trustWorkspace(root: untrustedRoot)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .accessibilityIdentifier("editor.workspace.trust.button")
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Color.orange.opacity(0.08))
+                .accessibilityIdentifier("editor.workspace.trust.banner")
+                Rectangle()
+                    .fill(Color.primary.opacity(0.08))
+                    .frame(height: 1)
+            }
             if let error = workspace.errorMessage {
                 HStack(alignment: .top) {
                     Text(error).font(.callout).textSelection(.enabled)

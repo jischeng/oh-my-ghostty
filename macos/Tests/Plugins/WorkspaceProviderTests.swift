@@ -906,6 +906,9 @@ struct WorkspaceProviderTests {
             applicationSupportURL: support,
             now: tomorrow
         ) == nil)
+        #expect(!FileManager.default.fileExists(atPath: url.path))
+
+        try JSONEncoder().encode(descriptor).write(to: url, options: .atomic)
         try FileManager.default.setAttributes(
             [
                 .modificationDate: Date(),
@@ -1067,5 +1070,67 @@ struct WorkspaceProviderTests {
         #expect(SSHWorkspaceFilesystem.shellQuote("foo'bar.txt") == "'foo'\\''bar.txt'")
         #expect(SSHWorkspaceFilesystem.shellQuote("foo$(printf expanded).txt") == "'foo$(printf expanded).txt'")
         #expect(SSHWorkspaceFilesystem.shellQuote("foo`whoami`$USER.txt") == "'foo`whoami`$USER.txt'")
+    }
+
+    @Test func sshReplayStoreDeletesExpiredEntriesOnLoadAndStartupPrune() throws {
+        let supportDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-ssh-replay-gc-\(UUID().uuidString)", isDirectory: true)
+        let replayDir = supportDir.appendingPathComponent("SSHReplay", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: replayDir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        defer { try? FileManager.default.removeItem(at: supportDir) }
+
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let descriptor = SSHReplayDescriptor(
+            version: 1,
+            ssh: "/usr/bin/ssh",
+            forwardEnv: false,
+            terminfo: false,
+            cache: false,
+            args: ["prod-box"]
+        )
+        let payload = try JSONEncoder().encode(descriptor)
+
+        func writeEntry(_ id: String, modifiedAt date: Date) throws -> URL {
+            let url = try #require(SSHReplayStore.url(for: id, applicationSupportURL: supportDir))
+            try payload.write(to: url)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600, .modificationDate: date],
+                ofItemAtPath: url.path
+            )
+            return url
+        }
+
+        let expiredOnLoadURL = try writeEntry(
+            "omg-ssh-expired-load",
+            modifiedAt: now.addingTimeInterval(-(25 * 60 * 60))
+        )
+        #expect(SSHReplayStore.load(
+            connectionID: "omg-ssh-expired-load",
+            applicationSupportURL: supportDir,
+            now: now
+        ) == nil)
+        #expect(!FileManager.default.fileExists(atPath: expiredOnLoadURL.path))
+
+        let expiredSweepURL = try writeEntry(
+            "omg-ssh-expired-sweep",
+            modifiedAt: now.addingTimeInterval(-(30 * 60 * 60))
+        )
+        let freshURL = try writeEntry(
+            "omg-ssh-fresh",
+            modifiedAt: now.addingTimeInterval(-(2 * 60 * 60))
+        )
+
+        SSHReplayStore.pruneExpired(applicationSupportURL: supportDir, now: now)
+        #expect(!FileManager.default.fileExists(atPath: expiredSweepURL.path))
+        #expect(FileManager.default.fileExists(atPath: freshURL.path))
+        #expect(SSHReplayStore.load(
+            connectionID: "omg-ssh-fresh",
+            applicationSupportURL: supportDir,
+            now: now
+        ) == descriptor)
     }
 }

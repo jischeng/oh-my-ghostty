@@ -20,7 +20,7 @@ enum OMGProjectPicker {
         page.items = desktops.map { mac in
             .init(title: mac.name, subtitle: mac.displayAddress, symbol: "desktopcomputer") {
                 guard let endpoint = mac.endpoint else { return }
-                let control = OMGControl(endpoint)
+                let control = OMGControl.shared(for: endpoint)
                 page.perform {
                     let result = try await control.call(["t": "workspaces"])
                     let workspaces = result["workspaces"] as? [[String: String]] ?? []

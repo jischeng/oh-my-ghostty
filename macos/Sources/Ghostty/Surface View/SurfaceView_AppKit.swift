@@ -21,14 +21,24 @@ extension Ghostty {
             }
         }
 
-        var runtimeDescriptor: SessionRuntimeDescriptor?
+        var runtimeDescriptor: SessionRuntimeDescriptor? {
+            didSet {
+                if oldValue != runtimeDescriptor {
+                    notifyOwningControllerCheckpointDirty()
+                }
+            }
+        }
         @Published var runtimeConnectionState: SessionRuntimeConnectionState? {
             didSet {
+                let wasConfirmed = runtimeConfirmedSession
                 switch runtimeConnectionState {
                 case .ready, .reconnecting, .attention, .exited:
                     runtimeConfirmedSession = true
                 default:
                     break
+                }
+                if wasConfirmed != runtimeConfirmedSession {
+                    notifyOwningControllerCheckpointDirty()
                 }
             }
         }
@@ -153,11 +163,26 @@ extension Ghostty {
         // Whether the cursor is currently visible (not hidden by typing, etc.)
         @Published private(set) var cursorVisible: Bool = true
 
-        /// Whether the belonging window is visible
+        /// Whether this surface is currently considered visible (unoccluded) by its controller.
         ///
-        /// We track this to restore surface occlusion state
-        /// after this surface is dragged to another window
+        /// Core surfaces initialize `visible = true` in `Surface.zig`, so `lastSentCoreOcclusionState`
+        /// starts `nil` to ensure an initial `false` transition still invokes `ghostty_surface_set_occlusion`.
         var isWindowVisible = false
+        private(set) var lastReportedOcclusionState: Bool?
+        private(set) var lastSentCoreOcclusionState: Bool?
+        private(set) var occlusionUpdateCount = 0
+
+        func updateSurfaceOcclusion(visible: Bool) {
+            if lastReportedOcclusionState != visible {
+                lastReportedOcclusionState = visible
+                isWindowVisible = visible
+                occlusionUpdateCount += 1
+            }
+            if let surface = self.surface, lastSentCoreOcclusionState != visible {
+                ghostty_surface_set_occlusion(surface, visible)
+                lastSentCoreOcclusionState = visible
+            }
+        }
 
         /// The configuration derived from the Ghostty config so we don't need to rely on references.
         @Published private(set) var derivedConfig: DerivedConfig

@@ -45,8 +45,14 @@ class BaseTerminalController: NSWindowController,
         didSet {
             syncFocusToSurfaceTree()
             observeFocusedSurfaceContext()
+            if oldValue !== focusedSurface {
+                sessionCheckpointStateDidChange()
+            }
         }
     }
+
+    var editorWorkspaceStore: EditorWorkspaceStore = .shared
+    var windowOcclusionOverrideForTesting: Bool?
 
     private var focusedSurfaceContextCancellables: Set<AnyCancellable> = []
 
@@ -149,6 +155,9 @@ class BaseTerminalController: NSWindowController,
         didSet {
             applyTitleToWindow()
             objectWillChange.send()
+            if oldValue != titleOverride {
+                sessionCheckpointStateDidChange()
+            }
         }
     }
 
@@ -257,6 +266,11 @@ class BaseTerminalController: NSWindowController,
             self,
             selector: #selector(ghosttyDidToggleSplitZoom(_:)),
             name: Ghostty.Notification.didToggleSplitZoom,
+            object: nil)
+        center.addObserver(
+            self,
+            selector: #selector(editorSurfaceCoverageDidChange(_:)),
+            name: EditorWorkspaceStore.surfaceCoverageDidChangeNotification,
             object: nil)
         center.addObserver(
             self,
@@ -407,7 +421,11 @@ class BaseTerminalController: NSWindowController,
             focusedSurface = nil
         }
         syncSurfaceTreeOcclusionState()
+        sessionCheckpointStateDidChange()
     }
+
+    /// Hook for subclasses that persist session checkpoints when terminal layout or metadata mutates.
+    func sessionCheckpointStateDidChange() {}
 
     /// Update all surfaces with the focus state. This ensures that libghostty has an accurate view about
     /// what surface is focused. This must be called whenever a surface OR window changes focus.
@@ -1459,13 +1477,77 @@ class BaseTerminalController: NSWindowController,
         syncSurfaceTreeOcclusionState()
     }
 
-    private func syncSurfaceTreeOcclusionState() {
-        let visible = self.window?.occlusionState.contains(.visible) ?? false
+    func windowDidMiniaturize(_ notification: Notification) {
+        syncSurfaceTreeOcclusionState()
+        sessionCheckpointStateDidChange()
+    }
+
+    func windowDidDeminiaturize(_ notification: Notification) {
+        syncSurfaceTreeOcclusionState()
+        sessionCheckpointStateDidChange()
+    }
+
+    @objc private func editorSurfaceCoverageDidChange(_ notification: Notification) {
+        guard let store = notification.object as? EditorWorkspaceStore,
+              store === editorWorkspaceStore,
+              let surfaceID = notification.userInfo?["surfaceID"] as? UUID,
+              surfaceTree.find(id: surfaceID) != nil else { return }
+        syncSurfaceTreeOcclusionState()
+    }
+
+    /// Whether this controller's window and tab container are actively presenting surfaces on screen.
+    var isControllerPresentingSurfaces: Bool {
+        if let override = windowOcclusionOverrideForTesting {
+            guard override else { return false }
+        } else {
+            guard let window, window.isVisible, !window.isMiniaturized,
+                  window.occlusionState.contains(.visible) else { return false }
+        }
+        if let window, let tabGroup = window.tabGroup,
+           let selectedWindow = tabGroup.selectedWindow,
+           selectedWindow !== window {
+            return false
+        }
+        return true
+    }
+
+    static func evaluateSurfaceVisibility(
+        viewID: UUID,
+        isControllerPresenting: Bool,
+        zoomedNode: SplitTree<Ghostty.SurfaceView>.Node?,
+        editorWorkspaceStore: EditorWorkspaceStore
+    ) -> Bool {
+        guard isControllerPresenting else { return false }
+        if let zoomedNode, zoomedNode.find(id: viewID) == nil {
+            return false
+        }
+        if editorWorkspaceStore.isEditorCovering(surfaceID: viewID) {
+            return false
+        }
+        return true
+    }
+
+    func isSurfaceEffectivelyVisible(_ view: Ghostty.SurfaceView) -> Bool {
+        Self.evaluateSurfaceVisibility(
+            viewID: view.id,
+            isControllerPresenting: isControllerPresentingSurfaces,
+            zoomedNode: surfaceTree.zoomed,
+            editorWorkspaceStore: editorWorkspaceStore
+        )
+    }
+
+    func syncSurfaceTreeOcclusionState() {
+        let controllerPresenting = isControllerPresentingSurfaces
+        let zoomedNode = surfaceTree.zoomed
+        let store = editorWorkspaceStore
         for view in surfaceTree {
-            if let surface = view.surface, view.isWindowVisible != visible {
-                ghostty_surface_set_occlusion(surface, visible)
-                view.isWindowVisible = visible
-            }
+            let visible = Self.evaluateSurfaceVisibility(
+                viewID: view.id,
+                isControllerPresenting: controllerPresenting,
+                zoomedNode: zoomedNode,
+                editorWorkspaceStore: store
+            )
+            view.updateSurfaceOcclusion(visible: visible)
         }
     }
 

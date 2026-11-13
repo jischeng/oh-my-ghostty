@@ -1240,6 +1240,8 @@ enum WorkspaceFilesystemFactory {
 }
 
 struct SSHImagePasteTransfer {
+    static let pasteDirectory = ".cache/oh-my-ghostty/paste"
+
     static func upload(localFile: URL, to ssh: PaneSessionContext.SSH) async throws -> String {
         guard localFile.isFileURL,
               !ssh.transferTarget.isEmpty,
@@ -1252,11 +1254,15 @@ struct SSHImagePasteTransfer {
               attributes[.type] as? FileAttributeType == .typeRegular else {
             throw WorkspaceFilesystemError.invalidPath
         }
-        let remotePath = remotePath(for: localFile)
-        let batch = batch(localPath: localFile.path, remotePath: remotePath)
-        _ = try await SSHSFTPClient.run(batch: batch, host: ssh.transferTarget,
-                                       connection: try? GitSSHConnection(session: ssh))
-        return Ghostty.Shell.escape(remotePath)
+        let relativePath = remotePath(for: localFile)
+        let sftpBatch = batch(localPath: localFile.path, remotePath: relativePath)
+        let output = try await SSHSFTPClient.run(
+            batch: sftpBatch,
+            host: ssh.transferTarget,
+            connection: try? GitSSHConnection(session: ssh)
+        )
+        let resolvedPath = resolvedRemotePath(relativePath: relativePath, fromSFTPOutput: output)
+        return Ghostty.Shell.escape(resolvedPath)
     }
 
     static func remotePath(for localFile: URL) -> String {
@@ -1264,14 +1270,40 @@ struct SSHImagePasteTransfer {
         let ext = (rawExt.count <= 8 && rawExt.allSatisfy({ $0.isLetter || $0.isNumber }) && !rawExt.isEmpty)
             ? rawExt
             : "png"
-        return "/tmp/omg-paste-\(UUID().uuidString).\(ext)"
+        return "\(pasteDirectory)/omg-paste-\(UUID().uuidString).\(ext)"
     }
 
     static func batch(localPath: String, remotePath: String) -> String {
         [
+            "pwd",
+            "-mkdir '.cache'",
+            "-mkdir '.cache/oh-my-ghostty'",
+            "chmod 700 '.cache/oh-my-ghostty'",
+            "-mkdir '.cache/oh-my-ghostty/paste'",
+            "chmod 700 '.cache/oh-my-ghostty/paste'",
             "put \(quote(localPath)) \(quote(remotePath))",
             "chmod 600 \(quote(remotePath))",
         ].joined(separator: "\n")
+    }
+
+    static func resolvedRemotePath(relativePath: String, fromSFTPOutput output: String) -> String {
+        guard !relativePath.hasPrefix("/") else { return relativePath }
+        let prefix = "Remote working directory:"
+        for rawLine in output.split(whereSeparator: \.isNewline) {
+            var line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("sftp>") {
+                line = String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+            }
+            guard line.hasPrefix(prefix) else { continue }
+            let directory = String(line.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
+            guard directory.hasPrefix("/"), !directory.contains("\0") else { continue }
+            if directory == "/" {
+                return "/" + relativePath
+            }
+            let cleanBase = directory.hasSuffix("/") ? String(directory.dropLast()) : directory
+            return cleanBase + "/" + relativePath
+        }
+        return "~/" + relativePath
     }
 
     private static func quote(_ path: String) -> String {
@@ -1475,6 +1507,26 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
         guard let output = try? await SSHSFTPClient.runCommand(command, host: host.alias, connection: connection) else { return nil }
         let result = output.trimmingCharacters(in: .whitespacesAndNewlines)
         return result.hasPrefix("/") && result != path ? result : nil
+    }
+
+    func resolveCanonicalPath(at path: String) async -> String? {
+        let command = "readlink -f \(Self.shellQuote(path)) 2>/dev/null || realpath \(Self.shellQuote(path)) 2>/dev/null"
+        if let output = try? await SSHSFTPClient.runCommand(command, host: host.alias, connection: connection) {
+            let resolved = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            if resolved.hasPrefix("/"), !resolved.contains("\0") {
+                return Self.standardized(resolved)
+            }
+        }
+        let resolved = await resolveSymlinkTarget(at: path)
+        if resolved == path {
+            switch await checkRemoteSymlinkStatus(at: path) {
+            case .regularFile:
+                return Self.standardized(path)
+            case .symlink, .indeterminate:
+                return nil
+            }
+        }
+        return Self.standardized(resolved)
     }
 
     enum RemoteSymlinkCheckResult: Equatable {

@@ -100,6 +100,47 @@ struct TerminalPathOpenerTests {
         #expect(TerminalPathOpener.directoryDestination(preferred: .currentPane, hasAgent: false) == .currentPane)
         #expect(TerminalPathOpener.directoryDestination(preferred: .newTab, hasAgent: true) == .newTab)
         #expect(TerminalPathOpener.directoryDestination(preferred: .splitDown, hasAgent: true) == .splitDown)
+        #expect(TerminalPathOpener.directoryDestination(
+            preferred: .currentPane,
+            hasAgent: false,
+            blocksProgrammaticInput: true,
+            isIdleInteractiveShell: true
+        ) == .splitRight)
+        #expect(TerminalPathOpener.directoryDestination(
+            preferred: .currentPane,
+            hasAgent: false,
+            blocksProgrammaticInput: false,
+            isIdleInteractiveShell: false
+        ) == .splitRight)
+        #expect(TerminalPathOpener.directoryDestination(
+            preferred: .newTab,
+            hasAgent: false,
+            blocksProgrammaticInput: true,
+            isIdleInteractiveShell: false
+        ) == .newTab)
+    }
+
+    @Test func interactiveShellProcessGroupDistinguishesIdleShellFromForegroundPrograms() {
+        #expect(TerminalPathOpener.isInteractiveShellProcessGroup("-zsh\n"))
+        #expect(TerminalPathOpener.isInteractiveShellProcessGroup(
+            "/usr/bin/login -q -flp user /bin/bash --noprofile --norc -c exec -l /bin/bash --noprofile --norc -i\n-/bin/bash --noprofile --norc -i\n"
+        ))
+        #expect(TerminalPathOpener.isInteractiveShellProcessGroup("/bin/zsh -l\n"))
+        #expect(TerminalPathOpener.isInteractiveShellProcessGroup("/opt/homebrew/bin/fish -i\n"))
+        #expect(TerminalPathOpener.isInteractiveShellProcessGroup("/bin/bash --rcfile /tmp/bashrc -i\n"))
+
+        #expect(!TerminalPathOpener.isInteractiveShellProcessGroup("vim README.md\n"))
+        #expect(!TerminalPathOpener.isInteractiveShellProcessGroup("less +F app.log\n"))
+        #expect(!TerminalPathOpener.isInteractiveShellProcessGroup("python3 -i\n"))
+        #expect(!TerminalPathOpener.isInteractiveShellProcessGroup("top\n"))
+        #expect(!TerminalPathOpener.isInteractiveShellProcessGroup("sudo -s\n"))
+        #expect(!TerminalPathOpener.isInteractiveShellProcessGroup("ssh user@example.com\n"))
+        #expect(!TerminalPathOpener.isInteractiveShellProcessGroup("/bin/bash ./deploy.sh\n"))
+        #expect(!TerminalPathOpener.isInteractiveShellProcessGroup("/bin/zsh -c 'python3 app.py'\n"))
+        #expect(!TerminalPathOpener.isInteractiveShellProcessGroup(
+            "/usr/bin/login -flp user /bin/bash -c exec -l python3\n-python3\n"
+        ))
+        #expect(!TerminalPathOpener.isInteractiveShellProcessGroup(""))
     }
 
     @Test func directoryCommandTreatsShellMetacharactersAsLiteralNames() throws {
@@ -239,5 +280,62 @@ struct TerminalPathOpenerTests {
         }
         #expect(workspace.selectedDocument?.text == "# preview")
         #expect(workspace.documents.count == 1)
+    }
+
+    @Test @MainActor func directoryClickOpensSplitInsteadOfCorruptingActiveForegroundProgram() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let folder = root.appendingPathComponent("subfolder")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let script = root.appendingPathComponent("repl.py")
+        let ready = root.appendingPathComponent("ready")
+        let captured = root.appendingPathComponent("captured")
+        try """
+        import os, pathlib, tty
+        tty.setraw(0)
+        pathlib.Path(\(String(reflecting: ready.path))).write_text("ready")
+        data = bytearray()
+        while True:
+            b = os.read(0, 1)
+            if not b:
+                break
+            data.extend(b)
+            pathlib.Path(\(String(reflecting: captured.path))).write_bytes(bytes(data))
+        """.write(to: script, atomically: true, encoding: .utf8)
+
+        let settings = OhMyGhosttySettings.shared
+        let oldDirectory = settings.editorDirectoryOpenDestination
+        settings.editorDirectoryOpenDestination = .currentPane
+        defer { settings.editorDirectoryOpenDestination = oldDirectory }
+
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let python = try #require(LocalPythonInterpreter.cached())
+        var config = Ghostty.SurfaceConfiguration()
+        config.workingDirectory = root.path
+        config.command = Ghostty.Shell.quote(python.executablePath) + " " + Ghostty.Shell.quote(script.path)
+        let controller = TerminalController(app, withBaseConfig: config)
+        let window = try #require(controller.window)
+        defer {
+            EditorWorkspaceStore.shared.remove(tabID: controller.tabSessionID)
+            window.delegate = nil
+            window.close()
+        }
+        window.makeKeyAndOrderFront(nil)
+        let surface = try #require(controller.surfaceTree.first)
+        surface.pwd = root.path
+        for _ in 0..<100 {
+            if FileManager.default.fileExists(atPath: ready.path) { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(FileManager.default.fileExists(atPath: ready.path))
+
+        #expect(TerminalPathOpener.open(folder.path, from: surface, baseDirectory: root.path))
+        for _ in 0..<100 {
+            if controller.surfaceTree.map({ $0 }).count == 2 { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        #expect(controller.surfaceTree.map({ $0 }).count == 2)
+        #expect(!FileManager.default.fileExists(atPath: captured.path))
     }
 }

@@ -23,6 +23,7 @@ class SecureInput: ObservableObject {
     // True if you want to enable secure input globally.
     var global: Bool = false {
         didSet {
+            objectWillChange.send()
             apply()
         }
     }

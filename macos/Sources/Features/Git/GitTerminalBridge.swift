@@ -3,15 +3,20 @@ import Foundation
 @MainActor
 protocol GitTerminalSurfaceTarget: AnyObject {
     var id: UUID { get }
+    var blocksProgrammaticInput: Bool { get }
 
     /// Sends terminal text and reports whether a live surface model exists.
     func sendText(_ text: String) -> Bool
 }
 
+extension GitTerminalSurfaceTarget {
+    var blocksProgrammaticInput: Bool { false }
+}
+
 extension Ghostty.SurfaceView: GitTerminalSurfaceTarget {
     @MainActor
     func sendText(_ text: String) -> Bool {
-        guard let surfaceModel else { return false }
+        guard !blocksProgrammaticInput, let surfaceModel else { return false }
         surfaceModel.sendText(text)
         return true
     }
@@ -22,6 +27,7 @@ enum GitTerminalDispatchFailure: Equatable, Sendable {
     case surfaceNotFound(tabID: UUID, surfaceID: UUID)
     case surfaceModelUnavailable(tabID: UUID, surfaceID: UUID)
     case targetContextMismatch
+    case passwordInputActive
 
     var displayMessage: String {
         switch self {
@@ -33,6 +39,8 @@ enum GitTerminalDispatchFailure: Equatable, Sendable {
             GitL10n.text("Git command target is still starting.")
         case .targetContextMismatch:
             GitL10n.text("Git command target does not match this terminal session.")
+        case .passwordInputActive:
+            GitL10n.text("Cannot send Git command while terminal is waiting for password input.")
         }
     }
 }
@@ -79,6 +87,10 @@ final class GitTerminalBridge {
 
         guard let surface = surfaceLookup(context.tabID, surfaceID) else {
             return .failed(.surfaceNotFound(tabID: context.tabID, surfaceID: surfaceID))
+        }
+
+        guard !surface.blocksProgrammaticInput else {
+            return .failed(.passwordInputActive)
         }
 
         let command = GitTerminalCommandFormatter.format(intent)

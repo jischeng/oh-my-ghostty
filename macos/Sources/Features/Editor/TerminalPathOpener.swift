@@ -187,7 +187,18 @@ enum TerminalPathOpener {
                 case .file:
                     EditorWorkspaceStore.shared.open(path: path, context: context, location: location)
                 case .directory:
-                    try openDirectory(path, controller: controller, source: source, session: session)
+                    let isIdleShell = await isIdleInteractiveShell(source, session: session)
+                    guard !Task.isCancelled,
+                          source.surface != nil,
+                          controller.surfaceTree.first(where: { $0.id == source.id }) != nil,
+                          controller.paneSessionContext(for: source)?.state == session.state else { return }
+                    try openDirectory(
+                        path,
+                        controller: controller,
+                        source: source,
+                        session: session,
+                        isIdleInteractiveShell: isIdleShell
+                    )
                 }
             } catch {
                 guard let controller, let source else { return }
@@ -199,21 +210,150 @@ enum TerminalPathOpener {
         return true
     }
 
+    private static let interactiveShellNames: Set<String> = [
+        "sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "oksh",
+        "pdksh", "tcsh", "csh", "nu", "nushell", "elvish", "xonsh", "pwsh",
+    ]
+
+    private static let shellFlagsTakingValue: Set<String> = [
+        "--rcfile", "--init-file", "-o", "+o", "--option",
+        "--init-command", "-C", "--config", "--env-config", "--plugin-config",
+    ]
+
     /// A directory click must never submit shell commands to an agent's chat
-    /// input. Preserve explicit destinations; use a sibling shell for current-pane.
-    static func directoryDestination(preferred: EditorOpenDestination, hasAgent: Bool) -> EditorOpenDestination {
-        hasAgent && preferred == .currentPane ? .splitRight : preferred
+    /// input, a password prompt, or an active non-shell foreground program.
+    /// Preserve explicit destinations; use a sibling split for current-pane.
+    nonisolated static func directoryDestination(
+        preferred: EditorOpenDestination,
+        hasAgent: Bool,
+        blocksProgrammaticInput: Bool = false,
+        isIdleInteractiveShell: Bool = true
+    ) -> EditorOpenDestination {
+        guard preferred == .currentPane else { return preferred }
+        if hasAgent || blocksProgrammaticInput || !isIdleInteractiveShell {
+            return .splitRight
+        }
+        return .currentPane
+    }
+
+    /// Returns true only when every foreground process in the PTY's foreground
+    /// process group is an interactive shell (plus optional macOS `login` wrapper),
+    /// with no script or `-c` command execution and no non-shell child program.
+    nonisolated static func isInteractiveShellProcessGroup(_ commandLines: String) -> Bool {
+        var foundInteractiveShell = false
+        for rawLine in commandLines.split(whereSeparator: \.isNewline) {
+            let tokens = rawLine.split(whereSeparator: \.isWhitespace).map(String.init)
+            guard let first = tokens.first else { continue }
+            if isLoginWrapperExecutable(first) {
+                continue
+            }
+            guard isInteractiveShellCommand(tokens: tokens) else {
+                return false
+            }
+            foundInteractiveShell = true
+        }
+        return foundInteractiveShell
+    }
+
+    nonisolated private static func isLoginWrapperExecutable(_ executable: String) -> Bool {
+        let trimmed = executable.hasPrefix("-") ? String(executable.dropFirst()) : executable
+        return (trimmed as NSString).lastPathComponent.lowercased() == "login"
+    }
+
+    nonisolated private static func isInteractiveShellCommand(tokens: [String]) -> Bool {
+        guard let executable = tokens.first else { return false }
+        let trimmed = executable.hasPrefix("-") ? String(executable.dropFirst()) : executable
+        let basename = (trimmed as NSString).lastPathComponent.lowercased()
+        guard interactiveShellNames.contains(basename) else {
+            return false
+        }
+        var index = 1
+        while index < tokens.count {
+            let arg = tokens[index]
+            if arg == "--" {
+                return index + 1 == tokens.count
+            }
+            if shellFlagsTakingValue.contains(arg) {
+                index += 2
+                continue
+            }
+            let lower = arg.lowercased()
+            if lower == "--command" || lower == "--commands" || lower == "--execute" ||
+                lower.hasPrefix("--command=") || lower.hasPrefix("--commands=") || lower.hasPrefix("--execute=") {
+                return false
+            }
+            if arg.hasPrefix("--") {
+                index += 1
+                continue
+            }
+            if arg.hasPrefix("-") && arg.count > 1 {
+                let cluster = arg.dropFirst()
+                if cluster.contains("c") {
+                    return false
+                }
+                if (basename == "nu" || basename == "nushell") && cluster.contains("e") {
+                    return false
+                }
+                index += 1
+                continue
+            }
+            if arg.hasPrefix("+") && arg.count > 1 {
+                index += 1
+                continue
+            }
+            // Positional script filename or non-option argument.
+            return false
+        }
+        return true
+    }
+
+    private static func isIdleInteractiveShell(
+        _ source: Ghostty.SurfaceView,
+        session: PaneSessionContext
+    ) async -> Bool {
+        guard !source.blocksProgrammaticInput,
+              !source.readonly,
+              !source.processExited,
+              source.surfaceModel?.mouseCaptured != true else {
+            return false
+        }
+        switch session.state {
+        case .local:
+            guard let foregroundPID = source.surfaceModel?.foregroundPID else {
+                return false
+            }
+            let commandLines = await Task.detached(priority: .userInitiated) {
+                TerminalController.processGroupCommandLines(foregroundPID)
+            }.value
+            guard source.surfaceModel?.foregroundPID == foregroundPID,
+                  !source.blocksProgrammaticInput,
+                  source.surfaceModel?.mouseCaptured != true,
+                  let commandLines else {
+                return false
+            }
+            return isInteractiveShellProcessGroup(commandLines)
+        case .sshReady:
+            return true
+        case .sshConnecting:
+            return false
+        }
     }
 
     private static func openDirectory(
-        _ path: String, controller: TerminalController, source: Ghostty.SurfaceView, session: PaneSessionContext
+        _ path: String,
+        controller: TerminalController,
+        source: Ghostty.SurfaceView,
+        session: PaneSessionContext,
+        isIdleInteractiveShell: Bool
     ) throws {
         let destination = directoryDestination(
             preferred: OhMyGhosttySettings.shared.editorDirectoryOpenDestination,
-            hasAgent: controller.agentActivity(for: source) != nil || controller.agentResumeDescriptor(for: source) != nil
+            hasAgent: controller.agentActivity(for: source) != nil || controller.agentResumeDescriptor(for: source) != nil,
+            blocksProgrammaticInput: source.blocksProgrammaticInput,
+            isIdleInteractiveShell: isIdleInteractiveShell
         )
         if destination == .currentPane {
-            guard let terminal = source.surfaceModel else { return }
+            guard !source.blocksProgrammaticInput, let terminal = source.surfaceModel else { return }
             EditorWorkspaceStore.shared.workspace(for: controller.tabSessionID, surfaceID: source.id).isVisible = false
             controller.focusedSurface = source
             source.window?.makeFirstResponder(source)

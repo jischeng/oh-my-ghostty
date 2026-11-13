@@ -1006,6 +1006,32 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 }
                 .store(in: &observers)
 
+            surface.$passwordInput
+                .dropFirst()
+                .sink { [weak self, weak surface] isPasswordInput in
+                    guard let self, let surface, self.surfaceTree.contains(surface) else { return }
+                    if isPasswordInput, self.quickInputModel.targetSurfaceID == surface.id {
+                        self.quickInputPendingDraftSurfaceID = nil
+                        self.quickInputDraftImportTask?.cancel()
+                    }
+                    // `@Published` emits in `willSet` before `surface.passwordInput`
+                    // and `SecureInput` finish updating in `didSet`.
+                    DispatchQueue.main.async { [weak self, weak surface] in
+                        guard let self, let surface, self.surfaceTree.contains(surface) else { return }
+                        self.objectWillChange.send()
+                        if !surface.blocksProgrammaticInput {
+                            if self.quickInputModel.targetSurfaceID == surface.id {
+                                let strings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
+                                if self.quickInputModel.statusMessage == strings.quickInputPasswordLockedMessage {
+                                    self.quickInputModel.setStatusMessage(nil)
+                                }
+                            }
+                            self.dispatchCompletedQuickInputQueues()
+                        }
+                    }
+                }
+                .store(in: &observers)
+
             paneSessionObservers[surface.id] = observers
         }
         if paneSessionContexts != previousContexts {
@@ -1028,7 +1054,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         if SessionRuntimeHandoff.shared.accept(signal, source: surface, controller: self) { return }
         if signal.id == "omg-inline-password" {
             if surface.runtimeInlineSession != nil, signal.metadata == "0" || signal.metadata == "1" {
-                surface.passwordInput = signal.metadata == "1"
+                let active = signal.metadata == "1"
+                surface.runtimeInlineSession?.passwordInput = active
+                surface.passwordInput = active
             }
             return
         }

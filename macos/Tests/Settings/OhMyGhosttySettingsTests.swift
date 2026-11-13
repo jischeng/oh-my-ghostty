@@ -715,6 +715,46 @@ struct OhMyGhosttySettingsTests {
         #expect(en.agentDetectorUpdateExplanation.contains("not a vendor status Hook"))
     }
 
+    @Test func settingsAndAppearanceOverlayEnforcePrivate0700And0600Permissions() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let configDir = root.appendingPathComponent("oh-my-ghostty", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // Pre-create with permissive 0755/0644 modes to verify tightening on save.
+        try FileManager.default.createDirectory(
+            at: configDir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o755]
+        )
+        let settingsURL = configDir.appendingPathComponent("settings.json")
+        try Data("{}".utf8).write(to: settingsURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: settingsURL.path)
+
+        let settings = OhMyGhosttySettings(fileURL: settingsURL)
+        settings.windowThemeOverride = .dark
+        #expect(settings.lastError == nil)
+
+        let overlayURL = configDir.appendingPathComponent("appearance.ghostty")
+        let dirPerms = try (FileManager.default.attributesOfItem(atPath: configDir.path)[.posixPermissions] as? NSNumber)?.intValue
+        let settingsPerms = try (FileManager.default.attributesOfItem(atPath: settingsURL.path)[.posixPermissions] as? NSNumber)?.intValue
+        let overlayPerms = try (FileManager.default.attributesOfItem(atPath: overlayURL.path)[.posixPermissions] as? NSNumber)?.intValue
+
+        #expect((dirPerms ?? 0) & 0o777 == 0o700)
+        #expect((settingsPerms ?? 0) & 0o777 == 0o600)
+        #expect((overlayPerms ?? 0) & 0o777 == 0o600)
+
+        // Symlinked target must be refused rather than clobbering an external target.
+        let external = root.appendingPathComponent("external.json")
+        try Data("keep".utf8).write(to: external)
+        let symlink = root.appendingPathComponent("symlink.json")
+        try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: external)
+        #expect(throws: OMGPrivateFileWriter.WriteError.self) {
+            try OMGPrivateFileWriter.writeAtomically(Data("overwrite".utf8), to: symlink)
+        }
+        #expect(try String(contentsOf: external, encoding: .utf8) == "keep")
+    }
+
     private func temporarySettings() -> (OhMyGhosttySettings, URL) {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)

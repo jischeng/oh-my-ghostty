@@ -35,8 +35,13 @@ struct InputTextIntent: AppIntent {
             throw GhosttyIntentError.permissionDenied
         }
 
-        guard let surface = terminal.surfaceModel else {
+        guard let surfaceView = terminal.surfaceView,
+              let surface = surfaceView.surfaceModel else {
             throw GhosttyIntentError.surfaceNotFound
+        }
+
+        guard !surfaceView.blocksProgrammaticInput else {
+            throw GhosttyIntentError.passwordInputActive
         }
 
         surface.sendText(text)
@@ -87,8 +92,13 @@ struct KeyEventIntent: AppIntent {
             throw GhosttyIntentError.permissionDenied
         }
 
-        guard let surface = terminal.surfaceModel else {
+        guard let surfaceView = terminal.surfaceView,
+              let surface = surfaceView.surfaceModel else {
             throw GhosttyIntentError.surfaceNotFound
+        }
+
+        guard !surfaceView.blocksProgrammaticInput else {
+            throw GhosttyIntentError.passwordInputActive
         }
 
         // Convert KeyEventMods array to Ghostty.Input.Mods
@@ -151,8 +161,13 @@ struct MouseButtonIntent: AppIntent {
             throw GhosttyIntentError.permissionDenied
         }
 
-        guard let surface = terminal.surfaceModel else {
+        guard let surfaceView = terminal.surfaceView,
+              let surface = surfaceView.surfaceModel else {
             throw GhosttyIntentError.surfaceNotFound
+        }
+
+        guard !surfaceView.blocksProgrammaticInput else {
+            throw GhosttyIntentError.passwordInputActive
         }
 
         // Convert KeyEventMods array to Ghostty.Input.Mods
@@ -214,8 +229,13 @@ struct MousePosIntent: AppIntent {
             throw GhosttyIntentError.permissionDenied
         }
 
-        guard let surface = terminal.surfaceModel else {
+        guard let surfaceView = terminal.surfaceView,
+              let surface = surfaceView.surfaceModel else {
             throw GhosttyIntentError.surfaceNotFound
+        }
+
+        guard !surfaceView.blocksProgrammaticInput else {
+            throw GhosttyIntentError.passwordInputActive
         }
 
         // Convert KeyEventMods array to Ghostty.Input.Mods
@@ -284,8 +304,13 @@ struct MouseScrollIntent: AppIntent {
             throw GhosttyIntentError.permissionDenied
         }
 
-        guard let surface = terminal.surfaceModel else {
+        guard let surfaceView = terminal.surfaceView,
+              let surface = surfaceView.surfaceModel else {
             throw GhosttyIntentError.surfaceNotFound
+        }
+
+        guard !surfaceView.blocksProgrammaticInput else {
+            throw GhosttyIntentError.passwordInputActive
         }
 
         let scrollEvent = Ghostty.Input.MouseScrollEvent(

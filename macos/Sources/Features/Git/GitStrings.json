@@ -1449,5 +1449,9 @@
   "Discard changes in {0} selected files? Review the files below. This cannot be undone.": {
     "en": "Discard changes in {0} selected files? Review the files below. This cannot be undone.",
     "zh-Hans": "丢弃所选 {0} 个文件的更改？请核对下方文件。此操作无法撤销。"
+  },
+  "Cannot send Git command while terminal is waiting for password input.": {
+    "en": "Cannot send Git command while terminal is waiting for password input.",
+    "zh-Hans": "终端正在等待密码输入，无法发送 Git 命令。"
   }
 }

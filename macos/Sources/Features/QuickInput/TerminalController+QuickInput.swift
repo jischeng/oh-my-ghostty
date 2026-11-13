@@ -14,11 +14,25 @@ extension TerminalController {
         quickInputPendingDraftSurfaceID = surface.id
     }
 
+    func isQuickInputPasswordLocked(for surfaceID: UUID?) -> Bool {
+        if ProgrammaticInputGuard.isGlobalSecureInputActive { return true }
+        guard let surfaceID,
+              let surface = surfaceTree.first(where: { $0.id == surfaceID }) else {
+            return false
+        }
+        return surface.blocksProgrammaticInput
+    }
+
     func quickInputComposerDidBecomeReady(for surfaceID: UUID?) {
         guard let surfaceID, quickInputPendingDraftSurfaceID == surfaceID,
               quickInputModel.isPresented, quickInputModel.targetSurfaceID == surfaceID,
               let surface = surfaceTree.first(where: { $0.id == surfaceID }) else { return }
         quickInputPendingDraftSurfaceID = nil
+        guard !surface.blocksProgrammaticInput else {
+            let strings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
+            quickInputModel.setStatusMessage(strings.quickInputPasswordLockedMessage)
+            return
+        }
         guard quickInputDraftImportTask == nil, quickInputSubmissionTasks[surfaceID] == nil else { return }
         let currentContext = paneSessionContext(for: surface)
         let sshConnecting: Bool
@@ -53,7 +67,7 @@ extension TerminalController {
         let agent = foregroundAgent ?? detectedAgentInstances[surface.id]?.agent
             ?? agentActivities[surface.id].flatMap { SupportedAgent(rawValue: $0.source) }
             ?? agentResumeDescriptor(for: surface)?.agent
-        guard !SecureInput.shared.enabled,
+        guard !surface.blocksProgrammaticInput,
               let keys = QuickInputDraftBridge.importKeys(
                 setting: setting, agent: agent, hasAgentActivity: agentActivities[surface.id] != nil
               ),
@@ -73,6 +87,7 @@ extension TerminalController {
                 let received = try await QuickInputDraftBridge.shared.awaitResponse(request) {
                     guard !Task.isCancelled,
                           let self, let surface,
+                          !surface.blocksProgrammaticInput,
                           self.quickInputModel.isPresented,
                           self.quickInputModel.targetSurfaceID == surface.id,
                           self.surfaceTree.first(where: { $0.id == surface.id }) != nil else {
@@ -80,7 +95,7 @@ extension TerminalController {
                     }
                 }
                 if let text = received {
-                    guard let self, !SecureInput.shared.enabled,
+                    guard let self, let surface, !surface.blocksProgrammaticInput,
                           terminal.foregroundPID == importForegroundPID else { return }
                     self.quickInputModel.importAgentDraft(
                         text,
@@ -301,7 +316,7 @@ extension TerminalController {
     }
 
     @discardableResult
-    private func submitQuickInputText(
+    func submitQuickInputText(
         _ text: String,
         to surfaceID: UUID,
         restoreFocus: Bool,
@@ -317,15 +332,23 @@ extension TerminalController {
             quickInputModel.setStatusMessage(strings.t("Message exceeds the 1 MiB limit.", "消息大小超过 1 MiB 限制。"))
             return false
         }
-        guard !SecureInput.shared.enabled else {
-            quickInputModel.setStatusMessage(strings.t(
-                "Paused while Secure Input is enabled.",
-                "安全输入（Secure Input）开启期间已暂停发送。"
-            ))
+        guard !ProgrammaticInputGuard.isGlobalSecureInputActive else {
+            quickInputModel.setStatusMessage(strings.quickInputPasswordLockedMessage)
             return false
         }
-        guard let surface = surfaceTree.first(where: { $0.id == surfaceID }),
-              let terminal = surface.surfaceModel else {
+        guard let surface = surfaceTree.first(where: { $0.id == surfaceID }) else {
+            quickInputModel.setStatusMessage(strings.t(
+                "The target terminal is no longer available.",
+                "目标终端已不可用。"
+            ))
+            quickInputModel.removeState(for: surfaceID)
+            return false
+        }
+        guard !surface.blocksProgrammaticInput else {
+            quickInputModel.setStatusMessage(strings.quickInputPasswordLockedMessage)
+            return false
+        }
+        guard let terminal = surface.surfaceModel else {
             quickInputModel.setStatusMessage(strings.t(
                 "The target terminal is no longer available.",
                 "目标终端已不可用。"
@@ -364,6 +387,11 @@ extension TerminalController {
             defer { self?.quickInputSubmissionTasks.removeValue(forKey: surfaceID) }
             guard let self, let surface,
                   self.surfaceTree.contains(where: { $0 === surface }) else { return }
+            guard !surface.blocksProgrammaticInput else {
+                let currentStrings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
+                self.quickInputModel.setStatusMessage(currentStrings.quickInputPasswordLockedMessage)
+                return
+            }
             do {
                 if let shortcut = self.quickInputModel.agentDraftShortcut(
                     for: surfaceID, foregroundPID: terminal.foregroundPID) {
@@ -374,16 +402,26 @@ extension TerminalController {
                 try await Task.sleep(for: .milliseconds(250))
             } catch {
                 let currentStrings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
-                self.quickInputModel.setStatusMessage(currentStrings.t(
-                    "Could not send the complete message. Your draft or queued message is retained; retry sending.",
-                    "未能发送完整消息，草稿或排队消息已保留，请重试发送。"
-                ))
+                if surface.blocksProgrammaticInput {
+                    self.quickInputModel.setStatusMessage(currentStrings.quickInputPasswordLockedMessage)
+                } else {
+                    self.quickInputModel.setStatusMessage(currentStrings.t(
+                        "Could not send the complete message. Your draft or queued message is retained; retry sending.",
+                        "未能发送完整消息，草稿或排队消息已保留，请重试发送。"
+                    ))
+                }
                 return
             }
-            guard !Task.isCancelled, !SecureInput.shared.enabled,
+            guard !Task.isCancelled, !surface.blocksProgrammaticInput,
                   self.surfaceTree.contains(where: { $0 === surface }), !surface.processExited,
                   !surface.readonly,
-                  surface.runtimeDescriptor == nil || surface.runtimeConnectionState == .ready else { return }
+                  surface.runtimeDescriptor == nil || surface.runtimeConnectionState == .ready else {
+                if surface.blocksProgrammaticInput {
+                    let currentStrings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
+                    self.quickInputModel.setStatusMessage(currentStrings.quickInputPasswordLockedMessage)
+                }
+                return
+            }
             if let historyID,
                self.quickInputModel.state(for: surfaceID)?.queue.first(where: { $0.id == historyID })?.text != text {
                 return
@@ -417,6 +455,12 @@ extension TerminalController {
         guard quickInputAutomaticTasks[surfaceID] == nil,
               agentActivities[surfaceID]?.state == .done,
               quickInputModel.state(for: surfaceID)?.queue.isEmpty == false else { return }
+        if ProgrammaticInputGuard.isGlobalSecureInputActive ||
+            surfaceTree.first(where: { $0.id == surfaceID })?.blocksProgrammaticInput == true {
+            let strings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
+            quickInputModel.setStatusMessage(strings.quickInputPasswordLockedMessage)
+            return
+        }
         quickInputAutomaticTasks[surfaceID] = Task { @MainActor [weak self] in
             defer { self?.quickInputAutomaticTasks.removeValue(forKey: surfaceID) }
             // Stop hooks report completion before the CLI has returned to its
@@ -426,6 +470,11 @@ extension TerminalController {
                   let surface = self.surfaceTree.first(where: { $0.id == surfaceID }),
                   !surface.processExited,
                   let item = self.quickInputModel.state(for: surfaceID)?.queue.first else { return }
+            guard !surface.blocksProgrammaticInput else {
+                let strings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
+                self.quickInputModel.setStatusMessage(strings.quickInputPasswordLockedMessage)
+                return
+            }
             if self.paneSessionContext(for: surface)?.isSSHSession != true {
                 let foreground = surface.surfaceModel?.foregroundPID
                 let hookMatches = foreground.map {

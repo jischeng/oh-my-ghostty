@@ -39,6 +39,9 @@ extension TerminalController {
     /// The external editor replaces the CLI's whole input and acknowledges the
     /// exact bytes. Never infer that an old imported prefix is still present.
     func replaceQuickInputAgentDraft(_ text: String, for surface: Ghostty.SurfaceView, shortcut: String) async throws {
+        guard !surface.blocksProgrammaticInput else {
+            throw CancellationError()
+        }
         guard let keys = QuickInputDraftBridge.keys(shortcut), let terminal = surface.surfaceModel else {
             throw CocoaError(.featureUnsupported)
         }
@@ -46,7 +49,7 @@ extension TerminalController {
         let runtimeIdentity = (surface.runtimeInlineSession?.descriptor ?? surface.runtimeDescriptor)?.identity
         let foregroundPID = terminal.foregroundPID
         func checkTarget() throws {
-            guard !Task.isCancelled, !SecureInput.shared.enabled, !surface.readonly, !surface.processExited,
+            guard !Task.isCancelled, !surface.blocksProgrammaticInput, !surface.readonly, !surface.processExited,
                   surfaceTree.contains(where: { $0 === surface }),
                   paneSessionContext(for: surface)?.state == context?.state,
                   (surface.runtimeInlineSession?.descriptor ?? surface.runtimeDescriptor)?.identity == runtimeIdentity,
@@ -114,7 +117,7 @@ extension TerminalController {
     func importRemoteQuickInputDraft(
         for surface: Ghostty.SurfaceView, context: PaneSessionContext, setting: String
     ) {
-        guard !setting.isEmpty, !SecureInput.shared.enabled,
+        guard !setting.isEmpty, !surface.blocksProgrammaticInput,
               case .sshReady(let ssh, _) = context.state,
               let connection = try? GitSSHConnection(session: context) else { return }
         let descriptor = surface.runtimeInlineSession?.descriptor ?? surface.runtimeDescriptor
@@ -140,7 +143,7 @@ extension TerminalController {
                       self.paneSessionContext(for: surface)?.state == context.state,
                       surface.runtimeInlineSession?.pane == inlinePane,
                       (surface.runtimeInlineSession?.descriptor ?? surface.runtimeDescriptor)?.identity == runtimeIdentity,
-                      !SecureInput.shared.enabled else { return false }
+                      !surface.blocksProgrammaticInput else { return false }
                 return true
             }
             do {

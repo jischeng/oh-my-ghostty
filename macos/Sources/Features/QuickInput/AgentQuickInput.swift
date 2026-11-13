@@ -811,6 +811,7 @@ final class ShortcutRecorderButton: NSButton {
 struct AgentQuickInputDock<Content: View>: View {
     @ObservedObject var controller: TerminalController
     @ObservedObject var model: AgentQuickInputModel
+    @ObservedObject private var secureInput = SecureInput.shared
     let content: Content
 
     init(
@@ -863,6 +864,7 @@ struct AgentQuickInputDock<Content: View>: View {
                 items: queue,
                 surfaceID: surfaceID,
                 model: model,
+                isSendLocked: isQueueSendLocked(for: surfaceID),
                 send: { controller.sendQueuedQuickInput($0, from: surfaceID) },
                 edit: { controller.editQueuedQuickInput($0, from: surfaceID) },
                 remove: { controller.removeQueuedQuickInput($0, from: surfaceID) },
@@ -870,6 +872,11 @@ struct AgentQuickInputDock<Content: View>: View {
                 chromeBackground: controller.terminalChromeBackground
             )
         }
+    }
+
+    private func isQueueSendLocked(for surfaceID: UUID) -> Bool {
+        _ = secureInput.enabled
+        return controller.isQuickInputPasswordLocked(for: surfaceID)
     }
 
     private var presentedQueueSurfaceID: UUID? {
@@ -904,6 +911,7 @@ private struct AgentQuickInputQueueLane: View {
     let items: [AgentQuickInputQueueItem]
     let surfaceID: UUID
     @ObservedObject var model: AgentQuickInputModel
+    let isSendLocked: Bool
     let send: (UUID) -> Void
     let edit: (UUID) -> Void
     let remove: (UUID) -> Void
@@ -926,6 +934,7 @@ private struct AgentQuickInputQueueLane: View {
                                 AgentQuickInputQueueCard(
                                     item: item,
                                     isEditing: model.editingQueueItemID == item.id,
+                                    isSendLocked: isSendLocked,
                                     send: { send(item.id) },
                                     edit: { edit(item.id) },
                                     remove: { remove(item.id) }
@@ -981,25 +990,31 @@ private struct AgentQuickInputQueueLane: View {
 private struct AgentQuickInputQueueCard: View {
     let item: AgentQuickInputQueueItem
     let isEditing: Bool
+    let isSendLocked: Bool
     let send: () -> Void
     let edit: () -> Void
     let remove: () -> Void
+    @ObservedObject private var settings = OhMyGhosttySettings.shared
     @State private var hovered = false
     @State private var showFullMessage = false
     @State private var hoverPreviewTask: Task<Void, Never>?
 
+    private var strings: SettingsStrings { SettingsStrings(language: settings.language) }
+
     var body: some View {
         HStack(spacing: 2) {
             Button(action: send) {
-                Image(systemName: "arrow.turn.down.right")
+                Image(systemName: isSendLocked ? "lock.fill" : "arrow.turn.down.right")
                     .frame(
                         width: AgentQuickInputMetrics.queueButtonHitSize,
                         height: AgentQuickInputMetrics.queueButtonHitSize
                     )
                     .contentShape(Rectangle())
             }
+            .disabled(isSendLocked)
+            .opacity(isSendLocked ? 0.45 : 1)
             .foregroundStyle(.secondary)
-            .help("Send now")
+            .help(isSendLocked ? strings.quickInputPasswordLockedMessage : "Send now")
             .pointingHandCursor()
 
             Text(item.preview)
@@ -1121,7 +1136,15 @@ private struct AgentQuickInputComposer: View {
     @ObservedObject var model: AgentQuickInputModel
 
     @ObservedObject private var settings = OhMyGhosttySettings.shared
+    @ObservedObject private var secureInput = SecureInput.shared
     private var strings: SettingsStrings { SettingsStrings(language: settings.language) }
+    private var isPasswordLocked: Bool {
+        _ = secureInput.enabled
+        return controller.isQuickInputPasswordLocked(for: model.targetSurfaceID)
+    }
+    private var isSendDisabled: Bool {
+        isPasswordLocked && !model.isEditingQueuedItem
+    }
 
     /// Effective chrome background (see `TerminalController.terminalChromeBackground`).
     private var chromeBackground: Color { controller.terminalChromeBackground }
@@ -1167,7 +1190,14 @@ private struct AgentQuickInputComposer: View {
                     title: model.isEditingQueuedItem ? strings.quickInputSaveTitle : strings.quickInputSendTitle,
                     action: controller.sendQuickInputDraft
                 )
-                .help(model.isEditingQueuedItem ? "⌘↩ " + strings.quickInputSaveTitle : "⌘↩ " + strings.quickInputSendTitle)
+                .disabled(isSendDisabled)
+                .help(
+                    isSendDisabled
+                        ? strings.quickInputPasswordLockedMessage
+                        : (model.isEditingQueuedItem
+                            ? "⌘↩ " + strings.quickInputSaveTitle
+                            : "⌘↩ " + strings.quickInputSendTitle)
+                )
                 QuickInputFooterActionButton(
                     symbols: ["option", "command", "return"],
                     title: model.isEditingQueuedItem ? strings.quickInputMoveTitle : strings.quickInputQueueTitle,
@@ -1177,7 +1207,16 @@ private struct AgentQuickInputComposer: View {
                 QuickInputFooterActionButton(symbols: ["escape"], title: strings.quickInputCancelTitle,
                                             action: controller.dismissQuickInput)
                     .help("Esc " + strings.quickInputCancelTitle)
-                if let statusMessage = model.statusMessage {
+                if isPasswordLocked {
+                    Text("·")
+                    HStack(spacing: 4) {
+                        Image(systemName: "lock.fill")
+                            .font(QuickInputFooterStyle.iconFont)
+                        Text(strings.quickInputPasswordLockedMessage)
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(.secondary)
+                } else if let statusMessage = model.statusMessage {
                     Text("·")
                     Text(statusMessage)
                         .foregroundStyle(.secondary)

@@ -29,6 +29,12 @@ final class ScriptInputTextCommand: NSScriptCommand {
             return nil
         }
 
+        guard !surfaceView.blocksProgrammaticInput else {
+            scriptErrorNumber = errAEEventFailed
+            scriptErrorString = "Cannot send input while terminal is waiting for password input."
+            return nil
+        }
+
         guard let surface = surfaceView.surfaceModel else {
             scriptErrorNumber = errAEEventFailed
             scriptErrorString = "Terminal surface model is not available."

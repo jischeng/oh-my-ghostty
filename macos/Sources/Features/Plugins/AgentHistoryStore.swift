@@ -481,13 +481,11 @@ enum AgentHistoryStore {
         }
 
         if cacheUpdated && !Task.isCancelled {
-            try? FileManager.default.createDirectory(
-                at: resolvedCacheURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
             if let data = try? JSONEncoder().encode(diskCache) {
-                try? data.write(to: resolvedCacheURL, options: .atomic)
+                try? OMGPrivateFileWriter.writeAtomically(data, to: resolvedCacheURL)
             }
+        } else {
+            OMGPrivateFileWriter.tightenPermissionsIfPresent(at: resolvedCacheURL)
         }
 
         if agents.contains(.antigravity) {

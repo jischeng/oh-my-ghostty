@@ -437,6 +437,9 @@ struct SettingsStrings: Equatable, Sendable {
         t("Draft imported. Sending will append only text after the original prefix.",
           "草稿已导入。发送时只会追加原有内容之后新增的文字。")
     }
+    var quickInputPasswordLockedMessage: String {
+        t("Waiting for password input in terminal", "终端正在等待密码输入")
+    }
     var quickInputHeightLabel: String { t("Composer Height", "输入框高度") }
     var quickInputControlJNewlineLabel: String { t("Control-J Inserts Newline", "Control-J 换行") }
     var focusedSplitBorderSection: String { t("Focus", "聚焦") }

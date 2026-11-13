@@ -7,14 +7,16 @@ private final class GitTerminalSurfaceTargetStub: GitTerminalSurfaceTarget {
     let id: UUID
     private(set) var sentText: [String] = []
     let acceptsText: Bool
+    var blocksProgrammaticInput: Bool
 
-    init(id: UUID, acceptsText: Bool = true) {
+    init(id: UUID, acceptsText: Bool = true, blocksProgrammaticInput: Bool = false) {
         self.id = id
         self.acceptsText = acceptsText
+        self.blocksProgrammaticInput = blocksProgrammaticInput
     }
 
     func sendText(_ text: String) -> Bool {
-        guard acceptsText else { return false }
+        guard acceptsText, !blocksProgrammaticInput else { return false }
         sentText.append(text)
         return true
     }
@@ -81,5 +83,34 @@ struct GitTerminalBridgeTests {
 
         let result = bridge.dispatch(.status(repository: repository), in: localContext)
         #expect(result == .failed(.targetContextMismatch))
+    }
+
+    @Test func blocksDispatchWithoutFocusingOrSendingDuringPasswordPrompt() {
+        let tabID = UUID()
+        let surfaceID = UUID()
+        let target = GitTerminalSurfaceTargetStub(id: surfaceID, blocksProgrammaticInput: true)
+        var focusedIDs: [UUID] = []
+        let bridge = GitTerminalBridge(
+            surfaceLookup: { _, _ in target },
+            focusSurface: { focusedIDs.append($0.id) }
+        )
+        let context = InspectorPaneContext(
+            tabID: tabID,
+            surfaceID: surfaceID,
+            title: "Terminal",
+            workingDirectory: "/tmp/project"
+        )
+        let result = bridge.dispatch(
+            .status(repository: GitRepositoryIdentity(
+                worktreePath: "/tmp/project",
+                gitDirPath: "/tmp/project/.git",
+                commonGitDirPath: "/tmp/project/.git"
+            )),
+            in: context
+        )
+        #expect(result == .failed(.passwordInputActive))
+        #expect(focusedIDs.isEmpty)
+        #expect(target.sentText.isEmpty)
+        #expect(result.displayMessage?.isEmpty == false)
     }
 }

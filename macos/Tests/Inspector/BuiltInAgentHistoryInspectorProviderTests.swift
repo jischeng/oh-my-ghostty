@@ -1467,6 +1467,28 @@ struct AgentHistoryInspectorTests {
         #expect(await AgentHistoryStore.loadCached(cacheURL: cache).isEmpty)
     }
 
+    @Test func sessionCacheUsesPrivate0700DirectoryAnd0600FilePermissions() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessionsDir = root.appendingPathComponent("sessions", isDirectory: true)
+        let file = sessionsDir.appendingPathComponent("2026_private-cache.jsonl")
+        let cacheDir = root.appendingPathComponent("AgentHistory", isDirectory: true)
+        let cache = cacheDir.appendingPathComponent("session-cache.json")
+        try writeJSONL([["type": "session", "id": "private-cache", "cwd": "/repo"]], to: file)
+
+        let sessions = await AgentHistoryStore.load(
+            agents: [.pi],
+            rootURLs: [.pi: sessionsDir],
+            cacheURL: cache
+        )
+        #expect(sessions.count == 1)
+
+        let dirPerms = try (FileManager.default.attributesOfItem(atPath: cacheDir.path)[.posixPermissions] as? NSNumber)?.intValue
+        let filePerms = try (FileManager.default.attributesOfItem(atPath: cache.path)[.posixPermissions] as? NSNumber)?.intValue
+        #expect((dirPerms ?? 0) & 0o777 == 0o700)
+        #expect((filePerms ?? 0) & 0o777 == 0o600)
+    }
+
     private func writeJSONL(
         _ objects: [[String: Any]],
         to url: URL

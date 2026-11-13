@@ -334,18 +334,38 @@ struct WorkspaceProviderTests {
     @Test func imageTransferBuildsPrivateRemoteSFTPBatch() {
         let batch = SSHImagePasteTransfer.batch(
             localPath: "/tmp/local image's.png",
-            remotePath: "/tmp/omg-paste-123.png"
+            remotePath: ".cache/oh-my-ghostty/paste/omg-paste-123.png"
         )
         #expect(batch == """
-        put '/tmp/local image'\\''s.png' '/tmp/omg-paste-123.png'
-        chmod 600 '/tmp/omg-paste-123.png'
+        pwd
+        -mkdir '.cache'
+        -mkdir '.cache/oh-my-ghostty'
+        chmod 700 '.cache/oh-my-ghostty'
+        -mkdir '.cache/oh-my-ghostty/paste'
+        chmod 700 '.cache/oh-my-ghostty/paste'
+        put '/tmp/local image'\\''s.png' '.cache/oh-my-ghostty/paste/omg-paste-123.png'
+        chmod 600 '.cache/oh-my-ghostty/paste/omg-paste-123.png'
         """)
+        #expect(!batch.contains("'/tmp/omg-paste-"))
+
+        let resolved = SSHImagePasteTransfer.resolvedRemotePath(
+            relativePath: ".cache/oh-my-ghostty/paste/omg-paste-123.png",
+            fromSFTPOutput: "sftp> pwd\nRemote working directory: /home/json\n"
+        )
+        #expect(resolved == "/home/json/.cache/oh-my-ghostty/paste/omg-paste-123.png")
+
+        let fallback = SSHImagePasteTransfer.resolvedRemotePath(
+            relativePath: ".cache/oh-my-ghostty/paste/omg-paste-123.png",
+            fromSFTPOutput: ""
+        )
+        #expect(fallback == "~/.cache/oh-my-ghostty/paste/omg-paste-123.png")
     }
 
     @Test func imageTransferPreservesKnownFileExtensions() {
         let jpgURL = URL(fileURLWithPath: "/tmp/img_v3_test.jpg")
         let jpgRemote = SSHImagePasteTransfer.remotePath(for: jpgURL)
-        #expect(jpgRemote.hasPrefix("/tmp/omg-paste-"))
+        #expect(jpgRemote.hasPrefix(".cache/oh-my-ghostty/paste/omg-paste-"))
+        #expect(!jpgRemote.hasPrefix("/tmp/"))
         #expect(jpgRemote.hasSuffix(".jpg"))
 
         let pngURL = URL(fileURLWithPath: "/tmp/screenshot.PNG")

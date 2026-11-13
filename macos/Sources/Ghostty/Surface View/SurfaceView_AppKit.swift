@@ -190,7 +190,7 @@ extension Ghostty {
 
         // Set whether the surface is currently on a password input or not. This is
         // detected with the set_password_input_cb on the Ghostty state.
-        var passwordInput: Bool = false {
+        @Published var passwordInput: Bool = false {
             didSet {
                 // We need to update our state within the SecureInput manager.
                 let input = SecureInput.shared

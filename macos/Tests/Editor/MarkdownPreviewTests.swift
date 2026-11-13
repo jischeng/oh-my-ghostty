@@ -134,6 +134,206 @@ struct MarkdownPreviewTests {
         }
         #expect(loaded, "Local SVG should load through the document filesystem scheme")
     }
+
+    @Test func templateCSPRemovesExternalHTTPAndHTTPSFromImageSources() throws {
+        let root = try #require(Bundle.main.url(forResource: "MarkdownPreview", withExtension: nil))
+        let html = try String(contentsOf: root.appendingPathComponent("template.html"), encoding: .utf8)
+        let directives = html.components(separatedBy: ";").map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let imgSrc = try #require(directives.first(where: { $0.hasPrefix("img-src ") }))
+        #expect(imgSrc.contains("'self'"))
+        #expect(imgSrc.contains("omg-markdown:"))
+        #expect(imgSrc.contains("omg-markdown-image:"))
+        #expect(imgSrc.contains("data:"))
+        #expect(imgSrc.contains("blob:"))
+        #expect(!imgSrc.contains("http:"))
+        #expect(!imgSrc.contains("https:"))
+    }
+
+    @Test func imageSchemeEnforcesAllowedRootAndRejectsTraversalAndSymlinkEscapesWith403() async throws {
+        let sandbox = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-md-boundary-\(UUID().uuidString)", isDirectory: true)
+        let workspaceRoot = sandbox.appendingPathComponent("workspace", isDirectory: true)
+        let docsDir = workspaceRoot.appendingPathComponent("docs", isDirectory: true)
+        let assetsDir = workspaceRoot.appendingPathComponent("assets", isDirectory: true)
+        let outsideDir = sandbox.appendingPathComponent("outside", isDirectory: true)
+        try FileManager.default.createDirectory(at: docsDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: assetsDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outsideDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sandbox) }
+
+        let validSVG = Data("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"8\"/>".utf8)
+        let secretPNG = Data([0x89, 0x50, 0x4E, 0x47])
+        let validAsset = assetsDir.appendingPathComponent("ok.svg")
+        let outsideSecret = outsideDir.appendingPathComponent("secret.png")
+        try validSVG.write(to: validAsset)
+        try secretPNG.write(to: outsideSecret)
+
+        let symlinkFile = docsDir.appendingPathComponent("leak.png")
+        let symlinkDir = docsDir.appendingPathComponent("symdir")
+        try FileManager.default.createSymbolicLink(at: symlinkFile, withDestinationURL: outsideSecret)
+        try FileManager.default.createSymbolicLink(at: symlinkDir, withDestinationURL: outsideDir)
+
+        let canonicalValidAsset = try #require(MarkdownPreviewResources.canonicalLocalPath(validAsset.path))
+        let localSpy = SpyWorkspaceFilesystem(
+            descriptor: .init(
+                kind: .local,
+                id: "local",
+                displayName: "workspace",
+                workingDirectory: workspaceRoot.path
+            ),
+            files: [canonicalValidAsset: validSVG]
+        )
+        let resources = MarkdownPreviewResources()
+        resources.filesystem = localSpy
+        resources.documentDirectory = docsDir.path
+        let webView = WKWebView(frame: .zero)
+        let base = MarkdownPreviewResources.imageBaseURL(directory: docsDir)
+
+        // 1. Valid intra-workspace relative image (`../assets/ok.svg`) is allowed (HTTP 200).
+        let allowedURL = try #require(URL(string: "../assets/ok.svg", relativeTo: base)?.absoluteURL)
+        let allowedOutcome = await runSchemeTask(resources: resources, webView: webView, url: allowedURL)
+        #expect(allowedOutcome.statusCode == 200)
+        #expect(allowedOutcome.data == validSVG)
+        #expect(localSpy.readPaths.count == 1)
+
+        // 2. Out-of-bounds traversal (`../../../../etc/passwd.png`), outside directory, and symlink escapes return HTTP 403.
+        let escapedURLs: [URL] = [
+            try #require(URL(string: "../../../../etc/passwd.png", relativeTo: base)?.absoluteURL),
+            try #require(URL(string: "../../outside/secret.png", relativeTo: base)?.absoluteURL),
+            try #require(URL(string: "leak.png", relativeTo: base)?.absoluteURL),
+            try #require(URL(string: "symdir/secret.png", relativeTo: base)?.absoluteURL),
+            try #require(URL(string: "omg-markdown-image://document/etc/passwd.png")),
+            try #require(URL(string: "omg-markdown-image://document\(docsDir.path)/../../outside/secret.png")),
+            try #require(URL(string: "omg-markdown-image://document\(docsDir.path)/bad%00.png")),
+        ]
+        for badURL in escapedURLs {
+            let outcome = await runSchemeTask(resources: resources, webView: webView, url: badURL)
+            #expect(outcome.statusCode == 403, "Expected HTTP 403 for \(badURL.absoluteString)")
+            #expect(outcome.data.isEmpty)
+        }
+        #expect(localSpy.readPaths.count == 1, "Rejected requests must never reach filesystem.readFile")
+
+        // 3. Remote SSH workspace boundary rejects `../` escapes with HTTP 403 without reading remote files.
+        let sshSpy = SpyWorkspaceFilesystem(
+            descriptor: .init(
+                kind: .ssh,
+                id: "ssh:prod",
+                displayName: "prod",
+                workingDirectory: "/home/alice/project"
+            ),
+            files: ["/home/alice/project/assets/remote.png": secretPNG]
+        )
+        resources.filesystem = sshSpy
+        resources.documentDirectory = "/home/alice/project/docs"
+        let sshBase = MarkdownPreviewResources.imageBaseURL(directory: URL(fileURLWithPath: "/home/alice/project/docs"))
+
+        let sshEscape = try #require(URL(string: "../../.ssh/id_ed25519.png", relativeTo: sshBase)?.absoluteURL)
+        let sshEscapeOutcome = await runSchemeTask(resources: resources, webView: webView, url: sshEscape)
+        #expect(sshEscapeOutcome.statusCode == 403)
+        #expect(sshSpy.readPaths.isEmpty)
+
+        let sshRawTraversal = try #require(URL(string: "omg-markdown-image://document/home/alice/project/docs/../../../etc/shadow.png"))
+        let sshRawOutcome = await runSchemeTask(resources: resources, webView: webView, url: sshRawTraversal)
+        #expect(sshRawOutcome.statusCode == 403)
+        #expect(sshSpy.readPaths.isEmpty)
+
+        let sshValid = try #require(URL(string: "../assets/remote.png", relativeTo: sshBase)?.absoluteURL)
+        let sshValidOutcome = await runSchemeTask(resources: resources, webView: webView, url: sshValid)
+        #expect(sshValidOutcome.statusCode == 200)
+        #expect(sshValidOutcome.data == secretPNG)
+        #expect(sshSpy.readPaths == ["/home/alice/project/assets/remote.png"])
+
+        // 4. Standalone `.md` file when workspace root falls back to "/" scopes strictly to document parent directory.
+        let standaloneSpy = SpyWorkspaceFilesystem(
+            descriptor: .init(
+                kind: .local,
+                id: "local",
+                displayName: "/",
+                workingDirectory: "/"
+            ),
+            files: [validAsset.resolvingSymlinksInPath().path: validSVG]
+        )
+        resources.filesystem = standaloneSpy
+        resources.documentDirectory = docsDir.path
+        let siblingOutsideDocParent = try #require(URL(string: "../assets/ok.svg", relativeTo: base)?.absoluteURL)
+        let standaloneEscape = await runSchemeTask(resources: resources, webView: webView, url: siblingOutsideDocParent)
+        #expect(standaloneEscape.statusCode == 403)
+        #expect(standaloneSpy.readPaths.isEmpty)
+    }
+
+    private func runSchemeTask(
+        resources: MarkdownPreviewResources,
+        webView: WKWebView,
+        url: URL
+    ) async -> (statusCode: Int?, data: Data, error: Error?) {
+        await withCheckedContinuation { continuation in
+            let task = RecordingURLSchemeTask(request: URLRequest(url: url)) { statusCode, data, error in
+                continuation.resume(returning: (statusCode, data, error))
+            }
+            resources.webView(webView, start: task)
+        }
+    }
+}
+
+private final class SpyWorkspaceFilesystem: WorkspaceFilesystem, @unchecked Sendable {
+    let descriptor: WorkspaceDescriptor
+    private let files: [String: Data]
+    private let lock = NSLock()
+    private(set) var readPaths: [String] = []
+
+    init(descriptor: WorkspaceDescriptor, files: [String: Data]) {
+        self.descriptor = descriptor
+        self.files = files
+    }
+
+    func listDirectory(at path: String) async throws -> [WorkspaceFileEntry] { [] }
+    func createFile(named name: String, in directory: String) async throws {}
+    func createDirectory(named name: String, in directory: String) async throws {}
+
+    func readFile(at path: String) async throws -> Data {
+        lock.lock()
+        readPaths.append(path)
+        lock.unlock()
+        guard let data = files[path] else {
+            throw WorkspaceFilesystemError.unavailable
+        }
+        return data
+    }
+}
+
+private final class RecordingURLSchemeTask: NSObject, WKURLSchemeTask {
+    let request: URLRequest
+    private let onComplete: (Int?, Data, Error?) -> Void
+    private var statusCode: Int?
+    private var received = Data()
+    private var finished = false
+
+    init(request: URLRequest, onComplete: @escaping (Int?, Data, Error?) -> Void) {
+        self.request = request
+        self.onComplete = onComplete
+    }
+
+    func didReceive(_ response: URLResponse) {
+        statusCode = (response as? HTTPURLResponse)?.statusCode
+    }
+
+    func didReceive(_ data: Data) {
+        received.append(data)
+    }
+
+    func didFinish() {
+        guard !finished else { return }
+        finished = true
+        onComplete(statusCode, received, nil)
+    }
+
+    func didFailWithError(_ error: Error) {
+        guard !finished else { return }
+        finished = true
+        onComplete(statusCode, received, error)
+    }
 }
 
 @MainActor

@@ -82,6 +82,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
             onOpenLink = preview.onOpenLink
             let directory = preview.fileURL?.deletingLastPathComponent()
                 ?? URL(fileURLWithPath: NSTemporaryDirectory())
+            resources.documentDirectory = directory.path
             // Never fall back to the local host for a disconnected SSH document.
             resources.filesystem = preview.filesystem ?? (preview.isRemote
                 ? nil : LocalWorkspaceFilesystem(workingDirectory: directory.path))
@@ -328,6 +329,7 @@ final class MarkdownPreviewWebView: WKWebView {
 @MainActor
 final class MarkdownPreviewResources: NSObject, WKURLSchemeHandler {
     var filesystem: (any WorkspaceFilesystem)?
+    var documentDirectory: String?
     private var tasks: [ObjectIdentifier: Task<Void, Never>] = [:]
 
     static func imageBaseURL(directory: URL) -> URL {
@@ -344,9 +346,191 @@ final class MarkdownPreviewResources: NSObject, WKURLSchemeHandler {
         return type.preferredMIMEType
     }
 
+    nonisolated static func normalizePOSIXPath(_ rawPath: String) -> String? {
+        guard !rawPath.isEmpty,
+              rawPath.hasPrefix("/"),
+              !rawPath.contains("\0"),
+              !rawPath.contains("\n"),
+              !rawPath.contains("\r") else {
+            return nil
+        }
+        var stack: [String] = []
+        for component in rawPath.split(separator: "/", omittingEmptySubsequences: true) {
+            if component == "." {
+                continue
+            }
+            if component == ".." {
+                guard !stack.isEmpty else { return nil }
+                stack.removeLast()
+                continue
+            }
+            stack.append(String(component))
+        }
+        return stack.isEmpty ? "/" : "/" + stack.joined(separator: "/")
+    }
+
+    nonisolated static func canonicalLocalPath(_ rawPath: String) -> String? {
+        guard !rawPath.isEmpty,
+              rawPath.hasPrefix("/"),
+              !rawPath.contains("\0"),
+              !rawPath.contains("\n"),
+              !rawPath.contains("\r") else {
+            return nil
+        }
+        if let resolvedPtr = Darwin.realpath(rawPath, nil) {
+            defer { Darwin.free(resolvedPtr) }
+            return String(cString: resolvedPtr)
+        }
+        guard let normalized = normalizePOSIXPath(rawPath) else { return nil }
+        if let resolvedPtr = Darwin.realpath(normalized, nil) {
+            defer { Darwin.free(resolvedPtr) }
+            return String(cString: resolvedPtr)
+        }
+        var current = normalized
+        var trailing: [String] = []
+        while current != "/" && !current.isEmpty {
+            let leaf = (current as NSString).lastPathComponent
+            guard !leaf.isEmpty, leaf != ".", leaf != ".." else { return nil }
+            trailing.append(leaf)
+            let parent = (current as NSString).deletingLastPathComponent
+            current = parent.isEmpty ? "/" : parent
+            if let resolvedPtr = Darwin.realpath(current, nil) {
+                defer { Darwin.free(resolvedPtr) }
+                let base = String(cString: resolvedPtr)
+                let suffix = trailing.reversed().joined(separator: "/")
+                return base == "/" ? "/" + suffix : base + "/" + suffix
+            }
+        }
+        return normalized
+    }
+
+    nonisolated private static func isWithinOrEqual(_ path: String, root: String) -> Bool {
+        guard root != "/" else { return false }
+        return path == root || path.hasPrefix(root + "/")
+    }
+
+    nonisolated private static func isStrictlyWithin(_ path: String, root: String) -> Bool {
+        guard root != "/" else { return false }
+        return path.hasPrefix(root + "/")
+    }
+
+    nonisolated static func effectiveAllowedRoot(
+        kind: WorkspaceDescriptor.Kind,
+        workspaceRoot: String,
+        documentDirectory: String?
+    ) -> String? {
+        switch kind {
+        case .local:
+            let canonicalWorkspace = (workspaceRoot.isEmpty || workspaceRoot == "/")
+                ? nil
+                : canonicalLocalPath(workspaceRoot)
+            let canonicalDoc = documentDirectory.flatMap { raw in
+                (raw.isEmpty || raw == "/") ? nil : canonicalLocalPath(raw)
+            }
+            let validWorkspace = canonicalWorkspace.flatMap { $0 == "/" ? nil : $0 }
+            let validDoc = canonicalDoc.flatMap { $0 == "/" ? nil : $0 }
+            if let validWorkspace, let validDoc {
+                return isWithinOrEqual(validDoc, under: validWorkspace) ? validWorkspace : validDoc
+            }
+            return validDoc ?? validWorkspace
+        case .ssh:
+            let normalizedWorkspace = (workspaceRoot.isEmpty || workspaceRoot == "/")
+                ? nil
+                : normalizePOSIXPath(workspaceRoot)
+            let normalizedDoc = documentDirectory.flatMap { raw in
+                (raw.isEmpty || raw == "/") ? nil : normalizePOSIXPath(raw)
+            }
+            let validWorkspace = normalizedWorkspace.flatMap { $0 == "/" ? nil : $0 }
+            let validDoc = normalizedDoc.flatMap { $0 == "/" ? nil : $0 }
+            if let validWorkspace, let validDoc {
+                return isWithinOrEqual(validDoc, under: validWorkspace) ? validWorkspace : validDoc
+            }
+            return validDoc ?? validWorkspace
+        }
+    }
+
+    nonisolated private static func isWithinOrEqual(_ path: String, under root: String) -> Bool {
+        isWithinOrEqual(path, root: root)
+    }
+
+    nonisolated static func resolveAllowedImagePath(
+        for url: URL,
+        rawRequestString: String? = nil,
+        filesystem: any WorkspaceFilesystem,
+        documentDirectory: String?
+    ) async -> String? {
+        guard url.scheme == "omg-markdown-image",
+              url.host == "document",
+              url.user == nil,
+              url.password == nil,
+              url.port == nil else {
+            return nil
+        }
+        let raw = (rawRequestString ?? url.absoluteString).lowercased()
+        if raw.contains("%00") || raw.contains("\0") || raw.contains("%0a") || raw.contains("%0d") {
+            return nil
+        }
+        guard let allowedRoot = effectiveAllowedRoot(
+            kind: filesystem.descriptor.kind,
+            workspaceRoot: filesystem.descriptor.workingDirectory,
+            documentDirectory: documentDirectory
+        ) else {
+            return nil
+        }
+
+        switch filesystem.descriptor.kind {
+        case .local:
+            guard let resolved = canonicalLocalPath(url.path),
+                  isStrictlyWithin(resolved, root: allowedRoot) else {
+                return nil
+            }
+            return resolved
+        case .ssh:
+            guard let normalized = normalizePOSIXPath(url.path),
+                  isStrictlyWithin(normalized, root: allowedRoot) else {
+                return nil
+            }
+            if let sshFilesystem = filesystem as? SSHWorkspaceFilesystem {
+                guard let remoteResolved = await sshFilesystem.resolveCanonicalPath(at: normalized),
+                      let canonicalNormalized = normalizePOSIXPath(remoteResolved) else {
+                    return nil
+                }
+                if isStrictlyWithin(canonicalNormalized, root: allowedRoot) {
+                    return canonicalNormalized
+                }
+                if let remoteRoot = await sshFilesystem.resolveCanonicalPath(at: allowedRoot),
+                   let canonicalRoot = normalizePOSIXPath(remoteRoot),
+                   isStrictlyWithin(canonicalNormalized, root: canonicalRoot) {
+                    return canonicalNormalized
+                }
+                return nil
+            }
+            return normalized
+        }
+    }
+
+    private static func respondForbidden(_ urlSchemeTask: any WKURLSchemeTask, url: URL) {
+        if let response = HTTPURLResponse(
+            url: url,
+            statusCode: 403,
+            httpVersion: "HTTP/1.1",
+            headerFields: [
+                "Content-Type": "text/plain; charset=utf-8",
+                "Cache-Control": "no-store",
+            ]
+        ) {
+            urlSchemeTask.didReceive(response)
+            urlSchemeTask.didFinish()
+        } else {
+            urlSchemeTask.didFailWithError(URLError(.noPermissionsToReadFile))
+        }
+    }
+
     func webView(_ webView: WKWebView, start urlSchemeTask: any WKURLSchemeTask) {
         let id = ObjectIdentifier(urlSchemeTask)
         let filesystem = filesystem
+        let documentDirectory = documentDirectory
+        let rawRequestString = urlSchemeTask.request.url?.absoluteString
         tasks[id] = Task { [weak self] in
             do {
                 guard let url = urlSchemeTask.request.url else { throw URLError(.badURL) }
@@ -358,19 +542,47 @@ final class MarkdownPreviewResources: NSObject, WKURLSchemeHandler {
                     }
                     let root = rawRoot.resolvingSymlinksInPath().standardizedFileURL
                     let file = root.appendingPathComponent(url.path).resolvingSymlinksInPath().standardizedFileURL
-                    guard file.path.hasPrefix(root.path + "/") else { throw URLError(.noPermissionsToReadFile) }
+                    guard file.path.hasPrefix(root.path + "/") else {
+                        guard !Task.isCancelled else { return }
+                        Self.respondForbidden(urlSchemeTask, url: url)
+                        self?.tasks.removeValue(forKey: id)
+                        return
+                    }
                     data = try await Task.detached(priority: .utility) { try Data(contentsOf: file) }.value
                     mimeType = UTType(filenameExtension: file.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
                 } else {
                     guard let imageType = Self.imageMIMEType(for: url), let filesystem else {
                         throw URLError(.unsupportedURL)
                     }
+                    guard let allowedPath = await Self.resolveAllowedImagePath(
+                        for: url,
+                        rawRequestString: rawRequestString,
+                        filesystem: filesystem,
+                        documentDirectory: documentDirectory
+                    ) else {
+                        guard !Task.isCancelled else { return }
+                        Self.respondForbidden(urlSchemeTask, url: url)
+                        self?.tasks.removeValue(forKey: id)
+                        return
+                    }
                     mimeType = imageType
-                    data = try await filesystem.readFile(at: url.path)
+                    data = try await filesystem.readFile(at: allowedPath)
                 }
                 guard !Task.isCancelled else { return }
-                urlSchemeTask.didReceive(URLResponse(url: url, mimeType: mimeType,
-                    expectedContentLength: data.count, textEncodingName: nil))
+                if let response = HTTPURLResponse(
+                    url: url,
+                    statusCode: 200,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: [
+                        "Content-Type": mimeType,
+                        "Content-Length": "\(data.count)",
+                    ]
+                ) {
+                    urlSchemeTask.didReceive(response)
+                } else {
+                    urlSchemeTask.didReceive(URLResponse(url: url, mimeType: mimeType,
+                        expectedContentLength: data.count, textEncodingName: nil))
+                }
                 urlSchemeTask.didReceive(data)
                 urlSchemeTask.didFinish()
             } catch {

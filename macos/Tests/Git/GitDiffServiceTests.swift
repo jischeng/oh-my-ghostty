@@ -239,6 +239,79 @@ struct GitDiffServiceTests {
         #expect(rename.path == "new name.txt")
     }
 
+    @Test func isBinaryDiffOnlyMatchesMetadataHeadersOutsideHunks() async throws {
+        let swiftHunkWithBinaryLiterals = [
+            "diff --git a/GitDiffTextView.swift b/GitDiffTextView.swift",
+            "deleted file mode 100644",
+            "index 1234567..0000000",
+            "--- a/GitDiffTextView.swift",
+            "+++ /dev/null",
+            "@@ -70,6 +0,0 @@ enum GitDiffTextRenderer {",
+            "-    line.hasPrefix(\"Binary files \")",
+            "+    // GIT binary patch",
+            "-Binary files a/icon.png and b/icon.png differ",
+            "+GIT binary patch",
+            " diff --git a/icon.png b/icon.png",
+            " Binary files a/icon.png and b/icon.png differ",
+            " GIT binary patch",
+            "\\ No newline at end of file",
+            "",
+        ].joined(separator: "\n")
+        #expect(!GitDiffService.isBinaryDiff(swiftHunkWithBinaryLiterals))
+        #expect(!GitDiffService.isBinaryDiff(swiftHunkWithBinaryLiterals.replacingOccurrences(of: "\n", with: "\r\n")))
+
+        let realBinaryFilesDiff = "diff --git a/icon.png b/icon.png\nindex 123..456 100644\nBinary files a/icon.png and b/icon.png differ\n"
+        #expect(GitDiffService.isBinaryDiff(realBinaryFilesDiff))
+        #expect(GitDiffService.isBinaryDiff(realBinaryFilesDiff.replacingOccurrences(of: "\n", with: "\r\n")))
+
+        let realGitBinaryPatch = [
+            "diff --git a/icon.png b/icon.png",
+            "new file mode 100644",
+            "index 0000000000000000000000000000000000000000..f971a5e28b6c4cb237ca3c7349e33bb600dbc907",
+            "GIT binary patch",
+            "literal 4",
+            "LcmZQzWcm*P0SW;F",
+            "",
+            "literal 0",
+            "HcmV?d00001",
+            "",
+        ].joined(separator: "\n")
+        #expect(GitDiffService.isBinaryDiff(realGitBinaryPatch))
+
+        let binaryPatchDoc = GitDiffDocument(
+            file: .init(path: "icon.png", status: "A"),
+            text: realGitBinaryPatch,
+            isBinary: true,
+            isTruncated: false,
+            byteLimit: 1024,
+            baseDescription: "index vs HEAD"
+        )
+        #expect(binaryPatchDoc.summary?.contains("GIT binary patch") == true)
+        #expect(binaryPatchDoc.summary?.contains("LcmZQzWcm*P0SW;F") == false)
+
+        let dir = try makeRepository()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let deletedSwift = dir.appendingPathComponent("GitDiffTextView.swift")
+        let modifiedSwift = dir.appendingPathComponent("GitDiffService.swift")
+        try write("func check(_ line: String) -> Bool {\n    line.hasPrefix(\"Binary files \")\n}\n", to: deletedSwift)
+        try write("func detect(_ text: String) -> Bool {\n    text.contains(\"Binary files \")\n}\n", to: modifiedSwift)
+        try run(["git", "add", "."], in: dir.path)
+        _ = try commit(in: dir, message: "initial")
+
+        try FileManager.default.removeItem(at: deletedSwift)
+        try write("func detect(_ text: String) -> Bool {\n    // GIT binary patch\n    false\n}\n", to: modifiedSwift)
+
+        let repository = try await repositoryIdentity(for: dir)
+        let service = GitDiffService()
+        let unstaged = try await service.listFiles(for: repository, target: .unstaged)
+        #expect(unstaged.files.count == 2)
+        for file in unstaged.files {
+            let doc = try await service.loadDiff(for: file, repository: repository, target: .unstaged)
+            #expect(!doc.isBinary, "Source file \(file.path) mentioning binary diff markers must not be marked binary")
+            #expect(doc.summary == nil)
+        }
+    }
+
     private func makeRepository() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("git-diff-test-\(UUID().uuidString)")

@@ -148,9 +148,17 @@ struct GitDiffDocument: Hashable, Sendable, Equatable {
 
     var summary: String? {
         guard isBinary else { return nil }
-        return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? GitL10n.text("Binary file")
-            : text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return GitL10n.text("Binary file") }
+        var headerLines: [String] = []
+        for raw in trimmed.components(separatedBy: "\n") {
+            let line = String(raw.hasSuffix("\r") ? raw.dropLast() : raw[...])
+            headerLines.append(line)
+            if line == "GIT binary patch" || (line.hasPrefix("Binary files ") && line.hasSuffix(" differ")) {
+                break
+            }
+        }
+        return headerLines.joined(separator: "\n")
     }
 }
 

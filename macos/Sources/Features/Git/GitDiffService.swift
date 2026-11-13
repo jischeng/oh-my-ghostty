@@ -243,7 +243,7 @@ struct GitDiffService: Sendable {
             return GitDiffDocument(
                 file: file,
                 text: text,
-                isBinary: isBinaryDiff(text),
+                isBinary: Self.isBinaryDiff(text),
                 isTruncated: false,
                 byteLimit: diffByteLimit,
                 baseDescription: base
@@ -391,8 +391,25 @@ struct GitDiffService: Sendable {
         }
     }
 
-    private func isBinaryDiff(_ text: String) -> Bool {
-        text.contains("Binary files ") || text.contains("GIT binary patch")
+    static func isBinaryDiff(_ text: String) -> Bool {
+        var inHunk = false
+        // Split LF code units rather than Swift Characters so CRLF lines split cleanly.
+        for raw in text.components(separatedBy: "\n") {
+            let line = raw.hasSuffix("\r") ? raw.dropLast() : raw[...]
+            if line.hasPrefix("diff --git ") || line.hasPrefix("diff --cc ") || line.hasPrefix("diff --combined ") {
+                inHunk = false
+                continue
+            }
+            if line.hasPrefix("@@ ") || line.hasPrefix("@@@ ") {
+                inHunk = true
+                continue
+            }
+            guard !inHunk else { continue }
+            if (line.hasPrefix("Binary files ") && line.hasSuffix(" differ")) || line == "GIT binary patch" {
+                return true
+            }
+        }
+        return false
     }
 
     private func gitErrorMessage(from result: GitExecutionResult) -> String {

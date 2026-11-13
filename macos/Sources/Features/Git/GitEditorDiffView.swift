@@ -253,17 +253,7 @@ struct GitEditorDiffView: View {
                 }
 
                 if showsNonDiffPlaceholder {
-                    VStack(alignment: .leading, spacing: 0) {
-                        if let error = model.error {
-                            Text(error).foregroundStyle(.red).padding()
-                        } else if let content = model.content,
-                                  content.document.isBinary || content.document.isTruncated {
-                            Text(content.document.summary ?? content.document.text).padding()
-                        } else if !model.isLoading {
-                            Text(GitL10n.text("No changed files")).foregroundStyle(.secondary).padding()
-                        }
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    nonDiffPlaceholder
                 } else if model.isLoading && !hasMountedDiffSurface {
                     ProgressView()
                         .padding()
@@ -336,6 +326,44 @@ struct GitEditorDiffView: View {
     }
 
     // MARK: - Workbench Synchronization
+
+    @ViewBuilder
+    private var nonDiffPlaceholder: some View {
+        if let error = model.error {
+            ScrollView {
+                Text(error)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+            }
+            .scrollContentBackground(.hidden)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        } else if let content = model.content,
+                  content.document.isBinary || content.document.isTruncated {
+            let message = (content.document.summary ?? content.document.text)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            ScrollView {
+                Text(message)
+                    .font(content.document.isBinary ? .system(size: 12, design: .monospaced) : .system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+            }
+            .scrollContentBackground(.hidden)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        } else if !model.isLoading {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(GitL10n.text("No changed files"))
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .padding()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+    }
 
     private func syncWorkbenchEnvironment() {
         configureCallbacks()

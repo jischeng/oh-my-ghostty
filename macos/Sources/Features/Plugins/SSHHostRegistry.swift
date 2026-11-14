@@ -28,8 +28,17 @@ final class SSHHostRegistry: ObservableObject {
     @Published private(set) var connections: [String: GitSSHConnection] = [:]
     @Published private(set) var pending: Set<String> = []
     @Published private(set) var errors: [String: String] = [:]
-    @Published var automaticallyRegister: Bool { didSet { save(); reconcile() } }
+    @Published var automaticallyRegister: Bool {
+        didSet {
+            guard !isApplyingPortableState else { return }
+            save()
+            reconcile()
+        }
+    }
+    var onPortableStateDidChange: (() -> Void)?
+    var excludedIDs: Set<String> { excluded }
     private var excluded: Set<String>
+    private var isApplyingPortableState = false
     private var attempted: Set<String> = []
     private var tasks: [String: Task<Void, Never>] = [:]
     private var observers: [AnyCancellable] = []
@@ -221,6 +230,35 @@ final class SSHHostRegistry: ObservableObject {
     private func save() {
         let store = Store(hosts: hosts, automaticallyRegister: automaticallyRegister, excluded: excluded)
         if let data = try? JSONEncoder().encode(store) { defaults.set(data, forKey: key) }
+        if !isApplyingPortableState {
+            onPortableStateDidChange?()
+        }
+    }
+
+    func portableSection() -> PortableSSHRegistrySection {
+        PortableSSHRegistrySection(
+            automaticallyRegister: automaticallyRegister,
+            excluded: Array(excluded),
+            hosts: hosts.map(PortableSSHHostRecord.init(from:))
+        )
+    }
+
+    func applyPortableSection(_ section: PortableSSHRegistrySection) {
+        isApplyingPortableState = true
+        defer { isApplyingPortableState = false }
+        let existingByID = Dictionary(uniqueKeysWithValues: hosts.map { ($0.id, $0) })
+        var updatedHosts = section.hosts
+            .filter { $0.id == RegisteredSSHHost.id(for: $0.connection) }
+            .map { $0.merged(into: existingByID[$0.id]) }
+        updatedHosts.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        hosts = updatedHosts
+        excluded = Set(section.excluded)
+        if automaticallyRegister != section.automaticallyRegister {
+            automaticallyRegister = section.automaticallyRegister
+        }
+        let store = Store(hosts: hosts, automaticallyRegister: automaticallyRegister, excluded: excluded)
+        if let data = try? JSONEncoder().encode(store) { defaults.set(data, forKey: key) }
+        reconcile()
     }
 
     nonisolated static func readInventory(_ connection: GitSSHConnection) async throws -> AgentIntegrationSnapshot {

@@ -286,8 +286,17 @@ final class OhMyGhosttySettings: ObservableObject {
         "com.oh-my-ghostty.appearanceDidChange"
     )
 
+    private static let testIsolatedFileURL: URL = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "omg-testing-settings-\(ProcessInfo.processInfo.processIdentifier)",
+            isDirectory: true
+        )
+        .appendingPathComponent("settings.json")
+
     static var fileURL: URL {
-        OMGApplicationEnvironment.settingsFileURL()
+        OMGApplicationEnvironment.isRunningTests
+            ? testIsolatedFileURL
+            : OMGApplicationEnvironment.settingsFileURL()
     }
 
     static var ghosttyAppearanceOverlayURL: URL {
@@ -296,7 +305,10 @@ final class OhMyGhosttySettings: ObservableObject {
 
     /// Reads a persisted value straight from the settings JSON, actor-free.
     nonisolated static func persistedValue(forKey key: String) -> Any? {
-        guard let data = try? Data(contentsOf: OMGApplicationEnvironment.settingsFileURL()),
+        let targetURL = OMGApplicationEnvironment.isRunningTests
+            ? testIsolatedFileURL
+            : OMGApplicationEnvironment.settingsFileURL()
+        guard let data = try? Data(contentsOf: targetURL),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         return object[key]
     }
@@ -627,6 +639,11 @@ final class OhMyGhosttySettings: ObservableObject {
             allowedValues: nil, minimum: nil, maximum: nil,
             description: "Launch new local terminals in the durable local session runtime.",
             requiresNewWindow: true, category: "general"),
+        .init(
+            id: "sessions.quickTerminalRuntimeEnabled", type: .boolean, defaultValue: "false",
+            allowedValues: nil, minimum: nil, maximum: nil,
+            description: "Persist the Quick Terminal in a dedicated local session runtime session.",
+            requiresNewWindow: false, category: "general"),
         .init(
             id: "sessions.keepLocalOnQuit", type: .boolean, defaultValue: "true",
             allowedValues: nil, minimum: nil, maximum: nil,
@@ -1040,6 +1057,9 @@ final class OhMyGhosttySettings: ObservableObject {
     @Published var localRuntimeEnabled = true {
         didSet { persist("sessions.localRuntimeEnabled", localRuntimeEnabled) }
     }
+    @Published var quickTerminalRuntimeEnabled = false {
+        didSet { persist("sessions.quickTerminalRuntimeEnabled", quickTerminalRuntimeEnabled) }
+    }
     @Published var keepLocalSessionsOnQuit = true {
         didSet { persist("sessions.keepLocalOnQuit", keepLocalSessionsOnQuit) }
     }
@@ -1093,14 +1113,66 @@ final class OhMyGhosttySettings: ObservableObject {
     private let fileURL: URL
     private let appearanceOverlayURL: URL
     private var appearanceNotificationWorkItem: DispatchWorkItem?
+    private var portableBinding: OMGPortableSettingsBinding?
 
     init(fileURL: URL? = nil) {
-        if fileURL == nil { Self.seedDevelopmentSettingsIfNeeded() }
+        if fileURL == nil, !OMGApplicationEnvironment.isRunningTests {
+            Self.seedDevelopmentSettingsIfNeeded()
+        }
         let fileURL = fileURL ?? Self.fileURL
         self.fileURL = fileURL
         self.appearanceOverlayURL = fileURL.deletingLastPathComponent()
             .appendingPathComponent("appearance.ghostty")
         reloadFromDisk()
+    }
+
+    var portableSSHHosts: PortableSSHRegistrySection? {
+        chosen[OMGPortableSettingsBinding.sshHostsKey].flatMap(OMGPortableSettingsBinding.decodeJSONObject)
+    }
+
+    var portableAgentPolicies: [String: PortableAgentPolicyRecord]? {
+        chosen[OMGPortableSettingsBinding.agentPoliciesKey].flatMap(OMGPortableSettingsBinding.decodeJSONObject)
+    }
+
+    var portableGitDiff: PortableGitDiffSection? {
+        chosen[OMGPortableSettingsBinding.gitDiffKey].flatMap(OMGPortableSettingsBinding.decodeJSONObject)
+    }
+
+    func activateDefaultPortableStoresIfNeeded() {
+        guard !OMGApplicationEnvironment.isRunningTests, portableBinding == nil else { return }
+        bindPortableStores(
+            sshRegistry: .shared,
+            agentManager: .shared,
+            gitDiff: .shared,
+            defaults: .standard
+        )
+    }
+
+    func bindPortableStores(
+        sshRegistry: SSHHostRegistry,
+        agentManager: AgentIntegrationManager,
+        gitDiff: GitDiffPreferences,
+        defaults: UserDefaults
+    ) {
+        let binding = OMGPortableSettingsBinding(
+            settings: self,
+            sshRegistry: sshRegistry,
+            agentManager: agentManager,
+            gitDiff: gitDiff,
+            defaults: defaults
+        )
+        portableBinding = binding
+        if binding.synchronize(chosen: &chosen) {
+            save()
+            notifyRuntime()
+        }
+    }
+
+    func persistPortableSection(_ key: String, value: Any) {
+        guard !isApplying else { return }
+        chosen[key] = value
+        save()
+        notifyRuntime(changedKey: key)
     }
 
     static func seedDevelopmentSettingsIfNeeded(
@@ -1153,8 +1225,11 @@ final class OhMyGhosttySettings: ObservableObject {
             let migratedPathDisplay = migratePathDisplayDefault()
             let migratedResizeRendering = migrateResizeRenderingSetting()
             let migratedStartupMode = migrateStartupModeSetting()
+            let migratedPortableStores = portableBinding?.synchronize(chosen: &chosen) ?? false
             applyChosenValues()
-            if migratedPathDisplay || migratedResizeRendering || migratedStartupMode { save() }
+            if migratedPathDisplay || migratedResizeRendering || migratedStartupMode || migratedPortableStores {
+                save()
+            }
             lastError = nil
             writeAppearanceOverlay()
             notifyRuntime()
@@ -1397,6 +1472,7 @@ final class OhMyGhosttySettings: ObservableObject {
                 range: 100...50_000
             )
             localRuntimeEnabled = boolValue("sessions.localRuntimeEnabled", fallback: true)
+            quickTerminalRuntimeEnabled = boolValue("sessions.quickTerminalRuntimeEnabled", fallback: false)
             keepLocalSessionsOnQuit = boolValue("sessions.keepLocalOnQuit", fallback: true)
             keepSSHSessionsOnQuit = boolValue("sessions.keepSSHOnQuit", fallback: true)
             startupMode = enumValue("sessions.startupMode", fallback: .restoreSessions)

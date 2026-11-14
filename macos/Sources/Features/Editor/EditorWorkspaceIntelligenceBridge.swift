@@ -16,6 +16,7 @@ final class EditorWorkspaceIntelligenceBridge {
     private var gutterTasks: [EditorDocumentID: Task<Void, Never>] = [:]
     private var lifecycleTasks: [EditorDocumentID: Task<Void, Never>] = [:]
     private var focusCheckTask: Task<Void, Never>?
+    private var hasSuspendedLSPDocuments = false
     private nonisolated(unsafe) var windowKeyObserver: NSObjectProtocol?
     private nonisolated(unsafe) var trustChangeObserver: NSObjectProtocol?
 
@@ -163,10 +164,25 @@ final class EditorWorkspaceIntelligenceBridge {
         }
     }
 
+    func suspendDocumentsForHiddenReclaim() async {
+        guard let workspace, !workspace.documents.isEmpty else { return }
+        for (_, task) in lifecycleTasks { task.cancel() }
+        lifecycleTasks.removeAll()
+        for (_, task) in gutterTasks { task.cancel() }
+        gutterTasks.removeAll()
+        hasSuspendedLSPDocuments = true
+        for document in workspace.documents {
+            let ctx = documentContext(for: document)
+            await coordinator.documentDidClose(ctx)
+        }
+    }
+
     /// Restores git gutter bars and language-server diagnostics after an idle-reaped workbench
     /// recreates its `WKWebView` while open documents remained preserved in `EditorWorkspace`.
     func rehydrateWorkbenchDecorations() {
         guard let workspace else { return }
+        let reopenSuspended = hasSuspendedLSPDocuments
+        hasSuspendedLSPDocuments = false
         for document in workspace.documents {
             refreshGitGutter(for: document)
             let ctx = documentContext(for: document)
@@ -174,7 +190,11 @@ final class EditorWorkspaceIntelligenceBridge {
             let docID = document.id
             lifecycleTasks[docID]?.cancel()
             lifecycleTasks[docID] = Task { @MainActor [weak self] in
-                await self?.coordinator.documentDidChange(ctx, text: currentText)
+                if reopenSuspended {
+                    await self?.coordinator.documentDidOpen(ctx, text: currentText)
+                } else {
+                    await self?.coordinator.documentDidChange(ctx, text: currentText)
+                }
             }
         }
     }
@@ -203,6 +223,7 @@ final class EditorWorkspaceIntelligenceBridge {
             }
             guard !Task.isCancelled,
                   let workspace = self?.workspace,
+                  workspace.workbenchController.webView != nil,
                   workspace.documents.contains(where: { $0.id == docID }) else { return }
             let payload = EditorGitGutterService.bridgePayload(from: diffMap)
             workspace.workbenchController.setGitDiffLines(uri: uri, lines: payload)
@@ -238,7 +259,8 @@ final class EditorWorkspaceIntelligenceBridge {
         }
 
         coordinator.onDiagnostics = { [weak self] path, diagnostics in
-            guard let workspace = self?.workspace else { return }
+            guard let workspace = self?.workspace,
+                  workspace.workbenchController.webView != nil else { return }
             let markers = diagnostics.map(\.bridgeDictionary)
             for doc in workspace.documents where doc.id.endpoint == .local && doc.path == path {
                 workspace.workbenchController.setDiagnostics(uri: doc.id.monacoURI, markers: markers)

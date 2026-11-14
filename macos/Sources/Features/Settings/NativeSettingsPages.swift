@@ -145,6 +145,8 @@ extension NativeSettingsController {
             page.section(self.text("Local terminals", "本地终端"))
             self.toggle(page, self.text("Use background sessions for new terminals", "新终端使用后台会话"), \.localRuntimeEnabled,
                         help: self.strings.runtimeLocalRuntimeCaption)
+            self.toggle(page, self.text("Persist Quick Terminal in background session", "快捷终端启用持久化后台会话"), \.quickTerminalRuntimeEnabled,
+                        help: self.strings.runtimeQuickTerminalCaption)
         }
         core(.shell, in: form)
         more(form, text("Terminal notifications", "终端通知")) { [weak self] page in self?.core(.notifications, in: page) }

@@ -517,16 +517,39 @@ ACTION = "\#(action.rawValue)"
 SELECTED = json.loads(base64.b64decode("\#(selectionData.base64EncodedString())"))
 
 
+def write_private_backup(source, destination):
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    payload = source.read_bytes()
+    descriptor, temporary = tempfile.mkstemp(prefix=".omg-bak-", dir=destination.parent)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
 def backup(path):
-    if not path.exists():
+    if not path.exists() or path.is_dir():
         return
     destination = path.with_name(path.name + ".omg-backup")
     if not destination.exists():
-        shutil.copy2(path, destination)
+        write_private_backup(path, destination)
 
 
 def atomic_write(path, content):
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and not path.is_dir() and ".config/oh-my-ghostty/agent-status" not in path.as_posix():
+        write_private_backup(path, path.with_name(path.name + ".omg.bak"))
     mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
     descriptor, temporary = tempfile.mkstemp(prefix=".omg-agent-", dir=path.parent)
     try:
@@ -1567,7 +1590,53 @@ else:
         try writeData(data, to: url)
     }
 
+    struct BackupAudit: Equatable, Sendable {
+        let backupCount: Int
+        let insecureBackupCount: Int
+    }
+
+    func backupAudit() -> BackupAudit {
+        var urls: [URL] = [homeURL.appendingPathComponent(".codex/config.toml")]
+        for agent in SupportedAgent.allCases where agent.definition.hook.kind != .none {
+            let base = hookURL(for: agent)
+            if agent.definition.hook.kind == .scripts {
+                for event in agent.definition.hook.events {
+                    urls.append(base.appendingPathComponent(event.name))
+                }
+            } else {
+                urls.append(base)
+            }
+        }
+        var seen = Set<String>()
+        var backupCount = 0
+        var insecureBackupCount = 0
+        for target in urls {
+            let bakURL = target.appendingPathExtension("omg.bak")
+            guard seen.insert(bakURL.path).inserted else { continue }
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: bakURL.path, isDirectory: &isDir),
+                  !isDir.boolValue else { continue }
+            backupCount += 1
+            let attrs = try? FileManager.default.attributesOfItem(atPath: bakURL.path)
+            let mode = (attrs?[.posixPermissions] as? NSNumber)?.intValue ?? 0
+            if (mode & 0o777) != 0o600 {
+                insecureBackupCount += 1
+            }
+        }
+        return BackupAudit(backupCount: backupCount, insecureBackupCount: insecureBackupCount)
+    }
+
     private func writeData(_ data: Data, to url: URL) throws {
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+           !isDirectory.boolValue,
+           !url.path.contains("/.config/oh-my-ghostty/agent-status/") {
+            let existing = try Data(contentsOf: url)
+            try OMGPrivateFileWriter.writeAtomically(
+                existing,
+                to: url.appendingPathExtension("omg.bak")
+            )
+        }
         let attributes = try? FileManager.default.attributesOfItem(
             atPath: url.path
         )
@@ -1627,10 +1696,13 @@ else:
     }
 
     private func backupIfNeeded(_ url: URL) throws {
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue else { return }
         let backup = url.appendingPathExtension("omg-backup")
         guard !FileManager.default.fileExists(atPath: backup.path) else { return }
-        try FileManager.default.copyItem(at: url, to: backup)
+        let existing = try Data(contentsOf: url)
+        try OMGPrivateFileWriter.writeAtomically(existing, to: backup)
     }
 
     private static func hookEvents(

@@ -1011,6 +1011,12 @@ struct AgentStatusPluginTests {
         #expect(FileManager.default.fileExists(
             atPath: claudeSettings.appendingPathExtension("omg-backup").path
         ))
+        #expect(FileManager.default.fileExists(
+            atPath: codexHooks.appendingPathExtension("omg.bak").path
+        ))
+        #expect(FileManager.default.fileExists(
+            atPath: claudeSettings.appendingPathExtension("omg.bak").path
+        ))
 
         for url in [codexHooks, claudeSettings] {
             let root = try #require(
@@ -1771,6 +1777,63 @@ struct AgentStatusPluginTests {
             }
         }
         return count
+    }
+
+    @Test func rewritingExistingUserConfigsWritesPrivate0600OmgBakBackupsAcrossAgents() throws {
+        struct BackupTarget {
+            let agent: SupportedAgent
+            let relPath: String
+            let initialContent: String
+        }
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-agent-bak-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        let targets: [BackupTarget] = [
+            .init(agent: .claude, relPath: ".claude/settings.json", initialContent: "{\"theme\":\"dark\"}\n"),
+            .init(agent: .qwen, relPath: ".qwen/settings.json", initialContent: "{\"model\":\"qwen-coder\"}\n"),
+            .init(agent: .antigravity, relPath: ".gemini/config/hooks.json", initialContent: "{}\n"),
+            .init(agent: .cursor, relPath: ".cursor/hooks.json", initialContent: "{\"hooks\":{}}\n"),
+            .init(agent: .codex, relPath: ".codex/hooks.json", initialContent: "{\"hooks\":{}}\n"),
+            .init(agent: .hermes, relPath: ".hermes/config.yaml", initialContent: "model: sonnet\n"),
+            .init(agent: .kimi, relPath: ".kimi-code/config.toml", initialContent: "model = \"k2\"\n"),
+        ]
+
+        for target in targets {
+            let url = home.appendingPathComponent(target.relPath)
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try Data(target.initialContent.utf8).write(to: url)
+            try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
+        }
+        let codexConfig = home.appendingPathComponent(".codex/config.toml")
+        try Data("[features]\nother = true\n".utf8).write(to: codexConfig)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: codexConfig.path)
+
+        let installer = AgentHookInstaller(homeURL: home)
+        for target in targets {
+            try installer.install(target.agent)
+        }
+
+        for target in targets {
+            let bakURL = home.appendingPathComponent(target.relPath).appendingPathExtension("omg.bak")
+            #expect(FileManager.default.fileExists(atPath: bakURL.path), "Missing .omg.bak for \(target.relPath)")
+            let content = try String(contentsOf: bakURL, encoding: .utf8)
+            #expect(content == target.initialContent)
+            let perms = try (FileManager.default.attributesOfItem(atPath: bakURL.path)[.posixPermissions] as? NSNumber)?.intValue
+            #expect((perms ?? 0) & 0o777 == 0o600)
+        }
+
+        let codexConfigBak = codexConfig.appendingPathExtension("omg.bak")
+        #expect(try String(contentsOf: codexConfigBak, encoding: .utf8) == "[features]\nother = true\n")
+        let codexPerms = try (FileManager.default.attributesOfItem(atPath: codexConfigBak.path)[.posixPermissions] as? NSNumber)?.intValue
+        #expect((codexPerms ?? 0) & 0o777 == 0o600)
+
+        let audit = installer.backupAudit()
+        #expect(audit.backupCount == targets.count + 1)
+        #expect(audit.insecureBackupCount == 0)
     }
 
     private func assertUnrelatedHooksPreserved(at url: URL) throws {

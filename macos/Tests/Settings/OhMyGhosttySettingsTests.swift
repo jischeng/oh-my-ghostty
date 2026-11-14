@@ -762,6 +762,190 @@ struct OhMyGhosttySettingsTests {
         #expect(try String(contentsOf: external, encoding: .utf8) == "keep")
     }
 
+    @Test func portableSettingsMigratesLegacyUserDefaultsNonDestructivelyIntoPrivateJSON() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-portable-migrate-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let suiteName = "OhMyGhosttyPortableMigrate.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let registry = SSHHostRegistry(defaults: defaults, live: { [] }, inventory: { _ in .init() })
+        let conn = try GitSSHConnection(destination: "dev@box.example.com", options: ["-p", "2222"])
+        _ = registry.prepareSetup(conn)
+        registry.automaticallyRegister = false
+
+        let agents = AgentIntegrationManager(defaults: defaults, connectionTargets: { [] }, registry: registry)
+        agents.setPolicy(
+            AgentIntegrationPolicy(
+                checkAutomatically: false,
+                updateHooksAutomatically: false,
+                automaticallyUpdatedAgents: [.claude, .codex],
+                intervalHours: 12,
+                updateAllCLIsAutomatically: true,
+                checkOnConnection: false
+            ),
+            for: AgentIntegrationManager.localID
+        )
+
+        let gitDiff = GitDiffPreferences(defaults: defaults)
+        gitDiff.setViewMode(.split)
+        gitDiff.setReview(false)
+        gitDiff.setWordWrap(false)
+
+        let settingsURL = dir.appendingPathComponent("settings.json")
+        let settings = OhMyGhosttySettings(fileURL: settingsURL)
+        settings.bindPortableStores(
+            sshRegistry: registry,
+            agentManager: agents,
+            gitDiff: gitDiff,
+            defaults: defaults
+        )
+
+        // Legacy UserDefaults entries remain intact (non-destructive migration).
+        #expect(defaults.data(forKey: "OMG.SSH.Registry.v1") != nil)
+        #expect(defaults.data(forKey: "OMG.AgentIntegration.Policies.v1") != nil)
+
+        // And settings.json now mirrors sshHosts, agentPolicies, and gitDiff with 0600 permissions.
+        let perms = try (FileManager.default.attributesOfItem(atPath: settingsURL.path)[.posixPermissions] as? NSNumber)?.intValue
+        #expect((perms ?? 0) & 0o777 == 0o600)
+
+        let rawJSON = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: settingsURL)) as? [String: Any]
+        )
+        #expect(rawJSON["sshHosts"] != nil)
+        #expect(rawJSON["agentPolicies"] != nil)
+        #expect(rawJSON["gitDiff"] != nil)
+        #expect(rawJSON["workspaceTrust"] == nil)
+
+        // Loading that single settings.json on a second clean Mac restores all three stores!
+        let cleanSuite = "OhMyGhosttyPortableClean.\(UUID().uuidString)"
+        let cleanDefaults = try #require(UserDefaults(suiteName: cleanSuite))
+        defer { cleanDefaults.removePersistentDomain(forName: cleanSuite) }
+
+        let targetRegistry = SSHHostRegistry(defaults: cleanDefaults, live: { [] }, inventory: { _ in .init() })
+        let targetAgents = AgentIntegrationManager(defaults: cleanDefaults, connectionTargets: { [] }, registry: targetRegistry)
+        let targetGitDiff = GitDiffPreferences(defaults: cleanDefaults)
+        let targetSettings = OhMyGhosttySettings(fileURL: settingsURL)
+        targetSettings.bindPortableStores(
+            sshRegistry: targetRegistry,
+            agentManager: targetAgents,
+            gitDiff: targetGitDiff,
+            defaults: cleanDefaults
+        )
+
+        #expect(!targetRegistry.automaticallyRegister)
+        #expect(targetRegistry.hosts.map(\.connection) == [conn])
+        let restoredPolicy = targetAgents.policy(for: AgentIntegrationManager.localID)
+        #expect(!restoredPolicy.checkAutomatically)
+        #expect(!restoredPolicy.updateHooksAutomatically)
+        #expect(restoredPolicy.automaticallyUpdatedAgents == [.claude, .codex])
+        #expect(restoredPolicy.intervalHours == 12)
+        #expect(restoredPolicy.updateAllCLIsAutomatically == true)
+        #expect(targetGitDiff.viewMode == .split)
+        #expect(!targetGitDiff.review)
+        #expect(!targetGitDiff.wordWrap)
+    }
+
+    @Test func portableSettingsAppliesReloadedJSONAndMirrorsLiveMutationsWhileKeepingTrustLocal() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-portable-sync-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let suiteName = "OhMyGhosttyPortableSync.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let trustFileURL = dir.appendingPathComponent("editor-trusted-workspaces.json")
+        let trustedRepo = dir.appendingPathComponent("local-machine-only-repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: trustedRepo, withIntermediateDirectories: true)
+        let trustStore = EditorWorkspaceTrustStore(fileURL: trustFileURL)
+        trustStore.trust(workspaceRoot: trustedRepo.path)
+
+        let registry = SSHHostRegistry(defaults: defaults, live: { [] }, inventory: { _ in .init() })
+        let agents = AgentIntegrationManager(defaults: defaults, connectionTargets: { [] }, registry: registry)
+        let gitDiff = GitDiffPreferences(defaults: defaults)
+
+        let settingsURL = dir.appendingPathComponent("settings.json")
+        let settings = OhMyGhosttySettings(fileURL: settingsURL)
+        settings.bindPortableStores(
+            sshRegistry: registry,
+            agentManager: agents,
+            gitDiff: gitDiff,
+            defaults: defaults
+        )
+
+        // Mutate live -> automatically mirrored to settings.json
+        gitDiff.setViewMode(.split)
+        #expect(settings.portableGitDiff?.viewMode == GitDiffViewMode.split.rawValue)
+
+        // Edit settings.json externally (e.g. git pull / chezmoi apply) and reloadFromDisk()
+        let prodConn = try GitSSHConnection(destination: "ops@prod.example.com")
+        let prodHostID = RegisteredSSHHost.id(for: prodConn)
+        let externalJSON = """
+        {
+          "agentPolicies": {
+            "local": {
+              "automaticallyUpdatedAgents": ["qwen"],
+              "checkAutomatically": true,
+              "checkOnConnection": true,
+              "intervalHours": 6,
+              "updateAllCLIsAutomatically": false,
+              "updateHooksAutomatically": true
+            }
+          },
+          "gitDiff": {
+            "review": false,
+            "viewMode": "inline",
+            "wordWrap": false
+          },
+          "sshHosts": {
+            "automaticallyRegister": false,
+            "excluded": ["ssh-host:old"],
+            "hosts": [
+              {
+                "connection": {
+                  "destination": "ops@prod.example.com",
+                  "executablePath": "/usr/bin/ssh",
+                  "localWorkingDirectory": "/",
+                  "options": [],
+                  "workspaceID": "ssh:ops@prod.example.com"
+                },
+                "id": "\(prodHostID)",
+                "name": "ops@prod.example.com"
+              }
+            ]
+          }
+        }
+        """
+        try OMGPrivateFileWriter.writeAtomically(Data(externalJSON.utf8), to: settingsURL)
+        settings.reloadFromDisk()
+
+        #expect(gitDiff.viewMode == .inline)
+        #expect(!gitDiff.review)
+        #expect(!gitDiff.wordWrap)
+        #expect(!registry.automaticallyRegister)
+        #expect(registry.excludedIDs == ["ssh-host:old"])
+        #expect(registry.hosts.first?.connection.destination == "ops@prod.example.com")
+        #expect(agents.policy(for: "local").intervalHours == 6)
+        #expect(agents.policy(for: "local").automaticallyUpdatedAgents == [.qwen])
+
+        // Machine-local workspace trust remains untouched and never serialized into settings.json.
+        #expect(trustStore.isTrusted(workspaceRoot: trustedRepo.path))
+        let savedText = try String(contentsOf: settingsURL, encoding: .utf8)
+        #expect(!savedText.contains("local-machine-only-repo"))
+    }
+
+    @Test func testingEnvironmentIsolatesDefaultSettingsFileURLFromRealHomeDirectory() {
+        #expect(OMGApplicationEnvironment.isRunningTests)
+        let realConfigPath = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config")
+            .path
+        #expect(!OhMyGhosttySettings.fileURL.path.hasPrefix(realConfigPath))
+    }
+
     private func temporarySettings() -> (OhMyGhosttySettings, URL) {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)

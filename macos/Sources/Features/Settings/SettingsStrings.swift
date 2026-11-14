@@ -562,17 +562,25 @@ struct SettingsStrings: Equatable, Sendable {
             "插件独立于 OMG 安装，SSH 沿用现有 OpenSSH 配置。状态 Hook 请前往“集成 → Agent”配置。"
         )
     }
-    var installFromGitHubSection: String { t("Install from GitHub", "从 GitHub 安装") }
     var installButton: String { t("Install", "安装") }
-    var installFromGitHubCaption: String {
+    var doctorSection: String { t("OMG Doctor", "OMG 健康中心") }
+    var doctorCaption: String {
         t(
-            "Only HTTPS GitHub repositories with a validated manifest.json are accepted. Installed external executables remain disabled until the supervised runtime is available.",
-            "仅接受带有效 manifest.json 的 HTTPS GitHub 仓库。在受监管的运行时可用之前，已安装的外部可执行文件保持禁用。"
+            "Inspects macOS Accessibility permissions, persistent session runtime and SSH multiplexers, Agent dotfile backups, and live editor/LSP memory.",
+            "检查 macOS 辅助功能权限、持久会话运行时与 SSH 复用目录、Agent 配置备份，以及编辑器与语言服务实时内存占用。"
         )
     }
-    var invalidGitHubURL: String {
-        t("Enter a valid HTTPS GitHub repository URL.", "请输入有效的 HTTPS GitHub 仓库地址。")
+    var doctorAccessibilityLabel: String { t("Accessibility & Global Keybinds", "辅助功能与全局快捷键") }
+    var doctorGrantAccessibilityButton: String { t("Grant Accessibility Permission", "授予辅助功能权限") }
+    var doctorRuntimeSSHLabel: String { t("Session Runtime & SSH", "会话运行时与 SSH") }
+    var doctorAgentBackupLabel: String { t("Agent Integrations & Backups", "Agent 集成与配置备份") }
+    var doctorResourcesLabel: String { t("Editor, LSP & Surface Memory", "编辑器、语言服务与终端内存") }
+    var doctorReclaimMemoryButton: String {
+        t("Reclaim Idle Editor & LSP Memory", "回收空闲编辑器与语言服务内存")
     }
+    var doctorRefreshButton: String { t("Refresh Diagnostics", "刷新诊断") }
+    var doctorStatusHealthy: String { t("Healthy", "正常") }
+    var doctorStatusAttention: String { t("Action Needed", "需处理") }
 
     func pluginOperationLabel(_ operation: String) -> String {
         switch operation {
@@ -803,6 +811,13 @@ struct SettingsStrings: Equatable, Sendable {
     var runtimeLocalRuntimeCaption: String {
         t("New windows, tabs and splits use the local session runtime, which keeps up to 4 MiB of terminal history and respects any lower Ghostty scrollback limit. Turn this off for larger history and native PTYs. Existing terminals keep their current process.",
           "新建窗口、标签页和分屏使用本地会话运行时，最多保留 4 MiB 终端历史，并遵循 Ghostty 更低的滚动历史限制。需要更多历史时可关闭此选项使用原生 PTY；已打开的终端继续使用原进程。")
+    }
+    var runtimeQuickTerminalEnabled: String {
+        t("Persist Quick Terminal in local session runtime", "快捷终端接入本地持久会话运行时")
+    }
+    var runtimeQuickTerminalCaption: String {
+        t("Attaches Quick Terminal to a dedicated background omgd session so shells survive hiding, relaunching, or window resets.",
+          "将快捷终端绑定到专属后台 omgd 会话，隐藏或重启后仍可恢复原终端进程。")
     }
     var runtimeLibrary: String { t("Browse Sessions…", "浏览后台会话…") }
     var runtimeKeepLocalOnQuit: String { t("Keep local sessions running after quitting OMG", "退出 OMG 后，本地会话继续运行") }

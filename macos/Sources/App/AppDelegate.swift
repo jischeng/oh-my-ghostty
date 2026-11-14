@@ -295,6 +295,7 @@ class AppDelegate: NSObject,
     func applicationWillFinishLaunching(_ notification: Notification) {
         TerminalWorkspaceSessionStore.shared.prepare()
         MainActor.assumeIsolated { applyMenuLocalization() }
+        OhMyGhosttySettings.shared.activateDefaultPortableStoresIfNeeded()
         AgentIntegrationManager.shared.start()
         do {
             try AgentHookInstaller().migrateImplicitDetectorsIfNeeded()
@@ -1081,6 +1082,7 @@ class AppDelegate: NSObject,
         // We need to handle our global event tap depending on if there are global
         // events that we care about in Ghostty.
         if ghostty_app_has_global_keybinds(ghostty.app!) {
+            GlobalEventTap.shared.noteConfiguredGlobalKeybinds(true)
             if timeSinceLaunch > 5 {
                 // If the process has been running for awhile we enable right away
                 // because no windows are likely to pop up.

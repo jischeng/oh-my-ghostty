@@ -9,6 +9,10 @@ import GhosttyKit
 // global keybindings.
 class GlobalEventTap {
     static let shared = GlobalEventTap()
+    static let stateDidChangeNotification = Notification.Name("OMGGlobalEventTapStateDidChange")
+    static let accessibilitySettingsURL = URL(
+        string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+    )!
 
     fileprivate static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier!,
@@ -22,6 +26,56 @@ class GlobalEventTap {
     // Polls Accessibility permission before enabling the global event tap.
     private var enableTimer: Timer?
 
+    // Whether the active Ghostty configuration defines one or more global keybindings.
+    private(set) var hasConfiguredGlobalKeybinds = false
+
+    var isTapEnabled: Bool {
+        eventTap != nil
+    }
+
+    var needsAccessibilityPermission: Bool {
+        hasConfiguredGlobalKeybinds && !Self.isAccessibilityTrusted()
+    }
+
+    static func isAccessibilityTrusted() -> Bool {
+        AXIsProcessTrusted()
+    }
+
+    @discardableResult
+    static func requestAccessibilityPermission(
+        prompt: Bool = true,
+        openSystemSettings: Bool = true
+    ) -> Bool {
+        let trusted: Bool
+        if OMGApplicationEnvironment.isRunningTests {
+            trusted = AXIsProcessTrusted()
+        } else {
+            let options = [
+                kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: prompt,
+            ] as CFDictionary
+            trusted = AXIsProcessTrustedWithOptions(options)
+            if !trusted && openSystemSettings {
+                NSWorkspace.shared.open(accessibilitySettingsURL)
+            }
+        }
+        if trusted && shared.hasConfiguredGlobalKeybinds {
+            shared.enable()
+        } else {
+            shared.notifyStateDidChange()
+        }
+        return trusted
+    }
+
+    func noteConfiguredGlobalKeybinds(_ configured: Bool) {
+        guard hasConfiguredGlobalKeybinds != configured else { return }
+        hasConfiguredGlobalKeybinds = configured
+        notifyStateDidChange()
+    }
+
+    private func notifyStateDidChange() {
+        NotificationCenter.default.post(name: Self.stateDidChangeNotification, object: self)
+    }
+
     // Private init so it can't be constructed outside of our singleton
     private init() {}
 
@@ -32,24 +86,34 @@ class GlobalEventTap {
     // Enable the global event tap. This is safe to call if it is already enabled or
     // waiting for Accessibility permission.
     func enable() {
+        let changed = !hasConfiguredGlobalKeybinds
+        hasConfiguredGlobalKeybinds = true
         // If we already have a tap or we're already checking on a timer, do nothing.
-        guard eventTap == nil, enableTimer == nil else { return }
+        guard eventTap == nil, enableTimer == nil else {
+            if changed { notifyStateDidChange() }
+            return
+        }
 
         // Creating a CGEventTap without Accessibility permission leaks a Mach port
         // inside CoreGraphics on each failed attempt. Request permission once and
         // poll the non-leaking trust check instead of retrying tap creation.
         if AXIsProcessTrusted() {
             _ = tryEnable()
+            notifyStateDidChange()
             return
         }
 
         // Ask macOS to prompt for Accessibility access. Approval happens
         // asynchronously, so ignore the current result and poll below.
-        Self.logger.info("No accessibility permission detected, prompting...")
-        let options = [
-            kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true,
-        ] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(options)
+        Self.logger.warning(
+            "Global keybindings are configured, but Accessibility permission is missing; open OMG Doctor to grant access."
+        )
+        if !OMGApplicationEnvironment.isRunningTests {
+            let options = [
+                kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true,
+            ] as CFDictionary
+            _ = AXIsProcessTrustedWithOptions(options)
+        }
 
         // Check in a timer
         enableTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -60,11 +124,16 @@ class GlobalEventTap {
             self.enableTimer?.invalidate()
             self.enableTimer = nil
             _ = self.tryEnable()
+            self.notifyStateDidChange()
         }
+        notifyStateDidChange()
     }
 
     // Disable the global event tap. This is safe to call if it is already disabled.
     func disable() {
+        let hadState = hasConfiguredGlobalKeybinds || enableTimer != nil || eventTap != nil
+        hasConfiguredGlobalKeybinds = false
+
         // Stop our enable timer if it is on
         if let enableTimer {
             enableTimer.invalidate()
@@ -76,6 +145,10 @@ class GlobalEventTap {
             Self.logger.debug("invalidating event tap mach port")
             CFMachPortInvalidate(eventTap)
             self.eventTap = nil
+        }
+
+        if hadState {
+            notifyStateDidChange()
         }
     }
 

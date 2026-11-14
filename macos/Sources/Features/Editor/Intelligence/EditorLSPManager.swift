@@ -529,6 +529,48 @@ actor EditorLSPManager {
         }
     }
 
+    struct ResourceMetrics: Equatable, Sendable {
+        let activeServers: Int
+        let idleServers: Int
+    }
+
+    func resourceMetrics() -> ResourceMetrics {
+        var alive = 0
+        var idle = 0
+        for session in activeSessions.values where session.isAlive {
+            alive += 1
+            if session.openDocumentCount == 0 {
+                idle += 1
+            }
+        }
+        return ResourceMetrics(activeServers: alive, idleServers: idle)
+    }
+
+    @discardableResult
+    func reclaimIdleServers() async -> Int {
+        var idleSessions: [LSPServerSession] = []
+        for (key, session) in activeSessions {
+            if !session.isAlive {
+                activeSessions.removeValue(forKey: key)
+                zeroDocumentReapTasks.removeValue(forKey: key)?.cancel()
+                continue
+            }
+            if session.openDocumentCount == 0 {
+                activeSessions.removeValue(forKey: key)
+                zeroDocumentReapTasks.removeValue(forKey: key)?.cancel()
+                idleSessions.append(session)
+            }
+        }
+        if activeSessions.isEmpty {
+            reaperTask?.cancel()
+            reaperTask = nil
+        }
+        for session in idleSessions {
+            await session.shutdown()
+        }
+        return idleSessions.count
+    }
+
     func reapIdleServers(now: Date = Date()) async {
         var idleSessions: [LSPServerSession] = []
         for (key, session) in activeSessions {

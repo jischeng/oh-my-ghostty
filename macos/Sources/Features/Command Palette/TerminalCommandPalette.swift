@@ -112,7 +112,28 @@ struct TerminalCommandPaletteView: View {
         ) {
             _ = TerminalCommandOutputActions.openLastCommandOutputInEditor(from: surfaceView)
         })
+        options.append(Self.makeDoctorOption())
         return options
+    }
+
+    @MainActor
+    static func makeDoctorOption(
+        language: OhMyGhosttyLanguage? = nil,
+        openDoctor: (() -> Void)? = nil
+    ) -> CommandOption {
+        let effectiveLanguage = language ?? OhMyGhosttySettings.shared.language
+        return CommandOption(
+            title: effectiveLanguage == .simplifiedChinese ? "OMG Doctor（健康中心）" : "OMG Doctor",
+            description: effectiveLanguage == .simplifiedChinese
+                ? "检查辅助功能权限、会话运行时与编辑器内存占用"
+                : "Inspect Accessibility permissions, session runtime, backups, and live memory",
+            leadingIcon: "stethoscope",
+            action: openDoctor ?? {
+                Task { @MainActor in
+                    SettingsNavigation.open(.plugins)
+                }
+            }
+        )
     }
 
     /// Commands for installing or canceling available updates.

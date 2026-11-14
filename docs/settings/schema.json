@@ -415,6 +415,27 @@
       "description": "Keep newly created local terminals in the session runtime, with at most 4 MiB logical terminal history and any lower Ghostty limits. Disable for larger ordinary PTY history. Existing terminals are unchanged.",
       "type": "boolean"
     },
+    "sessions.quickTerminalRuntimeEnabled": {
+      "category": "general",
+      "default": false,
+      "description": "Persist the Quick Terminal in a dedicated local session runtime session.",
+      "type": "boolean"
+    },
+    "sshHosts": {
+      "category": "ssh",
+      "description": "Dotfiles-portable registered SSH hosts and automatic registration preferences.",
+      "type": "object"
+    },
+    "agentPolicies": {
+      "category": "agents",
+      "description": "Dotfiles-portable Agent integration and Hook maintenance policies keyed by target ID.",
+      "type": "object"
+    },
+    "gitDiff": {
+      "category": "git",
+      "description": "Dotfiles-portable Git diff viewer preferences (viewMode, review, wordWrap).",
+      "type": "object"
+    },
     "sessions.keepLocalOnQuit": {
       "category": "general",
       "default": true,

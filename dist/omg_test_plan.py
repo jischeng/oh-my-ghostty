@@ -30,7 +30,13 @@ MODULES = {
         ("macos/Tests/*.swift", "macos/Tests/Helpers/*.swift", "macos/Tests/Ghostty/**/*.swift"),
     ),
     "terminal": Module(
-        ("macos/Sources/Features/Terminal/**", "macos/Sources/Features/Splits/**"),
+        (
+            "macos/Sources/Features/Terminal/**",
+            "macos/Sources/Features/Splits/**",
+            "macos/Sources/Features/QuickTerminal/**",
+            "macos/Sources/Features/Global Keybinds/**",
+            "macos/Sources/Features/Command Palette/**",
+        ),
         ("macos/Tests/Terminal/*.swift", "macos/Tests/Splits/*.swift"),
         ("tabs", "inspector", "agents", "editor"),
     ),

@@ -204,51 +204,50 @@ final class TerminalHistoryService {
 
     func commands(for surfaceID: UUID) -> [InspectorHistoryItem] {
         if let commandSource { return commandSource(surfaceID) }
-        for controller in TerminalFocusRouter.allTerminalControllers() {
-            guard let view = controller.surfaceTree.first(where: { $0.id == surfaceID }),
-                  let surface = view.surface else { continue }
-            if let context = controller.paneSessionContext(for: view) {
-                synchronizeSession(context, in: view)
-            }
-            guard let epoch = sessions[surfaceID]?.epoch else { return [] }
-            let raw = snapshotCommands(surface, surfaceID: surfaceID, epoch: epoch,
-                                       sourceLabel: sessions[surfaceID]?.sourceLabel ?? "Local")
-            let validIDs = Set(raw.compactMap(Self.executionID))
-            let previousFloor = historicalExecutionFloor[surfaceID]
-            let live = raw.filter { item in
-                if case .command(_, let id, _) = item.location { return previousFloor.map { id > $0 } ?? true }
-                return false
-            }
-            let archived = (archivedBySurface[surfaceID] ?? []).map { item in
-                if case .command(_, let id, _) = item.location, !validIDs.contains(id) {
-                    return Self.expired(item)
-                }
-                return item
-            }
-            archivedBySurface[surfaceID] = archived
-            let combined: [InspectorHistoryItem]
-            if let saved = ShellScrollbackRestoreStore.savedCommands(for: surfaceID) {
-                combined = Self.presentingHistory(
-                    in: live + archived,
-                    from: saved,
-                    surfaceID: surfaceID,
-                    allowReconciliation: ShellScrollbackRestoreStore.allowsAnchorReconciliation(for: surfaceID)
-                )
-            } else if let runtime = view.runtimeDescriptor,
-                      let runtimeRecord = SessionRuntimeHistoryStore.load(for: runtime, paneID: surfaceID) {
-                combined = SessionRuntimeHistoryStore.reconcile(
-                    liveNewestFirst: live + archived,
-                    with: runtimeRecord.commands,
-                    surfaceID: surfaceID
-                )
-            } else {
-                combined = live + archived
-            }
-            return combined.sorted { lhs, rhs in
-                (lhs.timestamp ?? .distantPast) > (rhs.timestamp ?? .distantPast)
-            }
+        guard let (view, host) = TerminalHostLookup.surfaceAndHost(for: surfaceID),
+              let surface = view.surface else {
+            return []
         }
-        return []
+        if let context = host.paneSessionContext(for: view) {
+            synchronizeSession(context, in: view)
+        }
+        guard let epoch = sessions[surfaceID]?.epoch else { return [] }
+        let raw = snapshotCommands(surface, surfaceID: surfaceID, epoch: epoch,
+                                   sourceLabel: sessions[surfaceID]?.sourceLabel ?? "Local")
+        let validIDs = Set(raw.compactMap(Self.executionID))
+        let previousFloor = historicalExecutionFloor[surfaceID]
+        let live = raw.filter { item in
+            if case .command(_, let id, _) = item.location { return previousFloor.map { id > $0 } ?? true }
+            return false
+        }
+        let archived = (archivedBySurface[surfaceID] ?? []).map { item in
+            if case .command(_, let id, _) = item.location, !validIDs.contains(id) {
+                return Self.expired(item)
+            }
+            return item
+        }
+        archivedBySurface[surfaceID] = archived
+        let combined: [InspectorHistoryItem]
+        if let saved = ShellScrollbackRestoreStore.savedCommands(for: surfaceID) {
+            combined = Self.presentingHistory(
+                in: live + archived,
+                from: saved,
+                surfaceID: surfaceID,
+                allowReconciliation: ShellScrollbackRestoreStore.allowsAnchorReconciliation(for: surfaceID)
+            )
+        } else if let runtime = view.runtimeDescriptor,
+                  let runtimeRecord = SessionRuntimeHistoryStore.load(for: runtime, paneID: surfaceID) {
+            combined = SessionRuntimeHistoryStore.reconcile(
+                liveNewestFirst: live + archived,
+                with: runtimeRecord.commands,
+                surfaceID: surfaceID
+            )
+        } else {
+            combined = live + archived
+        }
+        return combined.sorted { lhs, rhs in
+            (lhs.timestamp ?? .distantPast) > (rhs.timestamp ?? .distantPast)
+        }
     }
 
     func commandOutput(executionID: UInt64, in view: Ghostty.SurfaceView) -> String? {

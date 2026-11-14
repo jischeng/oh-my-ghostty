@@ -121,6 +121,33 @@ final class EditorWorkspace: ObservableObject {
         isVisible = false
     }
 
+    var canReclaimWorkbenchNow: Bool {
+        isIdleForWorkbenchReap && workbenchController.webView != nil
+    }
+
+    @discardableResult
+    func reclaimIdleWorkbenchNow() async -> Bool {
+        guard isIdleForWorkbenchReap else { return false }
+        cancelWorkbenchReap()
+        let hadWebView = workbenchController.webView != nil
+        if !isVisible && !documents.isEmpty {
+            await intelligenceBridge.suspendDocumentsForHiddenReclaim()
+            guard isIdleForWorkbenchReap else { return false }
+        }
+        if hadWebView || workbenchController.webView != nil {
+            if !documents.isEmpty || !gitDiffs.isEmpty {
+                wasReapedWhileHidden = true
+                reapedActiveDiff = workbenchController.activeDiff
+            } else {
+                wasReapedWhileHidden = false
+                reapedActiveDiff = nil
+            }
+            workbenchController.tearDown()
+            return true
+        }
+        return false
+    }
+
     private var isIdleForWorkbenchReap: Bool {
         (documents.isEmpty && gitDiffs.isEmpty) || !isVisible
     }
@@ -660,6 +687,45 @@ final class EditorWorkspaceStore {
     static let surfaceCoverageDidChangeNotification = Notification.Name(
         "OMGEditorSurfaceCoverageDidChange"
     )
+
+    struct ResourceMetrics: Equatable, Sendable {
+        let totalWorkspaces: Int
+        let visibleWorkspaces: Int
+        let activeWebViews: Int
+        let idleReclaimableWebViews: Int
+    }
+
+    var resourceMetrics: ResourceMetrics {
+        var visibleCount = 0
+        var activeWebViews = 0
+        var reclaimable = 0
+        for workspace in workspaces.values {
+            if workspace.isVisible {
+                visibleCount += 1
+            }
+            if workspace.workbenchController.webView != nil {
+                activeWebViews += 1
+            }
+            if workspace.canReclaimWorkbenchNow {
+                reclaimable += 1
+            }
+        }
+        return ResourceMetrics(
+            totalWorkspaces: workspaces.count,
+            visibleWorkspaces: visibleCount,
+            activeWebViews: activeWebViews,
+            idleReclaimableWebViews: reclaimable
+        )
+    }
+
+    @discardableResult
+    func reclaimIdleWebViews() async -> Int {
+        var reclaimed = 0
+        for workspace in Array(workspaces.values) where await workspace.reclaimIdleWorkbenchNow() {
+            reclaimed += 1
+        }
+        return reclaimed
+    }
 
     func isEditorCovering(surfaceID: UUID) -> Bool {
         workspaces[surfaceID]?.isVisible == true

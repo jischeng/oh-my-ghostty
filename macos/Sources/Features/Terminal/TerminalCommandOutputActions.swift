@@ -139,12 +139,13 @@ enum TerminalCommandOutputActions {
         }
     }
 
-    private static func openOutputTextInEditor(
+    @discardableResult
+    static func openOutputTextInEditor(
         _ output: String,
-        commandText: String?,
+        commandText: String? = nil,
         from surface: Ghostty.SurfaceView,
-        editorStore: EditorWorkspaceStore,
-        baseDirectory: URL?
+        editorStore: EditorWorkspaceStore = .shared,
+        baseDirectory: URL? = nil
     ) -> URL? {
         guard let fileURL = writeTemporaryOutputFile(
             output,
@@ -155,18 +156,30 @@ enum TerminalCommandOutputActions {
             return nil
         }
 
+        let localFilesystem = LocalWorkspaceFilesystem(
+            workingDirectory: fileURL.deletingLastPathComponent().path
+        )
         if let controller = TerminalFocusRouter.controller(owning: surface) as? TerminalController,
            let target = EditorPaneDestination.open(
                in: controller,
                source: surface,
                destination: OhMyGhosttySettings.shared.editorFileOpenDestination
            ) {
-            let localFilesystem = LocalWorkspaceFilesystem(
-                workingDirectory: fileURL.deletingLastPathComponent().path
-            )
             editorStore.workspace(
                 for: target.controller.tabSessionID,
                 surfaceID: target.surface.id
+            ).open(
+                path: fileURL.path,
+                filesystem: localFilesystem,
+                location: nil,
+                externalFallback: true
+            )
+        } else if let host = TerminalHostLookup.host(owning: surface),
+                  let editorController = host.resolveEditorHostController(workingDirectory: surface.pwd),
+                  let targetSurface = editorController.focusedSurface ?? editorController.surfaceTree.first {
+            editorStore.workspace(
+                for: editorController.tabSessionID,
+                surfaceID: targetSurface.id
             ).open(
                 path: fileURL.path,
                 filesystem: localFilesystem,

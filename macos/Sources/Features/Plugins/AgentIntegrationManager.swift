@@ -109,6 +109,8 @@ final class AgentIntegrationManager: ObservableObject {
     private var automaticTargets: Set<String> = []
     private var checkedConnections: Set<String> = []
     private let storageKey = "OMG.AgentIntegration.Policies.v1"
+    var onPortableStateDidChange: (() -> Void)?
+    private var isApplyingPortableState = false
     /// One-shot flag for enabling automatic Hook adoption on stored policies.
     private static let automaticHookAdoptionKey = "OMG.AgentIntegration.AutomaticHookAdoption.v1"
     let integrationRevision: String
@@ -194,6 +196,24 @@ final class AgentIntegrationManager: ObservableObject {
 
     func setPolicy(_ policy: AgentIntegrationPolicy, for target: String) {
         policies[target] = policy
+        if let data = try? JSONEncoder().encode(policies) { defaults.set(data, forKey: storageKey) }
+        if !isApplyingPortableState {
+            onPortableStateDidChange?()
+        }
+    }
+
+    func portablePolicies() -> [String: PortableAgentPolicyRecord] {
+        policies.mapValues(PortableAgentPolicyRecord.init(from:))
+    }
+
+    func applyPortablePolicies(_ records: [String: PortableAgentPolicyRecord]) {
+        isApplyingPortableState = true
+        defer { isApplyingPortableState = false }
+        var updated: [String: AgentIntegrationPolicy] = [:]
+        for (target, record) in records {
+            updated[target] = record.merged(into: policies[target])
+        }
+        policies = updated
         if let data = try? JSONEncoder().encode(policies) { defaults.set(data, forKey: storageKey) }
     }
 
@@ -379,6 +399,9 @@ final class AgentIntegrationManager: ObservableObject {
         snapshots[target] = nil
         policies[target] = nil
         if let data = try? JSONEncoder().encode(policies) { defaults.set(data, forKey: storageKey) }
+        if !isApplyingPortableState {
+            onPortableStateDidChange?()
+        }
     }
 
     func refresh(target: String, automatic: Bool = false, hooksOnly: Bool = false, checkLatest: Bool = true) async {

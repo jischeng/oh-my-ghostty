@@ -338,6 +338,23 @@ class BaseTerminalController: NSWindowController,
             .first { $0.surfaceTree.contains(surface) }
     }
 
+    static func surface(withID surfaceID: UUID) -> Ghostty.SurfaceView? {
+        let enumerator = surfaceControllers.keyEnumerator()
+        while let candidate = enumerator.nextObject() as? Ghostty.SurfaceView {
+            guard candidate.id == surfaceID,
+                  let controller = surfaceControllers.object(forKey: candidate),
+                  controller.surfaceTree.contains(candidate) else { continue }
+            return candidate
+        }
+
+        for controller in NSApp.windows.compactMap({ $0.windowController as? BaseTerminalController }) {
+            if let surface = controller.surfaceTree.first(where: { $0.id == surfaceID }) {
+                return surface
+            }
+        }
+        return nil
+    }
+
     private static func updateSurfaceControllers(
         _ controller: BaseTerminalController,
         from oldTree: SplitTree<Ghostty.SurfaceView>,

@@ -14,10 +14,10 @@ but it does **not** discover, install, launch, or connect third-party plugin
 executables in production.
 
 A directory, manifest, or executable copied beside OMG will not be loaded.
-The Experimental `PluginInstallationManager` can download a GitHub repository's
-`main` archive, validate `manifest.json`, and store it under the OMG Application
-Support Plugins directory, but no installed package is launched or connected to
-runtime yet. There is no public SDK, socket listener, or hot reload command.
+`PluginInstallationManager` maintains the on-disk Application Support `Plugins/`
+and `PluginData/` boundaries for built-in official entries, while external
+third-party packages are neither downloaded nor launched at runtime yet. There
+is no public SDK, socket listener, or hot reload command.
 
 ## Native Session Runtime lifecycle
 
@@ -2640,17 +2640,19 @@ data, or SSH replay descriptors. Global vendor Agent hooks are intentionally
 outside this directory because they belong to each Agent's own configuration;
 they must remain backward-compatible across OMG channels.
 
-`PluginInstallationManager` provides `install(from:)`, `update(_:from:)`,
+`PluginInstallationManager` provides `installOfficial(_:)`,
 `disable(_:)`, `enable(_:)`, `uninstall(_:removeData:)`, and `dataURL(for:)`.
-The source currently must be an HTTPS GitHub repository URL. Installation
-fetches the repository's `main.tar.gz`, finds `manifest.json`, validates the
-plugin ID/version/relative executable path, copies code to `Plugins/<id>`, and
-creates a separate data directory. Disabled state is stored in
-`Plugins/disabled.json`.
+Official installations write `manifest.json` under `Plugins/<id>` and create a
+separate `PluginData/<id>` directory; unverified GitHub tarball downloads are
+intentionally retired until signed package distribution and process supervision
+exist. Disabled state is stored in `Plugins/disabled.json`.
 
-Settings → Plugins exposes the official catalog and an Install from GitHub
-URL field backed by this manager. The SSH official entry installs the in-tree
-provider marker and enables the generic workspace provider; it does not
+Settings → Plugins exposes the official catalog alongside **OMG Doctor**
+(Accessibility/TCC global keybind health, local `omgd` runtime and SSH
+multiplexer health, Agent dotfile `.omg.bak` backup audit, and live
+WebView/LSP/surface memory reclamation, also reachable via the `OMG Doctor`
+Command Palette action and `omg +doctor`). The SSH official entry installs the
+in-tree provider marker and enables the generic workspace provider; it does not
 download private keys or a remote helper. External installed packages remain
 inert. There is no signature/ownership verification, semver host compatibility
 enforcement, executable launch, process supervision, or automatic update

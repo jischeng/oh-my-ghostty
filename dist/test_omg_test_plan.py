@@ -105,6 +105,15 @@ class PlannerTests(unittest.TestCase):
         self.assertFalse(result["run_swift"])
         self.assertEqual(result["unknown_paths"], [])
 
+    def test_quick_terminal_global_keybinds_and_command_palette_map_to_terminal(self):
+        result = self.plan(paths=[
+            "macos/Sources/Features/QuickTerminal/QuickTerminalController.swift",
+            "macos/Sources/Features/Global Keybinds/GlobalEventTap.swift",
+            "macos/Sources/Features/Command Palette/TerminalCommandPalette.swift",
+        ])
+        self.assertEqual(result["unknown_paths"], [])
+        self.assertIn("terminal", result["modules"])
+
     def test_tabs_keep_policy_tests_and_defer_only_real_native_drag(self):
         result = self.plan(modules=["tabs"])
         self.assertIn("GhosttyTests/VerticalNativeTabOutlineTests", result["only_testing"])

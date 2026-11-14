@@ -148,7 +148,8 @@ enum TerminalPathTarget {
 enum TerminalPathOpener {
     /// Return true for file candidates even when absent, so prose cannot reach Launch Services.
     struct Resolved {
-        let controller: TerminalController
+        let host: any TerminalHostProviding
+        var controller: TerminalController? { host as? TerminalController }
         let session: PaneSessionContext
         let context: InspectorPaneContext
         let filesystem: any WorkspaceFilesystem
@@ -159,11 +160,11 @@ enum TerminalPathOpener {
     /// Resolve a candidate against the source pane's local or SSH filesystem.
     /// Shared by Cmd-hover existence checks and Cmd-click so both agree.
     static func resolve(_ value: String, from source: Ghostty.SurfaceView, baseDirectory: String?) -> Resolved? {
-        guard let controller = source.window?.windowController as? TerminalController,
-              let session = controller.paneSessionContext(for: source) else { return nil }
+        guard let host = TerminalHostLookup.host(owning: source),
+              let session = host.paneSessionContext(for: source) else { return nil }
         if case .sshConnecting = session.state { return nil }
         let context = InspectorPaneContext(
-            tabID: controller.tabSessionID, surfaceID: source.id, title: session.presentationTitle,
+            tabID: host.hostTabSessionID, surfaceID: source.id, title: session.presentationTitle,
             workingDirectory: session.workingDirectory, workspace: session.workspace, session: session
         )
         let filesystem = WorkspaceFilesystemFactory.make(for: context)
@@ -176,7 +177,7 @@ enum TerminalPathOpener {
             value, directory: directory, isRemote: filesystem.descriptor.kind == .ssh
         ) else { return nil }
         return .init(
-            controller: controller, session: session, context: context,
+            host: host, session: session, context: context,
             filesystem: filesystem, path: target.path, location: target.location
         )
     }
@@ -184,16 +185,16 @@ enum TerminalPathOpener {
     static func open(_ value: String, from source: Ghostty.SurfaceView, baseDirectory: String? = nil) -> Bool {
         guard TerminalPathTarget.isCandidate(value) else { return false }
         guard let resolved = resolve(value, from: source, baseDirectory: baseDirectory) else { return true }
-        let controller = resolved.controller
+        let host = resolved.host
         let filesystem = resolved.filesystem
         let path = resolved.path
-        Task { [weak controller, weak source] in
+        Task { [weak host, weak source] in
             do {
                 guard let kind = try await filesystem.itemType(at: path),
-                      let controller, let source else { return }
-                try await performOpen(kind: kind, resolved: resolved, controller: controller, source: source)
+                      let host, let source else { return }
+                try await performOpen(kind: kind, resolved: resolved, host: host, source: source)
             } catch {
-                presentOpenError(error, controller: controller, source: source)
+                presentOpenError(error, host: host, source: source)
             }
         }
         return true
@@ -216,7 +217,7 @@ enum TerminalPathOpener {
                     reportLinkChecked(candidate, baseDirectory: base, exists: false, to: source)
                     continue
                 }
-                let controller = resolved.controller
+                let host = resolved.host
                 let filesystem = resolved.filesystem
                 let path = resolved.path
                 do {
@@ -224,10 +225,10 @@ enum TerminalPathOpener {
                     guard !Task.isCancelled else { return }
                     reportLinkChecked(candidate, baseDirectory: base, exists: kind != nil, to: source)
                     guard let kind else { continue }
-                    try await performOpen(kind: kind, resolved: resolved, controller: controller, source: source)
+                    try await performOpen(kind: kind, resolved: resolved, host: host, source: source)
                     return
                 } catch {
-                    presentOpenError(error, controller: controller, source: source)
+                    presentOpenError(error, host: host, source: source)
                     return
                 }
             }
@@ -257,43 +258,78 @@ enum TerminalPathOpener {
     private static func performOpen(
         kind: WorkspaceItemType,
         resolved: Resolved,
-        controller: TerminalController,
+        host: any TerminalHostProviding,
         source: Ghostty.SurfaceView
     ) async throws {
         let session = resolved.session
         guard source.surface != nil,
-              controller.surfaceTree.first(where: { $0.id == source.id }) != nil,
-              controller.paneSessionContext(for: source)?.state == session.state else { return }
+              host.surfaceTree.first(where: { $0.id == source.id }) != nil,
+              host.paneSessionContext(for: source)?.state == session.state else { return }
         switch kind {
         case .file:
-            EditorWorkspaceStore.shared.open(
-                path: resolved.path,
-                context: resolved.context,
-                location: resolved.location
-            )
+            if host is TerminalController {
+                EditorWorkspaceStore.shared.open(
+                    path: resolved.path,
+                    context: resolved.context,
+                    location: resolved.location
+                )
+            } else {
+                let parentDirectory = (resolved.path as NSString).deletingLastPathComponent
+                guard let editorController = host.resolveEditorHostController(workingDirectory: parentDirectory) else {
+                    return
+                }
+                let targetSurface = editorController.focusedSurface ?? editorController.surfaceTree.first
+                let targetSession = editorController.paneSessionContext(for: targetSurface)
+                    ?? PaneSessionContext(workingDirectory: parentDirectory, terminalTitle: targetSurface?.title ?? "")
+                let targetContext = InspectorPaneContext(
+                    tabID: editorController.tabSessionID,
+                    surfaceID: targetSurface?.id,
+                    title: targetSession.presentationTitle,
+                    workingDirectory: parentDirectory,
+                    workspace: nil,
+                    session: .init(workingDirectory: parentDirectory, terminalTitle: targetSurface?.title ?? "")
+                )
+                EditorWorkspaceStore.shared.open(
+                    path: resolved.path,
+                    context: targetContext,
+                    location: resolved.location
+                )
+            }
         case .directory:
             let isIdleShell = await isIdleInteractiveShell(source, session: session)
             guard !Task.isCancelled,
                   source.surface != nil,
-                  controller.surfaceTree.first(where: { $0.id == source.id }) != nil,
-                  controller.paneSessionContext(for: source)?.state == session.state else { return }
-            try openDirectory(
-                resolved.path,
-                controller: controller,
-                source: source,
-                session: session,
+                  host.surfaceTree.first(where: { $0.id == source.id }) != nil,
+                  host.paneSessionContext(for: source)?.state == session.state else { return }
+            let destination = directoryDestination(
+                preferred: OhMyGhosttySettings.shared.editorDirectoryOpenDestination,
+                hasAgent: host.hasActivePaneAgent(for: source),
+                blocksProgrammaticInput: source.blocksProgrammaticInput,
                 isIdleInteractiveShell: isIdleShell
+            )
+            try host.navigateToDirectory(
+                resolved.path,
+                from: source,
+                session: session,
+                destination: destination
             )
         }
     }
 
     private static func presentOpenError(
         _ error: Error,
-        controller: TerminalController?,
+        host: (any TerminalHostProviding)?,
         source: Ghostty.SurfaceView?
     ) {
-        guard let controller, let source else { return }
-        let workspace = EditorWorkspaceStore.shared.workspace(for: controller.tabSessionID, surfaceID: source.id)
+        guard let host, let source else { return }
+        let parentDirectory = source.pwd
+        guard let controller = (host as? TerminalController)
+                ?? host.resolveEditorHostController(workingDirectory: parentDirectory) else { return }
+        let resolvedSurfaceID: UUID? = (host is TerminalController)
+            ? source.id
+            : (controller.focusedSurface?.id ?? controller.surfaceTree.first?.id)
+        guard let targetSurfaceID = resolvedSurfaceID else { return }
+        let workspace = EditorWorkspaceStore.shared.workspace(for: controller.tabSessionID, surfaceID: targetSurfaceID)
         workspace.errorMessage = error.localizedDescription
         workspace.isVisible = true
     }
@@ -425,50 +461,6 @@ enum TerminalPathOpener {
         case .sshConnecting:
             return false
         }
-    }
-
-    private static func openDirectory(
-        _ path: String,
-        controller: TerminalController,
-        source: Ghostty.SurfaceView,
-        session: PaneSessionContext,
-        isIdleInteractiveShell: Bool
-    ) throws {
-        let destination = directoryDestination(
-            preferred: OhMyGhosttySettings.shared.editorDirectoryOpenDestination,
-            hasAgent: controller.agentActivity(for: source) != nil || controller.agentResumeDescriptor(for: source) != nil,
-            blocksProgrammaticInput: source.blocksProgrammaticInput,
-            isIdleInteractiveShell: isIdleInteractiveShell
-        )
-        if destination == .currentPane {
-            guard !source.blocksProgrammaticInput, let terminal = source.surfaceModel else { return }
-            EditorWorkspaceStore.shared.workspace(for: controller.tabSessionID, surfaceID: source.id).isVisible = false
-            controller.focusedSurface = source
-            source.window?.makeFirstResponder(source)
-            // Move to the end and clear any partial shell input before changing directory.
-            terminal.sendKeyEvent(.init(key: .e, mods: .ctrl))
-            terminal.sendKeyEvent(.init(key: .u, mods: .ctrl))
-            terminal.sendText(TerminalPathTarget.directoryCommand(path))
-            terminal.sendKeyEvent(.init(key: .enter))
-            return
-        }
-
-        var configuration = Ghostty.SurfaceConfiguration()
-        switch session.state {
-        case .local:
-            configuration.workingDirectory = path
-        case .sshReady(let ssh, _):
-            guard let replay = ssh.replay ?? SSHReplayStore.load(connectionID: ssh.connectionID),
-                  let executable = Bundle.main.executableURL?.path,
-                  let command = replay.command(executablePath: executable, remoteWorkingDirectory: path) else {
-                throw WorkspaceFilesystemError.operationFailed("This SSH session cannot be opened in another pane.")
-            }
-            configuration.workingDirectory = session.local.workingDirectory
-            configuration.command = TerminalController.replaySurvivalCommand(command)
-        case .sshConnecting:
-            return
-        }
-        _ = EditorPaneDestination.open(in: controller, source: source, destination: destination, configuration: configuration)
     }
 }
 

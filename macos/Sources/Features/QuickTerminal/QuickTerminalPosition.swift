@@ -47,13 +47,76 @@ enum QuickTerminalPosition: String {
         // We always end visible
         window.alphaValue = 1
 
-        // Position depends
-        window.setFrame(.init(
-            origin: finalOrigin(for: window, on: screen),
-            size: closedFrame?.size ?? configuredFrameSize(
+        // Clamp geometry strictly inside screen.visibleFrame so the quick terminal
+        // avoids the macOS Dock and menu bar without mutating global Dock preferences.
+        window.setFrame(
+            resolvedFinalFrame(
                 on: screen,
-                terminalSize: terminalSize)
-        ), display: true)
+                terminalSize: terminalSize,
+                closedFrame: closedFrame
+            ),
+            display: true
+        )
+    }
+
+    /// Resolve a safe final frame bounded within `screen.visibleFrame`.
+    func resolvedFinalFrame(
+        on screen: NSScreen,
+        terminalSize: QuickTerminalSize,
+        closedFrame: NSRect? = nil
+    ) -> NSRect {
+        resolvedFinalFrame(
+            in: screen.visibleFrame,
+            terminalSize: terminalSize,
+            closedFrame: closedFrame
+        )
+    }
+
+    /// Pure geometry helper bounded within a screen's `visibleFrame` (excluding Dock & menu bar).
+    func resolvedFinalFrame(
+        in visibleFrame: NSRect,
+        terminalSize: QuickTerminalSize,
+        closedFrame: NSRect? = nil
+    ) -> NSRect {
+        let configured = terminalSize.calculate(position: self, screenDimensions: visibleFrame.size)
+        let rawSize = closedFrame?.size ?? NSSize(width: configured.width, height: configured.height)
+        let clampedSize = NSSize(
+            width: max(1, min(rawSize.width, visibleFrame.width)),
+            height: max(1, min(rawSize.height, visibleFrame.height))
+        )
+        let rawOrigin: CGPoint
+        switch self {
+        case .top:
+            rawOrigin = .init(
+                x: round(visibleFrame.origin.x + (visibleFrame.width - clampedSize.width) / 2),
+                y: visibleFrame.maxY - clampedSize.height
+            )
+        case .bottom:
+            rawOrigin = .init(
+                x: round(visibleFrame.origin.x + (visibleFrame.width - clampedSize.width) / 2),
+                y: visibleFrame.minY
+            )
+        case .left:
+            rawOrigin = .init(
+                x: visibleFrame.minX,
+                y: round(visibleFrame.origin.y + (visibleFrame.height - clampedSize.height) / 2)
+            )
+        case .right:
+            rawOrigin = .init(
+                x: visibleFrame.maxX - clampedSize.width,
+                y: round(visibleFrame.origin.y + (visibleFrame.height - clampedSize.height) / 2)
+            )
+        case .center:
+            rawOrigin = .init(
+                x: round(visibleFrame.origin.x + (visibleFrame.width - clampedSize.width) / 2),
+                y: round(visibleFrame.origin.y + (visibleFrame.height - clampedSize.height) / 2)
+            )
+        }
+        let clampedOrigin = CGPoint(
+            x: max(visibleFrame.minX, min(rawOrigin.x, visibleFrame.maxX - clampedSize.width)),
+            y: max(visibleFrame.minY, min(rawOrigin.y, visibleFrame.maxY - clampedSize.height))
+        )
+        return NSRect(origin: clampedOrigin, size: clampedSize)
     }
 
     /// Get the configured frame size for initial positioning and animations.

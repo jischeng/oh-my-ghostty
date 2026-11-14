@@ -35,8 +35,8 @@ enum SettingsSearchCatalog {
             item(.general, \.quitSection, ["general.quitWithoutConfirmation"], "exit quit confirmation 退出 确认"),
             item(.terminal, \.sessionRecoverySection, ["sessions.startup"], "startup restore scrollback 启动 恢复 滚屏"),
             .init(id: "terminal:runtime", tab: .terminal, title: strings.runtimeTitle, anchor: strings.runtimeTitle,
-                  keywords: "SSH background lifetime deadline TTL Agent completion resume quit exit keep 后台 会话 存活 截止 完成 恢复 退出 继续",
-                  prefixes: ["sessions.runtime", "sessions.localRuntime", "sessions.keep"]),
+                  keywords: "SSH background lifetime deadline TTL Agent completion resume quit exit keep quick terminal 后台 会话 存活 截止 完成 恢复 退出 继续 快捷终端",
+                  prefixes: ["sessions.runtime", "sessions.localRuntime", "sessions.quickTerminalRuntime", "sessions.keep"]),
             item(.controls, \.quickInputSection, ["keyboard.quickInputHeight", "keyboard.quickInputHistory", "keyboard.quickInputControlJ"], "history retention newline control-j 快捷输入 历史 保留 换行"),
             item(.editor, \.editorOpeningSection, ["editor.fileOpen", "editor.directoryOpen"], "files folders 打开 文件 目录"),
             item(.editor, \.editorBehaviorSection, ["editor.keymap", "editor.autoClose", "editor.wordWrap"], "vim wrap pairs 自动换行 括号"),
@@ -65,7 +65,7 @@ enum SettingsSearchCatalog {
             item(.mobile, \.mobileAccessTitle, [], "mobile iPhone iPad device pair invitation gateway LAN 手机 移动 设备 配对 邀请 网关 局域网 连接 状态 访问 权限"),
             item(.ssh, \.sshSettingsTitle, [], "ssh machine host remote register 机器 主机 远程 注册", anchor: "sshRegistration"),
             item(.plugins, \.officialPluginsSection, [], "plugin install 插件 安装 官方"),
-            item(.plugins, \.installFromGitHubSection, [], "GitHub plugin repository 仓库 插件"),
+            item(.plugins, \.doctorSection, [], "doctor health diagnostics accessibility tcc memory webview lsp reclaim runtime omgd ssh backup 健康 自检 诊断 辅助功能 权限 内存 回收"),
             item(.advanced, \.settingsLocationsSection, [""], "config settings.json reload 配置文件 重载 来源", anchor: "settingsFiles"),
         ]
         for group in CoreSetting.Group.allCases {

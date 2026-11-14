@@ -29,14 +29,14 @@ enum TerminalLinkChecker {
             return
         }
         let filesystem = resolved.filesystem, path = resolved.path
-        let controller = resolved.controller, session = resolved.session
+        let host = resolved.host, session = resolved.session
         let scope = TerminalLinkCheckBatcher.Scope(
             revision: session.revision, filesystemID: filesystem.descriptor.id,
             directory: filesystem.descriptor.workingDirectory
         )
-        source.linkCheckBatcher.enqueue(path: path, scope: scope, filesystem: filesystem, reply: { [weak source, weak controller] exists in
-            guard let source, let controller,
-                  controller.paneSessionContext(for: source)?.state == session.state else {
+        source.linkCheckBatcher.enqueue(path: path, scope: scope, filesystem: filesystem, reply: { [weak source, weak host] exists in
+            guard let source, let host,
+                  host.paneSessionContext(for: source)?.state == session.state else {
                 reply(false)
                 return
             }

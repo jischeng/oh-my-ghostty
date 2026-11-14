@@ -34,9 +34,11 @@ final class GitDiffPreferences: ObservableObject {
     @Published private(set) var viewMode: GitDiffViewMode
     @Published private(set) var review: Bool
     @Published private(set) var wordWrap: Bool
+    var onPortableStateDidChange: (() -> Void)?
 
     private let defaults: UserDefaults
     private var isWritingDefaults = false
+    private var isApplyingPortableState = false
     private nonisolated(unsafe) var defaultsObserver: NSObjectProtocol?
 
     init(defaults: UserDefaults = .standard) {
@@ -75,6 +77,9 @@ final class GitDiffPreferences: ObservableObject {
             defaults.set(next.rawValue, forKey: Self.viewModeKey)
             isWritingDefaults = false
         }
+        if !isApplyingPortableState {
+            onPortableStateDidChange?()
+        }
     }
 
     func setReview(_ next: Bool) {
@@ -85,6 +90,9 @@ final class GitDiffPreferences: ObservableObject {
             isWritingDefaults = true
             defaults.set(next, forKey: Self.reviewKey)
             isWritingDefaults = false
+        }
+        if !isApplyingPortableState {
+            onPortableStateDidChange?()
         }
     }
 
@@ -97,6 +105,21 @@ final class GitDiffPreferences: ObservableObject {
             defaults.set(next, forKey: Self.wordWrapKey)
             isWritingDefaults = false
         }
+        if !isApplyingPortableState {
+            onPortableStateDidChange?()
+        }
+    }
+
+    func portableSection() -> PortableGitDiffSection {
+        PortableGitDiffSection(viewMode: viewMode, review: review, wordWrap: wordWrap)
+    }
+
+    func applyPortableSection(_ section: PortableGitDiffSection) {
+        isApplyingPortableState = true
+        defer { isApplyingPortableState = false }
+        setViewMode(GitDiffViewMode(storedValue: section.viewMode))
+        setReview(section.review)
+        setWordWrap(section.wordWrap)
     }
 
     func refreshFromDefaults() {

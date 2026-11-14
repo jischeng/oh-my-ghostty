@@ -24,9 +24,6 @@ class QuickTerminalController: BaseTerminalController {
     /// Cache for per-screen window state.
     let screenStateCache: QuickTerminalScreenStateCache
 
-    /// Non-nil if we have hidden dock state.
-    private var hiddenDock: HiddenDock?
-
     /// The configuration derived from the Ghostty config so we don't need to rely on references.
     private var derivedConfig: DerivedConfig
 
@@ -60,11 +57,6 @@ class QuickTerminalController: BaseTerminalController {
 
         // Setup our notifications for behaviors
         let center = NotificationCenter.default
-        center.addObserver(
-            self,
-            selector: #selector(applicationWillTerminate(_:)),
-            name: NSApplication.willTerminateNotification,
-            object: nil)
         center.addObserver(
             self,
             selector: #selector(onToggleFullscreen(notification:)),
@@ -101,9 +93,6 @@ class QuickTerminalController: BaseTerminalController {
         // Remove all of our notificationcenter subscriptions
         let center = NotificationCenter.default
         center.removeObserver(self)
-
-        // Make sure we restore our hidden dock
-        hiddenDock = nil
     }
 
     // MARK: NSWindowController
@@ -160,9 +149,6 @@ class QuickTerminalController: BaseTerminalController {
         guard visible else { return }
 
         terminalViewContainer?.updateGlassTintOverlay(isKeyWindow: true)
-
-        // Re-hide the dock if we were hiding it before.
-        hiddenDock?.hide()
     }
 
     override func windowDidResignKey(_ notification: Notification) {
@@ -186,10 +172,6 @@ class QuickTerminalController: BaseTerminalController {
         if NSApp.isActive {
             self.previousApp = nil
         }
-
-        // Regardless of autohide, we always want to bring the dock back
-        // when we lose focus.
-        hiddenDock?.restore()
 
         if derivedConfig.quickTerminalAutoHide {
             switch derivedConfig.quickTerminalSpaceBehavior {
@@ -320,9 +302,9 @@ class QuickTerminalController: BaseTerminalController {
         direction: SplitTree<Ghostty.SurfaceView>.NewDirection,
         baseConfig config: Ghostty.SurfaceConfiguration? = nil
     ) -> Ghostty.SurfaceView? {
-        var config = config ?? Ghostty.SurfaceConfiguration()
-        config.environmentVariables["GHOSTTY_QUICK_TERMINAL"] = "1"
-        return super.newSplit(at: oldView, direction: direction, baseConfig: config)
+        var resolved = config ?? Ghostty.SurfaceConfiguration()
+        QuickTerminalRuntimeSupport.prepareSplitConfiguration(&resolved)
+        return super.newSplit(at: oldView, direction: direction, baseConfig: resolved)
     }
 
     // MARK: Methods
@@ -380,9 +362,9 @@ class QuickTerminalController: BaseTerminalController {
                 }
             } else {
                 var config = Ghostty.SurfaceConfiguration()
-                config.environmentVariables["GHOSTTY_QUICK_TERMINAL"] = "1"
+                let paneID = QuickTerminalRuntimeSupport.prepareInitialConfiguration(&config)
 
-                let view = Ghostty.SurfaceView(ghostty_app, baseConfig: config)
+                let view = Ghostty.SurfaceView(ghostty_app, baseConfig: config, uuid: paneID)
                 surfaceTree = SplitTree(view: view)
                 focusedSurface = view
             }
@@ -394,6 +376,7 @@ class QuickTerminalController: BaseTerminalController {
         restorationState = nil
     }
 
+    @discardableResult
     func animateOut() {
         guard let window = self.window else { return }
 
@@ -449,22 +432,9 @@ class QuickTerminalController: BaseTerminalController {
             window.makeKeyAndOrderFront(nil)
         }
 
-        // If our dock position would conflict with our target location then
-        // we autohide the dock.
-        if position.conflictsWithDock(on: screen) {
-            if hiddenDock == nil {
-                hiddenDock = .init()
-            }
-
-            hiddenDock?.hide()
-        } else {
-            // Ensure we don't have any hidden dock if we don't conflict.
-            // The deinit will restore.
-            hiddenDock = nil
-        }
-
         // Run the animation that moves our window into the proper place and makes
-        // it visible.
+        // it visible. Geometry avoidance uses `screen.visibleFrame` directly without
+        // mutating system-wide macOS Dock preferences (`Dock.autoHideEnabled`).
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = derivedConfig.quickTerminalAnimationDuration
             context.timingFunction = .init(name: .easeIn)
@@ -479,7 +449,6 @@ class QuickTerminalController: BaseTerminalController {
             DispatchQueue.main.async {
                 // If we canceled our animation clean up some state.
                 guard self.visible else {
-                    self.hiddenDock = nil
                     return
                 }
 
@@ -551,9 +520,6 @@ class QuickTerminalController: BaseTerminalController {
 
     private func animateWindowOut(window: NSWindow, to position: QuickTerminalPosition) {
         saveScreenState(exitFullscreen: true)
-
-        // If we hid the dock then we unhide it.
-        hiddenDock = nil
 
         // If the window isn't on our active space then we don't animate, we just
         // hide it.
@@ -681,13 +647,6 @@ class QuickTerminalController: BaseTerminalController {
 
     // MARK: Notifications
 
-    @objc private func applicationWillTerminate(_ notification: Notification) {
-        // If the application is going to terminate we want to make sure we
-        // restore any global dock state. I think deinit should be called which
-        // would call this anyways but I can't be sure so I will do this too.
-        hiddenDock = nil
-    }
-
     @objc private func onToggleFullscreen(notification: SwiftUI.Notification) {
         guard let target = notification.object as? Ghostty.SurfaceView else { return }
         guard target == self.focusedSurface else { return }
@@ -769,35 +728,6 @@ class QuickTerminalController: BaseTerminalController {
             self.quickTerminalSize = config.quickTerminalSize
             self.backgroundOpacity = config.backgroundOpacity
             self.backgroundBlur = config.backgroundBlur
-        }
-    }
-
-    /// Hides the dock globally (not just NSApp). This is only used if the quick terminal is
-    /// in a conflicting position with the dock.
-    private class HiddenDock {
-        let previousAutoHide: Bool
-        private var hidden: Bool = false
-
-        init() {
-            previousAutoHide = Dock.autoHideEnabled
-        }
-
-        deinit {
-            restore()
-        }
-
-        func hide() {
-            guard !hidden else { return }
-            NSApp.acquirePresentationOption(.autoHideDock)
-            Dock.autoHideEnabled = true
-            hidden = true
-        }
-
-        func restore() {
-            guard hidden else { return }
-            NSApp.releasePresentationOption(.autoHideDock)
-            Dock.autoHideEnabled = previousAutoHide
-            hidden = false
         }
     }
 }

@@ -1,10 +1,13 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const posix = std.posix;
 const Allocator = std.mem.Allocator;
 const args = @import("args.zig");
 const Action = @import("ghostty.zig").Action;
 const Config = @import("../config.zig").Config;
 const global = @import("../global.zig");
+
+const fstatat_sym = if (builtin.os.tag == .windows) void else if (posix.lfs64_abi) posix.system.fstatat64 else posix.system.fstatat;
 
 pub const Options = struct {
     /// Emit machine-readable JSON diagnostics to stdout.
@@ -74,7 +77,22 @@ pub const InspectParams = struct {
     settings_rel_path: []const u8 = ".config/oh-my-ghostty/settings.json",
     has_global_keybinds: bool,
     accessibility_trusted: bool,
+    expected_uid: ?u32 = null,
 };
+
+pub fn settingsRelPathForExecutableDir(executable_dir: ?[]const u8) []const u8 {
+    const dir = executable_dir orelse return ".config/oh-my-ghostty/settings.json";
+    if (std.mem.indexOf(u8, dir, "OMG Dev PTY.app") != null) {
+        return ".config/oh-my-ghostty-dev-pty/settings.json";
+    }
+    if (std.mem.indexOf(u8, dir, "OMG Dev Workspace.app") != null) {
+        return ".config/oh-my-ghostty-dev-workspace/settings.json";
+    }
+    if (std.mem.indexOf(u8, dir, "OMG Dev.app") != null) {
+        return ".config/oh-my-ghostty-dev/settings.json";
+    }
+    return ".config/oh-my-ghostty/settings.json";
+}
 
 /// Inspect OMG host permissions, persistent session runtime, SSH ControlMaster
 /// sockets, Agent dotfile `.omg.bak` backups, and portable `settings.json`.
@@ -107,10 +125,7 @@ pub fn run(gpa: Allocator) !u8 {
     const has_global = detectConfiguredGlobalKeybinds(gpa);
     const ax_trusted = checkMacOSAccessibilityTrusted();
 
-    const settings_rel = if (executable_dir != null and std.mem.indexOf(u8, executable_dir.?, "OMG Dev.app") != null)
-        ".config/oh-my-ghostty-dev/settings.json"
-    else
-        ".config/oh-my-ghostty/settings.json";
+    const settings_rel = settingsRelPathForExecutableDir(executable_dir);
 
     const report = try inspectEnvironment(global.io(), alloc, .{
         .home_dir = home_dir,
@@ -239,21 +254,43 @@ pub fn inspectEnvironment(
         } else |_| {}
     }
 
+    const expected_uid: u32 = if (comptime builtin.os.tag == .windows)
+        0
+    else
+        params.expected_uid orelse @intCast(std.c.getuid());
+
     var ssh_exists = false;
     var ssh_private = true;
     if (params.ssh_control_dir.len > 0) {
-        if (std.Io.Dir.openDirAbsolute(io, params.ssh_control_dir, .{})) |dir_val| {
+        if (comptime builtin.os.tag != .windows) {
+            switch (try posixLstat(alloc, params.ssh_control_dir)) {
+                .not_found => {
+                    ssh_exists = false;
+                    ssh_private = true;
+                },
+                .inaccessible => {
+                    ssh_exists = true;
+                    ssh_private = false;
+                },
+                .stat => |st| {
+                    ssh_exists = true;
+                    const is_dir = (st.mode & posix.S.IFMT) == posix.S.IFDIR;
+                    const is_private = (st.mode & 0o777) == 0o700;
+                    const owned_by_user = st.uid == expected_uid;
+                    ssh_private = is_dir and is_private and owned_by_user;
+                },
+            }
+        } else if (std.Io.Dir.openDirAbsolute(io, params.ssh_control_dir, .{})) |dir_val| {
             var dir = dir_val;
             defer dir.close(io);
             ssh_exists = true;
-            if (comptime builtin.os.tag != .windows) {
-                if (dir.stat(io)) |st| {
-                    ssh_private = (st.permissions.toMode() & 0o777) == 0o700;
-                } else |_| {
-                    ssh_private = false;
-                }
-            }
-        } else |_| {}
+        } else |err| switch (err) {
+            error.FileNotFound => {},
+            else => {
+                ssh_exists = true;
+                ssh_private = false;
+            },
+        }
     }
 
     const runtime_ssh: RuntimeSSHReport = .{
@@ -288,17 +325,34 @@ pub fn inspectEnvironment(
     if (params.home_dir.len > 0) {
         for (agent_rel_paths) |rel| {
             const bak_path = try std.fmt.allocPrint(alloc, "{s}/{s}.omg.bak", .{ params.home_dir, rel });
-            const file = std.Io.Dir.openFileAbsolute(io, bak_path, .{}) catch continue;
-            defer file.close(io);
-            backup_files += 1;
             if (comptime builtin.os.tag != .windows) {
-                if (file.stat(io)) |st| {
-                    if ((st.permissions.toMode() & 0o777) != 0o600) {
+                switch (try posixLstat(alloc, bak_path)) {
+                    .not_found => continue,
+                    .inaccessible => {
+                        backup_files += 1;
                         insecure_backups += 1;
-                    }
-                } else |_| {
-                    insecure_backups += 1;
+                    },
+                    .stat => |st| {
+                        backup_files += 1;
+                        const is_reg = (st.mode & posix.S.IFMT) == posix.S.IFREG;
+                        const is_private = (st.mode & 0o777) == 0o600;
+                        const owned_by_user = st.uid == expected_uid;
+                        if (!is_reg or !is_private or !owned_by_user) {
+                            insecure_backups += 1;
+                        }
+                    },
                 }
+            } else {
+                const file = std.Io.Dir.openFileAbsolute(io, bak_path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+                    error.FileNotFound => continue,
+                    else => {
+                        backup_files += 1;
+                        insecure_backups += 1;
+                        continue;
+                    },
+                };
+                defer file.close(io);
+                backup_files += 1;
             }
         }
     }
@@ -322,34 +376,66 @@ pub fn inspectEnvironment(
     var settings_valid = true;
 
     if (params.home_dir.len > 0) {
-        if (std.Io.Dir.openFileAbsolute(io, settings_path, .{})) |file| {
-            defer file.close(io);
-            settings_exists = true;
-            if (comptime builtin.os.tag != .windows) {
-                if (file.stat(io)) |st| {
-                    settings_private = (st.permissions.toMode() & 0o777) == 0o600;
-                } else |_| {
+        var should_read_settings = false;
+        if (comptime builtin.os.tag != .windows) {
+            switch (try posixLstat(alloc, settings_path)) {
+                .not_found => {},
+                .inaccessible => {
+                    settings_exists = true;
                     settings_private = false;
-                }
-            }
-            var reader = file.reader(io, &.{});
-            if (reader.interface.allocRemaining(alloc, .limited(1024 * 1024))) |bytes| {
-                if (std.json.parseFromSlice(std.json.Value, alloc, bytes, .{})) |parsed| {
-                    defer parsed.deinit();
-                    if (parsed.value == .object) {
-                        has_ssh_hosts = parsed.value.object.contains("sshHosts");
-                        has_agent_policies = parsed.value.object.contains("agentPolicies");
-                        has_git_diff = parsed.value.object.contains("gitDiff");
+                    settings_valid = false;
+                },
+                .stat => |st| {
+                    settings_exists = true;
+                    const is_reg = (st.mode & posix.S.IFMT) == posix.S.IFREG;
+                    const is_private = (st.mode & 0o777) == 0o600;
+                    const owned_by_user = st.uid == expected_uid;
+                    settings_private = is_reg and is_private and owned_by_user;
+                    if (is_reg and owned_by_user) {
+                        should_read_settings = true;
                     } else {
+                        settings_valid = false;
+                    }
+                },
+            }
+        } else {
+            should_read_settings = true;
+        }
+
+        if (should_read_settings) {
+            if (std.Io.Dir.openFileAbsolute(io, settings_path, .{ .follow_symlinks = false })) |file| {
+                defer file.close(io);
+                settings_exists = true;
+                var reader = file.reader(io, &.{});
+                if (reader.interface.allocRemaining(alloc, .limited(1024 * 1024))) |bytes| {
+                    if (std.json.parseFromSlice(std.json.Value, alloc, bytes, .{})) |parsed| {
+                        defer parsed.deinit();
+                        if (parsed.value == .object) {
+                            has_ssh_hosts = parsed.value.object.contains("sshHosts");
+                            has_agent_policies = parsed.value.object.contains("agentPolicies");
+                            has_git_diff = parsed.value.object.contains("gitDiff");
+                        } else {
+                            settings_valid = false;
+                        }
+                    } else |_| {
                         settings_valid = false;
                     }
                 } else |_| {
                     settings_valid = false;
                 }
-            } else |_| {
-                settings_valid = false;
+            } else |err| {
+                if (comptime builtin.os.tag == .windows) {
+                    if (err != error.FileNotFound) {
+                        settings_exists = true;
+                        settings_private = false;
+                        settings_valid = false;
+                    }
+                } else {
+                    settings_private = false;
+                    settings_valid = false;
+                }
             }
-        } else |_| {}
+        }
     }
 
     const portable_settings: PortableSettingsReport = .{
@@ -555,4 +641,128 @@ test "doctor reports TCC warning and audits sessions, backups, and portable sett
     defer parsed.deinit();
     try testing.expectEqual(HealthStatus.warning, parsed.value.status);
     try testing.expectEqual(@as(usize, 1), parsed.value.runtime_ssh.active_sessions);
+}
+
+const PosixLstatResult = union(enum) {
+    not_found,
+    inaccessible,
+    stat: struct {
+        mode: u32,
+        uid: u32,
+    },
+};
+
+fn posixLstat(alloc: Allocator, path: []const u8) !PosixLstatResult {
+    if (comptime builtin.os.tag == .windows) unreachable;
+    const path_z = try alloc.dupeZ(u8, path);
+    var st = std.mem.zeroes(posix.Stat);
+    while (true) {
+        switch (posix.errno(fstatat_sym(
+            posix.AT.FDCWD,
+            path_z.ptr,
+            &st,
+            posix.AT.SYMLINK_NOFOLLOW,
+        ))) {
+            .SUCCESS => return .{
+                .stat = .{
+                    .mode = @intCast(st.mode),
+                    .uid = @intCast(st.uid),
+                },
+            },
+            .INTR => continue,
+            .NOENT => return .not_found,
+            else => return .inaccessible,
+        }
+    }
+}
+
+test "doctor rejects symlinks, wrong-UID squatting, and resolves all dev channel settings paths" {
+    const testing = std.testing;
+    try testing.expectEqualStrings(
+        ".config/oh-my-ghostty-dev-pty/settings.json",
+        settingsRelPathForExecutableDir("/Applications/OMG Dev PTY.app/Contents/MacOS"),
+    );
+    try testing.expectEqualStrings(
+        ".config/oh-my-ghostty-dev-workspace/settings.json",
+        settingsRelPathForExecutableDir("/Applications/OMG Dev Workspace.app/Contents/MacOS"),
+    );
+    try testing.expectEqualStrings(
+        ".config/oh-my-ghostty-dev/settings.json",
+        settingsRelPathForExecutableDir("/Applications/OMG Dev.app/Contents/MacOS"),
+    );
+    try testing.expectEqualStrings(
+        ".config/oh-my-ghostty/settings.json",
+        settingsRelPathForExecutableDir("/Applications/OMG.app/Contents/MacOS"),
+    );
+
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const home_path = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+
+    try tmp.dir.createDirPath(testing.io, "real-ssh");
+    const real_ssh = try std.fs.path.join(alloc, &.{ home_path, "real-ssh" });
+    {
+        var d = try std.Io.Dir.openDirAbsolute(testing.io, real_ssh, .{});
+        defer d.close(testing.io);
+        try d.setPermissions(testing.io, .fromMode(0o700));
+    }
+
+    // 1) Wrong-UID squatting on real directory -> warning!
+    const wrong_uid: u32 = @as(u32, @intCast(std.c.getuid())) +% 1;
+    const wrong_uid_report = try inspectEnvironment(testing.io, alloc, .{
+        .home_dir = home_path,
+        .ssh_control_dir = real_ssh,
+        .has_global_keybinds = false,
+        .accessibility_trusted = true,
+        .expected_uid = wrong_uid,
+    });
+    try testing.expect(wrong_uid_report.runtime_ssh.ssh_control_dir_exists);
+    try testing.expect(!wrong_uid_report.runtime_ssh.ssh_control_dir_private);
+    try testing.expectEqual(HealthStatus.warning, wrong_uid_report.runtime_ssh.status);
+
+    // 2) Symlinked ssh_control_dir, symlinked .omg.bak, and symlinked settings.json -> all rejected!
+    try tmp.dir.symLink(testing.io, "real-ssh", "symlink-ssh", .{});
+    const symlink_ssh = try std.fs.path.join(alloc, &.{ home_path, "symlink-ssh" });
+
+    try tmp.dir.createDirPath(testing.io, ".claude");
+    try tmp.dir.createDirPath(testing.io, ".config/oh-my-ghostty");
+    {
+        var f = try tmp.dir.createFile(testing.io, "target-secret.json", .{
+            .permissions = .fromMode(0o600),
+        });
+        defer f.close(testing.io);
+        try f.setPermissions(testing.io, .fromMode(0o600));
+        var buf: [128]u8 = undefined;
+        var w = f.writer(testing.io, &buf);
+        try w.interface.writeAll("{\"sshHosts\":{}}\n");
+        try w.interface.flush();
+    }
+    const target_secret = try std.fs.path.join(alloc, &.{ home_path, "target-secret.json" });
+    try tmp.dir.symLink(testing.io, target_secret, ".claude/settings.json.omg.bak", .{});
+    try tmp.dir.symLink(testing.io, target_secret, ".config/oh-my-ghostty/settings.json", .{});
+
+    const symlink_report = try inspectEnvironment(testing.io, alloc, .{
+        .home_dir = home_path,
+        .ssh_control_dir = symlink_ssh,
+        .has_global_keybinds = false,
+        .accessibility_trusted = true,
+    });
+    try testing.expect(symlink_report.runtime_ssh.ssh_control_dir_exists);
+    try testing.expect(!symlink_report.runtime_ssh.ssh_control_dir_private);
+    try testing.expectEqual(HealthStatus.warning, symlink_report.runtime_ssh.status);
+
+    try testing.expectEqual(@as(usize, 1), symlink_report.agent_backups.backup_files);
+    try testing.expectEqual(@as(usize, 1), symlink_report.agent_backups.insecure_backups);
+    try testing.expectEqual(HealthStatus.warning, symlink_report.agent_backups.status);
+
+    try testing.expect(symlink_report.portable_settings.exists);
+    try testing.expect(!symlink_report.portable_settings.private_mode);
+    try testing.expect(!symlink_report.portable_settings.has_ssh_hosts);
+    try testing.expectEqual(HealthStatus.warning, symlink_report.portable_settings.status);
 }

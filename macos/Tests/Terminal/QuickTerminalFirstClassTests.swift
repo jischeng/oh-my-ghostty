@@ -25,6 +25,8 @@ struct QuickTerminalFirstClassTests {
         let quickSurface = Ghostty.SurfaceView(cApp, baseConfig: config)
         quickSurface.pwd = tempDir.path
         quickController.surfaceTree = SplitTree(view: quickSurface)
+        _ = quickController.window
+        #expect(quickController.visible)
         defer {
             quickController.surfaceTree = .init()
             quickController.window?.delegate = nil
@@ -82,6 +84,8 @@ struct QuickTerminalFirstClassTests {
         let quickSurface = Ghostty.SurfaceView(cApp, baseConfig: config)
         quickSurface.pwd = tempDir.path
         quickController.surfaceTree = SplitTree(view: quickSurface)
+        _ = quickController.window
+        #expect(quickController.visible)
 
         defer {
             if let hostSurface = standardController.surfaceTree.first {
@@ -105,6 +109,7 @@ struct QuickTerminalFirstClassTests {
         for _ in 0..<40 where workspace.documents.isEmpty {
             try await Task.sleep(for: .milliseconds(25))
         }
+        #expect(!quickController.visible)
         #expect(workspace.documents.map(\.path) == [fileURL.resolvingSymlinksInPath().path])
         #expect(workspace.isVisible)
     }
@@ -127,12 +132,12 @@ struct QuickTerminalFirstClassTests {
         let quickSurface = Ghostty.SurfaceView(cApp, baseConfig: config)
         quickController.surfaceTree = SplitTree(view: quickSurface)
 
-        var createdController: TerminalController?
+        var createdResolution: EditorHostResolution?
         defer {
             quickController.surfaceTree = .init()
             quickController.window?.delegate = nil
             quickController.window?.close()
-            if let createdController {
+            if let createdController = createdResolution?.controller {
                 createdController.window?.delegate = nil
                 createdController.window?.close()
             }
@@ -141,10 +146,115 @@ struct QuickTerminalFirstClassTests {
             }
         }
 
-        createdController = quickController.resolveEditorHostController(workingDirectory: "/tmp")
-        let resolved = try #require(createdController)
-        #expect(!beforeSet.contains(ObjectIdentifier(resolved)))
-        #expect(QuickTerminalController.isEligibleEditorHost(resolved))
+        createdResolution = quickController.resolveEditorHost(workingDirectory: "/tmp")
+        let resolution = try #require(createdResolution)
+        #expect(resolution.createdNewWindow)
+        #expect(!beforeSet.contains(ObjectIdentifier(resolution.controller)))
+        #expect(QuickTerminalController.isEligibleEditorHost(resolution.controller))
+    }
+
+    @Test func quickTerminalEditorHandoffHonorsSplitOnExistingWindowAndCurrentPaneOnNewWindow() async throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let cApp = try #require(app.app)
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-qt-dest-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let existingFile = tempDir.appendingPathComponent("Existing.swift")
+        let newWinFile = tempDir.appendingPathComponent("NewWindow.swift")
+        try "let existing = 1\n".write(to: existingFile, atomically: true, encoding: .utf8)
+        try "let fresh = 2\n".write(to: newWinFile, atomically: true, encoding: .utf8)
+
+        let previousDestination = OhMyGhosttySettings.shared.editorFileOpenDestination
+        OhMyGhosttySettings.shared.editorFileOpenDestination = .splitRight
+        defer { OhMyGhosttySettings.shared.editorFileOpenDestination = previousDestination }
+
+        let existingEligible = TerminalController.all.filter(QuickTerminalController.isEligibleEditorHost)
+        for controller in existingEligible {
+            controller.workspacePresentationIsParked = true
+        }
+
+        let store = TerminalWorkspaceStore(fileURL: nil)
+        let coordinator = TerminalWorkspaceCoordinator(store: store)
+        coordinator.finishRestoring()
+
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        config.workingDirectory = tempDir.path
+
+        let standardController = TerminalController(
+            app,
+            withBaseConfig: config,
+            workspaceID: store.defaultID,
+            workspaceCoordinator: coordinator
+        )
+        standardController.window?.makeKeyAndOrderFront(nil)
+
+        let quickController = QuickTerminalController(app, baseConfig: config)
+        let quickSurface = Ghostty.SurfaceView(cApp, baseConfig: config)
+        quickSurface.pwd = tempDir.path
+        quickController.surfaceTree = SplitTree(view: quickSurface)
+        _ = quickController.window
+        #expect(quickController.visible)
+
+        var createdController: TerminalController?
+        var outputURL: URL?
+        defer {
+            if let outputURL {
+                try? FileManager.default.removeItem(at: outputURL)
+            }
+            EditorWorkspaceStore.shared.remove(surfaceIDs: Array(standardController.surfaceTree).map(\.id))
+            if let createdController {
+                EditorWorkspaceStore.shared.remove(surfaceIDs: Array(createdController.surfaceTree).map(\.id))
+                createdController.window?.delegate = nil
+                createdController.window?.close()
+            }
+            quickController.surfaceTree = .init()
+            quickController.window?.delegate = nil
+            quickController.window?.close()
+            standardController.window?.delegate = nil
+            standardController.window?.close()
+            for controller in existingEligible {
+                controller.workspacePresentationIsParked = false
+            }
+        }
+
+        // 1) Reusing an existing standard window honors .splitRight (splits 1 -> 2 panes).
+        #expect(Array(standardController.surfaceTree).count == 1)
+        #expect(TerminalPathOpener.open("Existing.swift", from: quickSurface))
+        for _ in 0..<40 where Array(standardController.surfaceTree).count < 2 {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        #expect(!quickController.visible)
+        let splitSurfaces = Array(standardController.surfaceTree)
+        #expect(splitSurfaces.count == 2)
+
+        outputURL = TerminalCommandOutputActions.openOutputTextInEditor("split output\n", from: quickSurface)
+        #expect(outputURL != nil)
+        #expect(Array(standardController.surfaceTree).count == 3)
+
+        // 2) Creating a brand-new standard window overrides .splitRight with .currentPane (stays 1 pane).
+        standardController.workspacePresentationIsParked = true
+        let knownBefore = Set(TerminalController.all.map(ObjectIdentifier.init))
+        #expect(TerminalPathOpener.open("NewWindow.swift", from: quickSurface))
+        for _ in 0..<40 where createdController == nil {
+            createdController = TerminalController.all.first { !knownBefore.contains(ObjectIdentifier($0)) }
+            if createdController == nil {
+                try await Task.sleep(for: .milliseconds(25))
+            }
+        }
+        let freshController = try #require(createdController)
+        let freshSurface = try #require(freshController.surfaceTree.first)
+        let freshWorkspace = EditorWorkspaceStore.shared.workspace(
+            for: freshController.tabSessionID,
+            surfaceID: freshSurface.id
+        )
+        for _ in 0..<40 where freshWorkspace.documents.isEmpty {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        #expect(Array(freshController.surfaceTree).count == 1)
+        #expect(freshWorkspace.documents.map(\.path) == [newWinFile.resolvingSymlinksInPath().path])
     }
 
     @Test func quickTerminalSupportsCommandHistoryAndOutputEditorHandoff() async throws {

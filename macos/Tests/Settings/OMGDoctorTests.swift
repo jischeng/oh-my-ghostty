@@ -244,4 +244,90 @@ struct OMGDoctorTests {
         let zhOption = TerminalCommandPaletteView.makeDoctorOption(language: .simplifiedChinese) {}
         #expect(zhOption.title.contains("OMG Doctor"))
     }
+
+    @Test func nativePluginSettingsUpdatesDoctorInPlaceWithoutRebuildLoopOrSearchWipe() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let settings = OhMyGhosttySettings(fileURL: dir.appendingPathComponent("settings.json"))
+        settings.language = .english
+
+        let suiteName = "OMGDoctorNoLoop.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let registry = SSHHostRegistry(defaults: defaults, live: { [] }, inventory: { _ in .init() })
+        let agents = AgentIntegrationManager(defaults: defaults, connectionTargets: { [] }, registry: registry)
+
+        final class MemoryCounter: @unchecked Sendable {
+            private let lock = NSLock()
+            private var step: UInt64 = 0
+            func nextBytes() -> UInt64 {
+                lock.lock()
+                defer { lock.unlock() }
+                step += 1
+                return (100 + step) * 1_048_576
+            }
+            var calls: UInt64 {
+                lock.lock()
+                defer { lock.unlock() }
+                return step
+            }
+        }
+        let counter = MemoryCounter()
+        let deps = OMGDoctorService.Dependencies(
+            hasGlobalKeybinds: { false },
+            isAccessibilityTrusted: { true },
+            isEventTapEnabled: { false },
+            resourcesURL: nil,
+            homeDirectory: dir,
+            sshControlDirectoryPath: dir.appendingPathComponent("no-ssh").path,
+            agentManager: agents,
+            surfaceCounter: { .init(visible: 2, occluded: 0) },
+            residentMemoryProvider: { counter.nextBytes() }
+        )
+        let doctor = OMGDoctorService(dependencies: deps)
+
+        let controller = NativeSettingsController(
+            settings: settings,
+            initialSelection: .plugins,
+            registry: registry,
+            agents: agents,
+            doctor: doctor
+        )
+        _ = controller.view
+        controller.select(.plugins)
+        controller.searchField.stringValue = "doctor"
+        let initialForm = try #require(controller.children.compactMap { $0 as? NativeSettingsForm }.first)
+        let initialFormID = ObjectIdentifier(initialForm)
+
+        // Yield across multiple MainActor and RunLoop turns so initial async refresh settles.
+        for _ in 0..<8 {
+            try await Task.sleep(for: .milliseconds(15))
+        }
+        let callsAfterMount = counter.calls
+
+        // Trigger another explicit refresh with a new residentMemory value and settle RunLoop.main.
+        await doctor.refresh()
+        for _ in 0..<6 {
+            try await Task.sleep(for: .milliseconds(15))
+        }
+
+        let currentForm = try #require(controller.children.compactMap { $0 as? NativeSettingsForm }.first)
+        #expect(ObjectIdentifier(currentForm) == initialFormID)
+        #expect(controller.searchField.stringValue == "doctor")
+        #expect(counter.calls == callsAfterMount + 1)
+
+        func collectStrings(in view: NSView) -> [String] {
+            var out: [String] = []
+            if let field = view as? NSTextField {
+                out.append(field.stringValue)
+            }
+            for sub in view.subviews {
+                out.append(contentsOf: collectStrings(in: sub))
+            }
+            return out
+        }
+        let expectedMemoryText = doctor.report.resources.summary(strings: SettingsStrings(language: .english))
+        let renderedStrings = collectStrings(in: currentForm.view)
+        #expect(renderedStrings.contains { $0.contains(expectedMemoryText) })
+    }
 }

@@ -162,6 +162,23 @@ struct NativeSettingsRow {
     let labels: NSStackView
     let separator: NSView?
     func setVisible(_ visible: Bool) { view.isHidden = !visible; separator?.isHidden = !visible }
+    @MainActor func setSubtitle(_ text: String) {
+        if let existing = labels.arrangedSubviews.dropFirst().first as? NSTextField {
+            existing.stringValue = text
+            existing.isHidden = text.isEmpty
+        } else if !text.isEmpty {
+            let detail = NSTextField(wrappingLabelWithString: text)
+            detail.font = .systemFont(ofSize: 11)
+            detail.textColor = .secondaryLabelColor
+            detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            detail.setContentCompressionResistancePriority(.required, for: .vertical)
+            labels.addArrangedSubview(detail)
+            detail.widthAnchor.constraint(equalTo: labels.widthAnchor).isActive = true
+        }
+    }
+    @MainActor var subtitleText: String? {
+        (labels.arrangedSubviews.dropFirst().first as? NSTextField)?.stringValue
+    }
 }
 
 @MainActor

@@ -275,9 +275,10 @@ enum TerminalPathOpener {
                 )
             } else {
                 let parentDirectory = (resolved.path as NSString).deletingLastPathComponent
-                guard let editorController = host.resolveEditorHostController(workingDirectory: parentDirectory) else {
+                guard let resolution = host.resolveEditorHost(workingDirectory: parentDirectory) else {
                     return
                 }
+                let editorController = resolution.controller
                 let targetSurface = editorController.focusedSurface ?? editorController.surfaceTree.first
                 let targetSession = editorController.paneSessionContext(for: targetSurface)
                     ?? PaneSessionContext(workingDirectory: parentDirectory, terminalTitle: targetSurface?.title ?? "")
@@ -292,6 +293,7 @@ enum TerminalPathOpener {
                 EditorWorkspaceStore.shared.open(
                     path: resolved.path,
                     context: targetContext,
+                    destination: resolution.createdNewWindow ? .currentPane : nil,
                     location: resolved.location
                 )
             }

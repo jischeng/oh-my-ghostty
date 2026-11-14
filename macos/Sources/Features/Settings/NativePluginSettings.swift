@@ -1,8 +1,53 @@
 import AppKit
+import Combine
+
+private final class DoctorObserverToken {
+    let cancellable: AnyCancellable
+    init(_ cancellable: AnyCancellable) {
+        self.cancellable = cancellable
+    }
+}
+
+@MainActor
+private final class DoctorAccessibilityControlContainer: NSView {
+    let grantButton: SettingsActionButton
+    let statusBadge: NSTextField
+    private var activeConstraints: [NSLayoutConstraint] = []
+
+    init(grantButton: SettingsActionButton, statusBadge: NSTextField) {
+        self.grantButton = grantButton
+        self.statusBadge = statusBadge
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        grantButton.translatesAutoresizingMaskIntoConstraints = false
+        statusBadge.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(grantButton)
+        addSubview(statusBadge)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func update(showGrantButton: Bool) {
+        NSLayoutConstraint.deactivate(activeConstraints)
+        grantButton.isHidden = !showGrantButton
+        statusBadge.isHidden = showGrantButton
+        let activeView: NSView = showGrantButton ? grantButton : statusBadge
+        activeConstraints = [
+            activeView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            activeView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            activeView.topAnchor.constraint(equalTo: topAnchor),
+            activeView.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ]
+        NSLayoutConstraint.activate(activeConstraints)
+        invalidateIntrinsicContentSize()
+    }
+}
 
 extension NativeSettingsController {
     func plugins(_ form: NativeSettingsForm) {
-        let doctor = OMGDoctorService.shared
         buildOMGDoctorSection(form, doctor: doctor)
 
         let manager = PluginInstallationManager.shared
@@ -66,100 +111,176 @@ extension NativeSettingsController {
     }
 
     private func buildOMGDoctorSection(_ form: NativeSettingsForm, doctor: OMGDoctorService) {
-        let report = doctor.report
-        form.section(strings.doctorSection)
+        let initialReport = doctor.report
+        let currentStrings = strings
+        form.section(currentStrings.doctorSection)
 
-        let accessibilityControl: NSView
-        if report.accessibility.needsGrantAction {
-            accessibilityControl = SettingsActionButton(strings.doctorGrantAccessibilityButton) { [weak self] in
-                _ = doctor.grantAccessibilityPermission()
-                if self?.isShowing(OhMyGhosttySettingsTab.plugins.rawValue) == true {
-                    self?.select(.plugins)
-                }
-            }
-        } else {
-            accessibilityControl = makeDoctorStatusBadge(report.accessibility.status)
+        let grantButton = SettingsActionButton(currentStrings.doctorGrantAccessibilityButton) {
+            _ = doctor.grantAccessibilityPermission()
         }
-        form.row(
-            strings.doctorAccessibilityLabel,
-            subtitle: report.accessibility.summary(strings: strings),
-            control: accessibilityControl
+        let accessibilityBadge = makeDoctorStatusBadge(initialReport.accessibility.status)
+        let accessibilityContainer = DoctorAccessibilityControlContainer(
+            grantButton: grantButton,
+            statusBadge: accessibilityBadge
+        )
+        accessibilityContainer.update(showGrantButton: initialReport.accessibility.needsGrantAction)
+
+        let accessibilityRow = form.row(
+            currentStrings.doctorAccessibilityLabel,
+            subtitle: initialReport.accessibility.summary(strings: currentStrings),
+            control: accessibilityContainer
         )
 
-        form.row(
-            strings.doctorRuntimeSSHLabel,
-            subtitle: report.runtimeSSH.summary(strings: strings),
-            control: makeDoctorStatusBadge(report.runtimeSSH.status)
+        let runtimeSSHBadge = makeDoctorStatusBadge(initialReport.runtimeSSH.status)
+        let runtimeSSHRow = form.row(
+            currentStrings.doctorRuntimeSSHLabel,
+            subtitle: initialReport.runtimeSSH.summary(strings: currentStrings),
+            control: runtimeSSHBadge
         )
 
-        form.row(
-            strings.doctorAgentBackupLabel,
-            subtitle: report.agentBackups.summary(strings: strings),
-            control: makeDoctorStatusBadge(report.agentBackups.status)
+        let agentBackupBadge = makeDoctorStatusBadge(initialReport.agentBackups.status)
+        let agentBackupRow = form.row(
+            currentStrings.doctorAgentBackupLabel,
+            subtitle: initialReport.agentBackups.summary(strings: currentStrings),
+            control: agentBackupBadge
         )
 
-        let reclaimButton = SettingsActionButton(strings.doctorReclaimMemoryButton) {}
-        reclaimButton.invoke = { [weak self, weak reclaimButton] in
+        let reclaimButton = SettingsActionButton(currentStrings.doctorReclaimMemoryButton) {}
+        reclaimButton.invoke = { [weak reclaimButton] in
             reclaimButton?.isEnabled = false
-            Task { @MainActor [weak self, weak reclaimButton] in
+            Task { @MainActor [weak reclaimButton] in
                 defer { reclaimButton?.isEnabled = true }
                 _ = await doctor.reclaimIdleResources()
-                if self?.isShowing(OhMyGhosttySettingsTab.plugins.rawValue) == true {
-                    self?.select(.plugins)
-                }
             }
         }
-        var resourceSubtitle = report.resources.summary(strings: strings)
-        if let lastReclaim = doctor.lastReclaimResult {
+        let resourcesRow = form.row(
+            currentStrings.doctorResourcesLabel,
+            subtitle: formatDoctorResourcesSubtitle(
+                report: initialReport,
+                lastReclaim: doctor.lastReclaimResult,
+                strings: currentStrings
+            ),
+            control: reclaimButton
+        )
+
+        let refreshButton = SettingsActionButton(currentStrings.doctorRefreshButton) {}
+        refreshButton.invoke = { [weak refreshButton] in
+            refreshButton?.isEnabled = false
+            Task { @MainActor [weak refreshButton] in
+                defer { refreshButton?.isEnabled = true }
+                await doctor.refresh()
+            }
+        }
+        let snapshotRow = form.row(
+            text("Diagnostics Snapshot", "诊断快照"),
+            subtitle: formatDoctorOverallSubtitle(report: initialReport, strings: currentStrings),
+            control: refreshButton
+        )
+
+        form.note(currentStrings.doctorCaption)
+
+        struct DoctorSectionBindings {
+            let accessibilityRow: NativeSettingsRow?
+            let runtimeSSHRow: NativeSettingsRow?
+            let agentBackupRow: NativeSettingsRow?
+            let resourcesRow: NativeSettingsRow?
+            let snapshotRow: NativeSettingsRow?
+            weak var accessibilityContainer: DoctorAccessibilityControlContainer?
+            weak var accessibilityBadge: NSTextField?
+            weak var runtimeSSHBadge: NSTextField?
+            weak var agentBackupBadge: NSTextField?
+        }
+        let bindings = DoctorSectionBindings(
+            accessibilityRow: accessibilityRow,
+            runtimeSSHRow: runtimeSSHRow,
+            agentBackupRow: agentBackupRow,
+            resourcesRow: resourcesRow,
+            snapshotRow: snapshotRow,
+            accessibilityContainer: accessibilityContainer,
+            accessibilityBadge: accessibilityBadge,
+            runtimeSSHBadge: runtimeSSHBadge,
+            agentBackupBadge: agentBackupBadge
+        )
+
+        let subscription = doctor.$report
+            .combineLatest(doctor.$lastReclaimResult)
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] report, lastReclaim in
+                guard let self else { return }
+                let localized = self.strings
+                bindings.accessibilityRow?.setSubtitle(report.accessibility.summary(strings: localized))
+                if let badge = bindings.accessibilityBadge {
+                    self.applyDoctorStatusBadge(badge, status: report.accessibility.status, strings: localized)
+                }
+                bindings.accessibilityContainer?.update(showGrantButton: report.accessibility.needsGrantAction)
+
+                bindings.runtimeSSHRow?.setSubtitle(report.runtimeSSH.summary(strings: localized))
+                if let badge = bindings.runtimeSSHBadge {
+                    self.applyDoctorStatusBadge(badge, status: report.runtimeSSH.status, strings: localized)
+                }
+
+                bindings.agentBackupRow?.setSubtitle(report.agentBackups.summary(strings: localized))
+                if let badge = bindings.agentBackupBadge {
+                    self.applyDoctorStatusBadge(badge, status: report.agentBackups.status, strings: localized)
+                }
+
+                bindings.resourcesRow?.setSubtitle(
+                    self.formatDoctorResourcesSubtitle(
+                        report: report,
+                        lastReclaim: lastReclaim,
+                        strings: localized
+                    )
+                )
+                bindings.snapshotRow?.setSubtitle(self.formatDoctorOverallSubtitle(report: report, strings: localized))
+            }
+        form.retained.append(DoctorObserverToken(subscription))
+
+        Task { @MainActor [weak form] in
+            guard form != nil else { return }
+            await doctor.refresh()
+        }
+    }
+
+    private func formatDoctorResourcesSubtitle(
+        report: OMGDoctorReport,
+        lastReclaim: OMGDoctorReclaimResult?,
+        strings: SettingsStrings
+    ) -> String {
+        var subtitle = report.resources.summary(strings: strings)
+        if let lastReclaim {
             let note = strings.t(
                 "Last reclaim freed \(lastReclaim.reclaimedWebViews) WebViews and \(lastReclaim.reclaimedLSPServers) LSP servers.",
                 "上次回收释放了 \(lastReclaim.reclaimedWebViews) 个 WebView 与 \(lastReclaim.reclaimedLSPServers) 个语言服务。"
             )
-            resourceSubtitle += "\n" + note
+            subtitle += "\n" + note
         }
-        form.row(
-            strings.doctorResourcesLabel,
-            subtitle: resourceSubtitle,
-            control: reclaimButton
-        )
+        return subtitle
+    }
 
-        let refreshButton = SettingsActionButton(strings.doctorRefreshButton) {}
-        refreshButton.invoke = { [weak self, weak refreshButton] in
-            refreshButton?.isEnabled = false
-            Task { @MainActor [weak self, weak refreshButton] in
-                defer { refreshButton?.isEnabled = true }
-                await doctor.refresh()
-                if self?.isShowing(OhMyGhosttySettingsTab.plugins.rawValue) == true {
-                    self?.select(.plugins)
-                }
-            }
-        }
-        form.row(
-            text("Diagnostics Snapshot", "诊断快照"),
-            subtitle: report.overallStatus == .healthy
-                ? text("All core host checks are healthy.", "所有核心宿主检查项均正常。")
-                : text("One or more checks require attention.", "存在需要关注的诊断项。"),
-            control: refreshButton
-        )
-
-        form.note(strings.doctorCaption)
-
-        Task { @MainActor [weak self] in
-            let previous = doctor.report
-            await doctor.refresh()
-            if doctor.report != previous,
-               self?.isShowing(OhMyGhosttySettingsTab.plugins.rawValue) == true {
-                self?.select(.plugins)
-            }
-        }
+    private func formatDoctorOverallSubtitle(
+        report: OMGDoctorReport,
+        strings: SettingsStrings
+    ) -> String {
+        report.overallStatus == .healthy
+            ? strings.t("All core host checks are healthy.", "所有核心宿主检查项均正常。")
+            : strings.t("One or more checks require attention.", "存在需要关注的诊断项。")
     }
 
     private func makeDoctorStatusBadge(_ status: OMGDoctorHealthStatus) -> NSTextField {
-        let title = status == .healthy ? strings.doctorStatusHealthy : strings.doctorStatusAttention
-        let badge = NSTextField(labelWithString: title)
+        let badge = NSTextField(labelWithString: "")
         badge.font = .systemFont(ofSize: 12, weight: .medium)
         badge.alignment = .right
-        badge.textColor = status == .healthy ? .secondaryLabelColor : .systemOrange
+        applyDoctorStatusBadge(badge, status: status, strings: strings)
         return badge
+    }
+
+    private func applyDoctorStatusBadge(
+        _ badge: NSTextField,
+        status: OMGDoctorHealthStatus,
+        strings: SettingsStrings
+    ) {
+        badge.stringValue = status == .healthy ? strings.doctorStatusHealthy : strings.doctorStatusAttention
+        badge.textColor = status == .healthy ? .secondaryLabelColor : .systemOrange
     }
 }

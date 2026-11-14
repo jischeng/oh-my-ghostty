@@ -1610,16 +1610,17 @@ else:
         var seen = Set<String>()
         var backupCount = 0
         var insecureBackupCount = 0
+        let expectedUID = getuid()
         for target in urls {
             let bakURL = target.appendingPathExtension("omg.bak")
             guard seen.insert(bakURL.path).inserted else { continue }
-            var isDir: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: bakURL.path, isDirectory: &isDir),
-                  !isDir.boolValue else { continue }
+            var st = stat()
+            guard lstat(bakURL.path, &st) == 0 else { continue }
             backupCount += 1
-            let attrs = try? FileManager.default.attributesOfItem(atPath: bakURL.path)
-            let mode = (attrs?[.posixPermissions] as? NSNumber)?.intValue ?? 0
-            if (mode & 0o777) != 0o600 {
+            let isRegular = (st.st_mode & S_IFMT) == S_IFREG
+            let isPrivate = (st.st_mode & 0o777) == 0o600
+            let ownedByUser = st.st_uid == expectedUID
+            if !isRegular || !isPrivate || !ownedByUser {
                 insecureBackupCount += 1
             }
         }

@@ -393,6 +393,12 @@ class QuickTerminalController: BaseTerminalController {
         animateWindowOut(window: window, to: position)
     }
 
+    /// Clears any remembered external `previousApp` before switching focus to a standard
+    /// OMG window so `animateOut()` never restores another app on top of the editor window.
+    func prepareForInternalWindowHandoff() {
+        previousApp = nil
+    }
+
     func saveScreenState(exitFullscreen: Bool) {
         // If we are in fullscreen, then we exit fullscreen. We do this immediately so
         // we have th correct window.frame for the save state below.

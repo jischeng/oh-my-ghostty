@@ -2,6 +2,11 @@ import AppKit
 import Foundation
 import GhosttyKit
 
+struct EditorHostResolution {
+    let controller: TerminalController
+    let createdNewWindow: Bool
+}
+
 /// Fork-owned host capability protocol allowing both standard `TerminalController`
 /// windows and `QuickTerminalController` panels to participate in file-link hover/click,
 /// safe directory navigation, command history queries, and editor handoff.
@@ -13,13 +18,19 @@ protocol TerminalHostProviding: AnyObject {
 
     func paneSessionContext(for surface: Ghostty.SurfaceView?) -> PaneSessionContext?
     func hasActivePaneAgent(for surface: Ghostty.SurfaceView) -> Bool
-    func resolveEditorHostController(workingDirectory: String?) -> TerminalController?
+    func resolveEditorHost(workingDirectory: String?) -> EditorHostResolution?
     func navigateToDirectory(
         _ path: String,
         from surface: Ghostty.SurfaceView,
         session: PaneSessionContext,
         destination: EditorOpenDestination
     ) throws
+}
+
+extension TerminalHostProviding {
+    func resolveEditorHostController(workingDirectory: String?) -> TerminalController? {
+        resolveEditorHost(workingDirectory: workingDirectory)?.controller
+    }
 }
 
 @MainActor
@@ -59,8 +70,8 @@ extension TerminalController: TerminalHostProviding {
         agentActivity(for: surface) != nil || agentResumeDescriptor(for: surface) != nil
     }
 
-    func resolveEditorHostController(workingDirectory: String?) -> TerminalController? {
-        self
+    func resolveEditorHost(workingDirectory: String?) -> EditorHostResolution? {
+        EditorHostResolution(controller: self, createdNewWindow: false)
     }
 
     func navigateToDirectory(
@@ -127,19 +138,26 @@ extension QuickTerminalController: TerminalHostProviding {
         false
     }
 
-    func resolveEditorHostController(workingDirectory: String?) -> TerminalController? {
+    func resolveEditorHost(workingDirectory: String?) -> EditorHostResolution? {
+        prepareForInternalWindowHandoff()
+        let resolution: EditorHostResolution
         if let existing = Self.frontmostOpenTerminalController() {
-            Self.presentEditorHostWindow(existing)
-            return existing
+            resolution = EditorHostResolution(controller: existing, createdNewWindow: false)
+        } else {
+            var config = Ghostty.SurfaceConfiguration()
+            if let workingDirectory, !workingDirectory.isEmpty {
+                config.workingDirectory = workingDirectory
+            }
+            let created = TerminalController.newWindow(ghostty, withBaseConfig: config)
+            resolution = EditorHostResolution(controller: created, createdNewWindow: true)
         }
-
-        var config = Ghostty.SurfaceConfiguration()
-        if let workingDirectory, !workingDirectory.isEmpty {
-            config.workingDirectory = workingDirectory
+        NSApp.activate(ignoringOtherApps: true)
+        Self.presentEditorHostWindow(resolution.controller)
+        if visible {
+            animateOut()
+            resolution.controller.window?.makeKeyAndOrderFront(nil)
         }
-        let created = TerminalController.newWindow(ghostty, withBaseConfig: config)
-        Self.presentEditorHostWindow(created)
-        return created
+        return resolution
     }
 
     func navigateToDirectory(

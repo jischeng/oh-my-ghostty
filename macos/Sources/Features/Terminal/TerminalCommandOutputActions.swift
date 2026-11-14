@@ -175,11 +175,18 @@ enum TerminalCommandOutputActions {
                 externalFallback: true
             )
         } else if let host = TerminalHostLookup.host(owning: surface),
-                  let editorController = host.resolveEditorHostController(workingDirectory: surface.pwd),
-                  let targetSurface = editorController.focusedSurface ?? editorController.surfaceTree.first {
+                  let resolution = host.resolveEditorHost(workingDirectory: surface.pwd),
+                  let sourceSurface = resolution.controller.focusedSurface ?? resolution.controller.surfaceTree.first,
+                  let target = EditorPaneDestination.open(
+                      in: resolution.controller,
+                      source: sourceSurface,
+                      destination: resolution.createdNewWindow
+                          ? .currentPane
+                          : OhMyGhosttySettings.shared.editorFileOpenDestination
+                  ) {
             editorStore.workspace(
-                for: editorController.tabSessionID,
-                surfaceID: targetSurface.id
+                for: target.controller.tabSessionID,
+                surfaceID: target.surface.id
             ).open(
                 path: fileURL.path,
                 filesystem: localFilesystem,

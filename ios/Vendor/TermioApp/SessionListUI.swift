@@ -45,7 +45,12 @@ struct SessionRow: View {
                 Color.clear
                     .frame(width: Self.treeIndent, height: 1)
             }
-            OMGAgentMark(agent: session.agent.id, status: session.status, remoteHost: session.remoteHost)
+            OMGAgentMark(
+                agent: session.agent.id,
+                status: session.status,
+                icon: session.agent.iconRef,
+                remoteHost: session.remoteHost
+            )
                 .frame(width: ListCard.tileSize, height: ListCard.tileSize)
             VStack(alignment: .leading, spacing: 1) {
                 Text(session.title)
@@ -71,7 +76,7 @@ struct SessionRow: View {
             }
             // The dot only enters the layout when it has something to say, so
             // idle rows don't reserve invisible width.
-            if session.status == .done || session.status == .needsAttention {
+            if session.status == .done || session.status == .needsAttention || session.status == .error {
                 StatusDot(status: session.status)
             }
             ListChevron()
@@ -100,6 +105,7 @@ struct SessionRow: View {
         case .idle: localized("Idle")
         case .working: localized("Working")
         case .done: localized("Done")
+        case .error: localized("Error")
         case .needsAttention: localized("Needs You")
         }
     }
@@ -210,6 +216,7 @@ struct ProjectRow: View {
     @ViewBuilder
     private var summary: some View {
         let attention = project.sessions.count { $0.status == .needsAttention }
+        let errors = project.sessions.count { $0.status == .error }
         let working = project.sessions.count { $0.status == .working }
         let done = project.sessions.count { $0.status == .done }
         if attention > 0 {
@@ -218,6 +225,13 @@ struct ProjectRow: View {
                 Text("\(attention)")
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(.orange)
+            }
+        } else if errors > 0 {
+            HStack(spacing: 4) {
+                Circle().fill(.red).frame(width: 7, height: 7)
+                Text("\(errors)")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.red)
             }
         } else if working > 0 {
             WorkingIndicator(tint: .secondary)

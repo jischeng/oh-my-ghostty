@@ -32,12 +32,20 @@ the same ordered stream. Process-owned contexts are pruned on their owning
 machine; local holders never interpret remote PIDs as local PIDs.
 
 Inline viewers carry this state through `omg-agent-sync` begin/end context
-transactions at parser ground boundaries. The outer local holder retains these
-transactions too, covering GUI-only restarts without a remote reattach. Native
-backends deliver the equivalent transaction directly to the surface mailbox.
-An empty snapshot clears stale Agent presentation. Hydration is atomic and
-suppresses completion notifications, automatic composer presentation and queued
-input dispatch; future live events retain their normal behavior. Native status
+transactions at parser ground boundaries, tagged with `mode=restore` on initial
+attach/reattach hydration and `mode=live` on incremental live updates. The outer
+local holder retains these transactions too, covering GUI-only restarts without
+a remote reattach. Native backends deliver the equivalent transaction directly
+to the surface mailbox. An empty snapshot clears stale Agent presentation.
+Hydration (`mode=restore`, or untagged legacy `omg-agent-sync` streams) is
+atomic and suppresses completion notifications, automatic composer presentation
+and queued input dispatch; live transitions (`mode=live`) fire completion and
+attention notifications and dispatch queued Quick Input drafts normally. Mobile
+`omgd` stream clients also consume live inner `G` frames directly, project all
+19 canonical OMG agent icons/display names plus distinct `error` presentation
+(never mislabeling `error` as `needsAttention`), and acknowledge completed
+`done`/`error` states via `C` frames carrying an 8-byte big-endian
+`max_revision` watermark so newer racing completions are never wiped. Native status
 clear namespaces and matching SSH exits clear their owned contexts. Runtime
 attachment cwd/password metadata is not a remote shell prompt. Existing pinned
 hosts keep their protocol and running processes; they do not gain this capability
@@ -283,13 +291,20 @@ CLI remains a separate non-daemon command interface.
 ## Native Session Runtime hooks (Experimental)
 
 The local/SSH session runtime is an independent PTY owner, not a third-party plugin loader.
-Managed hook generation version 12 additionally reports Codex/Claude/Pi activity
-through `OMG_RUNTIME_BIN report` when that variable is present. The runtime injects
-`OMG_RUNTIME_EVENT_SOCKET`, `OMG_RUNTIME_EVENT_TOKEN` and `OMG_RUNTIME_GENERATION`
-into the child environment. Events go to a private Unix datagram socket; the daemon
-checks the capability, generation, reporter's OS session and typed Agent recovery
-descriptor. Tokens are not terminal output or persistent metadata. Ordinary terminal
-OSC 3008 status behavior remains available without this runtime.
+Managed hook generation version 13 routes all hook-backed Agents (Codex, Claude,
+Pi, OpenCode, Antigravity, Cursor, Hermes, OMP, Amp, Cline, Copilot, Droid,
+Grok, Kimi, Qoder, Qwen, and Reasonix) primarily through `OMG_RUNTIME_BIN report`
+over the session's Unix datagram socket when `OMG_RUNTIME_BIN` is present and
+succeeds, falling back to controlling-TTY `OSC 3008` (or file-backed Hermes
+status JSON for detached gateway runs) only when no `omgd` session socket is
+available. Prompt-submission hooks carry `--event prompt` (`omg_event=prompt`)
+so starting a new turn clears stale prior-turn `done`/`error` records cleanly.
+The runtime injects `OMG_RUNTIME_EVENT_SOCKET`, `OMG_RUNTIME_EVENT_TOKEN` and
+`OMG_RUNTIME_GENERATION` into the child environment. Events go to a private Unix
+datagram socket; the daemon checks the capability, generation, reporter's OS
+session and typed Agent recovery descriptor. Tokens are not terminal output or
+persistent metadata. Ordinary terminal OSC 3008 status behavior remains
+available without this runtime.
 
 A `done` event is task completion, not process exit. Optional completion cleanup
 applies only while detached, after a grace period, with an existing conversation
@@ -1440,8 +1455,10 @@ beside each existing file. Removal deletes only OMG-owned commands or blocks.
 
 Hermes exposes lifecycle shell hooks in `~/.hermes/config.yaml` (`hooks: { <event>:
 [{ command, timeout }] }`) rather than a plugin API, so its manifest selects the
-`yaml` mechanism. Hooks may execute in Hermes' headless shared gateway, so OMG
-installs a Python reporter instead of writing OSC from the hook process. It stores
+`yaml` mechanism. Inside an `omgd` session (`OMG_RUNTIME_BIN` set), the Python
+reporter delivers lifecycle states directly over `OMG_RUNTIME_BIN report hermes`
+without touching files or polling `ps`. When running outside `omgd` or in Hermes'
+headless shared gateway, the reporter falls back to storing
 bounded metadata (`session_id`, state, timestamp) in separate SHA-256-named JSON
 files under `~/.config/oh-my-ghostty/agent-status/hermes/` (directory 0700, files
 0600). Synthetic `test-*` sessions are ignored. The local and SSH installers ship
@@ -1476,12 +1493,15 @@ user's login shell for CLI environment setup, with an explicitly quoted Python
 executable. SSH probes continue to resolve Python on the remote account.
 
 Local panes share one in-flight Hermes status probe and a two-second snapshot
-cache across all windows and workspaces, including parked tabs. A single Python
+cache across all windows and workspaces, including parked tabs, gated strictly
+to panes that have detected a foreground `hermes` process (or still hold an
+active fallback Hermes context) and are not already tracked by `omgd` socket
+reporting. A single Python
 process reads the local process table once, selects foreground Hermes clients by
 exact TTY and process group, then reads only those TTYs'
 `~/.hermes/terminal-sessions/tty-*` breadcrumbs and matching session events.
-Ordinary terminal panes do not launch separate Python/`ps` probes or read Hermes
-session files. Cancelling one pane's request does not cancel the shared probe.
+Ordinary non-Hermes terminal panes and `omgd`-tracked Hermes panes never launch
+Python/`ps` probes or read Hermes session files. Cancelling one pane's request does not cancel the shared probe.
 Process, timeout, and decoding failures propagate as failures with a two-second
 retry backoff; they never masquerade as an empty snapshot or clear live Agent
 state. A successful scan without a client on a pane's TTY can end its old state.
@@ -1543,9 +1563,9 @@ Antigravity manifest now selects a named JSON Hook adapter under
 `~/.gemini/config/hooks.json`, the global customization root documented in the
 binary's Customizations Guide. The `antigravity` dialect owns only the
 `omg-agent-status` top-level named hook, preserving all other named hooks.
-`PreInvocation` and `PostToolUse` report working; `Stop` reports done only when
-background work is not explicitly active (`fullyIdle: false` retains working),
-reports `needsAttention` (`omg_attention=question`) when `terminationReason` is
+`PreInvocation` and `PostToolUse` report working; `Stop` reports `done` for
+normal turn completions (never self-locking in `working` when `fullyIdle` is
+`false`), reports `needsAttention` (`omg_attention=question`) when `terminationReason` is
 `TERMINAL_STEP_TYPE` (such as an `ask_question` prompt awaiting user input),
 reports `idle` when `terminationReason` is `USER_CANCELED`, and reports `error`
 for an error termination (`error` or `ERROR`). `PostInvocation` is not completion.
@@ -1553,8 +1573,9 @@ Tool permission prompts are reported through Antigravity's native OSC 7501
 (`state=blocked:kind=permission:app=antigravity`); the Hook adapter never invents
 attention from tool activity or emits permission grants. Tool hooks use grouped
 matcher/handler arrays; invocation/stop handlers are flat arrays. Stdout always
-contains a JSON response (`{}` or a non-blocking Stop decision); OSC 3008 goes
-only to the controlling TTY. Because `agy` executes `/bin/sh -c` hook handlers in
+contains a JSON response (`{}` or a non-blocking Stop decision); inside `omgd`
+sessions status is reported via `OMG_RUNTIME_BIN report`, falling back to OSC 3008
+on the controlling TTY when outside `omgd`. Because `agy` executes `/bin/sh -c` hook handlers in
 a dedicated child process group (`Setpgid`), the handler clears build-only
 `SDKROOT` / invalid `DEVELOPER_DIR` variables before invoking `python3` and walks
 same-session shell parents (`sh`, `bash`, `dash`, `zsh`) to attach the emitted
@@ -1627,13 +1648,34 @@ Local Exec shells also set `AGY_CLI_OSC7501=on` when unset so Antigravity CLI
 (`agy`) enables native OSC 7501 reporting (`working`, `blocked` with
 `permission`/`question`/`auth`, `done`, `error`, and `idle`) immediately.
 
-Known `app` values identify an Agent directly in its originating pane; this does
-not authorize commands, infer a conversation ID, or inspect a shared server's
-TTY. Non-idle native reports take presentation precedence over legacy Hook and
-title fallbacks until cleared, while a native `idle` baseline (such as `agy`
-startup `state=idle:app=antigravity`) yields to non-idle OSC 3008 Hook states so
-mixed native+Hook CLIs still surface active and completed turns; user
-acknowledgement clears terminal `done`/`error` records across both channels and
+Known `app` values identify an Agent directly in its originating pane (with
+sub-records such as `id=main/sub` inheriting `app` from ancestor/root records or
+the pane's active Agent); this does not authorize commands, infer a conversation
+ID, or inspect a shared server's TTY. Multi-record status snapshots aggregate by
+strict priority (`needsAttention` > foreground `working` > background `working`
+> `error` > `done` > `idle`) instead of last-record order. Authority follows a
+strict three-tier hierarchy: Tier 1 (`OSC 7501`) > Tier 2 (`OMG_RUNTIME_BIN
+report` socket / `OSC 3008` Hooks) > Tier 3 (title/screen detector fallback,
+tagged `omg_tier=fallback`). When Tier 1 reports generic `working` while Tier 2
+reports an explicit `needsAttention` prompt for the same Agent, Tier 2
+`needsAttention` surfaces until resolved; once Tier 1 or Tier 2 owns a context,
+title spinner heuristics never downgrade `working` or `needsAttention` to `idle`
+(and there is no blind 20-second working stall timeout), though `titleStatus.attention`
+still assists Agents whose Hook configuration declares no `needsAttention` event
+(such as Grok or Qwen). OpenCode's in-process plugin auto-registers resumed
+sessions (`opencode -c` / `--session`), forwards child subagent permission and
+question prompts (`permission.updated`, `permission.asked`, `question.asked`) to
+the root session, suppresses cold initial `idle` before any `busy` turn, reports
+clean `end` on exit, and reports over `OMG_RUNTIME_BIN` without `/dev/tty`
+`ENXIO` errors under `opencode serve`. Pi's extension preserves active
+`needsAttention` across parallel sibling `tool_execution_end` events and
+reconciles orphaned subagent/background task counts on settle/abort. Starting a
+new foreground `working` turn clears stale prior-turn `done`/`error` records
+across both `OSC 7501` and Hook channels. User acknowledgement requires
+intentional non-repeating key or mouse-press interaction after completion
+arrival (trackpad scroll momentum, mouse release, passive tab-container focus
+restoration, and pre-arrival events never wipe a fresh `done` badge), clears
+terminal `done`/`error` records across both channels via `C` frames, and
 persists the acknowledged record identities per pane in `restoreSessions`
 workspace checkpoints (`acknowledgedAgentStatus`) so reattaching to a preserved
 local or SSH `omgd` session (`omg-agent-sync`) keeps already-cleared completions

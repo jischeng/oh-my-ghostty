@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import JavaScriptCore
 import Testing
 @testable import Ghostty
 
@@ -460,6 +461,10 @@ struct AgentStatusPluginTests {
             text: "Action Required"
         ) == .needsAttention)
         #expect(AgentScreenStatusDetector.detect(
+            status: SupportedAgent.grok.definition.titleStatus,
+            text: "grok ~/project"
+        ) == nil)
+        #expect(AgentScreenStatusDetector.detect(
             status: SupportedAgent.qwen.definition.titleStatus,
             text: "◐ Thinking"
         ) == .working)
@@ -486,6 +491,36 @@ struct AgentStatusPluginTests {
             typedHookOwnsContext: true
         ) == nil)
         #expect(AgentTitleStatusReconciler.nextState(
+            status: SupportedAgent.grok.definition.titleStatus,
+            title: "Action Required",
+            current: .working,
+            typedHookOwnsContext: true,
+            hookSupportsAttention: false
+        ) == .needsAttention)
+        for nonWorking in [TabActivityState.idle, .done, .error, nil] {
+            #expect(AgentTitleStatusReconciler.nextState(
+                status: SupportedAgent.grok.definition.titleStatus,
+                title: "Action Required",
+                current: nonWorking,
+                typedHookOwnsContext: true,
+                hookSupportsAttention: false
+            ) == nil)
+        }
+        #expect(AgentTitleStatusReconciler.nextState(
+            status: SupportedAgent.grok.definition.titleStatus,
+            title: "Action Required",
+            current: .working,
+            typedHookOwnsContext: true,
+            hookSupportsAttention: true
+        ) == nil)
+        #expect(AgentTitleStatusReconciler.nextState(
+            status: SupportedAgent.grok.definition.titleStatus,
+            title: "grok ~/project",
+            current: .working,
+            typedHookOwnsContext: false,
+            hookSupportsAttention: false
+        ) == nil)
+        #expect(AgentTitleStatusReconciler.nextState(
             status: SupportedAgent.crush.definition.titleStatus,
             title: "Ready",
             current: .working,
@@ -502,8 +537,7 @@ struct AgentStatusPluginTests {
         watcher.observe(title: "Ready", status: nil, now: start)
         #expect(!watcher.confirmsIdle(
             now: start.addingTimeInterval(60),
-            delay: AgentTitleStatusReconciler.idleConfirmationDelay,
-            stallDelay: AgentTitleStatusReconciler.idleStallDelay
+            delay: AgentTitleStatusReconciler.idleConfirmationDelay
         ))
 
         // Claude Code shows a spinner glyph while a turn runs.
@@ -511,22 +545,19 @@ struct AgentStatusPluginTests {
         #expect(watcher.detected == .working)
         #expect(!watcher.confirmsIdle(
             now: start.addingTimeInterval(1),
-            delay: AgentTitleStatusReconciler.idleConfirmationDelay,
-            stallDelay: AgentTitleStatusReconciler.idleStallDelay
+            delay: AgentTitleStatusReconciler.idleConfirmationDelay
         ))
 
-        // The idle glyph must persist before a stale working state is cleared.
+        // The idle glyph must persist before a Tier 3 working state is cleared.
         watcher.observe(title: "✳ Claude Code", status: claudeStatus, now: start.addingTimeInterval(1))
         #expect(watcher.detected == .idle)
         #expect(!watcher.confirmsIdle(
             now: start.addingTimeInterval(2),
-            delay: AgentTitleStatusReconciler.idleConfirmationDelay,
-            stallDelay: AgentTitleStatusReconciler.idleStallDelay
+            delay: AgentTitleStatusReconciler.idleConfirmationDelay
         ))
         #expect(watcher.confirmsIdle(
             now: start.addingTimeInterval(4),
-            delay: AgentTitleStatusReconciler.idleConfirmationDelay,
-            stallDelay: AgentTitleStatusReconciler.idleStallDelay
+            delay: AgentTitleStatusReconciler.idleConfirmationDelay
         ))
 
         // While the animation keeps running, the busy state must hold even
@@ -541,29 +572,30 @@ struct AgentStatusPluginTests {
         }
         #expect(!animated.confirmsIdle(
             now: start.addingTimeInterval(1.9),
-            delay: AgentTitleStatusReconciler.idleConfirmationDelay,
-            stallDelay: AgentTitleStatusReconciler.idleStallDelay
+            delay: AgentTitleStatusReconciler.idleConfirmationDelay
         ))
-        // Once the animation stopped, the stalled title confirms idle.
-        #expect(animated.confirmsIdle(
+        // Ending on a working frame must NEVER blind-timeout to idle even after long thinking.
+        #expect(!animated.confirmsIdle(
             now: start.addingTimeInterval(23),
-            delay: AgentTitleStatusReconciler.idleConfirmationDelay,
-            stallDelay: AgentTitleStatusReconciler.idleStallDelay
+            delay: AgentTitleStatusReconciler.idleConfirmationDelay
+        ))
+        animated.observe(title: "✳ Claude Code", status: claudeStatus, now: start.addingTimeInterval(24))
+        #expect(animated.confirmsIdle(
+            now: start.addingTimeInterval(27),
+            delay: AgentTitleStatusReconciler.idleConfirmationDelay
         ))
 
-        // An animation that ends on its working frame is still caught, because
-        // the title stopped changing.
+        // A static working glyph (such as a non-animated working marker during extended thinking)
+        // must never confirm idle without an explicit settled idle title.
         var stalled = AgentTitleIdleWatcher()
         stalled.observe(title: "◐ Claude Code", status: claudeStatus, now: start)
         #expect(!stalled.confirmsIdle(
             now: start.addingTimeInterval(19),
-            delay: AgentTitleStatusReconciler.idleConfirmationDelay,
-            stallDelay: AgentTitleStatusReconciler.idleStallDelay
+            delay: AgentTitleStatusReconciler.idleConfirmationDelay
         ))
-        #expect(stalled.confirmsIdle(
-            now: start.addingTimeInterval(21),
-            delay: AgentTitleStatusReconciler.idleConfirmationDelay,
-            stallDelay: AgentTitleStatusReconciler.idleStallDelay
+        #expect(!stalled.confirmsIdle(
+            now: start.addingTimeInterval(3_600),
+            delay: AgentTitleStatusReconciler.idleConfirmationDelay
         ))
     }
 
@@ -1677,6 +1709,8 @@ struct AgentStatusPluginTests {
             agy_pgid = os.getpgrp()
             env = dict(os.environ, SDKROOT="/nonexistent/sdkroot", DEVELOPER_DIR="/nonexistent/devdir")
             env.pop("SSH_CONNECTION", None)
+            env.pop("OMG_RUNTIME_REMOTE", None)
+            env.pop("OMG_RUNTIME_BIN", None)
             proc = subprocess.Popen(
                 ["/bin/sh", "-c", sys.argv[2]],
                 stdin=subprocess.PIPE,
@@ -1834,6 +1868,450 @@ struct AgentStatusPluginTests {
         let audit = installer.backupAudit()
         #expect(audit.backupCount == targets.count + 1)
         #expect(audit.insecureBackupCount == 0)
+    }
+
+    @Test func reducerPreservesAttentionOverSiblingWorkingAndClearsPriorCompletionOnNewTurn() throws {
+        var reducer = AgentContextSignalReducer()
+        _ = reducer.consume(signal(agent: .claude, state: "working", instance: 100))
+        guard case .set(let childAttention) = reducer.consume(signal(
+            agent: .claude,
+            state: "needsAttention",
+            instance: 101,
+            attention: .permission
+        )) else {
+            Issue.record("Expected child permission attention")
+            return
+        }
+        #expect(childAttention.state == .needsAttention)
+        #expect(childAttention.attentionKind == .permission)
+
+        // A non-prompt working heartbeat from the parent context must not bury active attention,
+        // and a background working signal on the same context is also ignored while waiting.
+        guard case .set(let stillWaiting) = reducer.consume(signal(
+            agent: .claude,
+            state: "working",
+            instance: 100
+        )) else {
+            Issue.record("Expected reducer activity")
+            return
+        }
+        #expect(stillWaiting.state == .needsAttention)
+        #expect(reducer.consume(.init(
+            action: .start,
+            id: "omg-agent-claude-101",
+            metadata: "type=app;omg_agent=claude;omg_scope=local;omg_state=working;omg_phase=background"
+        )) == nil)
+
+        // Starting an explicit new prompt turn (`omg_event=prompt`) clears stale attention/completion.
+        guard case .set(let nextTurn) = reducer.consume(.init(
+            action: .start,
+            id: "omg-agent-claude-100",
+            metadata: "type=app;omg_agent=claude;omg_scope=local;omg_state=working;omg_event=prompt"
+        )) else {
+            Issue.record("Expected new turn working state")
+            return
+        }
+        #expect(nextTurn.state == .working)
+
+        // Prior-turn `done` on an earlier context is downgraded to `idle` when a new working turn begins.
+        _ = reducer.consume(signal(agent: .claude, state: "done", instance: 100))
+        _ = reducer.consume(.init(
+            action: .start,
+            id: "omg-agent-codex-200",
+            metadata: "type=app;omg_agent=codex;omg_scope=local;omg_state=working;omg_event=prompt"
+        ))
+        _ = reducer.consume(signal(agent: .codex, state: "idle", instance: 200))
+        #expect(reducer.currentActivity?.state == .idle)
+    }
+
+    @Test func openCodeExtensionHandlesResumedSessionsChildPromptsServeModeAndCleanExit() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        try AgentHookInstaller(homeURL: home).install(.opencode)
+        let pluginURL = home.appendingPathComponent(".config/opencode/plugin/omg-agent-status.js")
+        var jsSource = try String(contentsOf: pluginURL, encoding: .utf8)
+        jsSource = jsSource
+            .replacingOccurrences(of: #"import \{[^}]+\} from "node:[^"]+";"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: "export const OmgAgentStatus =", with: "globalThis.OmgAgentStatus =")
+
+        let ctx = try #require(JSContext())
+        let harness = """
+        globalThis.__reports = [];
+        globalThis.__ttyOpens = 0;
+        globalThis.__exitHandlers = [];
+        globalThis.process = {
+          pid: 4242,
+          env: { OMG_RUNTIME_BIN: "/mock/omgd" },
+          cwd: () => "/work/repo",
+          once: (ev, fn) => { if (ev === "exit") globalThis.__exitHandlers.push(fn); }
+        };
+        globalThis.spawnSync = (_bin, args) => {
+          if (!globalThis.process.env.OMG_RUNTIME_BIN) return { status: 1 };
+          globalThis.__reports.push(args);
+          return { status: 0 };
+        };
+        globalThis.openSync = () => {
+          globalThis.__ttyOpens += 1;
+          const err = new Error("ENXIO: no such device or address, open '/dev/tty'");
+          throw err;
+        };
+        globalThis.writeSync = () => {};
+        globalThis.closeSync = () => {};
+        """
+        ctx.evaluateScript(harness)
+        ctx.evaluateScript(jsSource)
+        #expect(ctx.exception == nil, Comment(rawValue: ctx.exception?.toString() ?? ""))
+
+        ctx.evaluateScript("""
+        globalThis.__resolved = "";
+        (async () => {
+          const plugin = await globalThis.OmgAgentStatus();
+          // 1. Cold initial idle on a resumed session (`opencode -c`) must emit `idle`, NEVER false `done`.
+          await plugin.event({ event: { type: "session.status", properties: { sessionID: "ses-resumed", status: { type: "idle" } } } });
+          // 2. Busy activity on that resumed session auto-registers it and emits `working` + `--event prompt`.
+          await plugin.event({ event: { type: "session.status", properties: { sessionID: "ses-resumed", status: { type: "busy" } } } });
+          // 3. Child subagent (`parentID != nil`) busy/idle is ignored, while child permission/question prompts surface on root!
+          await plugin.event({ event: { type: "session.created", properties: { info: { id: "ses-child", parentID: "ses-resumed" } } } });
+          await plugin.event({ event: { type: "session.status", properties: { sessionID: "ses-child", status: { type: "idle" } } } });
+          await plugin.event({ event: { type: "permission.asked", properties: { sessionID: "ses-child" } } });
+          await plugin.event({ event: { type: "permission.replied", properties: { sessionID: "ses-child" } } });
+          await plugin.event({ event: { type: "question.asked", properties: { sessionID: "ses-child" } } });
+          await plugin.event({ event: { type: "question.replied", properties: { sessionID: "ses-child" } } });
+          // 4. Root session finishing busy work emits `done`, and subsequent idle emits `idle`.
+          await plugin.event({ event: { type: "session.status", properties: { sessionID: "ses-resumed", status: { type: "idle" } } } });
+          await plugin.event({ event: { type: "session.status", properties: { sessionID: "ses-resumed", status: { type: "idle" } } } });
+          // 5. Headless `opencode serve` without OMG_RUNTIME_BIN or `/dev/tty` catches ENXIO cleanly.
+          delete globalThis.process.env.OMG_RUNTIME_BIN;
+          await plugin.event({ event: { type: "session.status", properties: { sessionID: "ses-resumed", status: { type: "busy" } } } });
+          globalThis.process.env.OMG_RUNTIME_BIN = "/mock/omgd";
+          for (const fn of globalThis.__exitHandlers) fn();
+          globalThis.__resolved = JSON.stringify({ reports: globalThis.__reports, ttyOpens: globalThis.__ttyOpens });
+        })();
+        """)
+        #expect(ctx.exception == nil, Comment(rawValue: ctx.exception?.toString() ?? ""))
+        let jsonString = try #require(ctx.evaluateScript("globalThis.__resolved")?.toString())
+        let parsed = try #require(JSONSerialization.jsonObject(with: Data(jsonString.utf8)) as? [String: Any])
+        let reports = try #require(parsed["reports"] as? [[String]])
+        // `/dev/tty` was opened ONLY once (step 5 when OMG_RUNTIME_BIN was unset); steps 1-4 used socket-first reporting.
+        #expect(parsed["ttyOpens"] as? Int == 1)
+        let states = reports.map { $0[2] }
+        #expect(states == [
+            "idle",
+            "working",
+            "needsAttention",
+            "working",
+            "needsAttention",
+            "working",
+            "done",
+            "idle",
+            "idle",
+            "end",
+        ])
+        #expect(reports[1].contains("--event") && reports[1].contains("prompt"))
+        #expect(reports[2].suffix(2) == ["--attention", "permission"] && reports[2][3] == "ses-resumed")
+        #expect(reports[4].suffix(2) == ["--attention", "question"] && reports[4][3] == "ses-resumed")
+    }
+
+    @Test func piExtensionPreservesQuestionAttentionAcrossSiblingToolsAndReconcilesOrphanedSubagents() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        try AgentHookInstaller(homeURL: home).install(.pi)
+        let pluginURL = home.appendingPathComponent(".pi/agent/extensions/omg-agent-status.ts")
+        var jsSource = try String(contentsOf: pluginURL, encoding: .utf8)
+        let replacements: [(String, String)] = [
+            (#"import \{[^}]+\} from "node:[^"]+";"#, ""),
+            ("export default function (pi: any)", "globalThis.OmgPiPlugin = function (pi)"),
+            ("state?: string", "state"),
+            ("context?: any", "context"),
+            ("attention?: string", "attention"),
+            ("phase?: string", "phase"),
+            (": number | undefined", ""),
+            ("<string>", ""),
+            ("(onReply?: () => void)", "(onReply)"),
+            (": any", ""),
+        ]
+        for (pattern, replacement) in replacements {
+            if pattern.hasPrefix("import") {
+                jsSource = jsSource.replacingOccurrences(of: pattern, with: replacement, options: .regularExpression)
+            } else {
+                jsSource = jsSource.replacingOccurrences(of: pattern, with: replacement)
+            }
+        }
+
+        let ctx = try #require(JSContext())
+        ctx.evaluateScript("""
+        globalThis.__reports = [];
+        globalThis.__timers = [];
+        globalThis.process = {
+          pid: 5150,
+          env: { OMG_RUNTIME_BIN: "/mock/omgd" },
+          cwd: () => "/work/pi"
+        };
+        globalThis.setTimeout = (fn, _ms) => {
+          const handle = { fn, cancelled: false, unref: () => {} };
+          globalThis.__timers.push(handle);
+          return handle;
+        };
+        globalThis.clearTimeout = (handle) => { if (handle) handle.cancelled = true; };
+        globalThis.spawnSync = (_bin, args) => {
+          globalThis.__reports.push(args);
+          return { status: 0 };
+        };
+        globalThis.openSync = () => 1;
+        globalThis.writeSync = () => {};
+        globalThis.closeSync = () => {};
+        """)
+        ctx.evaluateScript(jsSource)
+        #expect(ctx.exception == nil, Comment(rawValue: ctx.exception?.toString() ?? ""))
+
+        ctx.evaluateScript("""
+        globalThis.__piResolved = "";
+        (async () => {
+          const handlers = new Map();
+          const bus = new Map();
+          const pi = {
+            on: (name, fn) => handlers.set(name, fn),
+            events: {
+              on: (name, fn) => {
+                if (!bus.has(name)) bus.set(name, new Set());
+                bus.get(name).add(fn);
+                return () => bus.get(name)?.delete(fn);
+              },
+              emit: (name, payload) => {
+                for (const fn of Array.from(bus.get(name) ?? [])) fn(payload);
+              }
+            }
+          };
+          globalThis.OmgPiPlugin(pi);
+          let idle = false;
+          const context = {
+            isIdle: () => idle,
+            sessionManager: { getSessionId: () => "pi-conv-1", getCwd: () => "/work/pi" }
+          };
+          await handlers.get("agent_start")({}, context);
+          // Ask-user question starts concurrently with a sibling bash tool:
+          await handlers.get("tool_execution_start")({ toolName: "ask_user_question", toolCallId: "q-1" }, context);
+          await handlers.get("tool_execution_start")({ toolName: "bash", toolCallId: "b-1" }, context);
+          // Sibling bash finishing MUST NOT overwrite `needsAttention`!
+          await handlers.get("tool_execution_end")({ toolName: "bash", toolCallId: "b-1" }, context);
+          const countBeforeQuestionEnds = globalThis.__reports.length;
+          await handlers.get("tool_execution_end")({ toolName: "ask_user_question", toolCallId: "q-1" }, context);
+
+          // Orphaned subagent run with no RPC responder reconciles on settle timer instead of hanging forever:
+          pi.events.emit("subagent:async-started", { id: "orphan-sub-1" });
+          idle = true;
+          await handlers.get("agent_settled")({}, context);
+          const beforeTimerStates = globalThis.__reports.map((r) => r[2]);
+          for (const t of globalThis.__timers) {
+            if (!t.cancelled) t.fn();
+          }
+
+          // Aborted turn clears orphaned background/subagent counts immediately:
+          idle = false;
+          await handlers.get("agent_start")({}, context);
+          pi.events.emit("subagent:async-started", { id: "orphan-sub-2" });
+          idle = true;
+          await handlers.get("agent_settled")({ aborted: true }, context);
+
+          globalThis.__piResolved = JSON.stringify({
+            countBeforeQuestionEnds,
+            beforeTimerStates,
+            finalStates: globalThis.__reports.map((r) => r[2]),
+            reports: globalThis.__reports
+          });
+        })();
+        """)
+        #expect(ctx.exception == nil, Comment(rawValue: ctx.exception?.toString() ?? ""))
+        let jsonString = try #require(ctx.evaluateScript("globalThis.__piResolved")?.toString())
+        let parsed = try #require(JSONSerialization.jsonObject(with: Data(jsonString.utf8)) as? [String: Any])
+        // Only `agent_start` ("working") and `ask_user_question` ("needsAttention") emitted before `q-1` finished!
+        #expect(parsed["countBeforeQuestionEnds"] as? Int == 2)
+        #expect(parsed["beforeTimerStates"] as? [String] == ["working", "needsAttention", "working", "working"])
+        #expect(parsed["finalStates"] as? [String] == [
+            "working",
+            "needsAttention",
+            "working",
+            "working",
+            "done",
+            "working",
+            "done",
+        ])
+    }
+
+    @Test func hookReportersSanitizeInvalidAndLeadingDashConversationIDsAndClearSDKROOT() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let installer = AgentHookInstaller(homeURL: home)
+        try installer.install(.codex)
+        try installer.install(.opencode)
+        try installer.install(.pi)
+
+        let codexRoot = try #require(
+            JSONSerialization.jsonObject(
+                with: Data(contentsOf: home.appendingPathComponent(".codex/hooks.json"))
+            ) as? [String: Any]
+        )
+        let codexHooks = try #require(codexRoot["hooks"] as? [String: Any])
+        let starts = try #require(codexHooks["SessionStart"] as? [[String: Any]])
+        let owned = try #require(starts.first { $0[AgentHookInstaller.marker] != nil })
+        let commands = try #require(owned["hooks"] as? [[String: Any]])
+        let command = try #require(commands.first?["command"] as? String)
+        #expect(command.contains("env -u SDKROOT -u DEVELOPER_DIR python3"))
+
+        let helper = home.appendingPathComponent("omgd-strict-mock")
+        let strictMock = """
+        #!/usr/bin/env python3
+        import json, re, sys
+        args = sys.argv[1:]
+        conv = args[3]
+        if conv != "-" and (conv.startswith("-") or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", conv)):
+            sys.exit(1)
+        open(sys.argv[0] + ".out", "w").write(json.dumps(args))
+        sys.exit(0)
+        """
+        try strictMock.write(to: helper, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+
+        for badID in ["-leading-dash", "ns:conv", "dir/conv", "~tilde"] {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/sh")
+            proc.arguments = ["-c", command]
+            proc.currentDirectoryURL = home
+            proc.environment = [
+                "PATH": "/opt/homebrew/bin:/usr/bin:/bin",
+                "OMG_RUNTIME_BIN": helper.path,
+                "SDKROOT": "/nonexistent/sdkroot",
+                "DEVELOPER_DIR": "/nonexistent/devdir",
+            ]
+            let stdin = Pipe()
+            proc.standardInput = stdin
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError = FileHandle.nullDevice
+            try proc.run()
+            let payload = try JSONSerialization.data(withJSONObject: ["session_id": badID])
+            try stdin.fileHandleForWriting.write(contentsOf: payload)
+            try stdin.fileHandleForWriting.close()
+            proc.waitUntilExit()
+            #expect(proc.terminationStatus == 0)
+            let recorded = try JSONDecoder().decode(
+                [String].self,
+                from: Data(contentsOf: URL(fileURLWithPath: helper.path + ".out"))
+            )
+            #expect(recorded.prefix(4) == ["report", "codex", "idle", "-"])
+        }
+
+        // Verify TTY OSC 3008 fallback still preserves URL-encoded `omg_conversation` when `OMG_RUNTIME_BIN` is absent.
+        let ptyCheck = Process()
+        ptyCheck.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        ptyCheck.arguments = [
+            "-c",
+            """
+            import fcntl, os, pty, subprocess, sys, termios
+            master, slave = pty.openpty()
+            holder = '''
+            import fcntl, os, signal, subprocess, sys, termios
+            signal.signal(signal.SIGHUP, signal.SIG_IGN)
+            os.setsid()
+            slave = int(sys.argv[1])
+            fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+            env = dict(os.environ, SDKROOT="/nonexistent/sdkroot", DEVELOPER_DIR="/nonexistent/devdir")
+            env.pop("OMG_RUNTIME_BIN", None)
+            p = subprocess.Popen(["/bin/sh", "-c", sys.argv[2]], stdin=subprocess.PIPE, env=env)
+            p.communicate(b'{"session_id":"ns:conv/1~a"}', timeout=5)
+            print("ok", flush=True)
+            '''
+            sub = subprocess.Popen(
+                [sys.executable, "-c", holder, str(slave), sys.argv[1]],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                pass_fds=(slave,),
+            )
+            assert sub.stdout.readline().strip() == b"ok"
+            os.set_blocking(master, False)
+            data = os.read(master, 65536).decode("utf-8", "replace")
+            # macOS can defer the session leader's reap until the PTY is closed.
+            os.close(master)
+            os.close(slave)
+            assert sub.wait(timeout=5) == 0
+            sys.stdout.write(data)
+            """,
+            command,
+        ]
+        let ptyOut = Pipe()
+        let ptyErr = Pipe()
+        ptyCheck.environment = [
+            "HOME": home.path,
+            "PATH": "/opt/homebrew/bin:/usr/bin:/bin",
+        ]
+        ptyCheck.standardOutput = ptyOut
+        ptyCheck.standardError = ptyErr
+        try ptyCheck.run()
+        let oscFallback = String(data: ptyOut.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let ptyErrText = String(data: ptyErr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        ptyCheck.waitUntilExit()
+        #expect(ptyCheck.terminationStatus == 0, Comment(rawValue: ptyErrText))
+        #expect(oscFallback.contains("omg_conversation=ns%3Aconv%2F1~a"))
+
+        // Verify OpenCode and Pi JS plugins also coerce leading `-` and non-slug conversation IDs to `"-"`.
+        let openCodeSource = try String(
+            contentsOf: home.appendingPathComponent(".config/opencode/plugin/omg-agent-status.js"),
+            encoding: .utf8
+        )
+        #expect(openCodeSource.contains("/^[A-Za-z0-9._][A-Za-z0-9._-]{0,127}$/"))
+        let piSource = try String(
+            contentsOf: home.appendingPathComponent(".pi/agent/extensions/omg-agent-status.ts"),
+            encoding: .utf8
+        )
+        #expect(piSource.contains("/^[A-Za-z0-9._][A-Za-z0-9._-]{0,127}$/"))
+    }
+
+    @Test func activeProcessGroupContextSurvivesForegroundChildShiftInLocalPolling() {
+        var reducer = AgentContextSignalReducer()
+        _ = reducer.consume(.init(
+            action: .start,
+            id: "omg-agent-codex-100",
+            metadata: "type=app;omg_agent=codex;omg_scope=local;omg_liveness=pgid;omg_state=working"
+        ))
+
+        // Foreground PGID shifted to child tool 200 while session leader PGID 100 is still alive:
+        // local 1Hz polling must NOT clobber `working` with synthesized `idle`.
+        #expect(reducer.hasActiveLocalContext(
+            for: .codex,
+            processGroupID: 200,
+            isProcessAlive: { _ in false },
+            isProcessGroupAlive: { $0 == 100 }
+        ))
+
+        _ = reducer.consume(.init(
+            action: .start,
+            id: "omg-agent-codex-100",
+            metadata: "type=app;omg_agent=codex;omg_scope=local;omg_liveness=pgid;omg_state=needsAttention;omg_attention=permission"
+        ))
+        #expect(reducer.hasActiveLocalContext(
+            for: .codex,
+            processGroupID: 200,
+            isProcessAlive: { _ in false },
+            isProcessGroupAlive: { $0 == 100 }
+        ))
+
+        // Once PGID 100 exits or settles to `done`, a newly detected PGID 200 may supersede it.
+        #expect(!reducer.hasActiveLocalContext(
+            for: .codex,
+            processGroupID: 200,
+            isProcessAlive: { _ in false },
+            isProcessGroupAlive: { _ in false }
+        ))
+        _ = reducer.consume(.init(
+            action: .start,
+            id: "omg-agent-codex-100",
+            metadata: "type=app;omg_agent=codex;omg_scope=local;omg_liveness=pgid;omg_state=done"
+        ))
+        #expect(!reducer.hasActiveLocalContext(
+            for: .codex,
+            processGroupID: 200,
+            isProcessAlive: { _ in false },
+            isProcessGroupAlive: { $0 == 100 }
+        ))
     }
 
     private func assertUnrelatedHooksPreserved(at url: URL) throws {

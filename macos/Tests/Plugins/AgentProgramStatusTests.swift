@@ -71,9 +71,10 @@ struct AgentProgramStatusTests {
         #expect(status.records.count == 2)
         #expect(status.consume("state=future:app=codex") == false)
         #expect(status.consume("state=working:app=codex:msg=AA==") == false)
-        #expect(status.activity?.state == .done)
+        #expect(status.activity?.state == .working)
         #expect(status.consume("state=clear:id=one") == true)
         #expect(status.records.map(\.id) == ["two"])
+        #expect(status.activity?.state == .done)
         for index in 0..<40 {
             #expect(status.consume("state=idle:app=codex:id=task\(index)") == true)
         }
@@ -336,5 +337,99 @@ struct AgentProgramStatusTests {
         defer { restoredController.window?.delegate = nil; restoredController.window?.close() }
         #expect(restoredController.agentActivities[restoredSurface.id]?.state == .idle)
         #expect(restoredSurface.acknowledgedAgentStatus != nil)
+    }
+
+    @Test func subRecordsInheritAppIdentityAndPrioritizeBlockedOverWorking() {
+        var status = AgentProgramStatus()
+        #expect(status.consume("state=working:app=codex:id=main") == true)
+        // Sub-record without `app=` inherits `codex` from parent `main` and outranks `working`.
+        #expect(status.consume("state=blocked:kind=permission:id=main/approval:msg=QWxsb3c=") == true)
+        #expect(status.activity?.source == "codex")
+        #expect(status.activity?.state == .needsAttention)
+        #expect(status.activity?.attentionKind == .permission)
+        #expect(status.activity?.message == "Allow")
+
+        // Parent heartbeat `working` must not mask child `blocked`.
+        #expect(status.consume("state=working:app=codex:id=main") == true)
+        #expect(status.activity?.state == .needsAttention)
+
+        // Clearing child `main/approval` restores parent `working`.
+        #expect(status.consume("state=clear:id=main/approval") == true)
+        #expect(status.activity?.state == .working)
+
+        // Pane fallback agent resolves `app=` when a sub-record arrives before any explicit `app=`.
+        var fallbackStatus = AgentProgramStatus()
+        #expect(fallbackStatus.consume("state=blocked:kind=question:id=prompt", fallbackAgent: .claude) == true)
+        #expect(fallbackStatus.activity?.source == "claude")
+        #expect(fallbackStatus.activity?.state == .needsAttention)
+        #expect(fallbackStatus.activity?.attentionKind == .question)
+
+        // New foreground working turn supersedes unacknowledged prior-turn `done`.
+        var multiTurn = AgentProgramStatus()
+        #expect(multiTurn.consume("state=done:app=codex:id=turn1") == true)
+        #expect(multiTurn.activity?.state == .done)
+        #expect(multiTurn.consume("state=working:app=codex:id=turn2") == true)
+        #expect(multiTurn.activity?.state == .working)
+        #expect(multiTurn.consume("state=idle:app=codex:id=turn2") == true)
+        #expect(multiTurn.activity?.state == .idle)
+    }
+
+    @Test func hookAttentionSurfacesOverGenericProgramWorkingAndPassiveEventsDoNotAcknowledge() throws {
+        let enabled = OhMyGhosttySettings.shared.agentStatusHooksEnabled
+        OhMyGhosttySettings.shared.agentStatusHooksEnabled = true
+        defer { OhMyGhosttySettings.shared.agentStatusHooksEnabled = enabled }
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let coordinator = TerminalWorkspaceCoordinator(store: TerminalWorkspaceStore(fileURL: nil))
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let controller = TerminalController(app, withBaseConfig: config, workspaceCoordinator: coordinator)
+        _ = controller.window
+        defer { controller.window?.delegate = nil; controller.window?.close() }
+        let surface = try #require(controller.surfaceTree.first)
+        let pgid = Int(getpgrp())
+
+        // Generic OSC 7501 `working` must not mask an explicit Hook `needsAttention` for the same agent.
+        surface.contextSignal = .init(action: .start, id: "omg-program-status",
+            metadata: "state=working:app=antigravity")
+        surface.contextSignal = .init(action: .start, id: "omg-agent-antigravity-\(pgid)",
+            metadata: "type=app;omg_agent=antigravity;omg_scope=local;omg_liveness=pgid;omg_state=needsAttention;omg_attention=permission")
+        #expect(controller.agentActivities[surface.id]?.state == .needsAttention)
+        #expect(controller.agentActivities[surface.id]?.attentionKind == .permission)
+
+        // Cross-channel new-turn clearing: stale OSC 7501 `done` is cleared when a new Hook `working` turn starts.
+        surface.contextSignal = .init(action: .start, id: "omg-program-status",
+            metadata: "state=done:app=antigravity")
+        surface.contextSignal = .init(action: .start, id: "omg-agent-antigravity-\(pgid)",
+            metadata: "type=app;omg_agent=antigravity;omg_scope=local;omg_liveness=pgid;omg_state=done")
+        #expect(controller.agentActivities[surface.id]?.state == .done)
+
+        surface.contextSignal = .init(action: .start, id: "omg-agent-antigravity-\(pgid)",
+            metadata: "type=app;omg_agent=antigravity;omg_scope=local;omg_liveness=pgid;omg_state=working;omg_event=prompt")
+        #expect(controller.agentActivities[surface.id]?.state == .working)
+
+        // Sub-150ms / pre-arrival passive events must NOT wipe a fresh `done` badge.
+        let beforeDone = ProcessInfo.processInfo.systemUptime
+        surface.contextSignal = .init(action: .start, id: "omg-agent-antigravity-\(pgid)",
+            metadata: "type=app;omg_agent=antigravity;omg_scope=local;omg_liveness=pgid;omg_state=done")
+        #expect(controller.agentActivities[surface.id]?.state == .done)
+        controller.acknowledgeTerminalAgentStateFromUserInput(on: surface, eventTimestamp: beforeDone - 0.5)
+        #expect(controller.agentActivities[surface.id]?.state == .done)
+        controller.acknowledgeTerminalAgentStateFromUserInput(on: surface, eventTimestamp: beforeDone + 0.05)
+        #expect(controller.agentActivities[surface.id]?.state == .done)
+
+        // Intentional interaction after arrival cleanly acknowledges `done -> idle`.
+        controller.acknowledgeTerminalAgentStateFromUserInput(on: surface, eventTimestamp: ProcessInfo.processInfo.systemUptime + 0.25)
+        #expect(controller.agentActivities[surface.id]?.state == .idle)
+
+        // Synthetic AppKit/Accessibility events with `eventTimestamp == 0` normalize to `systemUptime`
+        // rather than being permanently blocked by `0 < arrived + 0.15`.
+        surface.contextSignal = .init(action: .start, id: "omg-agent-antigravity-\(pgid)",
+            metadata: "type=app;omg_agent=antigravity;omg_scope=local;omg_liveness=pgid;omg_state=working;omg_event=prompt")
+        surface.contextSignal = .init(action: .start, id: "omg-agent-antigravity-\(pgid)",
+            metadata: "type=app;omg_agent=antigravity;omg_scope=local;omg_liveness=pgid;omg_state=done")
+        #expect(controller.agentActivities[surface.id]?.state == .done)
+        Thread.sleep(forTimeInterval: 0.17)
+        controller.acknowledgeTerminalAgentStateFromUserInput(on: surface, eventTimestamp: 0)
+        #expect(controller.agentActivities[surface.id]?.state == .idle)
     }
 }

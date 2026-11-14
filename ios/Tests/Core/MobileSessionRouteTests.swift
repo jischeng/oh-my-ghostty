@@ -39,4 +39,23 @@ final class MobileSessionRouteTests: XCTestCase {
         XCTAssertTrue(MobileSessionIcon.isRemoteSSHProject(deviceAlias: "cloud", sessionRemoteHosts: []))
         XCTAssertTrue(MobileSessionIcon.isRemoteSSHProject(deviceAlias: nil, sessionRemoteHosts: ["cloud", "devbox"]))
     }
+
+    func testAllNineteenMobileAgentsAndAliasesResolveCanonicalDescriptors() {
+        XCTAssertEqual(MobileSessionIcon.allAgents.count, 19)
+        for descriptor in MobileSessionIcon.allAgents {
+            XCTAssertFalse(descriptor.displayName.isEmpty)
+            XCTAssertTrue(descriptor.vectorIcon != nil || descriptor.assetIcon != nil, "Missing icon for \(descriptor.id)")
+            XCTAssertEqual(MobileSessionIcon.agentDescriptor(for: descriptor.id), descriptor)
+            XCTAssertEqual(MobileSessionIcon.normalizeAgentID(descriptor.id), descriptor.id)
+        }
+        XCTAssertEqual(MobileSessionIcon.normalizeAgentID("agy"), "antigravity")
+        XCTAssertEqual(MobileSessionIcon.normalizeAgentID("jetski"), "antigravity")
+        XCTAssertEqual(MobileSessionIcon.normalizeAgentID("qodercli"), "qoder")
+        XCTAssertEqual(MobileSessionIcon.normalizeAgentID("oh-my-pi"), "omp")
+        XCTAssertEqual(MobileSessionIcon.normalizeAgentID("aider-chat"), "aider")
+        XCTAssertEqual(MobileSessionIcon.normalizeAgentID("cursor-agent"), "cursor")
+        XCTAssertEqual(MobileSessionIcon.normalizeAgentID("kimi-code"), "kimi")
+        XCTAssertEqual(MobileSessionIcon.normalizeAgentID("qwen-code"), "qwen")
+        XCTAssertEqual(MobileSessionIcon.normalizeAgentID("gh-copilot"), "copilot")
+    }
 }

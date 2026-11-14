@@ -2325,6 +2325,23 @@ public enum Termiod {
             }
         }
 
+        /// Whether this input event represents an intentional user action that
+        /// acknowledges a terminal `done`/`error` agent badge. Passive mouse
+        /// motion/release, wheel scrolling, key repeats/releases, modifier-only
+        /// presses, IME composition, and focus reports never clear `done`.
+        public var acknowledgesActivity: Bool {
+            switch self {
+            case .key(let key):
+                return key.action == .press && !key.composing && !Self.modifierKeys.contains(key.key)
+            case .paste:
+                return true
+            case .mouse(let mouse):
+                return mouse.action == .press
+            case .wheel, .focus:
+                return false
+            }
+        }
+
         private static let modifierKeys: Set<String> = [
             "shift_left", "shift_right", "control_left", "control_right", "alt_left", "alt_right",
             "meta_left", "meta_right", "caps_lock", "fn", "fn_lock",

@@ -142,6 +142,55 @@ struct SessionRuntimeInlineSessionTests {
         #expect(controller.agentResumeDescriptor(for: surface) == nil)
     }
 
+    @Test func liveRuntimeSyncDeliversCompletionActionsWhileRestoreSuppressesThem() throws {
+        let settings = OhMyGhosttySettings.shared
+        let previous = (settings.agentStatusHooksEnabled, settings.openQuickInputOnAgentStart,
+                        settings.openQuickInputOnAgentComplete)
+        settings.agentStatusHooksEnabled = true
+        settings.openQuickInputOnAgentStart = false
+        settings.openQuickInputOnAgentComplete = true
+        defer {
+            settings.agentStatusHooksEnabled = previous.0
+            settings.openQuickInputOnAgentStart = previous.1
+            settings.openQuickInputOnAgentComplete = previous.2
+        }
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let controller = TerminalController(app, withBaseConfig: config)
+        _ = controller.window
+        defer { controller.window?.delegate = nil; controller.window?.close() }
+        let surface = try #require(controller.surfaceTree.first)
+
+        // Restore batch (`mode=restore`) sets `working -> done` without opening QuickInput.
+        surface.contextSignal = .init(action: .start, id: "omg-agent-sync", metadata: "begin;mode=restore")
+        surface.contextSignal = .init(action: .start, id: "omg-agent-claude-99",
+            metadata: "type=app;omg_agent=claude;omg_scope=remote;omg_state=working")
+        surface.contextSignal = .init(action: .start, id: "omg-agent-sync", metadata: "end")
+        #expect(controller.agentActivities[surface.id]?.state == .working)
+
+        surface.contextSignal = .init(action: .start, id: "omg-agent-sync", metadata: "begin;mode=restore")
+        surface.contextSignal = .init(action: .start, id: "omg-agent-claude-99",
+            metadata: "type=app;omg_agent=claude;omg_scope=remote;omg_state=done")
+        surface.contextSignal = .init(action: .start, id: "omg-agent-sync", metadata: "end")
+        #expect(controller.agentActivities[surface.id]?.state == .done)
+        #expect(!controller.quickInputModel.isPresented)
+
+        // Live remote SSH sync (`mode=live`) transitions `working -> done` and DOES trigger completion actions!
+        surface.contextSignal = .init(action: .start, id: "omg-agent-sync", metadata: "begin;mode=live")
+        surface.contextSignal = .init(action: .start, id: "omg-agent-claude-99",
+            metadata: "type=app;omg_agent=claude;omg_scope=remote;omg_state=working;omg_event=prompt")
+        surface.contextSignal = .init(action: .start, id: "omg-agent-sync", metadata: "end")
+        #expect(controller.agentActivities[surface.id]?.state == .working)
+
+        surface.contextSignal = .init(action: .start, id: "omg-agent-sync", metadata: "begin;mode=live")
+        surface.contextSignal = .init(action: .start, id: "omg-agent-claude-99",
+            metadata: "type=app;omg_agent=claude;omg_scope=remote;omg_state=done")
+        surface.contextSignal = .init(action: .start, id: "omg-agent-sync", metadata: "end")
+        #expect(controller.agentActivities[surface.id]?.state == .done)
+        #expect(controller.quickInputModel.isPresented)
+    }
+
     @Test func runtimeDirectoryUpdatesDoNotClearRemoteCodexStatus() throws {
         let settings = OhMyGhosttySettings.shared
         let enabled = settings.agentStatusHooksEnabled

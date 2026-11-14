@@ -4,6 +4,8 @@ import TermioStream
 
 /// The full upstream terminal screen uses this port without knowing omgd's framing.
 final class OMGSession: StreamDeviceSession {
+    static let activityDidChange = Notification.Name("OMGSessionActivityDidChange")
+
     var onOutput: ((Data) -> Void)?
     var onState: ((DeviceSessionState) -> Void)?
     var onSharedGrid: ((TerminalGrid, Bool) -> Void)?
@@ -13,8 +15,10 @@ final class OMGSession: StreamDeviceSession {
     var streamTerminal: TermiodStreamTerminal? { connection?.terminal }
 
     private var connection: RuntimeConnection?
+    private let routeID: String
     private let targetID: String?
     private let generation: String?
+    private(set) var liveActivity: RuntimeActivitySnapshot?
     private var pending = Data()
     private var claiming = false
     private var needsAutoClaim = true
@@ -27,6 +31,7 @@ final class OMGSession: StreamDeviceSession {
     private var lastWriter = false
 
     init(endpoint: DeviceEndpoint, sessionID: String) {
+        routeID = sessionID
         let route = MobileSessionRoute(sessionID)
         targetID = route?.sessionID
         generation = route?.generation
@@ -46,6 +51,21 @@ final class OMGSession: StreamDeviceSession {
             }
             connection.onChange = { [weak self] in self?.changed() }
             connection.onOutput = { [weak self] data in self?.onStreamData?(data) }
+            connection.onActivity = { [weak self, weak connection] snapshot in
+                guard let self else { return }
+                self.liveActivity = snapshot
+                if RuntimeActivityAckPolicy.shouldAcknowledgeOnActivity(
+                    rendering: self.rendering,
+                    snapshot: snapshot
+                ) {
+                    connection?.acknowledge()
+                }
+                NotificationCenter.default.post(
+                    name: Self.activityDidChange,
+                    object: nil,
+                    userInfo: ["sessionID": self.routeID, "snapshot": snapshot]
+                )
+            }
             connection.onSignal = { [weak self] signal in self?.onStreamSignal?(signal) }
             connection.onWriterChanged = { [weak self, weak connection] granted in
                 guard let self, let connection else { return }
@@ -58,11 +78,10 @@ final class OMGSession: StreamDeviceSession {
                         : "此 runtime 不支持输入权交接，请使用新版 runtime 创建的会话。"))
                 }
             }
-            connection.onState = { [weak self, weak connection] state in
+            connection.onState = { [weak self] state in
                 guard let self else { return }
                 switch state {
                 case .attached:
-                    if rendering { connection?.acknowledge() }
                     onState?(.connected)
                 case .connecting: discardPending(); onState?(.connecting)
                 case .disconnected: discardPending(); onState?(.reconnecting)
@@ -85,6 +104,10 @@ final class OMGSession: StreamDeviceSession {
     }
 
     func send(_ data: Data) {
+        send(data, acknowledgesActivity: true)
+    }
+
+    func send(_ data: Data, acknowledgesActivity: Bool) {
         guard let connection, connection.isAttached, !data.isEmpty else { return }
         guard data.count <= RuntimeConnection.maximumInput,
               pending.count + data.count <= RuntimeConnection.maximumInput else {
@@ -93,10 +116,21 @@ final class OMGSession: StreamDeviceSession {
             onState?(.readOnly("Input exceeds the 1 MiB limit."))
             return
         }
+        let shouldAcknowledge = RuntimeActivityAckPolicy.shouldAcknowledgeOnInput(
+            data,
+            acknowledgesActivity: acknowledgesActivity,
+            liveActivity: liveActivity
+        )
         if connection.isWriter {
             if inputRejected { inputRejected = false; onState?(.connected) }
+            if shouldAcknowledge {
+                connection.acknowledge()
+            }
             connection.inputBytes(data)
         } else {
+            if shouldAcknowledge {
+                connection.acknowledge()
+            }
             pending.append(data)
             if !claiming {
                 claiming = true
@@ -110,7 +144,9 @@ final class OMGSession: StreamDeviceSession {
         // Encoding uses the exact VT modes of this attachment. Query/focus
         // reports are not user input and cannot take the writer token.
         if case .focus = event { return }
-        if let bytes = try? terminal.encodeInput(event) { send(bytes) }
+        if let bytes = try? terminal.encodeInput(event) {
+            send(bytes, acknowledgesActivity: event.acknowledgesActivity)
+        }
     }
 
     func sendDeviceReport(_ data: Data) {
@@ -139,7 +175,10 @@ final class OMGSession: StreamDeviceSession {
         let becameVisible = !rendering && showing
         rendering = showing
         if becameVisible {
-            if connection?.isAttached == true {
+            if RuntimeActivityAckPolicy.shouldAcknowledgeOnBecomeVisible(
+                isAttached: connection?.isAttached == true,
+                liveActivity: liveActivity
+            ) {
                 connection?.acknowledge()
             }
             needsAutoClaim = true

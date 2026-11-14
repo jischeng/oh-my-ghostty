@@ -998,7 +998,7 @@ extension Ghostty {
             // We should use window to perform hitTest here,
             // because there could be some other overlays on top, like search bar
             guard window.contentView?.hitTest(location) == self else { return event }
-            acknowledgeAgentCompletionFromUserInput()
+            acknowledgeAgentCompletionFromUserInput(eventTimestamp: event.timestamp)
 
             // We always assume that we're resetting our mouse suppression
             // unless we see the specific scenario below to set it.
@@ -1246,13 +1246,18 @@ extension Ghostty {
             setSurfaceSize(width: UInt32(scaledSize.width), height: UInt32(scaledSize.height))
         }
 
-        private func acknowledgeAgentCompletionFromUserInput() {
+        private func acknowledgeAgentCompletionFromUserInput(
+            eventTimestamp: TimeInterval? = nil
+        ) {
             (window?.windowController as? TerminalController)?
-                .acknowledgeTerminalAgentStateFromUserInput(on: self)
+                .acknowledgeTerminalAgentStateFromUserInput(
+                    on: self,
+                    eventTimestamp: eventTimestamp
+                )
         }
 
         override func mouseDown(with event: NSEvent) {
-            acknowledgeAgentCompletionFromUserInput()
+            acknowledgeAgentCompletionFromUserInput(eventTimestamp: event.timestamp)
             guard let surface = self.surface else { return }
             if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command {
                 let pos = self.convert(event.locationInWindow, from: nil)
@@ -1272,7 +1277,6 @@ extension Ghostty {
         }
 
         override func mouseUp(with event: NSEvent) {
-            acknowledgeAgentCompletionFromUserInput()
             // If this mouse-up corresponds to a focus-only click transfer,
             // suppress it so we don't emit a release without a press.
             if suppressNextLeftMouseUp {
@@ -1293,7 +1297,7 @@ extension Ghostty {
         }
 
         override func otherMouseDown(with event: NSEvent) {
-            acknowledgeAgentCompletionFromUserInput()
+            acknowledgeAgentCompletionFromUserInput(eventTimestamp: event.timestamp)
             guard let surface = self.surface else { return }
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
             let button = Ghostty.Input.MouseButton(fromNSEventButtonNumber: event.buttonNumber)
@@ -1301,7 +1305,6 @@ extension Ghostty {
         }
 
         override func otherMouseUp(with event: NSEvent) {
-            acknowledgeAgentCompletionFromUserInput()
             guard let surface = self.surface else { return }
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
             let button = Ghostty.Input.MouseButton(fromNSEventButtonNumber: event.buttonNumber)
@@ -1309,7 +1312,7 @@ extension Ghostty {
         }
 
         override func rightMouseDown(with event: NSEvent) {
-            acknowledgeAgentCompletionFromUserInput()
+            acknowledgeAgentCompletionFromUserInput(eventTimestamp: event.timestamp)
             guard let surface = self.surface else { return super.rightMouseDown(with: event) }
 
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
@@ -1328,7 +1331,6 @@ extension Ghostty {
         }
 
         override func rightMouseUp(with event: NSEvent) {
-            acknowledgeAgentCompletionFromUserInput()
             guard let surface = self.surface else { return super.rightMouseUp(with: event) }
 
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
@@ -1436,7 +1438,6 @@ extension Ghostty {
         }
 
         override func scrollWheel(with event: NSEvent) {
-            acknowledgeAgentCompletionFromUserInput()
             guard let surfaceModel else { return }
 
             var x = event.scrollingDeltaX
@@ -1480,7 +1481,9 @@ extension Ghostty {
         }
 
         override func keyDown(with event: NSEvent) {
-            acknowledgeAgentCompletionFromUserInput()
+            if !event.isARepeat {
+                acknowledgeAgentCompletionFromUserInput(eventTimestamp: event.timestamp)
+            }
             guard let surface = self.surface else {
                 self.interpretKeyEvents([event])
                 return

@@ -41,4 +41,170 @@ final class RuntimeFrameTests: XCTestCase {
         _ = attachment.detach()
         XCTAssertFalse(attachment.accepts(live))
     }
+
+    func testAcknowledgeActivityEncodesOptionalMaxRevisionBigEndian() {
+        let untagged = RuntimeFrame.acknowledgeActivity()
+        XCTAssertEqual(untagged, RuntimeFrame(67, 0, Data()))
+        XCTAssertEqual(RuntimeFrame.acknowledgeActivity(maxRevision: 0), RuntimeFrame(67, 0, Data()))
+
+        let watermarked = RuntimeFrame.acknowledgeActivity(maxRevision: 0x0102030405060708)
+        XCTAssertEqual(watermarked.kind, 67)
+        XCTAssertEqual(watermarked.sequence, 0)
+        XCTAssertEqual(watermarked.data, Data([1, 2, 3, 4, 5, 6, 7, 8]))
+    }
+
+    func testRuntimeActivitySnapshotDecodesErrorInheritsAppAndHonorsTierPriority() throws {
+        let errorJSON = #"""
+        {
+          "version": 1,
+          "revision": 9,
+          "records": [
+            { "id": "omg-agent-claude-77", "metadata": "type=app;omg_agent=claude;omg_state=error" }
+          ],
+          "sync_restore": false
+        }
+        """#
+        let errorSnap = try RuntimeActivitySnapshot(data: Data(errorJSON.utf8))
+        XCTAssertEqual(errorSnap.revision, 9)
+        XCTAssertEqual(errorSnap.agent, "claude")
+        XCTAssertEqual(errorSnap.state, "error")
+        XCTAssertEqual(errorSnap.message, "Error")
+        XCTAssertTrue(errorSnap.isTerminal)
+        XCTAssertFalse(errorSnap.isSyncRestore)
+
+        let subRecordJSON = #"""
+        {
+          "version": 1,
+          "revision": 12,
+          "records": [
+            { "id": "omg-program-status", "metadata": "state=working:app=codex:id=main" },
+            { "id": "omg-program-status", "metadata": "state=blocked:kind=permission:id=main/sub" }
+          ],
+          "sync_restore": true
+        }
+        """#
+        let subSnap = try RuntimeActivitySnapshot(data: Data(subRecordJSON.utf8))
+        XCTAssertEqual(subSnap.agent, "codex")
+        XCTAssertEqual(subSnap.state, "needsAttention")
+        XCTAssertEqual(subSnap.attention, "permission")
+        XCTAssertEqual(subSnap.message, "Waiting for permission")
+        XCTAssertTrue(subSnap.isSyncRestore)
+
+        let hookOverGenericWorkingJSON = #"""
+        {
+          "version": 1,
+          "revision": 15,
+          "records": [
+            { "id": "omg-program-status", "metadata": "state=working:app=agy" },
+            { "id": "omg-agent-antigravity-88", "metadata": "type=app;omg_agent=antigravity;omg_state=needsAttention;omg_attention=question;omg_tier=hook" },
+            { "id": "omg-agent-antigravity-88", "metadata": "type=app;omg_agent=antigravity;omg_state=idle;omg_tier=fallback" }
+          ]
+        }
+        """#
+        let hookSnap = try RuntimeActivitySnapshot(data: Data(hookOverGenericWorkingJSON.utf8))
+        XCTAssertEqual(hookSnap.agent, "antigravity")
+        XCTAssertEqual(hookSnap.state, "needsAttention")
+        XCTAssertEqual(hookSnap.attention, "question")
+        XCTAssertEqual(hookSnap.message, "Waiting for you")
+    }
+
+    func testAttachVisibilityAndRawInputAcknowledgmentPolicy() throws {
+        let idleRestore = try RuntimeActivitySnapshot(data: Data(#"""
+        {"version":1,"revision":21,"records":[{"id":"omg-agent-codex-1","metadata":"type=app;omg_agent=codex;omg_state=idle"}],"sync_restore":true}
+        """#.utf8))
+        let workingRestore = try RuntimeActivitySnapshot(data: Data(#"""
+        {"version":1,"revision":22,"records":[{"id":"omg-agent-codex-1","metadata":"type=app;omg_agent=codex;omg_state=working"}],"sync_restore":true}
+        """#.utf8))
+        let doneRestore = try RuntimeActivitySnapshot(data: Data(#"""
+        {"version":1,"revision":42,"records":[{"id":"omg-agent-codex-1","metadata":"type=app;omg_agent=codex;omg_state=done"}],"sync_restore":true}
+        """#.utf8))
+        let doneLive = try RuntimeActivitySnapshot(data: Data(#"""
+        {"version":1,"revision":43,"records":[{"id":"omg-agent-codex-1","metadata":"type=app;omg_agent=codex;omg_state=done"}],"sync_restore":false}
+        """#.utf8))
+
+        // Attach on idle/working emits zero 'C' frames; foreground attach on done emits watermarked 'C' after 'G'.
+        XCTAssertFalse(RuntimeActivityAckPolicy.shouldAcknowledgeOnActivity(rendering: true, snapshot: idleRestore))
+        XCTAssertFalse(RuntimeActivityAckPolicy.shouldAcknowledgeOnActivity(rendering: true, snapshot: workingRestore))
+        XCTAssertFalse(RuntimeActivityAckPolicy.shouldAcknowledgeOnActivity(rendering: false, snapshot: doneRestore))
+        XCTAssertFalse(RuntimeActivityAckPolicy.shouldAcknowledgeOnActivity(rendering: true, snapshot: doneLive))
+        XCTAssertTrue(RuntimeActivityAckPolicy.shouldAcknowledgeOnActivity(rendering: true, snapshot: doneRestore))
+        let ackFrame = RuntimeFrame.acknowledgeActivity(maxRevision: doneRestore.revision)
+        XCTAssertEqual(ackFrame, RuntimeFrame(67, 0, Data([0, 0, 0, 0, 0, 0, 0, 42])))
+
+        // Visibility transition only acknowledges terminal done/error states when attached.
+        XCTAssertFalse(RuntimeActivityAckPolicy.shouldAcknowledgeOnBecomeVisible(isAttached: true, liveActivity: nil))
+        XCTAssertFalse(RuntimeActivityAckPolicy.shouldAcknowledgeOnBecomeVisible(isAttached: true, liveActivity: workingRestore))
+        XCTAssertFalse(RuntimeActivityAckPolicy.shouldAcknowledgeOnBecomeVisible(isAttached: false, liveActivity: doneLive))
+        XCTAssertTrue(RuntimeActivityAckPolicy.shouldAcknowledgeOnBecomeVisible(isAttached: true, liveActivity: doneLive))
+
+        // Passive focus and SGR/X10 mouse motion, release, and wheel never acknowledge done.
+        for passive in [
+            Data(),
+            Data("\u{1B}[I".utf8),
+            Data("\u{1B}[O".utf8),
+            Data("\u{1B}[<35;10;10M".utf8),
+            Data("\u{1B}[<64;10;10M".utf8),
+            Data("\u{1B}[<0;10;10m".utf8),
+            Data([0x1B, 0x5B, 0x4D, 32 + 35, 42, 42]),
+            Data([0x1B, 0x5B, 0x4D, 32 + 64, 42, 42]),
+            Data([0x1B, 0x5B, 0x4D, 32 + 3, 42, 42]),
+        ] {
+            XCTAssertFalse(
+                RuntimeActivityAckPolicy.shouldAcknowledgeOnInput(passive, liveActivity: doneLive),
+                "Expected passive sequence \(Array(passive)) not to acknowledge done"
+            )
+        }
+        XCTAssertFalse(
+            RuntimeActivityAckPolicy.shouldAcknowledgeOnInput(
+                Data("a".utf8),
+                acknowledgesActivity: false,
+                liveActivity: doneLive
+            )
+        )
+
+        // Intentional typing, paste, and mouse button presses DO acknowledge done.
+        for intentional in [
+            Data("a".utf8),
+            Data("\u{1B}[200~ls\u{1B}[201~".utf8),
+            Data("\u{1B}[<0;10;10M".utf8),
+            Data([0x1B, 0x5B, 0x4D, 32 + 0, 42, 42]),
+        ] {
+            XCTAssertTrue(
+                RuntimeActivityAckPolicy.shouldAcknowledgeOnInput(intentional, liveActivity: doneLive),
+                "Expected intentional sequence \(Array(intentional)) to acknowledge done"
+            )
+        }
+    }
+
+    func testDuplicateFieldKeysUseLastMatchAndMultiAppProgramStatusDoesNotGuessGlobalFallback() throws {
+        let duplicateKeysJSON = #"""
+        {
+          "version": 1,
+          "revision": 30,
+          "records": [
+            { "id": "omg-program-status", "metadata": "state=idle:app=codex:state=done" }
+          ]
+        }
+        """#
+        let duplicateSnap = try RuntimeActivitySnapshot(data: Data(duplicateKeysJSON.utf8))
+        XCTAssertEqual(duplicateSnap.agent, "codex")
+        XCTAssertEqual(duplicateSnap.state, "done")
+
+        let multiAppJSON = #"""
+        {
+          "version": 1,
+          "revision": 31,
+          "records": [
+            { "id": "omg-program-status", "metadata": "state=idle:app=codex:id=pane-a" },
+            { "id": "omg-program-status", "metadata": "state=idle:app=claude:id=pane-b" },
+            { "id": "omg-program-status", "metadata": "state=blocked:kind=question:id=orphan" },
+            { "id": "omg-agent-opencode-9", "metadata": "type=app;omg_agent=opencode;omg_state=idle" }
+          ]
+        }
+        """#
+        let multiAppSnap = try RuntimeActivitySnapshot(data: Data(multiAppJSON.utf8))
+        // `orphan` must not pick an arbitrary entry from `{codex, claude}`; it inherits the unambiguous hook fallback `opencode`.
+        XCTAssertEqual(multiAppSnap.agent, "opencode")
+        XCTAssertEqual(multiAppSnap.state, "needsAttention")
+    }
 }

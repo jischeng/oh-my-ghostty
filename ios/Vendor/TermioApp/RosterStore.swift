@@ -41,19 +41,19 @@ final class RosterStore {
         didSet {
             client?.viewingSessionID = currentSessionKey
             guard let key = currentSessionKey else { return }
-            var clearedDone = false
+            var clearedTerminal = false
             projects = projects.map { project in
                 var copy = project
-                for idx in copy.sessions.indices where copy.sessions[idx].key == key && copy.sessions[idx].status == .done {
+                for idx in copy.sessions.indices where copy.sessions[idx].key == key && (copy.sessions[idx].status == .done || copy.sessions[idx].status == .error) {
                     copy.sessions[idx].status = .idle
-                    if copy.sessions[idx].subtitle == "Done" {
+                    if copy.sessions[idx].subtitle == "Done" || copy.sessions[idx].subtitle == "Error" {
                         copy.sessions[idx].subtitle = ""
                     }
-                    clearedDone = true
+                    clearedTerminal = true
                 }
                 return copy
             }
-            if clearedDone {
+            if clearedTerminal {
                 NotificationCenter.default.post(name: Self.didChange, object: nil)
                 let statuses = Dictionary(
                     projects.flatMap { project in
@@ -93,6 +93,7 @@ final class RosterStore {
     /// one and echoes it back in `.started`.
     private var pendingStart: (project: MockProject, agent: RosterAgent?)?
     private var pairingObserver: NSObjectProtocol?
+    private var activityObserver: NSObjectProtocol?
 
     /// Every session currently blocked on the user, across all projects, in
     /// roster order — the root page's "Needs You" strip.
@@ -213,6 +214,88 @@ final class RosterStore {
                     self.disconnect()
                 }
             }
+        }
+        activityObserver = NotificationCenter.default.addObserver(
+            forName: OMGSession.activityDidChange, object: nil, queue: .main
+        ) { [weak self] note in
+            MainActor.assumeIsolated {
+                guard let self,
+                      let sessionID = note.userInfo?["sessionID"] as? String,
+                      let snapshot = note.userInfo?["snapshot"] as? RuntimeActivitySnapshot else { return }
+                self.applyLiveActivity(snapshot, forSessionID: sessionID)
+            }
+        }
+    }
+
+    private func applyLiveActivity(_ snapshot: RuntimeActivitySnapshot, forSessionID sessionID: String) {
+        let nextStatus = SessionStatus(wire: snapshot.state)
+        let resolvedAgent = snapshot.agent.map { id in
+            enabledAgents.first { $0.id == id } ?? RosterAgent.fallback(wire: id)
+        }
+        var changed = false
+        projects = projects.map { project in
+            var copy = project
+            for idx in copy.sessions.indices where copy.sessions[idx].rosterID == sessionID {
+                let effectiveStatus = (currentSessionKey == copy.sessions[idx].key && (nextStatus == .done || nextStatus == .error) && snapshot.isSyncRestore)
+                    ? .idle
+                    : nextStatus
+                let effectiveSubtitle = effectiveStatus == .idle ? "" : snapshot.message
+                var nextRow = copy.sessions[idx]
+                if let resolvedAgent, nextRow.agent.id != resolvedAgent.id {
+                    nextRow = MockSession(
+                        title: nextRow.title == nextRow.agent.name ? resolvedAgent.name : nextRow.title,
+                        project: nextRow.project,
+                        agent: resolvedAgent,
+                        status: effectiveStatus,
+                        subtitle: effectiveSubtitle,
+                        time: nextRow.time,
+                        rosterID: nextRow.rosterID,
+                        projectRosterID: nextRow.projectRosterID,
+                        projectPath: nextRow.projectPath,
+                        branch: nextRow.branch,
+                        worktreeBranch: nextRow.worktreeBranch,
+                        isBackground: nextRow.isBackground,
+                        isMobileCreated: nextRow.isMobileCreated,
+                        remoteHost: snapshot.remoteHost ?? nextRow.remoteHost,
+                        remotePath: snapshot.remoteCwd ?? nextRow.remotePath
+                    )
+                    copy.sessions[idx] = nextRow
+                    changed = true
+                } else {
+                    if copy.sessions[idx].status != effectiveStatus {
+                        copy.sessions[idx].status = effectiveStatus
+                        changed = true
+                    }
+                    if copy.sessions[idx].subtitle != effectiveSubtitle {
+                        copy.sessions[idx].subtitle = effectiveSubtitle
+                        changed = true
+                    }
+                    if let host = snapshot.remoteHost, !host.isEmpty, copy.sessions[idx].remoteHost != host {
+                        copy.sessions[idx].remoteHost = host
+                        changed = true
+                    }
+                    if let cwd = snapshot.remoteCwd, !cwd.isEmpty, copy.sessions[idx].remotePath != cwd {
+                        copy.sessions[idx].remotePath = cwd
+                        changed = true
+                    }
+                }
+            }
+            return copy
+        }
+        if changed {
+            NotificationCenter.default.post(name: Self.didChange, object: nil)
+            let statuses = Dictionary(
+                projects.flatMap { project in
+                    project.sessions.compactMap { session in
+                        session.rosterID.map { ($0, session.status) }
+                    }
+                },
+                uniquingKeysWith: { first, _ in first }
+            )
+            NotificationCenter.default.post(
+                name: .sessionStatusesDidChange, object: nil,
+                userInfo: ["statuses": statuses]
+            )
         }
     }
 

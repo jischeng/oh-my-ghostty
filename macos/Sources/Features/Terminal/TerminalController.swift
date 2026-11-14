@@ -450,13 +450,15 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     var agentReducers: [UUID: AgentContextSignalReducer] = [:]
     private var agentProgramStatuses: [UUID: AgentProgramStatus] = [:]
     private var agentRuntimeSnapshots: [UUID: [Ghostty.ContextSignal]] = [:]
-    /// Title observations per surface, used to clear a stale "working" state
-    /// when an Agent hook never delivered its terminal event.
+    private var agentRuntimeSyncRestore: [UUID: Bool] = [:]
+    private var agentCompletionArrivedUptime: [UUID: TimeInterval] = [:]
+    /// Tier 3 title observations per surface (used only when neither OSC 7501
+    /// nor a typed Hook context owns the pane).
     private var agentTitleWatchers: [UUID: AgentTitleIdleWatcher] = [:]
     private var typedAgentHookContextIDs: [UUID: String] = [:]
     private var agentValidationWorkItems: [UUID: DispatchWorkItem] = [:]
     private var agentProcessExitSources: [UUID: (pid: Int, source: DispatchSourceProcess)] = [:]
-    private var agentStaleWorkingWorkItems: [UUID: DispatchWorkItem] = [:]
+    private var agentTier3TitleIdleWorkItems: [UUID: DispatchWorkItem] = [:]
 
     var activeAgentProcessExitSourcePIDs: [UUID: Int] {
         agentProcessExitSources.mapValues(\.pid)
@@ -768,7 +770,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         agentProcessPollCancellable?.cancel()
         for entry in agentProcessExitSources.values { entry.source.cancel() }
         for item in agentValidationWorkItems.values { item.cancel() }
-        for item in agentStaleWorkingWorkItems.values { item.cancel() }
+        for item in agentTier3TitleIdleWorkItems.values { item.cancel() }
         pendingTabOrganizationWorkItem?.cancel()
         quickInputSecureInputCancellable?.cancel()
         quickInputDraftImportTask?.cancel()
@@ -928,6 +930,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         agentReducers = agentReducers.filter { activeIDs.contains($0.key) }
         agentProgramStatuses = agentProgramStatuses.filter { activeIDs.contains($0.key) }
         agentRuntimeSnapshots = agentRuntimeSnapshots.filter { activeIDs.contains($0.key) }
+        agentRuntimeSyncRestore = agentRuntimeSyncRestore.filter { activeIDs.contains($0.key) }
+        agentCompletionArrivedUptime = agentCompletionArrivedUptime.filter { activeIDs.contains($0.key) }
         agentTitleWatchers = agentTitleWatchers.filter { activeIDs.contains($0.key) }
         typedAgentHookContextIDs = typedAgentHookContextIDs.filter {
             activeIDs.contains($0.key)
@@ -954,7 +958,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         pruneQuickInputState(retaining: activeIDs)
         for surfaceID in Set(agentValidationWorkItems.keys)
             .union(agentProcessExitSources.keys)
-            .union(agentStaleWorkingWorkItems.keys)
+            .union(agentTier3TitleIdleWorkItems.keys)
         where !activeIDs.contains(surfaceID) {
             cancelAgentValidationMonitoring(for: surfaceID)
         }
@@ -1396,7 +1400,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
            reducer.hasActiveLocalContext(
                for: agent,
                processGroupID: processGroupID,
-               isProcessAlive: Self.processExists
+               isProcessAlive: Self.processExists,
+               isProcessGroupAlive: Self.processGroupExists
            ) {
             return
         }
@@ -1431,9 +1436,19 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             switch context.state {
             case .local:
                 guard AgentHookPresenceCache.shared.isInstalled(.hermes) == true else { continue }
+                let hasLocalHermes = detectedAgentInstances[id]?.agent == .hermes ||
+                    hermesPaneContexts[id] != nil
+                let trackedByRuntimeSocket = surface.runtimeDescriptor != nil &&
+                    typedAgentHookContextIDs[id] != nil &&
+                    hermesPaneContexts[id] == nil
+                guard hasLocalHermes, !trackedByRuntimeSocket else { continue }
                 connection = nil
                 tty = surface.surfaceModel?.ttyName
             case .sshReady(let ssh, _):
+                let trackedByRemoteRuntime = surface.runtimeInlineSession != nil &&
+                    typedAgentHookContextIDs[id] != nil &&
+                    hermesPaneContexts[id] == nil
+                guard !trackedByRemoteRuntime else { continue }
                 connection = try? GitSSHConnection(session: context)
                 tty = ssh.remoteTTY
                 guard connection != nil else { continue }
@@ -1656,27 +1671,93 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         _ title: String,
         for surfaceID: UUID
     ) {
+        // Tier 1 (OSC 7501) is strictly higher authority than title heuristics.
+        guard agentProgramStatuses[surfaceID] == nil else {
+            agentTier3TitleIdleWorkItems.removeValue(forKey: surfaceID)?.cancel()
+            return
+        }
         guard let descriptor = agentResumeDescriptors[surfaceID],
               let contextID = agentResumeContextIDs[surfaceID] else { return }
-        let status = descriptor.agent.definition.titleStatus
-        agentTitleWatchers[surfaceID, default: AgentTitleIdleWatcher()].observe(
-            title: title,
-            status: status,
-            now: Date()
-        )
-        scheduleStaleWorkingCheckIfNeeded(for: surfaceID)
+        let definition = descriptor.agent.definition
+        let status = definition.titleStatus
+        let typedOwns = typedAgentHookContextIDs[surfaceID] == contextID
+        let hookSupportsAttention = definition.hook.events.contains {
+            $0.state == .needsAttention
+        }
+        let now = Date()
+        if typedOwns {
+            agentTier3TitleIdleWorkItems.removeValue(forKey: surfaceID)?.cancel()
+        } else {
+            agentTitleWatchers[surfaceID, default: AgentTitleIdleWatcher()].observe(
+                title: title,
+                status: status,
+                now: now
+            )
+        }
         guard let state = AgentTitleStatusReconciler.nextState(
             status: status,
             title: title,
             current: agentActivities[surfaceID]?.state,
-            typedHookOwnsContext: typedAgentHookContextIDs[surfaceID] == contextID
-        ) else { return }
+            typedHookOwnsContext: typedOwns,
+            hookSupportsAttention: hookSupportsAttention
+        ) else {
+            if !typedOwns, agentTitleWatchers[surfaceID]?.detected != .idle {
+                agentTier3TitleIdleWorkItems.removeValue(forKey: surfaceID)?.cancel()
+            }
+            return
+        }
+        if !typedOwns, state == .idle {
+            let confirmed = agentTitleWatchers[surfaceID]?.confirmsIdle(
+                now: now,
+                delay: AgentTitleStatusReconciler.idleConfirmationDelay
+            ) == true
+            if !confirmed {
+                scheduleTier3TitleIdleConfirmation(for: surfaceID, contextID: contextID)
+                return
+            }
+        }
+        agentTier3TitleIdleWorkItems.removeValue(forKey: surfaceID)?.cancel()
+        let attention = state == .needsAttention ? ";omg_attention=permission" : ""
+        let tier = typedOwns ? "" : ";omg_tier=fallback"
         updateAgentActivity(.init(
             action: .start,
             id: contextID,
             metadata: "type=app;omg_agent=\(descriptor.agent.rawValue);" +
-                "omg_scope=\(descriptor.scope.rawValue);omg_state=\(state.rawValue)"
+                "omg_scope=\(descriptor.scope.rawValue);omg_state=\(state.rawValue)" +
+                "\(attention)\(tier)"
         ), for: surfaceID)
+    }
+
+    private func scheduleTier3TitleIdleConfirmation(
+        for surfaceID: UUID,
+        contextID: String
+    ) {
+        agentTier3TitleIdleWorkItems.removeValue(forKey: surfaceID)?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.agentTier3TitleIdleWorkItems.removeValue(forKey: surfaceID)
+            guard self.agentProgramStatuses[surfaceID] == nil,
+                  self.typedAgentHookContextIDs[surfaceID] != contextID,
+                  let descriptor = self.agentResumeDescriptors[surfaceID],
+                  self.agentResumeContextIDs[surfaceID] == contextID,
+                  let current = self.agentActivities[surfaceID]?.state,
+                  current == .working || current == .needsAttention,
+                  self.agentTitleWatchers[surfaceID]?.confirmsIdle(
+                      now: Date(),
+                      delay: AgentTitleStatusReconciler.idleConfirmationDelay
+                  ) == true else { return }
+            self.updateAgentActivity(.init(
+                action: .start,
+                id: contextID,
+                metadata: "type=app;omg_agent=\(descriptor.agent.rawValue);" +
+                    "omg_scope=\(descriptor.scope.rawValue);omg_state=idle;omg_tier=fallback"
+            ), for: surfaceID)
+        }
+        agentTier3TitleIdleWorkItems[surfaceID] = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + AgentTitleStatusReconciler.idleConfirmationDelay + 0.05,
+            execute: workItem
+        )
     }
 
     private func registerTypedAgentHookSignal(
@@ -1686,10 +1767,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         guard signal.id.hasPrefix("omg-agent-") else { return }
         switch signal.action {
         case .start:
-            guard AgentContextSignalReducer.sessionSignal(from: signal) != nil else {
+            guard !signal.metadata.contains("omg_tier=fallback"),
+                  AgentContextSignalReducer.sessionSignal(from: signal) != nil else {
                 return
             }
             typedAgentHookContextIDs[surfaceID] = signal.id
+            agentTier3TitleIdleWorkItems.removeValue(forKey: surfaceID)?.cancel()
         case .end:
             guard typedAgentHookContextIDs[surfaceID] == signal.id else { return }
             typedAgentHookContextIDs.removeValue(forKey: surfaceID)
@@ -1726,6 +1809,16 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             : nil
         let update = consumedAgentSignal ?? remotePromptUpdate
         agentReducers[surfaceID] = reducer
+        if case .set(let activity) = consumedAgentSignal,
+           activity.state == .working,
+           activity.phase != .background,
+           var programStatus = agentProgramStatuses[surfaceID],
+           programStatus.activity?.state == .done || programStatus.activity?.state == .error {
+            if programStatus.acknowledge() {
+                agentProgramStatuses[surfaceID] = programStatus
+            }
+            updateAcknowledgedAgentStatus(for: surfaceID) { $0.program = nil }
+        }
         let clearsAcknowledgedReducer: Bool = switch consumedAgentSignal {
         case .set(let activity): activity.state != .idle
         case .clear: true
@@ -1957,9 +2050,19 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     func acknowledgeTerminalAgentStateFromUserInput(
-        on surface: Ghostty.SurfaceView
+        on surface: Ghostty.SurfaceView,
+        eventTimestamp: TimeInterval? = nil
     ) {
         guard surfaceTree.contains(where: { $0 === surface }) else { return }
+        if let eventTimestamp,
+           let arrived = agentCompletionArrivedUptime[surface.id] {
+            let effective = eventTimestamp == 0
+                ? ProcessInfo.processInfo.systemUptime
+                : eventTimestamp
+            if effective < arrived + 0.15 {
+                return
+            }
+        }
         acknowledgeTerminalAgentState(for: surface)
         TerminalFocusRouter.acknowledgeDockAttention(for: surface, in: self)
     }
@@ -2024,6 +2127,14 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             next.removeValue(forKey: surfaceID)
         }
         guard next != agentActivities else { return }
+        let nextState = next[surfaceID]?.state
+        if nextState == .done || nextState == .error {
+            if previousState != nextState {
+                agentCompletionArrivedUptime[surfaceID] = ProcessInfo.processInfo.systemUptime
+            }
+        } else {
+            agentCompletionArrivedUptime.removeValue(forKey: surfaceID)
+        }
         agentActivities = next
         // Hydration changes presentation only. It must never dispatch queued
         // input or repeat completion notifications and composer actions.
@@ -2057,16 +2168,43 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
     }
 
+    private func fallbackAgent(for surfaceID: UUID) -> SupportedAgent? {
+        if let agent = agentResumeDescriptors[surfaceID]?.agent { return agent }
+        if let agent = detectedAgentInstances[surfaceID]?.agent { return agent }
+        if let source = agentReducers[surfaceID]?.currentActivity?.source {
+            return SupportedAgent(rawValue: source)
+        }
+        return nil
+    }
+
     private func consumeAgentRuntimeSnapshot(
         _ signal: Ghostty.ContextSignal, for surface: Ghostty.SurfaceView
     ) -> Bool {
         let id = surface.id
         if signal.id == "omg-agent-sync" {
-            if signal.action == .start, signal.metadata == "begin" {
+            guard signal.action == .start else { return true }
+            if signal.metadata == "mode=live" || signal.metadata == "mode=restore" {
+                agentRuntimeSyncRestore[id] = (signal.metadata != "mode=live")
+                return true
+            }
+            if signal.metadata == "begin" || signal.metadata.hasPrefix("begin;") {
                 agentRuntimeSnapshots[id] = []
-            } else if signal.action == .start, signal.metadata == "end",
+                if signal.metadata.contains("mode=live") {
+                    agentRuntimeSyncRestore[id] = false
+                } else if signal.metadata.contains("mode=restore") {
+                    agentRuntimeSyncRestore[id] = true
+                }
+            } else if signal.metadata == "end" || signal.metadata.hasPrefix("end;"),
                       let signals = agentRuntimeSnapshots.removeValue(forKey: id),
                       AgentStatusPlugin.isEnabled {
+                let recordedRestore = agentRuntimeSyncRestore.removeValue(forKey: id)
+                let isRestore: Bool = if signal.metadata.contains("mode=live") {
+                    false
+                } else if signal.metadata.contains("mode=restore") {
+                    true
+                } else {
+                    recordedRestore ?? true
+                }
                 var reducer = AgentContextSignalReducer()
                 var status = AgentProgramStatus()
                 status.isRemote = paneSessionContexts[id]?.isSSHSession == true ||
@@ -2075,9 +2213,18 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 clearAgentResumeDescriptor(for: id)
                 typedAgentHookContextIDs.removeValue(forKey: id)
                 agentTitleWatchers.removeValue(forKey: id)
+                agentTier3TitleIdleWorkItems.removeValue(forKey: id)?.cancel()
+                let snapshotHookAgents = Set(signals.compactMap { item -> SupportedAgent? in
+                    guard item.id.hasPrefix("omg-agent-") else { return nil }
+                    return AgentContextSignalReducer.sessionSignal(from: item)?.agent
+                })
+                let soleHookAgent = snapshotHookAgents.count == 1 ? snapshotHookAgents.first : nil
                 for item in signals {
                     if item.id == "omg-program-status" {
-                        _ = status.consume(item.metadata)
+                        _ = status.consume(
+                            item.metadata,
+                            fallbackAgent: soleHookAgent ?? detectedAgentInstances[id]?.agent
+                        )
                     } else {
                         _ = reducer.consume(item)
                         registerTypedAgentHookSignal(item, for: id)
@@ -2086,14 +2233,14 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 }
                 if var ack = surface.acknowledgedAgentStatus {
                     if let progAck = ack.program {
-                        if status.acknowledgmentCandidate == progAck {
+                        if progAck.matches(status.acknowledgmentCandidate) {
                             _ = status.acknowledge()
                         } else if !status.records.isEmpty {
                             ack.program = nil
                         }
                     }
                     if let redAck = ack.reducer {
-                        if reducer.acknowledgmentCandidate == redAck {
+                        if redAck.matches(reducer.acknowledgmentCandidate) {
                             _ = reducer.acknowledgeTerminalState()
                         } else if reducer.currentActivity != nil {
                             ack.reducer = nil
@@ -2107,8 +2254,14 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                     program: status.activity,
                     fallback: reducer.currentActivity
                 )
-                applyAgentActivityUpdate(activity.map(AgentActivityUpdate.set) ?? .clear, for: id, restoring: true)
+                applyAgentActivityUpdate(
+                    activity.map(AgentActivityUpdate.set) ?? .clear,
+                    for: id,
+                    restoring: isRestore
+                )
                 scheduleAgentValidation(for: id)
+            } else if signal.metadata == "end" || signal.metadata.hasPrefix("end;") {
+                agentRuntimeSyncRestore.removeValue(forKey: id)
             }
             return true
         }
@@ -2121,11 +2274,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 }
             if signal.id.hasPrefix("omg-ssh-"), signal.action == .end || isPrompt {
                 agentRuntimeSnapshots.removeValue(forKey: id)
+                agentRuntimeSyncRestore.removeValue(forKey: id)
             }
             return false
         }
         guard pending.count < 64, signal.metadata.utf8.count <= 4_096 else {
             agentRuntimeSnapshots.removeValue(forKey: id)
+            agentRuntimeSyncRestore.removeValue(forKey: id)
             return true
         }
         pending.append(signal)
@@ -2138,11 +2293,21 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         var status = agentProgramStatuses[surface.id] ?? AgentProgramStatus()
         let previousFG = status.foregroundProcessGroup
         let previousProgramState = status.activity?.state
-        guard status.consume(body) else { return }
+        guard status.consume(body, fallbackAgent: fallbackAgent(for: surface.id)) else { return }
+        agentTier3TitleIdleWorkItems.removeValue(forKey: surface.id)?.cancel()
         var acknowledgedReducer: AcknowledgedAgentStatus.ReducerRecord?
-        if previousProgramState == .done || previousProgramState == .error,
-           status.activity?.state == .idle,
-           var reducer = agentReducers[surface.id] {
+        let nextProgramActivity = status.activity
+        if nextProgramActivity?.state == .working,
+           nextProgramActivity?.phase != .background,
+           var reducer = agentReducers[surface.id],
+           reducer.currentActivity?.state == .done || reducer.currentActivity?.state == .error {
+            if reducer.acknowledgeTerminalState() != nil {
+                agentReducers[surface.id] = reducer
+            }
+            updateAcknowledgedAgentStatus(for: surface.id) { $0.reducer = nil }
+        } else if previousProgramState == .done || previousProgramState == .error,
+                  nextProgramActivity?.state == .idle,
+                  var reducer = agentReducers[surface.id] {
             let candidate = reducer.acknowledgmentCandidate
             if reducer.acknowledgeTerminalState() != nil {
                 agentReducers[surface.id] = reducer
@@ -2171,7 +2336,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         agentProgramStatuses[surface.id] = status.records.isEmpty ? nil : status
         updateAcknowledgedAgentStatus(for: surface.id) { ack in
             if let acknowledgedReducer { ack.reducer = acknowledgedReducer }
-            if status.records.last?.acknowledged != true || status.acknowledgmentCandidate != ack.program {
+            if !status.hasAcknowledgedTerminalRecord ||
+                !(ack.program?.matches(status.acknowledgmentCandidate) ?? false) {
                 ack.program = nil
             }
         }
@@ -2182,74 +2348,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         applyAgentActivityUpdate(activity.map(AgentActivityUpdate.set) ?? .clear, for: surface.id)
     }
 
-    /// A hook that never delivered its terminal event would keep the tab in
-    /// "working" forever. The Agent title is an independent channel, so a
-    /// sustained idle title may clear the state.
-    private func staleWorkingActivityUpdate(for surfaceID: UUID) -> AgentActivityUpdate? {
-        guard let activity = agentActivities[surfaceID],
-              activity.state == .working,
-              let contextID = agentResumeContextIDs[surfaceID],
-              typedAgentHookContextIDs[surfaceID] == contextID,
-              let watcher = agentTitleWatchers[surfaceID],
-              watcher.confirmsIdle(
-                  now: Date(),
-                  delay: AgentTitleStatusReconciler.idleConfirmationDelay,
-                  stallDelay: AgentTitleStatusReconciler.idleStallDelay
-              ) else { return nil }
-        return .set(.init(
-            source: activity.source,
-            state: .idle,
-            phase: nil,
-            attentionKind: nil,
-            label: activity.label,
-            message: nil,
-            detail: nil,
-            progress: nil,
-            icon: activity.icon
-        ))
-    }
-
     private func cancelAgentValidationMonitoring(for surfaceID: UUID) {
         agentValidationWorkItems.removeValue(forKey: surfaceID)?.cancel()
-        agentStaleWorkingWorkItems.removeValue(forKey: surfaceID)?.cancel()
+        agentTier3TitleIdleWorkItems.removeValue(forKey: surfaceID)?.cancel()
         if let entry = agentProcessExitSources.removeValue(forKey: surfaceID) {
             entry.source.cancel()
         }
-    }
-
-    private func scheduleStaleWorkingCheckIfNeeded(for surfaceID: UUID) {
-        agentStaleWorkingWorkItems.removeValue(forKey: surfaceID)?.cancel()
-        guard let activity = agentActivities[surfaceID],
-              activity.state == .working,
-              let contextID = agentResumeContextIDs[surfaceID],
-              typedAgentHookContextIDs[surfaceID] == contextID,
-              agentTitleWatchers[surfaceID] != nil else { return }
-        let delay = AgentTitleStatusReconciler.idleConfirmationDelay + 0.05
-        let workItem = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.agentStaleWorkingWorkItems.removeValue(forKey: surfaceID)
-            if let stale = self.staleWorkingActivityUpdate(for: surfaceID) {
-                self.applyAgentActivityUpdate(stale, for: surfaceID)
-                return
-            }
-            if self.agentActivities[surfaceID]?.state == .working,
-               self.agentTitleWatchers[surfaceID] != nil {
-                let stallCheck = DispatchWorkItem { [weak self] in
-                    guard let self else { return }
-                    self.agentStaleWorkingWorkItems.removeValue(forKey: surfaceID)
-                    if let stale = self.staleWorkingActivityUpdate(for: surfaceID) {
-                        self.applyAgentActivityUpdate(stale, for: surfaceID)
-                    }
-                }
-                self.agentStaleWorkingWorkItems[surfaceID] = stallCheck
-                DispatchQueue.main.asyncAfter(
-                    deadline: .now() + AgentTitleStatusReconciler.idleStallDelay + 0.05,
-                    execute: stallCheck
-                )
-            }
-        }
-        agentStaleWorkingWorkItems[surfaceID] = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
     private func reconcileAgentValidation(
@@ -2276,9 +2380,6 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             confirmedProcessExit: confirmedProcessExit
         )
         agentReducers[surfaceID] = reducer
-        if let stale = staleWorkingActivityUpdate(for: surfaceID) {
-            applyAgentActivityUpdate(stale, for: surfaceID)
-        }
         if let update {
             applyAgentActivityUpdate(update, for: surfaceID)
             if update == .clear {
@@ -2299,8 +2400,6 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             cancelAgentValidationMonitoring(for: surfaceID)
             return
         }
-
-        scheduleStaleWorkingCheckIfNeeded(for: surfaceID)
 
         switch identity {
         case .process(let processID):
@@ -5428,6 +5527,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 agentActivities = [:]
                 agentReducers = [:]
                 agentProgramStatuses = [:]
+                agentRuntimeSnapshots = [:]
+                agentRuntimeSyncRestore = [:]
+                agentCompletionArrivedUptime = [:]
                 typedAgentHookContextIDs = [:]
                 agentResumeDescriptors = [:]
                 agentResumeContextIDs = [:]
@@ -5438,8 +5540,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 agentScreenStableTicks = [:]
                 agentValidationWorkItems.values.forEach { $0.cancel() }
                 agentValidationWorkItems = [:]
-                agentStaleWorkingWorkItems.values.forEach { $0.cancel() }
-                agentStaleWorkingWorkItems = [:]
+                agentTier3TitleIdleWorkItems.values.forEach { $0.cancel() }
+                agentTier3TitleIdleWorkItems = [:]
                 agentProcessExitSources.values.forEach { $0.source.cancel() }
                 agentProcessExitSources = [:]
             }

@@ -16,21 +16,24 @@ public enum SessionStatus: Hashable, Sendable {
     /// The agent is blocked waiting on the user (permission prompt, or a
     /// bell / desktop notification it raised).
     case needsAttention
+    /// The agent's turn terminated with an error or crash.
+    case error
 
-    /// Sort rank for mobile lists: attention first, then working.
+    /// Sort rank for mobile lists: attention first, then errors, then working.
     public var rank: Int {
         switch self {
         case .needsAttention: 0
-        case .working: 1
-        case .idle: 2
-        case .done: 3
+        case .error: 1
+        case .working: 2
+        case .idle: 3
+        case .done: 4
         }
     }
 }
 
 /// A small coloured dot trailing a session title: hidden when idle/working
 /// (working is shown by the leading spinner instead), green when done,
-/// orange when the session needs the user.
+/// red when errored, and orange when the session needs the user.
 public struct StatusDot: View {
     let status: SessionStatus
 
@@ -42,11 +45,15 @@ public struct StatusDot: View {
         Circle()
             .fill(color)
             .frame(width: 7, height: 7)
-            .opacity(status == .done || status == .needsAttention ? 1 : 0)
+            .opacity(status == .done || status == .needsAttention || status == .error ? 1 : 0)
     }
 
     private var color: Color {
-        status == .needsAttention ? .orange : .green
+        switch status {
+        case .needsAttention: .orange
+        case .error: .red
+        default: .green
+        }
     }
 }
 

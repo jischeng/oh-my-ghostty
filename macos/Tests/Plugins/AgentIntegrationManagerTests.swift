@@ -761,10 +761,13 @@ else: sys.exit(2)
         let driver = #"""
 import base64, fcntl, json, os, pty, subprocess, termios
 commands = json.loads(base64.b64decode("\#(data.base64EncodedString())"))
-def execute(command, payload, remote=False, terminal=True):
+def execute(command, payload, remote=False, terminal=True, runtime_bin=None):
     environment = dict(os.environ)
     environment.pop("SSH_CONNECTION", None)
+    environment.pop("OMG_RUNTIME_REMOTE", None)
+    environment.pop("OMG_RUNTIME_BIN", None)
     if remote: environment["SSH_CONNECTION"] = "test"
+    if runtime_bin: environment["OMG_RUNTIME_BIN"] = runtime_bin
     master, slave = pty.openpty()
     def setup():
         os.setsid()
@@ -788,13 +791,14 @@ for remote in (False, True):
     response, sequence = execute(commands["pre"], {"conversationId": "test-123"}, remote)
     assert response == {}
     assert "omg_state=working" in sequence
+    assert "omg_event=prompt" in sequence
     assert "omg_scope=" + ("remote" if remote else "local") in sequence
     assert "omg_conversation=test-123" in sequence
     response, sequence = execute(commands["stop"], {"conversationId": "test-123", "fullyIdle": True}, remote)
     assert response == {"decision": "allow"}
     assert "omg_state=done" in sequence
     _, sequence = execute(commands["stop"], {"fullyIdle": False}, remote)
-    assert "omg_state=working" in sequence
+    assert "omg_state=done" in sequence
     _, sequence = execute(commands["stop"], {"terminationReason": "error"}, remote)
     assert "omg_state=error" in sequence
     _, sequence = execute(commands["stop"], {"terminationReason": "ERROR"}, remote)
@@ -805,6 +809,22 @@ for remote in (False, True):
     assert "omg_state=idle" in sequence
 response, sequence = execute(commands["pre"], {}, terminal=False)
 assert response == {} and not sequence
+# Verify socket-first reporting via OMG_RUNTIME_BIN (no PTY sequence when exit 0, PTY fallback when exit 1).
+helper_path = os.path.join(os.environ["HOME"], "mock-omgd")
+capture_path = os.path.join(os.environ["HOME"], "mock-omgd.json")
+with open(helper_path, "w") as f:
+    f.write("#!/usr/bin/python3\nimport json, os, sys\nopen(%r, 'w').write(json.dumps(sys.argv[1:]))\nsys.exit(0)\n" % capture_path)
+os.chmod(helper_path, 0o700)
+response, sequence = execute(commands["stop"], {"conversationId": "test-123", "fullyIdle": False, "cwd": "/tmp"}, runtime_bin=helper_path)
+assert response == {"decision": "allow"} and sequence == ""
+recorded = json.loads(open(capture_path).read())
+assert recorded[:5] == ["report", "antigravity", "done", "test-123", "/tmp"] and "--pid" in recorded
+for special_conv, encoded_conv in [("-agy-dash", "-agy-dash"), ("agy:dir/1~2", "agy%3Adir%2F1~2")]:
+    response, sequence = execute(commands["stop"], {"conversationId": special_conv, "fullyIdle": True, "cwd": "/tmp"}, runtime_bin=helper_path)
+    assert response == {"decision": "allow"} and sequence == ""
+    assert json.loads(open(capture_path).read())[:5] == ["report", "antigravity", "done", "-", "/tmp"]
+    response, sequence = execute(commands["stop"], {"conversationId": special_conv, "fullyIdle": True})
+    assert f"omg_conversation={encoded_conv}" in sequence
 # Simulate agy spawning `/bin/sh -c <hook>` in a separate child process group (`process_group=0`)
 # within the same PTY session: emitted `omg-agent-antigravity-<pgid>` must carry agy's pgid, not sh's!
 master, slave = pty.openpty()
@@ -815,6 +835,8 @@ parent_code = (
     "fcntl.ioctl(slave, termios.TIOCSCTTY, 0)\n"
     "env = dict(os.environ)\n"
     "env.pop('SSH_CONNECTION', None)\n"
+    "env.pop('OMG_RUNTIME_REMOTE', None)\n"
+    "env.pop('OMG_RUNTIME_BIN', None)\n"
     "env['SDKROOT'] = '/nonexistent/SDK'\n"
     "env['DEVELOPER_DIR'] = '/nonexistent/Developer'\n"
     "proc = subprocess.Popen(['/bin/sh', '-c', sys.argv[2]], stdin=subprocess.PIPE,"

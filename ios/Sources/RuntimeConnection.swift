@@ -70,6 +70,8 @@ final class RuntimeConnection {
     private var snapshotApplied = false
     private var transferSupported = false
     private var activityAcknowledge = false
+    private(set) var latestActivity: RuntimeActivitySnapshot?
+    private var latestActivityRevision: UInt64 = 0
     private var sentViewport: TerminalGrid?
     private var requestedViewport: TerminalGrid?
     private var viewportGeneration: UInt64 = 0
@@ -80,6 +82,7 @@ final class RuntimeConnection {
     var onChange: (() -> Void)?
     var onState: ((State) -> Void)?
     var onOutput: ((Data) -> Void)?
+    var onActivity: ((RuntimeActivitySnapshot) -> Void)?
     var onSignal: ((TermiodStreamTerminal.Signal) -> Void)?
     var onWriterChanged: ((Bool) -> Void)?
 
@@ -132,6 +135,8 @@ final class RuntimeConnection {
         sessionEnded = false
         snapshotApplied = false
         activityAcknowledge = false
+        latestActivity = nil
+        latestActivityRevision = 0
         isWriter = false
         sentViewport = nil
         requestedViewport = nil
@@ -148,6 +153,8 @@ final class RuntimeConnection {
         session = nil
         snapshotApplied = false
         activityAcknowledge = false
+        latestActivity = nil
+        latestActivityRevision = 0
         isWriter = false
         requestedViewport = nil
         sentViewport = nil
@@ -156,7 +163,7 @@ final class RuntimeConnection {
     }
     func acknowledge() {
         guard snapshotApplied, activityAcknowledge else { return }
-        inner(RuntimeFrame(67, 0))
+        inner(RuntimeFrame.acknowledgeActivity(maxRevision: latestActivityRevision))
     }
     func claim() {
         guard snapshotApplied else { return }
@@ -194,6 +201,8 @@ final class RuntimeConnection {
         _ = attachment.detach()
         snapshotApplied = false
         activityAcknowledge = false
+        latestActivity = nil
+        latestActivityRevision = 0
         isWriter = false
         sentViewport = nil
         requestedViewport = nil
@@ -278,6 +287,11 @@ final class RuntimeConnection {
             onChange?()
         case 71:
             guard watermark.position == frame.sequence else { throw RuntimeFrame.Failure.invalidSequence }
+            let snapshot = try RuntimeActivitySnapshot(data: frame.data)
+            latestActivity = snapshot
+            latestActivityRevision = max(latestActivityRevision, snapshot.revision)
+            onActivity?(snapshot)
+            onChange?()
         case 82:
             guard frame.data.count == 4 || frame.data.count == 8 else { throw RuntimeFrame.Failure.invalidSequence }
             let cols = UInt16(frame.data[0]) << 8 | UInt16(frame.data[1])

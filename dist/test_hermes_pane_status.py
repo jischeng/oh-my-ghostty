@@ -32,7 +32,8 @@ class HermesPaneStatusTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.home = Path(self.temporary.name)
         self.environment = patch.dict(os.environ, {"HOME": str(self.home),
-                                                  "HERMES_HOME": str(self.home / ".hermes")})
+                                                  "HERMES_HOME": str(self.home / ".hermes"),
+                                                  "OMG_RUNTIME_BIN": ""})
         self.environment.start()
         self.addCleanup(self.environment.stop)
         self.namespace = {}
@@ -256,6 +257,47 @@ class HermesPaneStatusTests(unittest.TestCase):
         self.assertEqual(decoded[self.tty]["pgid"], 320)
         self.assertEqual(decoded[self.tty]["conversation"], self.sid)
         self.assertIn("print(json.dumps(snapshots(), sort_keys=True))", SOURCE)
+
+    def test_reporter_prefers_runtime_socket_and_falls_back_on_failure(self):
+        capture = self.home / "runtime-args.json"
+        helper = self.home / "omg-runtime-mock"
+        helper.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, pathlib, sys\n"
+            "pathlib.Path(os.environ['OMG_TEST_CAPTURE']).write_text(json.dumps(sys.argv[1:]))\n"
+            "sys.exit(int(os.environ.get('OMG_TEST_EXIT', '0')))\n"
+        )
+        helper.chmod(0o700)
+        status_dir = self.home / ".config/oh-my-ghostty/agent-status/hermes"
+
+        env = dict(os.environ, OMG_RUNTIME_BIN=str(helper), OMG_TEST_CAPTURE=str(capture), OMG_TEST_EXIT="0")
+        res = subprocess.run(
+            [sys.executable, "-c", body("reporter"), "working"],
+            input=json.dumps({"session_id": self.sid, "cwd": "/work/project"}),
+            text=True, capture_output=True, env=env, timeout=5,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        args = json.loads(capture.read_text())
+        self.assertEqual(args, ["report", "hermes", "working", self.sid, "/work/project", "--event", "prompt"])
+        self.assertFalse(status_dir.exists())
+
+        for invalid_sid in ("-leading-dash", "ns:conv", "nested/conv", "~tilde"):
+            res = subprocess.run(
+                [sys.executable, "-c", body("reporter"), "done"],
+                input=json.dumps({"session_id": invalid_sid, "cwd": "/work/project"}),
+                text=True, capture_output=True, env=env, timeout=5,
+            )
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertEqual(json.loads(capture.read_text()), ["report", "hermes", "done", "-", "/work/project"])
+
+        env["OMG_TEST_EXIT"] = "1"
+        res = subprocess.run(
+            [sys.executable, "-c", body("reporter"), "done"],
+            input=json.dumps({"session_id": self.sid, "cwd": "/work/project"}),
+            text=True, capture_output=True, env=env, timeout=5,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.probe()["state"], "done")
 
 
 if __name__ == "__main__":

@@ -84,6 +84,7 @@ enum TerminalFocusRouter {
         surface: Ghostty.SurfaceView,
         highlight: Bool = false,
         activateApp: Bool = true,
+        acknowledgeCompletion: Bool = true,
         coordinator: TerminalWorkspaceCoordinator? = nil,
         quickController: QuickTerminalController? = nil
     ) -> Bool {
@@ -133,7 +134,9 @@ enum TerminalFocusRouter {
                 Ghostty.moveFocus(to: surface, delay: 0.1)
                 surface.highlight()
             }
-            terminalController.acknowledgeTerminalAgentState(for: surface)
+            if acknowledgeCompletion {
+                terminalController.acknowledgeTerminalAgentState(for: surface)
+            }
             acknowledgeDockAttention(for: surface, in: terminalController)
             return true
         }
@@ -157,11 +160,16 @@ enum TerminalFocusRouter {
     @discardableResult
     static func focus(
         tab controller: BaseTerminalController,
-        activateApp: Bool = true
+        activateApp: Bool = true,
+        acknowledgeCompletion: Bool = false
     ) -> Bool {
         if let target = controller.focusedSurface ?? controller.surfaceTree.first,
            controller.surfaceTree.contains(target) {
-            return focus(surface: target, activateApp: activateApp)
+            return focus(
+                surface: target,
+                activateApp: activateApp,
+                acknowledgeCompletion: acknowledgeCompletion
+            )
         }
 
         if let terminalController = controller as? TerminalController {

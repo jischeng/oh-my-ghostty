@@ -119,8 +119,18 @@ extension RosterAgent {
         id: "opencode", name: "OpenCode", icon: IconRef(asset: "opencode-favicon"))
 
     static func fallback(wire: String) -> RosterAgent {
-        legacyDefaults.first { $0.id == wire }
-            ?? RosterAgent(id: wire, name: wire, icon: IconRef())
+        if let legacy = legacyDefaults.first(where: { $0.id == wire }) {
+            return legacy
+        }
+        if let descriptor = MobileSessionIcon.agentDescriptor(for: wire) {
+            return RosterAgent(
+                id: descriptor.id,
+                name: descriptor.displayName,
+                tintHex: descriptor.id == "claude" ? "#D97757" : nil,
+                icon: IconRef(vector: descriptor.vectorIcon, asset: descriptor.assetIcon)
+            )
+        }
+        return RosterAgent(id: wire, name: wire, icon: IconRef())
     }
 
     var iconRef: IconRef { icon ?? IconRef() }
@@ -163,6 +173,7 @@ extension SessionStatus {
         switch wire {
         case "working": self = .working
         case "done": self = .done
+        case "error", "failed", "crashed": self = .error
         case "needsAttention", "needs_you": self = .needsAttention
         default: self = .idle
         }

@@ -2,10 +2,11 @@ import SwiftUI
 import TermioShared
 import UIKit
 
-/// Matches desktop AgentLogoStyle's timing and monochrome silhouettes.
+/// Matches desktop AgentLogoStyle's timing, brand icons, and monochrome silhouettes.
 struct OMGAgentMark: View {
     let agent: String
     let status: SessionStatus
+    var icon: IconRef? = nil
     var remoteHost: String? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -13,9 +14,15 @@ struct OMGAgentMark: View {
         TimelineView(.animation(minimumInterval: 1 / 20, paused: status != .working || reduceMotion)) { clock in
             let phase = clock.date.timeIntervalSinceReferenceDate * 2 * .pi / 1.8
             let opacity = status == .working && !reduceMotion ? 0.30 + 0.70 * (1 + cos(phase)) / 2 : 1
+            let resolved = resolvedIconRef
             Group {
                 if UIImage(named: "OMGAgent-\(agent)") != nil {
                     Image("OMGAgent-\(agent)").renderingMode(.template).resizable().scaledToFit()
+                } else if let vector = resolved.vector, let logo = BrandLogo(reference: vector) {
+                    BrandLogoShape(logo: logo)
+                        .fill(status == .idle ? logo.tint : color, style: FillStyle(eoFill: logo.usesEvenOddFill))
+                } else if resolved.png != nil || (resolved.asset != nil && !(resolved.asset?.isEmpty ?? true)) {
+                    AgentIconView(ref: resolved, size: 20, tint: color)
                 } else {
                     Image(systemName: MobileSessionIcon.fallbackSystemSymbol(agent: agent, remoteHost: remoteHost))
                         .resizable()
@@ -28,11 +35,22 @@ struct OMGAgentMark: View {
         }
     }
 
+    private var resolvedIconRef: IconRef {
+        if let icon, icon.png != nil || icon.vector != nil || icon.asset != nil || icon.symbol != nil {
+            return icon
+        }
+        if let descriptor = MobileSessionIcon.agentDescriptor(for: agent) {
+            return IconRef(vector: descriptor.vectorIcon, asset: descriptor.assetIcon)
+        }
+        return IconRef()
+    }
+
     private var color: Color {
         switch status {
         case .idle: .primary
         case .working: .accentColor
         case .done: .green
+        case .error: .red
         case .needsAttention: .orange
         }
     }

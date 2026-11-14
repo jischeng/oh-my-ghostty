@@ -63,7 +63,7 @@ enum HermesPaneStatus {
     }
 
     static let reporter = #"""
-import hashlib, json, os, re, stat, sys, tempfile, time
+import hashlib, json, os, re, stat, subprocess, sys, tempfile, time
 from pathlib import Path
 
 def report():
@@ -72,9 +72,27 @@ def report():
         return
     payload = json.loads(sys.stdin.read(65537))
     sid = payload.get("session_id")
-    if not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", sid):
+    if isinstance(sid, str) and sid.startswith("test-"):
         return
-    if sid.startswith("test-"):
+    runtime_bin = os.environ.get("OMG_RUNTIME_BIN")
+    if runtime_bin:
+        cwd = payload.get("cwd")
+        if not isinstance(cwd, str) or not cwd.startswith("/"):
+            try: cwd = os.getcwd()
+            except OSError: cwd = "/"
+        report_sid = (
+            sid if isinstance(sid, str) and re.fullmatch(r"[A-Za-z0-9._][A-Za-z0-9._-]{0,127}", sid) else "-"
+        )
+        cmd = [runtime_bin, "report", "hermes", state, report_sid, cwd]
+        if state == "working":
+            cmd.extend(["--event", "prompt"])
+        try:
+            res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+            if res.returncode == 0:
+                return
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9._][A-Za-z0-9._-]{0,127}", sid):
         return
     directory = Path.home() / ".config/oh-my-ghostty/agent-status/hermes"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -263,7 +281,7 @@ enum AgentHookRemoteAction: String {
 
 struct AgentHookInstaller {
     static let marker = "_omg_agent_status"
-    static let hookVersion = 12
+    static let hookVersion = 13
     static let detectorMarkerVersion = 1
     static let didChangeNotification = Notification.Name(
         "com.oh-my-ghostty.agentIntegrationDidChange"
@@ -461,6 +479,7 @@ struct AgentHookInstaller {
                         } else {
                             hookCommand(
                                 agent: agent,
+                                event: event.name,
                                 state: event.state,
                                 attentionKind: attentionKind(
                                     event: event.name,
@@ -1271,6 +1290,7 @@ else:
             }
             let command = Self.hookCommand(
                 agent: agent,
+                event: event.name,
                 state: event.state,
                 attentionKind: Self.attentionKind(
                     event: event.name,
@@ -1331,6 +1351,7 @@ else:
             }
             let source = "#!/bin/sh\n" + Self.hookCommand(
                 agent: agent,
+                event: event.name,
                 state: event.state,
                 attentionKind: Self.attentionKind(
                     event: event.name,
@@ -1722,6 +1743,7 @@ else:
     ) -> [String: Any] {
         let command = hookCommand(
             agent: agent,
+            event: event,
             state: state,
             attentionKind: attentionKind(
                 event: event,
@@ -1778,12 +1800,28 @@ else:
         return nil
     }
 
+    private static func isPromptStartEvent(
+        event: String?,
+        state: TabActivityState?
+    ) -> Bool {
+        guard state == .working, let event else { return false }
+        let normalized = event.lowercased()
+        return normalized.contains("prompt") ||
+            normalized == "preinvocation" ||
+            normalized == "taskstart" ||
+            normalized == "taskresume"
+    }
+
     private static func hookCommand(
         agent: SupportedAgent,
+        event: String? = nil,
         state: TabActivityState?,
         attentionKind: TabAttentionKind? = nil
     ) -> String {
-        if agent == .antigravity { return antigravityHookCommand(state: state) }
+        let promptEvent = isPromptStartEvent(event: event, state: state)
+        if agent == .antigravity {
+            return antigravityHookCommand(state: state, isPromptEvent: promptEvent)
+        }
         let action = state == nil ? "end" : "start"
         var metadata = "type=app;omg_agent=\(agent.rawValue);" +
             "omg_scope=%s;omg_liveness=pgid"
@@ -1791,20 +1829,36 @@ else:
         if let attentionKind {
             metadata += ";omg_attention=\(attentionKind.rawValue)"
         }
-        var setup = ""
+        if promptEvent {
+            metadata += ";omg_event=prompt"
+        }
+        var setup = "omg_report_conv=-; "
         var arguments = "\"$omg_pgid\" \"$omg_scope\""
         if let field = agent.definition.hook.conversationField {
-            setup = "omg_conversation=$(python3 -c 'import json,sys,urllib.parse; " +
-                "value=json.load(sys.stdin).get(\"\(field)\",\"\"); " +
-                "print(urllib.parse.quote(str(value)[:128],safe=\"._~-\"),end=\"\")' " +
-                "2>/dev/null || true); "
+            setup = "omg_pair=$(env -u SDKROOT -u DEVELOPER_DIR python3 -c " +
+                "'import json,re,sys,urllib.parse; " +
+                "raw=json.load(sys.stdin).get(\"\(field)\",\"\"); " +
+                "raw=raw[:128] if isinstance(raw,str) else str(raw or \"\")[:128]; " +
+                "rep=raw if re.fullmatch(r\"[A-Za-z0-9._][A-Za-z0-9._-]{0,127}\",raw) else \"-\"; " +
+                "osc=urllib.parse.quote(raw,safe=\"._~-\"); " +
+                "print(rep+\"|\"+osc,end=\"\")' " +
+                "2>/dev/null || printf '%s' '-|'); " +
+                "omg_report_conv=${omg_pair%%|*}; " +
+                "omg_conversation=${omg_pair#*|}; "
             metadata += ";omg_conversation=%s"
             arguments += " \"$omg_conversation\""
         }
-        let runtimeReport: String = if agent == .codex || agent == .claude {
-            "if [ -n \"${OMG_RUNTIME_BIN-}\" ] && [ -n \"${omg_conversation-}\" ]; then " +
-                "\"$OMG_RUNTIME_BIN\" report \(agent.rawValue) \(state?.rawValue ?? "end") \"$omg_conversation\" \"$PWD\" >/dev/null 2>&1 || true; fi; "
-        } else { "" }
+        var reportFlags = ""
+        if let attentionKind {
+            reportFlags += " --attention \(attentionKind.rawValue)"
+        }
+        if promptEvent {
+            reportFlags += " --event prompt"
+        }
+        let runtimeReport =
+            "if [ -n \"${OMG_RUNTIME_BIN-}\" ]; then " +
+            "\"$OMG_RUNTIME_BIN\" report \(agent.rawValue) \(state?.rawValue ?? "end") " +
+            "\"${omg_report_conv:--}\" \"$PWD\"\(reportFlags) >/dev/null 2>&1 && exit 0; fi; "
         return ": \(marker); : _omg_agent_status_v\(hookVersion); " + setup + runtimeReport +
             "omg_tty=$(ps -o tty= -p \"$PPID\" 2>/dev/null | tr -d ' '); " +
             "omg_pgid=$(ps -o pgid= -p \"$PPID\" 2>/dev/null | tr -d ' '); " +
@@ -1818,23 +1872,29 @@ else:
 
     private static let antigravityHookName = "omg-agent-status"
 
-    /// agy stdout is a JSON protocol channel; OSC goes only to the controlling TTY.
-    private static func antigravityHookCommand(state: TabActivityState?) -> String {
+    /// agy stdout is a JSON protocol channel; report via omgd socket when inside a
+    /// managed session and fall back to the controlling TTY otherwise.
+    private static func antigravityHookCommand(
+        state: TabActivityState?,
+        isPromptEvent: Bool = false
+    ) -> String {
         let script = #"""
 import json, os, re, subprocess, sys, urllib.parse
 response = {"decision": "allow"} if sys.argv[1] == "done" else {}
 try:
     payload = json.loads(sys.stdin.read(1048576))
     state = sys.argv[1]
+    is_prompt = len(sys.argv) > 2 and sys.argv[2] == "prompt"
     attention = ""
+    attention_kind = ""
     if state == "done":
         reason = str(payload.get("terminationReason") or "").upper()
         if payload.get("error") or reason == "ERROR": state = "error"
         elif reason == "TERMINAL_STEP_TYPE":
             state = "needsAttention"
             attention = ";omg_attention=question"
+            attention_kind = "question"
         elif reason == "USER_CANCELED": state = "idle"
-        elif payload.get("fullyIdle") is False: state = "working"
     sid = os.getsid(0)
     owner = os.getppid()
     owner_tty = ""
@@ -1850,26 +1910,43 @@ try:
         except OSError:
             break
         owner = ppid
-    pgid = os.getpgid(owner)
-    scope = "remote" if (os.environ.get("SSH_CONNECTION") or os.environ.get("OMG_RUNTIME_REMOTE")) else "local"
-    conversation = payload.get("conversationId", "")
-    if not isinstance(conversation, str): conversation = ""
-    conversation = urllib.parse.quote(conversation[:128], safe="._~-")
-    sequence = "\033]3008;start=omg-agent-antigravity-%d;type=app;omg_agent=antigravity;omg_scope=%s;omg_liveness=pgid;omg_state=%s%s;omg_conversation=%s\007" % (pgid, scope, state, attention, conversation)
-    try:
-        fd = os.open("/dev/tty", os.O_WRONLY | os.O_NOCTTY)
-    except OSError:
-        if not owner_tty: raise OSError("No controlling terminal")
-        fd = os.open("/dev/" + owner_tty, os.O_WRONLY | os.O_NOCTTY)
-    try: os.write(fd, sequence.encode())
-    finally: os.close(fd)
+    raw_conv = payload.get("conversationId", "")
+    if not isinstance(raw_conv, str): raw_conv = ""
+    raw_conv = raw_conv[:128]
+    report_conv = raw_conv if re.fullmatch(r"[A-Za-z0-9._][A-Za-z0-9._-]{0,127}", raw_conv) else "-"
+    conversation = urllib.parse.quote(raw_conv, safe="._~-")
+    reported = False
+    runtime_bin = os.environ.get("OMG_RUNTIME_BIN")
+    if runtime_bin:
+        cwd = payload.get("cwd")
+        if not isinstance(cwd, str) or not cwd.startswith("/"):
+            try: cwd = os.getcwd()
+            except OSError: cwd = "/"
+        cmd = [runtime_bin, "report", "antigravity", state, report_conv, cwd, "--pid", str(owner)]
+        if attention_kind: cmd.extend(["--attention", attention_kind])
+        if is_prompt and state == "working": cmd.extend(["--event", "prompt"])
+        res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+        reported = res.returncode == 0
+    if not reported:
+        pgid = os.getpgid(owner)
+        scope = "remote" if (os.environ.get("SSH_CONNECTION") or os.environ.get("OMG_RUNTIME_REMOTE")) else "local"
+        event_tag = ";omg_event=prompt" if (is_prompt and state == "working") else ""
+        sequence = "\033]3008;start=omg-agent-antigravity-%d;type=app;omg_agent=antigravity;omg_scope=%s;omg_liveness=pgid;omg_state=%s%s%s;omg_conversation=%s\007" % (pgid, scope, state, attention, event_tag, conversation)
+        try:
+            fd = os.open("/dev/tty", os.O_WRONLY | os.O_NOCTTY)
+        except OSError:
+            if not owner_tty: raise OSError("No controlling terminal")
+            fd = os.open("/dev/" + owner_tty, os.O_WRONLY | os.O_NOCTTY)
+        try: os.write(fd, sequence.encode())
+        finally: os.close(fd)
 except (ValueError, OSError, TypeError, AttributeError, subprocess.SubprocessError):
     pass
 print(json.dumps(response))
 """#
         let quoted = "'" + script.replacingOccurrences(of: "'", with: "'\\''") + "'"
         let envCleanup = "unset SDKROOT; if [ -n \"${DEVELOPER_DIR-}\" ] && [ ! -d \"$DEVELOPER_DIR\" ]; then unset DEVELOPER_DIR; fi"
-        return ": \(marker); : _omg_agent_status_v\(hookVersion); \(envCleanup); python3 -c \(quoted) \(state?.rawValue ?? "done")"
+        let promptArg = isPromptEvent ? " prompt" : ""
+        return ": \(marker); : _omg_agent_status_v\(hookVersion); \(envCleanup); python3 -c \(quoted) \(state?.rawValue ?? "done")\(promptArg)"
     }
 
     private static func pluginSource(for agent: SupportedAgent) -> String? {
@@ -1889,30 +1966,53 @@ import { spawnSync } from "node:child_process";
 
 const contextId = `omg-agent-pi-${process.pid}`;
 const scope = process.env.SSH_CONNECTION || process.env.OMG_RUNTIME_REMOTE ? "remote" : "local";
-function report(state?: string, end = false, context?: any, attention?: string, phase?: string) {
+function report(
+  state?: string,
+  end = false,
+  context?: any,
+  attention?: string,
+  phase?: string,
+  isPrompt = false,
+) {
   let fd: number | undefined;
   try {
     const raw = context?.sessionManager?.getSessionId?.();
-    const conversation = raw && /^[A-Za-z0-9._-]{1,128}$/.test(String(raw))
+    const validConv = Boolean(raw && /^[A-Za-z0-9._][A-Za-z0-9._-]{0,127}$/.test(String(raw)));
+    const conversation = validConv
       ? `;omg_conversation=${encodeURIComponent(String(raw))}` : "";
     // The session's own project directory can differ from the shell's cwd
     // (for example when `pi resume` picks a session from another project).
     // Restoring the conversation requires resuming it in this directory.
     const rawCwd = context?.sessionManager?.getCwd?.();
-    const sessionCwd = rawCwd && String(rawCwd).startsWith("/") &&
-        String(rawCwd).length <= 4096 && !String(rawCwd).includes("\0")
+    const validCwd = Boolean(
+      rawCwd && String(rawCwd).startsWith("/") &&
+      String(rawCwd).length <= 4096 && !String(rawCwd).includes("\0"),
+    );
+    const sessionCwd = validCwd
       ? `;omg_cwd=${encodeURIComponent(String(rawCwd))}` : "";
-    if (process.env.OMG_RUNTIME_BIN && conversation && sessionCwd) {
-      spawnSync(process.env.OMG_RUNTIME_BIN,
-        ["report", "pi", end ? "end" : String(state), String(raw), String(rawCwd)],
-        { stdio: "ignore", timeout: 1000 });
+    if (process.env.OMG_RUNTIME_BIN) {
+      const args = [
+        "report",
+        "pi",
+        end ? "end" : String(state),
+        validConv ? String(raw) : "-",
+        validCwd ? String(rawCwd) : process.cwd(),
+        "--pid",
+        String(process.pid),
+      ];
+      if (attention) args.push("--attention", attention);
+      if (phase) args.push("--phase", phase, "--message", "Background work running");
+      if (isPrompt && state === "working") args.push("--event", "prompt");
+      const res = spawnSync(process.env.OMG_RUNTIME_BIN, args, { stdio: "ignore", timeout: 1000 });
+      if (res.status === 0) return;
     }
     const attentionKind = attention ? `;omg_attention=${attention}` : "";
     const activityPhase = phase ? `;omg_phase=${phase};message=Background%20work%20running` : "";
+    const promptTag = isPrompt && state === "working" ? ";omg_event=prompt" : "";
     fd = openSync("/dev/tty", "w");
     const sequence = end
       ? `\u001b]3008;end=${contextId};type=app;omg_agent=pi;omg_scope=${scope};omg_liveness=pid${conversation}\u0007`
-      : `\u001b]3008;start=${contextId};type=app;omg_agent=pi;omg_scope=${scope};omg_liveness=pid;omg_state=${state}${conversation}${sessionCwd}${attentionKind}${activityPhase}\u0007`;
+      : `\u001b]3008;start=${contextId};type=app;omg_agent=pi;omg_scope=${scope};omg_liveness=pid;omg_state=${state}${conversation}${sessionCwd}${attentionKind}${activityPhase}${promptTag}\u0007`;
     writeSync(fd, sequence);
   } catch {
   } finally {
@@ -1927,13 +2027,27 @@ export default function (pi: any) {
   let closing = false;
   let requestSequence = 0;
   let completionPending = false;
+  let settleVerifyTimer: any;
+  let waitingUnnamedCount = 0;
+  const waitingToolCalls = new Set<string>();
   const subagentRuns = new Set<string>();
   const backgroundTasks = new Set<string>();
+  const waitingTools = new Set(["ask_user_question", "ask_question", "question", "confirm"]);
   const backgroundToolNames = new Set([
     "bg_run", "bg_run_pi_attested", "bg_delegate",
     "fusion_reason", "fusion_investigate", "fusion_research", "fusion_validate",
   ]);
 
+  const clearWaitingTools = () => {
+    waitingToolCalls.clear();
+    waitingUnnamedCount = 0;
+  };
+  const clearSettleVerify = () => {
+    if (settleVerifyTimer !== undefined) {
+      clearTimeout(settleVerifyTimer);
+      settleVerifyTimer = undefined;
+    }
+  };
   const activeBackgroundCount = () => subagentRuns.size + backgroundTasks.size;
   const updateSettledStatus = (context = currentContext) => {
     currentContext = context ?? currentContext;
@@ -1942,17 +2056,19 @@ export default function (pi: any) {
       completionPending = true;
       report("working", false, currentContext, undefined, "background");
     } else if (completionPending) {
+      clearSettleVerify();
       completionPending = false;
       report("done", false, currentContext);
     }
   };
   const validID = (value: any) => typeof value === "string" && value.length > 0 && value.length <= 256;
-  const refreshBackgroundTasks = () => {
+  const refreshBackgroundTasks = (onReply?: () => void) => {
     const requestId = `omg-agent-status-${process.pid}-${++requestSequence}`;
     const unsubscribe = pi.events.on("pi-background-tasks:response:v1", (response: any) => {
       if (response?.request_id !== requestId) return;
       unsubscribe?.();
       if (!response.ok || !Array.isArray(response.result?.tasks)) return;
+      onReply?.();
       backgroundTasks.clear();
       for (const task of response.result.tasks) {
         if (task?.status === "running" && validID(task.id)) backgroundTasks.add(task.id);
@@ -1965,14 +2081,16 @@ export default function (pi: any) {
       operation: "status",
       payload: {},
     });
+    return unsubscribe;
   };
-  const refreshSubagents = () => {
+  const refreshSubagents = (onReply?: () => void) => {
     const requestId = `omg-agent-status-${process.pid}-${++requestSequence}`;
     const replyEvent = `subagents:rpc:v1:reply:${requestId}`;
     const unsubscribe = pi.events.on(replyEvent, (reply: any) => {
       unsubscribe?.();
       const runs = reply?.success ? reply.data?.asyncSnapshot?.runs : undefined;
       if (!Array.isArray(runs)) return;
+      onReply?.();
       subagentRuns.clear();
       for (const run of runs) {
         if ((run?.state === "queued" || run?.state === "running") && validID(run.id)) {
@@ -1987,6 +2105,7 @@ export default function (pi: any) {
       method: "status",
       params: {},
     });
+    return unsubscribe;
   };
 
   pi.events.on("subagent:async-started", (event: any) => {
@@ -2008,28 +2127,45 @@ export default function (pi: any) {
   pi.on("session_start", async (_event: any, context: any) => {
     closing = false;
     completionPending = false;
+    clearWaitingTools();
+    clearSettleVerify();
     currentContext = context;
     report("idle", false, context);
     refreshBackgroundTasks();
   });
   pi.on("before_agent_start", async (_event: any, context: any) => {
     completionPending = true;
+    clearWaitingTools();
+    clearSettleVerify();
     currentContext = context;
-    report("working", false, context);
+    report("working", false, context, undefined, undefined, true);
   });
   pi.on("agent_start", async (_event: any, context: any) => {
     completionPending = true;
+    clearWaitingTools();
+    clearSettleVerify();
     currentContext = context;
-    report("working", false, context);
+    report("working", false, context, undefined, undefined, true);
   });
   pi.on("tool_execution_start", async (event: any, context: any) => {
     currentContext = context;
-    const waitingTools = new Set(["ask_user_question", "ask_question", "question", "confirm"]);
-    const waiting = waitingTools.has(String(event.toolName));
-    report(waiting ? "needsAttention" : "working", false, context, waiting ? "question" : undefined);
+    const waiting = waitingTools.has(String(event?.toolName));
+    const callId = validID(event?.toolCallId) ? event.toolCallId : undefined;
+    if (waiting) {
+      if (callId) waitingToolCalls.add(callId); else waitingUnnamedCount += 1;
+      report("needsAttention", false, context, "question");
+    } else if (waitingToolCalls.size === 0 && waitingUnnamedCount === 0) {
+      report("working", false, context);
+    }
   });
   pi.on("tool_execution_end", async (event: any, context: any) => {
     currentContext = context;
+    const callId = validID(event?.toolCallId) ? event.toolCallId : undefined;
+    if (callId && waitingToolCalls.has(callId)) {
+      waitingToolCalls.delete(callId);
+    } else if (!callId && waitingUnnamedCount > 0 && waitingTools.has(String(event?.toolName))) {
+      waitingUnnamedCount = Math.max(0, waitingUnnamedCount - 1);
+    }
     const task = event?.result?.details?.task;
     if (!event?.isError && task?.status === "running" && validID(task.id)) {
       backgroundTasks.add(task.id);
@@ -2037,16 +2173,46 @@ export default function (pi: any) {
     if (!event?.isError && backgroundToolNames.has(String(event?.toolName))) {
       refreshBackgroundTasks();
     }
-    report("working", false, context);
+    if (waitingToolCalls.size === 0 && waitingUnnamedCount === 0) {
+      report("working", false, context);
+    }
   });
-  pi.on("agent_settled", async (_event: any, context: any) => {
+  pi.on("agent_settled", async (event: any, context: any) => {
     // A previous run can settle after Esc just as a resumed prompt starts.
     // Never let that stale completion overwrite the newer working state.
     if (!context.isIdle()) return;
+    clearWaitingTools();
+    clearSettleVerify();
+    if (event?.aborted || event?.cancelled || event?.reason === "aborted") {
+      subagentRuns.clear();
+      backgroundTasks.clear();
+    }
     updateSettledStatus(context);
+    if (activeBackgroundCount() > 0) {
+      let bgConfirmed = backgroundTasks.size === 0;
+      let subConfirmed = subagentRuns.size === 0;
+      const unsubBg = backgroundTasks.size > 0
+        ? refreshBackgroundTasks(() => { bgConfirmed = true; })
+        : undefined;
+      const unsubSub = subagentRuns.size > 0
+        ? refreshSubagents(() => { subConfirmed = true; })
+        : undefined;
+      settleVerifyTimer = setTimeout(() => {
+        settleVerifyTimer = undefined;
+        unsubBg?.();
+        unsubSub?.();
+        if (closing || !currentContext?.isIdle?.()) return;
+        if (!bgConfirmed) backgroundTasks.clear();
+        if (!subConfirmed) subagentRuns.clear();
+        updateSettledStatus(currentContext);
+      }, 1500);
+      settleVerifyTimer?.unref?.();
+    }
   });
   pi.on("session_shutdown", async (_event: any, context: any) => {
     closing = true;
+    clearWaitingTools();
+    clearSettleVerify();
     subagentRuns.clear();
     backgroundTasks.clear();
     // Session shutdown is lifecycle cleanup, not task completion. Clear Pi's
@@ -2061,16 +2227,32 @@ export default function (pi: any) {
 // OMG agent status integration for Amp.
 // marker: _omg_agent_status
 import { closeSync, openSync, writeSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 
 const contextId = `omg-agent-amp-${process.pid}`;
-const scope = process.env.SSH_CONNECTION ? "remote" : "local";
-function report(state, end = false) {
+const scope = process.env.SSH_CONNECTION || process.env.OMG_RUNTIME_REMOTE ? "remote" : "local";
+function report(state, end = false, isPrompt = false) {
   let fd;
   try {
+    if (process.env.OMG_RUNTIME_BIN) {
+      const args = [
+        "report",
+        "amp",
+        end ? "end" : String(state),
+        "-",
+        process.cwd(),
+        "--pid",
+        String(process.pid),
+      ];
+      if (isPrompt && state === "working") args.push("--event", "prompt");
+      const res = spawnSync(process.env.OMG_RUNTIME_BIN, args, { stdio: "ignore", timeout: 1000 });
+      if (res.status === 0) return;
+    }
     fd = openSync("/dev/tty", "w");
+    const promptTag = isPrompt && state === "working" ? ";omg_event=prompt" : "";
     const sequence = end
       ? `\u001b]3008;end=${contextId};type=app;omg_agent=amp;omg_scope=${scope};omg_liveness=pid\u0007`
-      : `\u001b]3008;start=${contextId};type=app;omg_agent=amp;omg_scope=${scope};omg_liveness=pid;omg_state=${state}\u0007`;
+      : `\u001b]3008;start=${contextId};type=app;omg_agent=amp;omg_scope=${scope};omg_liveness=pid;omg_state=${state}${promptTag}\u0007`;
     writeSync(fd, sequence);
   } catch {
   } finally {
@@ -2081,7 +2263,7 @@ function report(state, end = false) {
 }
 
 export default function (amp) {
-  amp.on("agent.start", () => report("working"));
+  amp.on("agent.start", () => report("working", false, true));
   amp.on("agent.end", () => report("done"));
 }
 """#
@@ -2090,26 +2272,47 @@ export default function (amp) {
 // OMG agent status integration for OMP.
 // marker: _omg_agent_status
 import { closeSync, openSync, writeSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 
 const contextId = `omg-agent-omp-${process.pid}`;
-const scope = process.env.SSH_CONNECTION ? "remote" : "local";
-function report(state?: string, end = false, context?: any, attention?: string) {
+const scope = process.env.SSH_CONNECTION || process.env.OMG_RUNTIME_REMOTE ? "remote" : "local";
+function report(state?: string, end = false, context?: any, attention?: string, isPrompt = false) {
   let fd: number | undefined;
   try {
     const raw = context?.sessionManager?.getSessionId?.();
-    const conversation = raw && /^[A-Za-z0-9._-]{1,128}$/.test(String(raw))
+    const validConv = Boolean(raw && /^[A-Za-z0-9._][A-Za-z0-9._-]{0,127}$/.test(String(raw)));
+    const conversation = validConv
       ? `;omg_conversation=${encodeURIComponent(String(raw))}` : "";
     // Report the session's project directory so restoration resumes the
     // conversation in the directory that owns it, not the shell's cwd.
     const rawCwd = context?.sessionManager?.getCwd?.();
-    const sessionCwd = rawCwd && String(rawCwd).startsWith("/") &&
-        String(rawCwd).length <= 4096 && !String(rawCwd).includes("\0")
+    const validCwd = Boolean(
+      rawCwd && String(rawCwd).startsWith("/") &&
+      String(rawCwd).length <= 4096 && !String(rawCwd).includes("\0"),
+    );
+    const sessionCwd = validCwd
       ? `;omg_cwd=${encodeURIComponent(String(rawCwd))}` : "";
+    if (process.env.OMG_RUNTIME_BIN) {
+      const args = [
+        "report",
+        "omp",
+        end ? "end" : String(state),
+        validConv ? String(raw) : "-",
+        validCwd ? String(rawCwd) : process.cwd(),
+        "--pid",
+        String(process.pid),
+      ];
+      if (attention) args.push("--attention", attention);
+      if (isPrompt && state === "working") args.push("--event", "prompt");
+      const res = spawnSync(process.env.OMG_RUNTIME_BIN, args, { stdio: "ignore", timeout: 1000 });
+      if (res.status === 0) return;
+    }
     const attentionKind = attention ? `;omg_attention=${attention}` : "";
+    const promptTag = isPrompt && state === "working" ? ";omg_event=prompt" : "";
     fd = openSync("/dev/tty", "w");
     const sequence = end
       ? `\u001b]3008;end=${contextId};type=app;omg_agent=omp;omg_scope=${scope};omg_liveness=pid${conversation}\u0007`
-      : `\u001b]3008;start=${contextId};type=app;omg_agent=omp;omg_scope=${scope};omg_liveness=pid;omg_state=${state}${conversation}${sessionCwd}${attentionKind}\u0007`;
+      : `\u001b]3008;start=${contextId};type=app;omg_agent=omp;omg_scope=${scope};omg_liveness=pid;omg_state=${state}${conversation}${sessionCwd}${attentionKind}${promptTag}\u0007`;
     writeSync(fd, sequence);
   } catch {
   } finally {
@@ -2121,14 +2324,17 @@ function report(state?: string, end = false, context?: any, attention?: string) 
 
 export default function (omp: any) {
   omp.on("session_start", async (_event: any, context: any) => report("idle", false, context));
-  omp.on("agent_start", async (_event: any, context: any) => report("working", false, context));
+  omp.on("agent_start", async (_event: any, context: any) => report("working", false, context, undefined, true));
   omp.on("tool_call", async (event: any, context: any) => {
     const waitingTools = new Set(["ask_user_question", "ask_question", "question", "confirm"]);
     const waiting = waitingTools.has(String(event.toolName));
     if (waiting) report("needsAttention", false, context, "question");
   });
   omp.on("agent_end", async (_event: any, context: any) => report("done", false, context));
-  omp.on("session_shutdown", async (_event: any, context: any) => report(undefined, true, context));
+  omp.on("session_shutdown", async (_event: any, context: any) => {
+    report("idle", false, context);
+    report(undefined, true, context);
+  });
 }
 """#
 
@@ -2136,20 +2342,46 @@ export default function (omp: any) {
 // OMG agent status integration for OpenCode.
 // marker: _omg_agent_status
 import { closeSync, openSync, writeSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 
 const contextId = `omg-agent-opencode-${process.pid}`;
-const scope = process.env.SSH_CONNECTION ? "remote" : "local";
+const scope = process.env.SSH_CONNECTION || process.env.OMG_RUNTIME_REMOTE ? "remote" : "local";
 const roots = new Set();
-function report(state, conversation, end = false, attention) {
+const children = new Map();
+const busySessions = new Set();
+let lastConversation;
+let exitHookRegistered = false;
+
+function report(state, conversation, end = false, attention, isPrompt = false) {
   let fd;
   try {
-    const safe = conversation && /^[A-Za-z0-9._-]{1,128}$/.test(String(conversation))
+    const validConv = Boolean(
+      conversation && /^[A-Za-z0-9._][A-Za-z0-9._-]{0,127}$/.test(String(conversation)),
+    );
+    if (validConv) lastConversation = String(conversation);
+    if (process.env.OMG_RUNTIME_BIN) {
+      const args = [
+        "report",
+        "opencode",
+        end ? "end" : String(state),
+        validConv ? String(conversation) : "-",
+        process.cwd(),
+        "--pid",
+        String(process.pid),
+      ];
+      if (attention) args.push("--attention", attention);
+      if (isPrompt && state === "working") args.push("--event", "prompt");
+      const res = spawnSync(process.env.OMG_RUNTIME_BIN, args, { stdio: "ignore", timeout: 1000 });
+      if (res.status === 0) return;
+    }
+    const safe = validConv
       ? `;omg_conversation=${encodeURIComponent(String(conversation))}` : "";
     const attentionKind = attention ? `;omg_attention=${attention}` : "";
+    const promptTag = isPrompt && state === "working" ? ";omg_event=prompt" : "";
     fd = openSync("/dev/tty", "w");
     const sequence = end
       ? `\u001b]3008;end=${contextId};type=app;omg_agent=opencode;omg_scope=${scope};omg_liveness=pid${safe}\u0007`
-      : `\u001b]3008;start=${contextId};type=app;omg_agent=opencode;omg_scope=${scope};omg_liveness=pid;omg_state=${state}${safe}${attentionKind}\u0007`;
+      : `\u001b]3008;start=${contextId};type=app;omg_agent=opencode;omg_scope=${scope};omg_liveness=pid;omg_state=${state}${safe}${attentionKind}${promptTag}\u0007`;
     writeSync(fd, sequence);
   } catch {
   } finally {
@@ -2159,28 +2391,95 @@ function report(state, conversation, end = false, attention) {
   }
 }
 
-export const OmgAgentStatus = async () => ({
-  event: async ({ event }) => {
-    const info = event.properties?.info;
-    if (event.type === "session.created" || event.type === "session.updated") {
-      if (info?.id) {
-        if (info.parentID) roots.delete(info.id); else roots.add(info.id);
+function resolveRoot(id) {
+  let current = id;
+  let hops = 0;
+  while (children.has(current) && hops++ < 8) {
+    current = children.get(current);
+  }
+  roots.add(current);
+  return current;
+}
+
+function registerExitHook() {
+  if (exitHookRegistered) return;
+  exitHookRegistered = true;
+  process.once("exit", () => {
+    if (roots.size === 0 && !lastConversation) return;
+    report("idle", lastConversation, false);
+    report(undefined, lastConversation, true);
+  });
+}
+
+export const OmgAgentStatus = async () => {
+  registerExitHook();
+  return {
+    event: async ({ event }) => {
+      const info = event.properties?.info;
+      if (event.type === "session.created" || event.type === "session.updated") {
+        if (info?.id) {
+          if (info.parentID) {
+            roots.delete(info.id);
+            children.set(info.id, info.parentID);
+          } else {
+            children.delete(info.id);
+            roots.add(info.id);
+          }
+        }
+        return;
       }
-      return;
-    }
-    if (event.type === "session.deleted") {
-      if (info?.id && roots.delete(info.id)) report(undefined, info.id, true);
-      return;
-    }
-    const id = event.properties?.sessionID;
-    if (!id || !roots.has(id)) return;
-    if (event.type === "permission.updated") return report("needsAttention", id, false, "permission");
-    if (event.type === "session.status") {
-      if (event.properties?.status?.type === "busy") return report("working", id);
-      if (event.properties?.status?.type === "idle") return report("done", id);
-    }
-  },
-});
+      if (event.type === "session.deleted") {
+        if (info?.id) {
+          children.delete(info.id);
+          busySessions.delete(info.id);
+          if (roots.delete(info.id)) report(undefined, info.id, true);
+        }
+        return;
+      }
+      const id = event.properties?.sessionID ?? info?.sessionID ?? info?.id;
+      if (!id) return;
+      if (
+        event.type === "permission.updated" ||
+        event.type === "permission.asked" ||
+        event.type === "question.asked"
+      ) {
+        const rootId = resolveRoot(id);
+        busySessions.add(rootId);
+        const kind = event.type === "question.asked" ? "question" : "permission";
+        return report("needsAttention", rootId, false, kind);
+      }
+      if (
+        event.type === "permission.replied" ||
+        event.type === "question.replied" ||
+        event.type === "question.rejected"
+      ) {
+        const rootId = resolveRoot(id);
+        if (busySessions.has(rootId)) return report("working", rootId);
+        return;
+      }
+      if (children.has(id)) return;
+      roots.add(id);
+      if (event.type === "session.error") {
+        busySessions.delete(id);
+        return report("error", id);
+      }
+      if (event.type === "session.status") {
+        const statusType = event.properties?.status?.type ?? event.properties?.status;
+        if (statusType === "busy" || statusType === "retry") {
+          const isFirstBusy = !busySessions.has(id);
+          busySessions.add(id);
+          return report("working", id, false, undefined, isFirstBusy);
+        }
+        if (statusType === "idle") {
+          return report(busySessions.delete(id) ? "done" : "idle", id);
+        }
+      }
+      if (event.type === "session.idle") {
+        return report(busySessions.delete(id) ? "done" : "idle", id);
+      }
+    },
+  };
+};
 """#
 }
 
@@ -2274,7 +2573,8 @@ struct AgentContextSignalReducer: Sendable {
     func hasActiveLocalContext(
         for agent: SupportedAgent,
         processGroupID: Int,
-        isProcessAlive: (Int) -> Bool
+        isProcessAlive: (Int) -> Bool,
+        isProcessGroupAlive: (Int) -> Bool = { _ in false }
     ) -> Bool {
         guard let current = currentRecord,
               !current.terminated,
@@ -2283,10 +2583,16 @@ struct AgentContextSignalReducer: Sendable {
         if current.id == "omg-agent-\(agent.rawValue)-\(processGroupID)" {
             return true
         }
-        if case .process(let pid)? = current.liveness {
+        switch current.liveness {
+        case .process(let pid)?:
             return isProcessAlive(pid)
+        case .processGroup(let pgid)?:
+            return (current.activity.state == .working ||
+                current.activity.state == .needsAttention) &&
+                isProcessGroupAlive(pgid)
+        case nil:
+            return false
         }
-        return false
     }
 
     var validationIdentity: AgentLivenessIdentity? {
@@ -2368,6 +2674,43 @@ struct AgentContextSignalReducer: Sendable {
             let phase = state == .working
                 ? metadata["omg_phase"].flatMap(TabActivityPhase.init)
                 : nil
+            let isPrompt = metadata["omg_event"] == "prompt"
+            if state == .working, phase == .background,
+               let existing = activities.first(where: { $0.id == signal.id }),
+               !existing.terminated,
+               existing.activity.state == .needsAttention {
+                return nil
+            }
+            activities.removeAll { $0.terminated && $0.scope == scope }
+            if state == .working, phase != .background {
+                activities.removeAll {
+                    $0.terminated &&
+                        ($0.activity.state == .done || $0.activity.state == .error)
+                }
+                for idx in activities.indices
+                where activities[idx].id != signal.id &&
+                    (activities[idx].activity.state == .done ||
+                        activities[idx].activity.state == .error ||
+                        (isPrompt && activities[idx].activity.state == .needsAttention)) {
+                    let old = activities[idx]
+                    activities[idx] = Record(
+                        id: old.id,
+                        activity: TabActivity(
+                            source: old.activity.source,
+                            state: .idle,
+                            label: old.activity.label,
+                            message: nil,
+                            detail: nil,
+                            progress: nil,
+                            icon: old.activity.icon
+                        ),
+                        scope: old.scope,
+                        liveness: old.liveness,
+                        updatedAt: old.updatedAt,
+                        terminated: false
+                    )
+                }
+            }
             let activity = TabActivity(
                 source: agent.rawValue,
                 state: state,
@@ -2393,7 +2736,7 @@ struct AgentContextSignalReducer: Sendable {
                 updatedAt: Date(),
                 terminated: false
             ))
-            return .set(activity)
+            return currentRecord.map { .set($0.activity) } ?? .clear
         }
     }
 
@@ -2404,9 +2747,10 @@ struct AgentContextSignalReducer: Sendable {
         now: Date = Date()
     ) -> AgentActivityUpdate? {
         var removedCurrent = false
-        while let current = currentRecord,
-              current.scope == .local,
-              let liveness = current.liveness {
+        while let index = selectedIndex {
+            let current = activities[index]
+            guard current.scope == .local,
+                  let liveness = current.liveness else { break }
             if livenessIsAlive == true || liveness.matchesProcessGroup(foregroundPID) {
                 break
             }
@@ -2419,7 +2763,7 @@ struct AgentContextSignalReducer: Sendable {
                 current.activity.state == .needsAttention {
                 return markUnexpectedInterruption(record: current, now: now)
             }
-            activities.removeLast()
+            activities.remove(at: index)
             removedCurrent = true
         }
         guard removedCurrent else { return nil }
@@ -2439,11 +2783,12 @@ struct AgentContextSignalReducer: Sendable {
     }
 
     mutating func acknowledgeTerminalState() -> AgentActivityUpdate? {
-        guard let current = currentRecord,
-              current.activity.state == .done ||
+        guard let index = selectedIndex else { return nil }
+        let current = activities[index]
+        guard current.activity.state == .done ||
                 current.activity.state == .error else { return nil }
         if current.terminated {
-            activities.removeLast()
+            activities.remove(at: index)
             return currentRecord.map { .set($0.activity) } ?? .clear
         }
         let idle = TabActivity(
@@ -2455,7 +2800,7 @@ struct AgentContextSignalReducer: Sendable {
             progress: nil,
             icon: current.activity.icon
         )
-        activities[activities.count - 1] = Record(
+        activities[index] = Record(
             id: current.id,
             activity: idle,
             scope: current.scope,
@@ -2463,7 +2808,7 @@ struct AgentContextSignalReducer: Sendable {
             updatedAt: current.updatedAt,
             terminated: false
         )
-        return .set(idle)
+        return currentRecord.map { .set($0.activity) } ?? .clear
     }
 
     mutating func consumeRemotePrompt(
@@ -2480,29 +2825,43 @@ struct AgentContextSignalReducer: Sendable {
     /// known to have ended. Local nested contexts, if any, become visible
     /// again instead of being discarded with the remote connection.
     mutating func clearRemoteActivities() -> AgentActivityUpdate? {
+        let previous = currentRecord?.activity
         let previousID = currentRecord?.id
         activities.removeAll { $0.scope == .remote }
-        guard previousID != currentRecord?.id else { return nil }
+        guard previousID != currentRecord?.id || previous != currentRecord?.activity else {
+            return nil
+        }
         return currentRecord.map { .set($0.activity) } ?? .clear
     }
 
-    private var currentRecord: Record? { activities.last }
+    private var selectedIndex: Int? {
+        guard !activities.isEmpty else { return nil }
+        let useRemote = hasRemoteActivity
+        let candidateIndices = activities.indices.filter {
+            !useRemote || activities[$0].scope == .remote
+        }
+        if let attentionIndex = candidateIndices.last(where: {
+            !activities[$0].terminated &&
+                activities[$0].activity.state == .needsAttention
+        }) {
+            return attentionIndex
+        }
+        return candidateIndices.last ?? activities.indices.last
+    }
+
+    private var currentRecord: Record? {
+        selectedIndex.map { activities[$0] }
+    }
 
     private mutating func consumeEnd(_ id: String) -> AgentActivityUpdate? {
         guard let index = activities.firstIndex(where: { $0.id == id }) else {
             return nil
         }
         let current = activities[index]
-        guard index == activities.count - 1 else {
-            activities.remove(at: index)
-            return nil
-        }
-        if current.activity.state == .working ||
+        if current.id == currentRecord?.id,
+           current.activity.state == .working ||
             current.activity.state == .needsAttention {
             return markUnexpectedInterruption(record: current)
-        }
-        if current.activity.state == .done {
-            return remove(id)
         }
         if current.activity.state == .error,
            current.terminated {
@@ -2534,16 +2893,19 @@ struct AgentContextSignalReducer: Sendable {
                 terminated: true
             )
         }
-        return .set(error)
+        return currentRecord.map { .set($0.activity) } ?? .set(error)
     }
 
     private mutating func remove(_ id: String) -> AgentActivityUpdate? {
+        let previous = currentRecord?.activity
+        let previousID = currentRecord?.id
         guard let index = activities.firstIndex(where: { $0.id == id }) else {
             return nil
         }
-        let wasActive = index == activities.count - 1
         activities.remove(at: index)
-        guard wasActive else { return nil }
+        guard previousID != currentRecord?.id || previous != currentRecord?.activity else {
+            return nil
+        }
         return currentRecord.map { .set($0.activity) } ?? .clear
     }
 

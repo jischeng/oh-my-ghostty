@@ -11,6 +11,11 @@ struct AcknowledgedAgentStatus: Codable, Equatable, Sendable {
         var agent: String?
         var state: TabActivityState
         var message: String?
+
+        func matches(_ candidate: Self?) -> Bool {
+            guard let candidate else { return false }
+            return id == candidate.id && agent == candidate.agent && state == candidate.state
+        }
     }
 
     struct ReducerRecord: Codable, Equatable, Sendable {
@@ -18,6 +23,13 @@ struct AcknowledgedAgentStatus: Codable, Equatable, Sendable {
         var source: String
         var state: TabActivityState
         var message: String?
+
+        func matches(_ candidate: Self?) -> Bool {
+            guard let candidate else { return false }
+            return contextID == candidate.contextID &&
+                source == candidate.source &&
+                state == candidate.state
+        }
     }
 
     var program: ProgramRecord?
@@ -35,28 +47,40 @@ struct AgentProgramStatus {
         let id: String
         let agent: SupportedAgent?
         let state: TabActivityState
+        let phase: TabActivityPhase?
         let attention: TabAttentionKind?
         let message: String?
         let progress: Double?
         var acknowledged = false
 
+        var effectiveState: TabActivityState {
+            acknowledged ? .idle : state
+        }
+
         var activity: TabActivity? {
             guard let agent else { return nil }
-            return .init(source: agent.rawValue, state: acknowledged ? .idle : state,
-                         attentionKind: acknowledged ? nil : attention,
-                         label: agent.displayName, message: acknowledged ? nil : message, detail: nil,
-                         progress: acknowledged ? nil : progress, icon: agent.icon)
+            return .init(
+                source: agent.rawValue,
+                state: effectiveState,
+                phase: acknowledged ? nil : phase,
+                attentionKind: acknowledged ? nil : attention,
+                label: agent.displayName,
+                message: acknowledged ? nil : message,
+                detail: nil,
+                progress: acknowledged ? nil : progress,
+                icon: agent.icon
+            )
         }
     }
 
     private(set) var records: [Record] = []
     var isRemote = false
     var foregroundProcessGroup: Int?
-    var activity: TabActivity? { records.last?.activity }
+    var activity: TabActivity? { selectedRecord?.activity }
 
     /// Core validates the full protocol. Retain bounded validation here too:
     /// OSC 3008 shares the bridge and terminal text is never trusted authority.
-    mutating func consume(_ body: String) -> Bool {
+    mutating func consume(_ body: String, fallbackAgent: SupportedAgent? = nil) -> Bool {
         guard body.utf8.count <= 4087 else { return false }
         var fields: [String: String] = [:]
         for pair in body.split(separator: ":") {
@@ -85,6 +109,9 @@ struct AgentProgramStatus {
         case "error": state = .error
         default: return false
         }
+        let phase: TabActivityPhase? = state == .working && fields["phase"] == "background"
+            ? .background
+            : nil
         let progress = fields["progress"].flatMap { raw -> Double? in
             guard !raw.isEmpty, raw.utf8.allSatisfy({ (48...57).contains($0) }),
                   let value = Double(raw), (0...100).contains(value) else { return nil }
@@ -94,43 +121,67 @@ struct AgentProgramStatus {
             fields["kind"] == "question" ? .question : (fields["kind"] == "permission" ? .permission : nil)
         } else { nil }
         let agent = fields["app"].flatMap(Self.resolveAgent)
+            ?? inheritedAgent(for: id, fallback: fallbackAgent)
+        if state == .working, phase != .background {
+            for index in records.indices
+            where !records[index].acknowledged &&
+                (records[index].state == .done || records[index].state == .error) {
+                records[index].acknowledged = true
+            }
+        }
         let acknowledged = records.first { $0.id == id }.map {
-            $0.acknowledged && $0.agent == agent && $0.state == state
+            $0.acknowledged && $0.agent == agent && $0.state == state &&
+                (state == .done || state == .error)
         } ?? false
         records.removeAll { $0.id == id }
         if records.count >= 32 { records.removeFirst() }
-        records.append(.init(id: id, agent: agent,
-            state: state, attention: attention,
+        records.append(.init(
+            id: id,
+            agent: agent,
+            state: state,
+            phase: phase,
+            attention: attention,
             message: fields["msg"].flatMap { Self.text($0, limit: 2048) },
             progress: state == .working || state == .needsAttention ? progress : nil,
-            acknowledged: acknowledged))
+            acknowledged: acknowledged
+        ))
         return true
     }
 
     var acknowledgmentCandidate: AcknowledgedAgentStatus.ProgramRecord? {
-        guard let last = records.last,
-              last.state == .done || last.state == .error else { return nil }
+        let target = selectedRecord.flatMap {
+            ($0.state == .done || $0.state == .error) ? $0 : nil
+        } ?? records.last { $0.state == .done || $0.state == .error }
+        guard let target else { return nil }
         return .init(
-            id: last.id,
-            agent: last.agent?.rawValue,
-            state: last.state,
-            message: last.message
+            id: target.id,
+            agent: target.agent?.rawValue,
+            state: target.state,
+            message: target.message
         )
     }
 
+    var hasAcknowledgedTerminalRecord: Bool {
+        records.contains { $0.acknowledged && ($0.state == .done || $0.state == .error) }
+    }
+
     mutating func acknowledge() -> Bool {
-        guard let last = records.indices.last,
-              !records[last].acknowledged,
-              records[last].state == .done || records[last].state == .error else { return false }
-        records[last].acknowledged = true
-        return true
+        var didChange = false
+        for index in records.indices
+        where !records[index].acknowledged &&
+            (records[index].state == .done || records[index].state == .error) {
+            records[index].acknowledged = true
+            didChange = true
+        }
+        return didChange
     }
 
     /// Resolves effective pane activity when both native OSC 7501 (`program`)
-    /// and OSC 3008 / title-reconciled Hook state (`fallback`) exist.
+    /// and OSC 3008 / Hook state (`fallback`) exist.
     ///
-    /// Non-idle native program status always wins (for example, `blocked`
-    /// permission/question prompts while a Hook only knows the turn is `working`).
+    /// Non-idle native program status wins, except when native status only
+    /// reports generic `working` while an explicit Hook reports `needsAttention`
+    /// for the same agent (for CLIs whose permission prompt arrives via Hook).
     /// When native program status is `idle`, a non-idle Hook status surfaces so
     /// CLIs that emit `state=idle` on startup still show Hook turn transitions.
     static func preferredActivity(
@@ -138,9 +189,70 @@ struct AgentProgramStatus {
         fallback: TabActivity?
     ) -> TabActivity? {
         if let program {
-            if program.state != .idle { return program }
+            if program.state != .idle {
+                if program.state == .working,
+                   let fallback,
+                   fallback.state == .needsAttention,
+                   fallback.source == program.source {
+                    return fallback
+                }
+                return program
+            }
             if let fallback, fallback.state != .idle { return fallback }
             return program
+        }
+        return fallback
+    }
+
+    private var selectedRecord: Record? {
+        var best: Record?
+        for record in records where record.agent != nil {
+            guard let existing = best else {
+                best = record
+                continue
+            }
+            if Self.priority(record) >= Self.priority(existing) {
+                best = record
+            }
+        }
+        return best
+    }
+
+    private static func priority(_ record: Record) -> Int {
+        switch record.effectiveState {
+        case .needsAttention: 5
+        case .working: record.phase == .background ? 3 : 4
+        case .error: 2
+        case .done: 1
+        case .idle: 0
+        }
+    }
+
+    private func inheritedAgent(
+        for id: String,
+        fallback: SupportedAgent?
+    ) -> SupportedAgent? {
+        if let exact = records.reversed().first(where: { $0.id == id && $0.agent != nil })?.agent {
+            return exact
+        }
+        if !id.isEmpty {
+            var prefix = id[...]
+            while let slash = prefix.lastIndex(of: "/") {
+                let parent = String(prefix[..<slash])
+                if let match = records.reversed().first(where: {
+                    $0.id == parent && $0.agent != nil
+                })?.agent {
+                    return match
+                }
+                prefix = prefix[..<slash]
+            }
+        }
+        if let root = records.reversed().first(where: { $0.id.isEmpty && $0.agent != nil })?.agent {
+            return root
+        }
+        let known = Set(records.compactMap(\.agent))
+        if known.count == 1, let sole = known.first {
+            return sole
         }
         return fallback
     }

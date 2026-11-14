@@ -138,4 +138,55 @@ final class TerminalTests: XCTestCase {
         XCTAssertEqual(decoded, .acknowledge(sessionID: sessionID))
     }
 
+    func testSessionStatusErrorRankAndVectorBrandLogosFitCanvas() throws {
+        XCTAssertLessThan(SessionStatus.needsAttention.rank, SessionStatus.error.rank)
+        XCTAssertLessThan(SessionStatus.error.rank, SessionStatus.working.rank)
+        XCTAssertLessThan(SessionStatus.working.rank, SessionStatus.idle.rank)
+        XCTAssertLessThan(SessionStatus.idle.rank, SessionStatus.done.rank)
+
+        let canvas = CGRect(x: 0, y: 0, width: 24, height: 24)
+        let toleranceCanvas = canvas.insetBy(dx: -1, dy: -1)
+        for ref in ["claude", "codex", "grok", "qoder", "reasonix", "aider"] {
+            let logo = try XCTUnwrap(BrandLogo(reference: ref), "Missing BrandLogo for \(ref)")
+            let path = BrandLogoShape(logo: logo).path(in: canvas)
+            let bounds = path.boundingRect
+            XCTAssertFalse(bounds.isEmpty, "Empty vector path for \(ref)")
+            XCTAssertTrue(
+                toleranceCanvas.contains(bounds),
+                "Vector bounds \(bounds) for \(ref) escaped canvas \(canvas)"
+            )
+        }
+    }
+
+    func testInputEventActivityAcknowledgmentRejectsPassiveMouseWheelAndKeyRepeat() {
+        let pointer = Termiod.InputEvent.Pointer(x: 16, y: 24, cellWidth: 8, cellHeight: 16)
+
+        XCTAssertTrue(Termiod.InputEvent.key(.init(action: .press, key: "a", text: "a")).acknowledgesActivity)
+        XCTAssertFalse(Termiod.InputEvent.key(.init(action: .repeat, key: "a", text: "a")).acknowledgesActivity)
+        XCTAssertFalse(Termiod.InputEvent.key(.init(action: .release, key: "a", text: "a")).acknowledgesActivity)
+        XCTAssertFalse(Termiod.InputEvent.key(.init(action: .press, key: "shift_left")).acknowledgesActivity)
+        XCTAssertFalse(Termiod.InputEvent.key(.init(action: .press, key: "a", text: "a", composing: true)).acknowledgesActivity)
+
+        XCTAssertTrue(Termiod.InputEvent.paste("echo ok\n").acknowledgesActivity)
+
+        XCTAssertTrue(
+            Termiod.InputEvent.mouse(.init(action: .press, button: 1, mods: 0, at: pointer, buttonsHeld: true))
+                .acknowledgesActivity
+        )
+        XCTAssertFalse(
+            Termiod.InputEvent.mouse(.init(action: .motion, button: nil, mods: 0, at: pointer, buttonsHeld: false))
+                .acknowledgesActivity
+        )
+        XCTAssertFalse(
+            Termiod.InputEvent.mouse(.init(action: .release, button: 1, mods: 0, at: pointer, buttonsHeld: false))
+                .acknowledgesActivity
+        )
+        XCTAssertFalse(
+            Termiod.InputEvent.wheel(.init(rows: 3, columns: 0, mods: 0, at: pointer))
+                .acknowledgesActivity
+        )
+        XCTAssertFalse(Termiod.InputEvent.focus(true).acknowledgesActivity)
+        XCTAssertFalse(Termiod.InputEvent.focus(false).acknowledgesActivity)
+    }
+
 }

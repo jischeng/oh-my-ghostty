@@ -1,4 +1,6 @@
-//! Presentation facts only. Terminal output never authorizes recovery or cleanup.
+//! Presentation facts and authoritative agent activity reduction.
+//! Terminal output never authorizes session recovery or cleanup.
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::io;
 
@@ -8,14 +10,30 @@ pub const MAX_RECORDS: usize = 64;
 pub const MAX_SNAPSHOT: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct Signal {
     pub id: String,
     pub metadata: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Tier {
+    Fallback = 1,
+    Hook = 2,
+    ProgramStatus = 3,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Presentation {
+    pub tier: Tier,
+    pub agent: String,
+    pub state: &'static str,
+    pub attention: Option<&'static str>,
+    pub message: String,
+    pub background: bool,
+    pub conversation: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct Snapshot {
     pub version: u32,
     pub revision: u64,
@@ -25,7 +43,24 @@ pub struct Snapshot {
     pub remote_host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sync_restore: bool,
 }
+
+impl Default for Snapshot {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            revision: 0,
+            records: Vec::new(),
+            pending: None,
+            remote_host: None,
+            remote_cwd: None,
+            sync_restore: false,
+        }
+    }
+}
+
 impl Snapshot {
     pub fn decode(bytes: &[u8]) -> io::Result<Self> {
         if bytes.len() > MAX_SNAPSHOT {
@@ -52,7 +87,18 @@ impl Snapshot {
     /// The inline viewer uses the existing context bridge, at a parser ground
     /// boundary. This transaction also lets the outer local holder retain it.
     pub fn inline_bytes(&self) -> Vec<u8> {
-        let mut bytes = format!("\x1b]3008;start={SYNC};begin\x07").into_bytes();
+        self.inline_bytes_with_mode("restore")
+    }
+
+    pub fn inline_bytes_with_mode(&self, mode: &str) -> Vec<u8> {
+        let tag = match mode {
+            "live" => "live",
+            _ => "restore",
+        };
+        let mut bytes = format!(
+            "\x1b]3008;start={SYNC};mode={tag}\x07\x1b]3008;start={SYNC};begin\x07"
+        )
+        .into_bytes();
         for signal in &self.records {
             bytes.extend_from_slice(
                 format!("\x1b]3008;start={};{}\x07", signal.id, signal.metadata).as_bytes(),
@@ -60,7 +106,12 @@ impl Snapshot {
         }
         bytes.extend_from_slice(format!("\x1b]3008;start={SYNC};end\x07").as_bytes());
         if let Some(pending) = &self.pending {
-            bytes.extend_from_slice(format!("\x1b]3008;start={SYNC};begin\x07").as_bytes());
+            bytes.extend_from_slice(
+                format!(
+                    "\x1b]3008;start={SYNC};mode={tag}\x07\x1b]3008;start={SYNC};begin\x07"
+                )
+                .as_bytes(),
+            );
             for signal in pending {
                 bytes.extend_from_slice(
                     format!("\x1b]3008;start={};{}\x07", signal.id, signal.metadata).as_bytes(),
@@ -85,6 +136,277 @@ impl Snapshot {
         }
         changed
     }
+
+    /// Canonical authoritative reduction across Tier 1 (OSC 7501), Tier 2
+    /// (Socket `omgd report` / OSC 3008 Hooks), and Tier 3 (Fallback).
+    ///
+    /// Priority within a tier:
+    /// `needsAttention` > foreground `working` > background `working` > `error` > `done` > `idle`.
+    /// Never maps `error`/`failed` to `needsAttention` or `"Waiting for you"`.
+    pub fn presentation(&self) -> Option<Presentation> {
+        let mut inherited_app: Option<String> = None;
+        for sig in &self.records {
+            if sig.id == "omg-program-status" {
+                if let Some(raw_app) = field(&sig.metadata, ':', "app") {
+                    if let Some(norm) = crate::agents::normalize_id(raw_app) {
+                        inherited_app = Some(norm);
+                    }
+                }
+            }
+        }
+        if inherited_app.is_none() {
+            for sig in &self.records {
+                if sig.id.starts_with("omg-agent-") {
+                    if let Some(raw_app) = field(&sig.metadata, ';', "omg_agent") {
+                        if let Some(norm) = crate::agents::normalize_id(raw_app) {
+                            inherited_app = Some(norm);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut best_t1: Option<Presentation> = None;
+        let mut best_t2: Option<Presentation> = None;
+        let mut best_t3: Option<Presentation> = None;
+
+        for signal in &self.records {
+            let Some(item) = parse_presentation(signal, inherited_app.as_deref()) else {
+                continue;
+            };
+            let slot = match item.tier {
+                Tier::ProgramStatus => &mut best_t1,
+                Tier::Hook => &mut best_t2,
+                Tier::Fallback => &mut best_t3,
+            };
+            if slot
+                .as_ref()
+                .is_none_or(|prev| presentation_rank(&item) <= presentation_rank(prev))
+            {
+                *slot = Some(item);
+            }
+        }
+
+        // Strict authority hierarchy: Tier 1 > Tier 2 > Tier 3.
+        // Exception: if Tier 1 only reports generic `working` while Tier 2 Hook
+        // reports active `needsAttention` on the same agent (for CLIs whose
+        // permission prompt comes via Hook rather than OSC 7501 `blocked`),
+        // surface the Tier 2 `needsAttention`.
+        if let Some(t1) = &best_t1 {
+            if t1.state != "idle" {
+                if t1.state == "working" {
+                    if let Some(t2) = &best_t2 {
+                        if t2.state == "needsAttention" && t2.agent == t1.agent {
+                            return Some(t2.clone());
+                        }
+                    }
+                }
+                return Some(t1.clone());
+            }
+        }
+        if let Some(t2) = &best_t2 {
+            if t2.state != "idle" {
+                return Some(t2.clone());
+            }
+        }
+        if let Some(t3) = &best_t3 {
+            let shadowed_by_higher_tier = best_t1
+                .as_ref()
+                .is_some_and(|t1| t1.agent == t3.agent)
+                || best_t2
+                    .as_ref()
+                    .is_some_and(|t2| t2.agent == t3.agent);
+            if !shadowed_by_higher_tier && t3.state != "idle" {
+                return Some(t3.clone());
+            }
+        }
+        best_t1.or(best_t2).or(best_t3)
+    }
+}
+
+fn presentation_rank(p: &Presentation) -> u8 {
+    match p.state {
+        "needsAttention" => 0,
+        "working" if !p.background => 1,
+        "working" => 2,
+        "error" => 3,
+        "done" => 4,
+        _ => 5,
+    }
+}
+
+fn decode_base64_utf8(raw: &str) -> Option<String> {
+    if raw.is_empty() || raw.len() > 2800 {
+        return None;
+    }
+    let rem = raw.len() % 4;
+    let decoded = if rem == 0 {
+        STANDARD.decode(raw).ok()?
+    } else {
+        let mut padded = String::with_capacity(raw.len() + (4 - rem));
+        padded.push_str(raw);
+        for _ in 0..(4 - rem) {
+            padded.push('=');
+        }
+        STANDARD.decode(padded).ok()?
+    };
+    let text = String::from_utf8(decoded).ok()?;
+    if text
+        .chars()
+        .all(|c| !c.is_control() && !('\u{007f}'..='\u{009f}').contains(&c))
+    {
+        Some(text)
+    } else {
+        None
+    }
+}
+
+fn parse_presentation(signal: &Signal, fallback_app: Option<&str>) -> Option<Presentation> {
+    let native = signal.id == "omg-program-status";
+    if native {
+        let agent = field(&signal.metadata, ':', "app")
+            .and_then(crate::agents::normalize_id)
+            .or_else(|| fallback_app.map(str::to_owned))?;
+        let state = match field(&signal.metadata, ':', "state")? {
+            "working" => "working",
+            "blocked" => "needsAttention",
+            "error" => "error",
+            "done" => "done",
+            "idle" => "idle",
+            _ => return None,
+        };
+        let attention = if state == "needsAttention" {
+            match field(&signal.metadata, ':', "kind") {
+                Some("permission") => Some("permission"),
+                Some("question") => Some("question"),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let background = field(&signal.metadata, ':', "phase") == Some("background");
+        let message = field(&signal.metadata, ':', "msg")
+            .and_then(decode_base64_utf8)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| default_message(state, attention).to_owned());
+        return Some(Presentation {
+            tier: Tier::ProgramStatus,
+            agent,
+            state,
+            attention,
+            message,
+            background,
+            conversation: None,
+        });
+    }
+    if !signal.id.starts_with("omg-agent-") || signal.id == SYNC {
+        return None;
+    }
+    let agent = field(&signal.metadata, ';', "omg_agent").and_then(crate::agents::normalize_id)?;
+    let state = match field(&signal.metadata, ';', "omg_state")? {
+        "working" | "processing" | "active" => "working",
+        "waiting" | "awaiting" | "blocked" | "needsAttention" => "needsAttention",
+        "error" | "failed" => "error",
+        "done" | "completed" => "done",
+        "idle" => "idle",
+        _ => return None,
+    };
+    let tier = match field(&signal.metadata, ';', "omg_tier") {
+        Some("fallback") => Tier::Fallback,
+        _ => Tier::Hook,
+    };
+    let attention = if state == "needsAttention" {
+        match field(&signal.metadata, ';', "omg_attention") {
+            Some("permission") => Some("permission"),
+            Some("question") => Some("question"),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let background = field(&signal.metadata, ';', "omg_phase") == Some("background");
+    let conversation = field(&signal.metadata, ';', "omg_conversation")
+        .map(decode_percent)
+        .filter(|s| !s.is_empty());
+    let message = field(&signal.metadata, ';', "message")
+        .map(decode_percent)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| default_message(state, attention).to_owned());
+    Some(Presentation {
+        tier,
+        agent,
+        state,
+        attention,
+        message,
+        background,
+        conversation,
+    })
+}
+
+fn default_message(state: &str, attention: Option<&str>) -> &'static str {
+    match state {
+        "working" => "Working",
+        "needsAttention" => {
+            if attention == Some("permission") {
+                "Waiting for permission"
+            } else {
+                "Waiting for you"
+            }
+        }
+        "error" => "Error",
+        "done" => "Done",
+        _ => "",
+    }
+}
+
+fn rewrite_signal_state(signal: &mut Signal, target_state: &str, new_message: Option<&str>) -> bool {
+    if signal.id == "omg-program-status" {
+        if field(&signal.metadata, ':', "state") == Some(target_state) && new_message.is_none() {
+            return false;
+        }
+        let mut rewritten = Vec::new();
+        for part in signal.metadata.split(':') {
+            let Some((key, _)) = part.trim().split_once('=') else {
+                rewritten.push(part.to_owned());
+                continue;
+            };
+            match key.trim() {
+                "state" => rewritten.push(format!("state={target_state}")),
+                "msg" | "progress" | "kind" => {}
+                _ => rewritten.push(part.to_owned()),
+            }
+        }
+        if let Some(msg) = new_message {
+            let encoded = STANDARD.encode(msg.as_bytes());
+            rewritten.push(format!("msg={encoded}"));
+        }
+        signal.metadata = rewritten.join(":");
+        return true;
+    }
+    if signal.id.starts_with("omg-agent-") && signal.id != SYNC {
+        if field(&signal.metadata, ';', "omg_state") == Some(target_state) && new_message.is_none()
+        {
+            return false;
+        }
+        let mut rewritten = Vec::new();
+        for part in signal.metadata.split(';') {
+            let Some((key, _)) = part.trim().split_once('=') else {
+                rewritten.push(part.to_owned());
+                continue;
+            };
+            match key.trim() {
+                "omg_state" => rewritten.push(format!("omg_state={target_state}")),
+                "message" | "omg_phase" | "progress" | "omg_attention" | "omg_event" => {}
+                _ => rewritten.push(part.to_owned()),
+            }
+        }
+        if let Some(msg) = new_message {
+            rewritten.push(format!("message={}", encode_percent(msg)));
+        }
+        signal.metadata = rewritten.join(";");
+        return true;
+    }
+    false
 }
 
 fn acknowledge_signal(signal: &mut Signal) -> bool {
@@ -95,20 +417,7 @@ fn acknowledge_signal(signal: &mut Signal) -> bool {
         ) {
             return false;
         }
-        let mut rewritten = Vec::new();
-        for part in signal.metadata.split(':') {
-            let Some((key, _)) = part.trim().split_once('=') else {
-                rewritten.push(part.to_owned());
-                continue;
-            };
-            match key.trim() {
-                "state" => rewritten.push("state=idle".to_owned()),
-                "msg" | "progress" | "kind" => {}
-                _ => rewritten.push(part.to_owned()),
-            }
-        }
-        signal.metadata = rewritten.join(":");
-        return true;
+        return rewrite_signal_state(signal, "idle", None);
     }
     if signal.id.starts_with("omg-agent-") && signal.id != SYNC {
         if !matches!(
@@ -117,22 +426,33 @@ fn acknowledge_signal(signal: &mut Signal) -> bool {
         ) {
             return false;
         }
-        let mut rewritten = Vec::new();
-        for part in signal.metadata.split(';') {
-            let Some((key, _)) = part.trim().split_once('=') else {
-                rewritten.push(part.to_owned());
-                continue;
-            };
-            match key.trim() {
-                "omg_state" => rewritten.push("omg_state=idle".to_owned()),
-                "message" | "omg_phase" | "progress" | "omg_attention" => {}
-                _ => rewritten.push(part.to_owned()),
-            }
-        }
-        signal.metadata = rewritten.join(";");
-        return true;
+        return rewrite_signal_state(signal, "idle", None);
     }
     false
+}
+
+fn signal_effective_state(signal: &Signal) -> Option<&'static str> {
+    if signal.id == "omg-program-status" {
+        match field(&signal.metadata, ':', "state")? {
+            "working" => Some("working"),
+            "blocked" => Some("needsAttention"),
+            "error" => Some("error"),
+            "done" => Some("done"),
+            "idle" => Some("idle"),
+            _ => None,
+        }
+    } else if signal.id.starts_with("omg-agent-") && signal.id != SYNC {
+        match field(&signal.metadata, ';', "omg_state")? {
+            "working" | "processing" | "active" => Some("working"),
+            "waiting" | "awaiting" | "blocked" | "needsAttention" => Some("needsAttention"),
+            "error" | "failed" => Some("error"),
+            "done" | "completed" => Some("done"),
+            "idle" => Some("idle"),
+            _ => None,
+        }
+    } else {
+        None
+    }
 }
 
 #[derive(Clone)]
@@ -142,19 +462,187 @@ struct Record {
     remote: bool,
     // Only meaningful on the machine actually owning this process.
     owner: Option<(i32, bool)>,
+    verified_session: bool,
+    attention_locked: bool,
+    interrupted: bool,
+    terminal_revision: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InputOutcome {
+    pub activity_changed: bool,
+    pub user_interaction: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CsiScan {
+    params: [u32; 4],
+    base_key: u32,
+    event_type: u8,
+    param_idx: u8,
+    sub_idx: u8,
+    has_digit: bool,
+    private: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum InputScanState {
+    #[default]
+    Ground,
+    Esc,
+    Csi(CsiScan),
+    Osc,
+    OscEsc,
+    StrSeq,
+    StrEsc,
+    Ss3,
+    X10Mouse(u8),
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct InputTracker {
+    state: InputScanState,
+    in_paste: bool,
+}
+
+#[derive(Clone, Default)]
+pub struct Osc133Scanner {
+    state: Osc133State,
+    buf: [u8; 24],
+    len: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Osc133State {
+    #[default]
+    Ground,
+    Esc,
+    Osc,
+    OscEsc,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Osc133Event {
+    PromptStart,
+    CommandDone(Option<i32>),
+}
+
+impl Osc133Scanner {
+    pub fn in_sequence(&self) -> bool {
+        self.state != Osc133State::Ground
+    }
+
+    pub fn step(&mut self, byte: u8) -> Option<Osc133Event> {
+        match self.state {
+            Osc133State::Ground => {
+                if byte == 0x1b {
+                    self.state = Osc133State::Esc;
+                }
+                None
+            }
+            Osc133State::Esc => {
+                if byte == b']' {
+                    self.state = Osc133State::Osc;
+                    self.len = 0;
+                } else if byte != 0x1b {
+                    self.state = Osc133State::Ground;
+                }
+                None
+            }
+            Osc133State::Osc => {
+                if byte == 0x07 {
+                    self.state = Osc133State::Ground;
+                    return self.finish();
+                }
+                if byte == 0x1b {
+                    self.state = Osc133State::OscEsc;
+                    return None;
+                }
+                if byte < 0x20 {
+                    self.state = Osc133State::Ground;
+                    self.len = 0;
+                    return None;
+                }
+                if self.len < self.buf.len() {
+                    self.buf[self.len] = byte;
+                    self.len += 1;
+                    if self.len <= 4 && self.buf[..self.len] != b"133;"[..self.len] {
+                        // Still consume until BEL/ST in Osc, just mark non-133 by setting len = usize::MAX
+                        self.len = usize::MAX;
+                    }
+                }
+                None
+            }
+            Osc133State::OscEsc => {
+                self.state = Osc133State::Ground;
+                if byte == b'\\' {
+                    return self.finish();
+                }
+                if byte == b']' {
+                    self.state = Osc133State::Osc;
+                    self.len = 0;
+                }
+                None
+            }
+        }
+    }
+
+    fn finish(&mut self) -> Option<Osc133Event> {
+        let len = self.len;
+        self.len = 0;
+        if len == usize::MAX || len < 5 {
+            return None;
+        }
+        let payload = &self.buf[..len.min(self.buf.len())];
+        if !payload.starts_with(b"133;") {
+            return None;
+        }
+        match payload[4] {
+            b'A' if len == 5 || payload.get(5) == Some(&b';') => Some(Osc133Event::PromptStart),
+            b'D' if len == 5 => Some(Osc133Event::CommandDone(None)),
+            b'D' if payload.get(5) == Some(&b';') => {
+                let rest = &payload[6..];
+                let end = rest.iter().position(|&b| b == b';').unwrap_or(rest.len());
+                let code = std::str::from_utf8(&rest[..end])
+                    .ok()
+                    .and_then(|s| s.parse::<i32>().ok());
+                Some(Osc133Event::CommandDone(code))
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Default)]
 pub struct State {
     records: Vec<Record>,
     revision: u64,
+    ack_up_to_revision: u64,
     pending: Option<Vec<Record>>,
+    next_sync_restore: Option<bool>,
+    pending_sync_restore: bool,
+    last_change_sync_restore: bool,
     remote: bool,
     remote_id: Option<String>,
     remote_host: Option<String>,
     remote_cwd: Option<String>,
+    input_tracker: InputTracker,
+    pub(crate) osc133: Osc133Scanner,
     pub local: bool,
     pub foreground: Option<i32>,
+    pub session_leader: Option<i32>,
+}
+
+pub fn encode_percent(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 fn decode_percent(value: &str) -> String {
@@ -190,7 +678,7 @@ fn decode_hex(value: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-fn field<'a>(metadata: &'a str, separator: char, key: &str) -> Option<&'a str> {
+pub(crate) fn field<'a>(metadata: &'a str, separator: char, key: &str) -> Option<&'a str> {
     metadata
         .split(separator)
         .filter_map(|s| s.trim().split_once('='))
@@ -198,6 +686,7 @@ fn field<'a>(metadata: &'a str, separator: char, key: &str) -> Option<&'a str> {
         .map(|(_, v)| v.trim())
         .next_back()
 }
+
 fn valid(signal: &Signal) -> bool {
     (signal.id.starts_with("omg-agent-") && signal.id != SYNC || signal.id == "omg-program-status")
         && !signal.id.is_empty()
@@ -209,9 +698,366 @@ fn valid(signal: &Signal) -> bool {
         && signal.metadata.len() <= 4096
         && signal.metadata.chars().all(|c| !c.is_control())
 }
+
+/// Queries `(ppid, uid, pgid, is_zombie)` for `pid` on macOS and Linux.
+pub fn process_info(pid: i32) -> Option<(i32, u32, i32, bool)> {
+    if pid <= 1 {
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn omg_process_bsdinfo(
+                pid: i32,
+                ppid: *mut i32,
+                uid: *mut u32,
+                pgid: *mut i32,
+                zombie: *mut i32,
+            ) -> i32;
+        }
+        let (mut ppid, mut uid, mut pgid, mut zombie) = (0, 0, 0, 0);
+        if unsafe { omg_process_bsdinfo(pid, &mut ppid, &mut uid, &mut pgid, &mut zombie) } == 0 {
+            Some((ppid, uid, pgid, zombie != 0))
+        } else {
+            None
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let uid = std::fs::metadata(format!("/proc/{pid}")).ok()?.uid();
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let after_comm = stat.rsplit_once(')')?.1.trim_start();
+        let mut parts = after_comm.split_whitespace();
+        let state_ch = parts.next()?.chars().next()?;
+        let ppid: i32 = parts.next()?.parse().ok()?;
+        let pgid: i32 = parts.next()?.parse().ok()?;
+        Some((ppid, uid, pgid, state_ch == 'Z'))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let pgid = unsafe { libc::getpgid(pid) };
+        if pgid <= 1 {
+            return None;
+        }
+        Some((1, unsafe { libc::geteuid() }, pgid, false))
+    }
+}
+
+pub fn is_descendant_of(pid: i32, ancestor: i32) -> bool {
+    if pid <= 1 || ancestor <= 1 {
+        return false;
+    }
+    if pid == ancestor {
+        return true;
+    }
+    let mut current = pid;
+    for _ in 0..32 {
+        let Some((ppid, _, _, _)) = process_info(current) else {
+            return false;
+        };
+        if ppid == ancestor {
+            return true;
+        }
+        if ppid <= 1 || ppid == current {
+            return false;
+        }
+        current = ppid;
+    }
+    false
+}
+
+/// Validates a socket `AgentEvent` sender and resolves `(owner_id, is_group, job_pgid)`.
+/// Supports foreground child process groups, interactive shells, direct `exec` launches,
+/// and inherited-capability daemons owned by the same effective UID.
+pub fn resolve_event_owner(
+    event_pid: i32,
+    event_group: i32,
+    explicit_owner_pid: Option<i32>,
+    session_leader: i32,
+    fg_pgid: i32,
+) -> Option<(i32, bool, i32)> {
+    if event_pid <= 1 || event_group <= 1 || session_leader <= 1 {
+        return None;
+    }
+    let euid = unsafe { libc::geteuid() };
+    let (caller_ppid, caller_uid, caller_pgid, caller_zombie) = process_info(event_pid)?;
+    if caller_zombie || caller_uid != euid || caller_pgid != event_group {
+        return None;
+    }
+
+    if let Some(opid) = explicit_owner_pid {
+        if opid <= 1 {
+            return None;
+        }
+        let (_, o_uid, o_pgid, o_zombie) = process_info(opid)?;
+        if o_zombie || o_uid != euid {
+            return None;
+        }
+        return Some((opid, false, o_pgid.max(session_leader)));
+    }
+
+    let in_session = unsafe { libc::getsid(event_pid) } == session_leader;
+
+    if in_session {
+        let mut current = event_pid;
+        let mut top_child = None;
+        for _ in 0..32 {
+            if current == session_leader {
+                break;
+            }
+            let Some((ppid, _, _, _)) = process_info(current) else {
+                break;
+            };
+            if ppid == session_leader {
+                top_child = Some(current);
+                break;
+            }
+            if ppid <= 1 || ppid == current {
+                break;
+            }
+            current = ppid;
+        }
+        if let Some(p1) = top_child {
+            if p1 != event_pid {
+                let p1_pgid = process_info(p1)
+                    .map(|(_, _, pg, _)| pg)
+                    .unwrap_or(event_group);
+                if p1_pgid > 1
+                    && p1_pgid != session_leader
+                    && fg_pgid > 1
+                    && (fg_pgid == p1_pgid || is_descendant_of(fg_pgid, p1))
+                {
+                    return Some((p1_pgid, true, p1_pgid));
+                }
+                return Some((session_leader, true, session_leader));
+            }
+            let job = if fg_pgid > 1 { fg_pgid } else { session_leader };
+            return Some((session_leader, true, job));
+        }
+        if fg_pgid > 1 && fg_pgid != session_leader {
+            return Some((fg_pgid, true, fg_pgid));
+        }
+        return Some((session_leader, true, session_leader));
+    }
+
+    // Same-UID detached daemon (e.g. `opencode serve` with inherited capability).
+    // Walk `ppid` upward past ephemeral `/bin/sh` hook wrappers to the root daemon PID.
+    if caller_ppid > 1 {
+        if let Some((mut next_ppid, p_uid, mut root_pgid, p_zombie)) = process_info(caller_ppid) {
+            if !p_zombie && p_uid == euid {
+                let mut root_pid = caller_ppid;
+                for _ in 0..16 {
+                    if next_ppid <= 1
+                        || next_ppid == root_pid
+                        || unsafe { libc::getsid(root_pid) } == root_pid
+                    {
+                        break;
+                    }
+                    let Some((grand_ppid, g_uid, g_pgid, g_zombie)) = process_info(next_ppid)
+                    else {
+                        break;
+                    };
+                    if g_zombie || g_uid != euid {
+                        break;
+                    }
+                    root_pid = next_ppid;
+                    root_pgid = g_pgid;
+                    next_ppid = grand_ppid;
+                }
+                let job = if fg_pgid > 1 { fg_pgid } else { root_pgid };
+                return Some((root_pid, false, job));
+            }
+        }
+    }
+    None
+}
+
+fn owner_alive_in_session(pid: i32, group: bool, session: i32, verified_session: bool) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    if !group {
+        let Some((_, _, _, zombie)) = process_info(pid) else {
+            return false;
+        };
+        if zombie {
+            return false;
+        }
+        if verified_session {
+            return unsafe { libc::kill(pid, 0) == 0 }
+                || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+        }
+        return unsafe { libc::getsid(pid) == session && libc::kill(pid, 0) == 0 };
+    }
+
+    // Process-group (`pgid`) liveness: original group leader `pid` may have exited
+    // (`getsid(pid) == -1`) while child processes in `-pid` remain alive!
+    let kill_ok = unsafe { libc::kill(-pid, 0) == 0 }
+        || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+    if !kill_ok {
+        return false;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn omg_group_pids(pgid: i32, pids: *mut i32, capacity: usize) -> i32;
+        }
+        let mut pids = [0i32; 256];
+        let count = unsafe { omg_group_pids(pid, pids.as_mut_ptr(), pids.len()) };
+        if count > 0 {
+            for &member in &pids[..(count as usize).min(pids.len())] {
+                if member <= 1 {
+                    continue;
+                }
+                let Some((_, _, _, zombie)) = process_info(member) else {
+                    continue;
+                };
+                if !zombie && (verified_session || unsafe { libc::getsid(member) == session }) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Some((_, _, _, zombie)) = process_info(pid) {
+            if !zombie && (verified_session || unsafe { libc::getsid(pid) == session }) {
+                return true;
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir("/proc") {
+            for entry in entries.flatten().take(8192) {
+                let Some(member) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|s| s.parse::<i32>().ok())
+                else {
+                    continue;
+                };
+                if let Some((_, _, pgid, zombie)) = process_info(member) {
+                    if !zombie
+                        && pgid == pid
+                        && (verified_session || unsafe { libc::getsid(member) == session })
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+    }
+
+    if verified_session {
+        true
+    } else {
+        unsafe { libc::getsid(pid) == session }
+    }
+}
+
+fn inherit_native_app(records: &[Record], key: &str, metadata: &str) -> String {
+    if field(metadata, ':', "app").is_some_and(|v| !v.is_empty()) {
+        return metadata.to_owned();
+    }
+    let mut candidate: Option<String> = None;
+
+    // 1. Exact key match in existing OSC 7501 records.
+    for r in records.iter().rev() {
+        if r.signal.id == "omg-program-status" && r.key == key {
+            if let Some(app) = field(&r.signal.metadata, ':', "app").filter(|a| !a.is_empty()) {
+                candidate = Some(app.to_owned());
+                break;
+            }
+        }
+    }
+    // 2. Parent namespace walk (`a/b/c` -> `a/b` -> `a` -> `""`).
+    if candidate.is_none() && !key.is_empty() {
+        let mut prefix = key;
+        while let Some((parent, _)) = prefix.rsplit_once('/') {
+            if let Some(app) = records.iter().rev().find_map(|r| {
+                (r.signal.id == "omg-program-status" && r.key == parent)
+                    .then(|| field(&r.signal.metadata, ':', "app"))
+                    .flatten()
+                    .filter(|a| !a.is_empty())
+            }) {
+                candidate = Some(app.to_owned());
+                break;
+            }
+            prefix = parent;
+        }
+    }
+    // 3. Root `id=""` or sole active OSC 7501 agent.
+    if candidate.is_none() {
+        candidate = records
+            .iter()
+            .rev()
+            .find_map(|r| {
+                (r.signal.id == "omg-program-status" && r.key.is_empty())
+                    .then(|| field(&r.signal.metadata, ':', "app"))
+                    .flatten()
+                    .filter(|a| !a.is_empty())
+                    .map(str::to_owned)
+            })
+            .or_else(|| {
+                let mut unique: Option<String> = None;
+                for r in records {
+                    if r.signal.id == "omg-program-status" {
+                        if let Some(app) =
+                            field(&r.signal.metadata, ':', "app").and_then(crate::agents::normalize_id)
+                        {
+                            match &unique {
+                                None => unique = Some(app),
+                                Some(prev) if prev == &app => {}
+                                Some(_) => return None,
+                            }
+                        }
+                    }
+                }
+                unique
+            });
+    }
+    // 4. Sole active Hook agent in the same session.
+    if candidate.is_none() {
+        let mut unique: Option<String> = None;
+        for r in records {
+            if r.signal.id.starts_with("omg-agent-") {
+                if let Some(app) =
+                    field(&r.signal.metadata, ';', "omg_agent").and_then(crate::agents::normalize_id)
+                {
+                    match &unique {
+                        None => unique = Some(app),
+                        Some(prev) if prev == &app => {}
+                        Some(_) => {
+                            unique = None;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        candidate = unique;
+    }
+
+    if let Some(app) = candidate {
+        if metadata.len() + 5 + app.len() <= 4087 {
+            return format!("{metadata}:app={app}");
+        }
+    }
+    metadata.to_owned()
+}
+
 impl State {
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+    pub fn ack_up_to_revision(&self) -> u64 {
+        self.ack_up_to_revision
+    }
+    pub fn take_last_change_sync_restore(&mut self) -> bool {
+        std::mem::take(&mut self.last_change_sync_restore)
     }
     pub fn remote_host(&self) -> Option<&str> {
         self.remote_host.as_deref()
@@ -235,6 +1081,7 @@ impl State {
             }
         }
         self.revision = snapshot.revision;
+        self.last_change_sync_restore = false;
     }
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
@@ -247,22 +1094,135 @@ impl State {
                 .map(|r| r.iter().map(|r| r.signal.clone()).collect()),
             remote_host: self.remote_host.clone(),
             remote_cwd: self.remote_cwd.clone(),
+            sync_restore: false,
         }
     }
+    pub fn presentation(&self) -> Option<Presentation> {
+        self.snapshot().presentation()
+    }
+
+    /// Feeds a validated socket `omgd report` event directly into the authoritative engine.
+    #[allow(clippy::too_many_arguments)]
+    pub fn consume_report(
+        &mut self,
+        agent_raw: &str,
+        state: &str,
+        owner_id: i32,
+        owner_is_group: bool,
+        local_scope: bool,
+        conversation_id: Option<&str>,
+        cwd: Option<&str>,
+        context_id: Option<&str>,
+        attention: Option<&str>,
+        phase: Option<&str>,
+        message: Option<&str>,
+        tier: Option<&str>,
+        event_kind: Option<&str>,
+    ) -> bool {
+        let Some(agent) = crate::agents::normalize_id(agent_raw) else {
+            return false;
+        };
+        let id = if owner_id > 1 {
+            format!("omg-agent-{agent}-{owner_id}")
+        } else {
+            format!("omg-agent-{agent}")
+        };
+        let before = self.revision;
+        if state == "end" || state == "clear" {
+            let meta = if let Some(ctx) = context_id.filter(|s| !s.is_empty()) {
+                format!("omg_context={}", encode_percent(ctx))
+            } else {
+                String::new()
+            };
+            self.consume_with_verified_owner(
+                true,
+                &id,
+                &meta,
+                Some((owner_id, owner_is_group)),
+            );
+            return self.revision != before;
+        }
+        let scope = if local_scope { "local" } else { "remote" };
+        let liveness = if owner_is_group { "pgid" } else { "pid" };
+        let mut parts = vec![
+            "type=app".to_owned(),
+            format!("omg_agent={agent}"),
+            format!("omg_scope={scope}"),
+            format!("omg_liveness={liveness}"),
+            format!("omg_state={state}"),
+        ];
+        if let Some(att) = attention.filter(|a| matches!(*a, "permission" | "question")) {
+            parts.push(format!("omg_attention={att}"));
+        }
+        if let Some(ph) = phase.filter(|p| matches!(*p, "foreground" | "background")) {
+            parts.push(format!("omg_phase={ph}"));
+        }
+        if let Some(conv) = conversation_id.filter(|c| !c.is_empty() && c.len() <= 128) {
+            parts.push(format!("omg_conversation={}", encode_percent(conv)));
+        }
+        if let Some(dir) = cwd.filter(|d| d.starts_with('/') && d.len() <= 4096) {
+            parts.push(format!("omg_cwd={}", encode_percent(dir)));
+        }
+        if let Some(ctx) = context_id.filter(|c| !c.is_empty() && c.len() <= 128) {
+            parts.push(format!("omg_context={}", encode_percent(ctx)));
+        }
+        if let Some(msg) = message.filter(|m| !m.is_empty()) {
+            let truncated: String = msg.chars().take(256).collect();
+            parts.push(format!("message={}", encode_percent(&truncated)));
+        }
+        if tier == Some("fallback") {
+            parts.push("omg_tier=fallback".to_owned());
+        }
+        if let Some(ev) = event_kind.filter(|e| !e.is_empty() && e.len() <= 32) {
+            parts.push(format!("omg_event={}", encode_percent(ev)));
+        }
+        let metadata = parts.join(";");
+        self.consume_with_verified_owner(false, &id, &metadata, Some((owner_id, owner_is_group)));
+        self.revision != before
+    }
+
     pub fn consume(&mut self, ended: bool, id: &str, metadata: &str) {
+        self.consume_with_verified_owner(ended, id, metadata, None);
+    }
+
+    fn consume_with_verified_owner(
+        &mut self,
+        ended: bool,
+        id: &str,
+        metadata: &str,
+        explicit_verified_owner: Option<(i32, bool)>,
+    ) {
         if id == SYNC {
-            match metadata {
-                "begin" => self.pending = Some(Vec::new()),
-                "end" => {
-                    if let Some(records) = self.pending.take() {
-                        self.records = records;
-                        self.revision = self.revision.saturating_add(1);
-                    }
+            if metadata == "mode=live" || metadata == "mode=restore" {
+                self.next_sync_restore = Some(metadata != "mode=live");
+                return;
+            }
+            let is_begin = metadata == "begin" || metadata.starts_with("begin;");
+            let is_end = metadata == "end" || metadata.starts_with("end;");
+            if is_begin {
+                self.pending = Some(Vec::new());
+                self.pending_sync_restore = if metadata.contains("mode=") {
+                    field(metadata, ';', "mode") != Some("live")
+                } else {
+                    self.next_sync_restore.take().unwrap_or(true)
+                };
+            } else if is_end {
+                let end_is_restore = if metadata.contains("mode=") {
+                    field(metadata, ';', "mode") != Some("live")
+                } else {
+                    self.pending_sync_restore
+                };
+                if let Some(records) = self.pending.take() {
+                    self.records = records;
+                    self.revision = self.revision.saturating_add(1);
+                    self.last_change_sync_restore = end_is_restore;
                 }
-                _ => {}
+                self.pending_sync_restore = false;
+                self.next_sync_restore = None;
             }
             return;
         }
+        self.last_change_sync_restore = false;
         if id.starts_with("omg-ssh-") {
             if ended {
                 if self
@@ -308,118 +1268,306 @@ impl State {
             }
             return;
         }
+
+        let native = id == "omg-program-status";
+        let in_sync_batch = self.pending.is_some();
+        let raw_key = if native {
+            field(metadata, ':', "id").unwrap_or("").to_owned()
+        } else if let Some(ctx) = field(metadata, ';', "omg_context").filter(|s| !s.is_empty()) {
+            format!("{id}#{ctx}")
+        } else {
+            id.to_owned()
+        };
+
+        let clear = native && field(metadata, ':', "state") == Some("clear");
+        if ended || clear {
+            let ended_socket_agent = (!native && explicit_verified_owner.is_some())
+                .then(|| id.strip_prefix("omg-agent-"))
+                .flatten()
+                .map(|rest| {
+                    rest.rsplit_once('-')
+                        .and_then(|(prefix, tail)| tail.parse::<i32>().ok().map(|_| prefix))
+                        .unwrap_or(rest)
+                })
+                .and_then(crate::agents::normalize_id);
+            let records = self.pending.as_mut().unwrap_or(&mut self.records);
+            let before = records.len();
+            records.retain(|r| {
+                if native {
+                    r.signal.id != id
+                        || !(raw_key.is_empty()
+                            || r.key == raw_key
+                            || r.key.starts_with(&(raw_key.clone() + "/")))
+                } else if let Some(ctx) = field(metadata, ';', "omg_context") {
+                    if r.key == raw_key {
+                        return false;
+                    }
+                    if let Some(ref target_agent) = ended_socket_agent {
+                        let same_ctx = field(&r.signal.metadata, ';', "omg_context") == Some(ctx);
+                        let same_pgid_agent = field(&r.signal.metadata, ';', "omg_liveness")
+                            == Some("pgid")
+                            && field(&r.signal.metadata, ';', "omg_agent")
+                                .and_then(crate::agents::normalize_id)
+                                .as_deref()
+                                == Some(target_agent.as_str());
+                        return !(same_ctx && same_pgid_agent);
+                    }
+                    true
+                } else {
+                    if r.signal.id == id || r.key == raw_key {
+                        return false;
+                    }
+                    if let Some(ref target_agent) = ended_socket_agent {
+                        let same_pgid_agent = field(&r.signal.metadata, ';', "omg_liveness")
+                            == Some("pgid")
+                            && field(&r.signal.metadata, ';', "omg_agent")
+                                .and_then(crate::agents::normalize_id)
+                                .as_deref()
+                                == Some(target_agent.as_str());
+                        return !same_pgid_agent;
+                    }
+                    true
+                }
+            });
+            if records.len() != before || in_sync_batch {
+                self.revision = self.revision.saturating_add(1);
+            }
+            return;
+        }
+
+        let effective_metadata = if native {
+            let target_records = self.pending.as_deref().unwrap_or(&self.records);
+            inherit_native_app(target_records, &raw_key, metadata)
+        } else {
+            metadata.to_owned()
+        };
+
         let signal = Signal {
             id: id.into(),
-            metadata: metadata.into(),
+            metadata: effective_metadata.clone(),
         };
         if !valid(&signal) {
             return;
         }
-        let native = id == "omg-program-status";
         if native
             && !matches!(
-                field(metadata, ':', "state"),
+                field(&effective_metadata, ':', "state"),
                 Some("idle" | "working" | "done" | "blocked" | "error" | "clear")
             )
         {
             return;
         }
-        let key = if native {
-            field(metadata, ':', "id").unwrap_or("").to_owned()
-        } else {
-            id.to_owned()
-        };
-        let clear = native && field(metadata, ':', "state") == Some("clear");
-        let records = self.pending.as_mut().unwrap_or(&mut self.records);
-        if ended || clear {
-            records.retain(|r| {
-                if native {
-                    r.signal.id != id
-                        || !(key.is_empty()
-                            || r.key == key
-                            || r.key.starts_with(&(key.clone() + "/")))
-                } else {
-                    r.key != key
-                }
-            });
-        } else {
-            if !native {
-                let state = field(metadata, ';', "omg_state");
-                if field(metadata, ';', "type") != Some("app")
-                    || field(metadata, ';', "omg_agent").is_none()
-                    || !matches!(
-                        state,
-                        Some(
-                            "idle"
-                                | "working"
-                                | "processing"
-                                | "active"
-                                | "waiting"
-                                | "awaiting"
-                                | "blocked"
-                                | "needsAttention"
-                                | "done"
-                                | "completed"
-                                | "error"
-                                | "failed"
-                        )
+        if !native {
+            let state = field(&effective_metadata, ';', "omg_state");
+            if field(&effective_metadata, ';', "type") != Some("app")
+                || field(&effective_metadata, ';', "omg_agent").is_none()
+                || !matches!(
+                    state,
+                    Some(
+                        "idle"
+                            | "working"
+                            | "processing"
+                            | "active"
+                            | "waiting"
+                            | "awaiting"
+                            | "blocked"
+                            | "needsAttention"
+                            | "done"
+                            | "completed"
+                            | "error"
+                            | "failed"
                     )
+                )
+            {
+                return;
+            }
+        }
+
+        let new_state = signal_effective_state(&signal);
+        let is_prompt_event =
+            !native && field(&effective_metadata, ';', "omg_event") == Some("prompt");
+        let is_background = if native {
+            field(&effective_metadata, ':', "phase") == Some("background")
+        } else {
+            field(&effective_metadata, ';', "omg_phase") == Some("background")
+        };
+
+        let session_leader = self.session_leader;
+        let local_flag = self.local;
+        let self_remote = self.remote;
+        let foreground = self.foreground;
+
+        let records = self.pending.as_mut().unwrap_or(&mut self.records);
+
+        let is_root_hook = !native && field(&effective_metadata, ';', "omg_context").is_none();
+        let hook_agent = (!native)
+            .then(|| field(&effective_metadata, ';', "omg_agent"))
+            .flatten()
+            .and_then(crate::agents::normalize_id);
+        let incoming_pgid_scoped = !native
+            && (explicit_verified_owner.is_some_and(|(_, g)| g)
+                || field(&effective_metadata, ';', "omg_liveness") == Some("pgid"));
+
+        // Enforce `needsAttention` lock: prevent out-of-order sibling/tool `working`
+        // (or background `working`) on the same Hook record from overwriting an active
+        // `needsAttention` until unlocked by user input, explicit `prompt` event, or
+        // resolved via `done`/`error`/`idle`/`end`.
+        if !in_sync_batch && new_state == Some("working") {
+            if let Some(existing) = records.iter().find(|r| {
+                (r.signal.id == id && r.key == raw_key)
+                    || (incoming_pgid_scoped
+                        && is_root_hook
+                        && r.signal.id != "omg-program-status"
+                        && field(&r.signal.metadata, ';', "omg_context").is_none()
+                        && field(&r.signal.metadata, ';', "omg_liveness") == Some("pgid")
+                        && hook_agent.is_some()
+                        && field(&r.signal.metadata, ';', "omg_agent")
+                            .and_then(crate::agents::normalize_id)
+                            == hook_agent)
+            }) {
+                if signal_effective_state(&existing.signal) == Some("needsAttention")
+                    && ((!native && existing.attention_locked && !is_prompt_event) || is_background)
                 {
                     return;
                 }
             }
-            let remote = if native {
-                self.remote
-            } else {
-                field(metadata, ';', "omg_scope") == Some("remote")
-            };
-            let existing_owner = records
-                .iter()
-                .find(|r| r.signal.id == id && r.key == key)
-                .and_then(|r| r.owner);
-            if native && !(self.local && remote) && field(metadata, ':', "state") == Some("idle") {
-                if let Some((old_pid, true)) = existing_owner {
-                    if self.foreground != Some(old_pid) && unsafe { libc::kill(-old_pid, 0) != 0 } {
-                        records.retain(|r| r.signal.id != id || r.key != key);
-                        self.revision = self.revision.saturating_add(1);
-                        return;
-                    }
-                }
-            }
-            let owner = if !native && !(self.local && remote) {
-                let pid = id
-                    .rsplit('-')
-                    .next()
-                    .and_then(|s| s.parse::<i32>().ok())
-                    .filter(|p| *p > 1);
-                match (pid, field(metadata, ';', "omg_liveness")) {
-                    (Some(pid), Some("pid")) => Some((pid, false)),
-                    (Some(pid), Some("pgid")) => Some((pid, true)),
-                    _ => None,
-                }
-            } else if native && !(self.local && remote) {
-                match (field(metadata, ':', "state"), existing_owner) {
-                    (Some("idle"), Some((old_pid, true))) if self.foreground != Some(old_pid) => {
-                        Some((old_pid, true))
-                    }
-                    _ => self.foreground.filter(|p| *p > 1).map(|p| (p, true)),
-                }
-            } else {
-                None
-            };
-            records.retain(|r| r.signal.id != id || r.key != key);
-            if records.len() >= MAX_RECORDS {
-                records.remove(0);
-            }
-            records.push(Record {
-                signal,
-                key,
-                remote,
-                owner,
-            });
         }
-        self.revision = self.revision.saturating_add(1);
+
+        // Cross-agent & cross-channel new-turn superseding: when a new live foreground
+        // `working` turn begins in this pane, supersede stale prior-turn `done`/`error`
+        // across all records regardless of agent or channel (and for background `working`,
+        // across channels or sibling records of the same agent).
+        if !in_sync_batch && new_state == Some("working") {
+            let incoming_agent = if native {
+                field(&effective_metadata, ':', "app").and_then(crate::agents::normalize_id)
+            } else {
+                field(&effective_metadata, ';', "omg_agent").and_then(crate::agents::normalize_id)
+            };
+            for r in records.iter_mut() {
+                let should_supersede = if !is_background {
+                    true
+                } else {
+                    let r_native = r.signal.id == "omg-program-status";
+                    let same_agent = incoming_agent.as_deref().is_some_and(|inc| {
+                        let existing = if r_native {
+                            field(&r.signal.metadata, ':', "app")
+                                .and_then(crate::agents::normalize_id)
+                        } else {
+                            field(&r.signal.metadata, ';', "omg_agent")
+                                .and_then(crate::agents::normalize_id)
+                        };
+                        existing.as_deref() == Some(inc)
+                    });
+                    r_native != native || same_agent
+                };
+                if should_supersede && acknowledge_signal(&mut r.signal) {
+                    r.terminal_revision = 0;
+                    r.interrupted = false;
+                }
+            }
+        }
+
+        let remote = if native {
+            self_remote
+        } else {
+            field(&effective_metadata, ';', "omg_scope") == Some("remote")
+        };
+        let existing_owner = records
+            .iter()
+            .find(|r| r.signal.id == id && r.key == raw_key)
+            .and_then(|r| r.owner);
+        if native
+            && !(local_flag && remote)
+            && field(&effective_metadata, ':', "state") == Some("idle")
+        {
+            if let Some((old_pid, true)) = existing_owner {
+                if foreground != Some(old_pid) && unsafe { libc::kill(-old_pid, 0) != 0 } {
+                    records.retain(|r| r.signal.id != id || r.key != raw_key);
+                    self.revision = self.revision.saturating_add(1);
+                    return;
+                }
+            }
+        }
+        let owner = if let Some(explicit) = explicit_verified_owner {
+            if local_flag && remote {
+                None
+            } else {
+                Some(explicit)
+            }
+        } else if !native && !(local_flag && remote) {
+            let pid = id
+                .rsplit('-')
+                .next()
+                .and_then(|s| s.parse::<i32>().ok())
+                .filter(|p| *p > 1);
+            match (pid, field(&effective_metadata, ';', "omg_liveness")) {
+                (Some(pid), Some("pid")) => Some((pid, false)),
+                (Some(pid), Some("pgid")) => Some((pid, true)),
+                _ => foreground.filter(|p| *p > 1).map(|p| (p, true)),
+            }
+        } else if native && !(local_flag && remote) {
+            match (field(&effective_metadata, ':', "state"), existing_owner) {
+                (Some("idle"), Some((old_pid, true))) if foreground != Some(old_pid) => {
+                    Some((old_pid, true))
+                }
+                _ => foreground.filter(|p| *p > 1).map(|p| (p, true)),
+            }
+        } else {
+            None
+        };
+
+        let verified_session = if explicit_verified_owner.is_some() {
+            true
+        } else if let (Some((opid, ogroup)), Some(leader)) = (owner, session_leader) {
+            owner_alive_in_session(opid, ogroup, leader, false)
+        } else {
+            false
+        };
+
+        let attention_locked = !native && new_state == Some("needsAttention");
+
+        records.retain(|r| {
+            if r.signal.id == id && r.key == raw_key {
+                return false;
+            }
+            if !in_sync_batch
+                && incoming_pgid_scoped
+                && is_root_hook
+                && r.signal.id != "omg-program-status"
+                && r.remote == remote
+                && field(&r.signal.metadata, ';', "omg_context").is_none()
+                && field(&r.signal.metadata, ';', "omg_liveness") == Some("pgid")
+            {
+                let existing_agent = field(&r.signal.metadata, ';', "omg_agent")
+                    .and_then(crate::agents::normalize_id);
+                if hook_agent.is_some() && existing_agent == hook_agent {
+                    return false;
+                }
+            }
+            true
+        });
+        if records.len() >= MAX_RECORDS {
+            records.remove(0);
+        }
+        let next_revision = self.revision.saturating_add(1);
+        let terminal_revision = if matches!(new_state, Some("done" | "error")) {
+            next_revision
+        } else {
+            0
+        };
+        records.push(Record {
+            signal,
+            key: raw_key,
+            remote,
+            owner,
+            verified_session,
+            attention_locked,
+            interrupted: false,
+            terminal_revision,
+        });
+        self.revision = next_revision;
     }
+
     fn clear_remote(&mut self) {
         let before = self.records.len();
         self.records.retain(|r| !r.remote);
@@ -427,16 +1575,418 @@ impl State {
             self.revision = self.revision.saturating_add(1);
         }
     }
+
+    /// Inspects raw `'I'` (`INPUT`) frames from the active writer.
+    ///
+    /// - Mouse reports (`\x1b[<...M`/`m`, `\x1b[M...`), focus events (`\x1b[I`/`\x1b[O`),
+    ///   and terminal query replies (`\x1b[...R`, `\x1b[?1u`, `\x1b]...`) NEVER wipe
+    ///   `done`/`error`, do not unlock `needsAttention`, and do not count as user interaction.
+    /// - `0x03` (`Ctrl+C`), Kitty `CSI 99;5u` / `99;5:1u`, or `modifyOtherKeys` `CSI 27;5;99~`
+    ///   outside bracketed paste transitions `needsAttention`/`working -> idle` (Interrupt Fence).
+    /// - Standalone `0x1b` (`Esc`), Kitty `CSI 27u` / `27;1u`, or `modifyOtherKeys` `CSI 27;1;27~`
+    ///   outside bracketed paste transitions `needsAttention -> idle`.
+    /// - Real user keystrokes (including Kitty `CSI u` non-release keys) unlock `attention_locked`
+    ///   and report `user_interaction = true` so `close_on_agent_done` resets without wiping UI `done`.
+    pub fn consume_input(&mut self, data: &[u8]) -> bool {
+        self.consume_input_detailed(data).activity_changed
+    }
+
+    pub fn consume_input_detailed(&mut self, data: &[u8]) -> InputOutcome {
+        if data.is_empty() {
+            return InputOutcome::default();
+        }
+        let mut saw_ctrl_c = false;
+        let mut saw_bare_esc = false;
+        let mut saw_user_key = false;
+
+        for (idx, &byte) in data.iter().enumerate() {
+            match self.input_tracker.state {
+                InputScanState::Ground => {
+                    if byte == 0x1b {
+                        if idx == 0 && data.len() == 1 && !self.input_tracker.in_paste {
+                            saw_bare_esc = true;
+                        } else {
+                            self.input_tracker.state = InputScanState::Esc;
+                        }
+                    } else if !self.input_tracker.in_paste {
+                        if byte == 0x03 {
+                            saw_ctrl_c = true;
+                        } else if byte == b'\r'
+                            || byte == b'\n'
+                            || byte == b'\t'
+                            || byte == 0x7f
+                            || byte == 0x08
+                            || byte >= 0x20
+                        {
+                            saw_user_key = true;
+                        }
+                    }
+                }
+                InputScanState::Esc => match byte {
+                    b'[' => {
+                        self.input_tracker.state = InputScanState::Csi(CsiScan::default());
+                    }
+                    b']' => self.input_tracker.state = InputScanState::Osc,
+                    b'P' | b'X' | b'^' | b'_' => self.input_tracker.state = InputScanState::StrSeq,
+                    b'O' => self.input_tracker.state = InputScanState::Ss3,
+                    0x1b => {
+                        if idx + 1 == data.len() && !self.input_tracker.in_paste {
+                            saw_bare_esc = true;
+                            self.input_tracker.state = InputScanState::Ground;
+                        }
+                    }
+                    _ => {
+                        // Alt+<key>
+                        self.input_tracker.state = InputScanState::Ground;
+                        if !self.input_tracker.in_paste && byte >= 0x20 {
+                            saw_user_key = true;
+                        }
+                    }
+                },
+                InputScanState::Ss3 => {
+                    self.input_tracker.state = InputScanState::Ground;
+                    if !self.input_tracker.in_paste {
+                        saw_user_key = true;
+                    }
+                }
+                InputScanState::X10Mouse(rem) => {
+                    if rem <= 1 {
+                        self.input_tracker.state = InputScanState::Ground;
+                    } else {
+                        self.input_tracker.state = InputScanState::X10Mouse(rem - 1);
+                    }
+                }
+                InputScanState::Csi(mut csi) => {
+                    if byte == 0x03 && !self.input_tracker.in_paste {
+                        self.input_tracker.state = InputScanState::Ground;
+                        saw_ctrl_c = true;
+                    } else if matches!(byte, b'<' | b'?' | b'>' | b'=') {
+                        csi.private = true;
+                        self.input_tracker.state = InputScanState::Csi(csi);
+                    } else if byte.is_ascii_digit() {
+                        let d = (byte - b'0') as u32;
+                        csi.has_digit = true;
+                        if csi.sub_idx == 0 && (csi.param_idx as usize) < csi.params.len() {
+                            let slot = &mut csi.params[csi.param_idx as usize];
+                            *slot = slot.saturating_mul(10).saturating_add(d);
+                        } else if csi.param_idx == 0 && csi.sub_idx == 2 {
+                            csi.base_key = csi.base_key.saturating_mul(10).saturating_add(d);
+                        } else if csi.param_idx == 1 && csi.sub_idx == 1 {
+                            csi.event_type =
+                                csi.event_type.saturating_mul(10).saturating_add(d as u8);
+                        }
+                        self.input_tracker.state = InputScanState::Csi(csi);
+                    } else if byte == b';' {
+                        csi.param_idx = csi.param_idx.saturating_add(1);
+                        csi.sub_idx = 0;
+                        self.input_tracker.state = InputScanState::Csi(csi);
+                    } else if byte == b':' {
+                        csi.sub_idx = csi.sub_idx.saturating_add(1);
+                        self.input_tracker.state = InputScanState::Csi(csi);
+                    } else if (0x20..0x40).contains(&byte) {
+                        self.input_tracker.state = InputScanState::Csi(csi);
+                    } else if (0x40..=0x7e).contains(&byte) {
+                        if byte == b'M' && !csi.private && !csi.has_digit && csi.param_idx == 0 {
+                            // Classic X10 mouse `\x1b[M<cb><cx><cy>` consumes 3 raw bytes
+                            self.input_tracker.state = InputScanState::X10Mouse(3);
+                        } else {
+                            let is_release = csi.event_type == 3;
+                            if byte == b'~' && !csi.private && csi.has_digit {
+                                if csi.param_idx == 0 && csi.params[0] == 200 {
+                                    self.input_tracker.in_paste = true;
+                                } else if csi.param_idx == 0 && csi.params[0] == 201 {
+                                    self.input_tracker.in_paste = false;
+                                    saw_user_key = true;
+                                } else if !self.input_tracker.in_paste && !is_release {
+                                    if csi.param_idx >= 2 && csi.params[0] == 27 {
+                                        let mods = csi.params[1].saturating_sub(1) & 0x0f;
+                                        let key = csi.params[2];
+                                        if mods == 4 && (key == 99 || key == 67) {
+                                            saw_ctrl_c = true;
+                                        } else if mods == 0 && key == 27 {
+                                            saw_bare_esc = true;
+                                        } else {
+                                            saw_user_key = true;
+                                        }
+                                    } else {
+                                        saw_user_key = true;
+                                    }
+                                }
+                            } else if byte == b'u'
+                                && !csi.private
+                                && csi.has_digit
+                                && !self.input_tracker.in_paste
+                                && !is_release
+                            {
+                                let key = csi.params[0];
+                                let mods = csi.params[1].saturating_sub(1) & 0x0f;
+                                if mods == 4 && (key == 99 || key == 67 || csi.base_key == 99) {
+                                    saw_ctrl_c = true;
+                                } else if mods == 0 && key == 27 {
+                                    saw_bare_esc = true;
+                                } else {
+                                    saw_user_key = true;
+                                }
+                            } else if !self.input_tracker.in_paste
+                                && !csi.private
+                                && !is_release
+                                && matches!(
+                                    byte,
+                                    b'A' | b'B'
+                                        | b'C'
+                                        | b'D'
+                                        | b'H'
+                                        | b'F'
+                                        | b'Z'
+                                        | b'P'
+                                        | b'Q'
+                                        | b'S'
+                                )
+                            {
+                                saw_user_key = true;
+                            }
+                            self.input_tracker.state = InputScanState::Ground;
+                        }
+                    } else {
+                        self.input_tracker.state = InputScanState::Ground;
+                    }
+                }
+                InputScanState::Osc => {
+                    if byte == 0x07 {
+                        self.input_tracker.state = InputScanState::Ground;
+                    } else if byte == 0x1b {
+                        self.input_tracker.state = InputScanState::OscEsc;
+                    }
+                }
+                InputScanState::OscEsc => {
+                    self.input_tracker.state = if byte == b'\\' {
+                        InputScanState::Ground
+                    } else {
+                        InputScanState::Osc
+                    };
+                }
+                InputScanState::StrSeq => {
+                    if byte == 0x07 {
+                        self.input_tracker.state = InputScanState::Ground;
+                    } else if byte == 0x1b {
+                        self.input_tracker.state = InputScanState::StrEsc;
+                    }
+                }
+                InputScanState::StrEsc => {
+                    self.input_tracker.state = if byte == b'\\' {
+                        InputScanState::Ground
+                    } else {
+                        InputScanState::StrSeq
+                    };
+                }
+            }
+        }
+
+        let user_interaction = saw_user_key || saw_ctrl_c || saw_bare_esc;
+        let mut changed = false;
+        if user_interaction {
+            for r in &mut self.records {
+                r.attention_locked = false;
+            }
+        }
+        if saw_ctrl_c {
+            for r in &mut self.records {
+                if matches!(
+                    signal_effective_state(&r.signal),
+                    Some("working" | "needsAttention")
+                ) && rewrite_signal_state(&mut r.signal, "idle", None)
+                {
+                    r.interrupted = true;
+                    r.attention_locked = false;
+                    changed = true;
+                }
+            }
+        } else if saw_bare_esc {
+            for r in &mut self.records {
+                if signal_effective_state(&r.signal) == Some("needsAttention")
+                    && rewrite_signal_state(&mut r.signal, "idle", None)
+                {
+                    r.attention_locked = false;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.last_change_sync_restore = false;
+            self.revision = self.revision.saturating_add(1);
+        }
+        InputOutcome {
+            activity_changed: changed,
+            user_interaction,
+        }
+    }
+
+    /// Shell Prompt Return Fence (`OSC 133;A` / `OSC 133;D`):
+    /// When the shell emits `OSC 133;A` and the foreground process group is back at
+    /// the shell (not a live tracked agent child), clear lingering `working` /
+    /// `needsAttention` records while preserving `done` and `error`.
+    pub(crate) fn on_osc133(&mut self, event: Osc133Event) -> bool {
+        match event {
+            Osc133Event::CommandDone(Some(code)) if code != 0 && code != 130 => {
+                // Non-zero command exit (excluding SIGINT 130): if back at shell and an
+                // un-interrupted record was `working` without a live child owner, mark error.
+                if !self.is_at_shell_prompt() {
+                    return false;
+                }
+                let mut changed = false;
+                let next_rev = self.revision.saturating_add(1);
+                for r in &mut self.records {
+                    if r.remote && self.local {
+                        continue;
+                    }
+                    if signal_effective_state(&r.signal) == Some("working") && !r.interrupted {
+                        let owner_still_live = match (r.owner, self.session_leader) {
+                            (Some((pid, group)), Some(leader)) if pid != leader => {
+                                owner_alive_in_session(pid, group, leader, r.verified_session)
+                            }
+                            _ => false,
+                        };
+                        if !owner_still_live
+                            && rewrite_signal_state(
+                                &mut r.signal,
+                                "error",
+                                Some("Agent exited with an error."),
+                            )
+                        {
+                            r.owner = None;
+                            r.verified_session = false;
+                            r.terminal_revision = next_rev;
+                            changed = true;
+                        }
+                    }
+                }
+                if changed {
+                    self.last_change_sync_restore = false;
+                    self.revision = self.revision.saturating_add(1);
+                }
+                changed
+            }
+            Osc133Event::CommandDone(_) => false,
+            Osc133Event::PromptStart => {
+                if !self.is_at_shell_prompt() {
+                    return false;
+                }
+                let mut changed = false;
+                for r in &mut self.records {
+                    if r.remote && self.local {
+                        continue;
+                    }
+                    let owner_is_live_child = match (r.owner, self.session_leader) {
+                        (Some((pid, group)), Some(leader)) if pid != leader => {
+                            owner_alive_in_session(pid, group, leader, r.verified_session)
+                        }
+                        _ => false,
+                    };
+                    if owner_is_live_child {
+                        continue;
+                    }
+                    if matches!(
+                        signal_effective_state(&r.signal),
+                        Some("working" | "needsAttention")
+                    ) && rewrite_signal_state(&mut r.signal, "idle", None)
+                    {
+                        r.attention_locked = false;
+                        r.owner = None;
+                        r.verified_session = false;
+                        changed = true;
+                    }
+                }
+                // Also drop stale `idle` ownerless local records so bounded table stays clean.
+                let before = self.records.len();
+                self.records.retain(|r| {
+                    (r.remote && self.local)
+                        || r.owner.is_some()
+                        || signal_effective_state(&r.signal) != Some("idle")
+                });
+                if self.records.len() != before {
+                    changed = true;
+                }
+                if changed {
+                    self.last_change_sync_restore = false;
+                    self.revision = self.revision.saturating_add(1);
+                }
+                changed
+            }
+        }
+    }
+
+    fn is_at_shell_prompt(&self) -> bool {
+        match (self.session_leader, self.foreground) {
+            (Some(leader), Some(fg)) => {
+                fg == leader || !owner_alive_in_session(fg, true, leader, false)
+            }
+            (Some(_), None) => true,
+            (None, Some(fg)) => unsafe { libc::kill(-fg, 0) != 0 },
+            (None, None) => true,
+        }
+    }
+
     /// Runs even without viewers. Never probes remote PIDs on the local host.
     pub fn prune(&mut self, session: i32) -> bool {
-        let before = self.records.len();
-        self.records.retain(|r| match r.owner {
-            Some((pid, group)) => unsafe {
-                libc::getsid(pid) == session && libc::kill(if group { -pid } else { pid }, 0) == 0
-            },
-            None => true,
-        });
-        if before != self.records.len() {
+        let mut changed = false;
+        let at_shell = self.foreground == Some(session);
+        let next_rev = self.revision.saturating_add(1);
+        let mut retained = Vec::with_capacity(self.records.len());
+
+        for mut r in self.records.drain(..) {
+            match r.owner {
+                Some((pid, group)) => {
+                    if owner_alive_in_session(pid, group, session, r.verified_session) {
+                        retained.push(r);
+                    } else if r.verified_session {
+                        let st = signal_effective_state(&r.signal);
+                        if st == Some("working") && !r.interrupted {
+                            // Owned working process terminated unexpectedly without done/idle/end!
+                            let _ = rewrite_signal_state(
+                                &mut r.signal,
+                                "error",
+                                Some("Agent process exited unexpectedly."),
+                            );
+                            r.owner = None;
+                            r.verified_session = false;
+                            r.attention_locked = false;
+                            r.terminal_revision = next_rev;
+                            retained.push(r);
+                            changed = true;
+                        } else if matches!(st, Some("done" | "error")) {
+                            // Preserve completed/error badge from a one-shot CLI until acked or next turn.
+                            r.owner = None;
+                            r.verified_session = false;
+                            retained.push(r);
+                        } else {
+                            changed = true;
+                        }
+                    } else {
+                        changed = true;
+                    }
+                }
+                None => {
+                    // Preserve remote records on local outer holder; bound non-remote ownerless
+                    // working/attention records if foreground returned to the shell leader.
+                    if !(r.remote && self.local)
+                        && at_shell
+                        && matches!(
+                            signal_effective_state(&r.signal),
+                            Some("working" | "needsAttention")
+                        )
+                        && rewrite_signal_state(&mut r.signal, "idle", None)
+                    {
+                        r.attention_locked = false;
+                        changed = true;
+                    }
+                    retained.push(r);
+                }
+            }
+        }
+
+        self.records = retained;
+        if changed {
+            self.last_change_sync_restore = false;
             self.revision = self.revision.saturating_add(1);
             true
         } else {
@@ -445,17 +1995,38 @@ impl State {
     }
 
     pub fn acknowledge(&mut self) -> bool {
+        let target = self.revision;
+        self.acknowledge_up_to(target)
+    }
+
+    /// Idempotent acknowledgement bounded by `max_revision`.
+    pub fn acknowledge_up_to(&mut self, max_revision: u64) -> bool {
+        if max_revision < self.ack_up_to_revision {
+            return false;
+        }
         let mut changed = false;
         for record in &mut self.records {
-            changed |= acknowledge_signal(&mut record.signal);
+            if record.terminal_revision <= max_revision && acknowledge_signal(&mut record.signal) {
+                record.terminal_revision = 0;
+                changed = true;
+            }
         }
         if let Some(pending) = &mut self.pending {
             for record in pending {
-                changed |= acknowledge_signal(&mut record.signal);
+                if record.terminal_revision <= max_revision
+                    && acknowledge_signal(&mut record.signal)
+                {
+                    record.terminal_revision = 0;
+                    changed = true;
+                }
             }
         }
         if changed {
+            self.last_change_sync_restore = false;
             self.revision = self.revision.saturating_add(1);
+            self.ack_up_to_revision = self.revision;
+        } else {
+            self.ack_up_to_revision = self.ack_up_to_revision.max(max_revision.min(self.revision));
         }
         changed
     }
@@ -482,10 +2053,10 @@ mod tests {
         }
         let snapshot = vt.activity().snapshot();
         assert_eq!(snapshot.records.len(), 4);
-        assert!(snapshot
-            .records
+        assert!(snapshot.records[..3]
             .iter()
-            .all(|s| s.metadata.contains("omg_state=done")));
+            .all(|s| s.metadata.contains("omg_state=idle")));
+        assert!(snapshot.records[3].metadata.contains("omg_state=done"));
         vt.write(b"\x1b]3008;end=omg-agent-omp-42\x1b\\");
         assert_eq!(vt.activity().snapshot().records.len(), 3);
     }
@@ -597,22 +2168,364 @@ mod tests {
     #[test]
     fn acknowledging_activity_transitions_completed_and_failed_signals_to_idle() {
         let mut vt = Vt::new(80, 24).unwrap();
+        vt.write(report("claude", "working").as_bytes());
         vt.write(
             b"\x1b]3008;start=omg-agent-pi-72155;type=app;omg_agent=pi;omg_scope=local;omg_liveness=pid;omg_state=done;message=Finished;omg_cwd=%2Ftmp%2Frepo\x07",
         );
         vt.write(b"\x1b]7501;state=done:app=codex:msg=RG9uZQ==:progress=100\x07");
-        vt.write(report("claude", "working").as_bytes());
         let before = vt.activity().revision();
         assert!(vt.activity_mut().acknowledge());
         assert!(vt.activity().revision() > before);
         let snapshot = vt.activity().snapshot();
         assert_eq!(snapshot.records.len(), 3);
+        assert!(snapshot.records[0].metadata.contains("omg_state=working"));
         assert_eq!(
-            snapshot.records[0].metadata,
+            snapshot.records[1].metadata,
             "type=app;omg_agent=pi;omg_scope=local;omg_liveness=pid;omg_state=idle;omg_cwd=%2Ftmp%2Frepo"
         );
-        assert_eq!(snapshot.records[1].metadata, "state=idle:app=codex");
-        assert!(snapshot.records[2].metadata.contains("omg_state=working"));
+        assert_eq!(snapshot.records[2].metadata, "state=idle:app=codex");
         assert!(!vt.activity_mut().acknowledge());
+    }
+
+    #[test]
+    fn osc7501_inherits_app_and_enforces_tier_and_attention_hierarchy() {
+        let mut vt = Vt::new(80, 24).unwrap();
+        // Root sets `app=codex`; child omits `app` and blocks for permission.
+        vt.write(b"\x1b]7501;state=working:app=codex:id=turn1\x07");
+        vt.write(b"\x1b]7501;state=blocked:id=turn1/perm:kind=permission\x07");
+        // Sibling sub-record starts working without `app`.
+        vt.write(b"\x1b]7501;state=working:id=turn1/sub2\x07");
+
+        let snap = vt.activity().snapshot();
+        assert!(snap.records[1].metadata.contains("app=codex"));
+        let pres = snap.presentation().unwrap();
+        assert_eq!(pres.tier, Tier::ProgramStatus);
+        assert_eq!(pres.agent, "codex");
+        assert_eq!(pres.state, "needsAttention");
+        assert_eq!(pres.attention, Some("permission"));
+        assert_eq!(pres.message, "Waiting for permission");
+
+        // Tier 3 fallback error/done cannot override active Tier 1 or Tier 2.
+        vt.activity_mut().consume_report(
+            "codex",
+            "done",
+            42,
+            true,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("fallback"),
+            None,
+        );
+        assert_eq!(vt.activity().presentation().unwrap().state, "needsAttention");
+
+        // Resolve the blocked sub-record; remaining `turn1` and `turn1/sub2` stay `working`.
+        vt.write(b"\x1b]7501;state=clear:id=turn1/perm\x07");
+        assert_eq!(vt.activity().presentation().unwrap().state, "working");
+    }
+
+    #[test]
+    fn hook_needs_attention_locks_against_sibling_working_until_user_input() {
+        let mut vt = Vt::new(80, 24).unwrap();
+        vt.activity_mut().consume_report(
+            "claude",
+            "needsAttention",
+            500,
+            true,
+            false,
+            Some("conv-1"),
+            Some("/tmp"),
+            None,
+            Some("permission"),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(vt.activity().presentation().unwrap().state, "needsAttention");
+
+        // Sibling PostToolUse `working` on same agent/owner without user input is ignored!
+        vt.activity_mut().consume_report(
+            "claude", "working", 500, true, false, Some("conv-1"), Some("/tmp"), None, None, None,
+            None, None, None,
+        );
+        assert_eq!(vt.activity().presentation().unwrap().state, "needsAttention");
+
+        // Mouse motion & focus events do NOT unlock or wipe anything.
+        assert!(!vt.activity_mut().consume_input(b"\x1b[<35;10;20M\x1b[I\x1b[O"));
+        vt.activity_mut().consume_report(
+            "claude", "working", 500, true, false, Some("conv-1"), Some("/tmp"), None, None, None,
+            None, None, None,
+        );
+        assert_eq!(vt.activity().presentation().unwrap().state, "needsAttention");
+
+        // Real user keystroke (`y\r`) unlocks `attention_locked`, so next `working` hook transitions!
+        assert!(!vt.activity_mut().consume_input(b"y\r"));
+        vt.activity_mut().consume_report(
+            "claude", "working", 500, true, false, Some("conv-1"), Some("/tmp"), None, None, None,
+            None, None, None,
+        );
+        assert_eq!(vt.activity().presentation().unwrap().state, "working");
+    }
+
+    #[test]
+    fn new_working_turn_supersedes_stale_done_and_error_across_channels() {
+        let mut vt = Vt::new(80, 24).unwrap();
+        vt.write(b"\x1b]7501;state=error:app=antigravity:id=t1\x07");
+        vt.activity_mut().consume_report(
+            "antigravity",
+            "done",
+            700,
+            true,
+            false,
+            Some("conv-a"),
+            Some("/tmp"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(vt.activity().presentation().unwrap().state, "error");
+
+        // New Hook turn begins: supersedes prior OSC 7501 `error` AND prior Hook `done`!
+        vt.activity_mut().consume_report(
+            "antigravity",
+            "working",
+            700,
+            true,
+            false,
+            Some("conv-a"),
+            Some("/tmp"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("prompt"),
+        );
+        assert_eq!(vt.activity().presentation().unwrap().state, "working");
+        assert!(vt.activity().snapshot().records[0]
+            .metadata
+            .contains("state=idle"));
+    }
+
+    #[test]
+    fn interrupt_and_osc133_prompt_fences_clear_stuck_working_but_preserve_done_and_error() {
+        let mut vt = Vt::new(80, 24).unwrap();
+        vt.write(b"\x1b]7501;state=working:app=claude\x07");
+        // Ctrl+C inside bracketed paste must NOT trigger interrupt fence.
+        assert!(!vt
+            .activity_mut()
+            .consume_input(b"\x1b[200~hello\x03world\x1b[201~"));
+        assert_eq!(vt.activity().presentation().unwrap().state, "working");
+
+        // Real Ctrl+C outside paste transitions `working -> idle`.
+        assert!(vt.activity_mut().consume_input(b"\x03"));
+        assert_eq!(vt.activity().presentation().unwrap().state, "idle");
+
+        // Bare Esc in `needsAttention` transitions `needsAttention -> idle`.
+        vt.write(b"\x1b]7501;state=blocked:app=claude:kind=question\x07");
+        assert_eq!(vt.activity().presentation().unwrap().state, "needsAttention");
+        assert!(vt.activity_mut().consume_input(b"\x1b"));
+        assert_eq!(vt.activity().presentation().unwrap().state, "idle");
+
+        // OSC 133;A shell prompt return clears stuck `working`, but preserves `done` and `error`!
+        vt.write(b"\x1b]7501;state=working:app=codex\x07");
+        assert_eq!(vt.activity().presentation().unwrap().state, "working");
+        vt.write(b"\x1b]133;A;cl=m\x07$ ");
+        assert!(vt
+            .activity()
+            .presentation()
+            .is_none_or(|p| p.state == "idle"));
+
+        vt.write(b"\x1b]7501;state=done:app=codex\x07");
+        vt.write(b"\x1b]133;A\x07$ ");
+        assert_eq!(vt.activity().presentation().unwrap().state, "done");
+
+        vt.write(b"\x1b]7501;state=error:app=codex\x07");
+        vt.write(b"\x1b]133;A\x07$ ");
+        assert_eq!(vt.activity().presentation().unwrap().state, "error");
+    }
+
+    #[test]
+    fn kitty_csi_u_and_modify_other_keys_handle_interrupt_esc_unlock_and_chunk_splits() {
+        let mut vt = Vt::new(80, 24).unwrap();
+
+        // 1. Kitty keyboard query reply `\x1b[?1u`, SGR mouse, and chunk-split `\x1b` must NOT
+        //    count as user interaction or false-fire bare `Esc`!
+        vt.write(b"\x1b]7501;state=blocked:app=claude:kind=permission\x07");
+        let out_query = vt
+            .activity_mut()
+            .consume_input_detailed(b"\x1b[?1u\x1b[<35;10;20M\x1b");
+        assert!(!out_query.activity_changed);
+        assert!(!out_query.user_interaction);
+        assert_eq!(vt.activity().presentation().unwrap().state, "needsAttention");
+        let out_cont = vt.activity_mut().consume_input_detailed(b"[<35;11;20M");
+        assert!(!out_cont.activity_changed);
+        assert!(!out_cont.user_interaction);
+        assert_eq!(vt.activity().presentation().unwrap().state, "needsAttention");
+
+        // 2. Kitty key-release (`:3u`) is ignored, while press (`\x1b[27u` / `\x1b[27;1:1u`) clears `needsAttention`.
+        let out_rel = vt.activity_mut().consume_input_detailed(b"\x1b[27;1:3u");
+        assert!(!out_rel.activity_changed);
+        assert!(!out_rel.user_interaction);
+        assert_eq!(vt.activity().presentation().unwrap().state, "needsAttention");
+
+        let out_esc = vt.activity_mut().consume_input_detailed(b"\x1b[27;1:1u");
+        assert!(out_esc.activity_changed);
+        assert!(out_esc.user_interaction);
+        assert_eq!(vt.activity().presentation().unwrap().state, "idle");
+
+        // 3. Kitty `Ctrl+C` (`\x1b[99;5u`, `\x1b[99:67;5:1u`) and `modifyOtherKeys` (`\x1b[27;5;99~`)
+        //    trigger Interrupt Fence on `working`, while release `\x1b[99;5:3u` is ignored!
+        vt.write(b"\x1b]7501;state=working:app=codex\x07");
+        assert!(!vt.activity_mut().consume_input(b"\x1b[99;5:3u"));
+        assert_eq!(vt.activity().presentation().unwrap().state, "working");
+        assert!(vt.activity_mut().consume_input(b"\x1b[99:67;5:1u"));
+        assert_eq!(vt.activity().presentation().unwrap().state, "idle");
+
+        vt.write(b"\x1b]7501;state=working:app=codex\x07");
+        assert!(vt.activity_mut().consume_input(b"\x1b[27;5;99~"));
+        assert_eq!(vt.activity().presentation().unwrap().state, "idle");
+
+        // 4. `modifyOtherKeys` Esc (`\x1b[27;1;27~`) clears `needsAttention`.
+        vt.write(b"\x1b]7501;state=blocked:app=pi:kind=question\x07");
+        assert!(vt.activity_mut().consume_input(b"\x1b[27;1;27~"));
+        assert_eq!(vt.activity().presentation().unwrap().state, "idle");
+
+        // 5. Kitty `CSI u` ordinary key (`\x1b[121u` 'y' / `\x1b[13u` Enter) unlocks Hook `attention_locked`!
+        vt.activity_mut().consume_report(
+            "claude",
+            "needsAttention",
+            501,
+            true,
+            false,
+            Some("conv-k"),
+            Some("/tmp"),
+            None,
+            Some("permission"),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(vt.activity().presentation().unwrap().state, "needsAttention");
+        let out_y = vt.activity_mut().consume_input_detailed(b"\x1b[121u\x1b[13u");
+        assert!(!out_y.activity_changed);
+        assert!(out_y.user_interaction);
+        vt.activity_mut().consume_report(
+            "claude", "working", 501, true, false, Some("conv-k"), Some("/tmp"), None, None, None,
+            None, None, None,
+        );
+        assert_eq!(vt.activity().presentation().unwrap().state, "working");
+    }
+
+    #[test]
+    fn tier3_fallback_surfaces_for_different_agent_after_higher_tier_settles_idle_and_cross_agent_working_supersedes_error() {
+        let mut vt = Vt::new(80, 24).unwrap();
+
+        // Agent A (`claude`, Tier 2) fails with `error`.
+        vt.activity_mut().consume_report(
+            "claude",
+            "error",
+            601,
+            true,
+            false,
+            None,
+            Some("/tmp"),
+            None,
+            None,
+            None,
+            Some("API 500"),
+            None,
+            None,
+        );
+        assert_eq!(vt.activity().presentation().unwrap().state, "error");
+
+        // Agent B (`opencode`, Tier 2) starts a foreground `working` turn in the same shell ->
+        // supersedes `claude`'s stale `error` so `opencode`'s subsequent `done` is NOT masked!
+        vt.activity_mut().consume_report(
+            "opencode",
+            "working",
+            602,
+            true,
+            false,
+            None,
+            Some("/tmp"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        vt.activity_mut().consume_report(
+            "opencode",
+            "done",
+            602,
+            true,
+            false,
+            None,
+            Some("/tmp"),
+            None,
+            None,
+            None,
+            Some("Completed"),
+            None,
+            None,
+        );
+        let pres_b = vt.activity().presentation().unwrap();
+        assert_eq!(pres_b.agent, "opencode");
+        assert_eq!(pres_b.state, "done");
+
+        // Acknowledge `opencode` -> Tier 2 settles to `idle`.
+        assert!(vt.activity_mut().acknowledge());
+        assert_eq!(vt.activity().presentation().unwrap().state, "idle");
+
+        // Same-agent (`opencode`) Tier 3 fallback remains shadowed by Tier 2 `opencode`,
+        // whereas a different Tier 3-only agent (`crush`) surfaces cleanly!
+        vt.activity_mut().consume_report(
+            "opencode",
+            "working",
+            602,
+            false,
+            false,
+            None,
+            Some("/tmp"),
+            Some("fb"),
+            None,
+            Some("background"),
+            None,
+            Some("fallback"),
+            None,
+        );
+        // Note: background `working` did not supersede `opencode`'s Tier 2 `idle`, and Tier 2 owns `opencode`.
+        assert_eq!(vt.activity().presentation().unwrap().state, "idle");
+
+        vt.activity_mut().consume_report(
+            "crush",
+            "working",
+            603,
+            true,
+            false,
+            None,
+            Some("/tmp"),
+            None,
+            None,
+            None,
+            Some("Thinking"),
+            Some("fallback"),
+            None,
+        );
+        let pres_t3 = vt.activity().presentation().unwrap();
+        assert_eq!(pres_t3.tier, Tier::Fallback);
+        assert_eq!(pres_t3.agent, "crush");
+        assert_eq!(pres_t3.state, "working");
     }
 }

@@ -414,8 +414,16 @@ pub fn serve_managed(
         .transpose()?;
     let membership = group.as_ref().map(|g| g.membership()).transpose()?;
     let membership_fd = membership.as_ref().map(|f| f.as_raw_fd());
+    let id = managed
+        .as_ref()
+        .map(|m| m.record.id.clone())
+        .unwrap_or_else(|| token[..16.min(token.len())].to_owned());
+    let generation = managed
+        .as_ref()
+        .map(|m| m.record.generation.clone())
+        .unwrap_or_else(|| token.clone());
     let mut command = Command::new(&argv[0]);
-    if let Some(launch) = local_launch.as_ref() {
+    let has_explicit_osc7501 = if let Some(launch) = local_launch.as_ref() {
         command.env_clear().envs(launch.env.iter());
         if launch
             .env
@@ -427,20 +435,21 @@ pub fn serve_managed(
         if let Some(cwd) = launch.cwd.as_deref() {
             command.current_dir(cwd).env("PWD", cwd);
         }
+        launch.env.contains_key("AGY_CLI_OSC7501")
     } else {
         command.env("TERM", "xterm-256color");
+        std::env::var_os("AGY_CLI_OSC7501").is_some()
+    };
+    if !has_explicit_osc7501 {
+        command.env("AGY_CLI_OSC7501", "on");
     }
     command
         .args(&argv[1..])
+        .env("OMG_SESSION_ID", &id)
+        .env("OMG_AGENT_SOCK", &event_path)
         .env("OMG_RUNTIME_EVENT_SOCKET", &event_path)
         .env("OMG_RUNTIME_EVENT_TOKEN", &token)
-        .env(
-            "OMG_RUNTIME_GENERATION",
-            managed
-                .as_ref()
-                .map(|m| m.record.generation.as_str())
-                .unwrap_or(&token),
-        )
+        .env("OMG_RUNTIME_GENERATION", &generation)
         .env("OMG_RUNTIME_BIN", std::env::current_exe()?)
         .stdin(Stdio::from(slave.try_clone()?))
         .stdout(Stdio::from(slave.try_clone()?))
@@ -559,6 +568,8 @@ pub fn serve_managed(
         (&mut *input as *mut ReplyBuffer).cast(),
     )?;
     vt.activity_mut().local = local_mode;
+    vt.activity_mut().session_leader = Some(child.id() as i32);
+    let mut last_broadcast_revision = vt.activity().revision();
     let mut output = crate::terminal_output::Relay::default();
     let mut presentation_revision = None;
     let mut peers: Vec<Peer> = vec![];
@@ -571,14 +582,6 @@ pub fn serve_managed(
     // Stop retaining this bounded prefix once anyone has claimed the PTY.
     let mut initial_output = Some(Vec::<u8>::new());
     let mut seq = 0u64;
-    let id = managed
-        .as_ref()
-        .map(|m| m.record.id.clone())
-        .unwrap_or_else(|| format!("{}-{}", std::process::id(), child.id()));
-    let generation = managed
-        .as_ref()
-        .map(|m| m.record.generation.clone())
-        .unwrap_or_else(|| token.clone());
     let mut lifetime = Lifetime::new(Instant::now());
     let mut end_reason = EndReason::ProcessExited;
     let mut agent_done = false;
@@ -620,12 +623,9 @@ pub fn serve_managed(
             closing = Some(Instant::now());
         }
         if exited.is_none() && cwd_checked.elapsed() >= Duration::from_millis(500) {
-            if vt.activity_mut().prune(child.id() as i32) {
-                let state = serde_json::to_vec(&vt.activity().snapshot())?;
-                for peer in &mut peers {
-                    peer.push(Frame::new(crate::activity::FRAME, seq, &state));
-                }
-            }
+            let cur_fg = unsafe { libc::tcgetpgrp(master) };
+            vt.activity_mut().foreground = (cur_fg > 1).then_some(cur_fg);
+            let _ = vt.activity_mut().prune(child.id() as i32);
             let cwd = crate::location::session_cwd(master, child.id());
             let ssh = resolve_session_ssh(master, child.id(), &vt, &mut sniffed_remote_cwd);
             let foreground = local_mode
@@ -678,39 +678,91 @@ pub fn serve_managed(
         for _ in 0..16 {
             match events.recv_from(&mut event_bytes) {
                 Ok((n, source)) => {
+                    let mut accepted = false;
                     if let Ok(event) = serde_json::from_slice::<AgentEvent>(&event_bytes[..n]) {
-                        if event.token == token
-                            && event.generation == generation
-                            && event.resume.validate().is_ok()
-                            && event.pid > 1
-                            && event.group > 1
-                            && unsafe { libc::getpgid(event.pid) } == event.group
-                            && unsafe { libc::getsid(event.pid) } == child.id() as i32
-                            && unsafe { libc::tcgetpgrp(master) } == event.group
+                        let canonical_state = match event.state.as_str() {
+                            "working" | "processing" | "active" => Some("working"),
+                            "idle" => Some("idle"),
+                            "done" | "completed" => Some("done"),
+                            "needsAttention" | "waiting" | "awaiting" | "blocked" => {
+                                Some("needsAttention")
+                            }
+                            "error" | "failed" => Some("error"),
+                            "end" | "clear" => Some("end"),
+                            _ => None,
+                        };
+                        let resume_check_ok = match &event.resume {
+                            Some(r) if !r.conversation_id.is_empty() => r.validate().is_ok(),
+                            _ => true,
+                        };
+                        let raw_agent = event
+                            .agent
+                            .as_deref()
+                            .or_else(|| event.resume.as_ref().map(|r| r.agent.as_str()));
+                        let fg_pgid = unsafe { libc::tcgetpgrp(master) };
+                        if event.token == token && event.generation == generation && resume_check_ok
                         {
-                            if let Some(m) = &mut managed {
-                                if matches!(
-                                    event.state.as_str(),
-                                    "working"
-                                        | "idle"
-                                        | "done"
-                                        | "needsAttention"
-                                        | "error"
-                                        | "end"
-                                ) {
-                                    m.record.resume = Some(event.resume);
-                                    // Persist first: a completion must never destroy its own recovery data.
-                                    m.record.save(&m.path)?;
-                                    agent_done = event.state == "done";
-                                    completed_group = agent_done.then_some(event.group);
+                            if let (
+                                Some(state_str),
+                                Some(agent_str),
+                                Some((owner_id, owner_is_group, job_pgid)),
+                            ) = (
+                                canonical_state,
+                                raw_agent.and_then(crate::agents::normalize_id),
+                                crate::activity::resolve_event_owner(
+                                    event.pid,
+                                    event.group,
+                                    event.owner_pid,
+                                    child.id() as i32,
+                                    fg_pgid,
+                                ),
+                            ) {
+                                let conv_id = event
+                                    .resume
+                                    .as_ref()
+                                    .map(|r| r.conversation_id.as_str())
+                                    .filter(|s| !s.is_empty());
+                                let report_cwd = event
+                                    .cwd
+                                    .as_deref()
+                                    .or_else(|| event.resume.as_ref().map(|r| r.cwd.as_str()));
+                                vt.activity_mut().foreground = (fg_pgid > 1).then_some(fg_pgid);
+                                vt.activity_mut().consume_report(
+                                    &agent_str,
+                                    state_str,
+                                    owner_id,
+                                    owner_is_group,
+                                    local_mode,
+                                    conv_id,
+                                    report_cwd,
+                                    event.context_id.as_deref(),
+                                    event.attention.as_deref(),
+                                    event.phase.as_deref(),
+                                    event.message.as_deref(),
+                                    event.tier.as_deref(),
+                                    event.event.as_deref(),
+                                );
+                                if let Some(m) = &mut managed {
+                                    if let Some(mut resume) = event
+                                        .resume
+                                        .filter(|r| !r.conversation_id.is_empty())
+                                    {
+                                        resume.agent = agent_str;
+                                        m.record.resume = Some(resume);
+                                        // Persist first: a completion must never destroy its own recovery data.
+                                        m.record.save(&m.path)?;
+                                    }
+                                    agent_done = state_str == "done";
+                                    completed_group = agent_done.then_some(job_pgid);
                                     recovery_checked_at = Instant::now() - Duration::from_secs(5);
                                     lifetime.activity(agent_done, Instant::now());
-                                    if let Some(path) = source.as_pathname() {
-                                        let _ = events.send_to(b"OK", path);
-                                    }
                                 }
+                                accepted = true;
                             }
                         }
+                    }
+                    if let Some(path) = source.as_pathname() {
+                        let _ = events.send_to(if accepted { b"OK" } else { b"NO" }, path);
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
@@ -788,7 +840,6 @@ pub fn serve_managed(
         }
         let mut resizes = Vec::new();
         let mut revoked = Vec::new();
-        let mut activity_acknowledged = false;
         for peer in &mut peers {
             if close_after_flush.contains(&peer.id) {
                 continue;
@@ -840,11 +891,15 @@ pub fn serve_managed(
                     }
                     CLAIM => peer.push(Frame::new(b'B', seq, b"writer occupied")),
                     INPUT if writer == Some(peer.id) && exited.is_none() => {
-                        agent_done = false;
-                        completed_group = None;
-                        lifetime.activity(false, Instant::now());
-                        if vt.activity_mut().acknowledge() {
-                            activity_acknowledged = true;
+                        // Never blindly acknowledge `done`/`error` on INPUT: mouse motion,
+                        // focus events, and terminal replies must never wipe terminal status!
+                        // Run the Interrupt Fence (`Ctrl+C` / bare `Esc`) and reset the
+                        // `close_on_agent_done` reaper only on genuine user keystrokes.
+                        let outcome = vt.activity_mut().consume_input_detailed(&f.data);
+                        if outcome.user_interaction {
+                            agent_done = false;
+                            completed_group = None;
+                            lifetime.activity(false, Instant::now());
                         }
                         if input.len() + f.data.len() > 1024 * 1024 {
                             peer.dead = true;
@@ -852,12 +907,15 @@ pub fn serve_managed(
                             input.extend(f.data);
                         }
                     }
-                    crate::ACKNOWLEDGE if f.data.is_empty() => {
+                    crate::ACKNOWLEDGE if f.data.is_empty() || f.data.len() == 8 => {
                         agent_done = false;
                         completed_group = None;
                         lifetime.activity(false, Instant::now());
-                        if vt.activity_mut().acknowledge() {
-                            activity_acknowledged = true;
+                        if f.data.len() == 8 {
+                            let up_to = u64::from_be_bytes(f.data[..8].try_into().unwrap());
+                            let _ = vt.activity_mut().acknowledge_up_to(up_to);
+                        } else {
+                            let _ = vt.activity_mut().acknowledge();
                         }
                     }
                     RESIZE if writer == Some(peer.id) => {
@@ -918,14 +976,6 @@ pub fn serve_managed(
         for dimensions in resizes {
             for p in &mut peers {
                 p.push(Frame::new(RESIZE, seq, &dimensions));
-            }
-        }
-        if activity_acknowledged {
-            let snapshot_bytes = serde_json::to_vec(&vt.activity().snapshot())?;
-            for p in &mut peers {
-                if !close_after_flush.contains(&p.id) {
-                    p.push(Frame::new(crate::activity::FRAME, seq, &snapshot_bytes));
-                }
             }
         }
         if !input.is_empty() && !eof {
@@ -1030,7 +1080,28 @@ pub fn serve_managed(
                 }
             }
         }
-        if presentation_revision != Some(vt.activity().revision()) {
+        let current_activity_revision = vt.activity().revision();
+        if current_activity_revision != last_broadcast_revision {
+            last_broadcast_revision = current_activity_revision;
+            let was_sync_restore = vt.activity_mut().take_last_change_sync_restore();
+            let snapshot = vt.activity().snapshot();
+            if let Some(presentation) = managed.as_ref().and_then(|m| m.presentation.as_ref()) {
+                if let Ok(mut current) = presentation.lock() {
+                    *current = snapshot.clone();
+                    presentation_revision = Some(current.revision);
+                }
+            }
+            if !peers.is_empty() {
+                let mut wire_snapshot = snapshot;
+                wire_snapshot.sync_restore = was_sync_restore;
+                let snapshot_bytes = serde_json::to_vec(&wire_snapshot)?;
+                for peer in &mut peers {
+                    if !close_after_flush.contains(&peer.id) {
+                        peer.push(Frame::new(crate::activity::FRAME, seq, &snapshot_bytes));
+                    }
+                }
+            }
+        } else if presentation_revision != Some(current_activity_revision) {
             if let Some(presentation) = managed.as_ref().and_then(|m| m.presentation.as_ref()) {
                 if let Ok(mut current) = presentation.lock() {
                     *current = vt.activity().snapshot();

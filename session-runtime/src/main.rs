@@ -308,27 +308,170 @@ fn ensure_host_with(
     }
     Err(io::Error::other("host daemon failed to start"))
 }
-fn report(agent: &str, state: &str, conversation: &str, cwd: &str) -> io::Result<()> {
-    use omg_session_runtime::record::{AgentEvent, Resume};
-    let path = env::var("OMG_RUNTIME_EVENT_SOCKET").map_err(io::Error::other)?;
+fn report_cli(args: &[String]) -> io::Result<()> {
+    use omg_session_runtime::record::{nonce, AgentEvent, Resume};
+    let mut positional: Vec<&str> = Vec::new();
+    let mut conversation_flag: Option<&str> = None;
+    let mut cwd_flag: Option<&str> = None;
+    let mut context_id: Option<String> = None;
+    let mut attention: Option<String> = None;
+    let mut phase: Option<String> = None;
+    let mut message: Option<String> = None;
+    let mut tier: Option<String> = None;
+    let mut event_kind: Option<String> = None;
+    let mut owner_pid: Option<i32> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--id" | "--context-id" => {
+                i += 1;
+                context_id = Some(
+                    args.get(i)
+                        .ok_or_else(|| io::Error::other("missing --id value"))?
+                        .clone(),
+                );
+            }
+            "--conversation" => {
+                i += 1;
+                conversation_flag = Some(
+                    args.get(i)
+                        .ok_or_else(|| io::Error::other("missing --conversation value"))?,
+                );
+            }
+            "--cwd" => {
+                i += 1;
+                cwd_flag = Some(
+                    args.get(i)
+                        .ok_or_else(|| io::Error::other("missing --cwd value"))?,
+                );
+            }
+            "--attention" | "--kind" => {
+                i += 1;
+                attention = Some(
+                    args.get(i)
+                        .ok_or_else(|| io::Error::other("missing --attention value"))?
+                        .clone(),
+                );
+            }
+            "--phase" => {
+                i += 1;
+                phase = Some(
+                    args.get(i)
+                        .ok_or_else(|| io::Error::other("missing --phase value"))?
+                        .clone(),
+                );
+            }
+            "--message" => {
+                i += 1;
+                message = Some(
+                    args.get(i)
+                        .ok_or_else(|| io::Error::other("missing --message value"))?
+                        .clone(),
+                );
+            }
+            "--tier" => {
+                i += 1;
+                tier = Some(
+                    args.get(i)
+                        .ok_or_else(|| io::Error::other("missing --tier value"))?
+                        .clone(),
+                );
+            }
+            "--event" => {
+                i += 1;
+                event_kind = Some(
+                    args.get(i)
+                        .ok_or_else(|| io::Error::other("missing --event value"))?
+                        .clone(),
+                );
+            }
+            "--pid" => {
+                i += 1;
+                let raw = args
+                    .get(i)
+                    .ok_or_else(|| io::Error::other("missing --pid value"))?;
+                owner_pid = Some(
+                    raw.parse::<i32>()
+                        .map_err(|_| io::Error::other("invalid --pid value"))?,
+                );
+            }
+            flag if flag.starts_with("--") => {
+                return Err(io::Error::other(format!("unknown report flag: {flag}")));
+            }
+            value => positional.push(value),
+        }
+        i += 1;
+    }
+
+    if positional.len() < 2 || positional.len() > 4 {
+        return Err(io::Error::other(
+            "usage: omgd report <agent> <state> [<conversation> [<cwd>]] [--id ID] [--attention permission|question] [--phase foreground|background] [--message TEXT]",
+        ));
+    }
+    let raw_agent = positional[0];
+    let agent = omg_session_runtime::agents::normalize_id(raw_agent)
+        .ok_or_else(|| io::Error::other("invalid agent identifier"))?;
+    let state = positional[1];
+    let conversation = conversation_flag
+        .or_else(|| positional.get(2).copied())
+        .unwrap_or("")
+        .trim();
+    let conversation = if conversation == "-" { "" } else { conversation };
+    let fallback_cwd = env::current_dir()
+        .ok()
+        .and_then(|p| p.into_os_string().into_string().ok())
+        .unwrap_or_else(|| "/".into());
+    let cwd = cwd_flag
+        .or_else(|| positional.get(3).copied())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&fallback_cwd);
+    if !cwd.starts_with('/') || cwd.len() > 4096 || cwd.contains('\0') {
+        return Err(io::Error::other("invalid working directory"));
+    }
+
+    let resume = if !conversation.is_empty() {
+        let r = Resume {
+            agent: agent.clone(),
+            conversation_id: conversation.to_owned(),
+            cwd: cwd.to_owned(),
+        };
+        r.validate()?;
+        Some(r)
+    } else {
+        None
+    };
+
+    let path = env::var("OMG_RUNTIME_EVENT_SOCKET")
+        .or_else(|_| env::var("OMG_AGENT_SOCK"))
+        .map_err(io::Error::other)?;
     let event = AgentEvent {
         token: env::var("OMG_RUNTIME_EVENT_TOKEN").map_err(io::Error::other)?,
         generation: env::var("OMG_RUNTIME_GENERATION").map_err(io::Error::other)?,
         pid: unsafe { libc::getpid() },
         group: unsafe { libc::getpgrp() },
-        state: state.into(),
-        resume: Resume {
-            agent: agent.into(),
-            conversation_id: conversation.into(),
-            cwd: cwd.into(),
-        },
+        state: state.to_owned(),
+        resume,
+        agent: Some(agent),
+        cwd: Some(cwd.to_owned()),
+        context_id,
+        attention,
+        phase,
+        message,
+        tier,
+        event: event_kind,
+        owner_pid,
     };
-    event.resume.validate()?;
     use std::os::unix::fs::PermissionsExt;
+    let suffix = nonce().unwrap_or_else(|_| "0".into());
     let local = Path::new(&path)
         .parent()
-        .unwrap()
-        .join(format!("r-{}.sock", std::process::id()));
+        .ok_or_else(|| io::Error::other("invalid event socket path"))?
+        .join(format!(
+            "r-{}-{}.s",
+            std::process::id(),
+            &suffix[..4.min(suffix.len())]
+        ));
     let socket = std::os::unix::net::UnixDatagram::bind(&local)?;
     std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o600))?;
     let result = (|| {
@@ -416,7 +559,7 @@ fn main() -> io::Result<()> {
             Ok(())
         }
         Some("ensure-host") if a.len() == 3 => ensure_host(&a[2], None),
-        Some("report") if a.len() == 6 => report(&a[2], &a[3], &a[4], &a[5]),
+        Some("report") if a.len() >= 4 => report_cli(&a[2..]),
         Some("handoff-check") if a.len() >= 3 => {
             if unsafe { libc::isatty(libc::STDIN_FILENO) } == 1
                 && unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1

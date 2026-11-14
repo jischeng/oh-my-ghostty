@@ -4,7 +4,7 @@ mod experience;
 use super::{Config, Endpoint};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::{SinkExt, StreamExt};
-use omg_session_runtime::{activity, holder, record, Frame};
+use omg_session_runtime::{activity, agents, holder, record, Frame};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -24,12 +24,6 @@ use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
 
 const PERSONAL: &str = "00000000-0000-4000-8000-000000000001";
 const FILE_LIMIT: usize = 1024 * 1024;
-const AGENTS: [(&str, &str, &str); 4] = [
-    ("codex", "Codex", "codex"),
-    ("claude", "Claude Code", "claude"),
-    ("pi", "Pi", "pi-favicon"),
-    ("antigravity", "Antigravity", "antigravity-favicon"),
-];
 
 type SnapshotKey = (String, String);
 type SnapshotEntry = (Instant, Option<activity::Snapshot>);
@@ -89,6 +83,7 @@ struct InlineRemoteSession {
     generation: String,
     cwd: Option<String>,
     resume_agent: Option<String>,
+    activity: Option<activity::Snapshot>,
 }
 #[derive(Default)]
 struct Desktop {
@@ -295,6 +290,7 @@ fn resolve_inline_relays(
                             .resume
                             .map(|r| normalize_agent(&r.agent))
                             .filter(|a| !a.is_empty()),
+                        activity: s.activity,
                     },
                 );
             }
@@ -465,10 +461,7 @@ fn fields(text: &str, separator: char) -> HashMap<&str, &str> {
         .collect()
 }
 fn normalize_agent(raw: &str) -> String {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "agy" | "jetski" | "jetski-cli" | "antigravity-cli" => "antigravity".into(),
-        other => other.into(),
-    }
+    agents::normalize_id(raw).unwrap_or_else(|| raw.trim().to_ascii_lowercase())
 }
 fn decode_percent_value(value: &str) -> String {
     let bytes = value.as_bytes();
@@ -525,9 +518,7 @@ fn apply_desktop_acknowledgement(snap: &mut activity::Snapshot, owner: &PaneDesk
                     version: snap.version,
                     revision: snap.revision,
                     records: vec![signal.clone()],
-                    pending: None,
-                    remote_host: None,
-                    remote_cwd: None,
+                    ..Default::default()
                 };
                 if tmp.acknowledge() {
                     if let Some(updated) = tmp.records.into_iter().next() {
@@ -550,9 +541,7 @@ fn apply_desktop_acknowledgement(snap: &mut activity::Snapshot, owner: &PaneDesk
                     version: snap.version,
                     revision: snap.revision,
                     records: vec![signal.clone()],
-                    pending: None,
-                    remote_host: None,
-                    remote_cwd: None,
+                    ..Default::default()
                 };
                 if tmp.acknowledge() {
                     if let Some(updated) = tmp.records.into_iter().next() {
@@ -563,80 +552,10 @@ fn apply_desktop_acknowledgement(snap: &mut activity::Snapshot, owner: &PaneDesk
         }
     }
 }
-fn state_rank(state: &str) -> u8 {
-    match state {
-        "needsAttention" => 0,
-        "working" => 1,
-        "done" => 2,
-        _ => 3,
-    }
-}
-fn parse_signal_presentation(signal: &activity::Signal) -> Option<(bool, String, String, String)> {
-    let native = signal.id == "omg-program-status";
-    let fields = fields(&signal.metadata, if native { ':' } else { ';' });
-    let agent = normalize_agent(fields.get(if native { "app" } else { "omg_agent" })?);
-    let state = match *fields.get(if native { "state" } else { "omg_state" })? {
-        "working" | "processing" | "active" => "working",
-        "waiting" | "awaiting" | "blocked" | "needsAttention" | "error" | "failed" => {
-            "needsAttention"
-        }
-        "done" | "completed" => "done",
-        "idle" => "idle",
-        _ => return None,
-    };
-    let message = if native {
-        fields
-            .get("msg")
-            .and_then(|s| STANDARD.decode(s).ok())
-            .and_then(|b| String::from_utf8(b).ok())
-    } else {
-        fields.get("message").map(|s| decode_percent_value(s))
-    }
-    .filter(|s| !s.is_empty())
-    .unwrap_or_else(|| {
-        match state {
-            "working" => "Working",
-            "needsAttention" => {
-                if fields.get(if native { "kind" } else { "omg_attention" }) == Some(&"permission")
-                {
-                    "Waiting for permission"
-                } else {
-                    "Waiting for you"
-                }
-            }
-            "done" => "Done",
-            _ => "",
-        }
-        .into()
-    });
-    Some((native, agent, state.to_owned(), message))
-}
 fn presentation(snapshot: &activity::Snapshot) -> Option<(String, String, String)> {
-    let mut last_native: Option<(String, String, String)> = None;
-    let mut best_hook: Option<(String, String, String)> = None;
-    for signal in &snapshot.records {
-        let Some((native, agent, state, message)) = parse_signal_presentation(signal) else {
-            continue;
-        };
-        if native {
-            last_native = Some((agent, state, message));
-        } else if best_hook
-            .as_ref()
-            .is_none_or(|(_, prev, _)| state_rank(&state) <= state_rank(prev))
-        {
-            best_hook = Some((agent, state, message));
-        }
-    }
-    if let Some(program) = last_native {
-        if program.1 != "idle" {
-            return Some(program);
-        }
-        if let Some(fallback) = best_hook.filter(|f| f.1 != "idle") {
-            return Some(fallback);
-        }
-        return Some(program);
-    }
-    best_hook
+    snapshot
+        .presentation()
+        .map(|p| (p.agent, p.state.to_owned(), p.message))
 }
 fn acknowledged_path(config: &Config) -> Option<PathBuf> {
     config
@@ -1132,30 +1051,41 @@ fn build_view(config: &Config) -> io::Result<View> {
             let inline_remote = inline_owner
                 .filter(|io| !io.remote_session_id.is_empty())
                 .and_then(|io| inline_relays.get(&io.remote_session_id));
-            let mut facts = record
-                .as_ref()
-                .filter(|_| supports_presentation)
-                .and_then(|rec| {
-                    let socket = endpoint
-                        .socket
-                        .parent()?
-                        .join(format!("{}.sock", &hash(&session.id)[..16]));
-                    holder::presentation(&socket, rec).ok()
+            let mut facts = session
+                .activity
+                .clone()
+                .or_else(|| {
+                    record
+                        .as_ref()
+                        .filter(|_| supports_presentation)
+                        .and_then(|rec| {
+                            let socket = endpoint
+                                .socket
+                                .parent()?
+                                .join(format!("{}.sock", &hash(&session.id)[..16]));
+                            holder::presentation(&socket, rec).ok()
+                        })
                 })
                 .or_else(|| {
                     config
                         .control
                         .cached_snapshot(&endpoint, &session.id, &session.generation)
-                })
-                .or_else(|| {
-                    inline_remote.and_then(|remote| {
-                        config.control.cached_snapshot(
-                            &remote.endpoint,
-                            &remote.session_id,
-                            &remote.generation,
-                        )
-                    })
                 });
+            if let Some(remote) = inline_remote {
+                let remote_facts = remote.activity.clone().or_else(|| {
+                    config.control.cached_snapshot(
+                        &remote.endpoint,
+                        &remote.session_id,
+                        &remote.generation,
+                    )
+                });
+                if facts.is_none()
+                    || (facts.as_ref().is_some_and(|f| f.records.is_empty())
+                        && remote_facts.as_ref().is_some_and(|rf| !rf.records.is_empty()))
+                {
+                    facts = remote_facts;
+                }
+            }
             if let Some(ref mut snap) = facts {
                 if let Some(ack) = acknowledged.get(&session.id) {
                     if ack.generation != session.generation {
@@ -1414,10 +1344,8 @@ fn build_view(config: &Config) -> io::Result<View> {
                     if agent == "terminal" {
                         name.clone()
                     } else {
-                        AGENTS
-                            .iter()
-                            .find(|a| a.0 == agent)
-                            .map(|a| a.1)
+                        agents::resolve(&agent)
+                            .map(|spec| spec.display_name)
                             .unwrap_or(&agent)
                             .into()
                     }
@@ -1471,10 +1399,20 @@ fn build_view(config: &Config) -> io::Result<View> {
             });
         }
     }
-    let agents = AGENTS.iter().map(|(id, name, icon)| json!({
-        "id":id,"name":name,
-        "icon": if icon.ends_with("-favicon") { json!({"asset":icon}) } else { json!({"vector":icon}) },
-    })).collect::<Vec<_>>();
+    let agents = agents::AGENTS
+        .iter()
+        .map(|spec| {
+            json!({
+                "id": spec.id,
+                "name": spec.display_name,
+                "icon": if spec.mobile_icon.ends_with("-favicon") {
+                    json!({"asset": spec.mobile_icon})
+                } else {
+                    json!({"vector": spec.mobile_icon})
+                },
+            })
+        })
+        .collect::<Vec<_>>();
     let identity = device_identity(config)?;
     let channel = config
         .support
@@ -2026,12 +1964,12 @@ fn start(config: &Config, view: &View, request: &Value) -> io::Result<Value> {
                 "/bin/sh".into()
             }
         });
-    let agent = if kind == "start" {
+    let requested_agent = if kind == "start" {
         request["agent"].as_str().unwrap_or("codex")
     } else {
         "terminal"
     };
-    let mut argv = if kind == "startSSH" {
+    let (agent, mut argv) = if kind == "startSSH" {
         let host = text(request, "host")?;
         if !ssh_hosts_for_config(config)
             .iter()
@@ -2047,18 +1985,16 @@ fn start(config: &Config, view: &View, request: &Value) -> io::Result<Value> {
             cmd.extend(remembered.options);
         }
         cmd.push(host.into());
-        cmd
-    } else if agent == "terminal" {
-        vec![shell, "-l".into()]
+        ("terminal", cmd)
+    } else if requested_agent == "terminal" {
+        ("terminal", vec![shell, "-l".into()])
     } else {
-        let command = match agent {
-            "codex" => "codex",
-            "claude" => "claude",
-            "pi" => "pi",
-            "antigravity" => "agy",
-            _ => return Err(io::Error::other("Unsupported agent")),
-        };
-        vec![shell, "-lic".into(), format!("exec {command}")]
+        let spec = agents::resolve(requested_agent)
+            .ok_or_else(|| io::Error::other("Unsupported agent"))?;
+        (
+            spec.id,
+            vec![shell, "-lic".into(), format!("exec {}", spec.command)],
+        )
     };
     if let Some(host) = &project.host {
         let remote = experience::ssh_command(config, host)?;
@@ -2073,11 +2009,11 @@ fn start(config: &Config, view: &View, request: &Value) -> io::Result<Value> {
         );
         ssh.push(destination.into());
         let remote_command = if agent == "terminal" {
-            "${SHELL:-/bin/sh} -l".to_owned()
+            "AGY_CLI_OSC7501=on ${SHELL:-/bin/sh} -l".to_owned()
         } else {
             let command = argv.last().cloned().unwrap_or_default();
             format!(
-                "${{SHELL:-/bin/sh}} -lic {}",
+                "AGY_CLI_OSC7501=on ${{SHELL:-/bin/sh}} -lic {}",
                 experience::quote(command.strip_prefix("exec ").unwrap_or(&command))
             )
         };
@@ -2116,6 +2052,9 @@ fn start(config: &Config, view: &View, request: &Value) -> io::Result<Value> {
     {
         environment.insert("TERM".into(), "xterm-256color".into());
     }
+    environment
+        .entry("AGY_CLI_OSC7501".into())
+        .or_insert_with(|| "on".into());
     let policy_path = endpoint.socket.parent().unwrap().join("policy.json");
     let policy = if policy_path.exists() {
         serde_json::from_slice::<omg_session_runtime::lifecycle::Policy>(&bounded(
@@ -3048,5 +2987,207 @@ mod tests {
             .unwrap();
         assert_eq!(folder["workspaceName"], "Work");
         assert!(folder["sessions"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn error_states_remain_distinct_and_align_with_authoritative_tiers() {
+        // Tier 1 OSC 7501 error must stay "error", never "needsAttention" / "Waiting for you".
+        let mut t1_err = activity::State::default();
+        t1_err.consume(
+            false,
+            "omg-program-status",
+            &format!(
+                "state=error:app=opencode:id=turn-1:msg={}",
+                STANDARD.encode("Rate limit exceeded")
+            ),
+        );
+        assert_eq!(
+            presentation(&t1_err.snapshot()),
+            Some((
+                "opencode".into(),
+                "error".into(),
+                "Rate limit exceeded".into()
+            ))
+        );
+
+        // Tier 2 Hook failed/error must also stay "error" with default "Error" when message omitted.
+        let mut t2_err = activity::State::default();
+        t2_err.consume(
+            false,
+            "omg-agent-cursor-7",
+            "type=app;omg_agent=cursor-agent;omg_state=failed",
+        );
+        assert_eq!(
+            presentation(&t2_err.snapshot()),
+            Some(("cursor".into(), "error".into(), "Error".into()))
+        );
+
+        // Tier 1 > Tier 2 > Tier 3, except Tier 2 needsAttention surfaces over generic Tier 1 working.
+        let mut hierarchy = activity::State::default();
+        hierarchy.consume(
+            false,
+            "omg-agent-claude",
+            "type=app;omg_agent=claude;omg_tier=fallback;omg_state=done",
+        );
+        hierarchy.consume(
+            false,
+            "omg-program-status",
+            "state=working:app=claude:id=root",
+        );
+        assert_eq!(
+            presentation(&hierarchy.snapshot()),
+            Some(("claude".into(), "working".into(), "Working".into()))
+        );
+        hierarchy.consume(
+            false,
+            "omg-agent-claude-9",
+            "type=app;omg_agent=claude;omg_state=needsAttention;omg_attention=permission",
+        );
+        assert_eq!(
+            presentation(&hierarchy.snapshot()),
+            Some((
+                "claude".into(),
+                "needsAttention".into(),
+                "Waiting for permission".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn registry_covers_all_manifest_agents_and_lean_catalogue_avoids_ssh_attach() {
+        for expected in [
+            "codex",
+            "claude",
+            "pi",
+            "antigravity",
+            "opencode",
+            "cursor",
+            "copilot",
+            "droid",
+            "grok",
+            "qwen",
+            "amp",
+            "cline",
+            "kimi",
+            "hermes",
+            "crush",
+            "qoder",
+            "reasonix",
+            "omp",
+            "aider",
+        ] {
+            assert!(
+                agents::resolve(expected).is_some(),
+                "missing agent {expected}"
+            );
+        }
+        assert_eq!(normalize_agent("agy"), "antigravity");
+        assert_eq!(normalize_agent("cursor-agent"), "cursor");
+        assert_eq!(normalize_agent("qodercli"), "qoder");
+        assert_eq!(normalize_agent("oh-my-pi"), "omp");
+
+        // Verify a relay endpoint serving `activity` inside `L` never receives an `H` viewer attach.
+        use std::os::unix::net::UnixListener;
+        let dir = PathBuf::from("/tmp").join(format!("omg-lean-{}", &record::nonce().unwrap()[..8]));
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .unwrap();
+        struct Guard(PathBuf);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _guard = Guard(dir.clone());
+        let relay_sock = dir.join("relay.sock");
+        let listener = UnixListener::bind(&relay_sock).unwrap();
+        let pane_uuid = "12345678-1234-1234-1234-123456789abc";
+        let attach_attempted = Arc::new( std::sync::atomic::AtomicBool::new(false));
+        let attach_flag = attach_attempted.clone();
+
+        let server = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                while let Ok(req) = Frame::read(&mut stream) {
+                    match req.kind {
+                        b'P' => {
+                            let _ = Frame::new(b'P', 0, b"agent-state/1").send(&mut stream);
+                        }
+                        b'L' => {
+                            let mut st = activity::State::default();
+                            st.consume(
+                                false,
+                                "omg-agent-opencode-11",
+                                "type=app;omg_agent=opencode;omg_scope=remote;omg_state=working;message=Compiling",
+                            );
+                            let list = json!([{
+                                "id": pane_uuid,
+                                "generation": "gen-lean-1",
+                                "created_at": 1,
+                                "updated_at": 2,
+                                "pid": 5150,
+                                "ended": null,
+                                "resume": null,
+                                "policy": {},
+                                "cwd": "/srv/repo",
+                                "activity": st.snapshot()
+                            }]);
+                            let _ = Frame::new(b'L', 0, &serde_json::to_vec(&list).unwrap())
+                                .send(&mut stream);
+                            break;
+                        }
+                        b'H' => {
+                            attach_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
+
+        let config = Config {
+            endpoints: vec![Endpoint {
+                id: "ssh-cloud".into(),
+                name: "SSH · cloud".into(),
+                socket: relay_sock.clone(),
+                relay: Some(omg_session_runtime::location::SshTarget {
+                    destination: "cloud".into(),
+                    options: vec![],
+                    remote_cwd: Some("/srv/repo".into()),
+                }),
+            }],
+            support: None,
+            token: "t".repeat(64),
+            origin: None,
+            control: State::default(),
+        };
+        *config.control.phone.lock().unwrap() = Some(HashMap::from([(
+            pane_uuid.to_owned(),
+            PhoneMeta {
+                generation: "gen-lean-1".into(),
+                workspace: PERSONAL.into(),
+                agent: "opencode".into(),
+                project: None,
+            },
+        )]));
+        let view = build_view(&config).unwrap();
+        let _ = UnixStream::connect(&relay_sock);
+        let _ = server.join();
+        assert!(
+            !attach_attempted.load(std::sync::atomic::Ordering::SeqCst),
+            "SSH mobile roster polling must not open an H viewer attachment when L includes activity"
+        );
+        let ssh_proj = view.roster["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["deviceAlias"] == "cloud")
+            .expect("SSH project present");
+        let sess = &ssh_proj["sessions"][0];
+        assert_eq!(sess["agent"], "opencode");
+        assert_eq!(sess["status"], "working");
+        assert_eq!(sess["subtitle"], "Compiling");
     }
 }

@@ -389,7 +389,40 @@ fn full_ui_control_projects_roster_without_taking_input_and_serves_real_files() 
     let mut phone = connect(&address, "/control", token.trim()).unwrap();
     let roster = json_reply(&mut phone, "roster");
     assert_eq!(roster["wire"], 2);
-    assert_eq!(roster["agents"].as_array().unwrap().len(), 4);
+    assert_eq!(
+        roster["agents"].as_array().unwrap().len(),
+        omg_session_runtime::agents::AGENTS.len()
+    );
+    for required in [
+        "codex",
+        "claude",
+        "pi",
+        "antigravity",
+        "opencode",
+        "cursor",
+        "copilot",
+        "droid",
+        "grok",
+        "qwen",
+        "amp",
+        "cline",
+        "kimi",
+        "hermes",
+        "crush",
+        "qoder",
+        "reasonix",
+        "omp",
+        "aider",
+    ] {
+        assert!(
+            roster["agents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["id"] == required),
+            "roster missing agent {required}"
+        );
+    }
     let folder = roster["projects"]
         .as_array()
         .unwrap()

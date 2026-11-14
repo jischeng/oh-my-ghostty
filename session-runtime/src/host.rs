@@ -207,14 +207,10 @@ fn host_connection(socket: UnixStream, registry: Arc<Mutex<Registry>>) -> io::Re
                 }
                 b'L' if f.seq == 0 && f.data.is_empty() => {
                     let response = (|| {
-                        let records = registry.lock().unwrap().catalogue()?;
-                        if records.len() > MAX_LIST_ENTRIES {
+                        let summary = registry.lock().unwrap().catalogue_summaries()?;
+                        if summary.len() > MAX_LIST_ENTRIES {
                             return Err(io::Error::other("session catalogue exceeds entry limit"));
                         }
-                        let summary = records
-                            .iter()
-                            .map(crate::record::SessionSummary::from)
-                            .collect::<Vec<_>>();
                         let bytes = serde_json::to_vec(&summary)?;
                         if bytes.len() > MAX_LIST_BYTES {
                             return Err(io::Error::other("session catalogue exceeds size limit"));

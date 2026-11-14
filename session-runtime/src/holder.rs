@@ -46,13 +46,21 @@ pub fn presentation(
     session_socket: &Path,
     record: &Record,
 ) -> io::Result<crate::activity::Snapshot> {
+    presentation_with_timeout(session_socket, record, Duration::from_secs(1))
+}
+
+pub fn presentation_with_timeout(
+    session_socket: &Path,
+    record: &Record,
+    timeout: Duration,
+) -> io::Result<crate::activity::Snapshot> {
     let capability = record
         .holder_capability
         .as_deref()
         .ok_or_else(|| io::Error::other("holder has no presentation control"))?;
     let mut socket = UnixStream::connect(control_path(session_socket))?;
-    socket.set_read_timeout(Some(Duration::from_secs(1)))?;
-    socket.set_write_timeout(Some(Duration::from_secs(1)))?;
+    socket.set_read_timeout(Some(timeout))?;
+    socket.set_write_timeout(Some(timeout))?;
     let request = HolderProbe {
         id: record.id.clone(),
         generation: record.generation.clone(),

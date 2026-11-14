@@ -261,7 +261,8 @@ fn view_loop(
     let mut pending_password = None;
     let mut pending_cwd = None;
     let mut pending_output = Vec::new();
-    let mut pending_activity = false;
+    let mut pending_activity: Option<&'static str> = None;
+    let mut activity_hydrated = false;
     let mut size = dimensions();
     let mut screen = Screen::new(
         u16::from_be_bytes([size[0], size[1]]),
@@ -339,6 +340,8 @@ fn view_loop(
                     first_picture = false;
                     ready = false;
                     writer = false;
+                    activity_hydrated = false;
+                    pending_activity = None;
                     sequence = Some(frame.seq);
                     Frame::new(b'A', frame.seq, &generation.to_be_bytes()).send(socket)?;
                     Frame::new(b'W', generation, b"inline/1").send(socket)?;
@@ -412,7 +415,9 @@ fn view_loop(
                         .vt
                         .activity_mut()
                         .replace(crate::activity::Snapshot::decode(&frame.data)?);
-                    pending_activity = true;
+                    let mode = if activity_hydrated { "live" } else { "restore" };
+                    activity_hydrated = true;
+                    pending_activity = Some(mode);
                 }
                 b'R' if frame.data.len() == 4 || frame.data.len() == 8 => {
                     screen.vt.resize(
@@ -458,9 +463,14 @@ fn view_loop(
             }
             // Do not splice host metadata into a split CSI/OSC/image sequence.
             if ready && screen.continuation().is_ok_and(|bytes| bytes.is_empty()) {
-                if pending_activity {
-                    stdout.write_all(&screen.vt.activity().snapshot().inline_bytes())?;
-                    pending_activity = false;
+                if let Some(mode) = pending_activity.take() {
+                    stdout.write_all(
+                        &screen
+                            .vt
+                            .activity()
+                            .snapshot()
+                            .inline_bytes_with_mode(mode),
+                    )?;
                 }
                 if let Some(password) = pending_password.take() {
                     if password != password_input {
@@ -511,15 +521,6 @@ fn view_loop(
                     return Ok(0);
                 }
                 if ready {
-                    if screen.vt.activity_mut().acknowledge() {
-                        if screen.continuation().is_ok_and(|b| b.is_empty()) {
-                            stdout.write_all(&screen.vt.activity().snapshot().inline_bytes())?;
-                            stdout.flush()?;
-                            pending_activity = false;
-                        } else {
-                            pending_activity = true;
-                        }
-                    }
                     if !writer {
                         Frame::new(b'W', generation, b"inline-takeover/1").send(socket)?;
                     }

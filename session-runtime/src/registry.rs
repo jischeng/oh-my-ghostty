@@ -177,6 +177,7 @@ pub struct Registry {
     pub command: Vec<String>,
     pub policy: Policy,
     workers: HashMap<String, JoinHandle<()>>,
+    presentations: HashMap<String, Arc<Mutex<crate::activity::Snapshot>>>,
     finished_workers: Arc<Mutex<Vec<String>>>,
     wakeup: Option<crate::WakePipe>,
     local_holders: HashMap<String, LocalHolder>,
@@ -191,6 +192,7 @@ impl Registry {
             command,
             policy,
             workers: HashMap::new(),
+            presentations: HashMap::new(),
             finished_workers: Arc::new(Mutex::new(Vec::new())),
             wakeup: None,
             local_holders: HashMap::new(),
@@ -423,6 +425,7 @@ impl Registry {
     pub fn maintenance(&mut self) {
         let notified: Vec<_> = std::mem::take(&mut *self.finished_workers.lock().unwrap());
         for id in notified {
+            self.presentations.remove(&id);
             if let Some(h) = self.workers.remove(&id) {
                 let _ = h.join();
             }
@@ -434,6 +437,7 @@ impl Registry {
             .map(|(id, _)| id.clone())
             .collect();
         for id in finished {
+            self.presentations.remove(&id);
             if let Some(h) = self.workers.remove(&id) {
                 let _ = h.join();
             }
@@ -688,6 +692,35 @@ impl Registry {
         }
         self.list()
     }
+
+    pub fn catalogue_summaries(&mut self) -> io::Result<Vec<crate::record::SessionSummary>> {
+        let records = self.catalogue()?;
+        let mut local_queries = 0usize;
+        let mut summaries = Vec::with_capacity(records.len());
+        for record in &records {
+            let mut summary = crate::record::SessionSummary::from(record);
+            if record.ended.is_none() {
+                if self.mode == RuntimeMode::Remote {
+                    if self.workers.get(&record.id).is_some_and(|w| !w.is_finished()) {
+                        if let Some(pres) = self.presentations.get(&record.id) {
+                            summary.activity = pres.lock().ok().map(|s| s.clone());
+                        }
+                    }
+                } else if local_queries < MAX_RUNNING && record.holder_capability.is_some() {
+                    local_queries += 1;
+                    let socket = Self::session_socket_in(&self.root, &record.id);
+                    summary.activity = crate::holder::presentation_with_timeout(
+                        &socket,
+                        record,
+                        Duration::from_millis(50),
+                    )
+                    .ok();
+                }
+            }
+            summaries.push(summary);
+        }
+        Ok(summaries)
+    }
     pub fn connect(&mut self, id: &str, resume_generation: Option<&str>) -> io::Result<UnixStream> {
         self.connect_with(id, resume_generation, None, true, ConnectOptions::default())
     }
@@ -763,6 +796,7 @@ impl Registry {
             match UnixStream::connect(&socket) {
                 Ok(stream) => return Ok(stream),
                 Err(_) => {
+                    self.presentations.remove(id);
                     if let Some(worker) = self.workers.remove(id) {
                         let _ = worker.join();
                     }
@@ -885,6 +919,8 @@ impl Registry {
             finished: self.finished_workers.clone(),
             wakeup: self.wakeup.clone(),
         };
+        let presentation = Arc::new(Mutex::new(crate::activity::Snapshot::default()));
+        let worker_presentation = presentation.clone();
         let worker = thread::Builder::new()
             .name(format!("session-{id}"))
             .spawn(move || {
@@ -898,7 +934,7 @@ impl Registry {
                         containment_root,
                         initial_cwd: working_directory,
                         local_launch: None,
-                        presentation: None,
+                        presentation: Some(worker_presentation),
                     }),
                 ) {
                     if let Ok(mut r) = Record::load(&record_path) {
@@ -909,6 +945,7 @@ impl Registry {
                     eprintln!("session worker failed: {error}");
                 }
             })?;
+        self.presentations.insert(id.into(), presentation);
         self.workers.insert(id.into(), worker);
         let start = Instant::now();
         loop {

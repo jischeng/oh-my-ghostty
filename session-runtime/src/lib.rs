@@ -183,7 +183,26 @@ impl Vt {
         }
     }
     pub fn write(&mut self, data: &[u8]) {
-        unsafe { omg_vt_write(self.0, data.as_ptr(), data.len()) }
+        if !self.1.osc133.in_sequence() && !data.contains(&0x1b) {
+            unsafe { omg_vt_write(self.0, data.as_ptr(), data.len()) };
+            return;
+        }
+        let mut cursor = 0;
+        for (idx, &byte) in data.iter().enumerate() {
+            if let Some(event) = self.1.osc133.step(byte) {
+                let end = idx + 1;
+                unsafe {
+                    omg_vt_write(self.0, data[cursor..end].as_ptr(), end - cursor);
+                }
+                self.1.on_osc133(event);
+                cursor = end;
+            }
+        }
+        if cursor < data.len() {
+            unsafe {
+                omg_vt_write(self.0, data[cursor..].as_ptr(), data.len() - cursor);
+            }
+        }
     }
     pub fn activity(&self) -> &activity::State {
         &self.1
@@ -632,6 +651,7 @@ pub(crate) fn poll_fds(
     Ok(())
 }
 
+pub mod agents;
 pub mod deploy;
 pub mod handoff;
 pub mod host;

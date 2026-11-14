@@ -62,6 +62,17 @@ int omg_process_args(int pid, unsigned char *buffer, size_t capacity) {
     }
     return (int)size;
 }
+int omg_process_bsdinfo(int pid, int *ppid_out, unsigned int *uid_out, int *pgid_out, int *zombie_out) {
+    if (pid <= 1) return -1;
+    struct proc_bsdinfo info;
+    int result = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info));
+    if (result != sizeof(info)) return -1;
+    if (ppid_out) *ppid_out = (int)info.pbi_ppid;
+    if (uid_out) *uid_out = (unsigned int)info.pbi_uid;
+    if (pgid_out) *pgid_out = (int)info.pbi_pgid;
+    if (zombie_out) *zombie_out = (info.pbi_status == SZOMB) ? 1 : 0;
+    return 0;
+}
 #endif
 
 typedef void (*Reply)(void *, const unsigned char *, size_t);

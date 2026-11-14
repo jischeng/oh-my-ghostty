@@ -16,7 +16,7 @@ pub struct Resume {
 }
 impl Resume {
     pub fn validate(&self) -> io::Result<()> {
-        if !matches!(self.agent.as_str(), "codex" | "claude" | "pi")
+        if crate::agents::resolve(&self.agent).is_none()
             || self.conversation_id.is_empty()
             || self.conversation_id.len() > 128
             || self.conversation_id.starts_with('-')
@@ -34,76 +34,30 @@ impl Resume {
     }
     pub fn arguments(&self) -> io::Result<Vec<String>> {
         self.validate()?;
-        Ok(match self.agent.as_str() {
-            "codex" => vec![
-                "codex".into(),
-                "resume".into(),
-                self.conversation_id.clone(),
-            ],
-            "claude" => vec![
-                "claude".into(),
-                "--resume".into(),
-                self.conversation_id.clone(),
-            ],
-            "pi" => vec![
-                "pi".into(),
-                "--session-id".into(),
-                self.conversation_id.clone(),
-            ],
-            _ => unreachable!(),
-        })
+        let spec = crate::agents::resolve(&self.agent)
+            .ok_or_else(|| io::Error::other("invalid Agent recovery descriptor"))?;
+        if spec.resume_args.is_empty() {
+            return Err(io::Error::other("Agent does not support conversation recovery"));
+        }
+        let mut argv = Vec::with_capacity(1 + spec.resume_args.len());
+        argv.push(spec.command.to_owned());
+        for arg in spec.resume_args {
+            argv.push(arg.replace("{id}", &self.conversation_id));
+        }
+        Ok(argv)
     }
     /// Hooks alone don't prove the conversation has been flushed to disk.
     pub fn store_exists(&self) -> bool {
         if self.validate().is_err() {
             return false;
         }
+        let Some(spec) = crate::agents::resolve(&self.agent) else {
+            return false;
+        };
         let Some(home) = std::env::var_os("HOME") else {
             return false;
         };
-        let root = PathBuf::from(home).join(match self.agent.as_str() {
-            "codex" => ".codex/sessions",
-            "claude" => ".claude/projects",
-            "pi" => ".pi/agent/sessions",
-            _ => return false,
-        });
-        let mut stack = vec![(root, 0)];
-        let mut checked = 0;
-        while let Some((dir, depth)) = stack.pop() {
-            let Ok(entries) = fs::read_dir(dir) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                checked += 1;
-                if checked > 10000 {
-                    return false;
-                }
-                let Ok(kind) = entry.file_type() else {
-                    continue;
-                };
-                if kind.is_dir() && depth < 5 {
-                    stack.push((entry.path(), depth + 1));
-                }
-                if kind.is_file() {
-                    let name = entry.file_name();
-                    let name = name.to_string_lossy();
-                    let suffix = match self.agent.as_str() {
-                        "claude" => format!("{}.jsonl", self.conversation_id),
-                        "pi" => format!("_{}.jsonl", self.conversation_id),
-                        _ => format!("-{}.jsonl", self.conversation_id),
-                    };
-                    let matches = if self.agent == "claude" {
-                        name == suffix
-                    } else {
-                        name.ends_with(&suffix)
-                    };
-                    if matches && entry.metadata().is_ok_and(|m| m.len() > 0) {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
+        crate::agents::store_exists(spec, &PathBuf::from(home), &self.conversation_id)
     }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -217,6 +171,8 @@ pub struct SessionSummary {
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh: Option<crate::location::SshTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<crate::activity::Snapshot>,
 }
 
 impl From<&Record> for SessionSummary {
@@ -244,6 +200,7 @@ impl From<&Record> for SessionSummary {
                     None
                 }
             }),
+            activity: None,
         }
     }
 }
@@ -253,15 +210,33 @@ pub fn nonce() -> io::Result<String> {
     File::open("/dev/urandom")?.read_exact(&mut b)?;
     Ok(b.iter().map(|v| format!("{v:02x}")).collect())
 }
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AgentEvent {
     pub token: String,
     pub generation: String,
     pub pid: i32,
     pub group: i32,
     pub state: String,
-    pub resume: Resume,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<Resume>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_pid: Option<i32>,
 }
 #[cfg(test)]
 mod tests {

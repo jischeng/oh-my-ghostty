@@ -746,6 +746,7 @@ fn readLoop(self: *Self, io: *HostIO, epoch: u64, attached: *bool, connected_onc
         }
     }
     var sequence: ?u64 = null;
+    var activity_hydrated = false;
     while (true) {
         var h: [13]u8 = undefined;
         try self.readExact(&h);
@@ -771,6 +772,7 @@ fn readLoop(self: *Self, io: *HostIO, epoch: u64, attached: *bool, connected_onc
                 self.clearProcessInfo();
                 self.updatePasswordInputForEpoch(io, false, epoch);
                 sequence = null;
+                activity_hydrated = false;
                 try self.publishState(io, bytes);
             },
             'J' => {
@@ -809,6 +811,7 @@ fn readLoop(self: *Self, io: *HostIO, epoch: u64, attached: *bool, connected_onc
                 attached.* = true;
                 try self.confirmCreation();
                 sequence = seq;
+                activity_hydrated = false;
                 var acknowledgement: [8]u8 = undefined;
                 std.mem.writeInt(u64, &acknowledgement, self.generation.load(.acquire), .big);
                 try self.sendForAttachment('A', seq, &acknowledgement, epoch);
@@ -885,7 +888,9 @@ fn readLoop(self: *Self, io: *HostIO, epoch: u64, attached: *bool, connected_onc
             },
             'G' => {
                 if (sequence == null or sequence.? != seq) return error.OutputGap;
-                try self.publishActivitySnapshot(io, bytes);
+                const is_restore = !activity_hydrated;
+                try self.publishActivitySnapshot(io, bytes, is_restore);
+                activity_hydrated = true;
             },
             'B' => {
                 self.invalidateStartupInput();
@@ -904,6 +909,7 @@ fn readLoop(self: *Self, io: *HostIO, epoch: u64, attached: *bool, connected_onc
                 // A connection failure must not overwrite the retained terminal.
                 try self.publishFailure(io, bytes, true);
                 sequence = null;
+                activity_hydrated = false;
             },
             'X' => {
                 const code = std.fmt.parseInt(i32, bytes, 10) catch -1;
@@ -928,9 +934,19 @@ fn readLoop(self: *Self, io: *HostIO, epoch: u64, attached: *bool, connected_onc
     }
 }
 
-fn publishActivitySnapshot(self: *Self, io: *HostIO, bytes: []const u8) !void {
+fn activitySyncModeMetadata(is_restore: bool) []const u8 {
+    return if (is_restore) "mode=restore" else "mode=live";
+}
+
+fn publishActivitySnapshot(self: *Self, io: *HostIO, bytes: []const u8, is_restore: bool) !void {
     const Signal = struct { id: []const u8, metadata: []const u8 };
-    const Snapshot = struct { version: u32, revision: u64, records: []const Signal, pending: ?[]const Signal = null };
+    const Snapshot = struct {
+        version: u32,
+        revision: u64,
+        records: []const Signal,
+        pending: ?[]const Signal = null,
+        sync_restore: bool = false,
+    };
     if (bytes.len > 2 * 1024 * 1024) return error.InvalidMetadata;
     const parsed = try std.json.parseFromSlice(Snapshot, self.alloc, bytes, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
@@ -948,10 +964,13 @@ fn publishActivitySnapshot(self: *Self, io: *HostIO, bytes: []const u8) !void {
                 !std.unicode.utf8ValidateSlice(signal.metadata)) return error.InvalidMetadata;
         }
     }
+    const mode_metadata = activitySyncModeMetadata(is_restore or parsed.value.sync_restore);
+    try self.publishContext(io, "omg-agent-sync", mode_metadata);
     try self.publishContext(io, "omg-agent-sync", "begin");
     for (parsed.value.records) |signal| try self.publishContext(io, signal.id, signal.metadata);
     try self.publishContext(io, "omg-agent-sync", "end");
     if (parsed.value.pending) |records| {
+        try self.publishContext(io, "omg-agent-sync", mode_metadata);
         try self.publishContext(io, "omg-agent-sync", "begin");
         for (records) |signal| try self.publishContext(io, signal.id, signal.metadata);
     }
@@ -977,6 +996,11 @@ fn readTestBytes(fd: c_int, bytes: []u8) !void {
         if (n <= 0) return error.TestReadFailed;
         offset += @intCast(n);
     }
+}
+
+test "session activity sync tags restore vs live mode" {
+    try std.testing.expectEqualStrings("mode=restore", activitySyncModeMetadata(true));
+    try std.testing.expectEqualStrings("mode=live", activitySyncModeMetadata(false));
 }
 
 test "session relay restart only reattaches the confirmed UUID" {
@@ -1408,13 +1432,34 @@ fn seedRestoredPwd(term: *terminal.Terminal, path: []const u8) void {
     // any transitions at the same cursor coordinate if not careful, or leave
     // earlier scrollback without a seed. Save/restore only when seeding cold.
     if (comptime @import("builtin").target.os.tag == .macos) {
+        inline for (.{ .primary, .alternate }) |key| {
+            if (term.screens.get(key)) |screen| {
+                var idx = screen.omg_cwd_history.entries.items.len;
+                while (idx > 0) {
+                    idx -= 1;
+                    const entry = screen.omg_cwd_history.entries.items[idx];
+                    if (entry.cwd.len == 0 or entry.cwd[0] != '/') {
+                        _ = screen.omg_cwd_history.entries.orderedRemove(idx);
+                        screen.pages.untrackPin(entry.pin);
+                        screen.alloc.free(entry.cwd);
+                    }
+                }
+            }
+        }
         const primary_has_history = if (term.screens.get(.primary)) |s|
             s.omg_cwd_history.entries.items.len > 0
         else
             false;
         if (primary_has_history) {
-            if (term.pwd.items.len > 0) term.pwd.clearRetainingCapacity();
-            if (path.len > 0) term.pwd.appendSlice(term.screens.active.alloc, path) catch {};
+            if (path.len == 0) {
+                term.pwd.clearRetainingCapacity();
+                return;
+            }
+            const cap = std.math.add(usize, path.len, 1) catch return;
+            term.pwd.ensureTotalCapacity(term.gpa(), cap) catch return;
+            term.pwd.items.len = cap;
+            @memcpy(term.pwd.items[0..path.len], path);
+            term.pwd.items[path.len] = 0;
             return;
         }
     }
@@ -1597,6 +1642,27 @@ test "acknowledgeActivity sends C only when negotiated and snapshot is ready" {
     try std.testing.expectEqual(@as(u8, 'C'), frame[0]);
     try std.testing.expectEqual(@as(u64, 7), std.mem.readInt(u64, frame[1..9], .big));
     try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, frame[9..13], .big));
+}
+
+test "session activity sync tags restore vs live mode including sync_restore snapshots" {
+    const Signal = struct { id: []const u8, metadata: []const u8 };
+    const Snapshot = struct {
+        version: u32,
+        revision: u64,
+        records: []const Signal,
+        pending: ?[]const Signal = null,
+        sync_restore: bool = false,
+    };
+    const restore_json = "{\"version\":1,\"revision\":3,\"records\":[],\"sync_restore\":true}";
+    const live_json = "{\"version\":1,\"revision\":4,\"records\":[]}";
+    const p_restore = try std.json.parseFromSlice(Snapshot, std.testing.allocator, restore_json, .{ .ignore_unknown_fields = true });
+    defer p_restore.deinit();
+    const p_live = try std.json.parseFromSlice(Snapshot, std.testing.allocator, live_json, .{ .ignore_unknown_fields = true });
+    defer p_live.deinit();
+
+    try std.testing.expectEqualStrings("mode=restore", activitySyncModeMetadata(true or p_live.value.sync_restore));
+    try std.testing.expectEqualStrings("mode=restore", activitySyncModeMetadata(false or p_restore.value.sync_restore));
+    try std.testing.expectEqualStrings("mode=live", activitySyncModeMetadata(false or p_live.value.sync_restore));
 }
 
 test {

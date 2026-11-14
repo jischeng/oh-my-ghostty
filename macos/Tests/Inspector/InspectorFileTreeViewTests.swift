@@ -73,4 +73,83 @@ struct InspectorFileTreeViewTests {
         #expect(first == [.renameFile(path: "/repo/one")])
         #expect(second.isEmpty)
     }
+
+    @Test func localFilesInspectorAutoRefreshesOnFilesystemChangesAndStopsWatchingOnDisappear() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("files-fsevents-\(UUID().uuidString)")
+        let nested = root.appendingPathComponent("src")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("a".utf8).write(to: root.appendingPathComponent("initial.txt"))
+        try Data("b".utf8).write(to: nested.appendingPathComponent("inside.swift"))
+
+        let registry = InspectorRegistry()
+        let provider = BuiltInFilesInspectorProvider(
+            registry: registry,
+            fsEventDebounceInterval: .milliseconds(30),
+            openFile: { _, _, _ in }
+        )
+        try provider.register()
+        let context = InspectorPaneContext(
+            tabID: UUID(),
+            surfaceID: UUID(),
+            title: "Files Test",
+            workingDirectory: root.path
+        )
+
+        func currentTree() -> InspectorFileTree? {
+            guard case .fileTree(let tree) = registry.content(
+                for: BuiltInFilesInspectorProvider.paneID,
+                context: context
+            ) else {
+                return nil
+            }
+            return tree
+        }
+
+        registry.presentationDidChange(to: BuiltInFilesInspectorProvider.paneID, context: context)
+        for _ in 0..<80 {
+            if let tree = currentTree(), tree.nodes.count == 2 { break }
+            try await Task.sleep(for: .milliseconds(15))
+        }
+        #expect(provider.activeWatchedDirectoryCountForTesting == 1)
+
+        // Expand `src` so both root and expanded subdirectory are watched.
+        let initialSrcNode = try #require(currentTree()?.nodes.first(where: { $0.name == "src" }))
+        registry.performAction(
+            paneID: BuiltInFilesInspectorProvider.paneID,
+            action: .init(context: context, kind: .toggleNode(id: initialSrcNode.id, expanded: true))
+        )
+        for _ in 0..<80 {
+            if provider.activeWatchedDirectoryCountForTesting == 2,
+               let srcNode = currentTree()?.nodes.first(where: { $0.name == "src" }),
+               srcNode.children?.count == 1 {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(15))
+        }
+        #expect(provider.activeWatchedDirectoryCountForTesting == 2)
+
+        // External terminal touch/rm updates both root and expanded subdirectory automatically.
+        try Data("created".utf8).write(to: root.appendingPathComponent("added.md"))
+        try Data("nested".utf8).write(to: nested.appendingPathComponent("extra.swift"))
+        try FileManager.default.removeItem(at: root.appendingPathComponent("initial.txt"))
+
+        for _ in 0..<100 {
+            if let tree = currentTree(),
+               tree.nodes.contains(where: { $0.name == "added.md" }),
+               !tree.nodes.contains(where: { $0.name == "initial.txt" }),
+               tree.nodes.first(where: { $0.name == "src" })?.children?.count == 2 {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let updatedTree = try #require(currentTree())
+        #expect(updatedTree.nodes.map(\.name) == ["src", "added.md"])
+        #expect(updatedTree.nodes.first(where: { $0.name == "src" })?.children?.map(\.name) == ["extra.swift", "inside.swift"])
+
+        // Hiding the Files pane immediately tears down all directory watchers.
+        registry.presentationDidChange(to: nil, context: context)
+        #expect(provider.activeWatchedDirectoryCountForTesting == 0)
+    }
 }

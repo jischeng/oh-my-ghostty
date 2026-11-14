@@ -75,6 +75,7 @@ final class BuiltInGitInspectorProvider {
     private var localChangeMonitors: [UUID: (repository: GitRepositoryIdentity, monitor: GitRepositoryChangeMonitor)] = [:]
     private var lastAutoFetch: [String: Date] = [:]
     private var autoFetchTasks: [String: Task<Void, Never>] = [:]
+    private nonisolated(unsafe) var externalMutationObserver: NSObjectProtocol?
 
     init(
         registry: InspectorRegistry,
@@ -89,6 +90,34 @@ final class BuiltInGitInspectorProvider {
         self.diffService = GitDiffService(executor: executor)
         self.mutationService = GitMutationService(executor: executor)
         self.terminalBridge = terminalBridge ?? GitTerminalBridge()
+        self.externalMutationObserver = NotificationCenter.default.addObserver(
+            forName: .omgGitRepositoryDidMutate,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let repository = notification.userInfo?["repository"] as? GitRepositoryIdentity
+            MainActor.assumeIsolated {
+                if let repository {
+                    self?.handleExternalRepositoryMutation(repository)
+                }
+            }
+        }
+    }
+
+    deinit {
+        if let externalMutationObserver {
+            NotificationCenter.default.removeObserver(externalMutationObserver)
+        }
+    }
+
+    func handleExternalRepositoryMutation(_ repository: GitRepositoryIdentity) {
+        for (tabID, content) in lastPublishedContent where content.repository == repository {
+            if let current = presentedContexts[tabID] {
+                load(context: current, force: true)
+            } else {
+                lastPublishedContent.removeValue(forKey: tabID)
+            }
+        }
     }
 
     func register() throws {
@@ -451,6 +480,7 @@ final class BuiltInGitInspectorProvider {
                         (repository, $0)
                     }
                 }
+                self.localChangeMonitors[context.tabID]?.monitor.acknowledgeRefresh()
             } else {
                 self.localChangeMonitors.removeValue(forKey: context.tabID)
             }
@@ -912,6 +942,9 @@ final class BuiltInGitInspectorProvider {
                 self.operationTitles[key] = mutation.title
                 do {
                     try await self.mutationService.perform(mutation, in: repository)
+                    for (_, entry) in self.localChangeMonitors where entry.repository == repository {
+                        entry.monitor.acknowledgeRefresh()
+                    }
                     await self.refreshIndex(repository: repository, paths: paths)
                 } catch {
                     self.pendingIndexPaths[key]?.subtract(paths)

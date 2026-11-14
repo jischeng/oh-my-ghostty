@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 /// Only this native container assigns the three shell frames. Hosted leaves
@@ -6,6 +7,8 @@ import SwiftUI
 struct NativeTerminalShell: NSViewControllerRepresentable {
     let leadingWidth: CGFloat
     let trailingWidth: CGFloat
+    var layoutState: VerticalTabWindowLayoutState?
+    var tracksLiveInspectorWidth = false
     let leadingVisible: Bool
     let trailingVisible: Bool
     let chromeBackground: Color
@@ -18,6 +21,10 @@ struct NativeTerminalShell: NSViewControllerRepresentable {
     }
 
     func updateNSViewController(_ controller: TerminalShellController, context: Context) {
+        controller.bindLiveInspectorWidth(
+            layoutState: layoutState,
+            enabled: tracksLiveInspectorWidth
+        )
         controller.update(
             leading: AnyView(leading.environment(\.self, context.environment)),
             center: AnyView(center.environment(\.self, context.environment)),
@@ -43,8 +50,28 @@ struct TerminalShellGeometry {
 
 final class TerminalShellController: NSViewController {
     let container = TerminalShellNativeView()
+    private weak var observedLayoutState: VerticalTabWindowLayoutState?
+    private var tracksLiveInspectorWidth = false
+    private var liveInspectorWidthCancellable: AnyCancellable?
 
     override func loadView() { view = container }
+
+    @MainActor
+    func bindLiveInspectorWidth(
+        layoutState: VerticalTabWindowLayoutState?,
+        enabled: Bool
+    ) {
+        guard observedLayoutState !== layoutState || tracksLiveInspectorWidth != enabled else { return }
+        observedLayoutState = layoutState
+        tracksLiveInspectorWidth = enabled
+        guard enabled, let layoutState else {
+            liveInspectorWidthCancellable = nil
+            return
+        }
+        liveInspectorWidthCancellable = layoutState.inspectorWidthChanges.sink { [weak self] width in
+            self?.container.setTrailingWidth(width)
+        }
+    }
 
     func update(leading: AnyView, center: AnyView, trailing: AnyView,
                 layout: TerminalShellGeometry, background: NSColor = .clear) {
@@ -59,6 +86,7 @@ final class TerminalShellNativeView: NSView {
     private(set) var leadingHost: NSHostingView<AnyView>?
     private(set) var trailingHost: NSHostingView<AnyView>?
     let centerHost = NSHostingView(rootView: AnyView(EmptyView()))
+    private(set) var rootViewUpdateCount = 0
     private var leadingWidth: CGFloat = 0
     private var trailingWidth: CGFloat = 0
     private var leadingVisible = false
@@ -122,6 +150,7 @@ final class TerminalShellNativeView: NSView {
         chromeBackdrop.fillColor = background.cgColor
         CATransaction.commit()
         rememberContentResponder()
+        rootViewUpdateCount += 1
         centerHost.rootView = center
         updateHost(&leadingHost, content: leading, visible: layout.leadingVisible)
         updateHost(&trailingHost, content: trailing, visible: layout.trailingVisible)
@@ -132,6 +161,14 @@ final class TerminalShellNativeView: NSView {
             host.removeFromSuperview()
             leadingHost = nil
         }
+        needsLayout = true
+    }
+
+    /// Updates the Inspector width directly in AppKit during a live resize drag
+    /// without reassigning `NSHostingView.rootView` on any of the three panes.
+    func setTrailingWidth(_ width: CGFloat) {
+        guard trailingWidth != width else { return }
+        trailingWidth = width
         needsLayout = true
     }
 

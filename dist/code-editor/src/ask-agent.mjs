@@ -6,6 +6,7 @@ export class AskAgentController {
     getDiffContext,
     getModelMeta,
     postMessage,
+    onCancelDiffSelection,
   }) {
     this.monaco = monaco;
     this.container = container;
@@ -13,11 +14,13 @@ export class AskAgentController {
     this.getDiffContext = getDiffContext;
     this.getModelMeta = getModelMeta;
     this.postMessage = postMessage;
+    this.onCancelDiffSelection = onCancelDiffSelection;
     this.activeContext = null;
     this.disposables = [];
 
     this.barEl = this.buildBarElement();
     this.container.appendChild(this.barEl);
+    this.installEscapeListener();
   }
 
   buildBarElement() {
@@ -57,10 +60,16 @@ export class AskAgentController {
         e.preventDefault();
         e.stopPropagation();
         this.submitPrompt();
-      } else if (e.key === 'Escape') {
+      } else if (
+        e.key === 'Escape' &&
+        !e.shiftKey &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey
+      ) {
         e.preventDefault();
         e.stopPropagation();
-        this.hidePrompt(true);
+        this.hidePrompt(true, { cancelled: true });
       }
     });
 
@@ -71,11 +80,43 @@ export class AskAgentController {
 
     cancelBtn.addEventListener('click', (e) => {
       e.preventDefault();
-      this.hidePrompt(true);
+      this.hidePrompt(true, { cancelled: true });
+    });
+
+    bar.addEventListener('pointerdown', (e) => {
+      if (e.target === sendBtn || e.target === cancelBtn) return;
+      if (e.target !== input) {
+        e.preventDefault();
+        input.focus();
+      }
     });
 
     bar.append(badge, input, sendBtn, cancelBtn);
     return bar;
+  }
+
+  installEscapeListener() {
+    const doc = this.container.ownerDocument;
+    const target = doc?.defaultView ?? doc;
+    if (!target || typeof target.addEventListener !== 'function') return;
+    const onKeyDown = (e) => {
+      if (!this.isVisible() || e.defaultPrevented) return;
+      if (
+        e.key === 'Escape' &&
+        !e.shiftKey &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        this.hidePrompt(true, { cancelled: true });
+      }
+    };
+    target.addEventListener('keydown', onKeyDown, false);
+    this.disposables.push({
+      dispose: () => target.removeEventListener('keydown', onKeyDown, false),
+    });
   }
 
   attachToEditor(editor) {
@@ -137,14 +178,15 @@ export class AskAgentController {
     };
   }
 
-  presentBarForContext(ctx, anchorCoords, initialComment = '') {
+  presentBarForContext(ctx, anchorCoords, initialComment = '', { focusInput = true } = {}) {
     this.activeContext = ctx;
     const basename = ctx.path ? ctx.path.split('/').pop() : 'selection';
     const lineRef =
       ctx.startLine === ctx.endLine
         ? `L${ctx.startLine}`
         : `L${ctx.startLine}-${ctx.endLine}`;
-    this.badgeEl.textContent = `${basename}#${lineRef}`;
+    const sideBadge = ctx.side === 'deletions' ? ' (deleted)' : '';
+    this.badgeEl.textContent = `${basename}#${lineRef}${sideBadge}`;
     this.inputEl.value = initialComment;
 
     let topPx = 14;
@@ -173,12 +215,14 @@ export class AskAgentController {
     this.barEl.style.top = `${Math.round(topPx)}px`;
     this.barEl.style.left = `${Math.round(leftPx)}px`;
     this.barEl.hidden = false;
-    this.inputEl.focus();
-    this.inputEl.select();
+    if (focusInput) {
+      this.inputEl.focus();
+      this.inputEl.select();
+    }
     return true;
   }
 
-  openPromptForEditor(editorInstance, initialComment = '') {
+  openPromptForEditor(editorInstance, initialComment = '', options = { focusInput: true }) {
     const ctx = this.captureSelectionContext(editorInstance);
     if (!ctx) return false;
 
@@ -190,10 +234,10 @@ export class AskAgentController {
     } catch {
       coords = null;
     }
-    return this.presentBarForContext(ctx, coords, initialComment);
+    return this.presentBarForContext(ctx, coords, initialComment, options);
   }
 
-  openPromptForDiffContext(diffCtx, initialComment = '') {
+  openPromptForDiffContext(diffCtx, initialComment = '', options = { focusInput: true }) {
     if (!diffCtx) return false;
     const ctx = {
       source: 'diff',
@@ -207,7 +251,7 @@ export class AskAgentController {
     if (ctx.endLine < ctx.startLine) {
       ctx.endLine = ctx.startLine;
     }
-    return this.presentBarForContext(ctx, diffCtx.anchorCoords ?? null, initialComment);
+    return this.presentBarForContext(ctx, diffCtx.anchorCoords ?? null, initialComment, options);
   }
 
   emitOutboundMessage(ctx, promptText) {
@@ -291,12 +335,16 @@ export class AskAgentController {
     return this.openPromptForEditor(undefined, initialText);
   }
 
-  hidePrompt(restoreFocus = false) {
-    const prevEditor = this.activeContext?.editor;
-    const restoreTarget = this.activeContext?.restoreFocusTarget;
+  hidePrompt(restoreFocus = false, { cancelled = false } = {}) {
+    const prevContext = this.activeContext;
+    const prevEditor = prevContext?.editor;
+    const restoreTarget = prevContext?.restoreFocusTarget;
     this.activeContext = null;
     this.barEl.hidden = true;
     this.inputEl.value = '';
+    if (cancelled && prevContext?.source === 'diff') {
+      this.onCancelDiffSelection?.();
+    }
     if (restoreFocus) {
       if (prevEditor) {
         prevEditor.focus?.();
@@ -308,6 +356,13 @@ export class AskAgentController {
 
   isVisible() {
     return !this.barEl.hidden;
+  }
+
+  isInputFocused() {
+    return (
+      !this.barEl.hidden &&
+      this.container.ownerDocument?.activeElement === this.inputEl
+    );
   }
 
   dispose() {

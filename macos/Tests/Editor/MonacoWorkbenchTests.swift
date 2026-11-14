@@ -506,11 +506,11 @@ struct MonacoWorkbenchTests {
         // 3. Change navigation via toolbar buttons updates Pierre active change line
         let nextBtn = try #require(
             EditorTestSupport.findAll(NativeActionControl.self, in: mounted.0.view)
-                .first { $0.toolTip == GitL10n.text("Next change") }
+                .first { $0.toolTip == "\(GitL10n.text("Next change")) (F7)" }
         )
         let prevBtn = try #require(
             EditorTestSupport.findAll(NativeActionControl.self, in: mounted.0.view)
-                .first { $0.toolTip == GitL10n.text("Previous change") }
+                .first { $0.toolTip == "\(GitL10n.text("Previous change")) (⇧F7)" }
         )
         #expect(nextBtn.isEnabled && prevBtn.isEnabled)
         nextBtn.performClick(nil)
@@ -698,7 +698,7 @@ struct MonacoWorkbenchTests {
         )
         let requestB = GitEditorDiffRequest(
             repository: repository,
-            target: .unstaged,
+            target: .staged,
             file: .init(path: "Beta.swift", status: "M")
         )
         workspace.openGitDiff(requestA)
@@ -809,7 +809,7 @@ struct MonacoWorkbenchTests {
         )
         let requestB = GitEditorDiffRequest(
             repository: repository,
-            target: .unstaged,
+            target: .staged,
             file: .init(path: "Beta.swift", status: "M")
         )
 
@@ -946,12 +946,18 @@ struct MonacoWorkbenchTests {
         let betaFile = repoRoot.appendingPathComponent("Beta.swift")
         try Data("let alpha = 1\n".utf8).write(to: alphaFile)
         try Data("let beta = 1\n".utf8).write(to: betaFile)
-        for args in [["init", "--quiet"], ["add", "."]] {
+        for args in [
+            ["init", "--quiet"],
+            ["add", "."],
+            ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--quiet", "-m", "initial"],
+        ] {
             let res = try await LocalGitExecutor().execute(arguments: args, workingDirectory: repoRoot.path)
             try #require(res.isSuccess)
         }
         try Data("let alpha = 2\n".utf8).write(to: alphaFile)
         try Data("let beta = 2\n".utf8).write(to: betaFile)
+        let stageBeta = try await LocalGitExecutor().execute(arguments: ["add", "Beta.swift"], workingDirectory: repoRoot.path)
+        try #require(stageBeta.isSuccess)
 
         let workspace = EditorWorkspace()
         defer { workspace.cancelAndClear() }
@@ -975,7 +981,7 @@ struct MonacoWorkbenchTests {
         )
         let diffB = GitEditorDiffRequest(
             repository: repository,
-            target: .unstaged,
+            target: .staged,
             file: .init(path: "Beta.swift", status: "M")
         )
 
@@ -1153,5 +1159,106 @@ struct MonacoWorkbenchTests {
         #expect(!handled)
         #expect(child.performCount == 1)
         #expect(interceptChecks == 1)
+    }
+
+    @Test func askAgentPreservesDeletionSideAndTargetQualifierAndRoutesDiffShortcuts() throws {
+        let diffFile = GitDiffFile(path: "Sources/App.swift", status: "M")
+        let repo = GitRepositoryIdentity(
+            worktreePath: "/repo",
+            gitDirPath: "/repo/.git",
+            commonGitDirPath: "/repo/.git"
+        )
+        let content = GitEditorDiffModel.Content(
+            document: .init(
+                file: diffFile,
+                text: "",
+                isBinary: false,
+                isTruncated: false,
+                byteLimit: 1_048_576,
+                baseDescription: "working tree vs index"
+            ),
+            before: "line1\noldRemovedCall()\noldSecondLine()\nline4\n",
+            after: "line1\nnewReplacementCall()\nline4\n",
+            presentation: nil,
+            sourceError: nil
+        )
+        let rawDeletionReq = EditorAskAgentRequest(
+            path: "Sources/App.swift",
+            startLine: 2,
+            endLine: 3,
+            selectedText: "",
+            comment: "Why was this removed?",
+            side: .deletions
+        )
+
+        let unstagedResolved = GitEditorDiffView.resolveAskAgentRequest(
+            rawDeletionReq,
+            request: .init(repository: repo, target: .unstaged, file: diffFile),
+            selectedFile: diffFile,
+            content: content
+        )
+        let unstagedPrompt = unstagedResolved.formattedPrompt(workingDirectory: "/repo")
+        #expect(unstagedPrompt.contains("@Sources/App.swift (deleted L2-L3)"))
+        #expect(!unstagedPrompt.contains("@Sources/App.swift#L2-L3"), "Deleted lines must not be formatted as current working-tree #L2-L3")
+        #expect(unstagedPrompt.contains("oldRemovedCall()\noldSecondLine()"))
+        #expect(unstagedPrompt.contains("Why was this removed?"))
+
+        let commitResolved = GitEditorDiffView.resolveAskAgentRequest(
+            EditorAskAgentRequest(
+                path: "Sources/App.swift",
+                startLine: 2,
+                endLine: 2,
+                selectedText: "",
+                comment: "Check commit change",
+                side: .additions
+            ),
+            request: .init(
+                repository: repo,
+                target: .commit(.init("0123456789abcdef0123456789abcdef01234567")),
+                file: diffFile
+            ),
+            selectedFile: diffFile,
+            content: content
+        )
+        let commitPrompt = commitResolved.formattedPrompt(workingDirectory: "/repo")
+        #expect(commitPrompt.contains("@Sources/App.swift#L2 (commit 01234567)"))
+        #expect(commitPrompt.contains("newReplacementCall()"))
+
+        let stagedResolved = GitEditorDiffView.resolveAskAgentRequest(
+            rawDeletionReq,
+            request: .init(repository: repo, target: .staged, file: diffFile),
+            selectedFile: diffFile,
+            content: content
+        )
+        #expect(stagedResolved.formattedPrompt(workingDirectory: "/repo")
+            .contains("@Sources/App.swift (staged, deleted L2-L3)"))
+
+        // Verify F7 / Shift+F7 and Control+Option+[ / ] routing (including AppKit ESC/GS control chars).
+        let f7Event = try #require(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [.function], timestamp: 0,
+            windowNumber: 0, context: nil, characters: "\u{f70a}", charactersIgnoringModifiers: "\u{f70a}",
+            isARepeat: false, keyCode: 98
+        ))
+        let shiftF7Event = try #require(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [.shift, .function], timestamp: 0,
+            windowNumber: 0, context: nil, characters: "\u{f70a}", charactersIgnoringModifiers: "\u{f70a}",
+            isARepeat: false, keyCode: 98
+        ))
+        let ctrlOptLeftBracket = try #require(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [.control, .option], timestamp: 0,
+            windowNumber: 0, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
+            isARepeat: false, keyCode: 33
+        ))
+        let ctrlOptRightBracket = try #require(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [.control, .option], timestamp: 0,
+            windowNumber: 0, context: nil, characters: "\u{1d}", charactersIgnoringModifiers: "\u{1d}",
+            isARepeat: false, keyCode: 30
+        ))
+        for keymap in [EditorKeymap.vscode, EditorKeymap.idea] {
+            #expect(keymap.action(for: f7Event) == .nextDiffChange)
+            #expect(keymap.action(for: shiftF7Event) == .previousDiffChange)
+            #expect(keymap.action(for: ctrlOptLeftBracket) == .previousDiffFile)
+            #expect(keymap.action(for: ctrlOptRightBracket) == .nextDiffFile)
+        }
     }
 }

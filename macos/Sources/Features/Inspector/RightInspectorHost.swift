@@ -217,9 +217,12 @@ extension TerminalWindow {
         inspectorTitlebarPresentation.setWidth(
             TerminalTitlebarMetrics.inspectorCollapsedWidth
         )
+        let inspectorWidths = state.$inspectorWidth
+            .merge(with: state.inspectorWidthChanges)
+            .removeDuplicates()
         let layoutChanges = Publishers.CombineLatest3(
             state.$isInspectorVisible,
-            state.$inspectorWidth,
+            inspectorWidths,
             state.$sidebarWidth
         )
         let resizeChanges = NotificationCenter.default.publisher(
@@ -232,9 +235,10 @@ extension TerminalWindow {
             layoutChanges,
             resizeChanges
         )
-        .sink { [weak self, weak controller] layout, _ in
+        .sink { [weak self, weak controller, weak state] layout, _ in
             guard let self, let controller else { return }
-            let (isVisible, inspectorWidth, sidebarWidth) = layout
+            let (isVisible, publishedWidth, sidebarWidth) = layout
+            let inspectorWidth = state?.effectiveInspectorWidth ?? publishedWidth
             let totalWidth = self.contentLayoutRect.width
             let leadingWidth = controller.supportsSidebar
                 ? sidebarWidth + TerminalShellStyle.dividerWidth
@@ -440,6 +444,8 @@ struct TerminalShellLayoutContainer<Content: View>: View {
         NativeTerminalShell(
             leadingWidth: presentedSidebarWidth + TerminalShellStyle.dividerWidth,
             trailingWidth: preferredInspectorWidth,
+            layoutState: layoutState,
+            tracksLiveInspectorWidth: isSelectedTab,
             leadingVisible: leftVisible,
             trailingVisible: rightVisible,
             chromeBackground: chromeBackground,
@@ -473,7 +479,7 @@ struct TerminalShellLayoutContainer<Content: View>: View {
             trailing: AnyView(HStack(spacing: 0) {
                 RightInspectorResizeHandle(
                     color: controller.sidebarDividerColor, background: .clear,
-                    currentWidth: { layoutState.inspectorWidth },
+                    currentWidth: { layoutState.effectiveInspectorWidth },
                     resize: controller.updateInspectorWidth
                 )
                 .zIndex(10)
@@ -486,15 +492,19 @@ struct TerminalShellLayoutContainer<Content: View>: View {
         )
     }
 
-    private var presentedSidebarWidth: CGFloat {
+    private var isSelectedTab: Bool {
         controller.selectedTabID == ObjectIdentifier(controller)
+    }
+
+    private var presentedSidebarWidth: CGFloat {
+        isSelectedTab
             ? layoutState.sidebarWidth
             : layoutState.committedSidebarWidth
     }
 
     private var preferredInspectorWidth: CGFloat {
-        controller.selectedTabID == ObjectIdentifier(controller)
-            ? layoutState.inspectorWidth
+        isSelectedTab
+            ? layoutState.effectiveInspectorWidth
             : layoutState.committedInspectorWidth
     }
 }

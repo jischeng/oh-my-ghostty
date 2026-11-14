@@ -473,7 +473,11 @@ test('Inline Ask Agent in Pierre diff, keyboard shortcuts, and clean restore on 
     scroller.dispatchEvent(new h.window.PointerEvent('pointerdown', { bubbles: true }));
     assert.ok(h.messages.some((m) => m.type === 'focus'));
 
-    // Clicking a line number in the Pierre gutter selects that line and opens Ask Agent
+    // Clicking a line number in the Pierre gutter selects that line and shows Ask Agent bar
+    // unobtrusively WITHOUT stealing keyboard focus into .omg-ask-agent-input!
+    scroller.focus();
+    assert.equal(h.document.activeElement, scroller);
+
     const { shadowRoot: askShadowRoot } = getDiffShadowRoot(h);
     const gutterLine2 = askShadowRoot.querySelector(
       'code[data-additions] [data-column-number="2"]'
@@ -495,13 +499,56 @@ test('Inline Ask Agent in Pierre diff, keyboard shortcuts, and clean restore on 
         composed: true,
       })
     );
+    const bar = h.document.getElementById('omg-ask-agent-bar');
+    const badge = bar.querySelector('.omg-ask-agent-badge');
+    const input = bar.querySelector('.omg-ask-agent-input');
+
     assert.equal(h.omgEditor.getState().isAskAgentOpen, true);
-    assert.equal(
-      h.document.querySelector('#omg-ask-agent-bar .omg-ask-agent-badge').textContent,
-      'DiffView.swift#L2'
+    assert.notEqual(
+      h.document.activeElement,
+      input,
+      'Plain diff line selection must NOT steal keyboard focus into Ask Agent input'
+    );
+    assert.equal(badge.textContent, 'DiffView.swift#L2');
+
+    // Diff navigation & Shift+Escape shortcuts work immediately after line selection because focus was not stolen
+    h.window.dispatchEvent(
+      new h.window.KeyboardEvent('keydown', { key: 'F7', code: 'F7', bubbles: true })
+    );
+    h.window.dispatchEvent(
+      new h.window.KeyboardEvent('keydown', {
+        key: 'F7',
+        code: 'F7',
+        shiftKey: true,
+        bubbles: true,
+      })
+    );
+    h.window.dispatchEvent(
+      new h.window.KeyboardEvent('keydown', {
+        key: ']',
+        code: 'BracketRight',
+        ctrlKey: true,
+        altKey: true,
+        bubbles: true,
+      })
+    );
+    h.window.dispatchEvent(
+      new h.window.KeyboardEvent('keydown', {
+        key: '\u001b',
+        code: 'BracketLeft',
+        ctrlKey: true,
+        altKey: true,
+        bubbles: true,
+      })
     );
 
-    // Select lines 2..3 in Pierre diff -> updates floating Ask Agent bar with multi-line badge
+    // Plain Escape dismisses the unobtrusive Ask Agent bar even when input is not focused
+    h.window.dispatchEvent(
+      new h.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })
+    );
+    assert.equal(h.omgEditor.getState().isAskAgentOpen, false);
+
+    // Select lines 2..3 in Pierre diff -> updates floating Ask Agent bar without stealing focus
     assert.equal(
       h.omgEditor.selectDiffLines({
         startLine: 2,
@@ -512,11 +559,13 @@ test('Inline Ask Agent in Pierre diff, keyboard shortcuts, and clean restore on 
       true
     );
     assert.equal(h.omgEditor.getState().isAskAgentOpen, true);
-
-    const bar = h.document.getElementById('omg-ask-agent-bar');
-    const badge = bar.querySelector('.omg-ask-agent-badge');
-    const input = bar.querySelector('.omg-ask-agent-input');
+    assert.notEqual(h.document.activeElement, input);
     assert.equal(badge.textContent, 'DiffView.swift#L2-3');
+
+    // Clicking the Ask Agent bar transfers keyboard focus to input
+    bar.dispatchEvent(new h.window.PointerEvent('pointerdown', { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(h.document.activeElement, input);
 
     input.value = 'Extract mode constant into view model';
     input.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
@@ -525,13 +574,43 @@ test('Inline Ask Agent in Pierre diff, keyboard shortcuts, and clean restore on 
     const askMsgs = h.messages.filter((m) => m.type === 'askAgent');
     assert.equal(askMsgs.length, 1);
     assert.equal(askMsgs[0].path, '/workspace/Features/Git/DiffView.swift');
+    assert.equal(askMsgs[0].side, 'additions');
     assert.equal(askMsgs[0].startLine, 2);
     assert.equal(askMsgs[0].endLine, 3);
     assert.equal(askMsgs[0].selectedText, '  let mode = "pierre"\n  print(mode)');
     assert.equal(askMsgs[0].prompt, 'Extract mode constant into view model');
     assert.equal(askMsgs[0].comment, 'Extract mode constant into view model');
 
-    // Keyboard shortcut Cmd+Shift+L in diff mode opens Ask Agent bar
+    // Selecting deletion-side line preserves side: 'deletions', shows (deleted) badge, and emits diffSelection
+    assert.equal(
+      h.omgEditor.selectDiffLines({
+        startLine: 2,
+        endLine: 2,
+        side: 'deletions',
+        openAskAgent: true,
+        focusInput: true,
+      }),
+      true
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(badge.textContent, 'DiffView.swift#L2 (deleted)');
+    assert.equal(h.document.activeElement, input);
+    assert.ok(
+      h.messages.some(
+        (m) => m.type === 'diffSelection' && m.side === 'deletions' && m.hunkIndex === 0
+      ),
+      'Expected diffSelection event with hunkIndex and deletions side'
+    );
+    input.value = 'Why was old print removed?';
+    input.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+
+    const allAskMsgs = h.messages.filter((m) => m.type === 'askAgent');
+    assert.equal(allAskMsgs.length, 2);
+    assert.equal(allAskMsgs[1].side, 'deletions');
+    assert.equal(allAskMsgs[1].startLine, 2);
+    assert.equal(allAskMsgs[1].selectedText, '  print("old")');
+
+    // Keyboard shortcut Cmd+Shift+L in diff mode opens Ask Agent bar AND focuses input
     h.window.dispatchEvent(
       new h.window.KeyboardEvent('keydown', {
         key: 'L',
@@ -541,7 +620,9 @@ test('Inline Ask Agent in Pierre diff, keyboard shortcuts, and clean restore on 
         bubbles: true,
       })
     );
+    await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(h.omgEditor.getState().isAskAgentOpen, true);
+    assert.equal(h.document.activeElement, input);
 
     // Close Ask Agent with Escape, then verify Cmd+W / Cmd+O / Shift+Escape forward hostCommands in diff mode
     input.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
@@ -558,7 +639,15 @@ test('Inline Ask Agent in Pierre diff, keyboard shortcuts, and clean restore on 
     );
 
     const hostCmds = h.messages.filter((m) => m.type === 'hostCommand').map((m) => m.command);
-    assert.deepEqual(hostCmds, ['close', 'open', 'hide']);
+    assert.deepEqual(hostCmds, [
+      'nextDiffChange',
+      'previousDiffChange',
+      'nextDiffFile',
+      'previousDiffFile',
+      'close',
+      'open',
+      'hide',
+    ]);
 
     // Switching back to activateModel hides Pierre diff and restores Monaco editor + viewState
     assert.equal(h.omgEditor.activateModel({ uri }), true);

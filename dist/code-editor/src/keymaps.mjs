@@ -1,8 +1,16 @@
 export class KeymapController {
-  constructor({ monaco, postMessage, isAskAgentOpen, getMode, onAskAgentShortcut }) {
+  constructor({
+    monaco,
+    postMessage,
+    isAskAgentOpen,
+    isAskAgentFocused,
+    getMode,
+    onAskAgentShortcut,
+  }) {
     this.monaco = monaco;
     this.postMessage = postMessage;
     this.isAskAgentOpen = isAskAgentOpen;
+    this.isAskAgentFocused = isAskAgentFocused ?? isAskAgentOpen;
     this.getMode = getMode;
     this.onAskAgentShortcut = onAskAgentShortcut;
     this.profile = 'vscode';
@@ -39,7 +47,7 @@ export class KeymapController {
 
     // Cross-profile host commands
     editor.addCommand(KeyMod.Shift | KeyCode.Escape, () => {
-      if (this.isAskAgentOpen?.()) return;
+      if (this.isAskAgentFocused?.()) return;
       this.emitHostCommand('hide');
     });
     editor.addCommand(KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyS, () => {
@@ -189,7 +197,7 @@ export class KeymapController {
         !event.ctrlKey &&
         !event.altKey
       ) {
-        if (this.isAskAgentOpen?.()) return;
+        if (this.isAskAgentFocused?.()) return;
         event.preventDefault();
         this.emitHostCommand('hide');
         return;
@@ -197,6 +205,35 @@ export class KeymapController {
       const cmd = event.metaKey && !event.ctrlKey;
       const key = (event.key || '').toLowerCase();
       const code = event.code || '';
+
+      // Diff hunk & file navigation shortcuts when not typing in Ask Agent input
+      if (this.getMode?.() === 'diff' && !this.isAskAgentFocused?.()) {
+        if (
+          !event.metaKey &&
+          !event.ctrlKey &&
+          !event.altKey &&
+          (event.key === 'F7' || code === 'F7')
+        ) {
+          event.preventDefault();
+          this.emitHostCommand(event.shiftKey ? 'previousDiffChange' : 'nextDiffChange');
+          return;
+        }
+        if (
+          event.ctrlKey &&
+          event.altKey &&
+          !event.metaKey &&
+          !event.shiftKey &&
+          (code === 'BracketRight' ||
+            code === 'BracketLeft' ||
+            event.key === ']' ||
+            event.key === '[')
+        ) {
+          event.preventDefault();
+          const isNext = code === 'BracketRight' || event.key === ']';
+          this.emitHostCommand(isNext ? 'nextDiffFile' : 'previousDiffFile');
+          return;
+        }
+      }
 
       // Ask Agent shortcut (Cmd+Shift+L / Cmd+Shift+I) when in Pierre diff mode or outside Monaco input
       if (

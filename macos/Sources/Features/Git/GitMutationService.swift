@@ -1,5 +1,84 @@
 import Foundation
 
+extension Notification.Name {
+    static let omgGitRepositoryDidMutate = Notification.Name("OMG.GitRepositoryDidMutate")
+}
+
+enum GitDiffPatchParser {
+    struct ParsedPatch: Equatable, Sendable {
+        let headerLines: [String]
+        let hunks: [[String]]
+    }
+
+    static func parse(_ patch: String) -> ParsedPatch {
+        guard !patch.isEmpty else {
+            return ParsedPatch(headerLines: [], hunks: [])
+        }
+        var lines = patch.components(separatedBy: "\n").map { raw in
+            raw.hasSuffix("\r") ? String(raw.dropLast()) : raw
+        }
+        if lines.last == "" {
+            lines.removeLast()
+        }
+        var headerLines: [String] = []
+        var hunks: [[String]] = []
+        var currentHunk: [String]?
+
+        for line in lines {
+            if line.hasPrefix("@@ ") || line == "@@" {
+                if let existing = currentHunk {
+                    hunks.append(existing)
+                }
+                currentHunk = [line]
+            } else if currentHunk != nil {
+                if line.hasPrefix("diff --git ") {
+                    break
+                }
+                currentHunk?.append(line)
+            } else {
+                headerLines.append(line)
+            }
+        }
+        if let existing = currentHunk {
+            hunks.append(existing)
+        }
+        return ParsedPatch(headerLines: headerLines, hunks: hunks)
+    }
+
+    static func hunkCount(in patch: String) -> Int {
+        parse(patch).hunks.count
+    }
+
+    static func singleHunkPatch(from patch: String, file: GitDiffFile, hunkIndex: Int) -> String? {
+        let parsed = parse(patch)
+        guard parsed.hunks.indices.contains(hunkIndex) else { return nil }
+        let hunkLines = parsed.hunks[hunkIndex]
+
+        let headerLines: [String]
+        if file.isUntracked {
+            let modeLine = parsed.headerLines.first { $0.hasPrefix("new file mode ") } ?? "new file mode 100644"
+            headerLines = [
+                "diff --git a/\(file.path) b/\(file.path)",
+                modeLine,
+                "--- /dev/null",
+                "+++ b/\(file.path)",
+            ]
+        } else if parsed.headerLines.isEmpty {
+            let oldHeader = file.kind == .added ? "/dev/null" : "a/\(file.oldPath ?? file.path)"
+            let newHeader = file.kind == .deleted ? "/dev/null" : "b/\(file.path)"
+            headerLines = [
+                "diff --git a/\(file.oldPath ?? file.path) b/\(file.path)",
+                "--- \(oldHeader)",
+                "+++ \(newHeader)",
+            ]
+        } else {
+            headerLines = parsed.headerLines
+        }
+
+        return (headerLines + hunkLines).joined(separator: "\n") + "\n"
+    }
+}
+
 enum GitBranchOperation: String, Equatable, Sendable {
     case checkout
     case create
@@ -18,6 +97,8 @@ enum GitMutation: Equatable, Sendable {
     case discardBatch(GitStageBatch)
     case stage([String])
     case unstage([String])
+    case stageHunk(patch: String, path: String)
+    case unstageHunk(patch: String, path: String)
     case commit(String, stageAll: Bool = false, amend: Bool = false)
     case checkout(String)
     case create(name: String, start: String)
@@ -29,7 +110,7 @@ enum GitMutation: Equatable, Sendable {
 
     var updatesIndexOnly: Bool {
         switch self {
-        case .stage, .unstage: true
+        case .stage, .unstage, .stageHunk, .unstageHunk: true
         default: false
         }
     }
@@ -37,6 +118,7 @@ enum GitMutation: Equatable, Sendable {
     var indexPaths: [String]? {
         switch self {
         case .stage(let paths), .unstage(let paths): paths
+        case .stageHunk(_, let path), .unstageHunk(_, let path): [path]
         default: nil
         }
     }
@@ -52,6 +134,8 @@ enum GitMutation: Equatable, Sendable {
         case .discard, .discardBatch: return GitL10n.text("Discarding changes…")
         case .stage: return GitL10n.text("Staging files…")
         case .unstage: return GitL10n.text("Unstaging files…")
+        case .stageHunk: return GitL10n.text("Staging hunk…")
+        case .unstageHunk: return GitL10n.text("Unstaging hunk…")
         case .commit: return GitL10n.text("Committing…")
         case .checkout: return GitL10n.text("Switching branch…")
         case .create: return GitL10n.text("Creating branch…")
@@ -66,6 +150,15 @@ enum GitMutation: Equatable, Sendable {
 struct GitMutationService: Sendable {
     let executor: (any GitExecutor)?
     init(executor: (any GitExecutor)? = nil) { self.executor = executor }
+
+    @MainActor
+    static func notifyExternalMutation(in repository: GitRepositoryIdentity) {
+        NotificationCenter.default.post(
+            name: .omgGitRepositoryDidMutate,
+            object: nil,
+            userInfo: ["repository": repository]
+        )
+    }
 
     private func discard(_ file: GitDiffFile, staged: Bool, in repository: GitRepositoryIdentity) async throws {
         let paths = [file.path] + (file.kind == .renamed ? file.oldPath.map { [$0] } ?? [] : [])
@@ -182,6 +275,26 @@ struct GitMutationService: Sendable {
                 _ = try await run(["--literal-pathspecs", "reset", "--quiet", "--pathspec-from-file=-", "--pathspec-file-nul"],
                     in: repository, stdin: Data((paths.joined(separator: "\0") + "\0").utf8))
             } else { _ = try await run(["--literal-pathspecs", "reset", "--quiet", "--"] + paths, in: repository) }
+        case .stageHunk(let patch, let path):
+            try validate([path])
+            guard !patch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw GitDiffServiceError.gitFailed(GitL10n.text("Invalid file selection."))
+            }
+            _ = try await run(
+                ["apply", "--cached", "--recount", "--unidiff-zero", "-"],
+                in: repository,
+                stdin: Data(patch.utf8)
+            )
+        case .unstageHunk(let patch, let path):
+            try validate([path])
+            guard !patch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw GitDiffServiceError.gitFailed(GitL10n.text("Invalid file selection."))
+            }
+            _ = try await run(
+                ["apply", "--cached", "--reverse", "--recount", "--unidiff-zero", "-"],
+                in: repository,
+                stdin: Data(patch.utf8)
+            )
         case .commit(let message, let stageAll, let amend):
             let hasMessage = !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             guard hasMessage || amend else {

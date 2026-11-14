@@ -982,7 +982,12 @@ the row context menu's `Open in Editor` command. The provider validates that the
 path belongs to the current published file tree and is not a directory, then
 calls the host-injected `OpenFileHandler` with the absolute path and the current
 `InspectorPaneContext`, preserving local versus SSH session context for the
-editor controller. Single-click selection does not open files.
+editor controller. Single-click selection does not open files. While a local
+Files inspector pane is visible, the provider watches the root directory and
+currently expanded subdirectories with a debounced (~200ms) kernel directory
+monitor so terminal file mutations (`touch`, `rm`, `mv`, `git checkout`) refresh
+the visible tree automatically; watchers stop immediately when the Files pane
+disappears or switches to an SSH session.
 
 The host renders file tree icons using bundled Material Icon Theme artwork and
 its filename, compound-extension, and folder associations, shared by local and

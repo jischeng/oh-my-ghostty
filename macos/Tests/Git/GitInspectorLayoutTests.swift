@@ -328,7 +328,7 @@ struct GitInspectorLayoutTests {
             $0.toolTip == GitL10n.text("Disable linked scrolling") || $0.toolTip == GitL10n.text("Enable linked scrolling")
         })
 
-        let nextChange = try #require(buttons(in: view).first { $0.toolTip == GitL10n.text("Next change") })
+        let nextChange = try #require(buttons(in: view).first { $0.toolTip == "\(GitL10n.text("Next change")) (F7)" })
         #expect(nextChange.isEnabled)
         // alpha.swift has 2 change hunks: click 1 -> hunk 0, click 2 -> hunk 1, click 3 -> hint, click 4 -> beta.swift
         nextChange.performClick(nil)

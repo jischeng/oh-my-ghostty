@@ -164,7 +164,7 @@ struct GitDiffTextRendererTests {
         func buttons(in node: NSView) -> [NativeActionControl] {
             (node as? NativeActionControl).map { [$0] } ?? node.subviews.flatMap(buttons)
         }
-        let nextFile = try #require(buttons(in: view).first { $0.toolTip == GitL10n.text("Next file") })
+        let nextFile = try #require(buttons(in: view).first { $0.toolTip == "\(GitL10n.text("Next file")) (⌃⌥])" })
         let refresh = try #require(buttons(in: view).first { $0.toolTip == GitL10n.text("Refresh diff") })
         nextFile.performClick(nil)
         for _ in 0..<120 {

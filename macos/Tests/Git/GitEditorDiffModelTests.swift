@@ -300,6 +300,29 @@ struct GitEditorDiffModelTests {
         #expect(await executor.sourceWasCancelled)
     }
 
+    @Test func preferredIndexFallbackAndApplyRequestedFileSelectExpectedTargets() async throws {
+        let root = try await makeRepository()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("alpha\n".utf8).write(to: root.appendingPathComponent("a.txt"))
+        try Data("beta\n".utf8).write(to: root.appendingPathComponent("b.txt"))
+        try Data("gamma\n".utf8).write(to: root.appendingPathComponent("c.txt"))
+        let model = makeModel(root: root, file: .init(path: "b.txt", status: "A", isUntracked: true))
+        defer { model.cancel() }
+
+        await model.reload().value
+        #expect(model.selected?.path == "b.txt")
+
+        // Stage b.txt so it leaves the unstaged list; reload(preferredIndex: 1) selects the next file (c.txt) instead of jumping back to index 0.
+        try await git(["add", "--", "b.txt"], in: root)
+        await model.reload(preferredIndex: 1).value
+        #expect(model.selected?.path == "c.txt")
+
+        // Reusing an open diff tab for another file switches selection cleanly via applyRequestedFile.
+        await model.applyRequestedFile(.init(path: "a.txt", status: "A", isUntracked: true))?.value
+        #expect(model.selected?.path == "a.txt")
+        #expect(model.content?.after == "alpha\n")
+    }
+
     private func makeModel(root: URL, file: GitDiffFile? = nil) -> GitEditorDiffModel {
         let repository = GitRepositoryIdentity(worktreePath: root.path, gitDirPath: root.path + "/.git",
                                                commonGitDirPath: root.path + "/.git")

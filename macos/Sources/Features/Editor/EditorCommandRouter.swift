@@ -4,6 +4,7 @@ enum EditorAction: Hashable {
     case cut, copy, paste, selectAll, selectLine, undo, redo
     case find, replace, goToLine, findNext, findPrevious, documentSymbols
     case save, saveAll, close, open, nextDocument, previousDocument
+    case nextDiffChange, previousDiffChange, nextDiffFile, previousDiffFile
     case hide
     case duplicateLine, deleteLine, moveLineUp, moveLineDown, indent, outdent, toggleLineComment
     case insertLineBelow
@@ -22,6 +23,7 @@ struct EditorKeyStroke: Hashable {
     static let downArrow = "\u{f701}"
     static let leftArrow = "\u{f702}"
     static let rightArrow = "\u{f703}"
+    static let f7 = "\u{f70a}"
 
     let key: String
     let modifiers: UInt
@@ -40,10 +42,13 @@ struct EditorKeyStroke: Hashable {
 
     private static func key(for event: NSEvent) -> String {
         switch event.keyCode {
+        case 30 where event.modifierFlags.contains(.control): "]"
+        case 33 where event.modifierFlags.contains(.control): "["
         case 36: "\r"
         case 48: tab
         case 51: backspace
         case 53: escape
+        case 98: f7
         case 117: delete
         case 123: leftArrow
         case 124: rightArrow
@@ -90,6 +95,10 @@ struct EditorKeymap {
             .init(key: "s", modifiers: [.command, .shift]): .saveAll,
             .init(key: "\r", modifiers: .shift): .insertLineBelow,
             .init(key: EditorKeyStroke.escape, modifiers: .shift): .hide,
+            .init(key: EditorKeyStroke.f7, modifiers: []): .nextDiffChange,
+            .init(key: EditorKeyStroke.f7, modifiers: .shift): .previousDiffChange,
+            .init(key: "]", modifiers: [.control, .option]): .nextDiffFile,
+            .init(key: "[", modifiers: [.control, .option]): .previousDiffFile,
 
             // Option + Word operations (standard macOS text editing)
             .init(key: EditorKeyStroke.backspace, modifiers: .option): .deleteWordBackward,

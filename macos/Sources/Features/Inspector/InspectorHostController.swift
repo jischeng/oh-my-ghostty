@@ -5,6 +5,15 @@ import SwiftUI
 /// The native owner of Inspector presentation. All pre-change notifications are
 /// coalesced into a single read of committed model state on the main queue.
 final class InspectorHostController: NSViewController {
+    private struct RenderedPaneSignature: Equatable {
+        let paneID: String
+        let context: InspectorPaneContext
+        let content: InspectorPaneContent
+        let dividerColor: Color
+        let backgroundColor: Color
+        let environmentRevision: UInt64
+    }
+
     private let terminal: TerminalController
     private let layoutState: VerticalTabWindowLayoutState
     private let registry: InspectorRegistry
@@ -15,11 +24,14 @@ final class InspectorHostController: NSViewController {
     private var observations: [AnyCancellable] = []
     private var surfaceObservation: AnyCancellable?
     private weak var observedSurface: Ghostty.SurfaceView?
+    private var hasConfigured = false
     private var requestedPresentation = false
     private var refreshPending = false
     private var stopped = false
     private var lastContext: InspectorPaneContext?
+    private var lastRenderedSignature: RenderedPaneSignature?
     private var environment = EnvironmentValues()
+    private var environmentRevision: UInt64 = 0
     private var backgroundColor = Color.clear
 
     init(controller: TerminalController, layoutState: VerticalTabWindowLayoutState,
@@ -28,8 +40,12 @@ final class InspectorHostController: NSViewController {
         self.layoutState = layoutState
         self.registry = registry
         super.init(nibName: nil, bundle: nil)
+        let inspectorLayoutChanges = Publishers.CombineLatest(
+            layoutState.$isInspectorVisible.removeDuplicates(),
+            layoutState.$selectedInspectorPaneID.removeDuplicates()
+        ).dropFirst()
         observations = [controller.objectWillChange.sink { [weak self] _ in self?.scheduleRefresh() },
-                        layoutState.objectWillChange.sink { [weak self] _ in self?.scheduleRefresh() },
+                        inspectorLayoutChanges.sink { [weak self] _, _ in self?.scheduleRefresh() },
                         registry.objectWillChange.sink { [weak self] _ in self?.scheduleRefresh() },
                         registry.contentChanges.sink { [weak self] change in
                             guard let self, self.requestedPresentation, self.layoutState.isInspectorVisible else { return }
@@ -113,10 +129,23 @@ final class InspectorHostController: NSViewController {
     func configure(isPresented: Bool, backgroundColor: Color,
                    environment: EnvironmentValues) {
         _ = view
+        let environmentChanged = self.environment.colorScheme != environment.colorScheme
+            || self.environment.controlActiveState != environment.controlActiveState
+            || self.environment.locale != environment.locale
+        let shouldRefresh = !hasConfigured
+            || requestedPresentation != isPresented
+            || self.backgroundColor != backgroundColor
+            || environmentChanged
+        hasConfigured = true
         requestedPresentation = isPresented
         self.backgroundColor = backgroundColor
         self.environment = environment
-        scheduleRefresh()
+        if environmentChanged {
+            environmentRevision &+= 1
+        }
+        if shouldRefresh {
+            scheduleRefresh()
+        }
     }
 
     func stop() {
@@ -176,8 +205,23 @@ final class InspectorHostController: NSViewController {
         updateNavigation()
         view.needsLayout = true
         guard visible, let paneID, let content = registry.content(for: paneID, context: context) else { return }
+        let dividerColor = terminal.sidebarDividerColor
+        let signature = RenderedPaneSignature(
+            paneID: paneID,
+            context: context,
+            content: content,
+            dividerColor: dividerColor,
+            backgroundColor: backgroundColor,
+            environmentRevision: environmentRevision
+        )
+        if lastRenderedSignature == signature,
+           deck.selectedPaneID == paneID,
+           deck.hosts[paneID] != nil {
+            return
+        }
+        lastRenderedSignature = signature
         let root = InspectorPaneContentView(content: content, paneID: paneID, context: context,
-                                            dividerColor: terminal.sidebarDividerColor, registry: registry)
+                                            dividerColor: dividerColor, registry: registry)
             .environment(\.self, environment)
             .environment(\.gitCollectionColors, GitCollectionColors(
                 config: terminal.ghostty.config, background: NSColor(backgroundColor)))

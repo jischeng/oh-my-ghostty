@@ -22,7 +22,7 @@ final class GitEditorDiffModel: ObservableObject {
     @Published private(set) var phase = LoadingPhase.idle
     var isLoading: Bool { phase != .idle }
 
-    private let request: GitEditorDiffRequest
+    private var request: GitEditorDiffRequest
     private let service: GitDiffService
     private var task: Task<Void, Never>?
     private var commitBase: GitDiffCommitBase?
@@ -33,9 +33,10 @@ final class GitEditorDiffModel: ObservableObject {
     }
 
     @discardableResult
-    func reload() -> Task<Void, Never> {
+    func reload(preferredIndex: Int? = nil) -> Task<Void, Never> {
         let optimisticFile = selected ?? request.file
         let path = optimisticFile?.path
+        let fallbackIndex = preferredIndex ?? selected.flatMap { files.firstIndex(of: $0) }
         let knownCommitBase = commitBase
         let shouldPreloadOptimistic: Bool = {
             guard optimisticFile != nil else { return false }
@@ -59,7 +60,14 @@ final class GitEditorDiffModel: ObservableObject {
             try Task.checkCancellation()
             self.files = list.files
             self.commitBase = list.commitBase
-            self.selected = path.flatMap { path in list.files.first { $0.path == path } } ?? list.files.first
+            if let path, let matched = list.files.first(where: { $0.path == path }) {
+                self.selected = matched
+            } else if let fallbackIndex, !list.files.isEmpty {
+                let clamped = min(max(0, fallbackIndex), list.files.count - 1)
+                self.selected = list.files[clamped]
+            } else {
+                self.selected = list.files.first
+            }
             guard let selected = self.selected else {
                 optimisticTask?.cancel()
                 return
@@ -76,6 +84,20 @@ final class GitEditorDiffModel: ObservableObject {
                 self.content = loaded
             }
         }
+    }
+
+    @discardableResult
+    func applyRequestedFile(_ requestedFile: GitDiffFile?) -> Task<Void, Never>? {
+        request.file = requestedFile
+        guard let requestedFile else { return nil }
+        if selected?.path == requestedFile.path, content != nil || isLoading {
+            return nil
+        }
+        if let matched = files.first(where: { $0.path == requestedFile.path }) {
+            return select(matched)
+        }
+        selected = nil
+        return reload()
     }
 
     @discardableResult

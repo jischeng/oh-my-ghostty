@@ -1208,6 +1208,7 @@ enum EditorQuickInputBridge {
         if controller.quickInputModel.isEditingQueuedItem {
             controller.quickInputModel.cancelQueuedItemEdit()
         }
+        controller.hideCoveringEditorWorkspace(surfaceID: surface.id)
         controller.presentQuickInput(for: surface, requestFocus: true)
         controller.quickInputModel.useHistoryText(prompt, mode: .append)
     }

@@ -149,4 +149,68 @@ struct EditorVisibilityHostTests {
         #expect(primarySurface.lastSentCoreOcclusionState == true)
         #expect(secondSurface.lastSentCoreOcclusionState == true)
     }
+
+    @Test func submittingAskAgentOrQuickInputCollapsesCoveringEditorToRevealTerminal() async throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        guard app.app != nil else {
+            Issue.record("Ghostty core app unavailable in test harness")
+            return
+        }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ask-agent-reveal-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("Sample.swift")
+        try Data("let x = 42\n".utf8).write(to: file)
+
+        let editorStore = EditorWorkspaceStore()
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let controller = TerminalController(app, withBaseConfig: config)
+        let window = try #require(controller.window)
+        defer {
+            editorStore.remove(surfaceIDs: controller.surfaceTree.map(\.id))
+            window.delegate = nil
+            window.close()
+        }
+        controller.editorWorkspaceStore = editorStore
+        let surface = try #require(controller.surfaceTree.first)
+        let workspace = editorStore.workspace(for: controller.tabSessionID, surfaceID: surface.id)
+        workspace.open(path: file.path, filesystem: LocalWorkspaceFilesystem(workingDirectory: root.path))
+        for _ in 0..<50 {
+            if !workspace.isLoading, workspace.documents.count == 1 { break }
+            try await Task.sleep(for: .milliseconds(15))
+        }
+        #expect(workspace.isVisible)
+        #expect(editorStore.isEditorCovering(surfaceID: surface.id))
+
+        // 1. Submitting Ask Agent collapses the covering EditorWorkspace (leaving open documents
+        //    intact for 1-keystroke Shift+Esc restore) and opens QuickInput with the prompt.
+        EditorQuickInputBridge.send(
+            EditorAskAgentRequest(
+                path: file.path,
+                startLine: 1,
+                endLine: 1,
+                selectedText: "let x = 42",
+                comment: "Explain this constant"
+            ),
+            workingDirectory: root.path,
+            to: controller,
+            surface: surface
+        )
+        #expect(!workspace.isVisible)
+        #expect(!editorStore.isEditorCovering(surfaceID: surface.id))
+        #expect(workspace.documents.count == 1)
+        #expect(controller.quickInputModel.isPresented)
+        #expect(controller.quickInputModel.draft.contains("@Sample.swift#L1"))
+        #expect(controller.quickInputModel.draft.contains("Explain this constant"))
+
+        // 2. If the user re-opens the editor while QuickInput is open and submits/queues a draft,
+        //    the covering editor also collapses immediately so the terminal is visible.
+        workspace.isVisible = true
+        #expect(editorStore.isEditorCovering(surfaceID: surface.id))
+        controller.queueQuickInputDraft()
+        #expect(!workspace.isVisible)
+        #expect(!editorStore.isEditorCovering(surfaceID: surface.id))
+        #expect(workspace.documents.count == 1)
+    }
 }

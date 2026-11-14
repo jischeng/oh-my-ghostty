@@ -309,6 +309,75 @@ struct GitHistoryServiceTests {
         #expect(commands.count >= 6)
         #expect(commands.allSatisfy { $0.first == "--no-optional-locks" })
     }
+
+    @Test func plainTextAndMsgSearchPushGrepDownToGitLogWithoutLinearBatchScanning() async throws {
+        let directory = createTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try runCommand(["git", "init", "-b", "main"], in: directory.path)
+
+        var fastImportStream = ""
+        for index in 0..<410 {
+            let message = "commit \(index)\n\nbody needle \(index)\n"
+            let byteCount = message.utf8.count
+            fastImportStream += "commit refs/heads/main\n"
+            fastImportStream += "mark :\(index + 1)\n"
+            fastImportStream += "author History Test <history@example.com> \(1_700_000_000 + index) +0000\n"
+            fastImportStream += "committer History Test <history@example.com> \(1_700_000_000 + index) +0000\n"
+            fastImportStream += "data \(byteCount)\n\(message)"
+            if index > 0 {
+                fastImportStream += "from :\(index)\n"
+            }
+        }
+        let importProcess = Process()
+        importProcess.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        importProcess.arguments = ["git", "fast-import", "--quiet"]
+        importProcess.currentDirectoryURL = directory
+        let stdinPipe = Pipe()
+        importProcess.standardInput = stdinPipe
+        try importProcess.run()
+        stdinPipe.fileHandleForWriting.write(Data(fastImportStream.utf8))
+        try stdinPipe.fileHandleForWriting.close()
+        importProcess.waitUntilExit()
+        #expect(importProcess.terminationStatus == 0)
+
+        let repository = try await identity(for: directory)
+        let snapshot = try await GitHistoryService().captureSnapshot(for: repository, scope: .allBranches)
+
+        let plainRecorder = RecordingHistoryExecutor()
+        let plainService = GitHistoryService(executor: plainRecorder)
+        let deepPage = try await plainService.loadPage(
+            snapshot: snapshot,
+            repository: repository,
+            offset: 405,
+            pageSize: 3,
+            query: "NEEDLE"
+        )
+        #expect(deepPage.commits.count == 3)
+        #expect(deepPage.hasMore)
+        let plainLogCommands = await plainRecorder.commands.filter { $0.contains("log") }
+        let grepLogCommands = plainLogCommands.filter { $0.contains("--grep=NEEDLE") }
+        let authorLogCommands = plainLogCommands.filter { $0.contains("--author=NEEDLE") }
+        #expect(plainLogCommands.count == 2)
+        #expect(grepLogCommands.count == 1)
+        #expect(authorLogCommands.count == 1)
+        #expect(grepLogCommands[0].contains("--regexp-ignore-case"))
+        #expect(grepLogCommands[0].contains("--fixed-strings"))
+        #expect(grepLogCommands[0].contains("--skip=405"))
+
+        let msgRecorder = RecordingHistoryExecutor()
+        let msgService = GitHistoryService(executor: msgRecorder)
+        let msgPage = try await msgService.loadPage(
+            snapshot: snapshot,
+            repository: repository,
+            offset: 0,
+            pageSize: 5,
+            query: "msg:\"needle 409\""
+        )
+        #expect(msgPage.commits.map(\.subject) == ["commit 409"])
+        let msgLogCommands = await msgRecorder.commands.filter { $0.contains("log") }
+        #expect(msgLogCommands.count == 1)
+        #expect(msgLogCommands[0].contains("--grep=needle 409"))
+    }
 }
 
 private actor RecordingHistoryExecutor: GitExecutor {

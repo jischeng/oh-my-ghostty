@@ -181,6 +181,19 @@ enum EditorQuickOpenSearch {
             }.value
         }
 
+        do {
+            if let indexed = try await filesystem.listQuickOpenFiles(
+                under: rootDirectory,
+                maxFiles: maxRemoteFiles
+            ) {
+                return indexed
+            }
+        } catch is CancellationError {
+            return []
+        } catch {
+            // Fall back to bounded directory walking when single-command indexing fails.
+        }
+
         var queue: [(path: String, depth: Int)] = [(rootDirectory, 0)]
         var visitedDirs = 0
         var files: [WorkspaceFileEntry] = []

@@ -494,6 +494,7 @@ export class PierreDiffController {
     this.lineLookup = { additions: new Map(), deletions: new Map() };
     this.changeBlocks = [];
     this.currentChangeIndex = -1;
+    this.activeHunkIndex = -1;
     this.currentLineNumber = 1;
     this.currentSide = 'additions';
     this.lastSelectedRange = null;
@@ -563,15 +564,16 @@ export class PierreDiffController {
       unsafeCSS: OMG_PIERRE_UNSAFE_CSS,
       onGutterUtilityClick: (range) => {
         if (range) {
-          this.handleSelectedRange(range, true);
+          this.handleSelectedRange(range, true, { focusInput: true });
         }
       },
       onLineSelectionEnd: (range) => {
         if (range) {
-          this.handleSelectedRange(range, true);
+          this.handleSelectedRange(range, true, { focusInput: false });
         } else {
           this.lastSelectedRange = null;
           this.askAgent?.hidePrompt?.(false);
+          this.emitDiffSelectionState();
         }
       },
     };
@@ -815,10 +817,16 @@ export class PierreDiffController {
 
     if (!isSameDiffTarget) {
       this.currentChangeIndex = -1;
+      this.activeHunkIndex = (baseDiff.hunks?.length ?? 0) > 0 ? 0 : -1;
       this.currentLineNumber = 1;
       this.currentSide = 'additions';
       this.lastSelectedRange = null;
       this.scrollerEl.scrollTop = 0;
+    } else if (
+      this.activeHunkIndex < 0 ||
+      this.activeHunkIndex >= (baseDiff.hunks?.length ?? 0)
+    ) {
+      this.activeHunkIndex = (baseDiff.hunks?.length ?? 0) > 0 ? 0 : -1;
     }
 
     const options = this.buildOptions({
@@ -949,6 +957,7 @@ export class PierreDiffController {
     if (!block) return false;
 
     this.currentChangeIndex = targetIndex;
+    this.activeHunkIndex = block.hunkIndex ?? this.activeHunkIndex;
     this.currentLineNumber = block.modifiedLineNumber;
     this.currentSide = block.side;
 
@@ -960,7 +969,67 @@ export class PierreDiffController {
     this.scrollToLineElement(lineEl);
     this.ensureShadowScrollListener();
     this.syncHorizontalScrollClipping();
+    this.emitDiffSelectionState();
     return true;
+  }
+
+  resolveHunkIndex(side, startLine, endLine) {
+    const hunks = this.cachedBaseDiff?.hunks ?? [];
+    if (hunks.length === 0) return -1;
+    const lo = Math.min(startLine, endLine);
+    const hi = Math.max(startLine, endLine);
+    const checkDeletions = side === 'deletions';
+
+    for (let idx = 0; idx < hunks.length; idx++) {
+      const hunk = hunks[idx];
+      let addCount = 0;
+      let delCount = 0;
+      for (const content of hunk.hunkContent ?? []) {
+        if (content.type === 'context') {
+          addCount += content.lines;
+          delCount += content.lines;
+        } else if (content.type === 'change') {
+          addCount += content.additions;
+          delCount += content.deletions;
+        }
+      }
+      const spanStart = Math.max(
+        1,
+        checkDeletions ? hunk.deletionStart || 1 : hunk.additionStart || 1
+      );
+      const spanCount = Math.max(1, checkDeletions ? delCount : addCount);
+      const spanEnd = spanStart + spanCount - 1;
+      if (lo <= spanEnd && hi >= spanStart) {
+        return idx;
+      }
+    }
+
+    return this.activeHunkIndex >= 0 && this.activeHunkIndex < hunks.length
+      ? this.activeHunkIndex
+      : 0;
+  }
+
+  emitDiffSelectionState() {
+    this.postMessage?.({
+      type: 'diffSelection',
+      id: this.activeState.id,
+      path: this.activeState.path,
+      hunkIndex: this.activeHunkIndex,
+      hunkCount: this.cachedBaseDiff?.hunks?.length ?? 0,
+      currentChangeIndex: this.currentChangeIndex,
+      changeCount: this.changeBlocks.length,
+      side: this.lastSelectedRange?.side ?? null,
+      startLine: this.lastSelectedRange?.startLine ?? null,
+      endLine: this.lastSelectedRange?.endLine ?? null,
+    });
+  }
+
+  clearSelection() {
+    this.lastSelectedRange = null;
+    if (this.fileDiffInstance) {
+      this.fileDiffInstance.setSelectedLines(null, { notify: false });
+    }
+    this.emitDiffSelectionState();
   }
 
   extractLinesText(side, startLine, endLine) {
@@ -1001,7 +1070,7 @@ export class PierreDiffController {
     };
   }
 
-  handleSelectedRange(range, openPrompt = true) {
+  handleSelectedRange(range, openPrompt = true, { focusInput = false } = {}) {
     if (!range) return false;
     const side = range.endSide ?? range.side ?? 'additions';
     const startLine = Math.max(1, Math.min(range.start, range.end));
@@ -1010,6 +1079,8 @@ export class PierreDiffController {
     this.lastSelectedRange = { side, startLine, endLine };
     this.currentLineNumber = startLine;
     this.currentSide = side;
+    this.activeHunkIndex = this.resolveHunkIndex(side, startLine, endLine);
+    this.emitDiffSelectionState();
 
     if (!openPrompt || !this.askAgent) {
       return true;
@@ -1018,18 +1089,28 @@ export class PierreDiffController {
     const selectedText = this.extractLinesText(side, startLine, endLine);
     const anchorCoords = this.computeAnchorRectForLine(startLine, side);
 
-    return this.askAgent.openPromptForDiffContext({
-      path: this.activeState.path,
-      side,
-      startLine,
-      endLine,
-      selectedText,
-      anchorCoords,
-      restoreFocusTarget: this.scrollerEl,
-    });
+    return this.askAgent.openPromptForDiffContext(
+      {
+        path: this.activeState.path,
+        side,
+        startLine,
+        endLine,
+        selectedText,
+        anchorCoords,
+        restoreFocusTarget: this.scrollerEl,
+      },
+      '',
+      { focusInput }
+    );
   }
 
-  selectLines({ startLine = 1, endLine = startLine, side = 'additions', openAskAgent = true } = {}) {
+  selectLines({
+    startLine = 1,
+    endLine = startLine,
+    side = 'additions',
+    openAskAgent = true,
+    focusInput = false,
+  } = {}) {
     if (!this.fileDiffInstance) return false;
     const s = Math.max(1, Math.trunc(Number(startLine) || 1));
     const e = Math.max(s, Math.trunc(Number(endLine) || s));
@@ -1038,7 +1119,11 @@ export class PierreDiffController {
       { start: s, end: e, side: normalizedSide },
       { notify: false }
     );
-    return this.handleSelectedRange({ start: s, end: e, side: normalizedSide }, openAskAgent);
+    return this.handleSelectedRange(
+      { start: s, end: e, side: normalizedSide },
+      openAskAgent,
+      { focusInput: Boolean(focusInput) }
+    );
   }
 
   captureNativeDomSelection() {
@@ -1158,7 +1243,7 @@ export class PierreDiffController {
     if (!this.askAgent) return false;
     const ctx = this.captureAskAgentContext();
     if (!ctx) return false;
-    return this.askAgent.openPromptForDiffContext(ctx, initialComment);
+    return this.askAgent.openPromptForDiffContext(ctx, initialComment, { focusInput: true });
   }
 
   setTheme(themeData) {
@@ -1207,6 +1292,7 @@ export class PierreDiffController {
       ...this.activeState,
       changeCount: this.changeBlocks.length,
       currentChangeIndex: this.currentChangeIndex,
+      activeHunkIndex: this.activeHunkIndex,
       currentLineNumber: this.currentLineNumber,
       currentSide: this.currentSide,
       hunkCount: this.effectiveDiff?.hunks?.length ?? 0,

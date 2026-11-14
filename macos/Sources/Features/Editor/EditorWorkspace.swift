@@ -388,9 +388,17 @@ final class EditorWorkspace: ObservableObject {
         openTask?.cancel()
         isLoading = false
         errorMessage = nil
-        let existing = gitDiffs.first { $0.repository == request.repository && $0.target == request.target && $0.file?.path == request.file?.path }
-        if existing == nil { gitDiffs.append(request) }
-        selectGitDiff(existing ?? request)
+        if let index = gitDiffs.firstIndex(where: {
+            $0.repository == request.repository && $0.target == request.target
+        }) {
+            if let requestedFile = request.file, gitDiffs[index].file != requestedFile {
+                gitDiffs[index].file = requestedFile
+            }
+            selectGitDiff(gitDiffs[index])
+        } else {
+            gitDiffs.append(request)
+            selectGitDiff(request)
+        }
     }
 
     func selectGitDiff(_ request: GitEditorDiffRequest) {
@@ -661,6 +669,13 @@ final class EditorWorkspaceStore {
     func hideIfCovering(surfaceID: UUID) -> Bool {
         guard let workspace = workspaces[surfaceID], workspace.isVisible else { return false }
         workspace.isVisible = false
+        return true
+    }
+
+    @discardableResult
+    func focusIfCovering(surfaceID: UUID) -> Bool {
+        guard let workspace = workspaces[surfaceID], workspace.isVisible else { return false }
+        workspace.workbenchController.focus()
         return true
     }
 

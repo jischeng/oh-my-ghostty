@@ -618,6 +618,53 @@ struct EditorWorkspaceTests {
         #expect(workspace.workbenchController.activeDiff?.path == "Code.swift")
         #expect(workspace.workbenchController.activeDiff?.inline == false)
     }
+
+    @Test @MainActor func openGitDiffDeduplicatesSameTargetEvenAfterFileSwitchAndUpdatesRequestedFile() {
+        let workspace = EditorWorkspace()
+        defer { workspace.cancelAndClear() }
+
+        let repo = GitRepositoryIdentity(
+            worktreePath: "/repo",
+            gitDirPath: "/repo/.git",
+            commonGitDirPath: "/repo/.git"
+        )
+        let initial = GitEditorDiffRequest(
+            repository: repo,
+            target: .unstaged,
+            file: .init(path: "Alpha.swift", status: "M")
+        )
+        workspace.openGitDiff(initial)
+        #expect(workspace.gitDiffs.count == 1)
+        #expect(workspace.gitDiff?.id == initial.id)
+        #expect(workspace.gitDiff?.file?.path == "Alpha.swift")
+
+        // Simulate in-diff Next File mutating the existing tab's selected file.
+        workspace.updateGitDiffFile(.init(path: "Beta.swift", status: "M"), for: initial.id)
+        #expect(workspace.gitDiffs.count == 1)
+        #expect(workspace.gitDiff?.file?.path == "Beta.swift")
+
+        // Opening another unstaged file from Git Inspector reuses the existing .unstaged tab
+        // and updates its requested file instead of splitting into duplicate .unstaged tabs.
+        let reopenGamma = GitEditorDiffRequest(
+            repository: repo,
+            target: .unstaged,
+            file: .init(path: "Gamma.swift", status: "A", isUntracked: true)
+        )
+        workspace.openGitDiff(reopenGamma)
+        #expect(workspace.gitDiffs.count == 1)
+        #expect(workspace.gitDiff?.id == initial.id)
+        #expect(workspace.gitDiff?.file?.path == "Gamma.swift")
+
+        // A distinct target (.staged) still opens its own separate tab.
+        let staged = GitEditorDiffRequest(
+            repository: repo,
+            target: .staged,
+            file: .init(path: "Alpha.swift", status: "M")
+        )
+        workspace.openGitDiff(staged)
+        #expect(workspace.gitDiffs.count == 2)
+        #expect(workspace.gitDiff?.id == staged.id)
+    }
 }
 
 private actor ControlledEditorWorkspaceFilesystem: WorkspaceFilesystem {

@@ -225,6 +225,11 @@ export function createOmgEditorWorkbench({
     container: appContainer,
     getTargetEditor: getActiveCodeEditor,
     getDiffContext: () => (mode === 'diff' ? pierreDiff?.captureAskAgentContext() : null),
+    onCancelDiffSelection: () => {
+      if (mode === 'diff') {
+        pierreDiff?.clearSelection();
+      }
+    },
     getModelMeta: (uri) => modelMetaByUri.get(uri) ?? null,
     postMessage,
   });
@@ -244,6 +249,7 @@ export function createOmgEditorWorkbench({
     monaco,
     postMessage,
     isAskAgentOpen: () => askAgent.isVisible(),
+    isAskAgentFocused: () => askAgent.isInputFocused(),
     getMode: () => mode,
     onAskAgentShortcut: () => pierreDiff.openAskAgentPrompt(),
   });

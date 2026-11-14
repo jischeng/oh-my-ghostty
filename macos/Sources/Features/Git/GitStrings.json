@@ -1453,5 +1453,29 @@
   "Cannot send Git command while terminal is waiting for password input.": {
     "en": "Cannot send Git command while terminal is waiting for password input.",
     "zh-Hans": "终端正在等待密码输入，无法发送 Git 命令。"
+  },
+  "Stage Hunk": {
+    "en": "Stage Hunk",
+    "zh-Hans": "暂存区块"
+  },
+  "Unstage Hunk": {
+    "en": "Unstage Hunk",
+    "zh-Hans": "取消暂存区块"
+  },
+  "Stage current hunk": {
+    "en": "Stage current hunk",
+    "zh-Hans": "暂存当前差异区块"
+  },
+  "Unstage current hunk": {
+    "en": "Unstage current hunk",
+    "zh-Hans": "取消暂存当前差异区块"
+  },
+  "Staging hunk…": {
+    "en": "Staging hunk…",
+    "zh-Hans": "正在暂存区块…"
+  },
+  "Unstaging hunk…": {
+    "en": "Unstaging hunk…",
+    "zh-Hans": "正在取消暂存区块…"
   }
 }

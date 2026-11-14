@@ -1,7 +1,108 @@
 import AppKit
+import Darwin
 import Foundation
 import OSLog
 import UniformTypeIdentifiers
+
+@MainActor
+final class LocalFilesDirectoryWatcher {
+    nonisolated static let defaultDebounceInterval: Duration = .milliseconds(200)
+    nonisolated static let maxWatchedDirectories = 128
+
+    private struct Entry {
+        let descriptor: CInt
+        let source: any DispatchSourceFileSystemObject
+    }
+
+    private let debounceInterval: Duration
+    private let onChange: @MainActor () -> Void
+    private var entries: [String: Entry] = [:]
+    private var invalidatedPaths: Set<String> = []
+    private var debounceTask: Task<Void, Never>?
+
+    var watchedDirectoryCount: Int { entries.count }
+
+    init(
+        debounceInterval: Duration = LocalFilesDirectoryWatcher.defaultDebounceInterval,
+        onChange: @escaping @MainActor () -> Void
+    ) {
+        self.debounceInterval = debounceInterval
+        self.onChange = onChange
+    }
+
+    deinit {
+        debounceTask?.cancel()
+        for entry in entries.values {
+            entry.source.cancel()
+        }
+    }
+
+    func update(directories: Set<String>) {
+        let resolvedTargets = Array(
+            Set(
+                directories
+                    .filter { !$0.isEmpty }
+                    .map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path }
+            )
+        )
+        .sorted { lhs, rhs in
+            if lhs.count != rhs.count { return lhs.count < rhs.count }
+            return lhs < rhs
+        }
+        .prefix(Self.maxWatchedDirectories)
+        let desired = Set(resolvedTargets)
+
+        for existingPath in Array(entries.keys) where !desired.contains(existingPath) || invalidatedPaths.contains(existingPath) {
+            entries.removeValue(forKey: existingPath)?.source.cancel()
+            invalidatedPaths.remove(existingPath)
+        }
+
+        for path in desired where entries[path] == nil {
+            let fd = Darwin.open(path, O_EVTONLY)
+            guard fd >= 0 else { continue }
+            let source = DispatchSource.makeFileSystemObjectSource(
+                fileDescriptor: fd,
+                eventMask: [.write, .rename, .delete, .extend, .attrib, .link],
+                queue: .main
+            )
+            source.setEventHandler { [weak self, weak source] in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    if let flags = source?.data, flags.contains(.delete) || flags.contains(.rename) {
+                        self.invalidatedPaths.insert(path)
+                    }
+                    self.scheduleChangeNotification()
+                }
+            }
+            source.setCancelHandler {
+                Darwin.close(fd)
+            }
+            entries[path] = Entry(descriptor: fd, source: source)
+            source.resume()
+        }
+    }
+
+    func stop() {
+        debounceTask?.cancel()
+        debounceTask = nil
+        invalidatedPaths.removeAll()
+        for entry in entries.values {
+            entry.source.cancel()
+        }
+        entries.removeAll()
+    }
+
+    private func scheduleChangeNotification() {
+        guard debounceTask == nil else { return }
+        let delay = debounceInterval
+        debounceTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled, let self else { return }
+            self.debounceTask = nil
+            self.onChange()
+        }
+    }
+}
 
 @MainActor
 final class BuiltInFilesInspectorProvider {
@@ -44,8 +145,15 @@ final class BuiltInFilesInspectorProvider {
     private let filesystemFactory: (InspectorPaneContext) -> any WorkspaceFilesystem
     private let openFile: OpenFileHandler
     private let currentDocumentPath: CurrentDocumentHandler
+    private let fsEventDebounceInterval: Duration
     private var states: [UUID: BrowserState] = [:]
     private var loadTasks: [LoadKey: Task<Void, Never>] = [:]
+    private var visibleTabs: Set<UUID> = []
+    private var directoryWatchers: [UUID: LocalFilesDirectoryWatcher] = [:]
+
+    var activeWatchedDirectoryCountForTesting: Int {
+        directoryWatchers.values.reduce(0) { $0 + $1.watchedDirectoryCount }
+    }
 
     init(
         registry: InspectorRegistry,
@@ -56,12 +164,20 @@ final class BuiltInFilesInspectorProvider {
                                                             preferredSurfaceID: context.surfaceID,
                                                             descriptor: descriptor)
         },
+        fsEventDebounceInterval: Duration = LocalFilesDirectoryWatcher.defaultDebounceInterval,
         openFile: @escaping OpenFileHandler
     ) {
         self.registry = registry
         self.filesystemFactory = filesystemFactory
         self.currentDocumentPath = currentDocumentPath
+        self.fsEventDebounceInterval = fsEventDebounceInterval
         self.openFile = openFile
+    }
+
+    deinit {
+        for task in loadTasks.values {
+            task.cancel()
+        }
     }
 
     func register() throws {
@@ -81,6 +197,8 @@ final class BuiltInFilesInspectorProvider {
     }
 
     func forgetTab(_ tabID: UUID) {
+        visibleTabs.remove(tabID)
+        stopDirectoryWatcher(for: tabID)
         cancelTasks(tabID: tabID)
         states.removeValue(forKey: tabID)
     }
@@ -88,15 +206,20 @@ final class BuiltInFilesInspectorProvider {
     private func handle(_ event: InspectorPaneLifecycleEvent) {
         guard case .appeared(let context) = event else {
             if case .disappeared(let previousContext) = event {
+                visibleTabs.remove(previousContext.tabID)
+                stopDirectoryWatcher(for: previousContext.tabID)
                 cancelTasks(tabID: previousContext.tabID)
                 Self.logger.debug("Files pane disappeared tab=\(previousContext.tabID.uuidString, privacy: .public)")
             }
             return
         }
+        let wasVisible = visibleTabs.contains(context.tabID)
+        visibleTabs.insert(context.tabID)
         Self.logger.debug("Files pane appeared tab=\(context.tabID.uuidString, privacy: .public) cwd=\(context.workingDirectory ?? "<none>", privacy: .public)")
         guard context.workingDirectory?.trimmingCharacters(
             in: .whitespacesAndNewlines
         ).isEmpty == false else {
+            stopDirectoryWatcher(for: context.tabID)
             cancelTasks(tabID: context.tabID)
             states.removeValue(forKey: context.tabID)
             publish(
@@ -113,7 +236,8 @@ final class BuiltInFilesInspectorProvider {
         var state = state(for: context)
         state.context = context
         states[context.tabID] = state
-        if previousState?.rootPath == state.rootPath, state.tree != nil {
+        syncDirectoryWatcher(for: context.tabID)
+        if wasVisible, previousState?.rootPath == state.rootPath, state.tree != nil {
             Self.logger.debug("Files context updated without root reload tab=\(context.tabID.uuidString, privacy: .public)")
             return
         }
@@ -122,8 +246,40 @@ final class BuiltInFilesInspectorProvider {
         }
         reloadRoot(
             context: context,
-            reason: previousState == nil ? "appear" : "cwd"
+            reason: previousState == nil ? "appear" : (wasVisible ? "cwd" : "reappear")
         )
+    }
+
+    private func syncDirectoryWatcher(for tabID: UUID) {
+        guard visibleTabs.contains(tabID),
+              let state = states[tabID],
+              state.filesystem.descriptor.kind == .local,
+              !state.context.session.isSSHSession else {
+            stopDirectoryWatcher(for: tabID)
+            return
+        }
+        let watcher = directoryWatchers[tabID] ?? {
+            let created = LocalFilesDirectoryWatcher(debounceInterval: fsEventDebounceInterval) { [weak self] in
+                guard let self,
+                      self.visibleTabs.contains(tabID),
+                      let current = self.states[tabID],
+                      current.filesystem.descriptor.kind == .local,
+                      !current.context.session.isSSHSession else { return }
+                self.reloadRoot(context: current.context, reason: "fsevent")
+            }
+            directoryWatchers[tabID] = created
+            return created
+        }()
+        var directories = state.expanded
+        directories.insert(state.rootPath)
+        if let tree = state.tree {
+            directories.insert(Self.nodeRoot(of: tree))
+        }
+        watcher.update(directories: directories)
+    }
+
+    private func stopDirectoryWatcher(for tabID: UUID) {
+        directoryWatchers.removeValue(forKey: tabID)?.stop()
     }
 
     private func handle(_ action: InspectorPaneAction) {
@@ -150,6 +306,7 @@ final class BuiltInFilesInspectorProvider {
                     )
                 }
                 states[context.tabID] = state
+                syncDirectoryWatcher(for: context.tabID)
                 publishTree(for: context.tabID)
                 if node.children == nil {
                     loadChildren(nodeID: id, context: context)
@@ -168,6 +325,7 @@ final class BuiltInFilesInspectorProvider {
                     )
                 }
                 states[context.tabID] = state
+                syncDirectoryWatcher(for: context.tabID)
                 publishTree(for: context.tabID)
             }
 
@@ -209,6 +367,7 @@ final class BuiltInFilesInspectorProvider {
                 )
             }
             states[context.tabID] = state
+            syncDirectoryWatcher(for: context.tabID)
             publishTree(for: context.tabID)
 
         case .expandAll:
@@ -408,6 +567,7 @@ final class BuiltInFilesInspectorProvider {
                 }
                 current.tree = tree
                 states[context.tabID] = current
+                syncDirectoryWatcher(for: context.tabID)
                 published = .fileTree(tree)
             }
             publish(published, tabID: context.tabID)

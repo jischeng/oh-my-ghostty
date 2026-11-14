@@ -31,10 +31,15 @@ final class GitRepositoryChangeMonitor {
                 let mustRescan = (0..<count).contains {
                     flags[$0] & FSEventStreamEventFlags(kFSEventStreamEventFlagMustScanSubDirs) != 0
                 }
-                Task { @MainActor in
+                let deliver: @MainActor @Sendable () -> Void = {
                     if mustRescan || names.contains(where: { path in
                         !monitor.ignoredPaths.contains { path == $0 || path.hasPrefix($0 + "/") }
                     }) { monitor.markDirty() }
+                }
+                if Thread.isMainThread {
+                    MainActor.assumeIsolated(deliver)
+                } else {
+                    Task { @MainActor in deliver() }
                 }
             }, &context, Array(Set(paths)) as CFArray,
             FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.2,
@@ -55,6 +60,16 @@ final class GitRepositoryChangeMonitor {
             self.notificationTask = nil
             self.onChange()
         }
+    }
+
+    func acknowledgeRefresh(now: Date = Date()) {
+        if let stream {
+            FSEventStreamFlushSync(stream)
+        }
+        notificationTask?.cancel()
+        notificationTask = nil
+        dirty = false
+        lastRefresh = now
     }
 
     func needsRefresh(now: Date = Date()) -> Bool {

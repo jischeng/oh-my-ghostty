@@ -149,12 +149,17 @@ final class VerticalTabWindowLayoutState: ObservableObject {
         inspectorResizeWorkItem?.cancel()
         pendingSidebarWidth = nil
         pendingInspectorWidth = nil
+        let previousInspectorEffective = effectiveInspectorWidth
+        liveInspectorWidth = nil
         if isSidebarVisible != value.sidebarVisible { isSidebarVisible = value.sidebarVisible }
         if sidebarWidth != CGFloat(value.sidebarWidth) { sidebarWidth = CGFloat(value.sidebarWidth) }
         if committedSidebarWidth != sidebarWidth { committedSidebarWidth = sidebarWidth }
         if isInspectorVisible != value.inspectorVisible { isInspectorVisible = value.inspectorVisible }
         if inspectorWidth != CGFloat(value.inspectorWidth) { inspectorWidth = CGFloat(value.inspectorWidth) }
         if committedInspectorWidth != inspectorWidth { committedInspectorWidth = inspectorWidth }
+        if effectiveInspectorWidth != previousInspectorEffective {
+            inspectorWidthChanges.send(effectiveInspectorWidth)
+        }
         if selectedInspectorPaneID != value.inspectorPane { selectedInspectorPaneID = value.inspectorPane }
     }
 
@@ -214,6 +219,12 @@ final class VerticalTabWindowLayoutState: ObservableObject {
     @Published private(set) var inspectorWidth = RightInspectorMetrics.defaultWidth
     @Published private(set) var committedInspectorWidth = RightInspectorMetrics.defaultWidth
     @Published private(set) var selectedInspectorPaneID: String?
+    /// Transient width during an active drag (`persist == false`). Stored outside
+    /// `@Published` so 1px drag movement updates AppKit shell geometry directly
+    /// without invalidating SwiftUI root views on every mouse sample.
+    private(set) var liveInspectorWidth: CGFloat?
+    let inspectorWidthChanges = PassthroughSubject<CGFloat, Never>()
+    var effectiveInspectorWidth: CGFloat { liveInspectorWidth ?? inspectorWidth }
 
     private var pendingSelectionSourceID: ObjectIdentifier?
     private(set) var selectionGeneration: UInt64 = 0
@@ -331,6 +342,7 @@ final class VerticalTabWindowLayoutState: ObservableObject {
 
     func setInspectorVisible(_ visible: Bool) {
         guard isInspectorVisible != visible else { return }
+        if !visible { liveInspectorWidth = nil }
         isInspectorVisible = visible
         if workspaceID == nil { inspectorPresentation.setVisible(visible) }
         saveWorkspacePresentation()
@@ -468,42 +480,36 @@ final class VerticalTabWindowLayoutState: ObservableObject {
         )
         let width = min(max(proposedWidth, RightInspectorMetrics.minimumWidth), maximumWidth)
 
+        inspectorResizeWorkItem?.cancel()
+        inspectorResizeWorkItem = nil
+        pendingInspectorWidth = nil
+
         if persist {
-            inspectorResizeWorkItem?.cancel()
-            inspectorResizeWorkItem = nil
-            pendingInspectorWidth = nil
-            applyInspectorWidth(width)
+            let previousEffective = effectiveInspectorWidth
+            liveInspectorWidth = nil
+            if inspectorWidth != width {
+                inspectorWidth = width
+            }
+            if previousEffective != width {
+                appliedInspectorResizeCount += 1
+                inspectorWidthChanges.send(width)
+            }
             committedInspectorWidth = width
             if workspaceID == nil { inspectorPresentation.setWidth(width) }
             saveWorkspacePresentation()
             return
         }
 
-        pendingInspectorWidth = width
-        guard inspectorResizeWorkItem == nil else { return }
-        let workItem = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.inspectorResizeWorkItem = nil
-            guard let width = self.pendingInspectorWidth else { return }
-            self.pendingInspectorWidth = nil
-            self.applyInspectorWidth(width)
-        }
-        inspectorResizeWorkItem = workItem
-        // Same rationale as the sidebar: frame-boundary scheduling avoids the
-        // fixed-timer pointer lag while still coalescing per-turn.
-        DispatchQueue.main.async(execute: workItem)
+        guard effectiveInspectorWidth != width else { return }
+        liveInspectorWidth = width
+        appliedInspectorResizeCount += 1
+        inspectorWidthChanges.send(width)
     }
 
     private func applySidebarWidth(_ width: CGFloat) {
         guard sidebarWidth != width else { return }
         sidebarWidth = width
         appliedResizeCount += 1
-    }
-
-    private func applyInspectorWidth(_ width: CGFloat) {
-        guard inspectorWidth != width else { return }
-        inspectorWidth = width
-        appliedInspectorResizeCount += 1
     }
 }
 

@@ -11,27 +11,52 @@ enum OMGWebViewProcessPool {
 
 /// Contextual code selection emitted by Monaco's "Ask Agent / Send to Quick Input" action.
 struct EditorAskAgentRequest: Equatable, Sendable {
+    enum DiffSide: String, Equatable, Sendable {
+        case additions
+        case deletions
+    }
+
     let path: String
     let startLine: Int?
     let endLine: Int?
     let selectedText: String
     let comment: String
+    var side: DiffSide?
+    var targetQualifier: String?
 
     func formattedPrompt(workingDirectory: String?) -> String {
         let displayPath = Self.relativeOrFullPath(path, workingDirectory: workingDirectory)
-        let lineSuffix: String
+        let lineRange: String
         if let startLine, startLine > 0 {
             if let endLine, endLine > startLine {
-                lineSuffix = "#L\(startLine)-L\(endLine)"
+                lineRange = "L\(startLine)-L\(endLine)"
             } else {
-                lineSuffix = "#L\(startLine)"
+                lineRange = "L\(startLine)"
             }
         } else {
-            lineSuffix = ""
+            lineRange = ""
+        }
+
+        let header: String
+        if displayPath.isEmpty {
+            header = ""
+        } else if side == .deletions {
+            let deletedDetail = lineRange.isEmpty ? "deleted" : "deleted \(lineRange)"
+            if let targetQualifier, !targetQualifier.isEmpty {
+                header = "@\(displayPath) (\(targetQualifier), \(deletedDetail))"
+            } else {
+                header = "@\(displayPath) (\(deletedDetail))"
+            }
+        } else {
+            let lineSuffix = lineRange.isEmpty ? "" : "#\(lineRange)"
+            if let targetQualifier, !targetQualifier.isEmpty {
+                header = "@\(displayPath)\(lineSuffix) (\(targetQualifier))"
+            } else {
+                header = "@\(displayPath)\(lineSuffix)"
+            }
         }
 
         var parts: [String] = []
-        let header = displayPath.isEmpty ? "" : "@\(displayPath)\(lineSuffix)"
         let trimmedComment = comment.trimmingCharacters(in: .whitespacesAndNewlines)
         if !header.isEmpty && !trimmedComment.isEmpty {
             parts.append("\(header) \(trimmedComment)")
@@ -557,6 +582,7 @@ final class MonacoWorkbenchController: NSObject, ObservableObject, WKNavigationD
     var onTextChange: ((String, String) -> Void)?
     var onCommand: ((EditorAction) -> Bool)?
     var onAskAgent: ((EditorAskAgentRequest) -> Void)?
+    var onDiffSelectionChanged: ((Int, Int) -> Void)?
     var onNavigateDefinition: ((String, EditorTextLocation) -> Void)?
     var onOpenExternalURL: ((URL) -> Void)?
     var onLSPRequest: ((
@@ -1002,13 +1028,20 @@ final class MonacoWorkbenchController: NSObject, ObservableObject, WKNavigationD
             let rawComment = (body["comment"] as? String) ?? ""
             let rawPrompt = (body["prompt"] as? String) ?? ""
             let comment = !rawComment.isEmpty ? rawComment : rawPrompt
+            let side = (body["side"] as? String).flatMap(EditorAskAgentRequest.DiffSide.init(rawValue:))
             onAskAgent?(EditorAskAgentRequest(
                 path: path,
                 startLine: startLine,
                 endLine: endLine,
                 selectedText: selectedText,
-                comment: comment
+                comment: comment,
+                side: side
             ))
+
+        case "diffSelection":
+            let hunkIndex = max(0, (body["hunkIndex"] as? Int) ?? 0)
+            let currentChangeIndex = (body["currentChangeIndex"] as? Int) ?? 0
+            onDiffSelectionChanged?(hunkIndex, currentChangeIndex)
 
         case "lspRequest":
             guard let requestId = body["requestId"],
@@ -1094,7 +1127,8 @@ final class MonacoWorkbenchController: NSObject, ObservableObject, WKNavigationD
             }
             guard let action = keymap.action(for: event) else { return false }
             switch action {
-            case .save, .saveAll, .close, .open, .nextDocument, .previousDocument, .hide:
+            case .save, .saveAll, .close, .open, .nextDocument, .previousDocument,
+                 .nextDiffChange, .previousDiffChange, .nextDiffFile, .previousDiffFile, .hide:
                 return onCommand?(action) ?? false
             default:
                 return false
@@ -1112,6 +1146,9 @@ final class MonacoWorkbenchController: NSObject, ObservableObject, WKNavigationD
         guard let action = keymap.action(for: event) else { return false }
         switch action {
         case .save, .saveAll, .close, .open, .nextDocument, .previousDocument, .hide:
+            return onCommand?(action) ?? false
+        case .nextDiffChange, .previousDiffChange, .nextDiffFile, .previousDiffFile:
+            guard activeDiff != nil else { return false }
             return onCommand?(action) ?? false
         case .find:
             performEditorAction("find")
@@ -1175,8 +1212,13 @@ final class MonacoWorkbenchController: NSObject, ObservableObject, WKNavigationD
         if modifiers == [.command, .shift], key == "l" || key == "i" {
             return true
         }
-        guard keymap.action(for: event) != nil else { return false }
-        return true
+        guard let action = keymap.action(for: event) else { return false }
+        switch action {
+        case .nextDiffChange, .previousDiffChange, .nextDiffFile, .previousDiffFile:
+            return activeDiff != nil
+        default:
+            return true
+        }
     }
 
     private func handleExternalLink(_ href: String) {
@@ -1217,6 +1259,10 @@ final class MonacoWorkbenchController: NSObject, ObservableObject, WKNavigationD
         case "open": .open
         case "nextDocument": .nextDocument
         case "previousDocument": .previousDocument
+        case "nextDiffChange": .nextDiffChange
+        case "previousDiffChange": .previousDiffChange
+        case "nextDiffFile": .nextDiffFile
+        case "previousDiffFile": .previousDiffFile
         case "hide": .hide
         default: nil
         }

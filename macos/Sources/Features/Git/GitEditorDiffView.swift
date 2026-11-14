@@ -155,7 +155,9 @@ struct GitEditorDiffView: View {
     var actions = GitDiffEditorActions()
     var externalController: MonacoWorkbenchController?
     var rehydrationRevision = 0
+    var confirmDiscard: ((GitDiffFile, Bool, NSWindow?) async -> Bool)?
     let close: () -> Void
+    private let mutationService: GitMutationService
     @StateObject private var model: GitEditorDiffModel
     @StateObject private var ownedWorkbench = MonacoWorkbenchController()
     @ObservedObject private var preferences = GitDiffPreferences.shared
@@ -166,6 +168,9 @@ struct GitEditorDiffView: View {
     @State private var pendingLanding: GitDiffReviewNavigator.Landing?
     @State private var navigationHint: String?
     @State private var hintTask: Task<Void, Never>?
+    @State private var activeHunkIndex = 0
+    @State private var isMutating = false
+    @State private var mutationError: String?
 
     init(
         request: GitEditorDiffRequest,
@@ -173,16 +178,20 @@ struct GitEditorDiffView: View {
         isActive: Bool = true,
         actions: GitDiffEditorActions = GitDiffEditorActions(),
         service: GitDiffService = GitDiffService(),
+        mutationService: GitMutationService = GitMutationService(),
         externalController: MonacoWorkbenchController? = nil,
         rehydrationRevision: Int = 0,
+        confirmDiscard: ((GitDiffFile, Bool, NSWindow?) async -> Bool)? = nil,
         close: @escaping () -> Void
     ) {
         self.request = request
         self.theme = theme
         self.isActive = isActive
         self.actions = actions
+        self.mutationService = mutationService
         self.externalController = externalController
         self.rehydrationRevision = rehydrationRevision
+        self.confirmDiscard = confirmDiscard
         self.close = close
         _model = StateObject(wrappedValue: GitEditorDiffModel(request: request, service: service))
     }
@@ -258,6 +267,31 @@ struct GitEditorDiffView: View {
         return diffContent != nil || (hasMountedDiffSurface && workbenchDisplaysThisRequest)
     }
 
+    private var isWorkingTreeTarget: Bool {
+        request.target == .unstaged || request.target == .staged
+    }
+
+    private var isStagedTarget: Bool {
+        request.target == .staged
+    }
+
+    private var availableHunkCount: Int {
+        guard let content = diffContent else { return 0 }
+        return GitDiffPatchParser.hunkCount(in: content.document.text)
+    }
+
+    private var canMutateSelectedFile: Bool {
+        isWorkingTreeTarget
+            && !isMutating
+            && !model.isLoading
+            && model.selected != nil
+            && model.selected?.kind != .unmerged
+    }
+
+    private var canMutateSelectedHunk: Bool {
+        canMutateSelectedFile && availableHunkCount > 0
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             GeometryReader { toolbarGeometry in
@@ -265,15 +299,17 @@ struct GitEditorDiffView: View {
                     HStack(spacing: 4) {
                         toolbarButton(
                             "chevron.left",
-                            help: GitL10n.text("Previous file"),
-                            disabled: selectedFileIndex < 0 || model.files.count < 2
+                            help: "\(GitL10n.text("Previous file")) (⌃⌥[)",
+                            disabled: selectedFileIndex < 0 || model.files.count < 2,
+                            identifier: "git.diff.previousFile"
                         ) {
                             selectAdjacentFile(offset: -1)
                         }
                         toolbarButton(
                             "chevron.right",
-                            help: GitL10n.text("Next file"),
-                            disabled: selectedFileIndex < 0 || model.files.count < 2
+                            help: "\(GitL10n.text("Next file")) (⌃⌥])",
+                            disabled: selectedFileIndex < 0 || model.files.count < 2,
+                            identifier: "git.diff.nextFile"
                         ) {
                             selectAdjacentFile(offset: 1)
                         }
@@ -284,15 +320,17 @@ struct GitEditorDiffView: View {
                         toolbarDivider
                         toolbarButton(
                             "arrow.up",
-                            help: GitL10n.text("Previous change"),
-                            disabled: changeCount == 0
+                            help: "\(GitL10n.text("Previous change")) (⇧F7)",
+                            disabled: changeCount == 0,
+                            identifier: "git.diff.previousChange"
                         ) {
                             selectChange(.previous)
                         }
                         toolbarButton(
                             "arrow.down",
-                            help: GitL10n.text("Next change"),
-                            disabled: changeCount == 0
+                            help: "\(GitL10n.text("Next change")) (F7)",
+                            disabled: changeCount == 0,
+                            identifier: "git.diff.nextChange"
                         ) {
                             selectChange(.next)
                         }
@@ -315,21 +353,51 @@ struct GitEditorDiffView: View {
                             }
                         }
                         // Reserve both toolbar clusters so mode changes never displace the file summary.
-                        .frame(maxWidth: max(160, toolbarGeometry.size.width - 560), alignment: .leading)
+                        .frame(maxWidth: max(140, toolbarGeometry.size.width - (isWorkingTreeTarget ? 660 : 560)), alignment: .leading)
                         Spacer(minLength: 8)
+                        if isWorkingTreeTarget {
+                            toolbarButton(
+                                isStagedTarget ? "text.badge.minus" : "text.badge.plus",
+                                help: GitL10n.text(isStagedTarget ? "Unstage current hunk" : "Stage current hunk"),
+                                disabled: !canMutateSelectedHunk,
+                                identifier: isStagedTarget ? "git.diff.unstageHunk" : "git.diff.stageHunk"
+                            ) {
+                                performHunkStageToggle()
+                            }
+                            toolbarButton(
+                                isStagedTarget ? "minus.circle" : "plus.circle",
+                                help: GitL10n.text(isStagedTarget ? "Unstage File" : "Stage File"),
+                                disabled: !canMutateSelectedFile,
+                                identifier: isStagedTarget ? "git.diff.unstageFile" : "git.diff.stageFile"
+                            ) {
+                                performFileStageToggle()
+                            }
+                            toolbarButton(
+                                "arrow.uturn.backward",
+                                help: GitL10n.text("Discard Changes…"),
+                                disabled: !canMutateSelectedFile,
+                                identifier: "git.diff.discardFile"
+                            ) {
+                                performDiscardSelectedFile()
+                            }
+                            toolbarDivider
+                        }
                         GitDiffReviewSwitcher(review: preferences.review) { next in
                             clearHint()
                             preferences.setReview(next)
                         }
                         .frame(width: 132, height: 26)
-                        toolbarButton(
-                            "arrow.turn.down.left",
+                        NativeActionButton(
+                            symbol: "arrow.turn.down.left",
                             help: GitL10n.text("Wrap diff lines"),
-                            selected: preferences.wordWrap
-                        ) {
+                            style: preferences.wordWrap ? .bordered : .plain,
+                            height: 24,
+                            identifier: "git.diff.wordWrap"
+                        ) { _ in
                             clearHint()
                             preferences.setWordWrap(!preferences.wordWrap)
                         }
+                        .frame(width: 28, height: 24)
                         fileMenu
                         GitDiffModeSwitcher(mode: preferences.viewMode) { next in
                             clearHint()
@@ -369,6 +437,30 @@ struct GitEditorDiffView: View {
 
             ZStack(alignment: .topLeading) {
                 VStack(spacing: 0) {
+                    if let mutationError {
+                        HStack(spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                            Text(mutationError)
+                                .font(.caption)
+                                .foregroundStyle(.primary)
+                                .lineLimit(2)
+                                .textSelection(.enabled)
+                            Spacer(minLength: 0)
+                            Button {
+                                self.mutationError = nil
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.caption2)
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Color.red.opacity(0.08))
+                        .overlay(alignment: .bottom) { Divider() }
+                    }
                     if let sourceError = diffContent?.sourceError {
                         HStack(spacing: 6) {
                             Image(systemName: "info.circle")
@@ -436,6 +528,8 @@ struct GitEditorDiffView: View {
         .background(GitDiffFallbackCommands(
             isActive: isActive && !showsDiffSurface,
             actions: actions,
+            nextFile: { selectAdjacentFile(offset: 1) },
+            previousFile: { selectAdjacentFile(offset: -1) },
             close: close
         ))
         .onAppear {
@@ -457,8 +551,23 @@ struct GitEditorDiffView: View {
                 workbench.isActive = false
             }
         }
-        .onChange(of: model.selected) { actions.selectFile($0) }
+        .onChange(of: request.file) { nextRequestedFile in
+            pendingLanding = nil
+            navigator.reset()
+            activeHunkIndex = 0
+            mutationError = nil
+            clearHint()
+            model.applyRequestedFile(nextRequestedFile)
+        }
+        .onChange(of: model.selected) {
+            activeHunkIndex = 0
+            mutationError = nil
+            actions.selectFile($0)
+        }
         .onChange(of: model.content) { newContent in
+            if activeHunkIndex >= availableHunkCount {
+                activeHunkIndex = max(0, availableHunkCount - 1)
+            }
             if canControlWorkbench {
                 syncDiffToWorkbench()
             }
@@ -602,6 +711,9 @@ struct GitEditorDiffView: View {
         workbench.onAskAgent = { askRequest in
             actions.askAgent(resolvedAskAgentRequest(askRequest))
         }
+        workbench.onDiffSelectionChanged = { hunkIndex, _ in
+            activeHunkIndex = hunkIndex
+        }
         workbench.onCommand = { action in
             switch action {
             case .hide:
@@ -614,6 +726,14 @@ struct GitEditorDiffView: View {
                 actions.nextDocument()
             case .previousDocument:
                 actions.previousDocument()
+            case .nextDiffChange:
+                selectChange(.next)
+            case .previousDiffChange:
+                selectChange(.previous)
+            case .nextDiffFile:
+                selectAdjacentFile(offset: 1)
+            case .previousDiffFile:
+                selectAdjacentFile(offset: -1)
             case .saveAll:
                 actions.saveAll()
             case .save:
@@ -626,21 +746,65 @@ struct GitEditorDiffView: View {
     }
 
     private func resolvedAskAgentRequest(_ askRequest: EditorAskAgentRequest) -> EditorAskAgentRequest {
+        Self.resolveAskAgentRequest(
+            askRequest,
+            request: request,
+            selectedFile: model.selected,
+            content: model.content
+        )
+    }
+
+    static func resolveAskAgentRequest(
+        _ askRequest: EditorAskAgentRequest,
+        request: GitEditorDiffRequest,
+        selectedFile: GitDiffFile?,
+        content: GitEditorDiffModel.Content?
+    ) -> EditorAskAgentRequest {
         let isRelativePath = askRequest.path.isEmpty || !askRequest.path.hasPrefix("/")
         let resolvedPath: String
         if isRelativePath,
-           let file = model.selected,
+           let file = selectedFile,
            let absolute = try? GitFileActions.absolutePath(file, repository: request.repository) {
             resolvedPath = absolute
         } else {
             resolvedPath = askRequest.path
         }
+
+        let targetQualifier: String? = switch request.target {
+        case .unstaged:
+            nil
+        case .staged:
+            "staged"
+        case .commit(let commit):
+            "commit \(commit.shortSHA)"
+        case .comparison(let base, let head):
+            "\(base.shortSHA)...\(head.shortSHA)"
+        }
+
+        var selectedText = askRequest.selectedText
+        if selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let startLine = askRequest.startLine,
+           startLine > 0,
+           let content {
+            let source = askRequest.side == .deletions ? content.before : content.after
+            if !source.isEmpty {
+                let lines = source.components(separatedBy: "\n")
+                let lo = max(1, min(startLine, lines.count))
+                let hi = max(lo, min(askRequest.endLine ?? startLine, lines.count))
+                if lo <= hi, lo <= lines.count {
+                    selectedText = lines[(lo - 1)...(hi - 1)].joined(separator: "\n")
+                }
+            }
+        }
+
         return EditorAskAgentRequest(
             path: resolvedPath,
             startLine: askRequest.startLine,
             endLine: askRequest.endLine,
-            selectedText: askRequest.selectedText,
-            comment: askRequest.comment
+            selectedText: selectedText,
+            comment: askRequest.comment,
+            side: askRequest.side,
+            targetQualifier: targetQualifier
         )
     }
 
@@ -783,31 +947,135 @@ struct GitEditorDiffView: View {
         return (deleted, added)
     }
 
-    // MARK: - Toolbar Controls
+    // MARK: - Toolbar Controls & In-Diff Mutations
 
     private func toolbarButton(
         _ image: String,
         help: String,
         disabled: Bool = false,
-        selected: Bool = false,
-        accessibilityValue: String = "",
-        width: CGFloat = 28,
+        identifier: String? = nil,
         action: @escaping () -> Void
     ) -> some View {
         NativeActionButton(
             symbol: image,
             help: help,
             enabled: !disabled,
-            style: selected ? .bordered : .plain,
+            style: .plain,
             height: 24,
-            accessibilityValue: accessibilityValue.isEmpty ? nil : accessibilityValue,
+            identifier: identifier,
             action: { _ in action() }
         )
-        .frame(width: width, height: 24)
+        .frame(width: 28, height: 24)
     }
 
     private var toolbarDivider: some View {
         Divider().frame(height: 14).padding(.horizontal, 2)
+    }
+
+    private func performFileStageToggle() {
+        guard canMutateSelectedFile, let file = model.selected else { return }
+        let staged = isStagedTarget
+        let preferredIndex = max(0, selectedFileIndex)
+        let paths = Array(Set([file.path] + (file.oldPath.map { [$0] } ?? []))).sorted()
+        let mutation: GitMutation = staged ? .unstage(paths) : .stage(paths)
+        runDiffMutation(preferredIndex: preferredIndex) {
+            try await mutationService.perform(mutation, in: request.repository)
+        }
+    }
+
+    private func performHunkStageToggle() {
+        guard canMutateSelectedHunk,
+              let file = model.selected,
+              let content = diffContent else { return }
+        let hunkCount = GitDiffPatchParser.hunkCount(in: content.document.text)
+        guard hunkCount > 0 else { return }
+        let clampedHunkIndex = min(max(0, activeHunkIndex), hunkCount - 1)
+        guard let hunkPatch = GitDiffPatchParser.singleHunkPatch(
+            from: content.document.text,
+            file: file,
+            hunkIndex: clampedHunkIndex
+        ) else { return }
+        let staged = isStagedTarget
+        let preferredIndex = max(0, selectedFileIndex)
+        let mutation: GitMutation = staged
+            ? .unstageHunk(patch: hunkPatch, path: file.path)
+            : .stageHunk(patch: hunkPatch, path: file.path)
+        runDiffMutation(preferredIndex: preferredIndex) {
+            try await mutationService.perform(mutation, in: request.repository)
+        }
+    }
+
+    private func performDiscardSelectedFile() {
+        guard canMutateSelectedFile, let file = model.selected else { return }
+        let staged = isStagedTarget
+        let preferredIndex = max(0, selectedFileIndex)
+        let window = surfaceBinding.containerView?.window ?? workbench.webView?.window ?? NSApp.keyWindow
+        Task { @MainActor in
+            let confirmed: Bool
+            if let confirmDiscard {
+                confirmed = await confirmDiscard(file, staged, window)
+            } else {
+                confirmed = await Self.presentDiscardConfirmationAlert(
+                    for: file,
+                    staged: staged,
+                    window: window
+                )
+            }
+            guard confirmed, canMutateSelectedFile, model.selected == file else { return }
+            runDiffMutation(preferredIndex: preferredIndex) {
+                try await EditorWorkspaceStore.shared.withGitFileRestore(file, repository: request.repository) {
+                    try await mutationService.perform(.discard(file, staged: staged), in: request.repository)
+                }
+            }
+        }
+    }
+
+    private func runDiffMutation(
+        preferredIndex: Int,
+        operation: @escaping @MainActor () async throws -> Void
+    ) {
+        guard !isMutating else { return }
+        clearHint()
+        mutationError = nil
+        isMutating = true
+        Task { @MainActor in
+            defer { isMutating = false }
+            do {
+                try await operation()
+                GitMutationService.notifyExternalMutation(in: request.repository)
+                forceNextDiffSync = true
+                await model.reload(preferredIndex: preferredIndex).value
+            } catch {
+                mutationError = error.localizedDescription
+            }
+        }
+    }
+
+    @MainActor
+    static func presentDiscardConfirmationAlert(
+        for file: GitDiffFile,
+        staged: Bool,
+        window: NSWindow?
+    ) async -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = GitL10n.text("Discard Changes?")
+        let explanation = file.isUntracked || (staged && file.kind == .added)
+            ? "This deletes the added file. This cannot be undone."
+            : staged
+                ? "This restores the file to HEAD, discarding both staged and unstaged changes. This cannot be undone."
+                : "This restores the file to its staged version. Staged changes are kept. This cannot be undone."
+        alert.informativeText = file.displayPath + "\n" + GitL10n.text(explanation)
+        let discardButton = alert.addButton(withTitle: GitL10n.text("Discard Changes"))
+        discardButton.hasDestructiveAction = true
+        alert.addButton(withTitle: GitL10n.text("Cancel"))
+        let response: NSApplication.ModalResponse
+        if let window {
+            response = await alert.beginSheetModal(for: window)
+        } else {
+            response = alert.runModal()
+        }
+        return response == .alertFirstButtonReturn
     }
 
     private var fileMenu: some View {
@@ -822,6 +1090,24 @@ struct GitEditorDiffView: View {
                 model.select(file)
             }
         }
+        let mutationEntries: [NativeMenuEntry] = {
+            guard isWorkingTreeTarget, model.selected != nil else { return [] }
+            var items: [NativeMenuEntry] = [.separator]
+            if canMutateSelectedHunk {
+                items.append(.action(GitL10n.text(isStagedTarget ? "Unstage Hunk" : "Stage Hunk")) {
+                    performHunkStageToggle()
+                })
+            }
+            if canMutateSelectedFile {
+                items.append(.action(GitL10n.text(isStagedTarget ? "Unstage File" : "Stage File")) {
+                    performFileStageToggle()
+                })
+                items.append(.action(GitL10n.text("Discard Changes…")) {
+                    performDiscardSelectedFile()
+                })
+            }
+            return items.count > 1 ? items : []
+        }()
         let operationEntries: [NativeMenuEntry] = model.selected.map { file in
             [
                 .separator,
@@ -843,7 +1129,7 @@ struct GitEditorDiffView: View {
             style: .plain,
             height: 24,
             identifier: "git.diff.fileMenu",
-            entries: fileEntries + operationEntries
+            entries: fileEntries + mutationEntries + operationEntries
         )
         .frame(width: 28, height: 24)
     }
@@ -963,11 +1249,15 @@ struct GitDiffReviewSwitcher: NSViewRepresentable {
 private struct GitDiffFallbackCommands: NSViewRepresentable {
     let isActive: Bool
     let actions: GitDiffEditorActions
+    var nextFile: () -> Void = {}
+    var previousFile: () -> Void = {}
     let close: () -> Void
 
     final class Scope: NSView {
         var active = false
         var actions = GitDiffEditorActions()
+        var nextFile: () -> Void = {}
+        var previousFile: () -> Void = {}
         var close: () -> Void = {}
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
@@ -986,6 +1276,8 @@ private struct GitDiffFallbackCommands: NSViewRepresentable {
             case .open: actions.open()
             case .nextDocument: actions.nextDocument()
             case .previousDocument: actions.previousDocument()
+            case .nextDiffFile: nextFile()
+            case .previousDiffFile: previousFile()
             case .saveAll: actions.saveAll()
             case .save: break
             default: return false
@@ -1003,6 +1295,8 @@ private struct GitDiffFallbackCommands: NSViewRepresentable {
     func updateNSView(_ view: Scope, context: Context) {
         view.active = isActive
         view.actions = actions
+        view.nextFile = nextFile
+        view.previousFile = previousFile
         view.close = close
     }
 

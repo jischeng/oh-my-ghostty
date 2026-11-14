@@ -131,19 +131,40 @@ extension TerminalController {
         // Manually resigning here creates an intermediate unfocused pane frame.
     }
 
+    func hideCoveringEditorWorkspace(surfaceID: UUID) {
+        editorWorkspaceStore.hideIfCovering(surfaceID: surfaceID)
+        if editorWorkspaceStore !== EditorWorkspaceStore.shared {
+            EditorWorkspaceStore.shared.hideIfCovering(surfaceID: surfaceID)
+        }
+    }
+
+    private func focusCoveringEditorWorkspace(surfaceID: UUID) -> Bool {
+        if editorWorkspaceStore.focusIfCovering(surfaceID: surfaceID) {
+            return true
+        }
+        if editorWorkspaceStore !== EditorWorkspaceStore.shared {
+            return EditorWorkspaceStore.shared.focusIfCovering(surfaceID: surfaceID)
+        }
+        return false
+    }
+
     func sendQuickInputDraft() {
         guard let surfaceID = quickInputModel.targetSurfaceID else { return }
         if quickInputModel.isEditingQueuedItem {
             guard quickInputModel.confirmQueuedItemEdit(moveToEnd: false) else {
                 return
             }
+            hideCoveringEditorWorkspace(surfaceID: surfaceID)
             if !quickInputModel.isPinned { restoreTerminalFocus(surfaceID: surfaceID) }
             dispatchNextQuickInput(for: surfaceID)
             return
         }
         let text = quickInputModel.draft
-        submitQuickInputText(text, to: surfaceID, restoreFocus: !quickInputModel.isPinned) { [weak self] in
+        let submitted = submitQuickInputText(text, to: surfaceID, restoreFocus: !quickInputModel.isPinned) { [weak self] in
             self?.quickInputModel.completeSubmittedDraft(text, for: surfaceID)
+        }
+        if submitted {
+            hideCoveringEditorWorkspace(surfaceID: surfaceID)
         }
     }
 
@@ -153,12 +174,14 @@ extension TerminalController {
             guard quickInputModel.confirmQueuedItemEdit(moveToEnd: true) else {
                 return
             }
+            hideCoveringEditorWorkspace(surfaceID: surfaceID)
             if !quickInputModel.isPinned { restoreTerminalFocus(surfaceID: surfaceID) }
             dispatchNextQuickInput(for: surfaceID)
             return
         }
         guard quickInputModel.enqueueDraft() != nil else { return }
         quickInputModel.completeSubmission(clearDraft: false)
+        hideCoveringEditorWorkspace(surfaceID: surfaceID)
         if agentActivities[surfaceID]?.state == .done {
             dispatchNextQuickInput(for: surfaceID)
         }
@@ -434,6 +457,7 @@ extension TerminalController {
             self.quickInputModel.setStatusMessage(nil)
             completion()
             if restoreFocus, self.quickInputModel.targetSurfaceID == surfaceID, !self.quickInputModel.isPresented {
+                self.hideCoveringEditorWorkspace(surfaceID: surfaceID)
                 self.restoreTerminalFocus(surfaceID: surfaceID)
             }
         }
@@ -447,6 +471,9 @@ extension TerminalController {
         }
         DispatchQueue.main.async { [weak self, weak surface] in
             guard let self, let surface, self.window?.isKeyWindow == true else { return }
+            if self.focusCoveringEditorWorkspace(surfaceID: surface.id) {
+                return
+            }
             self.window?.makeFirstResponder(surface)
         }
     }

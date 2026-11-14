@@ -1313,6 +1313,128 @@ struct WorkspaceProviderTests {
         #expect(await transport.recordedSFTPBatches().count == 2)
         #expect(await transport.recordedCommands().count == 1)
     }
+
+    @Test func sshQuickOpenUsesSingleRemoteCommandCachesResultsAndInvalidatesOnWrites() async throws {
+        let host = SSHHostConfiguration(
+            alias: "cloud",
+            hostname: "example.com",
+            user: "dev",
+            port: nil,
+            proxyJump: nil
+        )
+        let transport = MockSSHRemoteTransport(
+            commandHandler: { command in
+                #expect(command.contains("git --no-optional-locks ls-files -co --exclude-standard -z"))
+                #expect(command.contains("find . -maxdepth 10"))
+                return "src/main.swift\0./src/nested/helper.swift\0.DS_Store\0../escape.swift\0src/main.swift\0README.md\0"
+            },
+            sftpHandler: { _ in "" }
+        )
+        var filesystem = SSHWorkspaceFilesystem(
+            host: host,
+            workingDirectory: "/remote/repo",
+            transport: transport,
+            itemTypeCache: SSHWorkspaceItemTypeCache()
+        )
+        filesystem.quickOpenCache = SSHQuickOpenFileCache(ttl: .seconds(30))
+
+        // First Quick Open index runs 1 SSH command and 0 SFTP directory listings.
+        let files = await EditorQuickOpenSearch.collectFilesystemFiles(
+            rootDirectory: "/remote/repo",
+            filesystem: filesystem
+        )
+        #expect(files.map(\.path) == [
+            "/remote/repo/src/main.swift",
+            "/remote/repo/src/nested/helper.swift",
+            "/remote/repo/README.md",
+        ])
+        #expect(await transport.recordedCommands().count == 1)
+        #expect(await transport.recordedSFTPBatches().isEmpty)
+
+        // Second Quick Open index within TTL reuses cache with 0 additional SSH commands.
+        let cached = await EditorQuickOpenSearch.collectFilesystemFiles(
+            rootDirectory: "/remote/repo",
+            filesystem: filesystem
+        )
+        #expect(cached == files)
+        #expect(await transport.recordedCommands().count == 1)
+
+        // Mutating the workspace invalidates the Quick Open cache.
+        try await filesystem.createFile(named: "new.swift", in: "/remote/repo")
+        _ = await EditorQuickOpenSearch.collectFilesystemFiles(
+            rootDirectory: "/remote/repo",
+            filesystem: filesystem
+        )
+        #expect(await transport.recordedCommands().count == 2)
+    }
+
+    @Test func sshConnectionConcurrencyLimiterCapsInFlightSessionsAndCleansUpCancelledWaiters() async throws {
+        let limiter = SSHConnectionConcurrencyLimiter(maxConcurrentPerConnection: 4)
+        let key = "socket:/tmp/omg-test.sock"
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for _ in 0..<12 {
+                group.addTask {
+                    try await limiter.withPermit(for: key) {
+                        try await Task.sleep(for: .milliseconds(25))
+                    }
+                }
+            }
+            try await group.waitForAll()
+        }
+        #expect(await limiter.maxObservedConcurrency(for: key) == 4)
+        #expect(await limiter.activeConcurrency(for: key) == 0)
+
+        // Fill all 4 permits, cancel a queued 5th waiter, and verify all 4 permits release cleanly.
+        let releaseGate = ConcurrencyGate()
+        var holders: [Task<Void, Error>] = []
+        for _ in 0..<4 {
+            holders.append(Task {
+                try await limiter.withPermit(for: key) {
+                    await releaseGate.wait()
+                }
+            })
+        }
+        for _ in 0..<50 {
+            if await limiter.activeConcurrency(for: key) == 4 { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await limiter.activeConcurrency(for: key) == 4)
+
+        let cancelledWaiter = Task {
+            try await limiter.withPermit(for: key) {}
+        }
+        try await Task.sleep(for: .milliseconds(15))
+        cancelledWaiter.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await cancelledWaiter.value
+        }
+
+        await releaseGate.open()
+        for holder in holders {
+            try await holder.value
+        }
+        #expect(await limiter.activeConcurrency(for: key) == 0)
+    }
+}
+
+private actor ConcurrencyGate {
+    private var isOpen = false
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+        }
+    }
+
+    func open() {
+        isOpen = true
+        let pending = continuations
+        continuations.removeAll()
+        pending.forEach { $0.resume() }
+    }
 }
 
 private actor MockSSHRemoteTransport: SSHRemoteTransport {

@@ -202,43 +202,253 @@ struct GitHistoryService: Sendable {
                 return try await loadPage(snapshot: snapshot, repository: repository, offset: offset,
                                           pageSize: pageSize, includeMessage: includeMessage)
             }
-            let pathMatches = try await commitIDs(touching: search.paths, snapshot: snapshot, repository: repository)
-            var matches: [GitHistoryCommit] = []
-            var scanned = 0
-            var skipped = 0
-            while matches.count <= pageSize {
-                try Task.checkCancellation()
-                let batch = try await loadPage(snapshot: snapshot, repository: repository,
-                    offset: scanned, pageSize: 200, includeMessage: true)
-                for commit in batch.commits {
-                    guard search.matches(commit), pathMatches?.contains(commit.id) ?? true else { continue }
-                    if skipped < offset { skipped += 1 } else { matches.append(commit) }
-                }
-                scanned += batch.commits.count
-                if !batch.hasMore { break }
-            }
-            return GitHistoryPage(commits: Array(matches.prefix(pageSize)), offset: offset, hasMore: matches.count > pageSize)
+            return try await loadSearchPage(
+                search: search,
+                snapshot: snapshot,
+                repository: repository,
+                request: LogPageRequest(offset: offset, pageSize: pageSize, includeMessage: includeMessage)
+            )
         }
 
-        let requestedCount = pageSize + 1
+        return try await runLogPage(
+            snapshot: snapshot,
+            repository: repository,
+            request: LogPageRequest(offset: offset, pageSize: pageSize, includeMessage: includeMessage)
+        )
+    }
+
+    private struct LogPageRequest {
+        var offset: Int
+        var pageSize: Int
+        var includeMessage: Bool
+        var extraArguments: [String] = []
+        var pathspecs: [String] = []
+        var useSnapshotTipsStdin = true
+    }
+
+    private func loadSearchPage(
+        search: GitHistorySearchQuery,
+        snapshot: GitHistorySnapshot,
+        repository: GitRepositoryIdentity,
+        request: LogPageRequest
+    ) async throws -> GitHistoryPage {
+        let offset = request.offset
+        let pageSize = request.pageSize
+        let includeMessage = request.includeMessage
+        let pathspecs = search.paths.flatMap(GitHistorySearchQuery.pathspecs(for:))
+
+        // Case 1: Pure `message:` and/or `path:` query — 100% native single `git log` pushdown.
+        if search.isDirectMessageAndPathOnly {
+            let messageFilters = search.explicitMessageTerms
+            let extraArgs = messageFilters.isEmpty
+                ? []
+                : ["--regexp-ignore-case", "--fixed-strings", "--all-match"]
+                    + messageFilters.map { "--grep=\($0)" }
+            return try await runLogPage(
+                snapshot: snapshot,
+                repository: repository,
+                request: LogPageRequest(
+                    offset: offset,
+                    pageSize: pageSize,
+                    includeMessage: !messageFilters.isEmpty || includeMessage,
+                    extraArguments: extraArgs,
+                    pathspecs: pathspecs
+                )
+            )
+        }
+
+        // Case 2: Plain-text query — push down `--grep` with `--skip`/`--max-count` directly to `git log`,
+        // while preserving `--author` and SHA prefix parity in O(1) subprocesses.
+        if search.hasNoFieldTerms, !search.text.isEmpty {
+            async let grepTask = runLogPage(
+                snapshot: snapshot,
+                repository: repository,
+                request: LogPageRequest(
+                    offset: offset,
+                    pageSize: pageSize,
+                    includeMessage: true,
+                    extraArguments: ["--regexp-ignore-case", "--fixed-strings", "--grep=\(search.text)"]
+                )
+            )
+            async let authorTask = runLogPage(
+                snapshot: snapshot,
+                repository: repository,
+                request: LogPageRequest(
+                    offset: 0,
+                    pageSize: offset + pageSize,
+                    includeMessage: true,
+                    extraArguments: ["--regexp-ignore-case", "--fixed-strings", "--author=\(search.text)"]
+                )
+            )
+            async let hashTask = resolveReachableHashCommit(
+                prefix: search.text,
+                snapshot: snapshot,
+                repository: repository
+            )
+
+            let (grepPage, authorPage, resolvedHash) = try await (grepTask, authorTask, hashTask)
+            let authorMatches = authorPage.commits.filter { search.matches($0) }
+            let hashMatches = [resolvedHash].compactMap { $0 }.filter { search.matches($0) }
+
+            if authorMatches.isEmpty && hashMatches.isEmpty {
+                return grepPage
+            }
+            if offset == 0 && grepPage.commits.isEmpty && !grepPage.hasMore && hashMatches.isEmpty {
+                let hasMore = authorPage.hasMore || authorMatches.count > pageSize
+                return GitHistoryPage(
+                    commits: Array(authorMatches.prefix(pageSize)),
+                    offset: 0,
+                    hasMore: hasMore
+                )
+            }
+
+            let grepAll: GitHistoryPage
+            if offset > 0 && (!grepPage.commits.isEmpty || grepPage.hasMore) {
+                grepAll = try await runLogPage(
+                    snapshot: snapshot,
+                    repository: repository,
+                    request: LogPageRequest(
+                        offset: 0,
+                        pageSize: offset + pageSize,
+                        includeMessage: true,
+                        extraArguments: ["--regexp-ignore-case", "--fixed-strings", "--grep=\(search.text)"]
+                    )
+                )
+            } else {
+                grepAll = grepPage
+            }
+
+            var seen = Set<GitCommitID>()
+            var merged: [GitHistoryCommit] = []
+            for commit in grepAll.commits + authorMatches + hashMatches where seen.insert(commit.id).inserted {
+                merged.append(commit)
+            }
+            merged.sort { $0.authoredAt > $1.authoredAt }
+
+            let sliceStart = min(offset, merged.count)
+            let sliceEnd = min(offset + pageSize, merged.count)
+            let hasMore = merged.count > offset + pageSize || grepAll.hasMore || authorPage.hasMore
+            return GitHistoryPage(
+                commits: Array(merged[sliceStart..<sliceEnd]),
+                offset: offset,
+                hasMore: hasMore
+            )
+        }
+
+        // Case 3: Explicit `hash:` prefix with unambiguous >= 4-hex prefix.
+        if let hashPrefix = search.explicitHashTerms.first,
+           hashPrefix.count >= 4,
+           let commit = try await resolveReachableHashCommit(
+               prefix: hashPrefix,
+               snapshot: snapshot,
+               repository: repository
+           ) {
+            let touchesPath: Bool
+            if pathspecs.isEmpty {
+                touchesPath = true
+            } else {
+                let pathCheck = try await runLogPage(
+                    snapshot: snapshot,
+                    repository: repository,
+                    request: LogPageRequest(
+                        offset: 0,
+                        pageSize: 1,
+                        includeMessage: false,
+                        extraArguments: [commit.id.rawValue, "--no-walk"],
+                        pathspecs: pathspecs,
+                        useSnapshotTipsStdin: false
+                    )
+                )
+                touchesPath = !pathCheck.commits.isEmpty
+            }
+            if touchesPath && search.matches(commit) {
+                let commits = offset == 0 ? [commit] : []
+                return GitHistoryPage(commits: commits, offset: offset, hasMore: false)
+            }
+        }
+
+        // Case 4: Compound field filters — push down `--grep`, primary `--author`, and `pathspecs` to C git,
+        // then verify remaining multi-term predicates in Swift.
+        var pushedArgs: [String] = []
+        if !search.explicitMessageTerms.isEmpty {
+            pushedArgs += ["--regexp-ignore-case", "--fixed-strings", "--all-match"]
+            pushedArgs += search.explicitMessageTerms.map { "--grep=\($0)" }
+        }
+        if let primaryAuthor = search.explicitAuthorTerms.first ?? search.explicitEmailTerms.first {
+            if !pushedArgs.contains("--regexp-ignore-case") {
+                pushedArgs += ["--regexp-ignore-case", "--fixed-strings"]
+            }
+            pushedArgs.append("--author=\(primaryAuthor)")
+        }
+
+        var matches: [GitHistoryCommit] = []
+        var scanned = 0
+        var skipped = 0
+        let batchSize = max(200, pageSize)
+        while matches.count <= pageSize {
+            try Task.checkCancellation()
+            let batch = try await runLogPage(
+                snapshot: snapshot,
+                repository: repository,
+                request: LogPageRequest(
+                    offset: scanned,
+                    pageSize: batchSize,
+                    includeMessage: true,
+                    extraArguments: pushedArgs,
+                    pathspecs: pathspecs
+                )
+            )
+            for commit in batch.commits where search.matches(commit) {
+                if skipped < offset {
+                    skipped += 1
+                } else {
+                    matches.append(commit)
+                }
+            }
+            scanned += batch.commits.count
+            if !batch.hasMore { break }
+        }
+        return GitHistoryPage(
+            commits: Array(matches.prefix(pageSize)),
+            offset: offset,
+            hasMore: matches.count > pageSize
+        )
+    }
+
+    private func runLogPage(
+        snapshot: GitHistorySnapshot,
+        repository: GitRepositoryIdentity,
+        request: LogPageRequest
+    ) async throws -> GitHistoryPage {
+        let requestedCount = request.pageSize + 1
+        var arguments = [
+            "--no-optional-locks",
+            "log",
+            "--encoding=UTF-8",
+            "--topo-order",
+            "--no-color",
+            "--no-decorate",
+            "-z",
+            "--format=%H%x00%P%x00%an%x00%ae%x00%aI%x00%" + (request.includeMessage ? "B" : "s"),
+            "--skip=\(request.offset)",
+            "--max-count=\(requestedCount)",
+        ] + request.extraArguments
+        if request.useSnapshotTipsStdin {
+            arguments.append("--stdin")
+        }
+        if !request.pathspecs.isEmpty {
+            arguments.append("--")
+            arguments.append(contentsOf: request.pathspecs)
+        }
+        let stdinData = request.useSnapshotTipsStdin
+            ? Data((snapshot.tipCommitIDs.map(\.rawValue).joined(separator: "\n") + "\n").utf8)
+            : nil
         let result = try await (executor ?? repository.executor).execute(
-            arguments: [
-                "--no-optional-locks",
-                "log",
-                "--encoding=UTF-8",
-                "--topo-order",
-                "--no-color",
-                "--no-decorate",
-                "-z",
-                "--format=%H%x00%P%x00%an%x00%ae%x00%aI%x00%" + (includeMessage ? "B" : "s"),
-                "--skip=\(offset)",
-                "--max-count=\(requestedCount)",
-                "--stdin",
-            ],
+            arguments: arguments,
             workingDirectory: repository.worktreePath,
             // Keep frozen revisions out of argv: SSH wraps/encodes its command
             // and large all-branch snapshots can exceed the remote shell limit.
-            stdin: Data((snapshot.tipCommitIDs.map(\.rawValue).joined(separator: "\n") + "\n").utf8),
+            stdin: stdinData,
             maxOutputBytes: max(512 * 1024, requestedCount * 512)
         )
         guard result.isSuccess else {
@@ -257,39 +467,62 @@ struct GitHistoryService: Sendable {
             throw GitHistoryError.malformedCommit(GitL10n.text("Incomplete history record"))
         }
         let recordCount = fields.count / 6
-        let hasMore = recordCount > pageSize
-        let commits = try (0..<min(pageSize, recordCount)).map { index in
+        let hasMore = recordCount > request.pageSize
+        let commits = try (0..<min(request.pageSize, recordCount)).map { index in
             var commit = try parseCommit(fields: Array(fields[(index * 6)..<(index * 6 + 6)]), snapshot: snapshot)
             commit.isRemoteOnly = snapshot.remoteOnlyCommitIDs.contains(commit.id)
-            if includeMessage {
+            if request.includeMessage {
                 commit.message = commit.subject
                 commit.subject = commit.message.components(separatedBy: "\n").first ?? ""
             }
             return commit
         }
-        return GitHistoryPage(commits: commits, offset: offset, hasMore: hasMore)
+        return GitHistoryPage(commits: commits, offset: request.offset, hasMore: hasMore)
     }
 
-    /// Commits in the frozen snapshot that changed any of `paths`, or nil when
-    /// no path filter is active. Git evaluates the pathspecs (`git log -- path`);
-    /// a bare name also matches that file or directory at any depth.
-    private func commitIDs(
-        touching paths: [String],
+    private func resolveReachableHashCommit(
+        prefix: String,
         snapshot: GitHistorySnapshot,
         repository: GitRepositoryIdentity
-    ) async throws -> Set<GitCommitID>? {
-        guard !paths.isEmpty else { return nil }
-        let result = try await (executor ?? repository.executor).execute(
-            arguments: ["--no-optional-locks", "log", "--no-color", "--format=%H", "--stdin", "--"]
-                + paths.flatMap(GitHistorySearchQuery.pathspecs(for:)),
-            workingDirectory: repository.worktreePath,
-            stdin: Data((snapshot.tipCommitIDs.map(\.rawValue).joined(separator: "\n") + "\n").utf8),
-            maxOutputBytes: 64 * 1024 * 1024
-        )
-        guard result.isSuccess else {
-            throw GitHistoryError.commandFailed(result.stderrString)
+    ) async throws -> GitHistoryCommit? {
+        let trimmed = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (4...64).contains(trimmed.count), trimmed.allSatisfy(\.isHexDigit) else {
+            return nil
         }
-        return Set(result.stdoutString.split(whereSeparator: \.isNewline).map { GitCommitID(String($0)) })
+        let revParse = try await (executor ?? repository.executor).execute(
+            arguments: ["--no-optional-locks", "rev-parse", "--quiet", "--verify", "\(trimmed)^{commit}"],
+            workingDirectory: repository.worktreePath,
+            stdin: nil,
+            maxOutputBytes: 1024
+        )
+        guard revParse.isSuccess else { return nil }
+        let fullSHA = revParse.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !fullSHA.isEmpty else { return nil }
+
+        let negatedTips = snapshot.tipCommitIDs.map { "^\($0.rawValue)" }.joined(separator: "\n") + "\n"
+        let reachability = try await (executor ?? repository.executor).execute(
+            arguments: ["--no-optional-locks", "rev-list", "--max-count=1", fullSHA, "--stdin"],
+            workingDirectory: repository.worktreePath,
+            stdin: Data(negatedTips.utf8),
+            maxOutputBytes: 1024
+        )
+        guard reachability.isSuccess,
+              reachability.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+
+        let single = try await runLogPage(
+            snapshot: snapshot,
+            repository: repository,
+            request: LogPageRequest(
+                offset: 0,
+                pageSize: 1,
+                includeMessage: true,
+                extraArguments: [fullSHA, "--no-walk"],
+                useSnapshotTipsStdin: false
+            )
+        )
+        return single.commits.first
     }
 
     private func parseCommit(
@@ -349,6 +582,17 @@ struct GitHistorySearchQuery: Equatable, Sendable {
 
     var paths: [String] { terms[.path] ?? [] }
     var isEmpty: Bool { text.isEmpty && terms.values.allSatisfy(\.isEmpty) }
+    var hasNoFieldTerms: Bool { terms.values.allSatisfy(\.isEmpty) }
+    var explicitMessageTerms: [String] { terms[.message] ?? [] }
+    var explicitAuthorTerms: [String] { terms[.author] ?? [] }
+    var explicitEmailTerms: [String] { terms[.email] ?? [] }
+    var explicitHashTerms: [String] { terms[.hash] ?? [] }
+    var isDirectMessageAndPathOnly: Bool {
+        text.isEmpty
+            && explicitAuthorTerms.isEmpty
+            && explicitEmailTerms.isEmpty
+            && explicitHashTerms.isEmpty
+    }
     var messageTerms: [String] { (text.isEmpty ? [] : [text]) + (terms[.message] ?? []) }
     var authorTerms: [String] { (text.isEmpty ? [] : [text]) + (terms[.author] ?? []) }
     var emailTerms: [String] { (text.isEmpty ? [] : [text]) + (terms[.email] ?? []) }

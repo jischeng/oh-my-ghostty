@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import Testing
 @testable import Ghostty
@@ -105,5 +106,109 @@ struct NativeTerminalShellTests {
         #expect(Set(deck.hosts.keys) == ["one"])
         deck.reconcile(tabID: UUID(), availableIDs: ["one"])
         #expect(deck.hosts.isEmpty)
+    }
+
+    @Test func liveInspectorWidthDragUpdatesAppKitGeometryWithoutRecreatingSwiftUIRootViews() async throws {
+        let app = try #require(NSApp.delegate as? AppDelegate)
+        var configuration = Ghostty.SurfaceConfiguration()
+        configuration.command = "sleep 30"
+        let terminal = TerminalController(app.ghostty, withBaseConfig: configuration, tabLayout: .vertical)
+        let terminalWindow = try #require(terminal.window)
+        defer { terminalWindow.delegate = nil; terminalWindow.close() }
+
+        let suite = "LiveInspectorResize.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let state = VerticalTabWindowLayoutState(
+            isSidebarVisible: true,
+            sidebarWidth: 200,
+            isInspectorVisible: true,
+            inspectorPresentation: InspectorPresentationStore(defaults: defaults)
+        )
+        let registry = InspectorRegistry()
+        let paneID = BuiltInFilesInspectorProvider.paneID
+        try registry.registerCorePane(
+            .init(
+                id: paneID,
+                title: "Files",
+                systemImage: "folder",
+                source: .coreFeature("test"),
+                preferredWidth: 320,
+                minimumWidth: 176
+            ),
+            content: { _ in .fields([.init(id: "k", label: "Key", value: "Value")]) }
+        )
+
+        let shellController = TerminalShellController()
+        shellController.container.frame = .init(x: 0, y: 0, width: 1_000, height: 600)
+        shellController.bindLiveInspectorWidth(layoutState: state, enabled: true)
+        let inspectorHost = InspectorHostController(controller: terminal, layoutState: state, registry: registry)
+
+        let window = NSWindow(
+            contentRect: .init(x: 0, y: 0, width: 1_000, height: 600),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = shellController.view
+        window.orderFront(nil)
+        defer {
+            inspectorHost.stop()
+            window.contentView = nil
+            window.close()
+        }
+
+        shellController.update(
+            leading: AnyView(Color.red),
+            center: AnyView(Color.clear),
+            trailing: AnyView(RightInspectorHost(
+                controller: terminal,
+                layoutState: state,
+                registry: registry,
+                isPresented: true,
+                backgroundColor: .clear
+            )),
+            layout: .init(
+                leadingWidth: 201,
+                trailingWidth: state.effectiveInspectorWidth,
+                leadingVisible: true,
+                trailingVisible: true
+            )
+        )
+        inspectorHost.view.frame = .init(x: 0, y: 0, width: 320, height: 600)
+        shellController.container.trailingHost?.addSubview(inspectorHost.view)
+        inspectorHost.configure(isPresented: true, backgroundColor: .clear, environment: EnvironmentValues())
+        shellController.container.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(60))
+
+        let baselineShellRootUpdates = shellController.container.rootViewUpdateCount
+        let baselineDeckRootUpdates = inspectorHost.deck.rootViewUpdateCount
+        #expect(baselineDeckRootUpdates == 1)
+
+        var layoutWillChangeCount = 0
+        let cancellable = state.objectWillChange.sink { _ in layoutWillChangeCount += 1 }
+        defer { _ = cancellable }
+
+        // Simulate 25 pixels of live drag (`persist: false`): AppKit geometry updates at every
+        // pixel while zero `@Published` invalidations or `rootView` assignments occur.
+        for width in 321...345 {
+            state.updateInspectorWidth(CGFloat(width), availableWidth: 1_000, persist: false)
+            shellController.container.layoutSubtreeIfNeeded()
+            let expectedRight = CGFloat(width) + TerminalShellStyle.dividerWidth
+            #expect(shellController.container.trailingHost?.frame.width == expectedRight)
+            #expect(shellController.container.centerHost.frame.width == 1_000 - 201 - expectedRight)
+        }
+        #expect(layoutWillChangeCount == 0)
+        #expect(shellController.container.rootViewUpdateCount == baselineShellRootUpdates)
+
+        // Commit final width on mouseUp (`persist: true`): persists settled width cleanly without
+        // rebuilding `InspectorPaneContentView` inside `InspectorHostController.deck`.
+        state.updateInspectorWidth(345, availableWidth: 1_000, persist: true)
+        try await Task.sleep(for: .milliseconds(40))
+        #expect(state.inspectorWidth == 345)
+        #expect(state.committedInspectorWidth == 345)
+        #expect(state.liveInspectorWidth == nil)
+        #expect(inspectorHost.deck.rootViewUpdateCount == baselineDeckRootUpdates)
     }
 }

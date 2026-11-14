@@ -874,6 +874,9 @@ protocol WorkspaceFilesystem: Sendable {
     func itemType(at path: String) async throws -> WorkspaceItemType?
     /// Missing paths are omitted. Implementations may batch remote round trips.
     func itemTypes(at paths: [String]) async throws -> [String: WorkspaceItemType]
+    /// Optional fast single-trip workspace file listing for Quick Open (`⌘P`).
+    /// Returning `nil` falls back to bounded `listDirectory` traversal.
+    func listQuickOpenFiles(under rootDirectory: String, maxFiles: Int) async throws -> [WorkspaceFileEntry]?
 }
 
 enum WorkspaceFileActions {
@@ -921,6 +924,10 @@ extension WorkspaceFilesystem {
             if let kind = try await itemType(at: path) { result[path] = kind }
         }
         return result
+    }
+
+    func listQuickOpenFiles(under rootDirectory: String, maxFiles: Int) async throws -> [WorkspaceFileEntry]? {
+        nil
     }
 }
 
@@ -1361,7 +1368,12 @@ enum SSHSFTPClient {
         let result = try await SSHSessionTransport.run(connection: connection,
             command: SSHSessionTransport.shellCommand(command))
         guard result.isSuccess else { throw WorkspaceFilesystemError.commandFailed(result.exitCode, result.stderrString) }
-        return result.stdoutString
+        if let decoded = String(bytes: result.stdout, encoding: .utf8) {
+            return decoded
+        }
+        return result.stdout.split(separator: 0, omittingEmptySubsequences: false)
+            .compactMap { String(bytes: $0, encoding: .utf8) }
+            .joined(separator: "\0")
     }
 }
 
@@ -1448,12 +1460,85 @@ final class SSHWorkspaceItemTypeCache: @unchecked Sendable {
     }
 }
 
+final class SSHQuickOpenFileCache: @unchecked Sendable {
+    static let shared = SSHQuickOpenFileCache()
+
+    private struct CacheKey: Hashable {
+        let rootDirectory: String
+        let maxFiles: Int
+    }
+
+    private struct Entry {
+        let files: [WorkspaceFileEntry]
+        let updatedAt: ContinuousClock.Instant
+    }
+
+    private let lock = NSLock()
+    private let ttl: Duration
+    private let maxRootsPerWorkspace: Int
+    private var storage: [String: [CacheKey: Entry]] = [:]
+
+    init(ttl: Duration = .seconds(15), maxRootsPerWorkspace: Int = 8) {
+        self.ttl = ttl
+        self.maxRootsPerWorkspace = max(1, maxRootsPerWorkspace)
+    }
+
+    func lookup(
+        rootDirectory: String,
+        maxFiles: Int,
+        workspaceID: String,
+        now: ContinuousClock.Instant = ContinuousClock.now
+    ) -> [WorkspaceFileEntry]? {
+        let key = CacheKey(rootDirectory: rootDirectory, maxFiles: maxFiles)
+        lock.lock()
+        defer { lock.unlock() }
+        guard var entries = storage[workspaceID],
+              let entry = entries[key] else { return nil }
+        if entry.updatedAt.duration(to: now) > ttl {
+            entries.removeValue(forKey: key)
+            storage[workspaceID] = entries.isEmpty ? nil : entries
+            return nil
+        }
+        return entry.files
+    }
+
+    func store(
+        _ files: [WorkspaceFileEntry],
+        rootDirectory: String,
+        maxFiles: Int,
+        workspaceID: String,
+        now: ContinuousClock.Instant = ContinuousClock.now
+    ) {
+        let key = CacheKey(rootDirectory: rootDirectory, maxFiles: maxFiles)
+        lock.lock()
+        defer { lock.unlock() }
+        var entries = (storage[workspaceID] ?? [:]).filter {
+            $0.value.updatedAt.duration(to: now) <= ttl
+        }
+        if entries.count >= maxRootsPerWorkspace, entries[key] == nil,
+           let oldestKey = entries.min(by: { $0.value.updatedAt < $1.value.updatedAt })?.key {
+            entries.removeValue(forKey: oldestKey)
+        }
+        entries[key] = Entry(files: files, updatedAt: now)
+        storage[workspaceID] = entries
+    }
+
+    func invalidateAll(for workspaceID: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        storage.removeValue(forKey: workspaceID)
+    }
+}
+
 struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
+    static let quickOpenMaxOutputBytes = 786_432
+
     let host: SSHHostConfiguration
     let connection: GitSSHConnection?
     let descriptor: WorkspaceDescriptor
     let transport: any SSHRemoteTransport
     let itemTypeCache: SSHWorkspaceItemTypeCache
+    var quickOpenCache: SSHQuickOpenFileCache = .shared
 
     init(
         host: SSHHostConfiguration,
@@ -1494,16 +1579,106 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
         return entries
     }
 
+    func listQuickOpenFiles(under rootDirectory: String, maxFiles: Int) async throws -> [WorkspaceFileEntry]? {
+        guard rootDirectory.hasPrefix("/"), !rootDirectory.contains("\0"), maxFiles > 0 else {
+            throw WorkspaceFilesystemError.invalidPath
+        }
+        let normalizedRoot = Self.standardized(rootDirectory)
+        if let cached = quickOpenCache.lookup(
+            rootDirectory: normalizedRoot,
+            maxFiles: maxFiles,
+            workspaceID: descriptor.id
+        ) {
+            return cached
+        }
+        let output = try await runRemoteCommand(Self.quickOpenListingCommand(rootDirectory: normalizedRoot))
+        let entries = Self.parseQuickOpenListing(
+            output,
+            rootDirectory: normalizedRoot,
+            maxFiles: maxFiles
+        )
+        quickOpenCache.store(
+            entries,
+            rootDirectory: normalizedRoot,
+            maxFiles: maxFiles,
+            workspaceID: descriptor.id
+        )
+        return entries
+    }
+
+    static func quickOpenListingCommand(rootDirectory: String) -> String {
+        let quotedRoot = shellQuote(rootDirectory)
+        let pruneExpr = "\\( -name .git -o -name .hg -o -name .svn -o -name node_modules"
+            + " -o -name .build -o -name 'build*' -o -name DerivedData -o -name target"
+            + " -o -name __pycache__ -o -name .venv -o -name venv -o -name .next"
+            + " -o -name .cache -o -name .zig-cache -o -name 'zig-*' \\) -prune"
+        return """
+        cd \(quotedRoot) || exit 1
+        export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH
+        (
+          if command -v git >/dev/null 2>&1 && git --no-optional-locks rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            git --no-optional-locks ls-files -co --exclude-standard -z 2>/dev/null
+          else
+            find . -maxdepth 10 \(pruneExpr) -o -type f ! -name .DS_Store -print0 2>/dev/null || find . \(pruneExpr) -o -type f ! -name .DS_Store -exec printf '%s\\0' {} + 2>/dev/null
+          fi
+        ) | head -c \(quickOpenMaxOutputBytes)
+        """
+    }
+
+    static func parseQuickOpenListing(
+        _ output: String,
+        rootDirectory: String,
+        maxFiles: Int
+    ) -> [WorkspaceFileEntry] {
+        guard !output.isEmpty, maxFiles > 0 else { return [] }
+        let normalizedRoot = standardized(rootDirectory)
+        let wasLikelyTruncated = output.utf8.count >= quickOpenMaxOutputBytes && !output.hasSuffix("\0")
+        var rawParts = output.split(separator: "\0", omittingEmptySubsequences: false)
+        if wasLikelyTruncated && !rawParts.isEmpty {
+            rawParts.removeLast()
+        }
+
+        var entries: [WorkspaceFileEntry] = []
+        entries.reserveCapacity(min(maxFiles, 512))
+        var seenPaths = Set<String>()
+
+        for rawPart in rawParts {
+            guard entries.count < maxFiles else { break }
+            guard !rawPart.isEmpty, !rawPart.hasSuffix("/") else { continue }
+            var relative = Substring(rawPart)
+            while relative.hasPrefix("./") {
+                relative = relative.dropFirst(2)
+            }
+            while relative.hasPrefix("/") {
+                relative = relative.dropFirst()
+            }
+            guard !relative.isEmpty, relative != ".", relative != ".." else { continue }
+            let components = relative.split(separator: "/", omittingEmptySubsequences: false)
+            guard !components.isEmpty,
+                  !components.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else {
+                continue
+            }
+            let name = String(components[components.count - 1])
+            guard name != ".DS_Store" else { continue }
+            let fullPath = standardized(join(normalizedRoot, String(relative)))
+            guard seenPaths.insert(fullPath).inserted else { continue }
+            entries.append(WorkspaceFileEntry(path: fullPath, name: name, isDirectory: false))
+        }
+        return entries
+    }
+
     func createFile(named name: String, in directory: String) async throws {
         guard Self.validChildName(name) else { throw WorkspaceFilesystemError.invalidPath }
         _ = try await runSFTP(batch: "put /dev/null \(Self.quote(Self.join(directory, name)))")
         itemTypeCache.invalidateAll(for: descriptor.id)
+        quickOpenCache.invalidateAll(for: descriptor.id)
     }
 
     func createDirectory(named name: String, in directory: String) async throws {
         guard Self.validChildName(name) else { throw WorkspaceFilesystemError.invalidPath }
         _ = try await runSFTP(batch: "mkdir \(Self.quote(Self.join(directory, name)))")
         itemTypeCache.invalidateAll(for: descriptor.id)
+        quickOpenCache.invalidateAll(for: descriptor.id)
     }
 
     func renameItem(at path: String, to name: String) async throws {
@@ -1513,6 +1688,7 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
             Self.shellQuote(path) + " " + Self.shellQuote(destination)
         _ = try await runRemoteCommand(command)
         itemTypeCache.invalidateAll(for: descriptor.id)
+        quickOpenCache.invalidateAll(for: descriptor.id)
     }
 
     // No check-then-rename fallback: it could overwrite a concurrently created target.
@@ -1926,6 +2102,7 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
         do {
             _ = try await runSFTP(batch: batch)
             itemTypeCache.invalidateAll(for: descriptor.id)
+            quickOpenCache.invalidateAll(for: descriptor.id)
         } catch {
             _ = try? await runSFTP(batch: "rm \(Self.quote(remoteTempPath))")
             throw error

@@ -6,8 +6,10 @@ import SwiftUI
 enum InspectorPaneDeck {
     final class Container: NSView {
         private(set) var hosts: [String: NSHostingView<AnyView>] = [:]
+        private(set) var rootViewUpdateCount = 0
         private var tabID: UUID?
         private var selectedID: String?
+        var selectedPaneID: String? { selectedID }
         func reconcile(tabID: UUID, availableIDs: Set<String>) {
             if self.tabID != tabID {
                 hosts.values.forEach { $0.removeFromSuperview() }
@@ -25,6 +27,7 @@ enum InspectorPaneDeck {
                let responder = window?.firstResponder as? NSView, responder.isDescendant(of: old) {
                 window?.makeFirstResponder(nil)
             }
+            rootViewUpdateCount += 1
             if let host = hosts[paneID] { host.rootView = content } else {
                 let host = NSHostingView(rootView: content)
                 host.sizingOptions = []

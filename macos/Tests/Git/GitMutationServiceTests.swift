@@ -364,4 +364,84 @@ struct GitMutationServiceTests {
         await #expect(throws: (any Error).self) { try await service.perform(.stage(["../outside"]), in: repo) }
         await #expect(throws: (any Error).self) { try await service.perform(.checkout("--discard-changes"), in: repo) }
     }
+
+    @Test func stageHunkAndUnstageHunkApplyIndividualHunksIncludingUntrackedFiles() async throws {
+        let repo = try await repository()
+        defer { try? FileManager.default.removeItem(atPath: repo.worktreePath) }
+        let service = GitMutationService()
+        let diffService = GitDiffService()
+
+        let baseLines = (1...20).map { "line \($0)" }
+        try write(baseLines.joined(separator: "\n") + "\n", "multi.txt", repo)
+        try await service.perform(.stage(["multi.txt"]), in: repo)
+        try await service.perform(.commit("initial multi"), in: repo)
+
+        var modifiedLines = baseLines
+        modifiedLines[1] = "line 2 staged hunk"
+        modifiedLines[18] = "line 19 unstaged hunk"
+        try write(modifiedLines.joined(separator: "\n") + "\n", "multi.txt", repo)
+
+        let unstagedFiles = try await diffService.listFiles(for: repo, target: .unstaged).files
+        let multiFile = try #require(unstagedFiles.first { $0.path == "multi.txt" })
+        let rawUnstagedPatch = try await diffService.loadDiff(
+            for: multiFile,
+            repository: repo,
+            target: .unstaged
+        ).text
+        #expect(GitDiffPatchParser.hunkCount(in: rawUnstagedPatch) == 2)
+
+        let firstHunkPatch = try #require(GitDiffPatchParser.singleHunkPatch(
+            from: rawUnstagedPatch,
+            file: multiFile,
+            hunkIndex: 0
+        ))
+        try await service.perform(.stageHunk(patch: firstHunkPatch, path: "multi.txt"), in: repo)
+
+        // Index must contain ONLY hunk 0 while hunk 1 remains unstaged in working tree.
+        let indexSnapshot = try await git(["show", ":multi.txt"], repo)
+        #expect(indexSnapshot.contains("line 2 staged hunk"))
+        #expect(!indexSnapshot.contains("line 19 unstaged hunk"))
+
+        let remainingUnstaged = try await diffService.listFiles(for: repo, target: .unstaged).files
+        let stagedNow = try await diffService.listFiles(for: repo, target: .staged).files
+        #expect(remainingUnstaged.map(\.path) == ["multi.txt"])
+        #expect(stagedNow.map(\.path) == ["multi.txt"])
+
+        // Unstage hunk 0 back out of the index without clobbering working-tree edits.
+        let stagedFile = try #require(stagedNow.first)
+        let rawStagedPatch = try await diffService.loadDiff(
+            for: stagedFile,
+            repository: repo,
+            target: .staged
+        ).text
+        let stagedHunkPatch = try #require(GitDiffPatchParser.singleHunkPatch(
+            from: rawStagedPatch,
+            file: stagedFile,
+            hunkIndex: 0
+        ))
+        try await service.perform(.unstageHunk(patch: stagedHunkPatch, path: "multi.txt"), in: repo)
+        #expect(try await git(["diff", "--cached", "--name-only"], repo).isEmpty)
+        let workingTreeText = try String(contentsOfFile: repo.worktreePath + "/multi.txt", encoding: .utf8)
+        #expect(workingTreeText.contains("line 2 staged hunk"))
+        #expect(workingTreeText.contains("line 19 unstaged hunk"))
+
+        // Untracked file (--no-index diff header) stages cleanly via normalized hunk patch.
+        try write("brand new line\n", "untracked.swift", repo)
+        let untrackedEntry = try #require(
+            try await diffService.listFiles(for: repo, target: .unstaged).files
+                .first { $0.path == "untracked.swift" }
+        )
+        let untrackedPatch = try await diffService.loadDiff(
+            for: untrackedEntry,
+            repository: repo,
+            target: .unstaged
+        ).text
+        let normalizedUntrackedHunk = try #require(GitDiffPatchParser.singleHunkPatch(
+            from: untrackedPatch,
+            file: untrackedEntry,
+            hunkIndex: 0
+        ))
+        try await service.perform(.stageHunk(patch: normalizedUntrackedHunk, path: "untracked.swift"), in: repo)
+        #expect(try await git(["show", ":untracked.swift"], repo) == "brand new line")
+    }
 }

@@ -1,6 +1,10 @@
 import AppKit
 import SwiftUI
 
+protocol FloatingAccessoryOcclusionContainer: AnyObject {
+    func occludesContentPoint(inWindow pointInWindow: NSPoint) -> Bool
+}
+
 /// The terminal and accessories have one native geometry owner. Hosting views
 /// render leaves only; none of their intrinsic sizes can resize this container.
 struct AgentQuickInputDockContainer: NSViewRepresentable {
@@ -9,6 +13,7 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
     let queue: AnyView
     let composerHeight: CGFloat
     let queueHeight: CGFloat
+    var isPinned: Bool = false
 
     func makeNSView(context: Context) -> Container { Container() }
 
@@ -18,7 +23,8 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
             composer: AnyView(composer.environment(\.self, context.environment)),
             queue: AnyView(queue.environment(\.self, context.environment)),
             composerHeight: composerHeight,
-            queueHeight: queueHeight
+            queueHeight: queueHeight,
+            isPinned: isPinned
         )
     }
 
@@ -26,12 +32,25 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
         CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
     }
 
-    final class Container: NSView {
+    final class Container: NSView, FloatingAccessoryOcclusionContainer {
         let contentHost = NSHostingView(rootView: AnyView(EmptyView()))
         let composerHost = NSHostingView(rootView: AnyView(EmptyView()))
         let queueHost = NSHostingView(rootView: AnyView(EmptyView()))
         private var requestedComposerHeight: CGFloat = 0
         private var requestedQueueHeight: CGFloat = 0
+        private(set) var isPinned: Bool = false
+
+        func occludesContentPoint(inWindow pointInWindow: NSPoint) -> Bool {
+            guard !isPinned else { return false }
+            let local = convert(pointInWindow, from: nil)
+            if !composerHost.isHidden, composerHost.frame.contains(local) {
+                return true
+            }
+            if !queueHost.isHidden, queueHost.frame.contains(local) {
+                return true
+            }
+            return false
+        }
 
         override init(frame frameRect: NSRect) {
             super.init(frame: frameRect)
@@ -53,10 +72,12 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
             composer: AnyView,
             queue: AnyView,
             composerHeight: CGFloat,
-            queueHeight: CGFloat
+            queueHeight: CGFloat,
+            isPinned: Bool = false
         ) {
             requestedComposerHeight = max(0, composerHeight)
             requestedQueueHeight = max(0, queueHeight)
+            self.isPinned = isPinned
             // Publish the final viewport before SwiftUI updates the terminal
             // leaf. Updating its root at the old size produces an extra TUI
             // layout/redraw between the old and new composer reservations.
@@ -85,11 +106,20 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
                 context.allowsImplicitAnimation = false
                 let nextQueueHeight = min(requestedQueueHeight, max(0, bounds.height))
                 let nextComposerHeight = min(requestedComposerHeight, max(0, bounds.height - nextQueueHeight))
+                let contentFrame: NSRect = if isPinned {
+                    .init(
+                        x: 0,
+                        y: nextQueueHeight + nextComposerHeight,
+                        width: bounds.width,
+                        height: max(0, bounds.height - nextQueueHeight - nextComposerHeight)
+                    )
+                } else {
+                    .init(x: 0, y: 0, width: bounds.width, height: max(0, bounds.height))
+                }
                 let frames: [(NSView, NSRect)] = [
                     (queueHost, .init(x: 0, y: 0, width: bounds.width, height: nextQueueHeight)),
                     (composerHost, .init(x: 0, y: nextQueueHeight, width: bounds.width, height: nextComposerHeight)),
-                    (contentHost, .init(x: 0, y: nextQueueHeight + nextComposerHeight, width: bounds.width,
-                                        height: max(0, bounds.height - nextQueueHeight - nextComposerHeight)))
+                    (contentHost, contentFrame)
                 ]
                 for (host, frame) in frames where host.frame != frame { host.frame = frame }
                 if composerHost.isHidden != (nextComposerHeight == 0) {

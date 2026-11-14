@@ -136,11 +136,19 @@ struct QuickInputDraftBridgeTests {
         controller.quickInputModel.dismiss()
         controller.toggleQuickInput()
         #expect(controller.quickInputModel.isPresented)
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("keys").path),
+                "Opening Quick Input by default must not send Ctrl+G automatically")
+        #expect(controller.quickInputModel.draft.isEmpty)
+        #expect(surface.layer?.opacity == 1)
+
+        controller.importQuickInputDraftFromTerminal(for: surface.id)
         for _ in 0..<50 {
             if !controller.quickInputModel.draft.isEmpty { break }
             try await Task.sleep(for: .milliseconds(100))
         }
         #expect(controller.quickInputModel.draft == "中文 agent draft\nsecond line")
+        #expect(surface.layer?.opacity == 1)
         #expect(try String(contentsOf: root.appendingPathComponent("keys"), encoding: .utf8).contains("\u{1b}[103;5u"))
     }
 
@@ -195,6 +203,7 @@ struct QuickInputDraftBridgeTests {
         ), for: surface.id)
         controller.quickInputModel.dismiss()
         controller.toggleQuickInput()
+        controller.importQuickInputDraftFromTerminal(for: surface.id)
         #expect(controller.quickInputModel.isPresented)
         #expect(controller.quickInputModel.targetSurfaceID == surface.id)
         try await Task.sleep(for: .milliseconds(500))
@@ -502,6 +511,7 @@ struct QuickInputDraftBridgeTests {
         controller.adoptAgentResumeDescriptor(.init(agent: .pi, scope: .local, workingDirectory: "/tmp"), for: surface)
         controller.quickInputModel.dismiss()
         controller.toggleQuickInput()
+        controller.importQuickInputDraftFromTerminal(for: surface.id)
         try await waitForAppKit { controller.quickInputDraftImportTask == nil && controller.quickInputModel.draft == original }
         controller.quickInputModel.draft = full
         controller.queueQuickInputDraft()

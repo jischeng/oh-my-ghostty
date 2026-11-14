@@ -444,7 +444,6 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     private var quickInputEventMonitor: Any?
     private var quickInputSecureInputCancellable: AnyCancellable?
     var quickInputLastTerminalSurfaceID: UUID?
-    var quickInputPendingDraftSurfaceID: UUID?
     private var agentResumeContextIDs: [UUID: String] = [:]
     private var paneSessionObservers: [UUID: Set<AnyCancellable>] = [:]
     var agentReducers: [UUID: AgentContextSignalReducer] = [:]
@@ -1051,7 +1050,6 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 .sink { [weak self, weak surface] isPasswordInput in
                     guard let self, let surface, self.surfaceTree.contains(surface) else { return }
                     if isPasswordInput, self.quickInputModel.targetSurfaceID == surface.id {
-                        self.quickInputPendingDraftSurfaceID = nil
                         self.quickInputDraftImportTask?.cancel()
                     }
                     // `@Published` emits in `willSet` before `surface.passwordInput`

@@ -65,5 +65,6 @@ test {
     _ = ScrollPhysics;
     _ = Thread;
     _ = State;
+    _ = @import("renderer/generic.zig");
     _ = @import("renderer/omg_memory.zig");
 }

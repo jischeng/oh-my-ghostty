@@ -6,7 +6,7 @@ import Testing
 @MainActor
 struct QuickInputPresentationTests {
     @Test func footerSymbolsExistAndRenderConsistentlyInBothLanguages() throws {
-        for symbol in ["command", "option", "return", "escape", "clock.arrow.circlepath", "pin", "pin.fill"] {
+        for symbol in ["command", "option", "return", "escape", "clock.arrow.circlepath", "pin", "pin.fill", "square.and.arrow.down"] {
             #expect(NSImage(systemSymbolName: symbol, accessibilityDescription: nil) != nil)
         }
         for language in [OhMyGhosttyLanguage.english, .simplifiedChinese] {

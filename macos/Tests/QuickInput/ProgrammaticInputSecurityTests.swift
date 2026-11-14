@@ -98,10 +98,9 @@ struct ProgrammaticInputSecurityTests {
         #expect(controller.isQuickInputPasswordLocked(for: surface.id))
         #expect(!(surface as any GitTerminalSurfaceTarget).sendText("git status"))
 
-        // 1. Opening QuickInput and firing composer ready must NOT send Ctrl+G ($EDITOR bridge).
+        // 1. Opening QuickInput and requesting explicit draft import must NOT send Ctrl+G ($EDITOR bridge).
         controller.presentQuickInput(for: surface, requestFocus: false)
-        controller.quickInputPendingDraftSurfaceID = surface.id
-        controller.quickInputComposerDidBecomeReady(for: surface.id)
+        controller.importQuickInputDraftFromTerminal(for: surface.id)
         #expect(controller.quickInputDraftImportTask == nil)
         #expect(controller.quickInputModel.statusMessage == "Waiting for password input in terminal")
 

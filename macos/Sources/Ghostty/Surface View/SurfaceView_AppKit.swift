@@ -197,6 +197,61 @@ extension Ghostty {
         private(set) var lastSentCoreOcclusionState: Bool?
         private(set) var occlusionUpdateCount = 0
 
+        // OMG: tracks when focus has moved to this pane's companion Quick Input
+        // editor so DEC 1004 focus sequences are not emitted on round-trips.
+        var hasCompanionQuickInputFocus = false
+        private var isTransferringFocusToCompanion = false
+        private(set) var preeditClearCount = 0
+
+        @discardableResult
+        func transferFocusToCompanion(_ body: () -> Bool) -> Bool {
+            let wasFocused = focused
+            isTransferringFocusToCompanion = true
+            defer { isTransferringFocusToCompanion = false }
+            let transferred = body()
+            if !transferred {
+                hasCompanionQuickInputFocus = false
+                if wasFocused, window?.firstResponder !== self {
+                    focusDidChange(false)
+                }
+            }
+            return transferred
+        }
+
+        private func isResigningToCompanionQuickInput() -> Bool {
+            if isTransferringFocusToCompanion { return true }
+            guard let window,
+                  let event = NSApp.currentEvent,
+                  event.window === window,
+                  event.type == .leftMouseDown || event.type == .rightMouseDown || event.type == .otherMouseDown,
+                  let contentView = window.contentView else {
+                return false
+            }
+            let point = contentView.convert(event.locationInWindow, from: nil)
+            let hit = contentView.hitTest(point)
+            let responder = (hit as? any TerminalCompanionResponder)
+                ?? ((hit as? NSClipView)?.documentView as? any TerminalCompanionResponder)
+                ?? ((hit as? NSScrollView)?.documentView as? any TerminalCompanionResponder)
+            return responder?.companionSurfaceID == id
+        }
+
+        func isPointOccludedByFloatingAccessory(inWindow pointInWindow: NSPoint) -> Bool {
+            var current = superview
+            while let view = current {
+                if let container = view as? any FloatingAccessoryOcclusionContainer,
+                   container.occludesContentPoint(inWindow: pointInWindow) {
+                    return true
+                }
+                current = view.superview
+            }
+            return false
+        }
+
+        private func isEventOccludedByFloatingAccessory(_ event: NSEvent) -> Bool {
+            guard let window, event.window === window else { return false }
+            return isPointOccludedByFloatingAccessory(inWindow: event.locationInWindow)
+        }
+
         func updateSurfaceOcclusion(visible: Bool) {
             if lastReportedOcclusionState != visible {
                 lastReportedOcclusionState = visible
@@ -786,6 +841,7 @@ extension Ghostty {
         }
 
         override func cursorUpdate(with event: NSEvent) {
+            guard !isEventOccludedByFloatingAccessory(event) else { return }
             // AppKit updates cursors independently of mouseMoved. Reapply the
             // core's current shape instead of falling back to an ancestor's cursor.
             pointerStyle.cursor.set()
@@ -1162,7 +1218,13 @@ extension Ghostty {
 
         override func becomeFirstResponder() -> Bool {
             let result = super.becomeFirstResponder()
-            if result { focusDidChange(true) }
+            if result {
+                hasCompanionQuickInputFocus = false
+                if passwordInput {
+                    SecureInput.shared.setScoped(ObjectIdentifier(self), focused: true)
+                }
+                focusDidChange(true)
+            }
             return result
         }
 
@@ -1171,7 +1233,23 @@ extension Ghostty {
 
             // We sometimes call this manually (see SplitView) as a way to force us to
             // yield our focus state.
-            if result { focusDidChange(false) }
+            if result {
+                if hasMarkedText() {
+                    inputContext?.discardMarkedText()
+                    markedText.mutableString.setString("")
+                    preeditClearCount += 1
+                    syncPreedit(clearIfNeeded: true)
+                }
+                if isResigningToCompanionQuickInput() {
+                    hasCompanionQuickInputFocus = true
+                    if passwordInput {
+                        SecureInput.shared.setScoped(ObjectIdentifier(self), focused: false)
+                    }
+                } else {
+                    hasCompanionQuickInputFocus = false
+                    focusDidChange(false)
+                }
+            }
 
             return result
         }
@@ -1349,6 +1427,7 @@ extension Ghostty {
         }
 
         override func mouseEntered(with event: NSEvent) {
+            guard !isEventOccludedByFloatingAccessory(event) else { return }
             linkHintCommandPressed = event.modifierFlags.contains(.command)
             mouseOverSurface = true
             super.mouseEntered(with: event)
@@ -1395,6 +1474,12 @@ extension Ghostty {
         }
 
         override func mouseMoved(with event: NSEvent) {
+            if NSEvent.pressedMouseButtons == 0, isEventOccludedByFloatingAccessory(event) {
+                if mouseOverSurface {
+                    mouseExited(with: event)
+                }
+                return
+            }
             if !mouseOverSurface {
                 mouseOverSurface = true
             }
@@ -1418,7 +1503,7 @@ extension Ghostty {
             if let window,
                let controller = window.windowController as? BaseTerminalController,
                !controller.commandPaletteIsShowing,
-               window.isKeyWindow &&
+               (controller.keyWindowOverrideForTesting ?? window.isKeyWindow) &&
                     !self.focused &&
                     controller.focusFollowsMouse {
                 Ghostty.moveFocus(to: self)

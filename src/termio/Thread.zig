@@ -43,7 +43,6 @@ const Coalesce = struct {
 /// The number of milliseconds before we reset the synchronized output flag
 /// if the running program hasn't already.
 const sync_reset_ms = 1000;
-const post_resize_sync_reset_ms = 5000;
 
 /// The number of milliseconds between each movement during selection scrolling.
 const selection_scroll_ms = 15;
@@ -419,16 +418,23 @@ fn startSynchronizedOutput(self: *Thread, cb: *CallbackData) void {
     const timeout_ms: u64 = timeout: {
         cb.io.renderer_state.mutex.lockUncancelable(global.io());
         defer cb.io.renderer_state.mutex.unlock(global.io());
-        if (!cb.io.terminal_stream.handler.post_resize.active) {
+        const post_resize = &cb.io.terminal_stream.handler.post_resize;
+        if (!post_resize.active or !post_resize.held_sync_output) {
             break :timeout sync_reset_ms;
         }
-        if (cb.io.terminal_stream.handler.post_resize.hard_deadline) |hd| {
-            const now = std.Io.Timestamp.now(global.io(), .awake);
+        const now = std.Io.Timestamp.now(global.io(), .awake);
+        var cap_ms: u64 = termio.StreamHandler.PostResizeState.hard_limit_ms;
+        if (post_resize.deadline) |dl| {
+            const rem_ms = now.durationTo(dl).toMilliseconds();
+            if (rem_ms <= 0) break :timeout 1;
+            cap_ms = @min(cap_ms, @as(u64, @intCast(rem_ms)));
+        }
+        if (post_resize.hard_deadline) |hd| {
             const rem_ms = now.durationTo(hd).toMilliseconds();
             if (rem_ms <= 0) break :timeout 1;
-            break :timeout @min(post_resize_sync_reset_ms, @as(u64, @intCast(rem_ms)));
+            cap_ms = @min(cap_ms, @as(u64, @intCast(rem_ms)));
         }
-        break :timeout post_resize_sync_reset_ms;
+        break :timeout @max(@as(u64, 1), cap_ms);
     };
     self.sync_reset.reset(
         &self.loop,

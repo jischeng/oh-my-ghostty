@@ -72,15 +72,12 @@ extension TerminalController {
                 probeForegroundAgent: false
             ).target
             let request = UUID().uuidString
-            var snapshot: QuickInputTerminalSnapshot?
-            defer { snapshot?.removeAfterRedraw() }
             do {
                 try await QuickInputRemoteDraftBridge.begin(
                     connection: connection, session: target.session, request: request, tty: target.tty,
                     root: target.root, generation: target.generation, replacement: text
                 )
                 try checkTarget()
-                snapshot = QuickInputTerminalSnapshot(surface: surface, maximumDuration: .seconds(2))
                 QuickInputDraftBridge.sendKeys(keys, to: terminal)
                 let received = try await QuickInputRemoteDraftBridge.receive(
                     connection: connection, session: target.session, request: request, root: target.root
@@ -98,10 +95,8 @@ extension TerminalController {
             )
         } else {
             let request = try QuickInputDraftBridge.shared.begin(surfaceID: surface.id, replacement: text)
-            let snapshot = QuickInputTerminalSnapshot(surface: surface, maximumDuration: .milliseconds(600))
             defer {
                 QuickInputDraftBridge.shared.finish(request)
-                snapshot.removeAfterRedraw()
             }
             try checkTarget()
             QuickInputDraftBridge.sendKeys(keys, to: terminal)
@@ -130,10 +125,8 @@ extension TerminalController {
         let hasAgentActivity = agentActivity(for: surface) != nil
         let request = UUID().uuidString
         quickInputDraftImportTask = Task { @MainActor [weak self, weak surface] in
-            var snapshot: QuickInputTerminalSnapshot?
             var target: QuickInputRemoteDraftBridge.Target?
             defer {
-                snapshot?.removeAfterRedraw()
                 self?.quickInputDraftImportTask = nil
             }
             @MainActor func isStillTargetingSurface() -> Bool {
@@ -177,7 +170,6 @@ extension TerminalController {
                     )
                     return
                 }
-                snapshot = QuickInputTerminalSnapshot(surface: surface, maximumDuration: .seconds(2))
                 let importForegroundPID = terminal.foregroundPID
                 QuickInputDraftBridge.sendKeys(keys, to: terminal)
                 let text = try await QuickInputRemoteDraftBridge.receive(

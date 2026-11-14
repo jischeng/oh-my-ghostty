@@ -1,17 +1,48 @@
 import AppKit
 import Foundation
+import SwiftUI
 
 extension TerminalController {
+    func quickInputAccessoryBackground(isPinned: Bool) -> Color {
+        Self.quickInputAccessoryBackground(
+            isPinned: isPinned,
+            chromeBackground: terminalChromeBackground,
+            color: terminalBackgroundColor,
+            opacity: terminalBackgroundOpacity,
+            colorspaceIsDisplayP3: ghostty.config.windowColorspaceIsDisplayP3,
+            linearBlending: ghostty.config.usesLinearAlphaBlending
+        )
+    }
+
+    static func quickInputAccessoryBackground(
+        isPinned: Bool,
+        chromeBackground: Color,
+        color: Color,
+        opacity: Double,
+        colorspaceIsDisplayP3: Bool = false,
+        linearBlending: Bool = false
+    ) -> Color {
+        guard !isPinned else { return chromeBackground }
+        return Self.chromeBackground(
+            color: color,
+            opacity: opacity,
+            windowIsOpaque: true,
+            colorspaceIsDisplayP3: colorspaceIsDisplayP3,
+            linearBlending: linearBlending,
+            usesWindowGlass: false
+        )
+    }
+
     func toggleQuickInput() {
         if quickInputModel.isPresented {
             dismissQuickInput()
             return
         }
         guard let surface = focusedSurface ?? surfaceTree.first else { return }
-        // Presentation must never depend on the CLI's editor handshake. Only
-        // an actual external-editor request may retain its TUI's last frame.
+        // Opening Quick Input must never inject external-editor keystrokes or
+        // freeze the live terminal surface. CLI draft import runs only when the
+        // user explicitly requests it.
         presentQuickInput(for: surface, requestFocus: true)
-        quickInputPendingDraftSurfaceID = surface.id
     }
 
     func isQuickInputPasswordLocked(for surfaceID: UUID?) -> Bool {
@@ -23,17 +54,20 @@ extension TerminalController {
         return surface.blocksProgrammaticInput
     }
 
-    func quickInputComposerDidBecomeReady(for surfaceID: UUID?) {
-        guard let surfaceID, quickInputPendingDraftSurfaceID == surfaceID,
-              quickInputModel.isPresented, quickInputModel.targetSurfaceID == surfaceID,
-              let surface = surfaceTree.first(where: { $0.id == surfaceID }) else { return }
-        quickInputPendingDraftSurfaceID = nil
-        guard !surface.blocksProgrammaticInput else {
+    func importQuickInputDraftFromTerminal(for surfaceID: UUID? = nil) {
+        let resolvedID = surfaceID ?? quickInputModel.targetSurfaceID ?? (focusedSurface ?? surfaceTree.first)?.id
+        guard let resolvedID,
+              let surface = surfaceTree.first(where: { $0.id == resolvedID }) else { return }
+        if !quickInputModel.isPresented || quickInputModel.targetSurfaceID != surface.id {
+            presentQuickInput(for: surface, requestFocus: true)
+        }
+        guard !ProgrammaticInputGuard.isGlobalSecureInputActive,
+              !surface.blocksProgrammaticInput else {
             let strings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
             quickInputModel.setStatusMessage(strings.quickInputPasswordLockedMessage)
             return
         }
-        guard quickInputDraftImportTask == nil, quickInputSubmissionTasks[surfaceID] == nil else { return }
+        guard quickInputDraftImportTask == nil, quickInputSubmissionTasks[surface.id] == nil else { return }
         let currentContext = paneSessionContext(for: surface)
         let sshConnecting: Bool
         if case .sshConnecting? = currentContext?.state {
@@ -76,11 +110,9 @@ extension TerminalController {
             return
         }
         let importForegroundPID = terminal.foregroundPID
-        let snapshot = QuickInputTerminalSnapshot(surface: surface, maximumDuration: .milliseconds(600))
         quickInputDraftImportTask = Task { @MainActor [weak self, weak surface] in
             defer {
                 QuickInputDraftBridge.shared.finish(request)
-                snapshot.removeAfterRedraw()
                 self?.quickInputDraftImportTask = nil
             }
             do {
@@ -198,7 +230,6 @@ extension TerminalController {
     }
 
     func dismissQuickInput() {
-        quickInputPendingDraftSurfaceID = nil
         quickInputDraftImportTask?.cancel()
         let surfaceID = quickInputModel.targetSurfaceID
         quickInputModel.dismiss()
@@ -300,8 +331,7 @@ extension TerminalController {
               !hasSplitFocusTarget(from: surface, direction: .down) else {
             return event
         }
-        quickInputLastTerminalSurfaceID = surface.id
-        quickInputModel.requestFocus()
+        presentQuickInput(for: surface, requestFocus: true)
         return nil
     }
 
@@ -464,17 +494,38 @@ extension TerminalController {
         return true
     }
 
-    private func restoreTerminalFocus(surfaceID: UUID?) {
+    func focusQuickInputEditor(_ editor: ComposerTextView, for surfaceID: UUID?) {
+        guard let window else { return }
+        if let surfaceID,
+           let surface = surfaceTree.first(where: { $0.id == surfaceID }),
+           window.firstResponder === surface {
+            _ = surface.transferFocusToCompanion {
+                window.makeFirstResponder(editor)
+            }
+        } else {
+            window.makeFirstResponder(editor)
+        }
+    }
+
+    func restoreTerminalFocus(surfaceID: UUID?) {
         guard let surfaceID,
               let surface = surfaceTree.first(where: { $0.id == surfaceID }) else {
             return
         }
+        if focusCoveringEditorWorkspace(surfaceID: surface.id) {
+            return
+        }
+        if let window, surface.window === window {
+            if window.makeFirstResponder(surface) {
+                return
+            }
+        }
         DispatchQueue.main.async { [weak self, weak surface] in
-            guard let self, let surface, self.window?.isKeyWindow == true else { return }
+            guard let self, let surface, let window = self.window else { return }
             if self.focusCoveringEditorWorkspace(surfaceID: surface.id) {
                 return
             }
-            self.window?.makeFirstResponder(surface)
+            window.makeFirstResponder(surface)
         }
     }
 

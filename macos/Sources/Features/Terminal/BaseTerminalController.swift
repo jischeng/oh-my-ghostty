@@ -53,6 +53,8 @@ class BaseTerminalController: NSWindowController,
 
     var editorWorkspaceStore: EditorWorkspaceStore = .shared
     var windowOcclusionOverrideForTesting: Bool?
+    var keyWindowOverrideForTesting: Bool?
+    var focusFollowsMouseOverrideForTesting: Bool?
 
     private var focusedSurfaceContextCancellables: Set<AnyCancellable> = []
 
@@ -113,7 +115,7 @@ class BaseTerminalController: NSWindowController,
 
     /// Whether the terminal surface should focus when the mouse is over it.
     var focusFollowsMouse: Bool {
-        self.derivedConfig.focusFollowsMouse
+        focusFollowsMouseOverrideForTesting ?? self.derivedConfig.focusFollowsMouse
     }
 
     /// Non-nil when an alert is active so we don't overlap multiple.
@@ -461,12 +463,21 @@ class BaseTerminalController: NSWindowController,
 
     func syncFocusToSurfaceTree() {
         var newlyFocused: Ghostty.SurfaceView?
+        let isKeyWindow = keyWindowOverrideForTesting ?? (window?.isKeyWindow ?? false)
+        let companionSurfaceID = (window?.firstResponder as? any TerminalCompanionResponder)?.companionSurfaceID
         for surfaceView in surfaceTree {
-            // Our focus state requires that this window is key and our currently
-            // focused surface is the surface in this view.
-            let focused: Bool = (window?.isKeyWindow ?? false) &&
+            // Preserve companion Quick Input ownership across window key-loss
+            // (⌘Tab) so returning to the window restores terminal focus cleanly
+            // without a late DEC 1004 focus-in on composer dismiss.
+            let isCompanionFocused = surfaceView.hasCompanionQuickInputFocus &&
+                companionSurfaceID == surfaceView.id &&
+                surfaceView == focusedSurface
+            if !isCompanionFocused {
+                surfaceView.hasCompanionQuickInputFocus = false
+            }
+            let focused: Bool = isKeyWindow &&
                 surfaceView == focusedSurface &&
-                surfaceView.isFirstResponder
+                (surfaceView.isFirstResponder || isCompanionFocused)
             surfaceView.focusDidChange(focused)
             if focused { newlyFocused = surfaceView }
         }

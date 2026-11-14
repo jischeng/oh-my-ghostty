@@ -246,8 +246,10 @@ enum AgentQuickInputMetrics {
     static func reservedAccessoryHeight(
         dockHeight: CGFloat,
         isDockPresented: Bool,
-        hasQueue: Bool
+        hasQueue: Bool,
+        isPinned: Bool = false
     ) -> CGFloat {
+        guard isPinned else { return 0 }
         let dock = isDockPresented
             ? dockHeight + TerminalShellStyle.dividerWidth
             : 0
@@ -832,7 +834,8 @@ struct AgentQuickInputDock<Content: View>: View {
             composerHeight: model.isPresented
                 ? model.dockHeight + TerminalShellStyle.dividerWidth : 0,
             queueHeight: presentedQueueIDs.isEmpty
-                ? 0 : AgentQuickInputMetrics.queueLaneHeight + TerminalShellStyle.dividerWidth
+                ? 0 : AgentQuickInputMetrics.queueLaneHeight + TerminalShellStyle.dividerWidth,
+            isPinned: model.isPinned
         )
     }
 
@@ -869,7 +872,7 @@ struct AgentQuickInputDock<Content: View>: View {
                 edit: { controller.editQueuedQuickInput($0, from: surfaceID) },
                 remove: { controller.removeQueuedQuickInput($0, from: surfaceID) },
                 dividerColor: controller.sidebarDividerColor,
-                chromeBackground: controller.terminalChromeBackground
+                chromeBackground: controller.quickInputAccessoryBackground(isPinned: model.isPinned)
             )
         }
     }
@@ -902,7 +905,8 @@ private struct AgentQuickInputResizeHandle: View {
             color: color,
             currentExtent: { model.dockHeight },
             resize: controller.updateQuickInputHeight,
-            accessibilityLabel: "Resize Agent Quick Input"
+            accessibilityLabel: "Resize Agent Quick Input",
+            defersTerminalResize: model.isPinned
         )
     }
 }
@@ -1146,8 +1150,11 @@ private struct AgentQuickInputComposer: View {
         isPasswordLocked && !model.isEditingQueuedItem
     }
 
-    /// Effective chrome background (see `TerminalController.terminalChromeBackground`).
-    private var chromeBackground: Color { controller.terminalChromeBackground }
+    /// Opaque theme background when floating over live terminal text; matches
+    /// window/glass chrome when pinned in-flow below the terminal viewport.
+    private var chromeBackground: Color {
+        controller.quickInputAccessoryBackground(isPinned: model.isPinned)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1180,7 +1187,7 @@ private struct AgentQuickInputComposer: View {
                                           atBoundary: atBoundary, isRepeat: isRepeat)
                 },
                 onHistoryCaretMoved: model.historyCaretMoved,
-                onPresentationReady: { controller.quickInputComposerDidBecomeReady(for: model.targetSurfaceID) }
+                companionSurfaceID: model.targetSurfaceID
             )
             .background(.clear)
 
@@ -1223,6 +1230,16 @@ private struct AgentQuickInputComposer: View {
                         .lineLimit(1)
                 }
                 Spacer()
+                if !settings.quickInputImportShortcut.isEmpty, !model.isEditingQueuedItem {
+                    QuickInputFooterIconButton(
+                        title: strings.quickInputImportDraftHelp,
+                        symbol: "square.and.arrow.down",
+                        isActive: controller.quickInputDraftImportTask != nil
+                    ) {
+                        controller.importQuickInputDraftFromTerminal(for: model.targetSurfaceID)
+                    }
+                    .disabled(isPasswordLocked)
+                }
                 QuickInputFooterIconButton(
                     title: model.isPinned ? strings.quickInputUnpinHelp : strings.quickInputPinHelp,
                     symbol: model.isPinned ? "pin.fill" : "pin",

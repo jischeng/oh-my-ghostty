@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftUI
 import Testing
 @testable import Ghostty
 
@@ -426,25 +427,42 @@ struct AgentQuickInputTests {
 
     @Test func accessoryHeightReservesFinalLayoutWithoutAnimationSteps() {
         let divider = TerminalShellStyle.dividerWidth
+        for (presented, hasQueue) in [(false, false), (true, false), (false, true), (true, true)] {
+            #expect(AgentQuickInputMetrics.reservedAccessoryHeight(
+                dockHeight: 252,
+                isDockPresented: presented,
+                hasQueue: hasQueue
+            ) == 0)
+            #expect(AgentQuickInputMetrics.reservedAccessoryHeight(
+                dockHeight: 252,
+                isDockPresented: presented,
+                hasQueue: hasQueue,
+                isPinned: false
+            ) == 0)
+        }
         #expect(AgentQuickInputMetrics.reservedAccessoryHeight(
             dockHeight: 252,
             isDockPresented: false,
-            hasQueue: false
+            hasQueue: false,
+            isPinned: true
         ) == 0)
         #expect(AgentQuickInputMetrics.reservedAccessoryHeight(
             dockHeight: 252,
             isDockPresented: true,
-            hasQueue: false
+            hasQueue: false,
+            isPinned: true
         ) == 252 + divider)
         #expect(AgentQuickInputMetrics.reservedAccessoryHeight(
             dockHeight: 252,
             isDockPresented: false,
-            hasQueue: true
+            hasQueue: true,
+            isPinned: true
         ) == AgentQuickInputMetrics.queueLaneHeight + divider)
         #expect(AgentQuickInputMetrics.reservedAccessoryHeight(
             dockHeight: 252,
             isDockPresented: true,
-            hasQueue: true
+            hasQueue: true,
+            isPinned: true
         ) == 252 + AgentQuickInputMetrics.queueLaneHeight + divider * 2)
     }
 
@@ -609,5 +627,429 @@ struct AgentQuickInputTests {
         window.contentView = editor
         #expect(editor.undoManager != nil)
         #expect(editor.undoManager !== window.undoManager)
+    }
+
+    @Test @MainActor
+    func unpinnedQuickInputRoundTripEmitsZeroSIGWINCHZeroCtrlGAndZeroDEC1004FocusChatter() async throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let script = root.appendingPathComponent("probe.py")
+        let ready = root.appendingPathComponent("ready")
+        let captured = root.appendingPathComponent("captured")
+        let sigwinchFile = root.appendingPathComponent("sigwinch")
+        try #"""
+        import os, pathlib, signal, tty
+        tty.setraw(0)
+        root = pathlib.Path(__file__).parent
+        sigwinches = 0
+        def on_winch(signum, frame):
+            global sigwinches
+            sigwinches += 1
+            (root / "sigwinch").write_text(str(sigwinches))
+        signal.signal(signal.SIGWINCH, on_winch)
+        os.write(1, b"\x1b[?1004h")
+        (root / "sigwinch").write_text("0")
+        (root / "ready").touch()
+        buf = bytearray()
+        while True:
+            chunk = os.read(0, 4096)
+            if not chunk:
+                break
+            buf.extend(chunk)
+            (root / "captured").write_bytes(bytes(buf))
+        """#.write(to: script, atomically: true, encoding: .utf8)
+
+        let python = try #require(LocalPythonInterpreter.cached())
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = Ghostty.Shell.quote(python.executablePath) + " " + Ghostty.Shell.quote(script.path)
+        let controller = TerminalController(app, withBaseConfig: config)
+        controller.showWindow(nil)
+        let window = try #require(controller.window)
+        defer {
+            controller.dismissQuickInput()
+            window.delegate = nil
+            window.close()
+        }
+
+        let surface = try #require(controller.focusedSurface)
+        for _ in 0..<80 {
+            if FileManager.default.fileExists(atPath: ready.path) { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try #require(FileManager.default.fileExists(atPath: ready.path))
+        window.contentView?.layoutSubtreeIfNeeded()
+        _ = window.makeFirstResponder(surface)
+        surface.focusDidChange(true)
+        try await Task.sleep(for: .milliseconds(100))
+
+        let baselineBytes = (try? Data(contentsOf: captured))?.count ?? 0
+        let baselineWinch = Int((try? String(contentsOf: sigwinchFile, encoding: .utf8)) ?? "0") ?? 0
+        let initialSurfaceFrame = surface.frame
+        #expect(!controller.quickInputModel.isPinned)
+        #expect(surface.focused)
+
+        // 1. Open unpinned Quick Input (⌘⇧E) and transfer focus to ComposerTextView.
+        controller.toggleQuickInput()
+        #expect(controller.quickInputModel.isPresented)
+        window.contentView?.layoutSubtreeIfNeeded()
+        func findEditor(_ view: NSView) -> ComposerTextView? {
+            (view as? ComposerTextView) ?? view.subviews.lazy.compactMap(findEditor).first
+        }
+        let editor = try #require(window.contentView.flatMap(findEditor))
+        controller.focusQuickInputEditor(editor, for: surface.id)
+        #expect(window.firstResponder === editor)
+        #expect(surface.hasCompanionQuickInputFocus)
+        #expect(surface.focused)
+        #expect(surface.layer?.opacity == 1)
+        #expect(surface.frame == initialSurfaceFrame)
+
+        // 2. Round-trip focus between ComposerTextView and SurfaceView (⌘⌥↑ / ⌘⌥↓).
+        controller.restoreTerminalFocus(surfaceID: surface.id)
+        #expect(window.firstResponder === surface)
+        #expect(!surface.hasCompanionQuickInputFocus)
+        #expect(surface.focused)
+        controller.focusQuickInputEditor(editor, for: surface.id)
+        #expect(window.firstResponder === editor)
+        #expect(surface.hasCompanionQuickInputFocus)
+        #expect(surface.focused)
+
+        // 3. Queue a message while unpinned; queue bar appears as floating overlay with 0 resize.
+        controller.quickInputModel.draft = "queued while unpinned"
+        controller.queueQuickInputDraft()
+        window.contentView?.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+        window.contentView?.layoutSubtreeIfNeeded()
+        #expect(controller.quickInputModel.state(for: surface.id)?.queue.count == 1)
+        #expect(surface.frame == initialSurfaceFrame)
+        #expect(surface.focused)
+
+        // 4. Open again, send a draft, and dismiss on completion.
+        controller.toggleQuickInput()
+        window.contentView?.layoutSubtreeIfNeeded()
+        controller.focusQuickInputEditor(editor, for: surface.id)
+        controller.quickInputModel.draft = "direct overlay send"
+        controller.sendQuickInputDraft()
+
+        for _ in 0..<80 {
+            let allData = (try? Data(contentsOf: captured)) ?? Data()
+            let delta = allData.dropFirst(min(baselineBytes, allData.count))
+            if let text = String(data: delta, encoding: .utf8), text.contains("direct overlay send"), text.hasSuffix("\r") {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        window.contentView?.layoutSubtreeIfNeeded()
+        let postSendWinch = Int((try? String(contentsOf: sigwinchFile, encoding: .utf8)) ?? "0") ?? 0
+        #expect(postSendWinch == baselineWinch, "Unpinned Quick Input open/queue/send/dismiss must emit 0 SIGWINCH")
+        #expect(surface.frame == initialSurfaceFrame)
+        #expect(surface.layer?.opacity == 1)
+        #expect(surface.focused)
+
+        let allData = try Data(contentsOf: captured)
+        let roundTripSlice = Data(allData.dropFirst(min(baselineBytes, allData.count)))
+        let roundTripText = try #require(String(data: roundTripSlice, encoding: .utf8))
+        #expect(roundTripText.contains("direct overlay send"))
+        #expect(!roundTripSlice.contains(0x07), "Default Quick Input open/send must not inject Ctrl+G (0x07)")
+        #expect(!roundTripText.contains("\u{1B}[103;5u"), "Default Quick Input open/send must not inject Kitty Ctrl+G")
+        #expect(!roundTripText.contains("\u{1B}[O"), "Companion focus transfer must suppress DEC 1004 focus-out")
+        #expect(!roundTripText.contains("\u{1B}[I"), "Companion focus transfer must suppress duplicate DEC 1004 focus-in")
+
+        // 5. Real non-companion focus loss still emits DEC 1004 focus-out (\x1b[O).
+        let externalField = NSTextField(frame: NSRect(x: 0, y: 0, width: 80, height: 24))
+        window.contentView?.addSubview(externalField)
+        _ = window.makeFirstResponder(externalField)
+        #expect(!surface.focused)
+        for _ in 0..<40 {
+            let latest = (try? Data(contentsOf: captured)) ?? Data()
+            let afterSend = Data(latest.dropFirst(min(allData.count, latest.count)))
+            if String(data: afterSend, encoding: .utf8)?.contains("\u{1B}[O") == true {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let latest = try Data(contentsOf: captured)
+        let afterRealBlur = try #require(String(data: Data(latest.dropFirst(min(allData.count, latest.count))), encoding: .utf8))
+        #expect(afterRealBlur.contains("\u{1B}[O"))
+    }
+
+    @Test @MainActor
+    func floatingQuickInputUsesOpaqueBackgroundWhenWindowIsTranslucentOrGlass() throws {
+        let themeColor = Color(.sRGB, red: 0.12, green: 0.13, blue: 0.19, opacity: 1)
+
+        // 1. Translucent background-opacity < 1.0
+        let translucentChrome = TerminalController.chromeBackground(
+            color: themeColor,
+            opacity: 0.62,
+            windowIsOpaque: false,
+            usesWindowGlass: false
+        )
+        let floatingTranslucent = TerminalController.quickInputAccessoryBackground(
+            isPinned: false,
+            chromeBackground: translucentChrome,
+            color: themeColor,
+            opacity: 0.62
+        )
+        let pinnedTranslucent = TerminalController.quickInputAccessoryBackground(
+            isPinned: true,
+            chromeBackground: translucentChrome,
+            color: themeColor,
+            opacity: 0.62
+        )
+        #expect(NSColor(floatingTranslucent).cgColor.alpha == 1)
+        let pinnedTranslucentColor = try #require(NSColor(pinnedTranslucent).usingColorSpace(.sRGB))
+        #expect(abs(pinnedTranslucentColor.alphaComponent - 0.62) < 0.02)
+
+        // 2. macOS glass style (usesWindowGlass = true -> terminalChromeBackground is .clear)
+        let glassChrome = TerminalController.chromeBackground(
+            color: themeColor,
+            opacity: 0.62,
+            windowIsOpaque: false,
+            usesWindowGlass: true
+        )
+        let floatingGlass = TerminalController.quickInputAccessoryBackground(
+            isPinned: false,
+            chromeBackground: glassChrome,
+            color: themeColor,
+            opacity: 0.62
+        )
+        let pinnedGlass = TerminalController.quickInputAccessoryBackground(
+            isPinned: true,
+            chromeBackground: glassChrome,
+            color: themeColor,
+            opacity: 0.62
+        )
+        #expect(NSColor(floatingGlass).cgColor.alpha == 1)
+        #expect(NSColor(pinnedGlass).alphaComponent == 0)
+    }
+
+    @Test @MainActor
+    func keyWindowResignAndRegainPreservesCompanionQuickInputFocusWithoutLateDEC1004() async throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let script = root.appendingPathComponent("focus_probe.py")
+        let ready = root.appendingPathComponent("ready")
+        let captured = root.appendingPathComponent("captured")
+        try #"""
+        import os, pathlib, tty
+        tty.setraw(0)
+        root = pathlib.Path(__file__).parent
+        os.write(1, b"\x1b[?1004h")
+        (root / "ready").touch()
+        buf = bytearray()
+        while True:
+            chunk = os.read(0, 4096)
+            if not chunk:
+                break
+            buf.extend(chunk)
+            (root / "captured").write_bytes(bytes(buf))
+        """#.write(to: script, atomically: true, encoding: .utf8)
+
+        let python = try #require(LocalPythonInterpreter.cached())
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = Ghostty.Shell.quote(python.executablePath) + " " + Ghostty.Shell.quote(script.path)
+        let controller = TerminalController(app, withBaseConfig: config)
+        controller.showWindow(nil)
+        let window = try #require(controller.window)
+        defer {
+            controller.dismissQuickInput()
+            window.delegate = nil
+            window.close()
+        }
+
+        let surface = try #require(controller.focusedSurface)
+        for _ in 0..<80 {
+            if FileManager.default.fileExists(atPath: ready.path) { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try #require(FileManager.default.fileExists(atPath: ready.path))
+
+        controller.keyWindowOverrideForTesting = true
+        window.contentView?.layoutSubtreeIfNeeded()
+        #expect(window.makeFirstResponder(surface))
+        controller.syncFocusToSurfaceTree()
+        #expect(surface.focused)
+
+        controller.toggleQuickInput()
+        window.contentView?.layoutSubtreeIfNeeded()
+        func findEditor(_ view: NSView) -> ComposerTextView? {
+            (view as? ComposerTextView) ?? view.subviews.lazy.compactMap(findEditor).first
+        }
+        let editor = try #require(window.contentView.flatMap(findEditor))
+        controller.focusQuickInputEditor(editor, for: surface.id)
+        #expect(window.firstResponder === editor)
+        #expect(surface.hasCompanionQuickInputFocus)
+        #expect(surface.focused)
+        try await Task.sleep(for: .milliseconds(80))
+
+        // Simulate ⌘Tab away (windowDidResignKey): companion ownership stays intact while surface blurs.
+        let beforeResignCount = (try? Data(contentsOf: captured))?.count ?? 0
+        controller.keyWindowOverrideForTesting = false
+        controller.syncFocusToSurfaceTree()
+        #expect(window.firstResponder === editor)
+        #expect(surface.hasCompanionQuickInputFocus)
+        #expect(!surface.focused)
+        for _ in 0..<40 {
+            let data = (try? Data(contentsOf: captured)) ?? Data()
+            let slice = Data(data.dropFirst(min(beforeResignCount, data.count)))
+            if String(data: slice, encoding: .utf8)?.contains("\u{1B}[O") == true { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+
+        // Simulate ⌘Tab back (windowDidBecomeKey): surface regains focus immediately while QuickInput stays active.
+        let beforeRegainCount = (try? Data(contentsOf: captured))?.count ?? 0
+        controller.keyWindowOverrideForTesting = true
+        controller.syncFocusToSurfaceTree()
+        #expect(window.firstResponder === editor)
+        #expect(surface.hasCompanionQuickInputFocus)
+        #expect(surface.focused)
+        for _ in 0..<40 {
+            let data = (try? Data(contentsOf: captured)) ?? Data()
+            let slice = Data(data.dropFirst(min(beforeRegainCount, data.count)))
+            if String(data: slice, encoding: .utf8)?.contains("\u{1B}[I") == true { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        try await Task.sleep(for: .milliseconds(80))
+
+        // Dismissing QuickInput afterward must emit zero late \x1b[I or \x1b[O.
+        let beforeDismissCount = (try? Data(contentsOf: captured))?.count ?? 0
+        controller.dismissQuickInput()
+        #expect(window.firstResponder === surface)
+        #expect(!surface.hasCompanionQuickInputFocus)
+        #expect(surface.focused)
+        try await Task.sleep(for: .milliseconds(100))
+        let afterDismissData = (try? Data(contentsOf: captured)) ?? Data()
+        let dismissDelta = Data(afterDismissData.dropFirst(min(beforeDismissCount, afterDismissData.count)))
+        let dismissText = String(data: dismissDelta, encoding: .utf8) ?? ""
+        #expect(!dismissText.contains("\u{1B}[I"))
+        #expect(!dismissText.contains("\u{1B}[O"))
+    }
+
+    @Test @MainActor
+    func hoveringOverFloatingQuickInputSuppressesSGRMouseMotionAndFocusFollowsMouse() async throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let script = root.appendingPathComponent("mouse_probe.py")
+        let ready = root.appendingPathComponent("ready")
+        let captured = root.appendingPathComponent("captured")
+        try #"""
+        import os, pathlib, tty
+        tty.setraw(0)
+        root = pathlib.Path(__file__).parent
+        os.write(1, b"\x1b[?1003h\x1b[?1006h")
+        (root / "ready").touch()
+        buf = bytearray()
+        while True:
+            chunk = os.read(0, 4096)
+            if not chunk:
+                break
+            buf.extend(chunk)
+            (root / "captured").write_bytes(bytes(buf))
+        """#.write(to: script, atomically: true, encoding: .utf8)
+
+        let python = try #require(LocalPythonInterpreter.cached())
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = Ghostty.Shell.quote(python.executablePath) + " " + Ghostty.Shell.quote(script.path)
+        let controller = TerminalController(app, withBaseConfig: config)
+        controller.showWindow(nil)
+        let window = try #require(controller.window)
+        window.setContentSize(NSSize(width: 800, height: 600))
+        defer {
+            controller.dismissQuickInput()
+            window.delegate = nil
+            window.close()
+        }
+
+        let surface = try #require(controller.focusedSurface)
+        for _ in 0..<80 {
+            if FileManager.default.fileExists(atPath: ready.path) { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try #require(FileManager.default.fileExists(atPath: ready.path))
+
+        controller.keyWindowOverrideForTesting = true
+        controller.focusFollowsMouseOverrideForTesting = true
+        controller.presentQuickInput(for: surface, requestFocus: false)
+        window.contentView?.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+
+        let externalField = NSTextField(frame: NSRect(x: 0, y: 560, width: 80, height: 24))
+        window.contentView?.addSubview(externalField)
+        _ = window.makeFirstResponder(externalField)
+        #expect(!surface.hasCompanionQuickInputFocus)
+        #expect(!surface.focused)
+        #expect(window.firstResponder !== surface)
+
+        let occludedPoint = surface.convert(NSPoint(x: 120, y: 40), to: nil)
+        #expect(surface.isPointOccludedByFloatingAccessory(inWindow: occludedPoint))
+        let baselineCount = (try? Data(contentsOf: captured))?.count ?? 0
+
+        let makeMouseMoveEvent = { (location: NSPoint) throws -> NSEvent in
+            try #require(NSEvent.mouseEvent(
+                with: .mouseMoved,
+                location: location,
+                modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 0,
+                clickCount: 0,
+                pressure: 0
+            ))
+        }
+        let makeEnterExitEvent = { (type: NSEvent.EventType, location: NSPoint) throws -> NSEvent in
+            try #require(NSEvent.enterExitEvent(
+                with: type,
+                location: location,
+                modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 0,
+                trackingNumber: 0,
+                userData: nil
+            ))
+        }
+
+        let previousCursor = NSCursor.current
+        defer { previousCursor.set() }
+        NSCursor.pointingHand.set()
+        surface.cursorUpdate(with: try makeEnterExitEvent(.cursorUpdate, occludedPoint))
+        #expect(NSCursor.current == NSCursor.pointingHand)
+        surface.mouseEntered(with: try makeEnterExitEvent(.mouseEntered, occludedPoint))
+        surface.mouseMoved(with: try makeMouseMoveEvent(occludedPoint))
+        try await Task.sleep(for: .milliseconds(100))
+
+        #expect(!surface.mouseOverSurface)
+        #expect(!surface.focused, "Hovering over floating Quick Input must not trigger focusFollowsMouse")
+        #expect(window.firstResponder !== surface)
+        let afterOccludedData = (try? Data(contentsOf: captured)) ?? Data()
+        let occludedSlice = Data(afterOccludedData.dropFirst(min(baselineCount, afterOccludedData.count)))
+        let occludedText = String(data: occludedSlice, encoding: .utf8) ?? ""
+        #expect(!occludedText.contains("\u{1B}[<35;"), "Occluded hover must emit zero SGR mouse motion")
+
+        // Moving into the unoccluded upper terminal region still delivers SGR motion normally,
+        // and moving back over floating Quick Input exits cleanly.
+        let visiblePoint = surface.convert(NSPoint(x: 120, y: surface.bounds.height - 30), to: nil)
+        #expect(!surface.isPointOccludedByFloatingAccessory(inWindow: visiblePoint))
+        surface.mouseMoved(with: try makeMouseMoveEvent(visiblePoint))
+        #expect(surface.mouseOverSurface)
+        for _ in 0..<40 {
+            let data = (try? Data(contentsOf: captured)) ?? Data()
+            let slice = Data(data.dropFirst(min(afterOccludedData.count, data.count)))
+            if String(data: slice, encoding: .utf8)?.contains("\u{1B}[<35;") == true { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let afterVisibleData = try Data(contentsOf: captured)
+        let visibleText = String(data: Data(afterVisibleData.dropFirst(min(afterOccludedData.count, afterVisibleData.count))), encoding: .utf8) ?? ""
+        #expect(visibleText.contains("\u{1B}[<35;"))
+
+        surface.mouseMoved(with: try makeMouseMoveEvent(occludedPoint))
+        #expect(!surface.mouseOverSurface)
     }
 }

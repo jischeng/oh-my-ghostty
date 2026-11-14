@@ -57,6 +57,7 @@ struct TerminalResizeBoundary: View {
     let currentExtent: () -> CGFloat
     let resize: (CGFloat, Bool) -> Void
     let accessibilityLabel: String
+    var defersTerminalResize: Bool = true
     /// OMG: hover-or-drag state from the AppKit tracking area. It flips only on
     /// enter/exit/down/up, so the line never flickers while the mouse moves.
     @State private var isActive = false
@@ -105,6 +106,7 @@ struct TerminalResizeBoundary: View {
             currentWidth: currentExtent,
             resize: resize,
             direction: direction,
+            defersTerminalResize: defersTerminalResize,
             onActiveChange: { isActive = $0 }
         )
         .contentShape(Rectangle())

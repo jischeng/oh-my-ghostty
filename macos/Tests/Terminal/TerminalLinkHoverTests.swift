@@ -166,7 +166,13 @@ struct TerminalLinkHoverTests {
         let controller = try makeController(split: split,
             command: "/bin/sh -c 'printf \"\\033]8;;https://example.com\\007hover-target\\033]8;;\\007\\n\"; sleep 30'")
         defer { controller.window?.delegate = nil; controller.window?.close() }
-        let surface = try #require(controller.focusedSurface)
+        let window = try #require(controller.window)
+        let surface = try #require(split ? Array(controller.surfaceTree).last : controller.focusedSurface)
+        for _ in 0..<100 {
+            if window.firstResponder === surface { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try #require(window.firstResponder === surface)
         for _ in 0..<100 {
             if surface.cachedScreenContents.get().contains("hover-target") { break }
             try await Task.sleep(for: .milliseconds(20))

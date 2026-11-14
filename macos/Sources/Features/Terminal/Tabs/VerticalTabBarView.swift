@@ -912,6 +912,7 @@ struct SidebarResizeInteraction: NSViewRepresentable {
     let currentWidth: () -> CGFloat
     let resize: (CGFloat, Bool) -> Void
     let direction: Direction
+    var defersTerminalResize: Bool
     /// OMG: reports hover-or-drag so the divider line can highlight.
     let onActiveChange: (Bool) -> Void
 
@@ -919,16 +920,23 @@ struct SidebarResizeInteraction: NSViewRepresentable {
         currentWidth: @escaping () -> CGFloat,
         resize: @escaping (CGFloat, Bool) -> Void,
         direction: Direction = .leading,
+        defersTerminalResize: Bool = true,
         onActiveChange: @escaping (Bool) -> Void = { _ in }
     ) {
         self.currentWidth = currentWidth
         self.resize = resize
         self.direction = direction
+        self.defersTerminalResize = defersTerminalResize
         self.onActiveChange = onActiveChange
     }
 
     func makeNSView(context: Context) -> DragView {
-        let view = DragView(currentWidth: currentWidth, resize: resize, direction: direction)
+        let view = DragView(
+            currentWidth: currentWidth,
+            resize: resize,
+            direction: direction,
+            defersTerminalResize: defersTerminalResize
+        )
         view.onActiveChange = onActiveChange
         return view
     }
@@ -936,6 +944,7 @@ struct SidebarResizeInteraction: NSViewRepresentable {
     func updateNSView(_ view: DragView, context: Context) {
         view.currentWidth = currentWidth
         view.resize = resize
+        view.defersTerminalResize = defersTerminalResize
         view.onActiveChange = onActiveChange
         if view.direction != direction {
             view.direction = direction
@@ -947,6 +956,7 @@ struct SidebarResizeInteraction: NSViewRepresentable {
         var currentWidth: () -> CGFloat
         var resize: (CGFloat, Bool) -> Void
         var direction: Direction
+        var defersTerminalResize: Bool
         private var startWidth: CGFloat = 0
         private var startPosition: CGPoint = .zero
         private weak var resizeWindow: NSWindow?
@@ -961,11 +971,13 @@ struct SidebarResizeInteraction: NSViewRepresentable {
         init(
             currentWidth: @escaping () -> CGFloat,
             resize: @escaping (CGFloat, Bool) -> Void,
-            direction: Direction = .leading
+            direction: Direction = .leading,
+            defersTerminalResize: Bool = true
         ) {
             self.currentWidth = currentWidth
             self.resize = resize
             self.direction = direction
+            self.defersTerminalResize = defersTerminalResize
             super.init(frame: .zero)
             // inVisibleRect follows geometry, so the area is never replaced
             // (replacing it would synthesize exit/enter pairs).
@@ -1044,7 +1056,7 @@ struct SidebarResizeInteraction: NSViewRepresentable {
             if resizeDeferralActive {
                 finishResizeDeferral()
             }
-            guard let window else { return }
+            guard defersTerminalResize, let window else { return }
             resizeWindow = window
             resizeDeferralActive = true
             TerminalSurfaceResizeInteraction.begin(in: window)

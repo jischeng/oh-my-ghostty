@@ -426,8 +426,11 @@ struct SettingsStrings: Equatable, Sendable {
     }
     var quickInputImportLabel: String { t("Import Agent Draft", "导入 Agent 草稿") }
     var quickInputImportCaption: String {
-        t("Automatically copy the agent's input when opening Quick Input. Enabled by default; original input is preserved. Open a new terminal after enabling.",
-          "打开 Quick Input 时自动复制 Agent 输入，默认开启，原输入会保留。重新启用后需新建终端。")
+        t("Allow importing the agent's input from the Quick Input toolbar via $VISUAL. Original input is preserved; open a new terminal after enabling.",
+          "允许从 Quick Input 工具栏通过 $VISUAL 导入 Agent 当前输入。原输入会保留；重新启用后需新建终端。")
+    }
+    var quickInputImportDraftHelp: String {
+        t("Import Agent Draft", "导入 Agent 草稿")
     }
     var quickInputImportInvalid: String {
         t("Use up to four comma-separated shortcuts with control, option or shift and a letter or digit.",

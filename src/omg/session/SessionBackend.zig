@@ -53,6 +53,7 @@ attachment_changed: std.Io.Condition = .init,
 requested_size: std.atomic.Value(u32) = .init((80 << 16) | 24),
 requested_pixels: std.atomic.Value(u32) = .init((640 << 16) | 384),
 has_explicit_size: std.atomic.Value(bool) = .init(false),
+writer_resize_generation: std.atomic.Value(u64) = .init(0),
 
 pub const Options = struct {
     is_local: bool = false,
@@ -132,6 +133,7 @@ fn closeSocket(self: *Self) void {
     self.write_mutex.lockUncancelable(global.io());
     defer self.write_mutex.unlock(global.io());
     self.ready.store(false, .release);
+    self.writer_resize_generation.store(0, .release);
     self.snapshot_ready.store(false, .release);
     self.activity_acknowledge.store(false, .release);
     self.clearTakeoverInputLocked();
@@ -164,6 +166,7 @@ pub fn setSessionAttached(self: *Self, attached: bool) bool {
     _ = self.attachment_epoch.fetchAdd(1, .acq_rel);
     if (!self.is_local or !self.creating) self.force_attach.store(true, .release);
     self.ready.store(false, .release);
+    self.writer_resize_generation.store(0, .release);
     self.snapshot_ready.store(false, .release);
     self.activity_acknowledge.store(false, .release);
     self.clearTakeoverInputLocked();
@@ -247,11 +250,44 @@ pub fn resize(self: *Self, grid: renderer.GridSize, screen: renderer.ScreenSize)
 }
 
 fn sendDimensions(self: *Self) !void {
+    const generation = self.generation.load(.acquire);
+    self.writer_resize_generation.store(generation, .release);
     var bytes: [8]u8 = undefined;
     std.mem.writeInt(u32, bytes[0..4], self.requested_size.load(.acquire), .big);
     std.mem.writeInt(u32, bytes[4..8], self.requested_pixels.load(.acquire), .big);
     const length: usize = if (self.protocol_version.load(.acquire) >= 2) 8 else 4;
-    try self.send('R', self.generation.load(.acquire), bytes[0..length]);
+    try self.send('R', generation, bytes[0..length]);
+}
+
+fn applyResizeFrame(self: *const Self, io: anytype, bytes: []const u8) !bool {
+    if (bytes.len != 4 and bytes.len != 8) return error.InvalidResize;
+    const cols = std.mem.readInt(u16, bytes[0..2], .big);
+    const rows = std.mem.readInt(u16, bytes[2..4], .big);
+    const packed_grid = (@as(u32, cols) << 16) | rows;
+    const generation = self.generation.load(.acquire);
+    if (self.ready.load(.acquire) and generation != 0 and
+        self.writer_resize_generation.load(.acquire) == generation)
+    {
+        if (packed_grid != self.requested_size.load(.acquire)) return false;
+    }
+
+    io.renderer_state.mutex.lockUncancelable(global.io());
+    defer io.renderer_state.mutex.unlock(global.io());
+    const grid_changed = io.terminal.cols != cols or io.terminal.rows != rows;
+    if (grid_changed) {
+        try io.resizeTerminalLocked(.{
+            .cols = cols,
+            .rows = rows,
+        });
+    }
+    if (bytes.len == 8) {
+        io.terminal.width_px = std.mem.readInt(u16, bytes[4..6], .big);
+        io.terminal.height_px = std.mem.readInt(u16, bytes[6..8], .big);
+    }
+    if (grid_changed) {
+        try io.renderer_wakeup.notify();
+    }
+    return grid_changed;
 }
 pub fn queueWrite(self: *Self, _: std.mem.Allocator, _: *HostIO.ThreadData, data: []const u8, linefeed: bool) !void {
     const generation = self.inputGeneration() orelse return error.SessionNotReady;
@@ -401,6 +437,7 @@ fn invalidateStartupInput(self: *Self) void {
     self.write_mutex.lockUncancelable(global.io());
     defer self.write_mutex.unlock(global.io());
     self.ready.store(false, .release);
+    self.writer_resize_generation.store(0, .release);
     self.clearTakeoverInputLocked();
     self.disableStartupInputLocked();
 }
@@ -804,6 +841,7 @@ fn readLoop(self: *Self, io: *HostIO, epoch: u64, attached: *bool, connected_onc
                     self.write_mutex.lockUncancelable(global.io());
                     defer self.write_mutex.unlock(global.io());
                     self.ready.store(false, .release);
+                    self.writer_resize_generation.store(0, .release);
                     self.snapshot_ready.store(false, .release);
                     self.clearTakeoverInputLocked();
                 }
@@ -839,18 +877,7 @@ fn readLoop(self: *Self, io: *HostIO, epoch: u64, attached: *bool, connected_onc
                 try self.publishState(io, "{\"state\":\"ready\",\"attempt\":0}");
             },
             'R' => {
-                if (bytes.len != 4 and bytes.len != 8) return error.InvalidResize;
-                io.renderer_state.mutex.lockUncancelable(global.io());
-                defer io.renderer_state.mutex.unlock(global.io());
-                try io.resizeTerminalLocked(.{
-                    .cols = std.mem.readInt(u16, bytes[0..2], .big),
-                    .rows = std.mem.readInt(u16, bytes[2..4], .big),
-                });
-                if (bytes.len == 8) {
-                    io.terminal.width_px = std.mem.readInt(u16, bytes[4..6], .big);
-                    io.terminal.height_px = std.mem.readInt(u16, bytes[6..8], .big);
-                }
-                try io.renderer_wakeup.notify();
+                _ = try self.applyResizeFrame(io, bytes);
             },
             'M' => {
                 const Metadata = struct {
@@ -1663,6 +1690,91 @@ test "session activity sync tags restore vs live mode including sync_restore sna
     try std.testing.expectEqualStrings("mode=restore", activitySyncModeMetadata(true or p_live.value.sync_restore));
     try std.testing.expectEqualStrings("mode=restore", activitySyncModeMetadata(false or p_restore.value.sync_restore));
     try std.testing.expectEqualStrings("mode=live", activitySyncModeMetadata(false or p_live.value.sync_restore));
+}
+
+test "applyResizeFrame ignores stale self-echoes while active writer and skips wakeup when grid unchanged" {
+    const alloc = std.testing.allocator;
+    var backend = try Self.init(alloc, "/unused", null, .{});
+    defer backend.deinit();
+
+    var sockets: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF_UNIX, c.SOCK_STREAM, 0, &sockets));
+    defer _ = c.close(sockets[0]);
+    defer _ = c.close(sockets[1]);
+    backend.fd = sockets[0];
+    backend.generation.store(11, .release);
+    backend.protocol_version.store(2, .release);
+    backend.ready.store(true, .release);
+
+    const MockIO = struct {
+        const RendererState = struct {
+            mutex: std.Io.Mutex = .init,
+        };
+        const Wakeup = struct {
+            count: usize = 0,
+            pub fn notify(self: *@This()) !void {
+                self.count += 1;
+            }
+        };
+        alloc: std.mem.Allocator,
+        terminal: terminal.Terminal,
+        renderer_state: RendererState = .{},
+        renderer_wakeup: Wakeup = .{},
+
+        pub fn resizeTerminalLocked(self: *@This(), opts: terminal.Terminal.Resize) !void {
+            try self.terminal.resize(self.alloc, opts);
+        }
+    };
+
+    var mock_io: MockIO = .{
+        .alloc = alloc,
+        .terminal = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 120, .rows = 30 }),
+    };
+    defer mock_io.terminal.deinit(alloc);
+
+    // Rapid local writer resize A (120x40) -> B (120x30):
+    try backend.resize(.{ .columns = 120, .rows = 40 }, .{ .width = 1200, .height = 800 });
+    try backend.resize(.{ .columns = 120, .rows = 30 }, .{ .width = 1200, .height = 600 });
+    var drain: [42]u8 = undefined;
+    try readTestBytes(sockets[1], &drain);
+
+    // 1. Stale in-flight 'R(A)' self-echo arrives while local terminal is already at B (120x30):
+    var stale_echo: [8]u8 = undefined;
+    std.mem.writeInt(u16, stale_echo[0..2], 120, .big);
+    std.mem.writeInt(u16, stale_echo[2..4], 40, .big);
+    std.mem.writeInt(u16, stale_echo[4..6], 1200, .big);
+    std.mem.writeInt(u16, stale_echo[6..8], 800, .big);
+    try std.testing.expect(!try backend.applyResizeFrame(&mock_io, &stale_echo));
+    try std.testing.expectEqual(@as(terminal.size.CellCountInt, 120), mock_io.terminal.cols);
+    try std.testing.expectEqual(@as(terminal.size.CellCountInt, 30), mock_io.terminal.rows);
+    try std.testing.expectEqual(@as(usize, 0), mock_io.renderer_wakeup.count);
+
+    // 2. Current 'R(B)' echo arrives when grid is already 120x30: updates pixels without waking renderer!
+    var current_echo: [8]u8 = undefined;
+    std.mem.writeInt(u16, current_echo[0..2], 120, .big);
+    std.mem.writeInt(u16, current_echo[2..4], 30, .big);
+    std.mem.writeInt(u16, current_echo[4..6], 1200, .big);
+    std.mem.writeInt(u16, current_echo[6..8], 600, .big);
+    try std.testing.expect(!try backend.applyResizeFrame(&mock_io, &current_echo));
+    try std.testing.expectEqual(@as(u32, 1200), mock_io.terminal.width_px);
+    try std.testing.expectEqual(@as(u32, 600), mock_io.terminal.height_px);
+    try std.testing.expectEqual(@as(usize, 0), mock_io.renderer_wakeup.count);
+
+    // 3. Once another peer claims writer ('B' -> invalidateStartupInput), external 'R' updates apply and wake renderer!
+    backend.invalidateStartupInput();
+    var remote_resize: [8]u8 = undefined;
+    std.mem.writeInt(u16, remote_resize[0..2], 90, .big);
+    std.mem.writeInt(u16, remote_resize[2..4], 28, .big);
+    std.mem.writeInt(u16, remote_resize[4..6], 900, .big);
+    std.mem.writeInt(u16, remote_resize[6..8], 560, .big);
+    try std.testing.expect(try backend.applyResizeFrame(&mock_io, &remote_resize));
+    try std.testing.expectEqual(@as(terminal.size.CellCountInt, 90), mock_io.terminal.cols);
+    try std.testing.expectEqual(@as(terminal.size.CellCountInt, 28), mock_io.terminal.rows);
+    try std.testing.expectEqual(@as(usize, 1), mock_io.renderer_wakeup.count);
+
+    // Duplicate 'R' with unchanged (cols, rows) does not wake renderer a second time.
+    try std.testing.expect(!try backend.applyResizeFrame(&mock_io, &remote_resize));
+    try std.testing.expectEqual(@as(usize, 1), mock_io.renderer_wakeup.count);
 }
 
 test {

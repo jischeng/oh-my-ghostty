@@ -1,6 +1,10 @@
 import AppKit
 import SwiftUI
 
+protocol TerminalCompanionResponder: AnyObject {
+    var companionSurfaceID: UUID? { get }
+}
+
 struct AgentQuickInputTextEditor: NSViewRepresentable {
     @Binding var text: String
     let placeholder: String
@@ -16,6 +20,7 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
     var onNavigateHistory: ((QuickInputHistoryDirection, QuickInputDraftSnapshot, Bool, Bool)
         -> QuickInputHistoryNavigationResult)?
     var onHistoryCaretMoved: (() -> Void)?
+    var companionSurfaceID: UUID?
     var onPresentationReady: (() -> Void)?
 
     func makeCoordinator() -> Coordinator {
@@ -57,6 +62,7 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
         editor.onRecallHistory = onRecallHistory
         editor.onNavigateHistory = onNavigateHistory
         editor.onHistoryCaretMoved = onHistoryCaretMoved
+        editor.companionSurfaceID = companionSurfaceID
         scrollView.documentView = editor
         scrollView.isHidden = !isPresented
         context.coordinator.editor = editor
@@ -80,6 +86,7 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
         editor.onRecallHistory = onRecallHistory
         editor.onNavigateHistory = onNavigateHistory
         editor.onHistoryCaretMoved = onHistoryCaretMoved
+        editor.companionSurfaceID = companionSurfaceID
         var needsTypographyRefresh = false
         if !editor.hasMarkedText(), editor.string != text {
             editor.restoreHistorySnapshot(.init(text: text,
@@ -105,7 +112,11 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
                 guard scrollView.bounds.width > 0, scrollView.bounds.height > 0 else { return }
                 coordinator.handledFocusRequestID = request
                 coordinator.pendingFocusRequestID = nil
-                window.makeFirstResponder(editor)
+                if let controller = window.windowController as? TerminalController {
+                    controller.focusQuickInputEditor(editor, for: editor.companionSurfaceID)
+                } else {
+                    window.makeFirstResponder(editor)
+                }
                 onReady?()
             }
         } else if !isPresented {
@@ -247,7 +258,7 @@ enum AgentQuickInputMovementCommand: Equatable {
     }
 }
 
-final class ComposerTextView: NSTextView {
+final class ComposerTextView: NSTextView, TerminalCompanionResponder {
     var controlJNewlineEnabled: () -> Bool = { OhMyGhosttySettings.shared.quickInputControlJNewline }
     var pasteboard = NSPasteboard.general
     var placeholder = "" {
@@ -261,7 +272,28 @@ final class ComposerTextView: NSTextView {
     var onNavigateHistory: ((QuickInputHistoryDirection, QuickInputDraftSnapshot, Bool, Bool)
         -> QuickInputHistoryNavigationResult)?
     var onHistoryCaretMoved: (() -> Void)?
+    var companionSurfaceID: UUID?
     private(set) var isRestoringHistory = false
+
+    override func resignFirstResponder() -> Bool {
+        let result = super.resignFirstResponder()
+        if result {
+            let window = self.window
+            let companionID = self.companionSurfaceID
+            DispatchQueue.main.async { [weak window] in
+                guard let window,
+                      let controller = window.windowController as? BaseTerminalController else {
+                    return
+                }
+                if let companionID,
+                   (window.firstResponder as? Ghostty.SurfaceView)?.id == companionID {
+                    return
+                }
+                controller.syncFocusToSurfaceTree()
+            }
+        }
+        return result
+    }
 
     func restoreHistorySnapshot(_ snapshot: QuickInputDraftSnapshot) {
         isRestoringHistory = true

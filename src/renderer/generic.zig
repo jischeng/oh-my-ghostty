@@ -1207,12 +1207,6 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // when rebuilding the frame fails due to memory pressure.
             defer self.font_shaper.endFrame();
             const target_screen = self.target_screen_size.load(.acquire);
-            defer if (target_screen != 0) {
-                self.resize_mutex.lockUncancelable(global.io());
-                self.completed_screen_size.store(target_screen, .release);
-                self.resize_cond.broadcast(global.io());
-                self.resize_mutex.unlock(global.io());
-            };
 
             // We fully deinit and reset the terminal state every so often
             // so that a particularly large terminal state doesn't cause
@@ -1518,12 +1512,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             };
 
             // Acquire the draw mutex for all remaining state updates.
+            var rebuilt_cells = false;
             {
                 self.draw_mutex.lockUncancelable(global.io());
                 defer self.draw_mutex.unlock(global.io());
 
                 // Build our GPU cells
-                self.rebuildCells(
+                if (self.rebuildCells(
                     critical.preedit,
                     renderer.cursorStyle(&self.terminal_state, .{
                         .preedit = critical.preedit != null,
@@ -1531,13 +1526,15 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         .blink_visible = cursor_blink_visible,
                     }),
                     &critical.links,
-                ) catch |err| {
+                )) |_| {
+                    rebuilt_cells = true;
+                } else |err| {
                     // This means we weren't able to allocate our buffer
                     // to update the cells. In this case, we continue with
                     // our old buffer (frozen contents) and log it.
                     comptime assert(@TypeOf(err) == error{OutOfMemory});
                     log.warn("error rebuilding GPU cells err={}", .{err});
-                };
+                }
 
                 // The scrollbar is only emitted during draws so we also
                 // check the scrollbar cache here and update if needed.
@@ -1587,6 +1584,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         @as(f64, @floatFromInt(self.grid_metrics.cell_height))),
                 };
             }
+
+            completeTargetScreenResize(self, global.io(), target_screen, rebuilt_cells);
         }
 
         /// Step host-scrollback physics and sync the integer viewport.
@@ -2627,6 +2626,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Update our uniforms accordingly, otherwise
                 // our background cells will be out of place.
                 self.uniforms.grid_size = .{ new_size.columns, new_size.rows };
+                self.updateScreenSizeUniforms();
             }
 
             const rebuild = state.dirty == .full or grid_size_diff;
@@ -3667,4 +3667,79 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             try texture.replaceRegion(0, 0, atlas.size, atlas.size, atlas.data);
         }
     };
+}
+
+fn completeTargetScreenResize(
+    sync: anytype,
+    io: std.Io,
+    target_screen: u64,
+    cells_rebuilt: bool,
+) void {
+    if (!cells_rebuilt or target_screen == 0) return;
+    sync.resize_mutex.lockUncancelable(io);
+    defer sync.resize_mutex.unlock(io);
+    sync.completed_screen_size.store(target_screen, .release);
+    sync.resize_cond.broadcast(io);
+}
+
+test "generic renderer: completed_screen_size waits until cells rebuild after synchronized_output" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const SyncMock = struct {
+        target_screen_size: std.atomic.Value(u64) = .init(0),
+        completed_screen_size: std.atomic.Value(u64) = .init(0),
+        resize_mutex: std.Io.Mutex = .init,
+        resize_cond: std.Io.Condition = .init,
+    };
+
+    var t = try Terminal.init(testing.io, alloc, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(alloc);
+
+    const old_packed: u64 = (@as(u64, 800) << 32) | 480;
+    const new_packed: u64 = (@as(u64, 800) << 32) | 360;
+    var mock: SyncMock = .{
+        .target_screen_size = .init(new_packed),
+        .completed_screen_size = .init(old_packed),
+    };
+
+    // 1. Early return while `synchronized_output` is active must NOT mark
+    // `target_screen_size` completed (cells have not been rebuilt yet).
+    t.modes.set(.synchronized_output, true);
+    if (!t.modes.get(.synchronized_output)) {
+        completeTargetScreenResize(&mock, testing.io, mock.target_screen_size.load(.acquire), true);
+    }
+    try testing.expectEqual(old_packed, mock.completed_screen_size.load(.acquire));
+
+    // 2. A failed `rebuildCells` (e.g. OOM) must also keep `completed_screen_size` unchanged.
+    t.modes.set(.synchronized_output, false);
+    completeTargetScreenResize(&mock, testing.io, mock.target_screen_size.load(.acquire), false);
+    try testing.expectEqual(old_packed, mock.completed_screen_size.load(.acquire));
+
+    // 3. Once `synchronized_output` clears and `rebuildCells` succeeds,
+    // `completed_screen_size` advances to `new_packed` and wakes resize waiters.
+    const WaitCtx = struct {
+        mock: *SyncMock,
+        expected: u64,
+        ready: std.atomic.Value(bool) = .init(false),
+        observed: std.atomic.Value(u64) = .init(0),
+
+        fn run(ctx: *@This()) void {
+            ctx.mock.resize_mutex.lockUncancelable(global.io());
+            defer ctx.mock.resize_mutex.unlock(global.io());
+            ctx.ready.store(true, .release);
+            while (ctx.mock.completed_screen_size.load(.acquire) != ctx.expected) {
+                ctx.mock.resize_cond.waitUncancelable(global.io(), &ctx.mock.resize_mutex);
+            }
+            ctx.observed.store(ctx.mock.completed_screen_size.load(.acquire), .release);
+        }
+    };
+    var waiter: WaitCtx = .{ .mock = &mock, .expected = new_packed };
+    const thread = try std.Thread.spawn(.{}, WaitCtx.run, .{&waiter});
+    while (!waiter.ready.load(.acquire)) std.Thread.yield() catch {};
+
+    completeTargetScreenResize(&mock, global.io(), mock.target_screen_size.load(.acquire), true);
+    thread.join();
+    try testing.expectEqual(new_packed, mock.completed_screen_size.load(.acquire));
+    try testing.expectEqual(new_packed, waiter.observed.load(.acquire));
 }
